@@ -65,7 +65,7 @@ import os
 import sys
 from typing import Optional, Tuple
 
-from fno.pr._proc import ToolMissing, run
+from fno.pr._proc import run
 
 OK = 0
 REFUSED_STALE = 3
@@ -96,7 +96,7 @@ def _probe(args: list, cwd: str):
     """
     try:
         return run(args, cwd=cwd, timeout=_PROBE_TIMEOUT_S)
-    except (ToolMissing, Exception):  # noqa: BLE001 - incl. subprocess.TimeoutExpired
+    except Exception:  # noqa: BLE001 - incl. ToolMissing, subprocess.TimeoutExpired
         return None
 
 
@@ -110,7 +110,7 @@ def _default_branch(cwd: str) -> Optional[str]:
     return res.stdout.strip() or None
 
 
-def _base_ref(pr_number: int, cwd: str) -> Optional[str]:
+def _base_ref(pr_number, cwd: str) -> Optional[str]:
     res = _probe(
         ["gh", "pr", "view", str(pr_number), "--json", "baseRefName", "-q", ".baseRefName"],
         cwd,
@@ -151,19 +151,34 @@ def _merged_pr_for_head(base: str, cwd: str) -> tuple:
         return (_PROBE_FAILED, "")
 
 
-def _fetch_refs(base: str, default: str, cwd: str) -> bool:
-    """Fetch both refs with explicit refspecs. Reading a remote-tracking ref
+def _fetch_ref(ref: str, cwd: str) -> bool:
+    """Fetch one branch with an explicit refspec. Reading a remote-tracking ref
     without fetching answers from whatever the last fetch left behind, and a
     stale ref is exactly how a base that has since landed still looks alive."""
     fetch = _probe(
-        [
-            "git", "fetch", "origin",
-            f"+refs/heads/{base}:refs/remotes/origin/{base}",
-            f"+refs/heads/{default}:refs/remotes/origin/{default}",
-        ],
+        ["git", "fetch", "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"],
         cwd,
     )
     return fetch is not None and fetch.ok
+
+
+def _fetch_refs(base: str, default: str, cwd: str) -> bool:
+    """Refresh both refs. True once the DEFAULT branch is current.
+
+    One fetch carrying both refspecs fails wholesale when either ref is gone,
+    and the base ref being gone is not an edge case: `delete_branch_on_merge`
+    deletes it the moment the base lands, which is precisely the state this
+    module exists to catch. That failure left `origin/default` unrefreshed too,
+    blinded both git-side checks, and produced `unknown` - which every
+    in-process caller treats as proceed. Fetched separately, a deleted base
+    ref costs nothing: `origin/<base>` still exists locally, pinned at the
+    commit that landed, so (i) matches it against the merged PR's head and (ii)
+    still resolves ancestry. A base that never existed locally leaves
+    `_rev` empty and the verdict stays `unknown`, as before.
+    """
+    default_ok = _fetch_ref(default, cwd)
+    _fetch_ref(base, cwd)  # best-effort: a deleted base is itself the signal
+    return default_ok
 
 
 def _rev(ref: str, cwd: str) -> str:
@@ -186,8 +201,14 @@ def _base_contained_in_default(base: str, default: str, cwd: str) -> Optional[bo
     return None
 
 
-def lineage_verdict(pr_number: int, cwd: str) -> Tuple[str, str]:
+def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     """``(verdict, reason)`` for merging PR ``pr_number`` into its declared base.
+
+    ``pr_number`` is whatever identifier ``gh pr view`` accepts - a number, a
+    URL, a branch name - and is never parsed here. ``fno pr verify`` takes its
+    ``--pr-number`` as a free-form string for exactly that reason, so an
+    ``int()`` at the call site would turn a URL into a ValueError traceback out
+    of the remediation arm, after every precondition had already passed.
 
     ``verdict`` is ``ok`` | ``stale`` | ``unknown``. Both probes run before any
     verdict is chosen, so an ``unknown`` from one cannot mask a ``stale`` from
@@ -263,7 +284,7 @@ def bypassed() -> bool:
     return os.environ.get(BYPASS_ENV, "") == BYPASS_VALUE
 
 
-def emit_bypass_escape(pr_number: int, cwd: str, reason: str) -> None:
+def emit_bypass_escape(pr_number, cwd: str, reason: str) -> None:
     """Record a bypassed refusal as autonomy debt. Telemetry never blocks."""
     try:
         from fno.events.gate_escape import emit_gate_escape
@@ -278,7 +299,7 @@ def emit_bypass_escape(pr_number: int, cwd: str, reason: str) -> None:
         pass
 
 
-def run_base_lineage_check(pr_number: int, cwd: Optional[str] = None) -> int:
+def run_base_lineage_check(pr_number, cwd: Optional[str] = None) -> int:
     """CLI entry: 0 ok/bypassed, 3 stale, 4 unknown.
 
     ``unknown`` is exit 4 rather than 0 so a caller that cannot tolerate an

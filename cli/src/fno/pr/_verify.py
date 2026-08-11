@@ -384,7 +384,7 @@ def _bounded_remediation(
     # retarget rather than a retry.
     from fno.pr import _base_lineage
 
-    lineage, why = _base_lineage.lineage_verdict(int(pr_number), cwd)
+    lineage, why = _base_lineage.lineage_verdict(pr_number, cwd)
     if lineage == "stale" and not _base_lineage.bypassed():
         _emit_audit(
             repo_root, state_file, pr_number, "merge_refused_stacked_base", {"reason": why}
@@ -392,7 +392,7 @@ def _bounded_remediation(
         sys.stdout.write(f"merge_refused_stacked_base: PR #{pr_number} {why}\n")
         return 1
     if lineage == "stale":
-        _base_lineage.emit_bypass_escape(int(pr_number), cwd, why)
+        _base_lineage.emit_bypass_escape(pr_number, cwd, why)
         sys.stderr.write(
             f"verify-pr-merged: stacked-base guard bypassed "
             f"({_base_lineage.BYPASS_ENV}); {why}\n"

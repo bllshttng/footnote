@@ -58,8 +58,11 @@ def test_confirmed_stale_base_refuses(monkeypatch):
     msg = git_protection._stacked_base_refusal("gh pr merge 800 --merge")
     assert msg and "already landed" in msg
     assert seen["cmd"] == ["fno", "pr", "base-lineage-check", "800"]
-    # Unbounded would let a wedged probe hang the whole tool call.
-    assert seen["timeout"]
+    # Unbounded would let a wedged probe hang the whole tool call - and a bound
+    # at or above the harness hook budget (60s default) is nearly as bad: the
+    # HOOK gets killed, so the two-factor gate this veto sits in front of never
+    # runs and emits no verdict at all.
+    assert seen["timeout"] and seen["timeout"] < 60
 
 
 def test_exit_zero_allows(monkeypatch):

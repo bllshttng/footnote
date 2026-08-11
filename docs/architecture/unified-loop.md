@@ -266,7 +266,7 @@ Why the base was never retargeted is unexplained, so the guard asserts nothing a
 Both checks are kept because they go blind in opposite directions - under `merge_strategy = "squash"` a landed base is not an ancestor of main, and a base that landed leaving no merged PR is invisible to the first check.
 It tests for a MERGED PR rather than requiring an OPEN one on purpose: stacking onto a base whose PR nobody has opened yet is legitimate work, and a guard that refuses it gets switched off.
 
-Coverage of the seven reachable merge paths, stated honestly rather than implied:
+Coverage of the eight reachable merge paths, stated honestly rather than implied:
 
 | Merge path | Stacked-base guard |
 |---|---|

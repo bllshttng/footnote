@@ -556,6 +556,13 @@ def _stacked_base_refusal(command=""):
     `fno`, a timeout, an unevaluated probe (exit 4) - none of them may block a
     merge, because a guard whose own machinery is down must not become an
     outage. Exit 0 also covers the operator's documented bypass.
+
+    The timeout sits well under the harness hook budget (60s by default, and
+    neither hooks.json sets one) ON PURPOSE. This veto runs BEFORE the
+    pre-existing two-factor merge gate, so a probe allowed to eat the whole
+    budget would get the HOOK killed, and then no verdict is emitted at all -
+    an unauthorized merge that the two-factor path would have denied sails
+    through on a slow network. Fail open on this check, never on the hook.
     """
     pr_number = _parse_merge_pr(command)
     if not pr_number:
@@ -565,7 +572,7 @@ def _stacked_base_refusal(command=""):
             ["fno", "pr", "base-lineage-check", pr_number],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=25,
         )
     except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
         return None

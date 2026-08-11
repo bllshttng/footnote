@@ -36,6 +36,7 @@ class FakeRun:
         base_fails: bool = False,
         list_fails: bool = False,
         fetch_fails: bool = False,
+        base_fetch_fails: bool = False,
         git_missing: bool = False,
     ) -> None:
         self.default = default
@@ -48,6 +49,7 @@ class FakeRun:
         self.base_fails = base_fails
         self.list_fails = list_fails
         self.fetch_fails = fetch_fails
+        self.base_fetch_fails = base_fetch_fails
         self.git_missing = git_missing
         self.calls: list[list[str]] = []
 
@@ -76,7 +78,8 @@ class FakeRun:
                 return Result(0, f"{self.merged_pr} {self.merged_head}\n", "")
         if cmd[0] == "git":
             if cmd[1] == "fetch":
-                return Result(1 if self.fetch_fails else 0, "", "")
+                gone = self.base_fetch_fails and f"refs/heads/{self.base}:" in cmd[-1]
+                return Result(1 if (self.fetch_fails or gone) else 0, "", "")
             if cmd[1] == "rev-parse":
                 return Result(0, self.base_tip + "\n", "")
             if cmd[1] == "merge-base":
@@ -153,6 +156,24 @@ def test_healthy_stack_passes(patch_run):
     patch_run(FakeRun(merged_pr="", contained=False))
     verdict, _ = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "ok"
+
+
+def test_deleted_base_branch_still_refuses(patch_run):
+    """`delete_branch_on_merge` removes the base ref the instant it lands.
+
+    Fetching both refspecs in ONE `git fetch` failed wholesale on the missing
+    base ref, left `origin/main` unrefreshed too, and produced `unknown` -
+    which every in-process caller treats as proceed. Fetched separately, the
+    stale `origin/<base>` still pins the commit that landed and both checks
+    answer.
+    """
+    patch_run(
+        FakeRun(base_fetch_fails=True, merged_pr="789", merged_head=LANDED,
+                base_tip=LANDED, contained=True)
+    )
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "stale"
+    assert "#789" in why
 
 
 def test_failed_probe_does_not_mask_a_stale_verdict(patch_run):
