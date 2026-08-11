@@ -13,7 +13,7 @@ If no decision text provided, use interactive setup (one batched AskUserQuestion
 - What decision are you trying to make?
 - What perspective matters most? (product fit / technical feasibility / market positioning / all)
 - How deep? (shallow: 3 personas 1 round / standard: 5 personas 2 rounds / deep: all personas 3 rounds)
-- Chain after? (think / plan / megawalk / none)
+- Chain after? (think / plan / none)
 
 **Defaults:** depth=standard, personas=default, chain=none, auto=false, rounds=auto (from depth).
 
