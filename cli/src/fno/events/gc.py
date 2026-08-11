@@ -73,6 +73,23 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temp_path.unlink(missing_ok=True)
 
 
+def _recover_cursor_pending(path: Path, cursor: Path) -> None:
+    pending = cursor.with_name(cursor.name + ".gc-pending")
+    try:
+        payload = json.loads(pending.read_text(encoding="ascii"))
+    except FileNotFoundError:
+        return
+    stat = path.stat()
+    if payload.get("device") != stat.st_dev or payload.get("inode") != stat.st_ino:
+        pending.unlink(missing_ok=True)
+        return
+    value = payload.get("cursor")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"invalid pending event cursor: {pending}")
+    _atomic_write(cursor, str(value).encode("ascii"))
+    pending.unlink()
+
+
 def gc_events(
     events_path: Path,
     *,
@@ -92,6 +109,13 @@ def gc_events(
     cutoff = reference - timedelta(hours=ttl_hours)
 
     path = Path(events_path).resolve()
+    from fno.paths import global_events_json
+
+    if path == global_events_json().resolve():
+        raise ValueError(
+            "refusing to compact the global daemon journal while its bounded "
+            "Branch-B writer remains intentionally unlocked"
+        )
     result = {"scanned": 0, "deleted": 0, "kept": 0, "malformed": 0}
     if not path.exists():
         return result
@@ -116,6 +140,7 @@ def gc_events(
         cursor_token = acquire_dir_mutex(cursor_lock_dir, 30)
         if cursor_token is None:
             raise TimeoutError(f"event cursor lock timeout: {cursor_lock_dir}")
+        _recover_cursor_pending(path, cursor)
 
         next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
 

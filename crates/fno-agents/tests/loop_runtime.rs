@@ -541,6 +541,36 @@ fn journal_waits_for_shared_dir_mutex() {
 }
 
 #[test]
+fn journal_waits_through_expected_maintenance_contention() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("events.jsonl.lock.d");
+    let maintenance_dir = dir.path().join("events.jsonl.gc.d");
+    fs::create_dir(&lock_dir).unwrap();
+    fs::create_dir(&maintenance_dir).unwrap();
+
+    let handle = std::thread::spawn(move || {
+        Journal::new_raw(project_events, global_events)
+            .append("maintenance_probe", serde_json::json!({}))
+    });
+
+    std::thread::sleep(Duration::from_millis(2_300));
+    assert!(
+        !handle.is_finished(),
+        "expected maintenance contention aborted the active loop"
+    );
+
+    fs::remove_dir_all(lock_dir).unwrap();
+    fs::remove_dir_all(maintenance_dir).unwrap();
+    handle.join().unwrap().unwrap();
+    assert_eq!(
+        count_events(&dir.path().join("events.jsonl"), "maintenance_probe"),
+        1
+    );
+}
+
+#[test]
 fn symlinked_journal_waits_for_target_mutex() {
     let dir = TempDir::new().unwrap();
     let canonical_events = dir.path().join("canonical-events.jsonl");

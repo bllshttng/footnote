@@ -70,8 +70,33 @@ backups=("$existing/.fno/events.jsonl.pre-share."*)
 shopt -u nullglob
 assert "migration retains one pre-share backup" test "${#backups[@]}" -eq 1
 if (( ${#backups[@]} == 1 )); then
-  assert "backup retains the worktree bytes" grep -q '"type":"worktree_before"' "${backups[0]}"
+assert "backup retains the worktree bytes" grep -q '"type":"worktree_before"' "${backups[0]}"
 fi
+
+cursor_migration="$TMP/cursor-migration"
+mkdir -p "$cursor_migration/.fno"
+cursor_consumed='{"ts":"2026-08-11T00:00:00Z","type":"think_offered","source":"backlog","data":{"node_id":"consumed-offer"}}'
+cursor_pending='{"ts":"2026-08-11T00:01:00Z","type":"think_offered","source":"backlog","data":{"node_id":"pending-offer"}}'
+printf '%s\n%s\n' "$cursor_consumed" "$cursor_pending" > "$cursor_migration/.fno/events.jsonl"
+printf '%s' "$(( ${#cursor_consumed} + 1 ))" > "$cursor_migration/.fno/.think-offer-cursor"
+canonical_size_before_cursor=$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')
+rm -f "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$cursor_migration" bash "$SETUP" >/dev/null 2>&1
+mapped_cursor=$(cat "$canonical/.fno/.think-offer-cursor")
+assert "migration maps the consumed local offer after the canonical prefix" test "$mapped_cursor" -eq "$((canonical_size_before_cursor + ${#cursor_consumed} + 1))"
+assert "migration does not replay the consumed local offer" bash -c '! tail -c +"$(( $1 + 1 ))" "$2" | grep -q consumed-offer' _ "$mapped_cursor" "$canonical/.fno/events.jsonl"
+assert "migration leaves the pending local offer after the shared cursor" bash -c 'tail -c +"$(( $1 + 1 ))" "$2" | grep -q pending-offer' _ "$mapped_cursor" "$canonical/.fno/events.jsonl"
+assert "migrated worktree shares the mapped offer cursor" test -L "$cursor_migration/.fno/.think-offer-cursor"
+
+pending_canonical="$TMP/pending-canonical"
+mkdir -p "$pending_canonical/.fno"
+printf '%s\n' '{"type":"must_wait_for_canonical_offer"}' > "$pending_canonical/.fno/events.jsonl"
+printf '%s' 0 > "$pending_canonical/.fno/.think-offer-cursor"
+canonical_size_with_pending=$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')
+CANONICAL="$canonical" WORKTREE="$pending_canonical" bash "$SETUP" >/dev/null 2>&1
+assert "migration refuses to cross a pending canonical offer" test ! -L "$pending_canonical/.fno/events.jsonl"
+assert "refused migration preserves the local offer cursor boundary" test -f "$pending_canonical/.fno/.think-offer-cursor"
+printf '%s' "$canonical_size_with_pending" > "$canonical/.fno/.think-offer-cursor"
 
 concurrent="$TMP/concurrent"
 mkdir -p "$concurrent/.fno"

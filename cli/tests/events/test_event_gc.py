@@ -92,6 +92,22 @@ def test_gc_refuses_a_horizon_shorter_than_schema_minimum(tmp_path: Path) -> Non
         gc_events(events, now=NOW, ttl_hours=671)
 
 
+def test_gc_refuses_the_unlocked_global_daemon_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "global-events.jsonl"
+    events.write_text(
+        _event("claim_acquired", "2026-07-01T00:00:00Z") + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.paths.global_events_json", lambda: events)
+
+    with pytest.raises(ValueError, match="global daemon journal"):
+        gc_events(events, now=NOW, ttl_hours=672)
+
+    assert events.read_text(encoding="utf-8")
+
+
 def test_gc_dry_run_reports_without_rewriting(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     original = _event("claim_acquired", "2026-07-01T00:00:00Z") + "\n"
@@ -142,6 +158,24 @@ def test_gc_remaps_offer_cursor_without_skipping_pending_rows(tmp_path: Path) ->
     remapped = int(cursor.read_text(encoding="ascii"))
     assert remapped == len(consumed.encode())
     assert b"think_offered" in events.read_bytes()[remapped:]
+    assert not cursor.with_name(cursor.name + ".gc-pending").exists()
+
+
+def test_gc_recovers_cursor_mapping_left_by_interrupted_migration(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    row = _event("node_closed", "2026-08-11T00:00:00Z") + "\n"
+    events.write_text(row, encoding="utf-8")
+    cursor = tmp_path / ".think-offer-cursor"
+    cursor.write_text("0", encoding="ascii")
+    stat = events.stat()
+    cursor.with_name(cursor.name + ".gc-pending").write_text(
+        json.dumps({"device": stat.st_dev, "inode": stat.st_ino, "cursor": len(row)}),
+        encoding="ascii",
+    )
+
+    gc_events(events, now=NOW, ttl_hours=672, dry_run=True)
+
+    assert cursor.read_text(encoding="ascii") == str(len(row))
     assert not cursor.with_name(cursor.name + ".gc-pending").exists()
 
 

@@ -976,6 +976,35 @@ pub(crate) fn append_event_line(
     }
 }
 
+fn event_maintenance_dir(events_path: &Path) -> PathBuf {
+    let resolved_path =
+        std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+    resolved_path.with_file_name(format!(
+        "{}.gc.d",
+        resolved_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "events.jsonl".into())
+    ))
+}
+
+pub(crate) fn event_maintenance_active(events_path: &Path) -> bool {
+    std::fs::symlink_metadata(event_maintenance_dir(events_path)).is_ok()
+}
+
+pub(crate) fn wait_for_event_maintenance(events_path: &Path) {
+    let maintenance_dir = event_maintenance_dir(events_path);
+    loop {
+        if std::fs::symlink_metadata(&maintenance_dir).is_err() {
+            return;
+        }
+        if let Some(token) = acquire_dir_mutex(&maintenance_dir, Duration::from_secs(2), true) {
+            release_dir_mutex(&maintenance_dir, &token);
+            return;
+        }
+    }
+}
+
 /// Shared data fields for claim events (mirrors `events._common`, including
 /// the explicit `expires_at: null` for PID-liveness claims — the EVENT payload
 /// carries null where the LOCKFILE omits the key; that asymmetry is Python's).

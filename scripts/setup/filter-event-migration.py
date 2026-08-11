@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,7 +59,21 @@ def main() -> int:
     existing = {
         key for _, row in _rows(canonical) if (key := _gate_key(row)) is not None
     }
+    local_size = local.stat().st_size
+    try:
+        local_cursor = int(
+            Path(os.environ["EVENTS_MIGRATION_LOCAL_CURSOR"]).read_text(
+                encoding="ascii"
+            )
+        )
+    except (KeyError, OSError, UnicodeError, ValueError):
+        local_cursor = 0
+    if local_cursor < 0 or local_cursor > local_size:
+        local_cursor = 0
+    local_offset = 0
+    mapped_cursor = 0
     for raw, row in _rows(local):
+        line_end = local_offset + len(raw)
         key = _gate_key(row)
         if (
             key is not None
@@ -66,10 +81,17 @@ def main() -> int:
             and _favorable(row)
             and key in existing
         ):
+            local_offset = line_end
             continue
         sys.stdout.buffer.write(raw)
+        if line_end <= local_cursor:
+            mapped_cursor += len(raw)
         if key is not None:
             existing.add(key)
+        local_offset = line_end
+    mapping_path = os.environ.get("EVENTS_MIGRATION_CURSOR_MAP")
+    if mapping_path:
+        Path(mapping_path).write_text(str(mapped_cursor), encoding="ascii")
     return 0
 
 

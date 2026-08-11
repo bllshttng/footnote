@@ -271,18 +271,130 @@ journal_ends_with() {
   tail -c "$suffix_bytes" "$journal" | cmp -s - "$suffix"
 }
 
+recover_event_cursor_pending() {
+  local source="$1"
+  local cursor="$2"
+  local pending="${cursor}.gc-pending"
+  [[ -f "$pending" ]] || return 0
+  python3 - "$source" "$cursor" "$pending" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+source, cursor, pending = sys.argv[1:]
+payload = json.loads(open(pending, encoding="ascii").read())
+stat = os.stat(source)
+if payload.get("device") != stat.st_dev or payload.get("inode") != stat.st_ino:
+    os.unlink(pending)
+    raise SystemExit(0)
+value = payload.get("cursor")
+if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+    raise ValueError("invalid pending event cursor")
+fd, temp = tempfile.mkstemp(dir=os.path.dirname(cursor), prefix=f".{os.path.basename(cursor)}.")
+try:
+    with os.fdopen(fd, "w", encoding="ascii") as handle:
+        handle.write(str(value))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, cursor)
+    os.unlink(pending)
+finally:
+    try:
+        os.unlink(temp)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+publish_event_cursor_pending() {
+  local staged="$1"
+  local cursor="$2"
+  local value="$3"
+  python3 - "$staged" "${cursor}.gc-pending" "$value" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+staged, pending, raw_value = sys.argv[1:]
+stat = os.stat(staged)
+payload = json.dumps(
+    {"device": stat.st_dev, "inode": stat.st_ino, "cursor": int(raw_value)},
+    separators=(",", ":"),
+).encode("ascii")
+fd, temp = tempfile.mkstemp(dir=os.path.dirname(pending), prefix=f".{os.path.basename(pending)}.")
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, pending)
+finally:
+    try:
+        os.unlink(temp)
+    except FileNotFoundError:
+        pass
+PY
+}
+
 append_migrated_events() {
   local source="$1"
   local local_events="$2"
   local deduplicate_suffix="${3:-false}"
-  local filtered
+  local local_cursor="${4:-}"
+  local cursor="$(dirname "$source")/.think-offer-cursor"
+  recover_event_cursor_pending "$source" "$cursor" || return 1
+  local filtered mapping
   filtered=$(mktemp "${source}.migration.XXXXXX") || return 1
-  if ! python3 "$EVENTS_MIGRATION_FILTER" "$source" "$local_events" > "$filtered"; then
+  mapping=$(mktemp "${source}.migration-cursor.XXXXXX") || {
     rm -f "$filtered"
+    return 1
+  }
+  if ! EVENTS_MIGRATION_LOCAL_CURSOR="$local_cursor" EVENTS_MIGRATION_CURSOR_MAP="$mapping" \
+    python3 "$EVENTS_MIGRATION_FILTER" "$source" "$local_events" > "$filtered"; then
+    rm -f "$filtered" "$mapping"
     return 1
   fi
   local rc=0
-  if [[ "$deduplicate_suffix" != "true" ]] || ! journal_ends_with "$source" "$filtered"; then
+  if [[ "$deduplicate_suffix" == "true" ]] && journal_ends_with "$source" "$filtered"; then
+    rm -f "$filtered" "$mapping"
+    return 0
+  fi
+  local source_size canonical_cursor consumed_cursor
+  source_size=$(wc -c < "$source" | tr -d ' ')
+  canonical_cursor="$source_size"
+  if [[ -f "$cursor" ]]; then
+    canonical_cursor=$(tr -d ' \n' < "$cursor" 2>/dev/null)
+  fi
+  consumed_cursor=$(tr -d ' \n' < "$mapping" 2>/dev/null)
+  local cursor_at_end=0
+  if [[ "$canonical_cursor" =~ ^[0-9]+$ && "$canonical_cursor" -le "$source_size" ]]; then
+    if [[ "$canonical_cursor" -eq "$source_size" ]] || python3 - "$source" "$canonical_cursor" <<'PY'
+import sys
+import json
+
+source, raw_offset = sys.argv[1:]
+with open(source, "rb") as handle:
+    handle.seek(int(raw_offset))
+    for raw in handle.read().decode("utf-8", "replace").splitlines():
+        try:
+            row = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(row, dict) and row.get("type") == "think_offered":
+            raise SystemExit(1)
+PY
+    then
+      cursor_at_end=1
+      canonical_cursor="$source_size"
+    fi
+  fi
+  if (( cursor_at_end == 0 )) || [[ ! "$consumed_cursor" =~ ^[0-9]+$ ]]; then
+    echo "setup-worktree: refusing events migration while canonical offers are pending" >&2
+    rc=1
+  fi
+  if (( rc == 0 )); then
     local staged
     staged=$(mktemp "${source}.migration-append.XXXXXX") || rc=$?
     if (( rc == 0 )); then
@@ -292,11 +404,17 @@ append_migrated_events() {
       cat "$filtered" >> "$staged" || rc=$?
     fi
     if (( rc == 0 )); then
+      publish_event_cursor_pending "$staged" "$cursor" "$((canonical_cursor + consumed_cursor))" || rc=$?
+    fi
+    if (( rc == 0 )); then
       mv "$staged" "$source" || rc=$?
+    fi
+    if (( rc == 0 )); then
+      recover_event_cursor_pending "$source" "$cursor" || rc=$?
     fi
     [[ -z "${staged:-}" ]] || rm -f "$staged"
   fi
-  rm -f "$filtered"
+  rm -f "$filtered" "$mapping"
   return "$rc"
 }
 
@@ -343,6 +461,8 @@ link_events_journal() {
   local rel=".fno/events.jsonl"
   local source="$CANONICAL/$rel"
   local target="$WORKTREE/$rel"
+  local source_cursor="$CANONICAL/.fno/.think-offer-cursor"
+  local target_cursor="$WORKTREE/.fno/.think-offer-cursor"
   local token="$(hostname):$$:$(date -u +%s):$RANDOM"
   local pending_backups=()
   local recover_pending=0
@@ -429,6 +549,33 @@ link_events_journal() {
     return 1
   fi
   EVENTS_MIGRATION_DIRS+=("$second_lock")
+  local first_cursor_lock="${source_cursor}.lock.d"
+  local second_cursor_lock="${target_cursor}.lock.d"
+  if [[ -L "$target_cursor" ]]; then
+    second_cursor_lock="$(_resolve_event_symlink "$target_cursor").lock.d" || {
+      cleanup_events_migration
+      return 1
+    }
+  fi
+  if [[ "$second_cursor_lock" < "$first_cursor_lock" ]]; then
+    local swap_cursor_lock="$first_cursor_lock"
+    first_cursor_lock="$second_cursor_lock"
+    second_cursor_lock="$swap_cursor_lock"
+  fi
+  if ! acquire_events_dir "$first_cursor_lock" "$token"; then
+    cleanup_events_migration
+    echo "setup-worktree: event cursor migration timed out on $first_cursor_lock" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$first_cursor_lock")
+  if [[ "$second_cursor_lock" != "$first_cursor_lock" ]]; then
+    if ! acquire_events_dir "$second_cursor_lock" "$token"; then
+      cleanup_events_migration
+      echo "setup-worktree: event cursor migration timed out on $second_cursor_lock" >&2
+      return 1
+    fi
+    EVENTS_MIGRATION_DIRS+=("$second_cursor_lock")
+  fi
 
   # Another setup may have completed while this process waited for the locks.
   # Re-read both the link and recovery receipts before choosing a mutation path.
@@ -473,7 +620,7 @@ link_events_journal() {
     fi
     for pending in "${pending_backups[@]}"; do
       if (( rc == 0 )); then
-        append_migrated_events "$source" "$pending" true || rc=$?
+        append_migrated_events "$source" "$pending" true "$target_cursor" || rc=$?
         if (( rc == 0 )); then
           ensure_trailing_newline "$source" || rc=$?
         fi
@@ -489,7 +636,7 @@ link_events_journal() {
       ln -s "$source" "$target" || rc=$?
     fi
     if (( rc == 0 )) && [[ -s "$backup" ]]; then
-      append_migrated_events "$source" "$backup" || rc=$?
+      append_migrated_events "$source" "$backup" false "$target_cursor" || rc=$?
       if (( rc == 0 )); then
         ensure_trailing_newline "$source" || rc=$?
       fi
@@ -539,11 +686,13 @@ link_file ".fno/config.toml"
 if ! link_events_journal; then
   echo "setup-worktree: events journal left worktree-local after migration failure" >&2
 fi
-if [[ ! -e "$CANONICAL/.fno/.think-offer-cursor" ]]; then
-  canonical_events_size=$(wc -c < "$CANONICAL/.fno/events.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
-  (set -C; printf '%s' "${canonical_events_size:-0}" > "$CANONICAL/.fno/.think-offer-cursor") 2>/dev/null || true
+if [[ -L "$WORKTREE/.fno/events.jsonl" ]]; then
+  if [[ ! -e "$CANONICAL/.fno/.think-offer-cursor" ]]; then
+    canonical_events_size=$(wc -c < "$CANONICAL/.fno/events.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
+    (set -C; printf '%s' "${canonical_events_size:-0}" > "$CANONICAL/.fno/.think-offer-cursor") 2>/dev/null || true
+  fi
+  link_artifact ".fno/.think-offer-cursor"
 fi
-link_artifact ".fno/.think-offer-cursor"
 # config.local.toml is deliberately NOT linked: it is the one config file kept
 # per-worktree, layering the collision-prone keys (post_merge.parking_lot_path,
 # project.id) on top of the shared config.toml (x-cbce). Do not add a

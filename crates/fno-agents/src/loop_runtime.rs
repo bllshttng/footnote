@@ -268,10 +268,19 @@ impl Journal {
 
     /// Append through the same bounded mkdir mutex as canonical Python and Rust claims writers.
     fn append_to_file(&self, path: &Path, event: &Value, fatal: bool) -> Result<(), LoopError> {
-        match crate::claims::append_event_line(path, event, JOURNAL_LOCK_TIMEOUT) {
-            Ok(()) => Ok(()),
-            Err(message) if fatal => Err(LoopError::Journal(message)),
-            Err(message) => Err(LoopError::Io(std::io::Error::other(message))),
+        loop {
+            match crate::claims::append_event_line(path, event, JOURNAL_LOCK_TIMEOUT) {
+                Ok(()) => return Ok(()),
+                Err(message)
+                    if fatal
+                        && message.contains("events.jsonl lock timeout")
+                        && crate::claims::event_maintenance_active(path) =>
+                {
+                    crate::claims::wait_for_event_maintenance(path);
+                }
+                Err(message) if fatal => return Err(LoopError::Journal(message)),
+                Err(message) => return Err(LoopError::Io(std::io::Error::other(message))),
+            }
         }
     }
 
