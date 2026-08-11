@@ -7787,6 +7787,7 @@ def cmd_reopen(
     # -- Step 3: mutation under the lock --
     cascade_out: list[str] = []
     warned_out: list[str] = []
+    canonical_id_box: list[str] = [task_id]
 
     def mutator(entries):
         n = _find_node(entries, task_id)
@@ -7795,8 +7796,15 @@ def cmd_reopen(
             raise typer.Exit(code=1)
         if not n.get("completed_at"):
             return entries  # raced with another reopen; the safe direction wins
+        # The CANONICAL id, not the argument: _find_node resolves a partial id
+        # (`ab-9728` for `ab-9728f3c1`), while the cascade walks a parent map
+        # keyed on full ids. Passing the argument through would make the cascade
+        # silently find nothing for exactly the callers who typed the short form,
+        # leaving an auto-closed epic done over a live child. cmd_unsupersede
+        # carries the same box for the same reason.
+        canonical_id_box[0] = n.get("id") or task_id
         _clear_completion_fields(n, reason=cleaned_reason)
-        reopened, warned = _cascade_reopen_parents(entries, task_id)
+        reopened, warned = _cascade_reopen_parents(entries, canonical_id_box[0])
         cascade_out.extend(reopened)
         warned_out.extend(warned)
         return entries
@@ -7810,7 +7818,7 @@ def cmd_reopen(
             err=True,
         )
     typer.echo(
-        f"Reopened {task_id}"
+        f"Reopened {canonical_id_box[0]}"
         + (f" (cascade: {', '.join(cascade_out)})" if cascade_out else "")
     )
 
@@ -7819,7 +7827,7 @@ def cmd_reopen(
 
         _evts.append_event(
             _evts.backlog_reopened(
-                node_id=task_id,
+                node_id=canonical_id_box[0],
                 reason=cleaned_reason,
                 forced=bool(force),
                 pr_number=pr_number,
@@ -7834,8 +7842,7 @@ def cmd_reopen(
     # cmd_unsupersede's tail and both are needed for the same reasons: the
     # forward-only projector will not leave a terminal on its own, and the graph
     # status was derived during the mutation while the plan still read `done`.
-    ids = [task_id, *cascade_out]
-    for nid in ids:
+    for nid in [canonical_id_box[0], *cascade_out]:
         _project_plans_from_graph([nid], force_status_off_terminal_for=nid)
     locked_mutate_graph(_graph_path(), lambda entries: entries)
 

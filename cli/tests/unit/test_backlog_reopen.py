@@ -265,6 +265,25 @@ def test_an_auto_closed_epic_reopens_with_its_child(tmp_graph):
     assert "ab-e0000000" in res.output
 
 
+def test_the_cascade_still_fires_for_a_partial_id(tmp_graph):
+    """_find_node resolves `ab-c000` to the full id; the cascade walks full ids.
+
+    Passing the argument straight through made the cascade find nothing for
+    exactly the callers who typed the short form, leaving an auto-closed epic
+    done over a live child - a silent wrong answer, not an error.
+    """
+    _write(
+        tmp_graph,
+        _node("ab-e0000000", type="epic", completion_note="auto-closed: all children complete"),
+        _node("ab-c0000000", parent="ab-e0000000"),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-c000", "--reason", "wrong"])
+    assert res.exit_code == 0, res.output
+    nodes = _read(tmp_graph)
+    assert nodes["ab-c0000000"]["completed_at"] is None
+    assert nodes["ab-e0000000"]["completed_at"] is None
+
+
 def test_an_epic_closed_on_its_own_evidence_is_left_done_and_named(tmp_graph):
     """Silently reopening it would discard a judgment this verb never made."""
     _write(
