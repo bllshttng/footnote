@@ -38,12 +38,24 @@ PY="$REPO_ROOT/cli/.venv/bin/python"
 run_lane() {
   local mode="$1"
   PYTHONPATH="$REPO_ROOT/cli/src" "$PY" - "$mode" "$CANARY_TEST" <<'PYEOF' >/dev/null 2>&1
-import subprocess, sys
+import os, subprocess, sys
 from pathlib import Path
 import fno.test_cmd as tc
+from fno.hermetic import AMBIENT_LEAK_CANARY
 
 mode, test_path = sys.argv[1], sys.argv[2]
 root = Path.cwd()
+
+# The clean lane has to be clean BY CONSTRUCTION, not by assuming this
+# process's own parent was. When the whole smoke runs under `--ambient dirty`,
+# THIS script is itself a poisoned child: the canary is in its environment by
+# design (it is the one thing neutralise deliberately lets through), so a
+# clean sub-lane built from os.environ inherits it and the clean half fails.
+#
+# That is the same defect the suite is being checked for, in the checker. Drop
+# it explicitly; the dirty lane gets it back from poison() a line later.
+os.environ.pop(AMBIENT_LEAK_CANARY, None)
+
 tc._AMBIENT_MODE = mode
 env = tc._child_env(root)
 sys.exit(subprocess.run(
