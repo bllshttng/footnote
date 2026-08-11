@@ -2678,18 +2678,17 @@ def cmd_sent(
     ``--unclaimed`` applies exactly the predicate the nag applies, so what this
     prints is what that line is counting, never a differently-scoped set.
     """
+    from fno.agents.self_stamp import stamp_from
     from fno.config import load_settings
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
 
-    ident = resolve_harness_identity()
-    if not ident.harness or not ident.session_id:
-        # No ambient identity means no outbox to scope to. Report that rather
-        # than falling back to a project-wide list that would show mail this
-        # session cannot withdraw.
-        print("no harness identity in env: nothing to scope an outbox to", file=sys.stderr)
-        raise typer.Exit(code=0)
-    handle = canonical_handle(ident.session_id)
+    # `stamp_from(None)`, not the precedence-only resolver: this must be the
+    # SAME handle the send path stamped into `from`, or the outbox lists mail
+    # this session did not send and hides mail it did. A session that inherited
+    # a foreign marker stamps "fno" and resolves to its spawner by precedence,
+    # so the two answers genuinely differ.
+    handle = stamp_from(None)
 
+    is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
     if unclaimed_only:
         msgs = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
         claimed_flag = {m.id: False for m in msgs}
@@ -2698,15 +2697,16 @@ def cmd_sent(
 
         all_msgs = list(iter_messages())
         retracted = withdrawn_ids(all_msgs)
-        unclaimed_ids = {
-            m.id for m in _sent_unclaimed(handle, 0)
-        }
+        # TTL of -1, not 0: `_age_exceeds` is strict `>` and bus timestamps are
+        # whole seconds, so a message sent this second has age 0.0 and a TTL of 0
+        # would classify it CLAIMED - reporting a just-sent, unread message as
+        # picked up, which is the opposite of the truth this verb exists to tell.
+        unclaimed_ids = {m.id for m in _sent_unclaimed(handle, -1)}
         msgs = [
             m for m in all_msgs if m.from_ == handle and m.id not in retracted
         ]
         claimed_flag = {m.id: m.id not in unclaimed_ids for m in msgs}
 
-    is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
     if json_out or not is_tty:
         print(
             json.dumps(
@@ -2759,13 +2759,14 @@ def cmd_withdraw(
         iter_messages,
         withdrawn_ids,
     )
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.agents.self_stamp import stamp_from
 
-    ident = resolve_harness_identity()
-    if not ident.harness or not ident.session_id:
-        print("no harness identity in env: cannot prove you sent it", file=sys.stderr)
-        raise typer.Exit(code=1)
-    handle = canonical_handle(ident.session_id)
+    # The ownership check is the ONLY authz gate on this verb, so it compares
+    # against the same resolver that stamped the envelope's `from`. The
+    # precedence-only resolver would answer differently for a session carrying
+    # an inherited marker: it would refuse that session's own mail (stamped
+    # "fno") and let it retract its spawner's.
+    handle = stamp_from(None)
 
     all_msgs = list(iter_messages())
     target = next((m for m in all_msgs if m.id == msg_id), None)

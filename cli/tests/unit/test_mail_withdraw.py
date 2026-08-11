@@ -108,6 +108,40 @@ def test_sent_without_filter_marks_claimed_mail(env):
     assert by_id[stranded]["claimed"] is False
 
 
+def test_sent_does_not_call_a_just_sent_message_claimed(env):
+    """Bus timestamps are whole seconds and the age test is strict `>`, so a
+    message sent in the current second has age 0.0. A zero TTL would classify it
+    as picked up -- reporting the opposite of the truth this verb exists to
+    tell, on exactly the message a sender is most likely to be looking at."""
+    mid = _send(MY_HANDLE, PEER, "just now")
+
+    rows = json.loads(_run("mail", "sent", "--json").stdout)
+
+    assert {r["id"]: r["claimed"] for r in rows} == {mid: False}
+
+
+def test_sent_scopes_to_the_handle_the_send_path_stamps(env):
+    """`stamp_from` is what writes `from`, and it floors to "fno" with no
+    ambient identity while the precedence-only resolver would pick an inherited
+    marker's session. Scoping by the wrong one lists mail this session did not
+    send and hides mail it did."""
+    from fno.agents.self_stamp import stamp_from
+
+    for m in MARKERS:
+        monkeypatch_env_clear(m)
+    mid = _send(stamp_from(None), PEER, "from a bare shell", ts=_ts_ago(3600))
+
+    rows = json.loads(_run("mail", "sent", "--json").stdout)
+
+    assert [r["id"] for r in rows] == [mid]
+
+
+def monkeypatch_env_clear(name: str) -> None:
+    import os
+
+    os.environ.pop(name, None)
+
+
 def test_sent_shows_only_my_own_outbound(env):
     """Scoped to this session's handle, so it never lists mail this session
     could not withdraw anyway."""

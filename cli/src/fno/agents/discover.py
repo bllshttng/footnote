@@ -841,11 +841,21 @@ class DiscoveredSession:
         # private mapping, one silent session read `orphaned` here while an
         # equivalent registry row read `unknown`, which is the incongruence the
         # shared derivation exists to end.
+        from fno.agents.format import row_address
+
         reach = self._reachability()
         return {
             "handle": self.handle,
             "short_id": self.short_id,
             "session_id": self.session_id,
+            # Derived HERE, on the row, rather than in either table renderer:
+            # this lane is re-served verbatim by the Rust path, so a renderer-
+            # side derivation would need a second copy in Rust and the two would
+            # drift. `self.agent` is the row's real harness - hardcoding claude
+            # here would let a codex row fall through to the short_id fallback,
+            # which for a non-claude row is a daemon worker key rather than a
+            # mailbox.
+            "address": row_address(self.agent, self.session_id, self.short_id),
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,

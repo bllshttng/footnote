@@ -387,15 +387,12 @@ def _render_discovered_section(discovered: list[dict], width: int) -> str:
     """
     display = []
     for r in discovered:
-        # Same derivation the registry lane uses. The discovered lane records a
-        # full session id, so this resolves for every row that has one and falls
-        # back to the lane's own short_id otherwise.
-        address = row_address("claude", r.get("session_id"), r.get("short_id")) or str(
-            r.get("short_id") or "-"
-        )
         display.append(
             {
-                "address": address,
+                # Read off the row, not re-derived: `to_row` already resolved it
+                # from the session's own harness, and the Rust renderer reads the
+                # same key. A second derivation here would be a second answer.
+                "address": str(r.get("address") or "-"),
                 "label": str(r.get("handle") or "-"),
                 "status": str(r.get("status") or "-"),
                 "project": str(r.get("project") or "-"),
