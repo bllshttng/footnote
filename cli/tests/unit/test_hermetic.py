@@ -156,6 +156,50 @@ def test_cache_defaults_do_not_follow_a_poisoned_home(tmp_path, fixtures_dir):
 
 
 # ---------------------------------------------------------------------------
+# Git identity: an ambient channel HOME does not close.
+# ---------------------------------------------------------------------------
+
+
+def test_git_config_is_pinned_into_the_sandbox(tmp_path):
+    out = neutralise({"GIT_CONFIG_GLOBAL": "/home/dev/.gitconfig"}, tmp_path)
+    assert out["GIT_CONFIG_GLOBAL"] == str(tmp_path / "gitconfig")
+    assert out["GIT_CONFIG_SYSTEM"] == os.devnull
+    assert Path(out["GIT_CONFIG_GLOBAL"]).exists()
+
+
+def test_a_commit_gets_a_synthetic_identity_not_the_developers(tmp_path):
+    """Both directions, in one probe.
+
+    Reading: a test fixture's commits currently carry the real developer's
+    name and email, which `git log` in that fixture can then assert on.
+    Depending: exactly one shell harness commits without setting a local
+    identity, so it passes on any machine with a ~/.gitconfig and has nothing
+    to fall back on when there is none.
+    """
+    import subprocess
+
+    env = neutralise({}, tmp_path)
+    repo = tmp_path / "probe"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=repo, env=env, capture_output=True, text=True
+        )
+
+    git("init", "-q")
+    (repo / "f").write_text("x")
+    git("add", "f")
+    assert git("commit", "-q", "-m", "probe").returncode == 0
+
+    author = git("log", "-1", "--format=%an <%ae>").stdout.strip()
+    assert author == "fno test <fno-test@localhost>"
+    # init.defaultBranch is ambient too: a developer who sets it renames the
+    # branch a test just created.
+    assert git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+
+
+# ---------------------------------------------------------------------------
 # The invariant the dirty lane rests on.
 # ---------------------------------------------------------------------------
 

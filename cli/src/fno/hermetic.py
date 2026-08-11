@@ -109,6 +109,14 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # Shell-prompt config the mux integration reads.
     "STARSHIP_CONFIG",
     "ZDOTDIR",
+    # Git identity and config location. Re-pinned into the sandbox below; see
+    # _git_pins for what leaks through ~/.gitconfig in both directions.
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
 )
 
 # Read by source but NOT ambient state: the process needs these to run, and
@@ -328,8 +336,48 @@ def neutralise(
     out["FNO_E2E"] = "1"  # arm idle-exit so an orphaned mux server reaps itself
 
     out.update(caches)
+    out.update(_git_pins(sandbox))
     out["FNO_TEST_HERMETIC"] = "1"  # receipt: this env came through neutralise()
     return out
+
+
+# A synthetic global gitconfig. `~/.gitconfig` is an ambient channel HOME does
+# not close, because git resolves it before HOME in some layouts and because
+# nothing in the FNO_/TARGET_ sweep touches it. What leaks through it:
+#
+#   - the developer's user.name / user.email, which end up stamped on every
+#     commit a test fixture makes (`git log` in a temp repo currently reads
+#     the real author);
+#   - init.defaultBranch, which renames the branch a test just created;
+#   - core.* and alias.*, which can change what a plain `git` invocation does.
+#
+# It leaks in the other direction too: exactly one shell harness
+# (scripts/tests/test_git_protection_hook.sh) commits without setting a local
+# identity, so it passes on any machine with a ~/.gitconfig and has nothing to
+# fall back on when there is none.
+#
+# Pinned to a WRITABLE sandbox file rather than /dev/null so a test that wants
+# to write global git config still can. No shell harness uses
+# `git config --global` today, but breaking that is not worth the byte saved.
+_GIT_IDENTITY = """\
+[user]
+\tname = fno test
+\temail = fno-test@localhost
+[init]
+\tdefaultBranch = main
+[commit]
+\tgpgsign = false
+"""
+
+
+def _git_pins(sandbox: Path) -> dict:
+    gitconfig = sandbox / "gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text(_GIT_IDENTITY, encoding="utf-8")
+    return {
+        "GIT_CONFIG_GLOBAL": str(gitconfig),
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
 
 
 def poison(env: Optional[Mapping[str, str]] = None, fixtures: Optional[Path] = None) -> dict:
