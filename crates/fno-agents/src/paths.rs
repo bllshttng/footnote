@@ -211,6 +211,12 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
 /// Python `resolve_canonical_worktree` in `cli/src/fno/paths.py` so the two
 /// layers cannot drift (ab-77b691dc; review HIGH). Shared by the client `--fresh`
 /// dispatch (`bin/client.rs`).
+///
+/// A THIRD implementation of this question lives in `fno::digest_overlay`, which
+/// crate `fno` needs because it does not depend on `fno-agents`. It parses the
+/// linked worktree's `.git` file instead of shelling out, so it costs no
+/// subprocess on the mux attach path and, unlike this one, cannot see a repo
+/// whose git dir lives outside the checkout. Change one and check the other.
 pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")
