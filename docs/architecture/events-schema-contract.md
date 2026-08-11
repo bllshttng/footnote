@@ -71,6 +71,7 @@ The project journal treats a lock timeout as fatal, while its global observabili
 The three general shell helpers and four hook emitters remain unlocked and reject serialized rows above 4000 bytes before appending.
 They register unique entries under `<events-file>.shell-writers.d`, recheck `<events-file>.gc.d`, and remove the entry after appending, so they remain unserialized with each other while compaction can prove no append targets the old inode.
 Hook-provided explicit paths resolve a symlink leaf before deriving the marker and rendezvous, keeping their emergency writes in the canonical worktree journal neighbourhood.
+Shell writers and worktree setup age-steal an abandoned owner-token marker after 120 seconds; active GC renews that marker lease during long compactions.
 
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`

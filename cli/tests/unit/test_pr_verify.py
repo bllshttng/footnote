@@ -129,6 +129,31 @@ def test_closed_blocks_exit_1_and_audits(tmp_path, gh_on, monkeypatch):
     assert "pr_closed_without_merge" in events
 
 
+def test_audit_writer_locks_the_canonical_symlink_target(tmp_path, monkeypatch):
+    canonical = tmp_path / "canonical" / "events.jsonl"
+    canonical.parent.mkdir()
+    canonical.touch()
+    worktree = tmp_path / "worktree" / "events.jsonl"
+    worktree.parent.mkdir()
+    worktree.symlink_to(canonical)
+    acquired = []
+
+    def acquire(lock_dir, timeout, **kwargs):
+        acquired.append(lock_dir)
+        return "token"
+
+    monkeypatch.setattr(_verify, "acquire_dir_mutex", acquire)
+    monkeypatch.setattr(_verify, "release_dir_mutex", lambda lock_dir, token: None)
+
+    _verify._append_event_lenient(
+        str(worktree),
+        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "data": {}},
+        "probe",
+    )
+
+    assert acquired == [canonical.with_name("events.jsonl.lock.d")]
+
+
 def test_draft_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "isDraft": True}])

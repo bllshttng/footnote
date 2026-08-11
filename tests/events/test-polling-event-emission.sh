@@ -193,6 +193,16 @@ wait "$gc_release_pid"
 line=$(tail -1 "$EVENTS_FILE" 2>/dev/null)
 assert_contains "GC barrier append" "$line" '"type":"gc_barrier_probe"'
 
+# A killed collector must not leave shell writers blocked forever.
+rm -f "$EVENTS_FILE"
+mkdir "${EVENTS_FILE}.gc.d"
+printf '%s' 'dead:999999:marker' > "${EVENTS_FILE}.gc.d/owner"
+touch -t 202001010000 "${EVENTS_FILE}.gc.d"
+emit_event target stale_gc_probe '{}'
+line=$(tail -1 "$EVENTS_FILE" 2>/dev/null)
+assert_contains "stale GC marker recovery" "$line" '"type":"stale_gc_probe"'
+[[ ! -d "${EVENTS_FILE}.gc.d" ]] || { echo "FAIL stale GC marker was not reaped"; fail=1; }
+
 # Explicit paths passed by hook fallbacks must share the canonical journal's
 # GC marker and writer rendezvous when the worktree leaf is a symlink.
 canonical_events="$WORK/canonical/events.jsonl"

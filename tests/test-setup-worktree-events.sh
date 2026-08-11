@@ -134,6 +134,32 @@ CANONICAL="$canonical" WORKTREE="$failed_once" bash "$SETUP" >/dev/null 2>&1
 assert "migration retry appends a failed row exactly once" test "$(grep -c 'failed_once_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 assert "migration retry installs the shared symlink" test -L "$failed_once/.fno/events.jsonl"
 
+interrupted="$TMP/interrupted"
+mkdir -p "$interrupted/.fno"
+printf '%s\n' '{"type":"interrupted_row"}' > "$interrupted/.fno/events.jsonl.pre-share.pending.crash"
+ln -s "$canonical/.fno/events.jsonl" "$interrupted/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$interrupted" bash "$SETUP" >/dev/null 2>&1
+assert "interrupted symlink migration recovers its pending rows" test "$(grep -c 'interrupted_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+assert "interrupted migration clears its pending backup" test ! -e "$interrupted/.fno/events.jsonl.pre-share.pending.crash"
+CANONICAL="$canonical" WORKTREE="$interrupted" bash "$SETUP" >/dev/null 2>&1
+assert "interrupted migration recovery is idempotent" test "$(grep -c 'interrupted_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+
+post_append="$TMP/post-append"
+mkdir -p "$post_append/.fno"
+printf '%s\n' '{"type":"post_append_row"}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"type":"post_append_row"}' > "$post_append/.fno/events.jsonl.pre-share.pending.crash"
+ln -s "$canonical/.fno/events.jsonl" "$post_append/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$post_append" bash "$SETUP" >/dev/null 2>&1
+assert "post-append recovery does not duplicate landed rows" test "$(grep -c 'post_append_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+
+stale_marker="$TMP/stale-marker"
+mkdir -p "$stale_marker/.fno/events.jsonl.gc.d"
+printf '%s\n' '{"type":"stale_marker_row"}' > "$stale_marker/.fno/events.jsonl"
+printf '%s' 'dead:999999:marker' > "$stale_marker/.fno/events.jsonl.gc.d/owner"
+touch -t 202001010000 "$stale_marker/.fno/events.jsonl.gc.d"
+CANONICAL="$canonical" WORKTREE="$stale_marker" bash "$SETUP" >/dev/null 2>&1
+assert "migration reaps an abandoned GC marker" test -L "$stale_marker/.fno/events.jsonl"
+
 if (( fail )); then
   exit 1
 fi

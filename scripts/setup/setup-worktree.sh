@@ -24,6 +24,9 @@ set -euo pipefail
 # (mkdir, ln, rm, ls) always resolve.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
+# shellcheck source=../lib/events-lock.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/events-lock.sh"
+
 # Resolve canonical project root (where the shared files live). Priority:
 #   1. CANONICAL env var (manual override)
 #   2. CONDUCTOR_ROOT_PATH (set by Conductor when invoking via scripts.setup)
@@ -149,12 +152,15 @@ link_dir() {
 }
 
 # Acquire the same owner-token mkdir mutex used by the Python and Rust event
-# writers, without stale-stealing a lock whose holder setup cannot identify.
+# writers, including their age-gated recovery for an abandoned directory.
 acquire_events_dir() {
   local lock_dir="$1"
   local token="$2"
   local attempts=0
   while ! mkdir "$lock_dir" 2>/dev/null; do
+    if _steal_stale_event_dir "$lock_dir"; then
+      continue
+    fi
     if (( attempts >= 300 )); then
       return 1
     fi
@@ -201,6 +207,17 @@ ensure_trailing_newline() {
   fi
 }
 
+journal_ends_with() {
+  local journal="$1"
+  local suffix="$2"
+  local suffix_bytes
+  suffix_bytes=$(wc -c < "$suffix" | tr -d ' ')
+  (( suffix_bytes == 0 )) && return 0
+  [[ -f "$journal" ]] || return 1
+  (( $(wc -c < "$journal" | tr -d ' ') >= suffix_bytes )) || return 1
+  tail -c "$suffix_bytes" "$journal" | cmp -s - "$suffix"
+}
+
 wait_for_shell_event_writers() {
   local events_path="$1"
   local active_dir="${events_path}.shell-writers.d"
@@ -242,6 +259,8 @@ link_events_journal() {
   local source="$CANONICAL/$rel"
   local target="$WORKTREE/$rel"
   local token="$(hostname):$$:$(date -u +%s):$RANDOM"
+  local pending_backups=()
+  local recover_pending=0
   EVENTS_MIGRATION_TOKEN="$token"
   EVENTS_MIGRATION_DIRS=()
 
@@ -251,9 +270,15 @@ link_events_journal() {
     return 1
   }
 
-  if [[ -L "$target" ]]; then
+  shopt -s nullglob
+  pending_backups=("${target}.pre-share.pending."*)
+  shopt -u nullglob
+  if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     ln -sfn "$source" "$target"
     return 0
+  fi
+  if [[ -L "$target" ]]; then
+    recover_pending=1
   fi
   if [[ ! -e "$target" ]]; then
     ln -s "$source" "$target"
@@ -316,31 +341,58 @@ link_events_journal() {
   EVENTS_MIGRATION_DIRS+=("$second_lock")
 
   local rc=0
-  local backup="${target}.pre-share.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  local stamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
+  local backup="${target}.pre-share.pending.${stamp}"
+  local completed_backup="${target}.pre-share.${stamp}"
   ensure_trailing_newline "$source" || rc=$?
-  if (( rc == 0 )); then
+  if (( recover_pending == 1 )); then
+    local pending completed
+    for pending in "${pending_backups[@]}"; do
+      if (( rc == 0 )) && ! journal_ends_with "$source" "$pending"; then
+        cat "$pending" >> "$source" || rc=$?
+        if (( rc == 0 )); then
+          ensure_trailing_newline "$source" || rc=$?
+        fi
+      fi
+      completed="${pending/.pre-share.pending./.pre-share.}"
+      if (( rc == 0 )); then
+        mv "$pending" "$completed" || rc=$?
+      fi
+    done
+  elif (( rc == 0 )); then
     mv "$target" "$backup" || rc=$?
-  fi
-  if (( rc == 0 )); then
-    ln -s "$source" "$target" || rc=$?
-  fi
-  if (( rc == 0 )) && [[ -s "$backup" ]]; then
-    cat "$backup" >> "$source" || rc=$?
     if (( rc == 0 )); then
-      ensure_trailing_newline "$source" || rc=$?
+      ln -s "$source" "$target" || rc=$?
+    fi
+    if (( rc == 0 )) && [[ -s "$backup" ]]; then
+      cat "$backup" >> "$source" || rc=$?
+      if (( rc == 0 )); then
+        ensure_trailing_newline "$source" || rc=$?
+      fi
+    fi
+    if (( rc == 0 )) && ! mv "$backup" "$completed_backup"; then
+      echo "setup-worktree: events rows landed; pending backup retained for recovery: $backup" >&2
+      cleanup_events_migration
+      return 1
     fi
   fi
 
   if (( rc != 0 )); then
-    if [[ -L "$target" ]]; then
-      rm -f "$target" 2>/dev/null || true
-    fi
-    if [[ ! -e "$target" && -e "$backup" ]]; then
-      mv "$backup" "$target" 2>/dev/null || true
+    if (( recover_pending == 0 )); then
+      if [[ -L "$target" ]]; then
+        rm -f "$target" 2>/dev/null || true
+      fi
+      if [[ ! -e "$target" && -e "$backup" ]]; then
+        mv "$backup" "$target" 2>/dev/null || true
+      fi
     fi
     echo "setup-worktree: events migration failed; local journal retained: $target" >&2
   else
-    echo "setup-worktree: migrated events journal; backup retained at $backup" >&2
+    if (( recover_pending == 1 )); then
+      echo "setup-worktree: completed pending events journal migration" >&2
+    else
+      echo "setup-worktree: migrated events journal; backup retained at $completed_backup" >&2
+    fi
   fi
 
   cleanup_events_migration

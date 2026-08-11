@@ -3,6 +3,11 @@
 # Appends structured JSONL events to .fno/events.jsonl
 # Usage: source this file, then call emit_event
 
+_events_lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=events-lock.sh
+source "$_events_lib_dir/events-lock.sh" || return 1 2>/dev/null || exit 1
+unset _events_lib_dir
+
 if [[ -z "${EVENTS_FILE:-}" ]]; then
     _events_repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || _events_repo_root="$PWD"
     EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
@@ -43,6 +48,9 @@ _wait_for_event_gc() {
     local marker="${events_path}.gc.d"
     local attempts=0
     while [[ -d "$marker" && "$attempts" -lt 600 ]]; do
+        if _steal_stale_event_dir "$marker"; then
+            continue
+        fi
         sleep 0.05
         attempts=$((attempts + 1))
     done

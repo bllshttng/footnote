@@ -152,15 +152,18 @@ def _append_event_lenient(events_file: str, event: dict, reason: str) -> None:
             f"pr-verify: schema validation failed for transcript_audit_failed "
             f"(reason={reason}); appending anyway\n"
         )
-    lock = _Lock(events_file, 30, steal=True)  # whole-line append
-    if not lock.acquire():
+    path = Path(events_file).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir = path.with_name(path.name + ".lock.d")
+    token = acquire_dir_mutex(lock_dir, 30, steal=True, poll_s=1)
+    if token is None:
         sys.stderr.write(f"pr-verify: events.jsonl lock timeout (reason={reason})\n")
         return
     try:
-        with open(events_file, "a", encoding="utf-8") as fh:
+        with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, separators=(",", ":")) + "\n")
     finally:
-        lock.release()
+        release_dir_mutex(lock_dir, token)
 
 
 def _record_merge(state_file: str, pr: str, merged_at: str) -> bool:
