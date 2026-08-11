@@ -400,6 +400,27 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _has_flag(
+    args: Sequence[str], short: str = "", longs: tuple[str, ...] = ()
+) -> bool:
+    """True if the pre-argv args carry ``short`` or any of ``longs``.
+
+    Covers every Click spelling: a short flag as ``-X``, ``-X=V``, and the
+    attached ``-XV`` (the form per-detector copies kept missing, so a
+    ``--substrate bg`` spawn spelled that way routed to the Rust binary and
+    exited ``unknown flag``); a long flag as ``--foo`` and ``--foo=V``. One
+    matcher for every routing detector so the attached-short blind spot cannot
+    recur one flag at a time - the crown fix closed it for ``-k`` only; this
+    closes the sibling ``-r`` and ``-P`` detectors in the same file too.
+    """
+    for a in _args_before_argv(args):
+        if short and a.startswith(short):
+            return True
+        if any(a == lng or a.startswith(lng + "=") for lng in longs):
+            return True
+    return False
+
+
 def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--crown`` (bestow-at-spawn).
 
@@ -424,12 +445,7 @@ def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a == "--crown"
-        or a.startswith("--crown=")
-        or a.startswith("-k")  # -k VAL, -k=VAL, -kVAL (Click short attachment)
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, "-k", ("--crown",))
 
 
 def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -471,12 +487,7 @@ def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a in ("--resume", "-r")
-        or a.startswith("--resume=")
-        or a.startswith("-r=")
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, "-r", ("--resume",))
 
 
 def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -490,11 +501,7 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     exit ``unknown flag: --route`` or silently launch on the primary model."""
     if verb != "spawn":
         return False
-    return any(
-        a in ("--route", "--provider", "-P")
-        or a.startswith(("--route=", "--provider="))
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, "-P", ("--route", "--provider"))
 
 
 #: Flags that compose a COMPLETE route (endpoint + auth + model) before any

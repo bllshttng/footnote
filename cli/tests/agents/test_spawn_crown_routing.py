@@ -82,3 +82,22 @@ def test_crown_bearing_spawn_respects_argv_separator() -> None:
     assert not _is_crown_bearing_spawn(
         "spawn", ["spawn", "w", "--argv", "--crown", "level=1,scope=x"]
     )
+
+
+def test_resume_and_route_detectors_catch_attached_short_forms() -> None:
+    """The -k fix's sibling detectors (-r resume, -P route) must catch the same
+    Click attached-short-option form, or a --substrate bg spawn spelled -r<id>
+    or -P<vendor> routes to the Rust binary and fails. One _has_flag matcher
+    covers all three; a per-detector copy matched -X and -X=V but missed -XV."""
+    from fno.agents.rust_runtime import (
+        _is_resume_bearing_spawn,
+        _is_route_bearing_spawn,
+    )
+
+    assert _is_resume_bearing_spawn("spawn", ["spawn", "w", "-rabc"])
+    assert _is_resume_bearing_spawn("spawn", ["spawn", "w", "-r", "abc"])
+    assert _is_route_bearing_spawn("spawn", ["spawn", "w", "-Pzai"])
+    assert _is_route_bearing_spawn("spawn", ["spawn", "w", "--route=zai/glm"])
+    # Non-matching flags and other verbs do not trip them.
+    assert not _is_resume_bearing_spawn("spawn", ["spawn", "w", "--name", "n"])
+    assert not _is_route_bearing_spawn("crown", ["crown", "w", "-Pzai"])

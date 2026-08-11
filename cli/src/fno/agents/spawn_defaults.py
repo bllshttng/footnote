@@ -264,7 +264,9 @@ def normalize_spawn_args(
     # Pass 2: -r / --resume id widening + implied bg.
     resume_idxs = [
         i for i, t in enumerate(toks)
-        if t in ("-r", "--resume") or t.startswith("--resume=") or t.startswith("-r=")
+        if t in ("-r", "--resume")
+        or t.startswith("--resume=")
+        or (t.startswith("-r") and len(t) > 2)  # -r=ID and the Click -rID attached form
     ]
     if len(resume_idxs) > 1:
         print("fno agents spawn: resume given twice (-r / --resume)", file=err)
@@ -274,6 +276,10 @@ def normalize_spawn_args(
         flag = toks[i]
         if "=" in flag:
             raw_value: Optional[str] = flag.split("=", 1)[1]
+            value_at = None
+        elif flag.startswith("-r") and len(flag) > 2:
+            # Click attached short: -r<id>. Value is the rest of the token.
+            raw_value = flag[2:]
             value_at = None
         else:
             value_at = i + 1
