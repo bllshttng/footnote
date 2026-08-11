@@ -17,6 +17,7 @@ Coverage:
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -343,13 +344,76 @@ def test_a_raising_liveness_probe_answers_unknown_instead_of_escaping(boom) -> N
     assert mux_spawn._mux_pane_alive(MUX, run) is None
 
 
-def test_the_death_message_names_the_rm_that_a_respawn_needs() -> None:
-    """The row is kept as evidence and the collision guard is status-blind, so
-    "just retry" would be refused with exit 2 forever."""
-    import inspect
+# ---------------------------------------------------------------------------
+# The reaped-pane case, which is the NORMAL death and the one exit 12 misses
+# ---------------------------------------------------------------------------
 
-    src = inspect.getsource(mux_spawn.dispatch_spawn_pane)
-    assert "fno agents rm {name}" in src
+
+def _ls_runner(*, wait_rc: int, panes: list, ls_rc: int = 0, ls_out=None):
+    """A mux whose `pane wait` answers `wait_rc` and whose `pane ls` lists `panes`."""
+
+    def run(argv, **_kw):
+        verb = argv[3] if len(argv) > 3 else ""
+        if verb == "wait":
+            return _proc(wait_rc)
+        if verb == "ls":
+            body = ls_out if ls_out is not None else json.dumps(
+                [{"pane_id": p} for p in panes]
+            )
+            return _proc(ls_rc, body)
+        if verb == "read":
+            return _proc(0, "")
+        return _proc(0)
+
+    return run
+
+
+def test_a_reaped_pane_is_death_even_though_wait_cannot_say_so() -> None:
+    """When a pane's child exits the mux drops the pane, so a later `pane wait`
+    finds nothing to watch and returns the GENERIC error code 1 - which also
+    covers io failure, version skew, and server error. Exit 12 only fires when
+    the child dies while a watcher is already subscribed, which a --timeout 0
+    probe almost never is. Without the listing fallback the death branch would
+    be near-unreachable and a corpse would land as `spawning`."""
+    assert mux_spawn._mux_pane_alive(MUX, _ls_runner(wait_rc=1, panes=[99])) is False
+
+
+def test_a_pane_still_in_the_listing_is_alive() -> None:
+    assert mux_spawn._mux_pane_alive(MUX, _ls_runner(wait_rc=1, panes=[81, 99])) is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ls_rc": 1},                    # the enumeration itself failed
+        {"ls_out": "not json"},          # unparseable
+        {"ls_out": '{"panes": []}'},     # not a list
+    ],
+)
+def test_an_unsuccessful_enumeration_is_never_read_as_death(kwargs) -> None:
+    """The positive control is a SUCCESSFUL, parseable listing. Without one,
+    "not in the list" is an absence with two explanations."""
+    assert mux_spawn._mux_pane_alive(MUX, _ls_runner(wait_rc=1, panes=[], **kwargs)) is None
+
+
+def test_exit_12_still_short_circuits_without_a_listing_call() -> None:
+    """The definitive signal must not pay for a second round trip."""
+    calls = []
+
+    def run(argv, **_kw):
+        calls.append(argv[3] if len(argv) > 3 else "")
+        return _proc(WAIT_DEAD)
+
+    assert mux_spawn._mux_pane_alive(MUX, run) is False
+    assert "ls" not in calls
+
+
+def test_the_binding_window_stays_under_the_dispatch_subprocess_budget() -> None:
+    """`run_dispatch_one` kills the whole `fno dispatch one` subprocess after
+    20s, and that budget also covers process start, selection, and pane
+    creation. A window at or near 20s gets the subprocess killed BEFORE the
+    registry append, leaving a live pane with no row."""
+    assert mux_spawn._BINDING_WINDOW_S <= 10.0
 
 
 def test_repeat_deaths_do_not_overwrite_each_others_evidence(tmp_path, monkeypatch) -> None:

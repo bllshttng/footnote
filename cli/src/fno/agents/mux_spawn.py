@@ -1186,6 +1186,42 @@ def _lookup_child_pid(
 _WAIT_EXITED = 12
 
 
+def _pane_absent_from_listing(mux: dict, runner) -> Optional[bool]:
+    """True when the mux SUCCESSFULLY enumerated its panes and ours is not there.
+
+    This is the reaped-pane case, and it is the normal one: when a pane's child
+    exits the mux drops the pane outright (``close_pane``), so a later
+    ``pane wait`` finds no pane to watch and answers with the generic
+    ``EXIT_ERROR`` (1) that also covers io failures, version skew, and server
+    errors. Exit 12 only ever fires when the child dies while a watcher is
+    already subscribed, which a ``--timeout 0`` probe almost never is. Without
+    this fallback the death branch would be near-unreachable and a corpse would
+    sit out the whole window and land as `spawning` - the original bug.
+
+    A successful enumeration is what makes this a positive control rather than
+    an absence: exit 0 plus parseable JSON proves the instrument ran, so "not in
+    the list" means the mux says the pane is gone, not "I could not look".
+    Anything else returns None.
+    """
+    try:
+        proc = _run_mux(
+            ["mux", "pane", "ls", "--session", str(mux["session"]), "--json"], runner
+        )
+    except Exception:  # noqa: BLE001 -- a probe never fails a spawn
+        return None
+    if getattr(proc, "returncode", 1) != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    return not any(
+        isinstance(r, dict) and r.get("pane_id") == mux["pane_id"] for r in rows
+    )
+
+
 def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
     """Return exact pane liveness, or ``None`` when the mux cannot answer."""
     try:
@@ -1209,16 +1245,33 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
         return False
     if proc.returncode in {0, 11}:
         return True
-    return None
+    # Every other code is ambiguous by construction (EXIT_ERROR = 1 covers a
+    # dead pane AND io failure AND version skew AND server error), so it is not
+    # a death signal on its own. Ask the authoritative enumeration instead.
+    absent = _pane_absent_from_listing(mux, runner)
+    if absent is None:
+        return None
+    return not absent
 
 
 #: How long a pane may take to bind its session before the spawn stops waiting.
 #: The codex backfill's old ceiling was 3.0s (5 probes x 0.75s), which cannot
 #: separate "codex is slow to open its rollout" from "codex died on an argv
-#: error" - the repro's pane lived about 20s. A healthy spawn pays none of this:
-#: the loop returns the instant either signal fires, so only the genuinely
-#: ambiguous case waits out the window.
-_BINDING_WINDOW_S = 20.0
+#: error". A healthy spawn pays none of this: the loop returns the instant
+#: either signal fires, so only the genuinely ambiguous case waits it out.
+#:
+#: CEILING, and it is not arbitrary: `run_dispatch_one` in crates/fno/src/
+#: server.rs kills the whole `fno dispatch one` subprocess after 20s, and that
+#: budget also has to cover process start, node selection, and pane creation. A
+#: window at or near 20s would get the subprocess killed BEFORE the registry
+#: append, leaving a live pane with no row - the very orphan this change exists
+#: to prevent. Keep this comfortably under that budget; if the dispatch timeout
+#: moves, this moves with it.
+#:
+#: Nothing is lost by the shorter window: a death is detected when it happens
+#: (see _pane_absent_from_listing), not at expiry. The window only bounds how
+#: long a SLOW BIND is waited out.
+_BINDING_WINDOW_S = 8.0
 _BINDING_WINDOW_ENV = "FNO_PANE_BINDING_WINDOW_S"
 _BINDING_POLL_S = 0.75
 #: How long the wait may stay silent before it says what it is doing. A spawn
@@ -1742,7 +1795,20 @@ def dispatch_spawn_pane(
             entries = load_registry()
         except (OSError, ValueError, RegistryVersionError) as exc:
             raise DispatchAskError(f"registry read failed: {exc}", exit_code=12) from exc
-        if any(e.name == name for e in entries):
+        #: Set to the old status when this spawn is reclaiming a dead row's name,
+        #: so the append can drop the corpse in the same transaction.
+        replaced_terminal: Optional[str] = None
+        # A TERMINAL row does not own the name. It will never act again, so
+        # holding the name hostage only deadlocks the caller: `fno dispatch one`
+        # releases its claim and lane on failure and retries under the SAME
+        # deterministic worker name, so a status-blind guard turns one dead pane
+        # into a permanently failed node until a human runs `fno agents rm`.
+        # The evidence survives the row: the captured pane output is a
+        # timestamped file on disk, not a registry field.
+        clash = next((e for e in entries if e.name == name), None)
+        if clash is not None and clash.status in TERMINAL_STATUSES:
+            replaced_terminal = clash.status
+        elif clash is not None:
             raise DispatchAskError(
                 f"agent {name!r} already exists; "
                 f"use 'fno agents rm {name}' first or pick another name",
@@ -2028,6 +2094,17 @@ def dispatch_spawn_pane(
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded
+            # Reclaiming a dead row's name: drop the corpse in the SAME
+            # transaction that appends its replacement, so the registry never
+            # holds two rows under one name. Re-checked here, under the write
+            # lock, against the rows actually being written - the pre-lock read
+            # above decided, this enforces.
+            if replaced_terminal is not None:
+                rows = [
+                    r
+                    for r in rows
+                    if not (r.name == name and r.status in TERMINAL_STATUSES)
+                ]
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
             # candidate (the second pane's session may not exist yet when both
@@ -2164,10 +2241,9 @@ def dispatch_spawn_pane(
                 f"agent {name!r} never reached codex: the pane was created and its "
                 f"child exited before a session was bound, so nothing is running. "
                 f"The registry row is `failed` (not live) and {where}. "
-                f"Read that output for the cause, then 'fno agents rm {name}' "
-                "before respawning - the row is kept as evidence and the "
-                "name-collision guard is status-blind, so a bare retry under the "
-                "same name is refused. Or spawn with --substrate bg.",
+                "Read that output for the cause, then retry - the row is kept as "
+                "evidence but it is terminal, so a respawn under the same name "
+                "reclaims it rather than colliding. Or spawn with --substrate bg.",
                 exit_code=13,
             )
 
