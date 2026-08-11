@@ -15,6 +15,8 @@ pub mod client;
 pub mod clipboard;
 pub mod connections_view;
 pub mod digest_overlay;
+#[cfg(test)]
+pub mod frame_html;
 pub mod keys;
 pub mod link;
 pub mod mouse;
