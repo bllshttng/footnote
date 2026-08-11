@@ -7,9 +7,9 @@ route set`` (atomic, schema-validated, refuse-before-write).
 
 It is deliberately NOT a config layer read at resolve time. A ``posture`` key
 read during resolution would reproduce the deprecated ``use_conductor_canonical``
-precedence problem this repo already had to explain in a rule file
-(``.claude/rules/worktrees.md``): a stance that overrides effective config from a
-second source, silently and without a line in the file an operator would edit.
+precedence problem this repo already had to explain in its worktrees rule: a
+stance that overrides effective config from a second source, silently and
+without a line in the file an operator would edit.
 
 The applied-posture stamp (``posture.json`` under the state dir) is ADVISORY
 provenance that ``fno doctor`` may display; no resolver reads it. Keeping it in
