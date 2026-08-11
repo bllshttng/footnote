@@ -180,6 +180,19 @@ git -C "$repo_root" init -q
 [[ -s "$repo_root/.fno/events.jsonl" ]] || { echo "FAIL repo root: shell event did not land at root"; fail=1; }
 [[ ! -e "$repo_root/nested/source/.fno" ]] || { echo "FAIL repo root: shell event created a nested .fno"; fail=1; }
 
+# A collector marker pauses the unlocked shell append until replacement is done.
+rm -f "$EVENTS_FILE"
+mkdir "${EVENTS_FILE}.gc.d"
+(
+    sleep 0.1
+    rmdir "${EVENTS_FILE}.gc.d"
+) &
+gc_release_pid=$!
+emit_event target gc_barrier_probe '{}'
+wait "$gc_release_pid"
+line=$(tail -1 "$EVENTS_FILE" 2>/dev/null)
+assert_contains "GC barrier append" "$line" '"type":"gc_barrier_probe"'
+
 # AC-VALIDATOR: validator accepts canonical envelope (when validator is loadable)
 if declare -F validate_event >/dev/null 2>&1; then
     canonical='{"ts":"2026-05-07T09:30:42Z","type":"polling_external_review","source":"target","data":{"pr_number":204,"reviewer_bot":"gemini-code-assist[bot]","wait_kind":"cron","session_id":"s","next_check_at":"2026-05-08T16:00:00Z"}}'

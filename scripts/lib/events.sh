@@ -10,6 +10,17 @@ if [[ -z "${EVENTS_FILE:-}" ]]; then
 fi
 EVENTS_ATOMIC_LINE_MAX_BYTES=4000
 
+_wait_for_event_gc() {
+    local events_path="${1:?events path required}"
+    local marker="${events_path}.gc.d"
+    local attempts=0
+    while [[ -d "$marker" && "$attempts" -lt 600 ]]; do
+        sleep 0.05
+        attempts=$((attempts + 1))
+    done
+    [[ ! -d "$marker" ]]
+}
+
 _append_bounded_event() {
     local label="${1:?label required}"
     local event="${2:?event required}"
@@ -21,6 +32,7 @@ _append_bounded_event() {
             "$label" "$event_bytes" "$EVENTS_ATOMIC_LINE_MAX_BYTES" >&2
         return 1
     fi
+    _wait_for_event_gc "$events_path" || return 1
     mkdir -p "$(dirname "$events_path")" 2>/dev/null || return 1
     printf '%s\n' "$event" >> "$events_path" 2>/dev/null
 }

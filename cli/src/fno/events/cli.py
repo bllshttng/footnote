@@ -560,6 +560,40 @@ def gate_escape(
 
 
 @cli.command()
+def gc(
+    ctx: typer.Context,
+    events_path: Optional[Path] = typer.Option(
+        None, "--events", help="path to events.jsonl (default: worktree root)"
+    ),
+    ttl_hours: Optional[int] = typer.Option(
+        None, "--ttl-hours", min=1, help="ephemeral retention horizon in hours"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="report without rewriting"),
+) -> None:
+    """Delete expired explicit-ephemeral rows while preserving all other rows."""
+    from fno.events import RETENTION_MINIMUM_TTL_HOURS
+    from fno.events.gc import gc_events
+    from fno.paths import resolve_repo_root
+
+    resolved = events_path or (resolve_repo_root() / ".fno" / "events.jsonl")
+    horizon = ttl_hours if ttl_hours is not None else RETENTION_MINIMUM_TTL_HOURS
+    try:
+        result = gc_events(resolved, ttl_hours=horizon, dry_run=dry_run)
+    except (OSError, TimeoutError, ValueError) as exc:
+        typer.echo(f"error: event gc failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+    payload = {**result, "events": str(resolved), "ttl_hours": horizon, "dry_run": dry_run}
+    if bool(ctx.obj and ctx.obj.get("json", False)):
+        typer.echo(json.dumps(payload))
+    else:
+        typer.echo(
+            "event gc: "
+            f"scanned={result['scanned']} deleted={result['deleted']} "
+            f"kept={result['kept']} malformed={result['malformed']}"
+        )
+
+
+@cli.command()
 def audit(
     ctx: typer.Context,
     session_id: str = typer.Option(..., "--session-id", help="session ID to audit"),

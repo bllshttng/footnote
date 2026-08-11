@@ -96,6 +96,43 @@ def _load_schema() -> dict[str, Any]:
         raise SchemaUnavailableError(f"failed to parse {path}: {exc}") from exc
 
 
+_RETENTION_CLASSES = frozenset({"ephemeral", "gate", "durable"})
+
+
+def validate_retention_schema(schema: dict[str, Any]) -> None:
+    """Validate retention classes and every declared join as one contract."""
+    retention = schema.get("retention", {})
+    default = retention.get("default", "durable")
+    if default not in _RETENTION_CLASSES:
+        raise SchemaUnavailableError(f"invalid retention default: {default!r}")
+    minimum = retention.get("minimum_ephemeral_ttl_hours", 672)
+    if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum <= 0:
+        raise SchemaUnavailableError(
+            f"invalid minimum_ephemeral_ttl_hours: {minimum!r}"
+        )
+    entries = {entry.get("name"): entry for entry in schema.get("event_types", [])}
+    for name, entry in entries.items():
+        value = entry.get("retention", default)
+        if value not in _RETENTION_CLASSES:
+            raise SchemaUnavailableError(
+                f"invalid retention class for {name}: {value!r}"
+            )
+    for pair in retention.get("joins", []):
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise SchemaUnavailableError(f"invalid retention join: {pair!r}")
+        left, right = pair
+        if left not in entries or right not in entries:
+            raise SchemaUnavailableError(
+                f"retention join names unknown event type: {pair!r}"
+            )
+        left_class = entries[left].get("retention", default)
+        right_class = entries[right].get("retention", default)
+        if left_class != right_class:
+            raise SchemaUnavailableError(
+                f"retention join mismatch: {left}={left_class}, {right}={right_class}"
+            )
+
+
 # Schema is loaded lazily so a missing manifest does NOT break module
 # import. ``validate()`` and the typed builders raise SchemaUnavailableError
 # when invoked without a loadable schema. Smoke-test contexts (an isolated
@@ -112,10 +149,13 @@ ALLOWED_SOURCES: set[str]
 # regex, not enum membership. Compiled from envelope.properties.source.patterns.
 ALLOWED_SOURCE_PATTERNS: list[Any]
 ALLOWED_GATES: set[str]
+RETENTION_DEFAULT: str
+RETENTION_MINIMUM_TTL_HOURS: int
 _schema_load_error: SchemaUnavailableError | None = None
 
 try:
     SCHEMA = _load_schema()
+    validate_retention_schema(SCHEMA)
     EVENT_TYPES = {e["name"]: e for e in SCHEMA.get("event_types", [])}
     ENVELOPE_REQUIRED = SCHEMA["envelope"]["required"]
     MAX_DATA_BYTES = SCHEMA.get("limits", {}).get("max_data_bytes", 65536)
@@ -131,6 +171,10 @@ try:
         for p in SCHEMA["envelope"]["properties"]["source"].get("patterns", [])
     ]
     ALLOWED_GATES = set(SCHEMA.get("gates", []))
+    RETENTION_DEFAULT = SCHEMA.get("retention", {}).get("default", "durable")
+    RETENTION_MINIMUM_TTL_HOURS = int(
+        SCHEMA.get("retention", {}).get("minimum_ephemeral_ttl_hours", 672)
+    )
     # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
     _family = SCHEMA.get("protocol_family", {})
     PROTOCOL_FAMILY_TYPES = set(_family.get("types", []))
@@ -148,6 +192,8 @@ except SchemaUnavailableError as _exc:
     ALLOWED_SOURCES = set()
     ALLOWED_SOURCE_PATTERNS = []
     ALLOWED_GATES = set()
+    RETENTION_DEFAULT = "durable"
+    RETENTION_MINIMUM_TTL_HOURS = 672
     PROTOCOL_FAMILY_TYPES = set()
     PROTOCOL_FAMILY_VERSION = 1
     PROTOCOL_ENVELOPE_ALLOWED = set()
@@ -164,6 +210,13 @@ def _require_schema() -> None:
     """Raise the deferred SchemaUnavailableError if module import couldn't load."""
     if _schema_load_error is not None:
         raise _schema_load_error
+
+
+def retention_for(event_type: str) -> str:
+    """Return an event type's retention class, defaulting unknowns to durable."""
+    _require_schema()
+    entry = EVENT_TYPES.get(event_type) if EVENT_TYPES is not None else None
+    return entry.get("retention", RETENTION_DEFAULT) if entry else RETENTION_DEFAULT
 
 
 def validate(event: dict[str, Any]) -> None:
@@ -1260,6 +1313,8 @@ __all__ = [
     "ENVELOPE_REQUIRED",
     "EVENT_TYPES",
     "MAX_DATA_BYTES",
+    "RETENTION_DEFAULT",
+    "RETENTION_MINIMUM_TTL_HOURS",
     "SCHEMA",
     "SESSION_SATISFIED_SOURCES",
     "SchemaUnavailableError",
@@ -1284,7 +1339,9 @@ __all__ = [
     "phase_0_decision",
     "phase_transition",
     "session_satisfied",
+    "retention_for",
     "validate",
+    "validate_retention_schema",
     "FanInTally",
     "tally_fan_in",
     "verify_child_promise",

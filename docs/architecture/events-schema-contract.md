@@ -1,6 +1,6 @@
 ---
 created: 2026-06-18T11:54
-updated: 2026-07-26T10:55
+updated: 2026-08-11T12:00
 status: approved
 ---
 
@@ -64,6 +64,11 @@ schema's `gates:` allowlist; `gate_bearing: false` is for audit-only
 phase boundaries (no gate flip happened).
 
 The 64KB cap on `data` payload is enforced by both validators.
+
+Branch-A Python, Rust claims, and loop-journal writers serialize on the same mkdir mutex at `<events-file>.lock.d`.
+The project journal treats a lock timeout as fatal, while its global observability mirror remains best-effort so daemon progress does not depend on that mirror.
+The three fixed-shape shell helpers remain unlocked and reject serialized rows above 4000 bytes before appending.
+They also wait while `<events-file>.gc.d` exists so retention compaction cannot replace the journal during their append.
 
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
@@ -228,6 +233,24 @@ Ship-gate readers take the repository lock while reducing journals, and the appe
 Malformed canonical rows, unreadable canonical journals, malformed readable mirrors, or errors while discovering delivery journals mark coverage incomplete and prevent satisfaction even when another journal contains a plausible pass.
 An older valid receipt for a different SHA is reported as stale rather than absent.
 Local ship paths apply one shared requirement policy: explicit skip, documentation-only changes, and repositories without a configured preflight runner remain distinct exemptions; every other candidate must present trusted receipt evidence.
+
+## Retention and garbage collection
+
+The schema classifies event types as `ephemeral`, `gate`, or `durable`, and an omitted or unknown classification fails closed to `durable`.
+Ephemeral rows are high-volume operational evidence, gate rows participate in current-HEAD decisions, and durable rows preserve long-lived lineage.
+Declared join pairs must use the same retention class, and schema loading fails if either side is missing or the classes differ.
+
+The minimum ephemeral horizon is 672 hours because `human_touch` and claim context feed the scoreboard's default 28-day window.
+`fno event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
+It preserves gate, durable, undeclared, unknown, and malformed rows, including a malformed row whose timestamp cannot be evaluated.
+The collector rewrites through an fsynced same-directory temporary file while holding the shared writer mutex and a shell-visible GC marker.
+When a worktree journal is a symlink, collection resolves and rewrites its target without replacing the symlink.
+
+```bash
+fno event gc --dry-run
+fno event gc
+fno event gc --events /path/to/.fno/events.jsonl --ttl-hours 672
+```
 
 ### `mission_started` / `wave_advanced` / `mission_complete`
 
