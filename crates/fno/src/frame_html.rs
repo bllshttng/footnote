@@ -221,6 +221,15 @@ pub fn contrast_ratio(cell: &Cell, theme: Theme) -> f64 {
 ///
 /// Inherit-and-invert clears a relative bar by construction on every theme. No
 /// named pair can promise an absolute one, because the palette is not ours.
+///
+/// And one step further out, which took an outside reader to see: making the
+/// bar relative fixed the bar, not the question. BEFORE placing any bar, ask
+/// whether the value is yours to bound. Asserting a floor on a number your
+/// system does not choose is not a gate, it is a claim about someone else's
+/// software - a test over `Indexed(3)` on a light scheme grades the theme
+/// author's yellow, not our rendering. That is why the accent is PRINTED and
+/// never asserted, while `chrome_paints_in_the_readers_colours_not_ours`
+/// asserts the thing we do control: that we picked no colour at all.
 pub fn body_contrast(theme: Theme) -> f64 {
     contrast_ratio(
         &Cell {
