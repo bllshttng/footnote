@@ -19,7 +19,7 @@ That is the same path Python takes through `harnesses/claude.py`, `harnesses/_cl
 
 ## Byte-parity
 
-Byte-parity with Python on observable behavior (stdout, exit code, the BG8 envelope bytes, events.jsonl fields) is the contract. Two Python-specific encodings are hand-rolled to match: `json.dumps(ensure_ascii=True)` (non-ASCII → `\uXXXX`, fixed key order) for the envelope and event lines, and `html.escape(quote=True)` for `from_name`. `claude_ask_parity.rs` pins the byte-critical surfaces (envelope, `parse_short_id`, reply extraction) against the **real** `fno.agents.harnesses.claude` so Python-side drift is caught (skips when python3 is unavailable).
+Byte-parity with Python on observable behavior (stdout, exit code, the BG8 envelope bytes, events.jsonl fields) is the contract. Two Python-specific encodings are hand-rolled to match: `json.dumps(ensure_ascii=True)` (non-ASCII → `\uXXXX`, fixed key order) for the envelope and event lines, and `html.escape(quote=True)` for `from_name`. `claude_ask_parity.rs` pins the byte-critical surfaces (envelope, `parse_short_id`, reply extraction) against the **real** `fno.agents.harnesses.claude`, so Python-side drift is caught. When python3 is unavailable, it skips.
 
 ## Scope boundary
 

@@ -97,7 +97,8 @@ Two further limits, both printed by the gate on every scan run so a green is not
 - **File names are not judged.** Fifty-two tracked files carry an axis word, and most are correct (`harness_map.py`, `model_routing.py`). A directory name is inherited by every import path beneath it, which is why one of them reached 82 files. A file name is local.
 - **Symbol names are not judged.** `ProviderResult` and the `Provider*Error` classes are the content scan's subject and sit in the baseline.
 
-**This rule governs package and directory names only. It does not rename the `provider` config field**, which stays exactly where the value rule puts it, with `route` and `account` added beside it and the allowlisted config sites parked.
+**This rule governs package and directory names only. It does not rename the `provider` config field.**
+That field stays exactly where the value rule puts it, with `route` and `account` added beside it and the allowlisted config sites parked.
 
 ## Ambiguous values
 
