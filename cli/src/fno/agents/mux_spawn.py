@@ -1191,7 +1191,9 @@ def _lookup_child_pid(
 _WAIT_EXITED = 12
 
 
-def _pane_absent_from_listing(mux: dict, runner) -> Optional[bool]:
+def _pane_absent_from_listing(
+    mux: dict, runner, timeout: Optional[float] = None
+) -> Optional[bool]:
     """True when the mux SUCCESSFULLY enumerated its panes and ours is not there.
 
     This is the reaped-pane case, and it is the normal one: when a pane's child
@@ -1223,7 +1225,7 @@ def _pane_absent_from_listing(mux: dict, runner) -> Optional[bool]:
         proc = _run_mux(
             ["mux", "pane", "ls", "--session", str(mux["session"]), "--json"],
             runner,
-            timeout=_PROBE_TIMEOUT_S,
+            timeout=timeout,
         )
     except Exception:  # noqa: BLE001 -- a probe never fails a spawn
         return None
@@ -1241,8 +1243,17 @@ def _pane_absent_from_listing(mux: dict, runner) -> Optional[bool]:
     )
 
 
-def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
-    """Return exact pane liveness, or ``None`` when the mux cannot answer."""
+def _mux_pane_alive(
+    mux: dict, runner=subprocess.run, timeout: Optional[float] = None
+) -> Optional[bool]:
+    """Return exact pane liveness, or ``None`` when the mux cannot answer.
+
+    ``timeout`` defaults to the shared module bound. The binding loop passes a
+    tight one; reconcile and ``reachability.pane_falsifier`` must NOT inherit it,
+    because a mux answering in 3s under load would turn into "unavailable" there
+    and skip a heal that used to succeed. Tight bounds belong to the caller that
+    needs them, not baked into shared code.
+    """
     try:
         proc = _run_mux(
             [
@@ -1250,7 +1261,7 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
                 str(mux["pane_id"]), "--timeout", "0",
             ],
             runner,
-            timeout=_PROBE_TIMEOUT_S,
+            timeout=timeout,
         )
     except Exception:  # noqa: BLE001 -- see below: a probe never fails a spawn
         # Deliberately as broad as _read_pane_tail's. This runs at the same
@@ -1268,7 +1279,7 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
     # Every other code is ambiguous by construction (EXIT_ERROR = 1 covers a
     # dead pane AND io failure AND version skew AND server error), so it is not
     # a death signal on its own. Ask the authoritative enumeration instead.
-    absent = _pane_absent_from_listing(mux, runner)
+    absent = _pane_absent_from_listing(mux, runner, timeout=timeout)
     if absent is None:
         return None
     return not absent
@@ -1413,6 +1424,7 @@ def _await_pane_binding(
     tail = ""
     announced = False
     first_pass = True
+    last_alive: Optional[bool] = None
     while True:
         sid = bind_probe()
         if sid:
@@ -1424,7 +1436,7 @@ def _await_pane_binding(
         # slow mux must not buy itself another bounded probe past the ceiling.
         # The first pass is exempt for the same reason as below - one full look.
         if not first_pass and time.monotonic() >= deadline:
-            return PaneBinding(None, None, "binding-window-expired", tail)
+            return PaneBinding(None, last_alive, "binding-window-expired", tail)
         # Keep the newest NON-EMPTY read: a TUI that has not painted yet reads
         # empty, and a later empty read must not erase real earlier evidence.
         fresh = _read_pane_tail(mux, runner)
@@ -1439,9 +1451,13 @@ def _await_pane_binding(
         # skip the liveness probe entirely - so a pane that was already dead
         # would report "still booting" instead of dead.
         if not first_pass and time.monotonic() >= deadline:
-            return PaneBinding(None, None, "binding-window-expired", tail)
+            # last_alive, not None: the previous tick may have OBSERVED the pane
+            # up 0.75s ago, and reporting "the mux could not answer" would throw
+            # away a real observation.
+            return PaneBinding(None, last_alive, "binding-window-expired", tail)
         first_pass = False
-        alive = _mux_pane_alive(mux, runner)
+        alive = _mux_pane_alive(mux, runner, timeout=_PROBE_TIMEOUT_S)
+        last_alive = alive if alive is not None else last_alive
         if alive is False:
             return PaneBinding(None, False, "pane-died-before-binding", tail)
         # Checked AFTER a full probe, so a zero or negative window still buys
@@ -2166,11 +2182,27 @@ def dispatch_spawn_pane(
             # lock, against the rows actually being written - the pre-lock read
             # above decided, this enforces.
             if replaced_terminal is not None:
-                rows = [
+                kept = [
                     r
                     for r in rows
                     if not (r.name == name and r.status in _RECLAIMABLE_STATUSES)
                 ]
+                # REFUSE rather than fall through. `replaced_terminal` was decided
+                # from a pre-lock read, and `_stamp_status` writes under the
+                # registry lock without holding the agent lock, so a concurrent
+                # writer can flip that row off a reclaimable status in between -
+                # e.g. an `exited` row revived. Falling through would append a
+                # SECOND row under one name, breaking the very invariant this
+                # block exists to hold. A refusal is recoverable; a duplicate is
+                # not.
+                if any(r.name == name for r in kept):
+                    raise DispatchAskError(
+                        f"agent {name!r} was reclaimable when checked but is not "
+                        "now (a concurrent writer changed its status); nothing "
+                        f"was written - re-run, or 'fno agents rm {name}' first",
+                        exit_code=2,
+                    )
+                rows = kept
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
             # candidate (the second pane's session may not exist yet when both
