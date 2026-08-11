@@ -8,9 +8,10 @@ import pytest
 def _collapse_pane_binding_window(monkeypatch):
     """Collapse the pane binding window so no test pays its wall-clock.
 
-    Production waits up to 20s for a pane to bind a session, because a shorter
-    ceiling cannot separate "codex is slow to open its rollout" from "codex
-    died". That ceiling is only ever paid on the ambiguous path, but a test
+    Production waits `_BINDING_WINDOW_S` (8s) for a pane to bind a session: long
+    enough to outlast a slow rollout, and comfortably under the 20s dispatch
+    subprocess kill that a longer window would run into. That ceiling is only
+    ever paid on the ambiguous path, but a test
     whose fake mux reports a permanently live, never-binding pane would sit out
     the whole thing. Tests that exercise the window pass ``window_s=``
     explicitly and ignore this.

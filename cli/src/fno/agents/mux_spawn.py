@@ -1120,13 +1120,14 @@ def _run_mux(
     args: list[str],
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
     env: Optional[dict[str, str]] = None,
+    timeout: Optional[float] = None,
 ) -> "subprocess.CompletedProcess[str]":
     try:
         return runner(
             [_fno_bin(), *args],
             capture_output=True,
             text=True,
-            timeout=_MUX_SUBPROCESS_TIMEOUT_S,
+            timeout=_MUX_SUBPROCESS_TIMEOUT_S if timeout is None else timeout,
             **({"env": env} if env is not None else {}),
         )
     except FileNotFoundError as exc:
@@ -1198,14 +1199,27 @@ def _pane_absent_from_listing(mux: dict, runner) -> Optional[bool]:
     this fallback the death branch would be near-unreachable and a corpse would
     sit out the whole window and land as `spawning` - the original bug.
 
-    A successful enumeration is what makes this a positive control rather than
-    an absence: exit 0 plus parseable JSON proves the instrument ran, so "not in
-    the list" means the mux says the pane is gone, not "I could not look".
-    Anything else returns None.
+    The positive control is a NON-EMPTY listing, and the empty case is the whole
+    reason: `fno mux pane ls --json` deliberately prints `[]` and exits 0 when the
+    session socket is refused or absent (crates/fno/src/mux_cli.rs, the
+    `is_ls && no_server` branch). So exit 0 plus parseable JSON does NOT prove
+    the instrument ran - "I could not reach the session" and "the session has no
+    panes" are the same bytes. Only a listing that names at least one OTHER pane
+    proves the server answered with real content; absence from that is the mux
+    saying our pane is gone.
+
+    An empty list therefore returns None, not True. That costs death detection
+    when the dying pane was the session's last, and it is the right trade: this
+    helper's False is the condemn signal for reconcile and
+    ``reachability.pane_falsifier``, so a wrong False marks a LIVE worker exited
+    whenever the mux socket is briefly unreachable. Failing to unknown loses a
+    retry; failing to condemned loses a worker.
     """
     try:
         proc = _run_mux(
-            ["mux", "pane", "ls", "--session", str(mux["session"]), "--json"], runner
+            ["mux", "pane", "ls", "--session", str(mux["session"]), "--json"],
+            runner,
+            timeout=_PROBE_TIMEOUT_S,
         )
     except Exception:  # noqa: BLE001 -- a probe never fails a spawn
         return None
@@ -1215,7 +1229,8 @@ def _pane_absent_from_listing(mux: dict, runner) -> Optional[bool]:
         rows = json.loads(proc.stdout or "")
     except (ValueError, TypeError):
         return None
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or not rows:
+        # Empty is indistinguishable from an unreachable session (see docstring).
         return None
     return not any(
         isinstance(r, dict) and r.get("pane_id") == mux["pane_id"] for r in rows
@@ -1231,6 +1246,7 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
                 str(mux["pane_id"]), "--timeout", "0",
             ],
             runner,
+            timeout=_PROBE_TIMEOUT_S,
         )
     except Exception:  # noqa: BLE001 -- see below: a probe never fails a spawn
         # Deliberately as broad as _read_pane_tail's. This runs at the same
@@ -1274,6 +1290,13 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
 _BINDING_WINDOW_S = 8.0
 _BINDING_WINDOW_ENV = "FNO_PANE_BINDING_WINDOW_S"
 _BINDING_POLL_S = 0.75
+#: Per-probe subprocess ceiling inside the binding loop. The shared
+#: `_MUX_SUBPROCESS_TIMEOUT_S` is 30s and one tick issues up to three probes, so
+#: a wedged mux could make a SINGLE tick run ~90s and blow the window ceiling
+#: this whole design depends on - straight past the 20s dispatch kill, into the
+#: live-pane-with-no-registry-row orphan. These probes are all cheap reads with
+#: an honest "could not answer" result, so a tight bound costs nothing.
+_PROBE_TIMEOUT_S = 2.0
 #: How long the wait may stay silent before it says what it is doing. A spawn
 #: that used to return in 3s can now take the full window, and a silent block on
 #: an interactive verb reads as a hang, so the wait announces itself once.
@@ -1327,6 +1350,7 @@ def _read_pane_tail(
                 str(mux["pane_id"]), "--lines", str(_PANE_TAIL_LINES),
             ],
             runner,
+            timeout=_PROBE_TIMEOUT_S,
         )
     except Exception:  # noqa: BLE001 -- see docstring: evidence never fails a spawn
         return ""
@@ -1361,11 +1385,14 @@ def _await_pane_binding(
     costs a retry. Anyone tightening this branch later should promote a signal
     from unknown to confirmed, never lower the bar for calling a worker dead.
 
-    ``_mux_pane_alive`` is the death oracle because it reports a POSITIVE
-    marker: ``pane wait --timeout 0`` exits 12 to say "the child exited", not
-    merely "I did not find it". A pane missing from a ``pane ls`` would be an
-    absence, which has two explanations - the worker died, or the instrument
-    never ran - and cannot tell them apart.
+    ``_mux_pane_alive`` is the death oracle, and its two signals are ranked by
+    how much they prove. ``pane wait --timeout 0`` exiting 12 is definitive: the
+    child exited. But that only fires when the child dies while a watcher is
+    already subscribed, which a reaped pane never is, so it is not enough on its
+    own. The fallback is absence from a NON-EMPTY ``pane ls``, which is evidence
+    only because another pane in the listing proves the server answered with
+    real content; an empty listing is what an unreachable session also produces,
+    so it resolves to unknown. See ``_pane_absent_from_listing``.
 
     Each tick also retains the pane's scrollback, because the mux drops a dead
     pane's buffer in ``close_pane``: the capture has to happen BEFORE the death
@@ -1381,6 +1408,7 @@ def _await_pane_binding(
     deadline = started + window
     tail = ""
     announced = False
+    first_pass = True
     while True:
         sid = bind_probe()
         if sid:
@@ -1393,6 +1421,17 @@ def _await_pane_binding(
         fresh = _read_pane_tail(mux, runner)
         if fresh.strip():
             tail = fresh
+        # Checked BETWEEN probes, not only at the tick boundary: one tick issues
+        # three subprocesses, so a slow mux would otherwise carry the loop far
+        # past the ceiling even with each probe individually bounded.
+        #
+        # NOT on the first pass, though: the whole loop owes one complete look
+        # even when the window is zero or already spent, and bailing here would
+        # skip the liveness probe entirely - so a pane that was already dead
+        # would report "still booting" instead of dead.
+        if not first_pass and time.monotonic() >= deadline:
+            return PaneBinding(None, None, "binding-window-expired", tail)
+        first_pass = False
         alive = _mux_pane_alive(mux, runner)
         if alive is False:
             return PaneBinding(None, False, "pane-died-before-binding", tail)
@@ -1450,7 +1489,13 @@ def _resolve_unbound_reason(
     """
     if bound is not False:
         return None
-    return reason or f"no-session-binding-for-{harness}"
+    # Generic on purpose: a reason naming the harness reads as "this harness
+    # binds no session", which is exactly what `bound is None` means and the
+    # opposite of what a MISS means. An opencode backfill miss has a real cause
+    # ("no unique opencode session for this cwd after spawn", already emitted as
+    # an event); a receipt field whose job is to explain must not misdirect when
+    # the branch forgot to name one.
+    return reason or "unbound-reason-unrecorded"
 
 
 def _write_pane_death_log(name: str, tail: str, pane_id: Optional[int] = None) -> str:

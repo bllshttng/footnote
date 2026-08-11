@@ -47,7 +47,15 @@ def _proc(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
 
 
 def _runner(*, wait_rc: int = WAIT_ALIVE, tail: str = "", read_rc: int = 0, raises=None):
-    """A fake `fno mux` answering only the two verbs the binding loop calls."""
+    """A fake `fno mux` answering every verb the binding loop calls.
+
+    The `ls` arm is EXPLICIT and lists our pane on purpose. An earlier version
+    fell through to `_proc(0)` with empty stdout, so `json.loads("")` raised and
+    the absence probe returned None - which made the ambiguity tests pass for a
+    reason the real CLI never produces (it answers exit 0 with `[]`). A fake that
+    supplies the answer the code is waiting for is how this PR shipped a broken
+    death detector twice; the fake must model the real verb, not a convenient one.
+    """
     calls: list[list[str]] = []
 
     def run(argv, **_kw):
@@ -60,6 +68,8 @@ def _runner(*, wait_rc: int = WAIT_ALIVE, tail: str = "", read_rc: int = 0, rais
             if raises is not None:
                 raise raises
             return _proc(read_rc, tail)
+        if verb == "ls":
+            return _proc(0, json.dumps([{"pane_id": MUX["pane_id"]}, {"pane_id": 99}]))
         return _proc(0)
 
     run.calls = calls  # type: ignore[attr-defined]
@@ -117,12 +127,33 @@ def test_window_expiry_with_a_live_pane_is_still_booting() -> None:
 
 
 @pytest.mark.parametrize("wait_rc", [WAIT_UNKNOWN, 1, 127])
-def test_an_unanswerable_liveness_probe_never_reads_as_death(wait_rc: int) -> None:
+def test_an_unanswerable_wait_never_reads_as_death(wait_rc: int) -> None:
+    """`wait` cannot answer, but the listing names our pane, so it is alive.
+
+    The invariant is that an ambiguous exit code never becomes death - not that
+    it becomes None. Falling back to a listing that PROVES the pane is present
+    is strictly better information than a shrug.
+    """
     out = _await_pane_binding(
         MUX, lambda: None, runner=_runner(wait_rc=wait_rc), sleep=_no_sleep, window_s=0.0
     )
     assert out.reason == "binding-window-expired"
-    assert out.pane_alive is None, "unprovable liveness is None, not False"
+    assert out.pane_alive is not False, "an unanswerable probe must never condemn"
+    assert out.pane_alive is True
+
+
+@pytest.mark.parametrize("wait_rc", [WAIT_UNKNOWN, 1, 127])
+def test_neither_signal_answering_resolves_to_unknown(wait_rc: int) -> None:
+    """When the listing cannot answer either, the verdict is None, never death."""
+    out = _await_pane_binding(
+        MUX,
+        lambda: None,
+        runner=_ls_runner(wait_rc=wait_rc, panes=[], ls_out="[]"),
+        sleep=_no_sleep,
+        window_s=0.0,
+    )
+    assert out.reason == "binding-window-expired"
+    assert out.pane_alive is None
 
 
 def test_a_zero_window_still_buys_exactly_one_probe() -> None:
@@ -276,8 +307,11 @@ def test_bound_is_keyed_on_the_session_not_on_short_id() -> None:
         ("codex", "no-child-pid-to-correlate", "no-child-pid-to-correlate"),
         # Every OTHER unbound route - an opencode backfill miss, a happy-claude
         # row - names none, and must still not emit a null.
-        ("opencode", None, "no-session-binding-for-opencode"),
-        ("claude", None, "no-session-binding-for-claude"),
+        # A branch that names no reason gets a GENERIC one: naming the harness
+        # would read as "this harness binds no session", which is what
+        # `bound is None` means and the opposite of a miss.
+        ("opencode", None, "unbound-reason-unrecorded"),
+        ("claude", None, "unbound-reason-unrecorded"),
     ],
 )
 def test_every_unbound_receipt_names_a_reason(
@@ -388,12 +422,25 @@ def test_a_pane_still_in_the_listing_is_alive() -> None:
         {"ls_rc": 1},                    # the enumeration itself failed
         {"ls_out": "not json"},          # unparseable
         {"ls_out": '{"panes": []}'},     # not a list
+        # THE ONE THAT MATTERS: `fno mux pane ls --json` prints exactly this and
+        # exits 0 when the session socket is refused or absent, so an empty list
+        # is "I could not reach the session" and "the session is empty" wearing
+        # the same bytes. Reading it as death condemns a live worker whenever the
+        # mux is briefly unreachable - and this helper's False is the condemn
+        # signal for reconcile and reachability.pane_falsifier, not just spawn.
+        {"ls_out": "[]"},
     ],
 )
 def test_an_unsuccessful_enumeration_is_never_read_as_death(kwargs) -> None:
-    """The positive control is a SUCCESSFUL, parseable listing. Without one,
-    "not in the list" is an absence with two explanations."""
+    """The positive control is a NON-EMPTY listing. Without one, "not in the
+    list" is an absence with two explanations."""
     assert mux_spawn._mux_pane_alive(MUX, _ls_runner(wait_rc=1, panes=[], **kwargs)) is None
+
+
+def test_the_positive_control_is_another_pane_not_merely_exit_zero() -> None:
+    """A listing naming a DIFFERENT pane proves the server answered with real
+    content, which is what makes our pane's absence evidence rather than silence."""
+    assert mux_spawn._mux_pane_alive(MUX, _ls_runner(wait_rc=1, panes=[99])) is False
 
 
 def test_exit_12_still_short_circuits_without_a_listing_call() -> None:
