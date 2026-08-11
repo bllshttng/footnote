@@ -28,6 +28,10 @@ def test_registered_and_addressable():
 
 class _FakeSpawnOK:
     pane_id = 7
+    # The dispatcher's `launched` return reports whether the worker actually
+    # bound a session, not just whether a pane was created. A stub that omits it
+    # is claiming a successful launch it cannot answer for.
+    bound = True
 
 
 def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None, max_lanes=1):

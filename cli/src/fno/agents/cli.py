@@ -1255,7 +1255,20 @@ def cmd_spawn(
                 "status": pane_result.status,
                 "mux_session": pane_result.session,
                 "pane_id": pane_result.pane_id,
+                # Two facts the receipt used to conflate. `bound` says the
+                # worker reached its provider; `status` alone could not, so a
+                # pane about to bind and one already dead read identically.
+                "bound": pane_result.bound,
             }
+            if pane_result.bound is False:
+                # `is False`, not falsy: `bound` is tri-state and None means this
+                # harness binds no session at all (gemini, agy), which is not a
+                # failure and owes no explanation. Only on the genuinely unbound
+                # receipt, so a bound one stays byte-stable apart from `bound`
+                # itself. An empty short_id is a SIGNAL, and these two keys are
+                # what it signals.
+                receipt_obj["pane_alive"] = pane_result.pane_alive
+                receipt_obj["unbound_reason"] = pane_result.unbound_reason
             # Three orthogonal axes: harness always; provider (the model vendor)
             # and model only when an explicit route was applied (-P/--route) or a
             # model was named, absent otherwise. No key may hold another axis's

@@ -88,6 +88,12 @@ class _MuxRunner:
                 ),
                 "",
             )
+        # x-cdca: a codex pane spawn now probes liveness and retains the pane's
+        # output while it waits for a session binding. 11 = the pane is up.
+        if argv[1:4] == ["mux", "pane", "wait"]:
+            return subprocess.CompletedProcess(argv, 11, "", "")
+        if argv[1:4] == ["mux", "pane", "read"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected mux call: {argv}")
 
     def launched_argv(self) -> list[str]:

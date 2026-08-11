@@ -138,7 +138,12 @@ def test_opencode_variant_is_not_written_before_collision_check(tmp_path, monkey
         yield
 
     monkeypatch.setattr(mux_spawn, "hold_agent_lock", unlocked)
-    monkeypatch.setattr(mux_spawn, "load_registry", lambda: [SimpleNamespace(name="taken")])
+    # `status` too: the collision check reads it, because a TERMINAL row does
+    # not own its name (a dead worker must not deadlock a retry). "live" keeps
+    # this case a genuine collision.
+    monkeypatch.setattr(
+        mux_spawn, "load_registry", lambda: [SimpleNamespace(name="taken", status="live")]
+    )
     monkeypatch.setattr(mux_spawn.paths, "agents_registry_path", lambda: tmp_path / "registry.json")
     monkeypatch.setattr(mux_spawn, "apply_opencode_variant", lambda *args, **kwargs: applied.append(args))
 

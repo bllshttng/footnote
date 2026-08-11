@@ -1339,7 +1339,17 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "mux_session": "main",
         "pane_id": 9,
         "effective_message": "$fno:target x-81ad",
+        # x-cdca: an unbound receipt says so, says whether the pane is still
+        # there, and says why. Without these, this exact receipt shape - status
+        # `spawning` with an empty short_id, exit 0 - was indistinguishable from
+        # one whose pane had already died, and callers re-prompted the corpse.
+        "bound": False,
+        "pane_alive": None,
+        "unbound_reason": "no-child-pid-to-correlate",
     }
+    # The invariant that makes an empty short_id a signal rather than a
+    # formatting detail (claude/codex, where short_id IS the handle).
+    assert receipt["bound"] == bool(receipt["short_id"])
     # AC5: no -P/--route on this spawn -> provider (vendor) and model keys are
     # ABSENT, not defaulted to the harness. A provider key holding a harness
     # literal is the four-axis defect this receipt shape corrects.
@@ -2928,3 +2938,40 @@ def test_claude_pane_argv_carries_the_worker_name(tmp_path: Path) -> None:
         assert "--name" not in build_pane_argv(
             provider, "task", tmp_path, False, None, name="target-x-e4bf-ca-enf"
         ), f"{provider} pane argv must not grow an unverified --name"
+
+
+def test_a_terminal_row_does_not_own_its_name(tmp_path: Path, monkeypatch) -> None:
+    """x-cdca: a dead pane must not deadlock the node that spawned it.
+
+    `fno dispatch one` releases its claim and lane on a failed spawn and retries
+    under the SAME deterministic worker name. A status-blind collision guard
+    therefore turned one dead pane into a permanently failed node until a human
+    ran `fno agents rm`. A terminal row will never act again, so it does not
+    hold the name; its evidence lives in a timestamped file on disk, not in the
+    registry row.
+    """
+    from dataclasses import replace as _replace
+
+    from fno.agents.registry import load_registry, update_registry
+
+    first, _ = _spawn(monkeypatch, tmp_path, name="w1")
+    assert first.name == "w1"
+
+    # Make the existing row terminal, the way the death branch does.
+    update_registry(lambda rows: [_replace(r, status="failed") for r in rows])
+
+    second, _ = _spawn(monkeypatch, tmp_path, name="w1")
+    assert second.name == "w1"
+    rows = [r for r in load_registry() if r.name == "w1"]
+    assert len(rows) == 1, "the corpse must be dropped in the same transaction"
+    assert rows[0].status != "failed"
+
+
+def test_a_live_row_still_owns_its_name(tmp_path: Path, monkeypatch) -> None:
+    """The reclaim is scoped to terminal rows: a live worker is still protected."""
+    from fno.agents.dispatch import DispatchAskError
+
+    _spawn(monkeypatch, tmp_path, name="w2")
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, name="w2")
+    assert exc.value.exit_code == 2

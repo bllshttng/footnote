@@ -544,7 +544,11 @@ def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_pat
         "fno.agents.account_env.resolve_account_overlay",
         lambda a, **k: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/acct/ccr"}),
     )
-    monkeypatch.setattr(dm, "dispatch_spawn_pane", lambda **kw: SimpleNamespace(pane_id="p1"))
+    # `bound` too: the dispatcher's `launched` return reports whether the worker
+    # actually bound a session, not just whether a pane was created.
+    monkeypatch.setattr(
+        dm, "dispatch_spawn_pane", lambda **kw: SimpleNamespace(pane_id="p1", bound=True)
+    )
     dm._dispatch_one(session="s", node=None, project=None, account="ccr")
     assert seen["provider_id"] == "ccr"
 
