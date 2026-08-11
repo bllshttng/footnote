@@ -166,6 +166,14 @@ CANONICAL="$canonical" WORKTREE="$older_failure" bash "$SETUP" >/dev/null 2>&1
 passing_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "passing-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration cannot revoke newer passing gate evidence" test "$passing_verdict" = pass
 
+same_second_retraction="$TMP/same-second-retraction"
+mkdir -p "$same_second_retraction/.fno"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","type":"review_coverage","source":"hook","data":{"pr":1,"head_sha":"same-second-head","coverage":"covered","reviewed_count":1,"verdicts":[]}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","type":"review_coverage","source":"hook","data":{"pr":1,"head_sha":"same-second-head","coverage":"unknown","verdicts":[]}}' > "$same_second_retraction/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$same_second_retraction" bash "$SETUP" >/dev/null 2>&1
+same_second_coverage=$(jq -r 'select(.type == "review_coverage" and .data.head_sha == "same-second-head") | .data.coverage' "$canonical/.fno/events.jsonl" | tail -1)
+assert "migration preserves a same-second negative gate retraction" test "$same_second_coverage" = unknown
+
 newer_gate="$TMP/newer-gate"
 mkdir -p "$newer_gate/.fno"
 printf '%s\n' '{"ts":"2026-08-11T08:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"newer-head","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"

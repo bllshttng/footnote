@@ -114,7 +114,10 @@ def main() -> int:
                 (
                     timestamp is not None
                     and existing[key] is not None
-                    and timestamp <= existing[key]
+                    and (
+                        timestamp < existing[key]
+                        or (timestamp == existing[key] and _favorable(row))
+                    )
                 )
                 or (
                     _favorable(row)
