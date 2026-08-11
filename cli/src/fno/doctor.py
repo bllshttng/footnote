@@ -1577,22 +1577,24 @@ def _drained_msg_ids() -> set[str]:
     from fno.paths import state_dir
 
     path = state_dir() / "events.jsonl"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return set()
     ids: set[str] = set()
-    for line in text.splitlines():
-        if "agent_mail_drained" not in line:
-            continue
-        try:
-            rec = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if rec.get("kind") == "agent_mail_drained":
-            mid = rec.get("msg_id")
-            if isinstance(mid, str) and mid:
-                ids.add(mid)
+    try:
+        # Stream line-by-line: the events log grows unboundedly, so never slurp
+        # it whole just to collect drained ids (mirrors gate_escape.py's reader).
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "agent_mail_drained" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if rec.get("kind") == "agent_mail_drained":
+                    mid = rec.get("msg_id")
+                    if isinstance(mid, str) and mid:
+                        ids.add(mid)
+    except OSError:
+        return ids
     return ids
 
 

@@ -43,10 +43,14 @@ def sender_from_transcript_text(text: str, msg_id: str) -> Optional[str]:
     return None
 
 
-def resolve_live_sender(msg_id: str) -> Optional[str]:
-    """Find ``msg_id``'s sender handle by scanning the invoking session's own
-    transcript. ``None`` on any miss (no ambient identity, unreadable store, id
-    absent) so the caller falls through to its existing not-on-bus error path."""
+def _read_own_transcript_text() -> Optional[str]:
+    """The invoking session's own transcript text, or ``None`` when it cannot be
+    resolved or read (no ambient identity, no transcript path, unreadable store).
+
+    ponytail: reads the whole transcript. A received message is near the tail,
+    but it can be older; whole-file is the simple correct read. Bound to a tail
+    window only if a profiler ever says transcript size hurts.
+    """
     ident = resolve_harness_identity()
     if not ident.session_id or not ident.harness:
         return None
@@ -54,11 +58,17 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     if path is None:
         return None
     try:
-        # ponytail: reads the whole transcript. A received message is near the
-        # tail, but it can be older; whole-file is the simple correct read. Bound
-        # to a tail window only if a profiler ever says transcript size hurts.
-        text = path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return None
+
+
+def resolve_live_sender(msg_id: str) -> Optional[str]:
+    """Find ``msg_id``'s sender handle by scanning the invoking session's own
+    transcript. ``None`` on any miss (no ambient identity, unreadable store, id
+    absent) so the caller falls through to its existing not-on-bus error path."""
+    text = _read_own_transcript_text()
+    if text is None:
         return None
     return sender_from_transcript_text(text, msg_id)
 
@@ -76,15 +86,8 @@ def present_mail_ids() -> Optional[set[str]]:
     drop. An empty set means "read it; nothing matched," which is a safe
     print-everything because the transcript genuinely carries none of these ids.
     """
-    ident = resolve_harness_identity()
-    if not ident.session_id or not ident.harness:
-        return None
-    path = _transcript_path(ident.harness, ident.session_id)
-    if path is None:
-        return None
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = _read_own_transcript_text()
+    if text is None:
         return None
     # JSONL-escaped envelopes arrive with \\"; normalize so the regex matches the
     # raw form too (mirrors sender_from_transcript_text).
