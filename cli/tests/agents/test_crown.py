@@ -41,6 +41,37 @@ def test_split_is_the_inverse_of_canonical() -> None:
     assert split_scope(None) == []
 
 
+def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) -> None:
+    """scope_contains must canonicalize the graph node's project field before
+    comparing it to the canonicalized crown scope. Graph intake stores the
+    project field RAW (the short_name alias a node was filed under), so without
+    canonicalization a king over 'alpha' is falsely refused an epic filed as
+    'a' - a legitimate delegation blocked."""
+    import fno.projects.resolve as proj_resolve
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha", short_name = "a" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+
+    from fno.agents import crown
+
+    # An epic filed under the alias 'a' (the raw spelling intake stores).
+    monkeypatch.setattr(
+        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "a"}
+    )
+    assert crown.scope_contains("alpha", "epic-1") is True
+
+    # A genuinely different project is still not contained.
+    monkeypatch.setattr(
+        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "beta"}
+    )
+    assert crown.scope_contains("alpha", "epic-1") is False
+
+
 @pytest.mark.parametrize(
     "level,scope",
     [

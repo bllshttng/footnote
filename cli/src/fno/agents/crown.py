@@ -268,7 +268,15 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     if name in outer_members:
         return True
     entry = _graph_entry(name)
-    return bool(entry and entry.get("project") in outer_members)
+    if not entry:
+        return False
+    # Canonicalize the entry's project before the comparison: graph intake stores
+    # the project field RAW (the short_name alias a node was filed under), while
+    # outer_members is canonicalized - a raw 'a' would never match a canonical
+    # 'alpha', so a king over 'alpha' would be falsely refused an epic filed as
+    # 'a'. Same alias-normalization the _canon helper applies to the scopes.
+    proj = _canonical_project(entry.get("project")) or entry.get("project")
+    return proj in outer_members
 
 
 def grant_error(requested_scope: str, caller_row) -> Optional[str]:
