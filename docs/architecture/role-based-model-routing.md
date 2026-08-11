@@ -116,6 +116,25 @@ fno route set pr-create zai/glm-4.5-air      # atomic config write; effect: next
 
 The `/pr create` dispatch declares `--role pr-create` (or omits any `model:` override) at the spawn boundary, so the fail-safe makes the role a no-op until the lane is configured. The worker keeps its fresh, minimal context - branch, base, a one-line summary, and merge posture only - regardless of which model the role resolved to, because the small-context property is what makes the worker cheap, not the tier name.
 
+## The stage table: per-verb profile overlay
+
+Role routing keys on *what the worker is doing* (`--role build`). The stage table keys on *which verb started it*: `config.agents.profiles.<verb>` overlays `agents.defaults` field-by-field, selected by the seed's leading slash-verb (`/fno:blueprint x-123` -> the `blueprint` profile). It is the per-stage axis coordinate.
+
+The stage table reaches **every** spawn that carries a slash-verb seed, including autonomous dispatch. `skills/target/scripts/dispatch-node.sh` passes the verb as the spawn's positional message, so an autonomous `/target` or `/blueprint` worker inherits any field it did not itself pin from the matching profile. An explicit flag always wins, and a `--role` whose lane resolves owns the model, so the role and stage layers do not collide on the model: a stage table `model` is not injected alongside a resolving role, and a stage table `route` owns the model the same way an explicit `--route` does.
+
+```yaml
+config:
+  agents:
+    profiles:
+      blueprint:
+        model: opus               # the think/blueprint stage on the primary model
+      target:
+        route: "zai/glm-5.2[1m]"  # the delivery stage on the routed vendor
+        effort: high
+```
+
+The two layers compose by design. The stage table picks the coordinate per verb; `--role`, attached by the dispatch lane, owns the model when it resolves. A field the dispatch pinned explicitly (harness, substrate) is not displaced, which is why a stage table entry can set the model or route without rerouting the fleet's binary.
+
 ## `fno route` - legibility + on-the-fly switching
 
 Four verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):

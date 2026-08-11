@@ -14,9 +14,13 @@ written for - the config `provider`, else the builtin default (claude), NOT the
 ambient harness (whose shape the model may not match). A spawn that resolves to a
 DIFFERENT harness (an explicit `-H codex`, OR a codex-ambient session, over a
 claude-shaped `model`) leaves the model to that harness rather than forcing an
-incompatible one. An explicit `-m/--model` always wins. Scope is the operator-
-initiated spawn surface only; autonomous dispatch computes its own routing and
-reaches the seam as explicit flags, never displaced by these.
+incompatible one. An explicit `-m/--model` always wins. The profile layer
+applies to every spawn carrying a slash-verb seed, including autonomous dispatch
+(`/target`, `/blueprint`): a stage that has not pinned a field inherits it from
+`profiles.<verb>` then `agents.defaults`, so a coordinate set in the stage table
+reaches an autonomous worker. An explicit flag always wins, and a `--role` whose
+lane resolves owns the model, so autonomous dispatch is never rerouted on a field
+it pinned (harness, substrate).
 """
 from __future__ import annotations
 

@@ -1434,10 +1434,12 @@ class SpawnDefaultsBlock(BaseModel):
     = unset (the `spawn_permission_mode` convention); an unset field falls
     through to the built-in exactly as today.
 
-    Scope is the operator-initiated spawn surface only. Autonomous dispatch
-    (`/target`, think dispatch, backlog advance) computes its own routing and
-    reaches the seam as explicit flags, so setting `provider` here cannot
-    silently reroute the fleet.
+    These defaults reach every spawn that has not pinned a field, including
+    autonomous dispatch (`/target`, think dispatch, backlog advance); an explicit
+    flag always wins. Autonomous dispatch pins its harness and substrate, so
+    setting `provider` here cannot silently reroute the fleet's binary - but a
+    `model` or `effort` set here DOES reach an autonomous worker that left it
+    unpinned, which is the per-stage coordinate the stage table exists to carry.
 
     No value validation here: config stays a leaf module (x-7fdd, no import
     from agents/providers at load time). Provider is checked against the known

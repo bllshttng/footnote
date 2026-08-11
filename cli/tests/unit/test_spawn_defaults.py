@@ -609,3 +609,42 @@ def test_explicit_account_wins_over_config_account():
     )
     assert out.count("--account") == 1
     assert out[out.index("--account") + 1] == "explicit"
+
+
+# --------------------------------------------------------------------------- #
+# Autonomous lane reads the stage table (task 1.3)
+#
+# Autonomous dispatch (dispatch-node.sh) pins harness/substrate and passes the
+# verb as the positional message. The profile keyed by that verb fills fields
+# the dispatch has not itself pinned; an explicit flag still wins.
+# --------------------------------------------------------------------------- #
+
+def test_autonomous_dispatch_reads_blueprint_profile():
+    # A /fno:blueprint spawn with a populated blueprint profile resolves that
+    # coordinate (model here); the harness/substrate pins stand.
+    out = _inject(
+        ["spawn", "--harness", "claude", "--substrate", "bg", "--node", "x-1",
+         "--name", "w", "/fno:blueprint x-1"],
+        profiles={"blueprint": {"model": "fable"}},
+    )
+    assert out[out.index("--model") + 1] == "fable"
+
+
+def test_autonomous_dispatch_without_profile_resolves_as_today():
+    # Profile absent: nothing is injected beyond the explicit flags.
+    out = _inject(
+        ["spawn", "--harness", "claude", "--substrate", "bg", "--node", "x-1",
+         "--name", "w", "/fno:blueprint x-1"],
+    )
+    assert "--model" not in out
+
+
+def test_autonomous_dispatch_explicit_flag_beats_profile():
+    # An explicit -m wins over the profile (the dispatch pinned the model).
+    out = _inject(
+        ["spawn", "-m", "haiku", "--harness", "claude", "--substrate", "bg",
+         "--node", "x-1", "--name", "w", "/fno:blueprint x-1"],
+        profiles={"blueprint": {"model": "fable"}},
+    )
+    assert out.count("--model") == 0  # only the explicit -m
+    assert "fable" not in out
