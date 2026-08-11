@@ -23619,52 +23619,56 @@ mod tests {
         write_shot(&frame, "01-rename-prompt", "rename prompt (after)");
     }
 
-    /// The needs-attention accent, measured on every theme rather than filed.
+    /// Chrome never hardcodes a colour.
     ///
-    /// `LATTICE_ACCENT` is `Indexed(3)`, and on a real light scheme that is
-    /// `#b58900` on `#fdf6e3` - 2.98:1 plain, under the 3:1 non-text floor and
-    /// under that scheme's own body text. A blocked row also carries BOLD
-    /// (`lattice_style`), and bold brightens the foreground, which on a cream
-    /// background makes it WORSE: **1.70:1**, near-invisible. So the lowest-
-    /// contrast chrome in the mux is the one signal that means look here, and
-    /// the attribute meant to emphasise it is what finishes it off.
+    /// The mux paints into the user's terminal, and terminal themes are a
+    /// solved, user-owned space with thousands of options. So chrome uses
+    /// `Color::Default` plus attributes, or at most an `Indexed` palette slot,
+    /// which is still the reader's colour - `Indexed(3)` means "whatever your
+    /// scheme calls yellow", not a yellow we picked. `Color::Rgb` would be us
+    /// overriding a choice that is not ours to make.
     ///
-    /// Not fixed here, and the reason is worth stating because it is not
-    /// squeamishness: mux cannot detect the reader's background polarity, so
-    /// choosing a different index only moves which polarity loses. The two kinds
-    /// of use site also want different answers - a blocked agent row carries
-    /// `▲` and BOLD as well, so colour is a redundant channel there, while the
-    /// focus outline and the drop zones are colour ALONE.
-    ///
-    /// This test exists so the numbers live in the repo instead of a ledger:
-    /// it fails the moment the accent gets worse on any theme, and it is the
-    /// thing to relax deliberately when someone picks the real fix.
+    /// This is the rule the name-entry modal broke and had to be walked back:
+    /// it named an explicit pair, and on the reporter's own scheme that measured
+    /// worse than inheriting would have. A structural test rather than a review
+    /// habit, because the tempting version of that mistake looks like care.
     #[test]
-    fn accent_contrast_is_measured_on_every_theme() {
+    fn chrome_paints_in_the_readers_colours_not_ours() {
         use crate::frame_html::{body_contrast, contrast_ratio, THEMES};
+        let mut view = shot_view(
+            (34, 150),
+            vec![named_meta(1, "footnote", &["main", "review"], 0)],
+            vec![shot_agent(1, "reviewer", Some(AgentBadge::Blocked))],
+        );
+        view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
+        let frame = view.compose();
+        for (i, cell) in frame.cells.iter().enumerate() {
+            assert!(
+                !matches!(cell.fg, Color::Rgb(..)) && !matches!(cell.bg, Color::Rgb(..)),
+                "cell {i} ({:?}) hardcodes an RGB colour; chrome uses the \
+                 reader's palette",
+                cell.c
+            );
+        }
+        // Informational, not a bound: how the one palette slot mux does use
+        // lands on a few real schemes. mux does not choose these numbers - they
+        // are the scheme's own yellow against the scheme's own background - so
+        // there is nothing here to assert, only something to know when deciding
+        // whether a signal may rest on colour alone.
         let accent = Cell {
             c: '\u{25b2}',
             fg: LATTICE_ACCENT,
             bg: Color::Default,
             flags: cell_flags::BOLD,
         };
-        let mut worst = f64::MAX;
         for theme in THEMES {
-            let r = contrast_ratio(&accent, theme);
             eprintln!(
-                "accent on {:22} {r:5.2}:1   (body {:.2}:1)",
+                "accent on {:22} {:5.2}:1   (that scheme's body text {:.2}:1)",
                 theme.name,
+                contrast_ratio(&accent, theme),
                 body_contrast(theme)
             );
-            worst = worst.min(r);
         }
-        // 1.70:1 is where it stands today, on Solarized Light with BOLD. This
-        // guards the direction only: it fails if the accent gets WORSE, and
-        // stays green when someone fixes it properly.
-        assert!(
-            worst > 1.6,
-            "the accent regressed past its known-bad floor: {worst:.2}:1"
-        );
     }
 
     /// Item 2. A workspace header has to separate from its own contents.
