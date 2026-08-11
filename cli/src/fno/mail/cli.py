@@ -3056,11 +3056,14 @@ def cmd_drain_self(
     # last-eight (pre-flip mail still on the bus). Each address has its own
     # cursor; a message has one `to`, so it matches exactly one form.
     last_by_form: dict[str, str] = {}
+    form_by_id: dict[str, str] = {}
     all_msgs: list = []
     for _form in (handle, session_identity_key(sid), legacy_suffix_handle(sid)):
         _got = scan_unread(_form)
         if _got:
             last_by_form[_form] = _got[-1].id
+            for _m in _got:
+                form_by_id.setdefault(_m.id, _form)
             all_msgs.extend(_got)
     _seen: set[str] = set()
     msgs = []
@@ -3129,6 +3132,43 @@ def cmd_drain_self(
             advance_cursor(_form, _last_id)
     if job_addr and job_msgs:
         advance_cursor(job_addr, job_msgs[-1].id)
+
+    # ACK POINT receipt (W1.1). The cursor advances above are the commit; emit
+    # one agent_mail_drained per drained id HERE, never at the print point up
+    # top. This function is inject-before-ack, so a crash between print and this
+    # block re-surfaces the message; a marker written at print would claim
+    # delivery for a message about to be delivered again. Best-effort and
+    # swallowed on failure: the message is already printed and acked, so an
+    # observability gap must never become a delivery failure (AC9-ERR).
+    for m in msgs:
+        _emit_drain_marker(m.id, handle, form_by_id.get(m.id, handle), m.from_)
+    for m in job_msgs:
+        _emit_drain_marker(m.id, job_addr or handle, job_addr or handle, m.from_)
+
+
+def _emit_drain_marker(
+    msg_id: str, recipient: str, address_form: str, sender: "str | None"
+) -> None:
+    """Best-effort ``agent_mail_drained`` receipt, one per drained message id (W1.1).
+
+    Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
+    state, and lets the dead-letter sweep prefer a positive marker over cursor
+    inference. Swallowed on any failure: the caller has already printed and
+    acked the message, so a missing receipt degrades to the cursor fallback
+    rather than failing the drain (AC9-ERR).
+    """
+    from fno.agents import events
+
+    try:
+        events.emit(
+            events.KIND_AGENT_MAIL_DRAINED,
+            msg_id=msg_id,
+            recipient=recipient,
+            address_form=address_form,
+            sender=sender or "",
+        )
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 # ---------------------------------------------------------------------------
