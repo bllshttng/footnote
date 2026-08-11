@@ -4456,29 +4456,7 @@ impl View {
             if r >= rows {
                 continue;
             }
-            // A grip cell is one column wide, but the pane content underneath is
-            // arbitrary program output that may hold a DOUBLE-width glyph. The
-            // compositor skips any WIDE_SPACER cell, so stamping over half of
-            // such a pair leaves either a lead with no spacer or a spacer with
-            // no lead - and the row then emits the wrong number of columns,
-            // shifting every cell after it. Blank whichever half survives at the
-            // stamp's edges before writing (the interior is fully overwritten,
-            // so no orphan can survive in there).
-            let blank = Cell {
-                c: ' ',
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: 0,
-            };
-            if start > 0
-                && start < cols
-                && cells[r * cols + start].flags & cell_flags::WIDE_SPACER != 0
-            {
-                cells[r * cols + start - 1] = blank;
-            }
-            if end < cols && cells[r * cols + end].flags & cell_flags::WIDE_SPACER != 0 {
-                cells[r * cols + end] = blank;
-            }
+            blank_straddling_pair(&mut cells, cols, r, start, end);
             for (i, ch) in GRIP.chars().enumerate() {
                 let c = start + i;
                 if c < cols {
@@ -4808,6 +4786,10 @@ impl View {
             if row >= rows {
                 return;
             }
+            // The block stamps a sub-range of each row, so a double-width glyph
+            // in the pane content can straddle either edge. The one-row version
+            // this replaced cleared whole rows and never had to care.
+            blank_straddling_pair(cells, cols, row, c0, c0 + w);
             for (i, ch) in s.chars().take(w).enumerate() {
                 let col = c0 + i;
                 if col < cols {
@@ -5150,6 +5132,7 @@ impl View {
             flags: cell_flags::BOLD,
             fg: Color::Default,
             hit: None,
+            is_tab_label: false,
         });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_label_text(&t.name, i, t.named);
@@ -5184,6 +5167,7 @@ impl View {
                 flags: base_flags | glyph_flags,
                 fg,
                 hit: Some(TabHit::Tab(t.id)),
+                is_tab_label: true,
             });
         }
         spans.push(TabSpan {
@@ -5191,6 +5175,7 @@ impl View {
             flags: cell_flags::DIM,
             fg: Color::Default,
             hit: Some(TabHit::NewTab),
+            is_tab_label: false,
         });
         spans
     }
@@ -5279,6 +5264,7 @@ impl View {
                 // Clicking the counter selects the nearest tab it is hiding, so
                 // the strip walks toward the hidden end one click at a time.
                 hit: tabs[start - 1].hit,
+                is_tab_label: false,
             });
         }
         out.extend(tabs[start..end].iter().cloned());
@@ -5288,6 +5274,7 @@ impl View {
                 flags: cell_flags::DIM,
                 fg: Color::Default,
                 hit: tabs[end].hit,
+                is_tab_label: false,
             });
         }
         out.push(plus);
@@ -6452,41 +6439,68 @@ fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
 /// and never off the pinned chrome.
 ///
 /// The widest label yields first, and a tab is dropped only once it cannot show
-/// one character plus its brackets. The squad label, the counters and the `+`
-/// are never touched: clipping those trades reachability for a character.
+/// one character plus its brackets. The counters and the `+` are never touched:
+/// clipping those trades reachability for a character, and a counter shortened
+/// to `‹1 ` reports a wrong count as confidently as a right one. Once no tab
+/// label is left to give, the squad label yields instead - it is the only span
+/// on the strip that nothing navigates by.
+/// Blank whichever half of a double-width pair survives at the edges of the
+/// half-open column range `[start, end)` on `row`.
+///
+/// Chrome cells are one column wide, but they get stamped over arbitrary program
+/// output that may hold a DOUBLE-width glyph. `Compositor::draw_row` SKIPS any
+/// `WIDE_SPACER` cell, so overwriting one half of such a pair leaves either a
+/// lead with no spacer or a spacer with no lead, and the row then emits the
+/// wrong number of columns - shifting or wrapping everything after it. Only the
+/// edges can strand a half; the interior is fully overwritten.
+///
+/// Call this before stamping, from every overlay that writes a sub-range of a
+/// row. An overlay that clears whole rows does not need it.
+fn blank_straddling_pair(cells: &mut [Cell], cols: usize, row: usize, start: usize, end: usize) {
+    let blank = Cell {
+        c: ' ',
+        fg: Color::Default,
+        bg: Color::Default,
+        flags: 0,
+    };
+    if start > 0 && start < cols && cells[row * cols + start].flags & cell_flags::WIDE_SPACER != 0 {
+        cells[row * cols + start - 1] = blank;
+    }
+    if end < cols && cells[row * cols + end].flags & cell_flags::WIDE_SPACER != 0 {
+        cells[row * cols + end] = blank;
+    }
+}
+
 fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
     let w = |s: &TabSpan| s.text.chars().count();
     let total = |v: &Vec<TabSpan>| v.iter().map(w).sum::<usize>();
+    // Keeps the first and last character: the brackets or padding spaces that
+    // mark the active tab, and the squad label's own surrounding spaces.
+    let shrink = |s: &mut TabSpan| {
+        let mut chars: Vec<char> = s.text.chars().collect();
+        chars.remove(chars.len() - 2);
+        s.text = chars.into_iter().collect();
+    };
     while total(spans) > width {
-        // The widest condensable tab: a `[label]`/` label ` span with room to
-        // give. Index 0 is the squad label; `hit == NewTab` is the `+`; the
-        // counters carry a Tab hit but are already minimal, so guard on length.
         let victim = spans
             .iter()
             .enumerate()
-            .skip(1)
-            .filter(|(_, s)| matches!(s.hit, Some(TabHit::Tab(_))) && w(s) > 3)
+            .filter(|(_, s)| s.is_tab_label && w(s) > 3)
             .max_by_key(|(_, s)| w(s))
             .map(|(i, _)| i);
         match victim {
-            Some(i) => {
-                let text = &spans[i].text;
-                let mut chars: Vec<char> = text.chars().collect();
-                // Drop one interior character, keeping the first and last (the
-                // brackets or padding spaces that mark the active tab).
-                chars.remove(chars.len() - 2);
-                spans[i].text = chars.into_iter().collect();
-            }
-            // Nothing left to condense: shed the last non-pinned span instead of
-            // letting the pinned chrome fall off the edge.
-            None => match spans
-                .iter()
-                .rposition(|s| matches!(s.hit, Some(TabHit::Tab(_))))
-            {
+            Some(i) => shrink(&mut spans[i]),
+            // No tab label can give another column: shed the last whole tab, and
+            // when none remain start taking columns off the squad label rather
+            // than letting a counter or the `+` fall off the edge.
+            None => match spans.iter().rposition(|s| s.is_tab_label) {
                 Some(i) => {
                     spans.remove(i);
                 }
-                None => break,
+                None => match spans.first_mut().filter(|s| s.text.chars().count() > 3) {
+                    Some(label) => shrink(label),
+                    None => break,
+                },
             },
         }
     }
@@ -6500,6 +6514,12 @@ struct TabSpan {
     /// Blocked pane, else `Color::Default`.
     fg: Color,
     hit: Option<TabHit>,
+    /// Whether this span IS a tab's label, as opposed to pinned chrome that
+    /// merely resolves to a tab. An overflow counter also carries a `Tab` hit -
+    /// clicking it walks the strip - so the hit cannot tell the two apart, and
+    /// [`condense_to_width`] must never shorten a counter into `‹1 ` when the
+    /// count is what makes it worth clicking.
+    is_tab_label: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -23310,6 +23330,158 @@ mod tests {
         );
     }
 
+    /// Every surviving `WIDE_SPACER` still has its double-width lead, and every
+    /// wide lead still owns its spacer. Break either and the row emits the wrong
+    /// number of columns, shifting or wrapping everything after it.
+    fn assert_pairs_intact(row: &[Cell], what: &str) {
+        for (i, cell) in row.iter().enumerate() {
+            if cell.flags & cell_flags::WIDE_SPACER != 0 {
+                assert!(
+                    i > 0 && glyph_cols(row[i - 1].c) == 2,
+                    "{what}: orphaned spacer at column {i}: the row would shift left"
+                );
+            }
+            if glyph_cols(cell.c) == 2 {
+                assert!(
+                    i + 1 < row.len() && row[i + 1].flags & cell_flags::WIDE_SPACER != 0,
+                    "{what}: wide glyph at column {i} lost its spacer: the row would shift right"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_name_modal_never_bisects_a_double_width_glyph() {
+        // The one-row modal this replaced cleared whole rows and could not
+        // strand a half. The block stamps a SUB-RANGE of three rows, so pane
+        // content - arbitrary program output - can straddle either edge of any
+        // of them.
+        let view = shot_view(
+            (24, 80),
+            vec![named_meta(1, "footnote", &["main"], 0)],
+            vec![],
+        );
+        let (rows, cols) = (24usize, 80usize);
+        let r = rows / 2;
+
+        // Read the block's extent off a probe rather than recomputing its
+        // format here: a test that restates the format stops testing it.
+        let mut probe = vec![Cell::default(); rows * cols];
+        view.draw_name_modal(&mut probe, rows, cols, "rename tab", "release", None);
+        let lit: Vec<usize> = (0..cols)
+            .filter(|c| probe[r * cols + c].flags & cell_flags::INVERSE != 0)
+            .collect();
+        let (c0, end) = (lit[0], lit[lit.len() - 1] + 1);
+        assert!(c0 > 0 && end < cols, "fixture needs margins on both sides");
+
+        let mut cells = vec![Cell::default(); rows * cols];
+        let lead = |c: char| Cell {
+            c,
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: 0,
+        };
+        let spacer = Cell {
+            c: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: cell_flags::WIDE_SPACER,
+        };
+        // Straddle BOTH edges of EVERY row the block touches: a pair whose
+        // spacer is the block's first cell, and one whose lead is its last.
+        for row in [r - 1, r, r + 1] {
+            cells[row * cols + c0 - 1] = lead('\u{4f60}');
+            cells[row * cols + c0] = spacer;
+            cells[row * cols + end - 1] = lead('\u{597d}');
+            cells[row * cols + end] = spacer;
+        }
+
+        view.draw_name_modal(&mut cells, rows, cols, "rename tab", "release", None);
+        for row in [r - 1, r, r + 1] {
+            assert_pairs_intact(
+                &cells[row * cols..(row + 1) * cols],
+                &format!("modal row {row}"),
+            );
+        }
+        // And the prompt still drew.
+        let text: String = (0..cols).map(|c| cells[r * cols + c].c).collect();
+        assert!(
+            text.contains("rename tab: release_"),
+            "prompt missing: {text:?}"
+        );
+    }
+
+    #[test]
+    fn condensing_a_narrow_strip_never_shortens_an_overflow_counter() {
+        // A counter carries a Tab hit so that clicking it walks the strip, which
+        // is exactly why its role cannot be read off `hit`. Shortened, `‹13 `
+        // becomes `‹1 ` - a wrong count stated as confidently as a right one -
+        // and dropped, its click target goes with it.
+        let label = TabSpan {
+            text: " a-long-workspace-name ".to_string(),
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+            hit: None,
+            is_tab_label: false,
+        };
+        let counter = |text: &str| TabSpan {
+            text: text.to_string(),
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+            hit: Some(TabHit::Tab(7)),
+            is_tab_label: false,
+        };
+        let tab = |text: &str| TabSpan {
+            text: text.to_string(),
+            flags: 0,
+            fg: Color::Default,
+            hit: Some(TabHit::Tab(3)),
+            is_tab_label: true,
+        };
+        let strip = || {
+            vec![
+                label.clone(),
+                counter("\u{2039}13 "),
+                tab("[a-tab-label]"),
+                counter(" 4\u{203a}"),
+                TabSpan {
+                    text: " + ".to_string(),
+                    flags: cell_flags::DIM,
+                    fg: Color::Default,
+                    hit: Some(TabHit::NewTab),
+                    is_tab_label: false,
+                },
+            ]
+        };
+        // 40 columns: the tab label alone can pay. 30: it runs out, and the
+        // squad label - the one span nothing navigates by - has to yield rather
+        // than a counter losing its count or the `+` losing its click target.
+        for width in [40usize, 30] {
+            let mut spans = strip();
+            condense_to_width(&mut spans, width);
+            let texts: Vec<&str> = spans.iter().map(|s| s.text.as_str()).collect();
+            assert!(
+                texts.contains(&"\u{2039}13 ") && texts.contains(&" 4\u{203a}"),
+                "at {width}: both counters must survive intact: {texts:?}"
+            );
+            assert!(
+                texts.contains(&" + "),
+                "at {width}: the `+` is the only mouse route to a new tab: {texts:?}"
+            );
+            assert!(
+                spans.iter().map(|s| s.text.chars().count()).sum::<usize>() <= width,
+                "at {width}: still has to fit: {texts:?}"
+            );
+        }
+        let mut narrow = strip();
+        condense_to_width(&mut narrow, 30);
+        assert!(
+            narrow[0].text.chars().count() < label.text.chars().count(),
+            "at 30 the squad label is what is left to give: {:?}",
+            narrow.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn the_grip_never_bisects_a_double_width_glyph() {
         // The compositor SKIPS a WIDE_SPACER cell, so a lead left without its
@@ -23351,22 +23523,7 @@ mod tests {
         let out = view.compose();
         let cols = view.term.1 as usize;
         let row = &out.cells[grow as usize * cols..(grow as usize + 1) * cols];
-        // Every surviving WIDE_SPACER must still be preceded by a real
-        // double-width lead; every wide lead must still own its spacer.
-        for (i, cell) in row.iter().enumerate() {
-            if cell.flags & cell_flags::WIDE_SPACER != 0 {
-                assert!(
-                    i > 0 && glyph_cols(row[i - 1].c) == 2,
-                    "orphaned spacer at column {i}: the row would shift left"
-                );
-            }
-            if glyph_cols(cell.c) == 2 {
-                assert!(
-                    i + 1 < cols && row[i + 1].flags & cell_flags::WIDE_SPACER != 0,
-                    "wide glyph at column {i} lost its spacer: the row would shift right"
-                );
-            }
-        }
+        assert_pairs_intact(row, "grip row");
         // And the grip still drew.
         for (i, ch) in GRIP.chars().enumerate() {
             assert_eq!(row[gcols.start as usize + i].c, ch);
