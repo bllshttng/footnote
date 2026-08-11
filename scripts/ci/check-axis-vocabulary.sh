@@ -115,6 +115,39 @@ baseline_path = Path(sys.argv[3])
 HARNESS_LITERALS = ("claude", "codex", "agy", "opencode")
 VENDOR_LITERALS = ("anthropic", "openai", "zai", "deepseek", "google")
 
+# --- Declared axis for axis-NAMED directories ---------------------------------
+# The content scan above reads what the code says. It cannot read what the code
+# is CALLED: a path is a traversal input to os.walk, never a subject. That blind
+# spot let two directories named `providers` coexist for months, one holding
+# harness adapters and one holding real providers, so a reader who learned one
+# could not predict the other.
+#
+# Classifying a directory by its contents was measured and rejected. The
+# harness-adapter package held 298 harness literals to 5 vendor; the correctly
+# named provider package held 1024 to 49, because rotation and failover
+# legitimately name the harnesses whose accounts they rotate. Any threshold that
+# flags the wrong directory also flags the right one, so inference here is not
+# merely weak, it is inverted.
+#
+# What this map holds is a HUMAN DECLARATION of the axis a directory's contents
+# implement. The gate compares that declaration against the axis the directory's
+# NAME states and fails on disagreement. It never opens the directory to check
+# the declaration is true. The teeth are in the completeness half below: a new
+# axis-named directory that nobody declared fails, which is exactly the event
+# this guard exists to catch.
+#
+# Inline rather than a file on purpose: three axis-named directories exist in the
+# whole repository, and a separate file would buy a parser, a format validator,
+# and a malformed-entry branch to hold one line.
+DECLARED_PATH_AXIS = {
+    # Provider records, accounts, rotation, failover, benchmarks.
+    "cli/src/fno/adapters/providers": "provider",
+    # Harness subprocess adapters: claude.py, codex.py, opencode.py.
+    "cli/src/fno/agents/harnesses": "harness",
+    # Per-harness pages and the harness adapter/dispatch table.
+    "docs/harnesses": "harness",
+}
+
 SCANNABLE_EXT = {".py", ".rs", ".sh", ".bash", ".md", ".yaml", ".yml"}
 
 # Never scanned: build output, caches, the worktree forest under .claude/worktrees
@@ -192,11 +225,25 @@ def _findings_for_line(rel: str, lineno: int, line: str):
     return out
 
 
+def _stated_axis(name: str):
+    """The axis a path component's NAME states, or None."""
+    m = _axis_word.search(name)
+    return m.group(1).lower() if m else None
+
+
 def scan(root: Path):
     findings = []
     observed_by_ext = {}
+    axis_dirs = {}
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR]
+        # Collected in the SAME walk the content scan already performs, so the
+        # name check costs no second traversal of the tree.
+        rel_dir = os.path.relpath(dirpath, root)
+        if rel_dir != ".":
+            stated = _stated_axis(os.path.basename(dirpath))
+            if stated:
+                axis_dirs[rel_dir.replace(os.sep, "/")] = stated
         for fn in filenames:
             ext = os.path.splitext(fn)[1]
             if ext not in SCANNABLE_EXT:
@@ -220,7 +267,34 @@ def scan(root: Path):
                     observed_by_ext[ext] = observed_by_ext.get(ext, 0) + 1
                     reached = True
                 findings.extend(_findings_for_line(rel, i, line))
-    return sorted(set(findings)), observed_by_ext
+    return sorted(set(findings)), observed_by_ext, axis_dirs
+
+
+def _name_findings(axis_dirs: dict):
+    """Violations of the declared-axis rule, one string each.
+
+    Two rules, and the first is where the teeth are:
+
+    1. An axis-named directory absent from DECLARED_PATH_AXIS fails. Nobody
+       looked at it, so nothing vouches for the name it carries.
+    2. A declared directory whose declaration disagrees with the axis its name
+       states fails.
+    """
+    out = []
+    for rel, stated in sorted(axis_dirs.items()):
+        declared = DECLARED_PATH_AXIS.get(rel)
+        if declared is None:
+            out.append(
+                f"{rel}/: undeclared axis-named directory (name states "
+                f"'{stated}'); add it to DECLARED_PATH_AXIS with the axis its "
+                f"contents implement, or rename it"
+            )
+        elif declared != stated:
+            out.append(
+                f"{rel}/: directory name states '{stated}' but its declared "
+                f"axis is '{declared}'"
+            )
+    return out
 
 
 def _self_test():
@@ -238,7 +312,7 @@ def _self_test():
     for lang, (name, body) in specimens.items():
         d = Path(tempfile.mkdtemp(prefix=f"axis-{lang}-"))
         (d / name).write_text(body, encoding="utf-8")
-        found, _ = scan(d)
+        found, _, _ = scan(d)
         if found:
             print(f"caught planted {lang} violation")
         else:
@@ -246,7 +320,7 @@ def _self_test():
             failures += 1
     d = Path(tempfile.mkdtemp(prefix="axis-clean-"))
     (d / "ok.py").write_text('provider = "anthropic"\n', encoding="utf-8")
-    found, _ = scan(d)
+    found, _, _ = scan(d)
     if found:
         print("FAILED: clean tree produced findings", file=sys.stderr)
         for f in found:
@@ -254,13 +328,92 @@ def _self_test():
         failures += 1
     else:
         print("caught planted clean-tree (no findings) ok")
+
+    # Name scan. The planted directory is undeclared, which is the rule that
+    # catches a NEW mis-named directory on the PR that adds it.
+    d = Path(tempfile.mkdtemp(prefix="axis-name-"))
+    (d / "providers").mkdir()
+    (d / "providers" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    _, _, dirs = scan(d)
+    if _name_findings(dirs):
+        print("caught planted undeclared-directory violation")
+    else:
+        print("FAILED to catch planted undeclared-directory violation", file=sys.stderr)
+        failures += 1
+
+    # A declared directory whose declaration agrees with its name is silent.
+    # Asserted against a real DECLARED_PATH_AXIS entry rather than a stub, so a
+    # map emptied by a bad edit fails here instead of passing on a fixture.
+    declared_rel, declared_axis = next(iter(DECLARED_PATH_AXIS.items()))
+    d = Path(tempfile.mkdtemp(prefix="axis-declared-"))
+    (d / declared_rel).mkdir(parents=True)
+    (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
+    _, _, dirs = scan(d)
+    leftover = [v for v in _name_findings(dirs) if v.startswith(f"{declared_rel}/:")]
+    if leftover:
+        print(
+            f"FAILED: declared '{declared_rel}' ({declared_axis}) still flagged",
+            file=sys.stderr,
+        )
+        for v in leftover:
+            print(f"  {v}", file=sys.stderr)
+        failures += 1
+    else:
+        print("caught planted declared-directory (no name findings) ok")
     return 1 if failures else 0
 
 
 if os.environ.get("AXIS_SELF_TEST") == "1":
     sys.exit(_self_test())
 
-findings, observed = scan(root_arg)
+findings, observed, axis_dirs = scan(root_arg)
+
+# --- Name scan (independent of the content scan and its baseline) -------------
+# Runs in every mode and never contributes a baseline line: a directory naming
+# the wrong axis is not a finding to be ratcheted down over time, it is a rename.
+#
+# Positive control first. Zero axis-named directories means the traversal broke
+# (wrong root, an EXCLUDE_DIR change, a walk that never reached content), not a
+# clean tree. An absence has two explanations and cannot tell them apart, so a
+# zero-collection result exits 2 rather than reporting green.
+if not axis_dirs:
+    print(
+        "check-axis-vocabulary: name scan positive control failed "
+        "(no axis-named directories collected anywhere under the root); "
+        "the traversal did not reach content",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+name_violations = _name_findings(axis_dirs)
+
+# Printed on EVERY run, pass or fail. A green here means less than a reader will
+# assume, and the blind spot this guard was written for is exactly a green that
+# was read as covering more than it did.
+_declared_count = sum(1 for rel in axis_dirs if rel in DECLARED_PATH_AXIS)
+_noun = "directory" if len(axis_dirs) == 1 else "directories"
+print(
+    f"check-axis-vocabulary: name scan "
+    f"{'ok' if not name_violations else 'FAILED'} "
+    f"({len(axis_dirs)} axis-named {_noun}, {_declared_count} declared)\n"
+    "  scope: judges DIRECTORY names against DECLARED_PATH_AXIS, a human\n"
+    "  declaration. It does NOT open a directory to verify that declaration is\n"
+    "  true, so a wrong declaration passes green. It does not judge file names\n"
+    "  or symbol names; those are the content scan's subject and live in the\n"
+    "  baseline.",
+    file=sys.stderr if name_violations else sys.stdout,
+)
+
+if name_violations:
+    print("check-axis-vocabulary: directory-name violations:", file=sys.stderr)
+    for v in name_violations:
+        print(f"  {v}", file=sys.stderr)
+    print(
+        "A directory named for one axis may not hold another axis's "
+        "implementation; see docs/architecture/four-axis-vocabulary.md",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 # An allowlist entry MUST carry a one-line justification: `allowlist: <path>:<line> <why>`.
