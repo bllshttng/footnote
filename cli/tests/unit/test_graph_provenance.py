@@ -27,7 +27,6 @@ def _patch_graph(monkeypatch, graph_path: Path) -> None:
     """Redirect the graph module constants to a tmp graph."""
     import fno.graph._constants as gc
     import fno.graph.store as gs
-    lock = graph_path.parent / "graph.lock"
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
@@ -1757,7 +1756,7 @@ def test_skip_json_carries_the_resolved_node_and_identity(tmp_path, monkeypatch)
         "--guard-plan", _plan(tmp_path, "ab-other99"),
     ])
     assert r.exit_code == 0
-    payload = json.loads([l for l in r.output.splitlines() if l.startswith("{")][-1])
+    payload = json.loads([ln for ln in r.output.splitlines() if ln.startswith("{")][-1])
     assert payload["status"] == "skipped"
     assert payload["node_id"] == "ab-guard001"
     assert payload["session_id"] == "SESSION-A"

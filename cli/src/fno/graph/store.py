@@ -1177,7 +1177,10 @@ def append_session_record(
             if merged is not None:
                 prior["observed_model"] = merged
             return entries
-        row = {"phase": phase, "harness": harness, "session_id": session_id}
+        # Annotated: observed_model is a dict, so the inferred dict[str, str]
+        # from the three string fields would reject it.
+        row: dict[str, object] = {
+            "phase": phase, "harness": harness, "session_id": session_id}
         if ended_at is not None:
             row["ended_at"] = ended_at
         if started_at is not None:
