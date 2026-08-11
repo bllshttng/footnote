@@ -50,7 +50,16 @@ def _references_member(member: ExitCode, sources: list[Path]) -> bool:
     for src in sources:
         if src.is_relative_to(CLI_SRC / "handoff"):
             continue
-        if combined.search(src.read_text(encoding="utf-8", errors="replace")):
+        # A file can vanish between the glob and the read: under `-n auto`,
+        # test_ambient_identity_scrub.py copies itself into cli/src/fno/ so the
+        # other tree's conftest collects it, then unlinks it. A source file that
+        # no longer exists is not a source file, and treating the race as a
+        # failure makes this test's answer depend on worker interleaving.
+        try:
+            text = src.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        if combined.search(text):
             return True
     return False
 

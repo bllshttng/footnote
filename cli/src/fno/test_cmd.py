@@ -1304,9 +1304,17 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     total = len(steps)
     name_set = set(names)
 
+    # Lane-scoped. The two lanes fail for different reasons, so a shared record
+    # would let a dirty-lane failure list be replayed into a clean-lane
+    # --retry-failed and re-run steps that were never red there.
     failure_record = os.environ.get("SMOKE_FAILURE_RECORD") or str(
         root / SMOKE_FAILURE_RECORD_DEFAULT
     )
+    if _AMBIENT_MODE != "clean":
+        base, dot, ext = failure_record.rpartition(".")
+        failure_record = f"{base}-{_AMBIENT_MODE}{dot}{ext}" if dot else (
+            f"{failure_record}-{_AMBIENT_MODE}"
+        )
 
     # Selection: build the selected indices from the mode.
     retry_fell_back = False

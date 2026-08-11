@@ -281,10 +281,7 @@ def neutralise(
         raise ValueError("neutralise() needs a sandbox directory to pin state into")
     sandbox = Path(sandbox)
     home = sandbox / "home"
-    repo = sandbox / "repo"
-    for d in (home / ".fno", repo / ".fno"):
-        d.mkdir(parents=True, exist_ok=True)
-    del repo  # created for a caller that wants it; not pinned - see below
+    (home / ".fno").mkdir(parents=True, exist_ok=True)
 
     # State: HOME (POSIX) and USERPROFILE (Windows, which Path.home() reads).
     out["HOME"] = str(home)

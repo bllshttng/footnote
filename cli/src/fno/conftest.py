@@ -24,12 +24,34 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from fno.hermetic import neutralise
 
 _SANDBOX = tempfile.mkdtemp(prefix="fno-src-test-sandbox-")
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
 os.environ.update(_hermetic_env)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _config_search_ceiling(tmp_path_factory: pytest.TempPathFactory):
+    """Widen the config ceiling to include the pytest basetemp.
+
+    Both trees need this and for the same reason, so both carry it: tests here
+    write project-local and global settings files under ``tmp_path``, and the
+    ceiling ``neutralise`` sets covers only the sandbox. Adding it to one tree
+    and not the other is how three tests in this file went red while the
+    cli/tests tree stayed green - the same one-of-N-paths shape this whole
+    change exists to remove.
+    """
+    basetemp = str(tmp_path_factory.getbasetemp())
+    previous = os.environ.get("FNO_CONFIG_SEARCH_ROOT", "")
+    os.environ["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join(
+        [basetemp, previous] if previous else [basetemp]
+    )
+    yield
+    os.environ["FNO_CONFIG_SEARCH_ROOT"] = previous
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
