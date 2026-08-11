@@ -9,22 +9,14 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fno.events import RETENTION_MINIMUM_TTL_HOURS, retention_for
+from fno.events import RETENTION_MINIMUM_TTL_HOURS, _utc_timestamp, retention_for
 from fno.mutex import acquire_dir_mutex, release_dir_mutex, renew_dir_mutex
 
 _LEASE_RENEW_EVERY_S = 30
 
 
 def _timestamp(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
-        return None
-    return parsed.astimezone(timezone.utc)
+    return _utc_timestamp(value)
 
 
 def _wait_for_shell_writers(path: Path, timeout_seconds: float) -> None:

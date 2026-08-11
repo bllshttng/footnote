@@ -21,6 +21,7 @@ The legacy ``fno.events.log`` and ``fno.events.cli`` modules
 remain unchanged; this ``__init__`` adds the canonical envelope surface
 alongside them.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -57,10 +58,13 @@ def _is_nonnegative_integral_number(value: Any) -> TypeGuard[int | float]:
 def _utc_timestamp(value: Any) -> _dt.datetime | None:
     if not isinstance(value, str) or not value:
         return None
-    if _re.fullmatch(
-        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
-        value,
-    ) is None:
+    if (
+        _re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
+            value,
+        )
+        is None
+    ):
         return None
     try:
         parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -83,9 +87,7 @@ def _resolve_manifest_path() -> Path:
     sibling = Path(__file__).resolve().parent / "schema.yaml"
     if sibling.is_file():
         return sibling
-    raise SchemaUnavailableError(
-        f"events schema not found beside the package (expected {sibling})"
-    )
+    raise SchemaUnavailableError(f"events schema not found beside the package (expected {sibling})")
 
 
 def _load_schema() -> dict[str, Any]:
@@ -107,24 +109,18 @@ def validate_retention_schema(schema: dict[str, Any]) -> None:
         raise SchemaUnavailableError(f"invalid retention default: {default!r}")
     minimum = retention.get("minimum_ephemeral_ttl_hours", 672)
     if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum <= 0:
-        raise SchemaUnavailableError(
-            f"invalid minimum_ephemeral_ttl_hours: {minimum!r}"
-        )
+        raise SchemaUnavailableError(f"invalid minimum_ephemeral_ttl_hours: {minimum!r}")
     entries = {entry.get("name"): entry for entry in schema.get("event_types", [])}
     for name, entry in entries.items():
         value = entry.get("retention", default)
         if value not in _RETENTION_CLASSES:
-            raise SchemaUnavailableError(
-                f"invalid retention class for {name}: {value!r}"
-            )
+            raise SchemaUnavailableError(f"invalid retention class for {name}: {value!r}")
     for pair in retention.get("joins", []):
         if not isinstance(pair, list) or len(pair) != 2:
             raise SchemaUnavailableError(f"invalid retention join: {pair!r}")
         left, right = pair
         if left not in entries or right not in entries:
-            raise SchemaUnavailableError(
-                f"retention join names unknown event type: {pair!r}"
-            )
+            raise SchemaUnavailableError(f"retention join names unknown event type: {pair!r}")
         left_class = entries[left].get("retention", default)
         right_class = entries[right].get("retention", default)
         if left_class != right_class:
@@ -162,13 +158,11 @@ try:
     DATA_SIZE_ENCODING = SCHEMA.get("limits", {}).get("data_size_encoding", "")
     if DATA_SIZE_ENCODING != "compact-json-ascii-v1":
         raise SchemaUnavailableError(
-            "unsupported limits.data_size_encoding: "
-            f"{DATA_SIZE_ENCODING!r}"
+            f"unsupported limits.data_size_encoding: {DATA_SIZE_ENCODING!r}"
         )
     ALLOWED_SOURCES = set(SCHEMA["envelope"]["properties"]["source"]["enum"])
     ALLOWED_SOURCE_PATTERNS = [
-        _re.compile(p)
-        for p in SCHEMA["envelope"]["properties"]["source"].get("patterns", [])
+        _re.compile(p) for p in SCHEMA["envelope"]["properties"]["source"].get("patterns", [])
     ]
     ALLOWED_GATES = set(SCHEMA.get("gates", []))
     RETENTION_DEFAULT = SCHEMA.get("retention", {}).get("default", "durable")
@@ -236,8 +230,7 @@ def validate(event: dict[str, Any]) -> None:
     # isinstance guard first: a non-str source must reject cleanly, not crash
     # p.match() with a TypeError (the pre-pattern set-membership tolerated it).
     if not isinstance(source, str) or (
-        source not in ALLOWED_SOURCES
-        and not any(p.match(source) for p in ALLOWED_SOURCE_PATTERNS)
+        source not in ALLOWED_SOURCES and not any(p.match(source) for p in ALLOWED_SOURCE_PATTERNS)
     ):
         raise ValidationError(
             f"unknown source: {source!r} "
@@ -260,9 +253,7 @@ def validate(event: dict[str, Any]) -> None:
         if field == "gate" and not data.get("gate_bearing", False):
             continue
         if field not in data:
-            raise ValidationError(
-                f"event type {type_name} missing required data field: {field}"
-            )
+            raise ValidationError(f"event type {type_name} missing required data field: {field}")
 
     # a2a status-breakpoint family (x-dbaf): the extended envelope. Routable
     # fields live at envelope level; additionalProperties:false for this family
@@ -288,9 +279,7 @@ def validate(event: dict[str, Any]) -> None:
         has_outcome = "outcome" in event
         if type_name in PROTOCOL_OUTCOME_ON:
             if not has_outcome:
-                raise ValidationError(
-                    f"event type {type_name} requires envelope field: outcome"
-                )
+                raise ValidationError(f"event type {type_name} requires envelope field: outcome")
             if event["outcome"] not in PROTOCOL_OUTCOME_ENUM:
                 raise ValidationError(
                     f"unknown {type_name} outcome: {event['outcome']!r} "
@@ -303,15 +292,11 @@ def validate(event: dict[str, Any]) -> None:
             )
 
     if type_name == "phase_transition" and data.get("gate_bearing") and not data.get("gate"):
-        raise ValidationError(
-            "phase_transition with gate_bearing=true must include data.gate"
-        )
+        raise ValidationError("phase_transition with gate_bearing=true must include data.gate")
 
     if type_name == "context_snapshot":
         if source not in {"hook", "test"}:
-            raise ValidationError(
-                f"context_snapshot source must be hook or test (got {source!r})"
-            )
+            raise ValidationError(f"context_snapshot source must be hook or test (got {source!r})")
         session_id = data.get("session_id")
         harness = data.get("harness")
         entry_state = data.get("entry_state")
@@ -328,9 +313,7 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError(f"unknown context_snapshot entry_state: {entry_state!r}")
         manifest = data.get("source_manifest")
         errors = data.get("measurement_errors", [])
-        if not isinstance(manifest, list) or not all(
-            isinstance(item, dict) for item in manifest
-        ):
+        if not isinstance(manifest, list) or not all(isinstance(item, dict) for item in manifest):
             raise ValidationError("context_snapshot source_manifest must contain objects")
         if not isinstance(errors, list) or not all(isinstance(item, str) for item in errors):
             raise ValidationError("context_snapshot measurement_errors must contain strings")
@@ -377,9 +360,7 @@ def validate(event: dict[str, Any]) -> None:
 
     if type_name == "verification_receipt":
         if _utc_timestamp(event["ts"]) is None:
-            raise ValidationError(
-                "verification_receipt envelope ts must be RFC3339 UTC"
-            )
+            raise ValidationError("verification_receipt envelope ts must be RFC3339 UTC")
         type_sources = type_spec.get("sources", [])
         if source not in type_sources:
             raise ValidationError(
@@ -394,20 +375,31 @@ def validate(event: dict[str, Any]) -> None:
         if result not in type_props["result"]["enum"]:
             raise ValidationError(f"unknown verification_receipt data.result: {result!r}")
         candidate_sha = data.get("candidate_sha")
-        if not isinstance(candidate_sha, str) or _re.fullmatch(
-            r"[0-9a-f]{40}", candidate_sha, _re.IGNORECASE
-        ) is None:
+        if (
+            not isinstance(candidate_sha, str)
+            or _re.fullmatch(r"[0-9a-f]{40}", candidate_sha, _re.IGNORECASE) is None
+        ):
             raise ValidationError("verification_receipt candidate_sha must be full 40-hex")
         command = data.get("command")
         scope = data.get("scope")
-        if not isinstance(command, list) or not command or len(command) > 4096 or not all(
-            isinstance(item, str) and item and len(item.encode("utf-8")) <= 4096
-            for item in command
+        if (
+            not isinstance(command, list)
+            or not command
+            or len(command) > 4096
+            or not all(
+                isinstance(item, str) and item and len(item.encode("utf-8")) <= 4096
+                for item in command
+            )
         ):
             raise ValidationError("verification_receipt command must contain bounded argv strings")
-        if not isinstance(scope, list) or not scope or len(scope) > 128 or not all(
-            isinstance(item, str) and item and len(item.encode("utf-8")) <= 512
-            for item in scope
+        if (
+            not isinstance(scope, list)
+            or not scope
+            or len(scope) > 128
+            or not all(
+                isinstance(item, str) and item and len(item.encode("utf-8")) <= 512
+                for item in scope
+            )
         ):
             raise ValidationError("verification_receipt scope must contain bounded step names")
         environment = data.get("environment")
@@ -427,9 +419,7 @@ def validate(event: dict[str, Any]) -> None:
         started = _utc_timestamp(data.get("started_at"))
         finished = _utc_timestamp(data.get("finished_at"))
         if started is None or finished is None or finished < started:
-            raise ValidationError(
-                "verification_receipt timestamps must be ordered RFC3339 UTC"
-            )
+            raise ValidationError("verification_receipt timestamps must be ordered RFC3339 UTC")
         expected = data.get("steps_expected")
         executed = data.get("steps_executed")
         generation = data.get("generation")
@@ -443,28 +433,24 @@ def validate(event: dict[str, Any]) -> None:
             or int(expected) != len(scope)
         ):
             raise ValidationError("verification_receipt step counts are invalid")
-        if mode == "full" and result == "passed" and (
-            int(expected) == 0 or int(executed) != int(expected)
+        if (
+            mode == "full"
+            and result == "passed"
+            and (int(expected) == 0 or int(executed) != int(expected))
         ):
-            raise ValidationError(
-                "verification_receipt full pass requires every nonzero step"
-            )
+            raise ValidationError("verification_receipt full pass requires every nonzero step")
         if mode == "void" and result == "passed":
             raise ValidationError("verification_receipt void mode cannot pass")
 
     if type_name == "phase_transition" and data.get("gate") and data["gate"] not in ALLOWED_GATES:
-        raise ValidationError(
-            f"unknown gate: {data['gate']!r} (allowed: {sorted(ALLOWED_GATES)})"
-        )
+        raise ValidationError(f"unknown gate: {data['gate']!r} (allowed: {sorted(ALLOWED_GATES)})")
 
     if type_name == "mission_complete":
         status = data.get("status")
         type_props = type_spec["data"]["properties"]
         allowed_statuses = type_props.get("status", {}).get("enum", [])
         if allowed_statuses and status not in allowed_statuses:
-            raise ValidationError(
-                f"unknown status: {status!r} (allowed: {allowed_statuses})"
-            )
+            raise ValidationError(f"unknown status: {status!r} (allowed: {allowed_statuses})")
 
     # Enforce the data.source enum for session_satisfied + auto_complete_triggered
     # at validate() time so shell callers using `fno event emit --type ... --data ...`
@@ -495,8 +481,7 @@ def validate(event: dict[str, Any]) -> None:
             allowed = type_props[field]["enum"]
             if data.get(field) not in allowed:
                 raise ValidationError(
-                    f"unknown human_touch data.{field}: {data.get(field)!r} "
-                    f"(allowed: {allowed})"
+                    f"unknown human_touch data.{field}: {data.get(field)!r} (allowed: {allowed})"
                 )
 
     # Same chokepoint rationale: skill_eval_finding's dimension/verdict drive
@@ -532,8 +517,7 @@ def validate(event: dict[str, Any]) -> None:
         allowed = type_spec["data"]["properties"]["reason"]["enum"]
         if data.get("reason") not in allowed:
             raise ValidationError(
-                f"unknown mail_escalation data.reason: {data.get('reason')!r} "
-                f"(allowed: {allowed})"
+                f"unknown mail_escalation data.reason: {data.get('reason')!r} (allowed: {allowed})"
             )
 
     # Same chokepoint rationale: gate_escape's reason drives the retro
@@ -543,8 +527,7 @@ def validate(event: dict[str, Any]) -> None:
         allowed = type_spec["data"]["properties"]["reason"]["enum"]
         if data.get("reason") not in allowed:
             raise ValidationError(
-                f"unknown gate_escape data.reason: {data.get('reason')!r} "
-                f"(allowed: {allowed})"
+                f"unknown gate_escape data.reason: {data.get('reason')!r} (allowed: {allowed})"
             )
 
     # Same chokepoint rationale: post_merge_dispatch_receipt is the attribution
@@ -572,8 +555,10 @@ def validate(event: dict[str, Any]) -> None:
     # observation and skewing the recurrence fold.
     if type_name == "worktree_overlap_observed":
         peers = data.get("peer_session_ids")
-        if not isinstance(peers, list) or not peers or not all(
-            isinstance(p, str) and p for p in peers
+        if (
+            not isinstance(peers, list)
+            or not peers
+            or not all(isinstance(p, str) and p for p in peers)
         ):
             raise ValidationError(
                 "worktree_overlap_observed peer_session_ids must be a non-empty "
@@ -599,18 +584,19 @@ def validate(event: dict[str, Any]) -> None:
         wt = data.get("worktree_key")
         obs = data.get("observer_session_id")
         if not (
-            isinstance(repo, str) and repo
-            and isinstance(wt, str) and wt
-            and isinstance(obs, str) and obs
+            isinstance(repo, str)
+            and repo
+            and isinstance(wt, str)
+            and wt
+            and isinstance(obs, str)
+            and obs
         ):
             raise ValidationError(
                 "worktree_overlap_observed requires non-empty repository_key, "
                 "worktree_key, and observer_session_id strings"
             )
         if obs in peers:
-            raise ValidationError(
-                "worktree_overlap_observed observer cannot be its own peer"
-            )
+            raise ValidationError("worktree_overlap_observed observer cannot be its own peer")
         if oid != _overlap_observation_id(repo, wt, obs, sorted(set(peers))):
             raise ValidationError(
                 "worktree_overlap_observed observation_id does not match its fields"
@@ -627,16 +613,13 @@ def validate(event: dict[str, Any]) -> None:
         raise ValidationError(f"event data is not serializable: {exc}") from exc
     if len(serialized) > MAX_DATA_BYTES:
         raise ValidationError(
-            f"event data exceeds max_data_bytes "
-            f"(got {len(serialized)}, limit {MAX_DATA_BYTES})"
+            f"event data exceeds max_data_bytes (got {len(serialized)}, limit {MAX_DATA_BYTES})"
         )
 
 
 def _ts_now() -> str:
     return (
-        _dt.datetime.now(_dt.timezone.utc)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
+        _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     )
 
 
@@ -790,8 +773,7 @@ def phase_0_decision(
     """
     if decision not in PHASE_0_DECISIONS:
         raise ValidationError(
-            f"unknown phase_0 decision: {decision!r} "
-            f"(allowed: {sorted(PHASE_0_DECISIONS)})"
+            f"unknown phase_0 decision: {decision!r} (allowed: {sorted(PHASE_0_DECISIONS)})"
         )
     return _build(
         "phase_0_decision",
@@ -821,8 +803,7 @@ def integrity_warning(
     """
     if kind not in INTEGRITY_WARNING_KINDS:
         raise ValidationError(
-            f"unknown integrity_warning kind: {kind!r} "
-            f"(allowed: {sorted(INTEGRITY_WARNING_KINDS)})"
+            f"unknown integrity_warning kind: {kind!r} (allowed: {sorted(INTEGRITY_WARNING_KINDS)})"
         )
     return _build(
         "integrity_warning",
@@ -1228,9 +1209,7 @@ def worktree_overlap_observed(
     recurrence threshold.
     """
     if not isinstance(observer_session_id, str) or not observer_session_id:
-        raise ValidationError(
-            "worktree_overlap_observed observer_session_id cannot be empty"
-        )
+        raise ValidationError("worktree_overlap_observed observer_session_id cannot be empty")
     if (
         not isinstance(peer_session_ids, list)
         or not peer_session_ids
@@ -1241,13 +1220,9 @@ def worktree_overlap_observed(
             "list of non-empty strings"
         )
     if not isinstance(repository_key, str) or not repository_key:
-        raise ValidationError(
-            "worktree_overlap_observed repository_key cannot be empty"
-        )
+        raise ValidationError("worktree_overlap_observed repository_key cannot be empty")
     if not isinstance(worktree_key, str) or not worktree_key:
-        raise ValidationError(
-            "worktree_overlap_observed worktree_key cannot be empty"
-        )
+        raise ValidationError("worktree_overlap_observed worktree_key cannot be empty")
     if (
         not isinstance(live_window_seconds, int)
         or isinstance(live_window_seconds, bool)
@@ -1292,19 +1267,29 @@ def append_event(
         from fno.paths import resolve_repo_root
 
         events_path = resolve_repo_root() / ".fno" / "events.jsonl"
-    # Worktree setup symlinks this leaf to the canonical repo journal.
-    # Resolve it before deriving the sibling mutex so every worktree locks the
-    # same directory while appending the shared file.
-    events_path = events_path.resolve()
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lock_dir = events_path.parent / (events_path.name + ".lock.d")
-    token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
-    if token is None:
-        raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
+    requested_path = Path(events_path)
+    requested_path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        # Setup can replace a local journal with a canonical-journal symlink
+        # while this writer waits on the old mutex. Re-resolve after acquiring
+        # and retry whenever the leaf changed during that handoff.
+        resolved_path = requested_path.resolve()
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_dir = resolved_path.parent / (resolved_path.name + ".lock.d")
+        token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
+        if token is None:
+            raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
+        try:
+            current_path = requested_path.resolve()
+        except (OSError, RuntimeError):
+            release_dir_mutex(lock_dir, token)
+            raise
+        if current_path == resolved_path:
+            break
+        release_dir_mutex(lock_dir, token)
 
     try:
-        with events_path.open("a", encoding="utf-8") as fh:
+        with resolved_path.open("a", encoding="utf-8") as fh:
             fh.write(_json.dumps(event, separators=(",", ":")) + "\n")
     finally:
         release_dir_mutex(lock_dir, token)

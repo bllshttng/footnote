@@ -157,6 +157,17 @@ def test_gc_preserves_malformed_utf8_bytes(tmp_path: Path) -> None:
     assert events.read_bytes() == malformed
 
 
+def test_gc_preserves_ephemeral_row_with_noncanonical_timestamp(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    row = _event("claim_released", "2026-07-01 00:00:00+00:00") + "\n"
+    events.write_text(row, encoding="utf-8")
+
+    result = gc_events(events, now=NOW, ttl_hours=672)
+
+    assert result == {"scanned": 1, "deleted": 0, "kept": 1, "malformed": 1}
+    assert events.read_text(encoding="utf-8") == row
+
+
 def test_gc_waits_for_registered_shell_writer(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     events.write_text(
@@ -229,3 +240,22 @@ def test_gc_cli_reports_and_rejects_short_horizon(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "minimum retention horizon" in result.output
+
+
+def test_gc_cli_reports_mutex_ownership_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.touch()
+
+    def lose_lease(*args: object, **kwargs: object) -> dict[str, int]:
+        raise RuntimeError("events.jsonl GC mutex ownership was lost")
+
+    monkeypatch.setattr(event_gc, "gc_events", lose_lease)
+
+    result = CliRunner().invoke(event_cli, ["gc", "--events", str(events)])
+
+    assert result.exit_code == 1
+    assert result.exception is not None
+    assert "error: event gc failed: events.jsonl GC mutex ownership was lost" in result.output
+    assert "Traceback" not in result.output

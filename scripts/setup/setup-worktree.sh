@@ -283,7 +283,18 @@ append_migrated_events() {
   fi
   local rc=0
   if [[ "$deduplicate_suffix" != "true" ]] || ! journal_ends_with "$source" "$filtered"; then
-    cat "$filtered" >> "$source" || rc=$?
+    local staged
+    staged=$(mktemp "${source}.migration-append.XXXXXX") || rc=$?
+    if (( rc == 0 )); then
+      cp -p "$source" "$staged" || rc=$?
+    fi
+    if (( rc == 0 )); then
+      cat "$filtered" >> "$staged" || rc=$?
+    fi
+    if (( rc == 0 )); then
+      mv "$staged" "$source" || rc=$?
+    fi
+    [[ -z "${staged:-}" ]] || rm -f "$staged"
   fi
   rm -f "$filtered"
   return "$rc"
@@ -300,13 +311,15 @@ wait_for_shell_event_writers() {
     entries=("$active_dir"/*)
     shopt -u nullglob
     local entry name pid
-    for entry in "${entries[@]}"; do
-      name="$(basename "$entry")"
-      pid="${name%%.*}"
-      if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
-        rmdir "$entry" 2>/dev/null || true
-      fi
-    done
+    if [[ -n "${entries[0]:-}" ]]; then
+      for entry in "${entries[@]}"; do
+        name="$(basename "$entry")"
+        pid="${name%%.*}"
+        if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+          rmdir "$entry" 2>/dev/null || true
+        fi
+      done
+    fi
     shopt -s nullglob
     entries=("$active_dir"/*)
     shopt -u nullglob

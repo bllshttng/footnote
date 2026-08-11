@@ -941,32 +941,39 @@ pub(crate) fn append_event_line(
     event: &Value,
     lock_timeout: Duration,
 ) -> Result<(), String> {
-    // Worktree setup symlinks events.jsonl to the canonical repo journal.
-    // Resolve that leaf before deriving the sibling mutex path, or every
-    // worktree would lock a different directory while appending one file.
-    let resolved_path =
-        std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
-    let events_path = resolved_path.as_path();
-    if let Some(parent) = events_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    loop {
+        // Setup can replace a local journal with a canonical-journal symlink
+        // while this writer waits on the old mutex. Re-resolve after acquiring
+        // and retry whenever the leaf changed during that handoff.
+        let resolved_path =
+            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+        if let Some(parent) = resolved_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let lock_dir = resolved_path.with_file_name(format!(
+            "{}.lock.d",
+            resolved_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "events.jsonl".into())
+        ));
+        let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
+            .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
+        let current_path =
+            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+        if current_path != resolved_path {
+            release_dir_mutex(&lock_dir, &token);
+            continue;
+        }
+        let res = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&resolved_path)
+            .and_then(|mut f| writeln!(f, "{event}"))
+            .map_err(|e| e.to_string());
+        release_dir_mutex(&lock_dir, &token);
+        return res;
     }
-    let lock_dir = events_path.with_file_name(format!(
-        "{}.lock.d",
-        events_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "events.jsonl".into())
-    ));
-    let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
-        .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
-    let res = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(events_path)
-        .and_then(|mut f| writeln!(f, "{event}"))
-        .map_err(|e| e.to_string());
-    release_dir_mutex(&lock_dir, &token);
-    res
 }
 
 /// Shared data fields for claim events (mirrors `events._common`, including
@@ -2404,6 +2411,46 @@ mod tests {
         );
 
         assert!(res.is_err(), "fresh lock was stolen");
+    }
+
+    #[test]
+    fn event_append_retries_when_setup_retargets_leaf_while_waiting() {
+        let td = TempDir::new().unwrap();
+        let local = td.path().join("worktree-events.jsonl");
+        std::fs::write(&local, b"").unwrap();
+        let canonical = td.path().join("canonical-events.jsonl");
+        std::fs::write(&canonical, b"").unwrap();
+        let local_lock = td.path().join("worktree-events.jsonl.lock.d");
+        let canonical_lock = td.path().join("canonical-events.jsonl.lock.d");
+        std::fs::create_dir(&local_lock).unwrap();
+        std::fs::create_dir(&canonical_lock).unwrap();
+
+        let writer_path = local.clone();
+        let writer = std::thread::spawn(move || {
+            append_event_line(
+                &writer_path,
+                &json!({"ts": "t", "type": "handoff"}),
+                Duration::from_secs(5),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::rename(&local, td.path().join("local-backup.jsonl")).unwrap();
+        std::os::unix::fs::symlink(&canonical, &local).unwrap();
+        std::fs::remove_dir_all(&local_lock).unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            std::fs::metadata(&canonical).unwrap().len(),
+            0,
+            "writer bypassed the canonical mutex after the symlink handoff"
+        );
+
+        std::fs::remove_dir_all(&canonical_lock).unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&canonical).unwrap().lines().count(),
+            1
+        );
     }
 
     #[test]

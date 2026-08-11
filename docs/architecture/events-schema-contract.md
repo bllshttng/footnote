@@ -67,12 +67,14 @@ The 64KB cap on `data` payload is enforced by both validators.
 
 Branch-A Python, Rust claims, loop-journal, loop-check, finalize, and generic-delivery writers serialize on the same mkdir mutex at `<events-file>.lock.d`.
 When `events.jsonl` is a worktree symlink, every writer resolves the leaf before deriving that mutex so sibling worktrees lock the canonical target rather than separate worktree paths.
+Python and Rust writers re-resolve the requested leaf after acquiring the mutex and retry if setup changed its target while they waited, preventing an obsolete local mutex from authorizing a canonical append.
 The project journal treats a lock timeout as fatal, while its global observability mirror remains best-effort so daemon progress does not depend on that mirror.
 The three general shell helpers, five hook emitters, and target-handoff fallback remain unlocked and reject serialized rows above 4000 bytes before appending.
 They register unique entries under `<events-file>.shell-writers.d`, recheck `<events-file>.gc.d`, and remove the entry after appending, so they remain unserialized with each other while compaction can prove no append targets the old inode.
 Hook-provided explicit paths resolve a symlink leaf before deriving the marker and rendezvous, keeping their emergency writes in the canonical worktree journal neighbourhood.
 Shell writers and worktree setup age-steal an abandoned owner-token marker after 120 seconds; active GC and worktree migration renew every held marker lease during long rewrites.
 Worktree setup rechecks the journal after taking both migration locks, recovers pending backups even when interruption preceded symlink creation, and filters favorable gate rows that would supersede an existing canonical verdict for the same valid scalar gate key.
+It builds each merged journal in a same-directory temporary file and atomically replaces the canonical journal, so interruption or a partial copy cannot leave a torn prefix in the live log.
 Malformed JSON and UTF-8 rows remain byte-preserved rather than blocking migration.
 The `.think-offer-cursor` is shared beside the journal and resolves its symlink before taking its owner-token mutex, preserving once-per-project offer consumption across worktrees.
 
@@ -248,7 +250,7 @@ Declared join pairs must use the same retention class, and schema loading fails 
 
 The minimum ephemeral horizon is 672 hours because `human_touch` and claim context feed the scoreboard's default 28-day window.
 `fno event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
-It preserves gate, durable, undeclared, unknown, and malformed rows, including a malformed row whose timestamp cannot be evaluated.
+It preserves gate, durable, undeclared, unknown, and malformed rows, including any row whose timestamp does not satisfy the canonical UTC syntax enforced by schema validation.
 The collector rewrites through an fsynced same-directory temporary file while holding the shared writer mutex, a shell-visible GC marker, and an empty shell-writer rendezvous.
 It renews the GC, writer, and offer-cursor mutex leases during the scan and rewrite so a journal larger than the stale-lock horizon cannot be age-stolen mid-compaction.
 When a worktree journal is a symlink, collection resolves and rewrites its target without replacing the symlink.

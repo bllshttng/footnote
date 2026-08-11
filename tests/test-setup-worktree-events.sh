@@ -219,6 +219,27 @@ CANONICAL="$canonical" WORKTREE="$failed_once" bash "$SETUP" >/dev/null 2>&1
 assert "migration retry appends a failed row exactly once" test "$(grep -c 'failed_once_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 assert "migration retry installs the shared symlink" test -L "$failed_once/.fno/events.jsonl"
 
+partial_append="$TMP/partial-append"
+mkdir -p "$partial_append/.fno"
+printf '%s\n' '{"type":"partial_append_row"}' > "$partial_append/.fno/events.jsonl"
+canonical_size_before_partial=$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')
+cat > "$TMP/partial-cat-env" <<'STUB'
+cat() {
+  case "${1:-}" in
+    *.migration.*)
+      command head -c 7 "$1"
+      return 1
+      ;;
+  esac
+  command /bin/cat "$@"
+}
+export -f cat
+STUB
+CANONICAL="$canonical" WORKTREE="$partial_append" BASH_ENV="$TMP/partial-cat-env" bash "$SETUP" >/dev/null 2>&1
+assert "partial append failure leaves canonical journal byte-identical" test "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" -eq "$canonical_size_before_partial"
+CANONICAL="$canonical" WORKTREE="$partial_append" bash "$SETUP" >/dev/null 2>&1
+assert "partial append retry lands the row exactly once" test "$(grep -c 'partial_append_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+
 interrupted="$TMP/interrupted"
 mkdir -p "$interrupted/.fno"
 printf '%s\n' '{"type":"interrupted_row"}' > "$interrupted/.fno/events.jsonl.pre-share.pending.crash"

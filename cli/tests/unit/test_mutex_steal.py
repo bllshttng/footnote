@@ -6,6 +6,7 @@ Covers the design-doc ACs for the two mutexes that share the disease:
 The live incident these guard against: a process died holding both, and every
 waiter spun against the corpse for eight days.
 """
+
 from __future__ import annotations
 
 import json
@@ -75,16 +76,12 @@ def test_threshold_matches_the_rust_constant():
     constant would leave every other test green while the two implementations
     disagreed about which locks are corpses.
     """
-    root = next(
-        (p for p in Path(__file__).resolve().parents if (p / "crates").is_dir()), None
-    )
+    root = next((p for p in Path(__file__).resolve().parents if (p / "crates").is_dir()), None)
     if root is None:
         pytest.skip("crates/ not present (installed-wheel test run)")
 
     src = (root / "crates/fno-agents/src/claims.rs").read_text(encoding="utf-8")
-    m = re.search(
-        r"const STALE_MUTEX_STEAL: Duration = Duration::from_secs\((\d+)\)", src
-    )
+    m = re.search(r"const STALE_MUTEX_STEAL: Duration = Duration::from_secs\((\d+)\)", src)
     assert m, "STALE_MUTEX_STEAL not found in claims.rs (renamed or reshaped?)"
     assert int(m.group(1)) == STALE_MUTEX_STEAL_S
 
@@ -372,6 +369,32 @@ class TestEventsMutex:
 
         assert canonical.read_text() == ""
 
+    def test_journal_retries_when_setup_retargets_leaf_while_waiting(self, tmp_path, monkeypatch):
+        local = tmp_path / "worktree-events.jsonl"
+        local.touch()
+        canonical = tmp_path / "canonical-events.jsonl"
+        canonical.touch()
+        acquired: list[Path] = []
+
+        def acquire(lock_dir: Path, timeout_seconds: float) -> str:
+            acquired.append(lock_dir)
+            if len(acquired) == 1:
+                local.unlink()
+                local.symlink_to(canonical)
+            return f"token-{len(acquired)}"
+
+        monkeypatch.setattr("fno.events.acquire_dir_mutex", acquire)
+        monkeypatch.setattr("fno.events.release_dir_mutex", lambda *_: None)
+
+        append_event(_event(), events_path=local, lock_timeout_seconds=1)
+
+        assert acquired == [
+            tmp_path / "worktree-events.jsonl.lock.d",
+            tmp_path / "canonical-events.jsonl.lock.d",
+        ]
+        assert local.is_symlink()
+        assert canonical.read_text().count("\n") == 1
+
     def test_AC3_FR_concurrent_stealers_both_land(self, tmp_path):
         """Exactly one rename wins; both events land as whole lines.
 
@@ -540,8 +563,7 @@ class TestRecoveryMutex:
         _wait_for_recovery_release(recovery_lock)
 
         assert time.monotonic() - started >= 1.0, (
-            "waiter returned instantly on a dangling mutex; the caller would "
-            "recurse without pause"
+            "waiter returned instantly on a dangling mutex; the caller would recurse without pause"
         )
 
     def test_AC4_EDGE_fresh_recovery_lock_is_respected(self, tmp_path):
