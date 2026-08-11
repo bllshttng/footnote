@@ -13,7 +13,7 @@ If no decision text provided, use interactive setup (one batched AskUserQuestion
 - What decision are you trying to make?
 - What perspective matters most? (product fit / technical feasibility / market positioning / all)
 - How deep? (shallow: 3 personas 1 round / standard: 5 personas 2 rounds / deep: all personas 3 rounds)
-- Chain after? (think / plan / megawalk / none)
+- Chain after? (think / plan / none)
 
 **Defaults:** depth=standard, personas=default, chain=none, auto=false, rounds=auto (from depth).
 
@@ -402,7 +402,7 @@ Save the report and offer next steps.
 4. Present handoff options:
    - `/think "{top recommendation}"` - design the recommendation in depth
    - `/blueprint full "{top recommendation}"` - jump to execution planning
-   - `/megawalk` - feed into roadmap generation
+   - `/fno:target "{top recommendation}"` - execute it end to end (multi-feature: `fno backlog next`, then `/fno:target` per node)
    - `/think panel continue {slug}` - resume this debate later with new information
    - "Done for now" - just keep the report
 5. If `--chain` flag was set: invoke the chained skill automatically

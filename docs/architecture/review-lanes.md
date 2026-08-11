@@ -82,7 +82,11 @@ See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Sto
 A claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
 A mux-hosted session injects via `fno mux pane send`, a separate path that never reaches the mail-inject binary.
 So the front door is the single entry point; `mail-inject` is the transport for the daemon lane only, and it cannot target a mux pane.
-The binary verb is still reachable directly for scripting against a daemon session outside the Python CLI, where its STDIN form suits a pipe:
+
+### Direct binary: scripting against a daemon session (not the agent path)
+
+The agent path is `fno mail send --raw` above.
+The `mail-inject` binary is reachable directly only for scripting against a daemon session outside the Python CLI, where its STDIN form suits a pipe:
 
 ```bash
 printf '/code-review medium --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
@@ -107,8 +111,9 @@ When neither self-invocation nor a raw inject is available - no live
 session to inject into, or a worker's harness lacks the verb - ask a
 king over `fno mail send`.
 The king's reply injects as user-shaped text and the worker's own
-harness serves the verb in response, or the king can `mail-inject` the
-verb into the worker's live session directly (Lane 2).
+harness serves the verb in response, or the king can fire the verb
+into the worker's live session directly via
+`fno mail send <worker> '<verb>' --raw` (Lane 2).
 With no live king, fall back to advisory self-review or run the native
 verb by hand.
 
@@ -140,12 +145,12 @@ text, and the worker retried many times with no findings.
 So the refusal can be environment-wide across session types in a given
 window, not a property of one session's arg shape.
 The refusal text names the escape: it applies to MODEL invocation, and
-`mail-inject` (Lane 2) is the user-invocation path that lands the verb
+`fno mail send --raw` (Lane 2) is the user-invocation path that lands the verb
 as user-role text, so it is not subject to that refusal - reach for it
 when self-invocation is refused.
-The one environment-wide window predates the `mail-inject` verification
+The one environment-wide window predates the raw-inject lane's verification
 (confirmed separately, the next day) and was not exercised there, so
-treat that window as open; if `mail-inject` fails it too, report the
+treat that window as open; if `fno mail send --raw` fails it too, report the
 exact refusal text and surface it to a human rather than burning cycles
 re-invoking.
 
@@ -155,12 +160,12 @@ Guard the value, not a correlate.
 
 The Skill-tool success record (three workers) and a self-initiated
 refusal record sit side by side, and no cause has held up.
-`mail-inject` (Lane 2) is the most reliable trigger and the one to
+`fno mail send --raw` (Lane 2) is the most reliable trigger and the one to
 reach for when self-invocation is refused: it is the user-invocation
 path, so the model-invocation refusal does not apply to it.
 Short of that, the king-mail loop fires often but not always (refused
 twice in one session with an order in hand).
-Treat self-invocation as the lane worth trying first, `mail-inject` as
+Treat self-invocation as the lane worth trying first, `fno mail send --raw` as
 the reliable fallback, and king-mail as the asynchronous one - not a
 closed either/or.
 The king-mediated path, the per-harness verbs, and the never-substitute-

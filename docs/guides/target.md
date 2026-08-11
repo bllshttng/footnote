@@ -158,41 +158,36 @@ footnote has five levels of execution, each wrapping the one below:
 
 | Level | Skill | What it does | When to use |
 |-------|-------|-------------|-------------|
-| 5 | `/megawalk` | Vision to shipped product. Reads feature graph, picks ready features, dispatches target. | Multi-feature roadmap |
+| 5 | `/fno:target` per node | Multi-feature roadmap: pick ready features (`fno backlog next`), run `/fno:target` on each. | Multi-feature roadmap |
 | 4 | `/target` | Idea to shipped PR. Won't quit until done. | Single feature |
 | 3 | `/do waves` | Execute multi-phase plans with waves and verification. | Plan already exists |
 | 2 | `/do` | Execute a focused plan in one shot. | Bug fix, small change |
 | 1 | `archer` (agent) | Execute a single task with TDD. | Called by operator |
 
-Each level composes the one below. Megawalk calls target. Target calls operator. Operator dispatches archer. You pick the level that matches your task.
+Each level composes the one below. A roadmap runs `/fno:target` per node. Target calls operator. Operator dispatches archer. You pick the level that matches your task.
 
-Most of the time you'll use target (S/M/L). Megawalk is for when you have a vision document and want to ship multiple features continuously.
+Most of the time you'll use target (S/M/L). Megawalk is removed; for a vision document and multiple features shipped continuously, use a roadmap run (`fno backlog next`, then `/fno:target` per node) instead. See [megawalk-migration](../architecture/megawalk-migration.md).
 
-## Megawalk: The PM Layer
+## Multi-feature roadmaps
 
-Megawalk is the PM. Target is the tech lead for each feature.
+For multi-feature work, `fno backlog` is the PM layer and target is the tech lead for each feature.
 
-Megawalk reads from the feature graph (`~/.fno/graph.json`), which stores features with `ab-` prefixed IDs, `blocked_by` dependencies, and derived status. Key commands:
+The backlog graph (`~/.fno/graph.json`) stores features with `blocked_by` dependencies and derived status. Key commands:
 
 | Command | What it does |
 |---------|-------------|
-| `roadmap-tasks.py ready` | List features ready to execute |
-| `roadmap-tasks.py tree` | Show dependency tree |
-| `roadmap-tasks.py status` | Per-project progress with counts and cost |
-| `roadmap-tasks.py next --claim {sid}` | Atomically pick and claim the next ready feature |
-| `roadmap-tasks.py briefs --limit 5` | Load sidecar discovery briefs from completed features |
+| `fno backlog next` | Pick the next ready feature |
+| `fno backlog get <id>` | Per-feature status and details |
 
 ### Size Routing
 
-Each feature in the graph has a `size` field (S/M/L) set during roadmap generation. If null, megawalk infers from task attributes:
+Each backlog node has a `size` field (S/M/L, set via `fno backlog update <id> --size`):
 
-- **Estimated points 1-3** or **1 phase plan**: `/target -S`
-- **Estimated points 4-8** or **2-3 phase plan**: `/target -M`
-- **Estimated points 9+** or **4+ phase plan**: `/target -L`
+- **Estimated points 1-3** or **1 phase plan**: `/fno:target -S`
+- **Estimated points 4-8** or **2-3 phase plan**: `/fno:target -M`
+- **Estimated points 9+** or **4+ phase plan**: `/fno:target -L`
 
 Domain modifiers adjust the size: infrastructure, security, and migration tasks go up one size, docs tasks go down one size.
-
-You don't need to think about sizing when using megawalk. It handles it.
 
 ## Reliability features
 
