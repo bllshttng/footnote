@@ -23,15 +23,20 @@ class _Defaults:
 
 
 class _Settings:
-    def __init__(self, profiles=None, **kw):
+    def __init__(self, profiles=None, model_routing=None, **kw):
         # profiles: {verb: {field: value}} -> {verb: _Defaults}
         prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
         self.agents = type("A", (), {"defaults": _Defaults(**kw), "profiles": prof})()
+        # x-8cd5: a real ModelRoutingBlock so resolve_route can resolve a lane.
+        self.model_routing = model_routing
 
 
-def _inject(args, err=None, env=None, profiles=None, **cfg):
+def _inject(args, err=None, env=None, profiles=None, model_routing=None, **cfg):
     return inject_spawn_defaults(
-        args, settings=_Settings(profiles=profiles, **cfg), stderr=err, env=env or {}
+        args,
+        settings=_Settings(profiles=profiles, model_routing=model_routing, **cfg),
+        stderr=err,
+        env=env or {},
     )
 
 
@@ -461,3 +466,67 @@ def test_only_harness_flags_feed_the_provider_aware_default_scan():
 
     out = _inject(["spawn", "--name", "w", "hi", "--harness", "claude"], substrate="pane")
     assert out[out.index("--substrate") + 1] == "pane"
+
+
+# --------------------------------------------------------------------------- #
+# Role-aware model injection (x-8cd5 task 1.1)
+#
+# inject_spawn_defaults was role-blind: --role appeared only in the value-flag
+# skip list, never in the routing decision, so a spawn carrying --role build
+# (resolved to zai/glm-5.2[1m] via env) still got --model opus injected from
+# config.agents.defaults.model. The CLI flag and the routed env collided; the
+# worker was believed to be on the cheap lane and billed on the expensive one.
+# A spawn whose --role resolves to a real route must not receive the config
+# model: the route owns the model. A bare spawn still inherits the default.
+# --------------------------------------------------------------------------- #
+
+def _build_routing():
+    from fno.config import ModelRoutingBlock
+
+    return ModelRoutingBlock(roles={"build": "zai/glm-5.2[1m]"})
+
+
+def test_role_with_resolved_route_skips_config_model():
+    # The live bug: --role build resolves (zai configured + key present), so the
+    # config model opus must NOT be injected. The route owns the model via env.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--role", "build", "/fno:target x-1"],
+        err=err, env={"ZAI_API_KEY": "k"}, model="opus", model_routing=_build_routing(),
+    )
+    assert "--model" not in out
+    assert "opus" not in out
+    msg = err.getvalue()
+    assert "build" in msg  # the notice names the role whose route owns the model
+
+
+def test_role_without_route_still_inherits_config_model():
+    # --role present but the lane does NOT resolve (no key -> fail-safe to the
+    # primary model), so the config default applies exactly as a bare spawn.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--role", "build", "/fno:target x-1"],
+        err=err, env={}, model="opus", model_routing=_build_routing(),
+    )
+    assert out[out.index("--model") + 1] == "opus"
+
+
+def test_bare_spawn_still_inherits_default_model_unaffected_by_role_fix():
+    # No --role: the default model is injected exactly as before the fix.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err, env={}, model="opus",
+    )
+    assert out[out.index("--model") + 1] == "opus"
+
+
+def test_explicit_model_wins_over_role_route():
+    # An explicit -m is the supported cross-harness override; the role fix must
+    # not change that, nor re-inject the config model alongside it.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-m", "sonnet", "--name", "w", "--role", "build", "/fno:target x-1"],
+        err=err, env={"ZAI_API_KEY": "k"}, model="opus", model_routing=_build_routing(),
+    )
+    assert out.count("--model") == 0  # only the explicit -m survives
+    assert "opus" not in out
