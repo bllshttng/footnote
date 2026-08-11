@@ -488,6 +488,38 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
     enforce_body_cap(text.len(), warn, refuse)
 }
 
+/// Refuse an unframed payload that is not a single prompt-line command. The
+/// invariant this door pins: every unframed payload delivered here is a
+/// prompt-line command, never authored prose. Prose is style-checked and wrapped
+/// by `fno mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is
+/// framed and skipped. The predicate mirrors the Python guard in `_raw_send`
+/// (`cli/src/fno/mail/cli.py`), which sat on ONE of the two paths onto the
+/// transport; this moves it into the shared door so a direct binary call piping
+/// prose is the only thing that starts failing, and it changes no caller.
+/// `Some(exit)` refuses before delivery and before the audit record; `None`
+/// proceeds.
+fn command_only_decision(text: &str) -> Option<i32> {
+    if is_framed_envelope(text) {
+        return None;
+    }
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        eprintln!(
+            "mail-inject: an unframed payload must start with / (a prompt-line command). \
+             Prose belongs in `fno mail send`, which style-checks it."
+        );
+        return Some(1);
+    }
+    if text.contains('\n') || text.contains('\r') {
+        eprintln!(
+            "mail-inject: an unframed payload must be a single line. A second line rides \
+             in as trailing content on the submitted turn."
+        );
+        return Some(1);
+    }
+    None
+}
+
 pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -544,6 +576,15 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         cap_env_int("FNO_MAIL_BODY_WARN", 3000),
         cap_env_int("FNO_MAIL_BODY_REFUSE", 5000),
     ) {
+        return code;
+    }
+
+    // Command-only predicate on UNWRAPPED bodies. The Python guard in `_raw_send`
+    // already refuses a non-slash or multi-line payload, but on ONE path only;
+    // a direct binary call is the other unwrapped door, so the same predicate
+    // lives here. Refuses prose before delivery and before the audit record,
+    // matching the byte cap. Framed envelopes skip it.
+    if let Some(code) = command_only_decision(&text) {
         return code;
     }
 
@@ -779,6 +820,37 @@ mod tests {
         );
         // An over-cap UNWRAPPED body is still refused (both front doors stay capped).
         assert_eq!(body_cap_decision(&"x".repeat(6000), 3000, 5000), Some(1));
+    }
+
+    #[test]
+    fn command_only_passes_framed_envelopes_and_slash_commands() {
+        // Framed envelopes skip the predicate (a `<fno_mail>` body is Python-capped
+        // and wrapped; a relay hop must never be refused here).
+        assert_eq!(command_only_decision("<fno_mail from=\"a\">body</fno_mail>"), None);
+        assert_eq!(
+            command_only_decision("  <cross-session-message from-name=\"p\">hop</cross-session-message>"),
+            None
+        );
+        // An unwrapped single-line slash command is the documented unframed shape.
+        assert_eq!(command_only_decision("/code-review"), None);
+        assert_eq!(command_only_decision("  /compact  "), None);
+    }
+
+    #[test]
+    fn command_only_refuses_unwrapped_prose() {
+        // The hole: a direct binary call piping authored prose. Refused at the door.
+        assert_eq!(command_only_decision("hello there"), Some(1));
+        assert_eq!(command_only_decision("the build broke and I need help"), Some(1));
+        // A framed-looking word that does not start the payload is still prose.
+        assert_eq!(command_only_decision("see <fno_mail> mid-sentence"), Some(1));
+    }
+
+    #[test]
+    fn command_only_refuses_multi_line_unwrapped() {
+        // A second line rides in as trailing content on the submitted turn.
+        assert_eq!(command_only_decision("/cmd\nsecond line"), Some(1));
+        assert_eq!(command_only_decision("prose one\nprose two"), Some(1));
+        assert_eq!(command_only_decision("/cmd\r\n"), Some(1));
     }
 
     #[test]
