@@ -447,6 +447,17 @@ def _has_permission_mode(toks: Sequence[str]) -> bool:
     return False
 
 
+def _flag_present(toks: Sequence[str], flag: str) -> bool:
+    """Whether a value ``flag`` appears as ``--flag`` or ``--flag=...`` in toks,
+    up to the ``--argv`` payload boundary."""
+    for t in toks:
+        if t == "--argv":
+            break
+        if t == flag or t.startswith(flag + "="):
+            return True
+    return False
+
+
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
     resolved provider. ``bg`` is claude-only; ``pane``/``headless`` are universal.
@@ -555,7 +566,12 @@ def inject_spawn_defaults(
     cfg_effort, effort_rung = field("effort")
     cfg_substrate, substrate_rung = field("substrate")
     cfg_permission, permission_rung = field("permission_mode")
-    if not (cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission):
+    cfg_route, route_rung = field("route")
+    cfg_account, account_rung = field("account")
+    if not (
+        cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
+        or cfg_route or cfg_account
+    ):
         return out
 
     # A spawn carrying --role whose lane resolves to a real route is billed on
@@ -604,15 +620,38 @@ def inject_spawn_defaults(
         inject += ["--harness", cfg_provider]
         from_config.append(("provider", provider_rung))  # type: ignore[arg-type]
 
+    # route / account (ruling 4): two new fields beside the legacy provider.
+    # route carries vendor/model as vendor/model and is forwarded as --route, so
+    # it inherits the flag's fail-closed resolution - an unknown vendor or a
+    # missing key refuses the spawn rather than silently billing the primary,
+    # which is the invisible-billing shape this node exists to kill. account
+    # forwards --account. An explicit flag always wins.
+    route_injected = False
+    if cfg_route and not _flag_present(out[1:], "--route"):
+        inject += ["--route", cfg_route]
+        route_injected = True
+        from_config.append(("route", route_rung))  # type: ignore[arg-type]
+    if cfg_account and not _flag_present(out[1:], "--account"):
+        inject += ["--account", cfg_account]
+        from_config.append(("account", account_rung))  # type: ignore[arg-type]
+
     if cfg_model and not has_model:
-        # A spawn whose --role resolves to a real route is billed on that route:
-        # the route owns the model via env (ANTHROPIC_*), so injecting the config
-        # model here would collide with it (the five-opus-workers defect). Skip
-        # only when resolve_route returns a real route - it is fail-SAFE, so a
-        # protected role, a disabled block, an unconfigured lane, or a missing
-        # key all return None and the config default still applies, exactly as a
-        # bare spawn.
-        if role and _role_resolves(role, settings, env):
+        # The config model is suppressed when something else already owns the
+        # model: an injected route (route carries vendor/model), or a --role that
+        # resolves to a real route (the route owns the model via env). Either
+        # would collide with a config --model. An explicit -m already won via
+        # has_model, which short-circuited this whole branch.
+        if route_injected:
+            print(
+                f"fno agents spawn: route {cfg_route!r} owns the model; not "
+                f"injecting {model_rung}.model {cfg_model!r}",
+                file=err,
+            )
+        elif role and _role_resolves(role, settings, env):
+            # resolve_route is fail-SAFE: a protected role, a disabled block, an
+            # unconfigured lane, or a missing key all return None (spawn falls
+            # back to the primary model, where the config default still applies).
+            # Only a REAL route owns the model, so only then do we skip.
             print(
                 f"fno agents spawn: --role {role!r} resolves to a route; leaving "
                 f"model to the route (not injecting {model_rung}.model "

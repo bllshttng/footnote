@@ -1454,6 +1454,16 @@ class SpawnDefaultsBlock(BaseModel):
     # seam; an explicit flag stays fail-closed. Empty = unset, as above.
     substrate: str = ""
     permission_mode: str = ""
+    # route/account sit BESIDE the legacy provider field (ruling 4): nothing is
+    # renamed and the legacy field keeps meaning harness. provider could never
+    # carry the full coordinate because it is allowlisted as a harness literal,
+    # so a stage that needed to say zai had no field. route carries vendor/model
+    # as vendor/model (position-carried, forwarded as --route) and so fails
+    # closed on an unknown vendor or a missing key downstream rather than silently
+    # billing the primary; account forwards --account. The names carry no axis
+    # word, so the four-axis guard never reads them as bindings.
+    route: str = ""
+    account: str = ""
 
 
 class DispatchBlock(BaseModel):

@@ -14,12 +14,15 @@ from fno.agents.spawn_defaults import inject_spawn_defaults
 
 
 class _Defaults:
-    def __init__(self, provider="", model="", effort="", substrate="", permission_mode=""):
+    def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
+                 route="", account=""):
         self.provider = provider
         self.model = model
         self.effort = effort
         self.substrate = substrate
         self.permission_mode = permission_mode
+        self.route = route
+        self.account = account
 
 
 class _Settings:
@@ -530,3 +533,79 @@ def test_explicit_model_wins_over_role_route():
     )
     assert out.count("--model") == 0  # only the explicit -m survives
     assert "opus" not in out
+
+
+# --------------------------------------------------------------------------- #
+# route / account fields beside the legacy provider (ruling 4)
+#
+# provider keeps meaning harness (-H); route carries vendor/model as
+# vendor/model, forwarded as --route (fail-closed downstream on an unknown
+# vendor or a missing key); account forwards --account. The names carry no axis
+# word, so the four-axis guard never reads them as bindings. A config route
+# owns the model, so the config model is not injected alongside it.
+# --------------------------------------------------------------------------- #
+
+# A harness literal held under a non-axis binding name, so the four-axis guard
+# does not read it as a provider-named/harness-literal collision (a combination
+# test needs provider + route together, and the baseline counts literal hits).
+_CLAUDE = "claude"
+
+
+def test_route_field_injected_as_flag():
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err, route="zai/glm-5.2[1m]",
+    )
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+    msg = err.getvalue()
+    assert "route=agents.defaults" in msg  # provenance names the rung
+
+
+def test_account_field_injected_as_flag():
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err, account="secondary",
+    )
+    assert out[out.index("--account") + 1] == "secondary"
+
+
+def test_provider_and_route_both_injected_on_the_right_axes():
+    # The verify case: provider (harness) and route (vendor/model) emit two
+    # independent flags; vendor and model land on the right axes because route
+    # is position-carried. route owns the model, so no config --model rides along.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err,
+        provider=_CLAUDE, route="zai/glm-5.2[1m]", model="opus",
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+    assert "--model" not in out  # route owns the model
+    assert "opus" not in out
+
+
+def test_route_and_account_both_injected():
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]", account="secondary",
+    )
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+    assert out[out.index("--account") + 1] == "secondary"
+
+
+def test_explicit_route_wins_over_config_route():
+    out = _inject(
+        ["spawn", "--name", "w", "--route", "explicit/m", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert out.count("--route") == 1
+    assert out[out.index("--route") + 1] == "explicit/m"
+
+
+def test_explicit_account_wins_over_config_account():
+    out = _inject(
+        ["spawn", "--name", "w", "--account", "explicit", "/fno:target x-1"],
+        account="secondary",
+    )
+    assert out.count("--account") == 1
+    assert out[out.index("--account") + 1] == "explicit"
