@@ -6,8 +6,10 @@ events (``task_started`` / ``task_done`` / ``blocked`` / ``run_summary``) once t
 a tick and routes each event to configured external sinks per a per-sink filter.
 
 Correctness spine (see the plan's Locked Decisions):
-  - **Timestamp cursor, per-sink** at ``.fno/status-sinks/<name>.cursor`` - a byte
-    offset dies at the 8MB rotation; the RFC3339-Z ``ts`` string is rotation-proof.
+  - **Timestamp cursor, per-sink** beside the resolved project journal at
+    ``.fno/status-sinks/<name>.cursor`` - a byte offset dies at the 8MB rotation;
+    the RFC3339-Z ``ts`` string is rotation-proof. Worktrees sharing one journal
+    therefore share the cursor and tick lock too.
   - **Rotation catch-up:** ``events.jsonl`` renames to ``events.jsonl.1`` (single
     generation). When a cursor predates the active file's first line the tick
     drains ``.1`` first, so a rotation between ticks is transparent.
@@ -199,12 +201,17 @@ def _eof_cursor(active: Path) -> "tuple[str, int]":
 # ── cursor io (atomic) ──────────────────────────────────────────────────────
 
 
+def _state_dir(project_root: Optional[Path]) -> Path:
+    """Resolve fanout state beside the journal's physical target."""
+    return paths.project_log("events.jsonl", project_root=project_root).parent / "status-sinks"
+
+
 def _cursor_path(name: str, project_root: Optional[Path]) -> Path:
-    return paths.status_sinks_dir(project_root) / f"{name}.cursor"
+    return _state_dir(project_root) / f"{name}.cursor"
 
 
 def _errors_path(name: str, project_root: Optional[Path]) -> Path:
-    return paths.status_sinks_dir(project_root) / f"{name}.errors.jsonl"
+    return _state_dir(project_root) / f"{name}.errors.jsonl"
 
 
 def _read_cursor(name: str, project_root: Optional[Path]) -> "Optional[tuple[str, int]]":
@@ -374,12 +381,14 @@ def _run_locked(
 
 
 class _TickLock:
-    """Non-blocking flock over ``.fno/status-sinks/.tick.lock``. A hand-run tick
-    racing the daemon's tick just skips (locked_out) rather than double-advancing
-    cursors."""
+    """Non-blocking flock beside the resolved journal's shared fanout state.
+
+    A hand-run tick racing the daemon's tick skips rather than double-advancing
+    cursors, including when the callers entered through different worktrees.
+    """
 
     def __init__(self, project_root: Path) -> None:
-        self._path = paths.status_sinks_dir(project_root) / ".tick.lock"
+        self._path = _state_dir(project_root) / ".tick.lock"
         self._fd: Optional[int] = None
 
     def acquire(self) -> bool:

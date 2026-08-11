@@ -3086,6 +3086,23 @@ event_types:
           type: string
           description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
 
+  - name: operator_initiated
+    retention: durable
+    description: "An action completed while a human held a drive-authority window. The action remains successful if this best-effort audit emit fails."
+    sources: [target, backlog, test]
+    data:
+      required: [action_type]
+      properties:
+        action_type:
+          type: string
+          description: "Specific operator-authored action that completed, such as backlog_done_operator_initiated."
+        task_id:
+          type: string
+          description: "Backlog node affected by the action, when applicable."
+        gate:
+          type: string
+          description: "Gate affected by the action, when applicable."
+
   - name: human_touch
     retention: ephemeral
     description: "A human steered an agent-managed node (W4 touch telemetry). Emitted at exactly three choke points: mux keystroke injection into an agent pane (source=inject, coalesced per pane), answer-queue submission (source=answer), and a manual merge (source=merge: tty `fno pr merge` or reconcile closing an out-of-band merge). Observing never counts; steering always counts. Emit is fire-and-forget non-fatal: a failed emit must never touch the steering path."

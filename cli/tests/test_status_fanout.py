@@ -348,6 +348,41 @@ def test_tick_lock_blocks_overlapping_tick(tmp_path):
         lock.release()
 
 
+def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
+    import json as _json
+
+    from fno import status_fanout as sf
+
+    canonical = tmp_path / "canonical"
+    worktree = tmp_path / "worktree"
+    _write_events(canonical, [])
+    (worktree / ".fno").mkdir(parents=True)
+    (worktree / ".fno" / "events.jsonl").symlink_to(
+        canonical / ".fno" / "events.jsonl"
+    )
+    sink = _text_sink()
+
+    lock = sf._TickLock(canonical)
+    assert lock.acquire()
+    try:
+        assert sf.run_tick(worktree, [sink], dispatch_fn=_Recorder()).locked_out is True
+    finally:
+        lock.release()
+
+    sf.run_tick(canonical, [sink], dispatch_fn=_Recorder())
+    with (canonical / ".fno" / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(_json.dumps(_ev("2026-07-12T00:00:05Z", "blocked")) + "\n")
+
+    first = _Recorder()
+    second = _Recorder()
+    sf.run_tick(canonical, [sink], dispatch_fn=first)
+    sf.run_tick(worktree, [sink], dispatch_fn=second)
+
+    assert first.calls == [("s", "2026-07-12T00:00:05Z")]
+    assert second.calls == []
+    assert sf._cursor_path("s", canonical) == sf._cursor_path("s", worktree)
+
+
 # ── US3: json-webhook adapter (failure classes) ─────────────────────────────
 
 
