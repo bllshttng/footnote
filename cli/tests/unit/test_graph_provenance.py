@@ -27,7 +27,6 @@ def _patch_graph(monkeypatch, graph_path: Path) -> None:
     """Redirect the graph module constants to a tmp graph."""
     import fno.graph._constants as gc
     import fno.graph.store as gs
-    lock = graph_path.parent / "graph.lock"
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_path)
     monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
@@ -688,6 +687,16 @@ def test_sessions_survive_save_reload(tmp_path, monkeypatch):
 # -- append_session_record store primitive --
 
 
+def _strip_observed_model(rows: list[dict]) -> list[dict]:
+    """Rows minus ``observed_model``, for assertions that pin the OTHER fields.
+
+    Every session id in this file is short and readable, so the model read
+    declines as prefix-shaped before it touches the filesystem - which is also
+    what keeps this suite off the developer's real ~/.claude/projects store. The
+    field's own behaviour is owned by the observed-model tests further down."""
+    return [{k: v for k, v in r.items() if k != "observed_model"} for r in rows]
+
+
 def _node_sessions(g, node_id):
     from fno.graph.store import read_graph
     for e in read_graph(g):
@@ -708,8 +717,10 @@ def test_append_session_record_appends(tmp_path, monkeypatch):
     )
     assert (found, added) == (True, True)
     rows = _node_sessions(g, "ab-add00001")
-    assert rows == [{"phase": "think", "harness": "claude",
-                     "session_id": "S", "ended_at": "2026-07-12T03:00:00Z"}]
+    assert _strip_observed_model(rows) == [{"phase": "think", "harness": "claude",
+                                            "session_id": "S", "ended_at": "2026-07-12T03:00:00Z"}]
+    # The field is present on every new row; its own behaviour is pinned below.
+    assert rows[0]["observed_model"]["kind"] == "unreadable"
 
 
 def test_append_session_record_same_session_two_phases(tmp_path, monkeypatch):
@@ -1398,7 +1409,8 @@ def test_cli_session_add_uses_ambient_identity(tmp_path, monkeypatch):
     r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00001", "--phase", "think"])
     assert r.exit_code == 0, r.output
     rows = read_graph(g)[0]["sessions"]
-    assert rows == [{"phase": "think", "harness": "claude", "session_id": "sess-cli-1"}]
+    assert _strip_observed_model(rows) == [
+        {"phase": "think", "harness": "claude", "session_id": "sess-cli-1"}]
 
 
 def test_cli_session_add_duplicate_exits_zero_added_false(tmp_path, monkeypatch):
@@ -1744,7 +1756,7 @@ def test_skip_json_carries_the_resolved_node_and_identity(tmp_path, monkeypatch)
         "--guard-plan", _plan(tmp_path, "ab-other99"),
     ])
     assert r.exit_code == 0
-    payload = json.loads([l for l in r.output.splitlines() if l.startswith("{")][-1])
+    payload = json.loads([ln for ln in r.output.splitlines() if ln.startswith("{")][-1])
     assert payload["status"] == "skipped"
     assert payload["node_id"] == "ab-guard001"
     assert payload["session_id"] == "SESSION-A"
@@ -1814,3 +1826,296 @@ def test_an_explicit_source_node_reports_nothing_as_dropped(tmp_path, monkeypatc
     )
     assert prov["source_node_id"] == "x-aaaa"
     assert prov["source_node_dropped"] is None
+
+
+# ---------------------------------------------------------------------------
+# x-01ae - observed_model on session rows
+#
+# The operator routes phases by model to control cost, and `harness` names the
+# binary, not the model it answered as. These pin the ONE constraint: the whole
+# variant dict is stored, never a flattened string, because an unknown that
+# looks like an observation is worse than an absent field.
+# ---------------------------------------------------------------------------
+
+# A uuid-shaped id, so the prefix-refusal guard in _observe_model does not fire
+# and the monkeypatched reader is what the row records.
+_SID = "e4dca1f9-eb6e-498e-b8fc-dc14df7628a6"
+
+
+def _patch_observe(monkeypatch, *values):
+    """Feed _observe_model's return value(s), one per append call in order."""
+    import fno.graph.store as gs
+
+    queue = list(values)
+    monkeypatch.setattr(gs, "_observe_model",
+                        lambda harness, session_id: queue.pop(0) if queue else values[-1])
+
+
+def _add(g, node_id, **kw):
+    from fno.graph.store import append_session_record
+    return append_session_record(
+        g, node_id, phase="do", harness="claude", session_id=_SID, **kw)
+
+
+def test_observed_model_records_the_whole_variant_dict(tmp_path, monkeypatch):
+    """AC (x-01ae): the row stores the variant DICT, never a flattened string.
+
+    A bare model string cannot distinguish "seen on 12 samples" from "assumed",
+    which is the entire reason the field exists. If a future refactor flattens
+    it, this fails."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch, {"kind": "observed", "model": "glm-5.2", "samples": 12})
+
+    _add(g, "ab-obs00001", started_at="2026-08-11T01:00:00Z")
+
+    got = _node_sessions(g, "ab-obs00001")[0]["observed_model"]
+    assert isinstance(got, dict), "flattened to a scalar - the one thing this field must not do"
+    assert got == {"kind": "observed", "model": "glm-5.2", "samples": 12}
+
+
+def test_observed_model_records_unknown_kinds_verbatim(tmp_path, monkeypatch):
+    """AC (x-01ae): an unknown variant is written, not dropped.
+
+    An ABSENT key means the row predates the field or nobody looked;
+    {"kind": "no-transcript"} means the writer looked and found nothing. Those
+    are different facts, so the unknown kinds are recorded rather than skipped."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch, {"kind": "not-file-backed"})
+
+    _add(g, "ab-obs00002", ended_at="2026-08-11T01:00:00Z")
+
+    assert _node_sessions(g, "ab-obs00002")[0]["observed_model"] == {"kind": "not-file-backed"}
+
+
+def test_observed_model_unknown_upgrades_to_an_observation(tmp_path, monkeypatch):
+    """AC (x-01ae): a do row opened at claim acquire can honestly read
+    no-model-yet; the release stamp upgrades it. Without this the most
+    cost-relevant row in the graph would permanently record an unknown."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00003", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch,
+                   {"kind": "no-model-yet"},
+                   {"kind": "observed", "model": "claude-opus-5", "samples": 40})
+
+    _add(g, "ab-obs00003", started_at="2026-08-11T01:00:00Z")          # acquire
+    _add(g, "ab-obs00003", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")                              # release
+
+    rows = _node_sessions(g, "ab-obs00003")
+    assert len(rows) == 1, "the idempotency key must still collapse the two stamps"
+    assert rows[0]["observed_model"] == {
+        "kind": "observed", "model": "claude-opus-5", "samples": 40}
+
+
+def test_observed_model_unknown_never_displaces_an_observation(tmp_path, monkeypatch):
+    """AC (x-01ae): a transcript reaped between the two stamps must not erase
+    what the first read actually saw."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00004", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch,
+                   {"kind": "observed", "model": "glm-5.2", "samples": 3},
+                   {"kind": "no-transcript"})
+
+    _add(g, "ab-obs00004", started_at="2026-08-11T01:00:00Z")
+    _add(g, "ab-obs00004", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+
+    assert _node_sessions(g, "ab-obs00004")[0]["observed_model"] == {
+        "kind": "observed", "model": "glm-5.2", "samples": 3}
+
+
+def test_observed_model_disagreement_becomes_observed_multiple(tmp_path, monkeypatch):
+    """AC (x-01ae): a session that changes model mid-run (account failover,
+    provider rotation) must not be recorded as the lane it STARTED on.
+
+    The latest observation wins, and the row stops claiming to be a
+    single-model phase: a distinct kind, so a reader switching on
+    kind == "observed" cannot spend a partial truth as a total one."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00005", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch,
+                   {"kind": "observed", "model": "glm-5.2", "samples": 2},
+                   {"kind": "observed", "model": "claude-opus-5", "samples": 31})
+
+    _add(g, "ab-obs00005", started_at="2026-08-11T01:00:00Z")
+    _add(g, "ab-obs00005", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+
+    got = _node_sessions(g, "ab-obs00005")[0]["observed_model"]
+    assert got["kind"] == "observed-multiple", "a changed model must not read as a clean observation"
+    assert got["model"] == "claude-opus-5", "the LATEST model, not the first"
+    assert got["prior_models"] == ["glm-5.2"], "the failover stays auditable"
+    assert got["samples"] == 31
+
+
+def test_observed_model_same_model_restamp_stays_a_clean_observation(tmp_path, monkeypatch):
+    """AC (x-01ae): a re-stamp that sees the SAME model refreshes the sample
+    count and must NOT be promoted to observed-multiple."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00006", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch,
+                   {"kind": "observed", "model": "glm-5.2", "samples": 2},
+                   {"kind": "observed", "model": "glm-5.2", "samples": 55})
+
+    _add(g, "ab-obs00006", started_at="2026-08-11T01:00:00Z")
+    _add(g, "ab-obs00006", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+
+    assert _node_sessions(g, "ab-obs00006")[0]["observed_model"] == {
+        "kind": "observed", "model": "glm-5.2", "samples": 55}
+
+
+def test_observed_model_records_a_failed_resolution_as_unreadable(tmp_path, monkeypatch):
+    """AC (x-01ae): a resolver that FAILS must not be recorded as a session
+    with no transcript.
+
+    Exercised through the production path - the real resolver returning its
+    error verdict - not by monkeypatching the store's own helper to raise. A
+    test that patches a seam the production code cannot reach proves the seam,
+    not the behaviour: `resolve_transcript_path` swallows every failure to
+    None, so the store's outer except can never see one."""
+    import fno.provenance.resolver as resolver
+
+    g = _make_graph(tmp_path, [{"id": "ab-obs00007", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+
+    def failed(harness, session_id, cwd, **kw):
+        return resolver.ResolvedTranscript(
+            harness=harness, session_id=session_id, cwd=cwd,
+            resolved=False, reason="error")
+
+    monkeypatch.setattr(resolver, "resolve_transcript", failed)
+
+    found, added = _add(g, "ab-obs00007", ended_at="2026-08-11T02:00:00Z")
+
+    assert (found, added) == (True, True), "the row must survive a broken reader"
+    got = _node_sessions(g, "ab-obs00007")[0]["observed_model"]
+    assert got["kind"] == "unreadable", "a failed resolution is not an absent transcript"
+    assert "resolution failed" in got["reason"]
+
+
+def test_observed_model_absent_transcript_is_not_called_unreadable(tmp_path, monkeypatch):
+    """AC (x-01ae): the other half of the pair. A session that simply has no
+    transcript yet stays no-transcript, so unreadable keeps meaning something."""
+    import fno.provenance.resolver as resolver
+
+    g = _make_graph(tmp_path, [{"id": "ab-obs00010", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+
+    def missing(harness, session_id, cwd, **kw):
+        return resolver.ResolvedTranscript(
+            harness=harness, session_id=session_id, cwd=cwd,
+            resolved=False, reason="not-found")
+
+    monkeypatch.setattr(resolver, "resolve_transcript", missing)
+
+    _add(g, "ab-obs00010", ended_at="2026-08-11T02:00:00Z")
+
+    assert _node_sessions(g, "ab-obs00010")[0]["observed_model"] == {"kind": "no-transcript"}
+
+
+def test_observed_model_never_fails_the_stamp(tmp_path, monkeypatch):
+    """AC (x-01ae): the backstop inside _observe_model. An unexpected raise
+    from the reader becomes a named unknown, and the row is still written -
+    a provenance field must never fail a claim release."""
+    import fno.provenance.observed as obs
+
+    g = _make_graph(tmp_path, [{"id": "ab-obs00011", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+
+    def boom(*a, **kw):
+        raise RuntimeError("reader exploded")
+
+    monkeypatch.setattr(obs, "observed_model", boom)
+
+    found, added = _add(g, "ab-obs00011", ended_at="2026-08-11T02:00:00Z")
+
+    assert (found, added) == (True, True), "the row must survive a broken reader"
+    got = _node_sessions(g, "ab-obs00011")[0]["observed_model"]
+    assert got["kind"] == "unreadable"
+    assert "reader exploded" in got["reason"]
+
+
+def test_observed_model_refuses_a_prefix_shaped_session_id(tmp_path, monkeypatch):
+    """AC (x-01ae): the resolver glob-matches an 8-hex prefix and takes the
+    first-sorted hit when two sessions share it, so a prefix cannot be PROVEN
+    to be this session. Declined by name rather than reported as an
+    observation."""
+    from fno.graph.store import _observe_model
+
+    got = _observe_model("claude", "abc12345")
+
+    assert got["kind"] == "unreadable"
+    assert "prefix-shaped" in got["reason"]
+
+
+def test_observed_model_reads_a_real_transcript_end_to_end(tmp_path, monkeypatch):
+    """AC (x-01ae): the wiring works against a real file, not just a
+    monkeypatched reader - store -> resolve_transcript_path -> observed_model
+    -> the model a claude transcript actually names."""
+    import fno.provenance.resolver as resolver
+
+    projects = tmp_path / "projects" / "-some-worktree"
+    projects.mkdir(parents=True)
+    (projects / f"{_SID}.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant",
+                      "message": {"role": "assistant", "model": "claude-opus-5",
+                                  "content": [{"type": "text", "text": "yes"}]}}) + "\n"
+    )
+    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
+
+    g = _make_graph(tmp_path, [{"id": "ab-obs00008", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+
+    _add(g, "ab-obs00008", ended_at="2026-08-11T02:00:00Z")
+
+    got = _node_sessions(g, "ab-obs00008")[0]["observed_model"]
+    assert got["kind"] == "observed", got
+    assert got["model"] == "claude-opus-5"
+    assert got["samples"] >= 1
+
+
+def test_observed_model_multiple_survives_a_third_same_model_stamp(tmp_path, monkeypatch):
+    """AC (x-01ae): a recorded failover must not revert to a clean single-model
+    claim when a third stamp lands back on the model of the second.
+
+    Three stamps on one row are reachable today: acquire, release, and a
+    target-start re-acquire or a retried `backlog session add`. Collapsing
+    observed-multiple back to observed there is the partial truth read as
+    total, one more level in."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00009", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch,
+                   {"kind": "observed", "model": "glm-5.2", "samples": 2},
+                   {"kind": "observed", "model": "claude-opus-5", "samples": 31},
+                   {"kind": "observed", "model": "claude-opus-5", "samples": 77})
+
+    _add(g, "ab-obs00009", started_at="2026-08-11T01:00:00Z")
+    _add(g, "ab-obs00009", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+    _add(g, "ab-obs00009", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+
+    got = _node_sessions(g, "ab-obs00009")[0]["observed_model"]
+    assert got["kind"] == "observed-multiple", "the recorded failover was erased"
+    assert got["prior_models"] == ["glm-5.2"]
+    assert got["samples"] == 77, "the freshest sample count still wins"
+
+
+def test_observed_model_not_file_backed_harness_is_not_called_prefix_shaped(tmp_path):
+    """AC (x-01ae): a harness that keeps no per-session file answers
+    not-file-backed regardless of its id shape.
+
+    A real opencode id is 30 chars - under the full-uuid floor - so an id-shape
+    guard applied first would report a FULL id as prefix-shaped and send an
+    operator hunting for a broken store that does not exist. Permanently
+    unavailable and unprovable are different facts."""
+    from fno.graph.store import _observe_model
+
+    got = _observe_model("opencode", "ses_09679f284ffeJv7NdBAoLQLnLZ")
+
+    assert got == {"kind": "not-file-backed"}
+    assert _observe_model("gemini", "whatever-id")["kind"] == "not-file-backed"

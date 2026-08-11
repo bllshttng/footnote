@@ -369,7 +369,7 @@ def test_observed_model_no_transcript_still_renders(tmp_path):
 def test_observed_model_no_model_yet_is_separable_from_no_transcript(tmp_path):
     """AC4-ERR: a transcript that exists but carries no answered turn.
 
-    This is the diagnostic the whole four-variant shape exists for: a worker
+    This is the diagnostic the whole five-variant shape exists for: a worker
     that came up and never processed a turn must not read like one that was
     spawned two seconds ago.
     """
@@ -500,7 +500,7 @@ def test_observed_model_reports_a_silent_fallback_verbatim(tmp_path):
 def test_observed_model_reads_a_bounded_tail_not_the_whole_file(tmp_path):
     """A multi-MB transcript costs the same fixed read as a fresh one, and the
     window boundary never yields a torn-line verdict of its own."""
-    from fno.agents.session_truth import _MODEL_TAIL_BYTES, observed_model
+    from fno.provenance.observed import _MODEL_TAIL_BYTES, observed_model
 
     path = tmp_path / "big.jsonl"
     filler = json.dumps({"type": "user", "message": {"role": "user",
@@ -633,7 +633,7 @@ def test_observed_model_escalates_past_an_inconclusive_tail(tmp_path):
     a window we never looked past would call a healthy worker unhealthy -- the
     exact wrong diagnosis this reading exists to prevent.
     """
-    from fno.agents.session_truth import _MODEL_TAIL_BYTES, observed_model
+    from fno.provenance.observed import _MODEL_TAIL_BYTES, observed_model
 
     path = tmp_path / "rollout.jsonl"
     context = json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}})

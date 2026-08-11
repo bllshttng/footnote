@@ -80,8 +80,8 @@ def serialize_entry(
     Claude entries when the ``claude agents --json`` shellout failed or
     omitted the entry.
 
-    ``observed_model`` is the four-variant reading from
-    :func:`fno.agents.session_truth.observed_model` -- what the worker is
+    ``observed_model`` is the five-variant reading from
+    :func:`fno.provenance.observed.observed_model` -- what the worker is
     ACTUALLY answering as, derived from its own transcript rather than from
     anything the spawn recorded. Defaulted rather than required so a caller
     that has no truth reading still produces the full key set; the default is
