@@ -276,6 +276,7 @@ def neutralise(
     repo = sandbox / "repo"
     for d in (home / ".fno", repo / ".fno"):
         d.mkdir(parents=True, exist_ok=True)
+    del repo  # created for a caller that wants it; not pinned - see below
 
     # State: HOME (POSIX) and USERPROFILE (Windows, which Path.home() reads).
     out["HOME"] = str(home)
@@ -283,19 +284,41 @@ def neutralise(
     for name in _XDG_SANDBOXED:
         out[name] = str(sandbox / "xdg" / name.lower())
 
-    # Config chain. HOME cannot bound this one: the candidate chain climbs to
-    # the canonical checkout through ``git worktree list``, and git ignores
-    # HOME. Without the search ceiling a suite run from a real checkout reads
-    # its config, so local-red never equals CI-red.
-    out["FNO_CONFIG"] = os.devnull
-    out["FNO_GLOBAL_SETTINGS_PATH"] = os.devnull
+    # Config chain. The developer's FNO_CONFIG / FNO_GLOBAL_SETTINGS_PATH are
+    # already gone with the rest of the FNO_* sweep; what remains is to stop
+    # DISCOVERY finding their files.
+    #
+    # FNO_CONFIG is deliberately NOT re-pinned. Pinning it to a single path
+    # overrides project-local discovery for every test, which breaks the
+    # config-writing and worktree-policy suites for no isolation gain: the
+    # sandboxed HOME already relocates ~/.fno/config.toml, and the ceiling below
+    # bounds the rest of the chain.
+    #
+    # The ceiling is the part HOME cannot do. The candidate chain climbs to the
+    # canonical checkout through ``git worktree list``, and git ignores HOME, so
+    # without a ceiling a suite run from a real checkout reads that checkout's
+    # config and local-red never equals CI-red.
     out["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join([str(sandbox), str(home)])
+    # FNO_GLOBAL_SETTINGS_PATH is scrubbed and NOT re-pinned either. The global
+    # candidate is ``Path.home() / .fno / settings.yaml``, so the sandboxed HOME
+    # above already relocates it - the old per-tree ``/dev/null`` pin was
+    # standing in for a HOME redirect that tree did not have. Re-pinning it here
+    # would additionally OVERRIDE the candidate for tests that monkeypatch HOME
+    # to exercise the global-fallback path, which is a behaviour change dressed
+    # as isolation.
 
-    # State ledger. FNO_REPO_ROOT is the fallback the carve-out resolver uses
-    # when a node's recorded cwd is not a worktree; unpinned, the resolver
-    # climbs to the real checkout and counts the developer's deferred
-    # carve-outs.
-    out["FNO_REPO_ROOT"] = str(repo)
+    # FNO_REPO_ROOT is scrubbed with the rest of FNO_* but NOT re-pinned.
+    # Pinning it points repo-root resolution at an empty sandbox, and a large
+    # part of the suite legitimately resolves the real checkout to find a lint
+    # script or the installed package. Unset is also exactly what CI has, which
+    # is the state this module exists to reproduce.
+    #
+    # That leaves the carve-out ledger channel (specimen 3) open here, and it
+    # has to be: ``_carveout_ledger_root`` resolves from the caller's CWD via
+    # ``git worktree list``, so no environment variable can close it. It is
+    # closed at the reader instead - see ``_hermetic_promise_carveout_gate`` in
+    # cli/tests/conftest.py - and a shell test closes it by running from a
+    # directory that is not a worktree.
 
     # Env-gated side effects that would reach the host machine. These are the
     # pins the pytest conftest carried inline; they live here now so the shell

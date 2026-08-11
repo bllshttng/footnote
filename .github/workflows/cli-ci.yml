@@ -240,6 +240,45 @@ jobs:
       - name: Dead import paths (module-move guard)
         run: bash scripts/ci/check-import-paths.sh
 
+  # The lane that lets CI see what only a dirty machine sees.
+  #
+  # A clean runner cannot fail on a test that READS the developer's ambient
+  # state, because the value it reads is always absent here. This job poisons
+  # the runner's environment with synthetic developer state and lets the
+  # hermeticity fixture scrub it: a channel the fixture covers produces a child
+  # identical to the `smoke` job's, and a channel it MISSED survives into the
+  # child and reddens the test that reads it.
+  #
+  # Green `smoke` beside red `smoke-dirty` on one commit IS an ambient leak, and
+  # the failing test names itself. `smoke` stays the merge gate, so a leak reads
+  # as "ambient leak" rather than as "the suite is broken".
+  #
+  # TODO: graduate to blocking once this has run advisory for a release - remove
+  # continue-on-error then.
+  smoke-dirty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install PyYAML for bundler + marketplace lint
+        run: python -m pip install --upgrade pyyaml
+
+      - name: Smoke under synthetic ambient state
+        run: uv run --project cli fno-py test smoke --ambient dirty
+
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
     runs-on: ubuntu-latest

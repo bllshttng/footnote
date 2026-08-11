@@ -8,6 +8,12 @@
 #   4. fno backlog adopt <plan> creates a node + warns on stderr
 #   5. fno backlog done <id> marks the node complete
 #   6. fno backlog done <id> second time is a safe no-op
+#
+# Running this file directly is NOT hermetic: `bash tests/test-backlog-aliases.sh`
+# skips the runner that neutralises ambient state, so it reads your real HOME,
+# config chain and carve-out ledger - a pass proves nothing and a failure may be
+# your machine. Prefer `fno test smoke --only 'backlog aliases'`. See
+# tests/README.md.
 
 set -uo pipefail
 

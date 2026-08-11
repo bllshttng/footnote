@@ -94,103 +94,58 @@ def _hermetic_promise_carveout_gate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Hermetic state isolation (ab-2f78b48e)
+# Hermetic state isolation
 # ---------------------------------------------------------------------------
-# The fno.graph package freezes its path constants at IMPORT time -
-# store.py does ``from _constants import GRAPH_JSON`` at module top and
-# ``read_graph(path: Path = GRAPH_JSON)`` as a default arg - so the graph/ledger
-# paths are bound to ``~/.fno`` before any per-test fixture can redirect
-# them. Under cross-test contamination the graph store's fail-open
-# (``Path.home() / ".fno"``) then leaked test nodes into the developer's
-# REAL graph.json (observed: "promote via cli", "Stubbed node"). A fixture runs
-# too late to help; the only test-side cure that beats a frozen constant is to
-# move the home/state location BEFORE the import. conftest.py is imported by
-# pytest before it imports the test modules that pull in fno.graph, so we
-# redirect $HOME to a throwaway session dir here, at module load.
-_REAL_HOME = os.environ.get("HOME") or os.path.expanduser("~")
-_SESSION_HOME = tempfile.mkdtemp(prefix="fno-test-home-")
-# Redirect both HOME (POSIX) and USERPROFILE (Windows, which Path.home() reads
-# there) so the isolation holds regardless of platform (gemini review).
-os.environ["HOME"] = _SESSION_HOME
-os.environ["USERPROFILE"] = _SESSION_HOME
-# Kill env-gated side effects the HOME redirect can't reach: born-with-why
-# reads config.think_spawn.enabled from the AMBIENT repo (armed on a dev box),
-# so fixture node births during tests spawned REAL `claude --bg` /think
-# workers, burning tokens. FNO_THINK_SPAWN is the gate's highest-precedence
-# input; hard-set it off (a shell-exported =1 must not leak either). Tests
-# that exercise the spawn path re-arm per-test via monkeypatch.setenv.
-os.environ["FNO_THINK_SPAWN"] = "0"
-# Same class of hazard (x-c5cc): the spawn gate counts the HOST machine's
-# real live workers (registry + claude roster), so a CLI-level spawn test on
-# a busy dev box would queue for minutes behind processes the test doesn't
-# own. Gate off suite-wide; the gate's own tests re-arm via monkeypatch.delenv.
-os.environ["FNO_SPAWN_GATE"] = "0"
-# Reap any mux server a test autospawns (x-4e30): the 2026-07-05 incident's
-# leaked servers included Python-spawned `fno-test-home-*` ones, so Rust-only
-# wiring would miss the population that crushed the machine. FNO_E2E arms the
-# server's inactivity idle-exit (60s default grace), so a server orphaned by a
-# SIGKILL'd / panic=abort'd / timed-out test self-exits instead of burning CPU
-# for hours. spawn_server inherits the env (no env_clear), so the marker reaches
-# even a client-autospawned setsid server.
-os.environ["FNO_E2E"] = "1"
-# Ambient origin provenance. Node-birth capture reads the running session's
-# identity, so a suite run from inside a live /target worktree inherited that
-# session's node as the origin of every node any test filed: the manifest's
-# ownership proof passes (the session id genuinely matches), and FNO_NODE is
-# exported by every fno-spawned worker. Harmless-looking until something reads
-# the field back - then it is a foreign edge on a fixture node, or a receipt
-# landing in output the test parses as JSON.
+# Applied at MODULE LOAD, not as a fixture. The fno.graph package freezes its
+# path constants at IMPORT time - store.py does ``from _constants import
+# GRAPH_JSON`` at module top and ``read_graph(path: Path = GRAPH_JSON)`` as a
+# default arg - so the graph/ledger paths bind to ``~/.fno`` before any per-test
+# fixture can redirect them. Under cross-test contamination the graph store's
+# fail-open (``Path.home() / ".fno"``) then leaked test nodes into the
+# developer's REAL graph.json. A fixture runs too late; the only cure that beats
+# a frozen constant is to move the state location BEFORE the import, and
+# conftest.py is imported before the test modules that pull in fno.graph.
 #
-# Scrubbed at module load like the gates above. Tests that exercise capture arm
-# what they need per-test via monkeypatch.setenv.
+# WHAT gets neutralised lives in fno/hermetic.py, deny-by-default over the whole
+# ambient surface, so this file no longer carries a hand-maintained list that
+# loses to the next var somebody adds. `fno test` applies the same function at
+# `_child_env`, which covers the shell and cargo trees; this call is what covers
+# a developer running a bare `pytest cli/tests/...`.
 #
-# The harness-marker half is DERIVED from harness_identity's own tuples, never
-# retyped: a hand-maintained copy stops covering a marker the moment one is added,
-# and the miss stays invisible until a suite run on a box that exports it. The
-# legacy CLAUDE_SESSION_ID - which current_session_id() and current_session_ids()
-# genuinely read - was already missing from the literal this replaces. The import
-# is safe here despite the import-time-constant hazard above: harness_identity
-# pulls only os/re/typing plus the typing-only harness_map, never fno.graph.
-from fno.harness_identity import scrub_ambient_identity  # noqa: E402
+# The import is safe despite the import-time-constant hazard above: hermetic
+# pulls only os/pathlib/typing plus harness_identity, never fno.graph.
+from fno.hermetic import neutralise  # noqa: E402
 
-for _ambient_key in ("FNO_NODE", "FNO_SLUG", "FNO_PLAN"):
-    os.environ.pop(_ambient_key, None)
-# Same local-red != CI-red hazard as the config ceiling below, one layer up.
-# `resolve_plugin_script` takes CLAUDE_PLUGIN_ROOT as authoritative, so a suite
-# run from inside a live Claude session resolves the DEVELOPER's checkout as the
-# plugin payload - a hermetic fixture that builds its own source tree and passes
-# it via FNO_REPO_ROOT is then silently overruled and compares against the wrong
-# tree. CI exports neither var, so the failure only ever appears locally. Tests
-# that exercise root resolution set what they need via monkeypatch.setenv.
-for _ambient_key in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT"):
-    os.environ.pop(_ambient_key, None)
-scrub_ambient_identity()
+_REAL_HOME = os.environ.get("HOME") or os.path.expanduser("~")
+_SANDBOX = tempfile.mkdtemp(prefix="fno-test-sandbox-")
+_hermetic_env = neutralise(os.environ, Path(_SANDBOX))
+os.environ.clear()
+os.environ.update(_hermetic_env)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Remove the throwaway session HOME created for state isolation."""
+    """Remove the throwaway sandbox created for state isolation."""
     import shutil
 
-    shutil.rmtree(_SESSION_HOME, ignore_errors=True)
+    shutil.rmtree(_SANDBOX, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True, scope="session")
 def _config_search_ceiling(tmp_path_factory: pytest.TempPathFactory):
-    """Bound config resolution to the test tmpdirs.
+    """Widen the config ceiling to include the pytest basetemp.
 
-    The config candidate chain climbs to the canonical checkout via
-    ``git worktree list``, which the $HOME redirect above cannot bound (git
-    ignores $HOME). Absent this, a full-suite run from the developer's real
-    checkout reads its ~/.fno/config.toml, so local-red != CI-red. Pin the
-    ceiling to the pytest basetemp AND the redirected HOME (the two roots any
-    legitimate test config lives under); the real checkout falls outside both.
+    ``neutralise`` pins the ceiling to the sandbox, which is the right default
+    for every caller. Tests additionally write settings files under ``tmp_path``,
+    and that basetemp is only known once pytest has started, so it is appended
+    here rather than being another thing hermetic.py has to guess about.
     """
-    basetemp = tmp_path_factory.getbasetemp()
+    basetemp = str(tmp_path_factory.getbasetemp())
+    previous = os.environ.get("FNO_CONFIG_SEARCH_ROOT", "")
     os.environ["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join(
-        [str(basetemp), _SESSION_HOME]
+        [basetemp, previous] if previous else [basetemp]
     )
     yield
-    os.environ.pop("FNO_CONFIG_SEARCH_ROOT", None)
+    os.environ["FNO_CONFIG_SEARCH_ROOT"] = previous
 
 
 @pytest.fixture(autouse=True, scope="session")

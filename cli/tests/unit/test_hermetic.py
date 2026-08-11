@@ -9,6 +9,7 @@ here, before anything depends on it.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -47,25 +48,58 @@ def test_every_identity_marker_is_dropped(tmp_path):
     assert not [n for n in AMBIENT_IDENTITY_ENV if n in out]
 
 
-def test_config_chain_is_pinned_not_merely_dropped(tmp_path):
+def test_config_chain_is_bounded_by_a_ceiling(tmp_path):
     """Specimen 2's channel.
 
-    Dropping FNO_CONFIG is not enough: the candidate chain climbs through
-    ``git worktree list``, which HOME cannot bound. The pin plus the search
-    ceiling is what closes it.
+    Dropping the developer's FNO_CONFIG is not enough on its own: the candidate
+    chain climbs to the canonical checkout through ``git worktree list``, and
+    git ignores HOME. The ceiling is what closes that climb.
+
+    FNO_CONFIG is deliberately NOT re-pinned. Pinning it to one path overrides
+    project-local discovery for the whole suite, which breaks the config-writing
+    and worktree-policy tests while adding nothing: the sandboxed HOME already
+    relocates ~/.fno/config.toml.
     """
     out = neutralise({"FNO_CONFIG": "/home/dev/.fno/config.toml"}, tmp_path)
-    assert out["FNO_CONFIG"] == os.devnull
-    assert out["FNO_GLOBAL_SETTINGS_PATH"] == os.devnull
+    assert "FNO_CONFIG" not in out
     assert str(tmp_path) in out["FNO_CONFIG_SEARCH_ROOT"]
 
 
-def test_state_roots_are_pinned_into_the_sandbox(tmp_path):
-    """Specimen 3's channel: HOME alone isolates only one of the two stores."""
-    out = neutralise({"HOME": "/home/dev", "FNO_REPO_ROOT": "/repo"}, tmp_path)
+def test_global_settings_is_isolated_by_home_not_by_a_pin(tmp_path):
+    """The global candidate is Path.home()/.fno/settings.yaml.
+
+    Sandboxing HOME relocates it, so no separate pin is needed - and adding one
+    would override the candidate for tests that monkeypatch HOME precisely to
+    exercise the global-fallback path. Isolation must not quietly change which
+    code path runs.
+    """
+    out = neutralise({"FNO_GLOBAL_SETTINGS_PATH": "/home/dev/.fno/settings.yaml"}, tmp_path)
+    assert "FNO_GLOBAL_SETTINGS_PATH" not in out
+    assert not (Path(out["HOME"]) / ".fno" / "settings.yaml").exists()
+
+
+def test_home_is_pinned_into_the_sandbox(tmp_path):
+    out = neutralise({"HOME": "/home/dev"}, tmp_path)
     assert out["HOME"] == str(tmp_path / "home")
     assert out["USERPROFILE"] == out["HOME"]
-    assert out["FNO_REPO_ROOT"] == str(tmp_path / "repo")
+
+
+def test_repo_root_is_scrubbed_but_not_repinned(tmp_path):
+    """Specimen 3's channel, and the honest limit of an env-level cure.
+
+    The developer's FNO_REPO_ROOT goes, because that is ambient. It is not
+    replaced, because pinning it points repo-root resolution at an empty
+    sandbox and a large part of the suite legitimately resolves the real
+    checkout to find a lint script or the installed package. Unset is also
+    exactly what CI has.
+
+    So the carve-out ledger stays reachable here, and it has to:
+    ``_carveout_ledger_root`` resolves from the caller's CWD via
+    ``git worktree list``, which no environment variable can bound. That
+    channel is closed at the READER instead.
+    """
+    out = neutralise({"FNO_REPO_ROOT": "/home/dev/checkout"}, tmp_path)
+    assert "FNO_REPO_ROOT" not in out
 
 
 def test_plugin_roots_are_dropped(tmp_path):

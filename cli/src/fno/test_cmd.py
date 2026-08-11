@@ -27,6 +27,7 @@ uses it verbatim, giving `UNPROCESSED` passthrough: every pytest flag (`-x`,
 from __future__ import annotations
 
 import fnmatch
+import atexit
 import json
 import os
 import posixpath
@@ -36,14 +37,40 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import click
 
+from fno.hermetic import neutralise, poison
+
 _TAIL_LINES = 40
+
+# Which ambient shape the child processes run under. `clean` is today's
+# behaviour and the merge gate; `dirty` feeds a poisoned PARENT through
+# neutralise() so a channel the surface missed survives into the child and
+# reddens the test that reads it; `both` runs the two in sequence and names the
+# lane that differed. See docs/architecture/test-hermeticity.md.
+_AMBIENT_MODES = ("clean", "dirty", "both")
+_AMBIENT_MODE = "clean"
+
+_SANDBOX: Optional[Path] = None
+
+
+def _sandbox() -> Path:
+    """One throwaway state root per `fno test` process, reaped at exit."""
+    global _SANDBOX
+    if _SANDBOX is None:
+        _SANDBOX = Path(tempfile.mkdtemp(prefix="fno-test-sandbox-"))
+        atexit.register(shutil.rmtree, str(_SANDBOX), True)
+    return _SANDBOX
+
+
+def _poison_fixtures(root: Path) -> Path:
+    return root / "cli" / "tests" / "fixtures" / "ambient-poison"
 
 
 def _repo_root(start: Path) -> Optional[Path]:
@@ -108,7 +135,22 @@ def _tail(path: Path, n: int) -> list[str]:
 
 
 def _child_env(root: Path) -> dict:
-    env = os.environ.copy()
+    """The environment every test child gets.
+
+    This is the ONE process boundary all four test trees cross - pytest over
+    `cli/tests`, pytest over `cli/src`, every `bash tests/*.sh` smoke step, and
+    cargo - so neutralising here needs no shell mirror and no Rust mirror to
+    drift out of sync with it.
+
+    Under `--ambient dirty` the parent is poisoned FIRST and then neutralised.
+    If the ambient surface is complete the result is identical to the clean
+    lane; a name the surface missed survives into this dict and the test that
+    reads it fails naming itself.
+    """
+    parent: Mapping[str, str] = os.environ
+    if _AMBIENT_MODE == "dirty":
+        parent = poison(os.environ, _poison_fixtures(root))
+    env = neutralise(parent, _sandbox())
     src = str((root / "cli" / "src").resolve())
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
@@ -387,6 +429,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Reviewer descriptor parity check", ".",
      "bash scripts/ci/check-reviewer-descriptor-parity.sh"),
     ("smoke mode machinery self-test", ".", "bash tests/ci/test_smoke_modes.sh"),
+    ("hermetic lanes positive control (the dirty lane must be able to go red)", ".",
+     "bash tests/ci/test_hermetic_lanes.sh"),
     ("preflight orchestration self-test", ".", "bash tests/ci/test_preflight.sh"),
     ("changed/full CI job-boundary guard", ".", "bash tests/ci/test_changed_smoke_workflow.sh"),
 )
@@ -695,8 +739,12 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
     opts: dict = {
         "list": False, "keep_going": False, "retry_failed": False,
         "verbose": False, "only": "", "changed": False, "base": "", "head": "",
+        "ambient": "clean",
     }
-    valued = {"--only": "only", "--base": "base", "--head": "head"}
+    valued = {
+        "--only": "only", "--base": "base", "--head": "head",
+        "--ambient": "ambient",
+    }
     pending = ""
     for a in args:
         if pending:
@@ -744,6 +792,11 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
         raise ValueError(f"smoke: {' and '.join(subsets)} are separate subset modes - pick one")
     if (opts["base"] or opts["head"]) and not opts["changed"]:
         raise ValueError("smoke: --base/--head only apply to --changed")
+    if opts["ambient"] not in _AMBIENT_MODES:
+        raise ValueError(
+            f"smoke: --ambient {opts['ambient']!r} is not one of "
+            f"{'/'.join(_AMBIENT_MODES)}"
+        )
     return opts
 
 
@@ -1166,6 +1219,21 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     CHANGED SUBSET; exits 20 when nothing mapped, 21 when the diff is not
     trustworthy - neither is a green verdict, and the full run still gates).
     The three subset modes are mutually exclusive.
+
+    --ambient clean|dirty|both (default clean) picks the ambient shape every
+    step's child process runs under. `dirty` poisons this runner's own
+    environment with synthetic developer state and lets the hermeticity fixture
+    scrub it: a channel the fixture covers produces a child identical to the
+    clean lane, and a channel it MISSED survives into the child and reddens the
+    test that reads it. A green clean lane beside a red dirty lane is an ambient
+    leak, named by the failing test. `both` runs the two and reports which
+    diverged.
+
+    NOTE: hermeticity is applied by THIS runner, when it builds each step's
+    environment. Running a shell test directly (`bash tests/foo.sh`) skips it,
+    so that run reads your real HOME, config chain and carve-out ledger; a pass
+    there is not evidence the test is hermetic, and a failure may be your
+    machine. `fno test smoke --only '<glob>'` runs the same step hermetically.
     """
     root = _repo_root(Path.cwd()) or Path.cwd()
     if any(a in ("-h", "--help") for a in args):
@@ -1176,6 +1244,41 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     except ValueError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 2
+
+    if opts["ambient"] == "both":
+        rest: list[str] = []
+        skip_next = False
+        for a in args:
+            if skip_next:  # the detached value of a bare `--ambient`
+                skip_next = False
+                continue
+            if a == "--ambient":
+                skip_next = True
+                continue
+            if a.startswith("--ambient="):
+                continue
+            rest.append(a)
+        print("ambient: clean lane")
+        clean_rc = _run_smoke([*rest, "--ambient=clean"], stream=stream)
+        print("ambient: dirty lane")
+        dirty_rc = _run_smoke([*rest, "--ambient=dirty"], stream=stream)
+        if clean_rc == 0 and dirty_rc != 0:
+            sys.stderr.write(
+                "ambient divergence: the clean lane is green and the dirty lane "
+                "is red on the same commit. A test above read ambient state that "
+                "fno/hermetic.py does not neutralise. The failing test names "
+                "itself; add its channel to _AMBIENT_NAMES.\n"
+            )
+        elif clean_rc != 0 and dirty_rc == 0:
+            sys.stderr.write(
+                "ambient divergence (inverted): the clean lane is red and the "
+                "dirty lane is green. A test DEPENDS on ambient state being "
+                "present.\n"
+            )
+        return clean_rc or dirty_rc
+
+    global _AMBIENT_MODE
+    _AMBIENT_MODE = opts["ambient"]
     list_mode, keep_going = opts["list"], opts["keep_going"]
     retry_failed, verbose, only_glob = opts["retry_failed"], opts["verbose"], opts["only"]
 
