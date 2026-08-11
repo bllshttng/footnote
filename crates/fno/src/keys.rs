@@ -113,7 +113,9 @@ fn key_disp(b: u8) -> String {
 /// unusable: an unparseable spec, an unknown action, a digit (the `1-9` tab
 /// range is structural), a byte two actions would share, or the prefix byte
 /// itself. Refusing keeps the previous behaviour, which is always reachable;
-/// accepting a collision would silently shadow one of the two.
+/// accepting a collision would silently shadow one of the two. The PREFIX is
+/// held to the digit rule too: it is checked against the shipped table, and a
+/// digit prefix would quietly delete one entry from the `1-9` tab range.
 ///
 /// Collisions are judged against the FINAL assignment. Checking entries one at a
 /// time rejects every swap and cycle, because whichever the TOML map order hands
@@ -131,6 +133,14 @@ pub fn resolve_keymap(
     let mut prefix = DEFAULT_PREFIX;
     if let Some(spec) = prefix_spec.map(str::trim).filter(|s| !s.is_empty()) {
         match parse_key(spec) {
+            // The same structural rule the rebinds get, and for a sharper
+            // reason: `chord()` resolves the prefix BEFORE the `1-9` branch, so
+            // a digit prefix does not lose a chord, it removes one tab from a
+            // range the modal goes on advertising in full.
+            Some(b) if b.is_ascii_digit() && b != b'0' => warnings.push(KeymapWarning(format!(
+                "config.mux.prefix: 1-9 select tabs and cannot be the prefix; keeping {}",
+                key_disp(DEFAULT_PREFIX)
+            ))),
             Some(b) => prefix = b,
             None => warnings.push(KeymapWarning(format!(
                 "config.mux.prefix: cannot read {spec:?} as a key; keeping {}",
@@ -1176,6 +1186,29 @@ mod tests {
         let (map, warn) = resolve_keymap(Some("meta-q"), &[]);
         assert_eq!(map.prefix, DEFAULT_PREFIX);
         assert!(warn[0].0.contains("config.mux.prefix"));
+    }
+
+    #[test]
+    fn a_digit_prefix_is_refused_like_a_digit_rebind() {
+        // The final-map collision check only sees NAMED bindings, so `3` looked
+        // free. It is not: `chord()` resolves the prefix before the structural
+        // `1-9` branch, so `prefix+3` would forward a literal `3` while the key
+        // modal went on advertising the whole range. A quietly missing tab is
+        // worse than a refusal, which at least says why.
+        for spec in ["1", "3", "9"] {
+            let (map, warn) = resolve_keymap(Some(spec), &[]);
+            assert_eq!(map.prefix, DEFAULT_PREFIX, "prefix={spec} must not apply");
+            assert!(
+                warn.iter().any(|w| w.0.contains("1-9 select tabs")),
+                "prefix={spec} should say why, said {warn:?}"
+            );
+        }
+        // Asserted on the resolver rather than through `chord()`, because
+        // `install` is process-global and first-call-wins: a test that installs
+        // a keymap decides the keyboard for whichever tests run after it.
+        //
+        // `0` is not in the tab range, so it stays a legal prefix.
+        assert_eq!(resolve_keymap(Some("0"), &[]).0.prefix, b'0');
     }
 
     #[test]
