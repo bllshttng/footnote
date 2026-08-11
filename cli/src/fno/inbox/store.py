@@ -904,6 +904,37 @@ def write_new_thread(
     return handle
 
 
+def retract_durable_message(
+    msg_id: str, sender: str, recipient: str, *, to_kind: str = "session"
+) -> None:
+    """Append a withdraw tombstone for ``msg_id`` (W3 write-ahead).
+
+    The bus is append-only, so a retraction is one more envelope naming the
+    message it withdraws; ``scan_unread`` and the dead-letter sweep skip the pair
+    (the tombstone and its target). Used to retract the write-ahead placeholder
+    once live delivery confirms, so a hosted send leaves no durable copy that
+    would double-deliver (W2 guards the race either way) or surface later as a
+    false dead-letter.
+
+    Best-effort by design: a tombstone write failure only means the placeholder
+    lingers, and W2's transcript dedup still suppresses a repeat at the drain.
+    Raises propagate; the caller swallows them at the send site.
+    """
+    from fno.bus.log import WITHDRAW_KIND, Envelope, append
+
+    append(
+        Envelope.new(
+            from_=sender,
+            to=recipient,
+            kind=WITHDRAW_KIND,
+            body=f"withdrawn: {msg_id}",
+            thread=msg_id,
+            meta={"withdraws": msg_id},
+            to_kind=to_kind,
+        )
+    )
+
+
 def append_to_thread(
     thread_path: Path,
     sender: str,

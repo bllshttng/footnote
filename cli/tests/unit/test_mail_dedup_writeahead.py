@@ -16,8 +16,14 @@ from __future__ import annotations
 import json
 
 import pytest
+from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
+
+
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
 
 
 class _Msg:
@@ -196,3 +202,92 @@ def test_present_mail_ids_reads_envelope_ids_from_transcript(tmp_path, monkeypat
     ids = present_mail_ids()
     assert ids is not None, "a present transcript read as unreadable"
     assert "m-real" in ids
+
+
+# ---------------------------------------------------------------------------
+# W3: write the durable record ahead of the live attempt
+# ---------------------------------------------------------------------------
+
+
+def _register_claude_peer(name: str = "red") -> str:
+    """One live claude peer with a full session id; returns its canonical handle
+    (the durable recipient a send addresses)."""
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.harness_identity import canonical_handle
+
+    sid = "abcd1234-1111-7222-8333-444455556666"
+    write_registry([
+        AgentEntry(
+            name=name, harness="claude", harness_session_id=sid,
+            cwd="/tmp", log_path="/tmp/red.log", short_id="abcd1234", status="live",
+        )
+    ])
+    return canonical_handle(sid)
+
+
+def test_writeahead_writes_durable_before_live_attempt(runner, tmp_path, monkeypatch):
+    """AC8-HP (ordering): the durable placeholder exists on the bus BEFORE the
+    live attempt fires, so a kill during the live window cannot lose the
+    message. Proven by snapshotting the bus inside the _deliver_live seam."""
+    from fno.cli import app
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer("red")
+
+    bus_at_live: dict = {}
+
+    def _spy(*_a, **_k):
+        from fno.bus.log import iter_messages
+
+        bus_at_live["ids"] = [
+            m.id for m in iter_messages(warn=False) if m.kind != "withdraw"
+        ]
+        return False  # live does not confirm
+
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", _spy)
+    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+
+    assert bus_at_live.get("ids"), (
+        "no durable record existed when the live attempt fired; a kill in the "
+        "live window would lose the message"
+    )
+
+
+def test_hosted_send_retracts_writeahead_placeholder(runner, tmp_path, monkeypatch):
+    """A hosted send writes the placeholder then retracts it, so no durable copy
+    lingers to double-deliver or surface as a false dead-letter. scan_unread
+    filters the withdrawn pair, so the recipient's drain sees nothing."""
+    from fno.bus.cursor import scan_unread
+    from fno.cli import app
+
+    use_tmpdir(monkeypatch, tmp_path)
+    recipient = _register_claude_peer("red")
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: True)
+
+    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+    assert "hosted" in res.output.lower() or "delivered" in res.output.lower()
+
+    assert scan_unread(recipient) == [], (
+        "a hosted send left a durable copy the recipient's drain would surface"
+    )
+
+
+def test_not_hosted_send_leaves_a_drainable_durable(runner, tmp_path, monkeypatch):
+    """When live does not confirm, the write-ahead placeholder IS the delivery:
+    it stays on the bus (no retraction) and is drainable exactly once."""
+    from fno.bus.cursor import scan_unread
+    from fno.cli import app
+
+    use_tmpdir(monkeypatch, tmp_path)
+    recipient = _register_claude_peer("red")
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: False)
+
+    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+
+    unread = scan_unread(recipient)
+    assert unread, "the write-ahead placeholder did not stay on the bus as the delivery"
+    assert all(m.kind != "withdraw" for m in unread)
+

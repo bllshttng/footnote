@@ -6329,6 +6329,19 @@ def dispatch_send(
                     msg_id=msg_id,
                 )
 
+                # W3 write-ahead: persist the durable placeholder BEFORE the live
+                # attempt so a process kill during the up-to-20s live window
+                # leaves the message on the bus for the recipient's next drain,
+                # closing the crash window live-inject-first opened. Only when a
+                # durable recipient exists; a recipient with no harness session id
+                # cannot receive durable mail, so that path stays live-first (and
+                # the window with it -- it cannot be closed without a durable key).
+                # W2 makes this safe: write-ahead gives every send a durable copy,
+                # so the bounded double-delivery it would reintroduce is deduped at
+                # the drain, and a hosted send retracts the placeholder below.
+                writeahead = durable_recipient is not None
+                if writeahead:
+                    _write_durable()
                 delivery = "durable"
                 demotion_notice: Optional[str] = None
 
@@ -6346,21 +6359,29 @@ def dispatch_send(
                     sender_entry=sender_entry,
                 ):
                     delivery = "hosted"
-                else:
-                    # Durable fallback: an offline recipient, or a live inject that
-                    # did not confirm. Persist ONLY here so a CONFIRMED live turn is
-                    # not also queued. At-most-once on the common path; a busy
-                    # recipient whose injected turn is queued past the verb's confirm
-                    # budget can still receive the durable copy too (bounded
-                    # double-delivery -- see mail_inject.rs). Live-first also widens
-                    # the crash-loss window vs the old durable-first; both are
-                    # accepted tradeoffs of the live-inject-first design (node
-                    # x-1f23). A live peer that fell through gets a demotion notice.
+                    if writeahead:
+                        # Live confirmed: retract the placeholder so it neither
+                        # double-delivers nor surfaces as a false dead-letter. A
+                        # tombstone write failure only leaves the placeholder
+                        # lingering (W2 still dedups a repeat at the drain).
+                        try:
+                            from fno.inbox.store import retract_durable_message
+
+                            retract_durable_message(
+                                msg_id, from_name, durable_recipient, to_kind="session"
+                            )
+                        except (OSError, ValueError, RuntimeError):
+                            pass
+                elif not writeahead:
+                    # No durable recipient and live missed: the legacy durable
+                    # write, which raises durable-address exit 12 when the session
+                    # id is genuinely missing.
                     _write_durable()
-                    if family1_live:
-                        demotion_notice = (
-                            f"live delivery failed for {name!r}; message queued durable ({msg_id})"
-                        )
+
+                if delivery == "durable" and family1_live:
+                    demotion_notice = (
+                        f"live delivery failed for {name!r}; message queued durable ({msg_id})"
+                    )
 
                 _emit_ev(
                     "agent_send_done",
