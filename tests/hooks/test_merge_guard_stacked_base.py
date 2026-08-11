@@ -107,6 +107,9 @@ def test_other_repo_is_skipped(monkeypatch):
     # missed exactly the form that carries the value.
     assert git_protection._stacked_base_refusal("gh pr merge 42 -Rother/repo") is None
     assert git_protection._stacked_base_refusal("gh pr merge 42 --repo=other/repo") is None
+    # gh reads GH_REPO as the same override, so a flag-only test judged this
+    # against PR 42 in THIS checkout.
+    assert git_protection._stacked_base_refusal("GH_REPO=other/repo gh pr merge 42") is None
     assert "cmd" not in calls
 
 

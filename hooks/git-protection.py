@@ -573,8 +573,10 @@ def _stacked_base_refusal(command=""):
     # PR. Fail open, like every other unanswerable case in this function.
     # Prefix match, not equality: gh accepts the attached shorthand
     # `-Rowner/repo` as readily as `-R owner/repo`, and an equality test skipped
-    # exactly the form that carries the value.
-    if any(t.startswith("-R") or t.startswith("--repo") for t in command.split()):
+    # exactly the form that carries the value. `GH_REPO=` is the third form -
+    # gh reads it as the repo override, so a flag-only test judged
+    # `GH_REPO=other/repo gh pr merge 42` against PR 42 in THIS checkout.
+    if any(t.startswith(("-R", "--repo", "GH_REPO=")) for t in command.split()):
         return None
     try:
         proc = subprocess.run(

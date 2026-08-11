@@ -13,8 +13,8 @@
 # after the PR's last push, would be the one left unable to block.
 #
 # Usage: check-stacked-base.sh <pr-number> <head-sha>
-# Exit:  0 base still leads to the default branch
-#        1 stale base, or the probe could not evaluate
+# Exit:  0 base still leads to the default branch AND the status was posted
+#        1 stale base, the probe could not evaluate, or the status POST failed
 #
 # CI fails closed on an unevaluated probe: a check that could not run has
 # verified nothing, and reporting it green is the defect this guard exists for.
@@ -38,12 +38,18 @@ esac
 
 # The status is the durable artifact: a job's own conclusion is scoped to that
 # run, while a status stays attached to the head SHA where branch protection
-# and the merge button read it.
-gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+# and the merge button read it. A failed POST is therefore a failed check, not
+# a warning: the job would otherwise go green having published nothing for
+# branch protection to read - the same "verified nothing, reported fine" shape
+# the unevaluated-probe case above already fails closed on.
+if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
   -f state="$state" \
   -f context="$CONTEXT" \
   -f description="${desc:0:139}" \
   -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-  >/dev/null || echo "warn: could not post the $CONTEXT status for $SHA" >&2
+  >/dev/null; then
+  echo "FAIL: could not post the $CONTEXT status for $SHA (verdict was $state)" >&2
+  exit 1
+fi
 
 [ "$state" = success ]
