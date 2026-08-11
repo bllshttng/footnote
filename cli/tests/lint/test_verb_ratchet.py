@@ -361,3 +361,43 @@ def test_check_removed_hidden_flag_needs_no_exception(monkeypatch, tmp_path):
     assert "backlog done !--tag" in report.message
     assert "Removed hidden options" in report.message
     assert "flag-exception" not in report.message
+
+
+# --------------------------------------------------------------------------- #
+# Source/baseline agreement: the Python-side twin of the AC4 Rust reach check.
+#
+# The enumerator IMPORTS `fno.cli` in this interpreter while the baseline is
+# written to resolve_repo_root(). Run as a bare `fno`, those are two different
+# trees, and `--update` reported "regenerated ... (N leaves)" over a
+# byte-identical file - a success line for work it did not do, which is how a
+# new verb reached CI unbaselined.
+# --------------------------------------------------------------------------- #
+def test_enumeration_refuses_when_imported_package_is_not_this_checkout(monkeypatch, tmp_path):
+    """A stale installed package must be a named error, not a confident answer."""
+    monkeypatch.setattr(vr, "_repo_root", lambda: tmp_path)
+    with pytest.raises(vr.VerbRatchetError) as exc:
+        vr.enumerate_python_leaves()
+    msg = str(exc.value)
+    # Both paths named: the reader cannot act on "mismatch" alone.
+    assert "imported:" in msg and "expected:" in msg
+    # And it names the command that actually works.
+    assert "uv run --project cli fno-py" in msg
+
+
+def test_enumeration_passes_when_package_is_this_checkout():
+    """The ordinary in-repo run is unaffected (this test process IS the source)."""
+    leaves = vr.enumerate_python_leaves()
+    assert "pr merge" in leaves
+    assert "pr base-lineage-check" in leaves
+
+
+def test_guard_covers_check_not_only_update(monkeypatch, tmp_path):
+    """check() reaches the same enumerator, so it must refuse too.
+
+    A guard on `--update` alone would leave check() comparing one tree's surface
+    against another tree's baseline - a guard on one of two reachable paths,
+    which is the shape this module exists to catch.
+    """
+    monkeypatch.setattr(vr, "_repo_root", lambda: tmp_path)
+    with pytest.raises(vr.VerbRatchetError):
+        vr.check()

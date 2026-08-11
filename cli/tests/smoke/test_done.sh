@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 # Smoke test: `fno done` - help, no-match, and --note on a disposable graph.
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)/cli"
-uv sync --quiet
+
+# Every command that discards its output says something when it fails. Several
+# below are `>/dev/null 2>&1` with no guard, so under `set -e` a failure exited
+# with NO output at all: the smoke runner printed this script's header and then
+# nothing, and the reader learned only that something failed. Observed on
+# origin/main as a silent EXIT=6.
+#
+# Deliberately NOT an ERR trap: bash fires ERR under the same CONDITIONS as
+# errexit, and those are about command position, not about `set -e` being on -
+# so a trap would also fire inside the `set +e` block below, where a non-zero
+# exit is the expected result being measured.
+die() { echo "FAIL: test_done.sh: $1" >&2; exit 1; }
+
+cd "$(git rev-parse --show-toplevel)/cli" || die "cannot cd to the cli/ project root"
+uv sync --quiet || die "uv sync failed (cli/ project dependencies unavailable)"
 
 # Use a temp directory and point fno at it via HOME.
 TMP=$(mktemp -d)
@@ -66,7 +79,8 @@ if ! echo "$nomatch_out" | grep -qi "no match\|no entry"; then
 fi
 
 # AC: `fno done ab-smoke0001 --note "smoke test"` sets completion_note
-uv run fno-py done ab-smoke0001 --note "smoke test marker" >/dev/null 2>&1
+uv run fno-py done ab-smoke0001 --note "smoke test marker" >/dev/null 2>&1 \
+  || die "'fno done ab-smoke0001 --note' exited $? (rerun without >/dev/null to see it)"
 status=$(python3 -c "
 import json
 d = json.load(open('$TMP/.fno/graph.json'))
@@ -130,7 +144,8 @@ e['cost_sessions'] = []
 e['points'] = None
 json.dump(d, open('$TMP/.fno/graph.json', 'w'), indent=2)
 "
-uv run fno-py done ab-smoke0002 --backfill >/dev/null 2>&1
+uv run fno-py done ab-smoke0002 --backfill >/dev/null 2>&1 \
+  || die "'fno done ab-smoke0002 --backfill' exited $? (rerun without >/dev/null to see it)"
 backfilled=$(python3 -c "
 import json
 d = json.load(open('$TMP/.fno/graph.json'))

@@ -22,6 +22,22 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 mkdir -p "$HOME/.fno"
 GRAPH_JSON="$HOME/.fno/graph.json"
+
+# HOME alone isolates only ONE of the two stores `backlog done` reads. The
+# close guard also reads the project's carve-out ledger, resolved from the
+# NODE's recorded cwd via `git worktree list` - so intaking from inside this
+# checkout pointed it at the canonical worktree, where it counted the
+# developer's own deferred carve-outs and refused a node the test had just
+# minted. Green on a clean CI runner, red on any machine with carve-outs
+# outstanding.
+#
+# Run from a directory that is not a git worktree, so the node records a
+# hermetic cwd and the resolver falls back to FNO_REPO_ROOT (its test hook)
+# instead of climbing to the real checkout. Both are needed: the cd alone
+# leaves the fallback pointing at whatever ambient root it can find.
+export FNO_REPO_ROOT="$TMP/repo"
+mkdir -p "$FNO_REPO_ROOT/.fno"
+cd "$TMP" || exit 1
 echo '{"entries": []}' > "$GRAPH_JSON"
 
 PASS=0

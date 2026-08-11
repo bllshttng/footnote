@@ -194,10 +194,19 @@ def load_enrichment(root: Path) -> dict[str, tuple[str, str]]:
     try:
         import inspect
 
-        from fno.lint_verb_ratchet import iter_python_leaves
+        from fno.lint_verb_ratchet import VerbRatchetError, iter_python_leaves
     except Exception:
         return {}
     table: dict[str, tuple[str, str]] = {}
+    # A refusal is NOT the same as "no fno environment". The enumerator refuses
+    # when the imported package is not this checkout's source, and swallowing
+    # that into an empty table would report an unenriched sweep as if the
+    # registry simply had nothing to add - an absence reading as an answer. Let
+    # the sweep continue (enrichment is best-effort) but say why, with the
+    # named, actionable message rather than a bare traceback out of a diagnostic.
+    # Caught around the walk itself rather than by probing first: the enumerator
+    # imports every lazy subcommand module, so a separate probe call paid for
+    # that whole traversal twice.
     try:
         rel_root = root.resolve()
         for path, cmd in iter_python_leaves():
@@ -221,6 +230,9 @@ def load_enrichment(root: Path) -> dict[str, tuple[str, str]]:
                 help_text = (inspect.getdoc(real) or "").strip()
             help_line = help_text.splitlines()[0] if help_text else ""
             table[path] = (file_line, help_line)
+    except VerbRatchetError as exc:
+        print(f"verb enrichment SKIPPED: {exc}", file=sys.stderr)
+        return {}
     except Exception:
         pass
     return table

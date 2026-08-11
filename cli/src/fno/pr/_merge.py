@@ -1103,6 +1103,33 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                     err=False,
                 )
                 return 2
+        # (2c) Stacked-base guard: a base branch that no longer leads to the
+        # default branch merges green and ships nothing. Inside the lock because
+        # the event that kills a base IS a peer merge, which is what the lock
+        # serializes. `_behind_by` above cannot see this: it compares head to
+        # base, and a PR stacked on an already-landed base is 0 behind it.
+        # A refusal needs a retarget, so it is `blocked` (an operator action),
+        # never `held` (retry the same command). An unevaluated probe proceeds
+        # with a breadcrumb, matching `_behind_by`: our own read failing must
+        # not wedge a merge.
+        from fno.pr import _base_lineage
+
+        verdict, why = _base_lineage.lineage_verdict(pr_number, repo)
+        if verdict == "stale":
+            if _base_lineage.bypassed():
+                _base_lineage.emit_bypass_escape(pr_number, repo, why)
+                sys.stderr.write(
+                    f"pr-merge: stacked-base guard bypassed "
+                    f"({_base_lineage.BYPASS_ENV}); {why}\n"
+                )
+            else:
+                _emit(pr_number, "blocked", f"stacked base refused: {why}", "none", err=True)
+                return 2
+        elif verdict == "unknown":
+            sys.stderr.write(
+                f"pr-merge: stacked-base probe unavailable ({why}); "
+                "merging without the lineage guard\n"
+            )
         return _do_merge(pr_number, auto_merge, repo, covered_head)
 
 

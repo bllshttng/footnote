@@ -255,6 +255,46 @@ There is no environment override.
 A probe that cannot pass here is fixed by editing the plan, which is visible in git; a wedged one falls to the existing `NoProgress` and `Budget` backstops.
 Authoring guidance (freshness over bare existence) lives in `skills/blueprint/SKILL.md`.
 
+### The stacked-base guard
+
+Coverage answers whether anyone reviewed the PR. It says nothing about whether merging it puts the code anywhere.
+A stacked PR names another feature branch as its base, and when that base lands on main without the stacked PR being retargeted, GitHub merges it into the dead base, reports MERGED, and the commits never reach main.
+Specimen: PR #800 merged into `feature/bg-crown` at 2026-08-10T19:42:32Z, an hour after PR #789 landed that same branch on main; its merge commit `9b665db4` is the tip of `origin/feature/bg-crown` and is not an ancestor of `origin/main`.
+Why the base was never retargeted is unexplained, so the guard asserts nothing about GitHub's retarget behavior and reads observable facts instead.
+
+`cli/src/fno/pr/_base_lineage.py` is the one predicate: for a base that is not the default branch, it refuses if a MERGED PR already carried that base, or if the base tip is already an ancestor of the default branch.
+Both checks are kept because they go blind in opposite directions - under `merge_strategy = "squash"` a landed base is not an ancestor of main, and a base that landed leaving no merged PR is invisible to the first check.
+A third check covers where both go blind at once: `delete_branch_on_merge` removes the base as it lands, and a confirmed deletion is the verdict on its own, because a branch that does not exist carries nothing onward.
+It has to be, since a fresh clone (every CI runner) has no `origin/<base>` to compare a tip against or resolve ancestry from, and a stale one is no better - under squash the landed base is no ancestor of the default branch, and a local ref left behind the merged head fails the first check's equality test too.
+It fires only once `git ls-remote` answers, so a dead network still reads as `unknown` rather than forging a refusal.
+It tests for a MERGED PR rather than requiring an OPEN one on purpose: stacking onto a base whose PR nobody has opened yet is legitimate work, and a guard that refuses it gets switched off.
+
+Coverage of the eight reachable merge paths, stated honestly rather than implied:
+
+| Merge path | Stacked-base guard |
+|---|---|
+| `fno pr merge` (`_merge.py`), and its worktree API fallback | checked, refuses with `outcome=blocked` |
+| `fno pr verify --kind merged` bounded remediation (`_verify.py`) | checked, refuses the remediation |
+| `finalize.rs` autonomous `--auto` arm | checked, refuses to arm |
+| a PR update, via `.github/workflows/stacked-base-guard.yml` | checked for same-repo PRs; blocks only once marked a required status check. Fork PRs are skipped: their `GITHUB_TOKEN` cannot post the status |
+| GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |
+| an agent-run bare `gh pr merge`, via `hooks/git-protection.py` | checked, denies before the two-factor path so the merge-gate override cannot buy past it |
+| the GitHub web / mobile merge button | NOT covered until the context is marked required; reachable from no code here |
+| a human's `gh pr merge` in a plain terminal, or an unwired harness | NOT covered until the context is marked required |
+
+The hook was nearly left unwired, on the argument that a guard over one of the ways a human runs a command invites the belief that the command is guarded.
+That reasoning assumed a single harness and a mostly-human population; it is wired on both `hooks/hooks.json` and `hooks/codex-hooks.json`, and most merges here are agents running gh through a tool call.
+It also already gated `gh pr merge` with its own two-factor check, so omitting lineage would have made that gate the incomplete one.
+The residual hole is a human typing gh in a terminal, which only the required status context closes.
+
+Marking the `stacked-base-guard` context required is a repository-settings action; no code in this repo can take it, and this repo commits no branch-protection or ruleset config.
+Until someone does, the workflow reports and does not block.
+One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.
+The `guard` job therefore skips fork PRs outright rather than running and failing on the POST, which would have hung a permanently red check on every external contribution.
+Marking it required while fork PRs are accepted blocks every one of them permanently, waiting on a context no run can produce, so the setting is safe only on a repo that takes no fork PRs; covering forks needs a privileged second workflow, which is a security decision this PR does not make.
+The in-process callers fail OPEN on a probe that could not evaluate (a gh outage must not wedge a merge, matching `_merge._behind_by`), while CI fails CLOSED on the same condition, because a check that could not run has verified nothing.
+`FNO_PR_BASE_LINEAGE_OK=stale-acknowledged` bypasses a refusal and records a `gate_escape`.
+
 ---
 
 ## The exec shim (`scripts/run-target-loop.sh`)

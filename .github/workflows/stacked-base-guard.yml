@@ -1,0 +1,142 @@
+name: stacked-base-guard
+
+# Refuse a PR whose base branch no longer leads to the default branch: GitHub
+# merges it, reports MERGED, and the commits never reach main.
+#
+# Two triggers, because one of them is not enough:
+#
+#   pull_request - re-evaluates on every push to the PR. This alone would have
+#     caught the incident: PR #800's head moved at 18:51:44Z and 19:09:00Z,
+#     both after its base landed on main at 18:05:58Z.
+#   push to the default branch - the sweep. An armed `--auto` merge fires
+#     server-side later, so a base can die with no push to the PR to invalidate
+#     a green check. The sweep re-stamps every open PR whose base is not the
+#     default branch, which is the only way that window closes.
+#
+# Marking this a REQUIRED status check is a repository-settings action nobody
+# can take from code. Until an operator marks the `stacked-base-guard` context
+# required, this workflow reports but does not block: the web merge button and a
+# hand-run `gh pr merge` still ignore it.
+#
+# READ THIS BEFORE MARKING IT REQUIRED. On a `pull_request` event from a FORK,
+# GITHUB_TOKEN is read-only no matter what the `permissions:` block below says,
+# so the status POST fails and the context is never created for that PR. Mark
+# this required while fork PRs are accepted and every one of them blocks
+# forever, with no run able to produce the context it is waiting for. Marking it
+# required is therefore safe only on a repo that takes no fork PRs; covering
+# forks needs a privileged second workflow (`pull_request_target` or a
+# `workflow_run` follow-up), which is a security-relevant design decision and
+# deliberately not made here.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+concurrency:
+  group: stacked-base-guard-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+
+jobs:
+  guard:
+    # Fork PRs are skipped rather than run-and-failed. A `pull_request` event
+    # from a fork gets a read-only GITHUB_TOKEN whatever `permissions:` says, so
+    # the status POST 403s, `check-stacked-base.sh` treats a failed POST as a
+    # failed check (correctly - it published nothing), and every external
+    # contributor's PR would carry a red `guard` job it cannot ever make green.
+    # A skip matches what the header already states: the context is simply never
+    # created for a fork PR. Covering forks needs the privileged second workflow
+    # described above, which this PR deliberately does not add.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The lineage probe compares the base branch against the default
+          # branch, which a shallow single-branch clone cannot answer.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - name: Check base lineage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/check-stacked-base.sh "$PR_NUMBER" "$HEAD_SHA"
+
+  sweep:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - name: Re-stamp open PRs stacked on a non-default base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          default="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
+          # The base is filtered in the shell rather than inside the jq
+          # expression: interpolating $default into a -q string needs nested
+          # quoting, and a branch name with a quote or a shell metacharacter in
+          # it would then decide what the sweep looks at.
+          # Captured to a file and status-checked BEFORE mapfile. `mapfile -t
+          # rows < <(gh ...)` takes its exit status from mapfile, and pipefail
+          # does not reach into process substitution - so an auth blip or a 5xx
+          # would leave rows empty and this step would print "0 open PRs" and go
+          # green. This sweep is the only cover for the server-side --auto
+          # window, so "gh failed" reading as "nothing to check" is the one
+          # failure it must never have.
+          if ! gh pr list --state open --limit 200 \
+                --json number,baseRefName,headRefOid \
+                --jq '.[] | [.number, .baseRefName, .headRefOid] | @tsv' > /tmp/open-prs.tsv; then
+            echo "FAIL: could not list open PRs; sweep verified nothing" >&2
+            exit 1
+          fi
+          mapfile -t rows < /tmp/open-prs.tsv
+          checked=0
+          flipped=0
+          stamped=0
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r pr base sha <<<"$row"
+            # A PR based on the default branch cannot have its base die under
+            # it, but it still gets the context stamped. Once an operator marks
+            # `stacked-base-guard` required, any PR that never received the
+            # context sits permanently pending with nothing able to trigger a
+            # run - so every PR open when this lands would need a fresh push to
+            # become mergeable. One direct status post is cheaper here than
+            # re-running the whole check for each of them.
+            # Spelled as an `if` rather than `[ ... ] && continue`: the runner
+            # invokes this with `bash -e`, and a trailing `&&` whose left side
+            # is false is exactly the shape that reads as safe until it isn't.
+            if [ "$base" = "$default" ]; then
+              if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
+                   -f state=success -f context=stacked-base-guard \
+                   -f description="base is the default branch ($default)" >/dev/null; then
+                stamped=$((stamped + 1))
+              else
+                echo "warn: could not stamp PR #$pr ($sha)" >&2
+              fi
+              continue
+            fi
+            checked=$((checked + 1))
+            if ! bash scripts/ci/check-stacked-base.sh "$pr" "$sha"; then
+              flipped=$((flipped + 1))
+            fi
+          done
+          # The sweep never fails the main build: the signal is the per-PR
+          # status it just wrote, and a red main run would only obscure which PR
+          # is affected. The 200-PR cap is stated rather than silent, so a
+          # truncated sweep cannot read as full coverage.
+          echo "swept ${#rows[@]} open PR(s): $checked stacked checked, $flipped now failing, $stamped default-based stamped (cap: 200)"

@@ -138,7 +138,12 @@ def test_config_command_normalized_per_harness():
 def test_explicit_command_normalized_per_harness():
     """AC2-HP: the explicit `command=` rung normalizes too (x-0676 --reconcile
     passes an explicit template)."""
-    out = resolve_dispatch(command="/target no-merge {id}", harness="codex", node_id="x-1")
+    # `_resolve`, not a bare `resolve_dispatch`: this was the one call in the
+    # file that read the ambient config, so on a machine whose
+    # `[dispatch] substrate = "bg"` it resolved bg on codex and died
+    # ("bg is claude-only") instead of testing the normalization it names.
+    # Green in CI, red on a configured developer machine.
+    out = _resolve(command="/target no-merge {id}", harness="codex", node_id="x-1")
     assert out["command"] == "$fno:target no-merge x-1"
 
 
