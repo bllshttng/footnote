@@ -353,6 +353,7 @@ Properties:
 - Lock-shared with `set-gate.sh`: acquires `<file>.lock.d` via the
   same mkdir-based mutex so a live target session and a migration run
   cross-serialize.
+- Symlink-safe: resolves shared worktree journals before deriving sidecars or replacing bytes, deduplicates their canonical targets, and preserves each worktree symlink.
 
 Run once at ship time:
 

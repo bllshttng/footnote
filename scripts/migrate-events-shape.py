@@ -20,6 +20,8 @@ Properties:
   - Lock-shared: acquires the same mkdir-based mutex (``<file>.lock.d``) that
     ``fno.events.append_event`` and ``crates/fno-agents/src/claims.rs`` use, so
     a live target session and a migration run cross-serialize.
+  - Symlink-safe: resolves a shared worktree journal before deriving sidecars
+    or replacing bytes, so migration preserves the worktree symlink.
     ``MIGRATE_LOCK_TIMEOUT_SECONDS`` overrides the 30s default (used by tests).
 
 Exit codes:
@@ -95,6 +97,7 @@ def _migrate_file(path: Path, dry_run: bool) -> tuple[int, int, int]:
     """Returns (migrated, skipped, corrupt). Acquires the file's mkdir lock."""
     if not path.is_file():
         return (0, 0, 0)
+    path = path.resolve()
 
     lock_dir = path.parent / (path.name + ".lock.d")
     if not _acquire_lock(lock_dir, DEFAULT_TIMEOUT):
@@ -190,22 +193,28 @@ def _do_migrate(path: Path, dry_run: bool, lock_dir: Path) -> tuple[int, int, in
 
 def _walk(root: Path) -> list[Path]:
     candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        if not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(resolved)
+
     for relpath in (
         ".fno/events.jsonl",
         "cli/.fno/events.jsonl",
         ".fno/artifacts/events.jsonl",
     ):
-        p = root / relpath
-        if p.is_file():
-            candidates.append(p)
+        add(root / relpath)
 
     worktrees_root = root / ".claude/worktrees"
     if worktrees_root.is_dir():
         for wt in worktrees_root.iterdir():
             try:
-                p = wt / ".fno/events.jsonl"
-                if p.is_file():
-                    candidates.append(p)
+                add(wt / ".fno/events.jsonl")
             except OSError:
                 # Worktree removed or unreadable mid-walk; skip silently.
                 continue

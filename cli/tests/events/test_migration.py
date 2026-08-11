@@ -209,6 +209,32 @@ def test_dry_run_makes_no_changes(workdir):
     assert not (workdir / ".fno/events.jsonl.bak").exists()
 
 
+def test_symlinked_journal_migrates_target_without_replacing_link(tmp_path):
+    canonical = tmp_path / "canonical" / ".fno" / "events.jsonl"
+    _write_events(
+        canonical,
+        [
+            {
+                "timestamp": "2026-05-07T09:30:42Z",
+                "source": "target",
+                "type": "phase_init",
+                "data": {"phase": "p", "nonce": "n", "session_id": "s"},
+            }
+        ],
+    )
+    worktree = tmp_path / "worktree"
+    (worktree / ".fno").mkdir(parents=True)
+    linked = worktree / ".fno" / "events.jsonl"
+    linked.symlink_to(canonical)
+
+    rc = subprocess.call([sys.executable, str(SCRIPT), "--root", str(worktree)])
+
+    assert rc == 0
+    assert linked.is_symlink()
+    assert "timestamp" not in canonical.read_text(encoding="utf-8")
+    assert canonical.with_suffix(".jsonl.bak").exists()
+
+
 def test_long_migration_renews_its_lock_lease(tmp_path, monkeypatch):
     """A migration legitimately holds the events lock far longer than the
     steal threshold, so it must keep the lease fresh.
