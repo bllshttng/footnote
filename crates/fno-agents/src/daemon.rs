@@ -695,7 +695,9 @@ fn dispatch_termination(
     };
     let journal = crate::loop_runtime::Journal::new(
         crate::loop_runtime::ProjectJournalPath(
-            PathBuf::from(&entry.cwd).join(".fno/events.jsonl"),
+            crate::paths::worktree_repo_root(Path::new(&entry.cwd))
+                .join(".fno")
+                .join("events.jsonl"),
         ),
         crate::loop_runtime::GlobalJournalPath(global_events_path(home)),
     );

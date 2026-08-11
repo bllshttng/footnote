@@ -323,6 +323,18 @@ class TestStealHelper:
 
 
 class TestEventsMutex:
+    def test_default_event_path_anchors_to_repo_root(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        subdir = repo / "nested" / "source"
+        subdir.mkdir(parents=True)
+        monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+        monkeypatch.chdir(subdir)
+
+        append_event(_event())
+
+        assert (repo / ".fno/events.jsonl").exists()
+        assert not (subdir / ".fno/events.jsonl").exists()
+
     def test_AC1_HP_corpse_stolen_and_event_lands(self, tmp_path):
         events = tmp_path / "events.jsonl"
         lock = tmp_path / "events.jsonl.lock.d"

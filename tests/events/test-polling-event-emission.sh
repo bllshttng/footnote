@@ -166,6 +166,20 @@ assert_eq "size cap polling rc" 2 "$rc"
 assert_contains "size cap polling message" "$out" "exceeds"
 [[ ! -s "$EVENTS_FILE" ]] || { echo "FAIL size cap: polling emitter appended an oversized line"; fail=1; }
 
+# Default paths resolve from the worktree root even when sourced below it.
+repo_root="$WORK/repo"
+mkdir -p "$repo_root/nested/source"
+git -C "$repo_root" init -q
+(
+    unset EVENTS_FILE
+    cd "$repo_root/nested/source" || exit 1
+    # shellcheck disable=SC1090
+    source "$EVENTS_LIB"
+    emit_event target root_probe '{}'
+)
+[[ -s "$repo_root/.fno/events.jsonl" ]] || { echo "FAIL repo root: shell event did not land at root"; fail=1; }
+[[ ! -e "$repo_root/nested/source/.fno" ]] || { echo "FAIL repo root: shell event created a nested .fno"; fail=1; }
+
 # AC-VALIDATOR: validator accepts canonical envelope (when validator is loadable)
 if declare -F validate_event >/dev/null 2>&1; then
     canonical='{"ts":"2026-05-07T09:30:42Z","type":"polling_external_review","source":"target","data":{"pr_number":204,"reviewer_bot":"gemini-code-assist[bot]","wait_kind":"cron","session_id":"s","next_check_at":"2026-05-08T16:00:00Z"}}'

@@ -3,7 +3,11 @@
 # Appends structured JSONL events to .fno/events.jsonl
 # Usage: source this file, then call emit_event
 
-EVENTS_FILE="${EVENTS_FILE:-.fno/events.jsonl}"
+if [[ -z "${EVENTS_FILE:-}" ]]; then
+    _events_repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || _events_repo_root="$PWD"
+    EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
+    unset _events_repo_root
+fi
 EVENTS_ATOMIC_LINE_MAX_BYTES=4000
 
 _append_bounded_event() {

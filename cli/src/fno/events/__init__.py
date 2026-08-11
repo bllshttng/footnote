@@ -1236,7 +1236,9 @@ def append_event(
     validate(event)
 
     if events_path is None:
-        events_path = Path(".fno/events.jsonl")
+        from fno.paths import resolve_repo_root
+
+        events_path = resolve_repo_root() / ".fno" / "events.jsonl"
     events_path.parent.mkdir(parents=True, exist_ok=True)
 
     lock_dir = events_path.parent / (events_path.name + ".lock.d")
