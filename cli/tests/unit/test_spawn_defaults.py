@@ -625,6 +625,22 @@ def test_explicit_vendor_and_model_spelling_wins_over_config_route():
     assert out[out.index("-m") + 1] == "glm-5.2[1m]"
 
 
+def test_bare_explicit_model_wins_over_config_route():
+    # A bare -m (no -P) already names the model half of a route. cmd_spawn does
+    # not reject --route alongside a bare -m the way it rejects -P+-m against
+    # --route (no such check exists in cmd_spawn), so this collision would
+    # previously slip through here: --route got injected alongside the
+    # explicit -m, landing the spawn on the routed vendor's endpoint while
+    # still asking for the explicit (unrelated) model - the exact
+    # invisible-billing shape this field exists to kill.
+    out = _inject(
+        ["spawn", "-m", "sonnet", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert out[out.index("-m") + 1] == "sonnet"
+
+
 def test_config_account_not_injected_over_explicit_non_claude_harness():
     # Accounts are Claude-only; cmd_spawn rejects --account on any other
     # harness. A configured account must not follow an explicit -H codex (e.g.

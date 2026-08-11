@@ -629,18 +629,20 @@ def inject_spawn_defaults(
     # it inherits the flag's fail-closed resolution - an unknown vendor or a
     # missing key refuses the spawn rather than silently billing the primary,
     # which is the invisible-billing shape this node exists to kill. account
-    # forwards --account. An explicit flag always wins - including the
-    # -P/--provider (vendor) + -m/--model spelling of an explicit route: it
-    # carries the same two pieces of information as --route and cmd_spawn
-    # rejects two route spellings together, so injecting the config route on
-    # top of an explicit vendor+model pair would abort a spawn that named its
-    # route explicitly, just spelled differently.
-    explicit_vendor_and_model = (
-        _flag_present(out[1:], "-P") or _flag_present(out[1:], "--provider")
-    ) and has_model
+    # forwards --account. An explicit flag always wins - including a BARE
+    # explicit -m/--model with no -P: it already names the model half of a
+    # route, so injecting a config route on top would carry a DIFFERENT
+    # vendor's model behind the explicit one (cmd_spawn does not reject that
+    # combination the way it rejects -P+-m against --route, so a bare -m
+    # slipped through here and reached the routed vendor's endpoint asking
+    # for a model it likely doesn't have - the exact invisible-billing shape
+    # this field exists to kill). Also covers -P/--provider + -m/--model,
+    # which carries the same two pieces of information as --route and
+    # cmd_spawn rejects two route spellings together.
+    explicit_model_present = has_model
     explicit_route = _flag_present(out[1:], "--route")
     route_injected = False
-    if cfg_route and not explicit_route and not explicit_vendor_and_model:
+    if cfg_route and not explicit_route and not explicit_model_present:
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", route_rung))  # type: ignore[arg-type]
