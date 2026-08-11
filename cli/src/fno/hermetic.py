@@ -145,6 +145,10 @@ _ENVIRONMENT: tuple[str, ...] = (
     # 108-byte sockaddr limit under a long pytest tmpdir, which would break the
     # mux tests for no isolation gain.
     "XDG_RUNTIME_DIR",
+    # Where every test builds its own fixture. Neutralising it would relocate
+    # the sandbox itself, and it is read here only to widen the config ceiling
+    # so a test's OWN config stays findable.
+    "TMPDIR",
 )
 
 # Set deliberately by a CI workflow, not inherited from a developer's shell.
@@ -303,7 +307,19 @@ def neutralise(
     # canonical checkout through ``git worktree list``, and git ignores HOME, so
     # without a ceiling a suite run from a real checkout reads that checkout's
     # config and local-red never equals CI-red.
-    out["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join([str(sandbox), str(home)])
+    #
+    # TMPDIR is in the ceiling because a test's OWN config has to be findable.
+    # Shell harnesses build their fixture under `mktemp -d` and pytest builds
+    # basetemp under the same root, so a ceiling of sandbox-only rejects the
+    # config the test just wrote and the test reads defaults instead. The real
+    # checkout and the real home are still outside every entry, which is the
+    # thing the ceiling exists to exclude.
+    ceiling = [str(sandbox), str(home)]
+    tmpdir = os.environ.get("TMPDIR") or "/tmp"
+    for candidate in (tmpdir, os.path.realpath(tmpdir)):
+        if candidate not in ceiling:
+            ceiling.append(candidate)
+    out["FNO_CONFIG_SEARCH_ROOT"] = os.pathsep.join(ceiling)
     # FNO_GLOBAL_SETTINGS_PATH is scrubbed and NOT re-pinned either. The global
     # candidate is ``Path.home() / .fno / settings.yaml``, so the sandboxed HOME
     # above already relocates it - the old per-tree ``/dev/null`` pin was
