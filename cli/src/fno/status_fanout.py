@@ -36,6 +36,7 @@ import typer
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
 from fno.env_file import read_var_from_env_file
+from fno.mutex import acquire_dir_mutex, release_dir_mutex
 from fno.plan._stamp import _atomic_write as _atomic_write_plan
 from fno.plan.locking import plan_doc_lock
 
@@ -381,43 +382,30 @@ def _run_locked(
 
 
 class _TickLock:
-    """Non-blocking flock beside the resolved journal's shared fanout state.
+    """Non-blocking cross-language mutex beside the shared fanout state.
 
     A hand-run tick racing the daemon's tick skips rather than double-advancing
     cursors, including when the callers entered through different worktrees.
     """
 
     def __init__(self, project_root: Path) -> None:
-        self._path = _state_dir(project_root) / ".tick.lock"
-        self._fd: Optional[int] = None
+        self._path = _state_dir(project_root) / ".tick.lock.d"
+        self._token: Optional[str] = None
 
     def acquire(self) -> bool:
-        import fcntl
-
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o644)
         except OSError:
-            # A read-only fs / permission error creating the lockfile: treat as
+            # A read-only fs / permission error creating the lock: treat as
             # "cannot lock" (the tick skips as locked_out) rather than crashing.
             return False
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            return False
-        self._fd = fd
-        return True
+        self._token = acquire_dir_mutex(self._path, 0)
+        return self._token is not None
 
     def release(self) -> None:
-        if self._fd is not None:
-            import fcntl
-
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-            finally:
-                os.close(self._fd)
-                self._fd = None
+        if self._token is not None:
+            release_dir_mutex(self._path, self._token)
+            self._token = None
 
 
 # ── HTTP delivery (shared by the two webhook adapters) ──────────────────────

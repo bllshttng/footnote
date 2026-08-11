@@ -184,6 +184,30 @@ CANONICAL="$canonical" WORKTREE="$untimed_gate" bash "$SETUP" >/dev/null 2>&1
 untimed_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "untimed-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration cannot restore an untimed passing review" test "$untimed_verdict" = fail
 
+fanout_cursor_worktree="$TMP/fanout-cursor-worktree"
+mkdir -p "$fanout_cursor_worktree/.fno/status-sinks" "$canonical/.fno/status-sinks"
+printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","v":1,"type":"blocked","source":"target","run":"local-run","data":{"reason":"pending-local"}}' > "$fanout_cursor_worktree/.fno/events.jsonl"
+printf '%s' '{"ts":"2026-08-11T08:00:00Z","n":1}' > "$fanout_cursor_worktree/.fno/status-sinks/ops.cursor"
+printf '%s' '{"ts":"2026-08-11T10:00:00Z","n":1}' > "$canonical/.fno/status-sinks/ops.cursor"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$fanout_cursor_worktree" bash "$SETUP" >/dev/null 2>&1
+assert "migration lowers a shared fanout cursor before older pending rows" \
+  bash -c 'jq -e '\''.ts == "2026-08-11T08:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
+  _ "$canonical/.fno/status-sinks/ops.cursor"
+
+fanout_locked="$TMP/fanout-locked"
+mkdir -p "$fanout_locked/.fno" "$canonical/.fno/status-sinks/.tick.lock.d"
+printf '%s\n' '{"type":"fanout_locked_row"}' > "$fanout_locked/.fno/events.jsonl"
+printf '%s' "test:$$:fanout" > "$canonical/.fno/status-sinks/.tick.lock.d/owner"
+CANONICAL="$canonical" WORKTREE="$fanout_locked" bash "$SETUP" >/dev/null 2>&1 &
+fanout_locked_setup=$!
+sleep 0.2
+assert "migration waits for an active status fanout tick" test ! -L "$fanout_locked/.fno/events.jsonl"
+rm -f "$canonical/.fno/status-sinks/.tick.lock.d/owner"
+rmdir "$canonical/.fno/status-sinks/.tick.lock.d"
+wait "$fanout_locked_setup"
+assert "migration links after the status fanout tick exits" test -L "$fanout_locked/.fno/events.jsonl"
+
 malformed_gate="$TMP/malformed-gate"
 mkdir -p "$malformed_gate/.fno"
 printf '%s\n' '{"type":"review_attestation","data":{"reviewer":[],"head_sha":"abc","verdict":"fail"}}' >> "$canonical/.fno/events.jsonl"

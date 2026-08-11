@@ -193,6 +193,7 @@ def test_gc_retries_when_setup_retargets_leaf_while_waiting(
 
     monkeypatch.setattr(event_gc, "acquire_dir_mutex", acquire)
     monkeypatch.setattr(event_gc, "release_dir_mutex", lambda *_: None)
+    monkeypatch.setattr(event_gc, "renew_dir_mutex", lambda *_: True)
 
     event_gc.gc_events(local, now=NOW, ttl_hours=672)
 
@@ -422,6 +423,34 @@ def test_gc_renews_both_long_held_mutex_leases(
 
     assert "events.jsonl.gc.d" in renewed
     assert "events.jsonl.lock.d" in renewed
+
+
+def test_gc_verifies_every_mutex_immediately_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        _event("claim_released", "2026-07-01T00:00:00Z") + "\n",
+        encoding="utf-8",
+    )
+    replacements: list[tuple[Path, Path]] = []
+    real_replace = event_gc.os.replace
+
+    def lose_final_lease(lock_dir: Path, token: str) -> bool:
+        return False
+
+    def record_replace(source: Path, destination: Path) -> None:
+        replacements.append((Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(event_gc, "renew_dir_mutex", lose_final_lease)
+    monkeypatch.setattr(event_gc.os, "replace", record_replace)
+
+    with pytest.raises(RuntimeError, match="mutex ownership was lost"):
+        event_gc.gc_events(events, now=NOW, ttl_hours=672)
+
+    assert replacements == []
+    assert events.read_text(encoding="utf-8").count("claim_released") == 1
 
 
 def test_gc_cli_reports_and_rejects_short_horizon(tmp_path: Path) -> None:

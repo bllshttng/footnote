@@ -348,6 +348,20 @@ def test_tick_lock_blocks_overlapping_tick(tmp_path):
         lock.release()
 
 
+def test_tick_lock_uses_cross_language_directory_mutex(tmp_path):
+    from fno import status_fanout as sf
+
+    _write_events(tmp_path, [])
+    lock = sf._TickLock(tmp_path)
+
+    assert lock.acquire()
+    lock_dir = tmp_path / ".fno" / "status-sinks" / ".tick.lock.d"
+    assert lock_dir.is_dir()
+    assert (lock_dir / "owner").is_file()
+    lock.release()
+    assert not lock_dir.exists()
+
+
 def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
     import json as _json
 

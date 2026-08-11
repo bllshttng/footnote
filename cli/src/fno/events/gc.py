@@ -193,10 +193,8 @@ def gc_events(
 
         next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
 
-        def renew_leases_if_due() -> None:
+        def verify_and_renew_leases() -> None:
             nonlocal next_lease_renewal
-            if time.monotonic() < next_lease_renewal:
-                return
             if (
                 not renew_dir_mutex(gc_dir, gc_token)
                 or not renew_dir_mutex(lock_dir, lock_token)
@@ -204,6 +202,10 @@ def gc_events(
             ):
                 raise RuntimeError("events.jsonl GC mutex ownership was lost")
             next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
+
+        def renew_leases_if_due() -> None:
+            if time.monotonic() >= next_lease_renewal:
+                verify_and_renew_leases()
 
         cursor_exists = cursor.exists()
         old_cursor = _read_cursor(cursor) if cursor_exists else 0
@@ -308,7 +310,11 @@ def gc_events(
                 handle.flush()
                 os.fsync(handle.fileno())
             try:
-                renew_leases_if_due()
+                # The wall clock used by stale-lock recovery can cross its
+                # threshold while the monotonic renewal deadline does not
+                # (suspend or clock correction). Revalidate ownership at the
+                # destructive boundary regardless of the periodic deadline.
+                verify_and_renew_leases()
                 temp_path.chmod(path.stat().st_mode)
                 pending = cursor.with_name(cursor.name + ".gc-pending")
                 if cursor_exists:

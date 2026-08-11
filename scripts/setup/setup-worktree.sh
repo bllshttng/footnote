@@ -504,6 +504,69 @@ print(size)
 PY
 }
 
+reconcile_status_fanout_cursors() {
+  local source="$1"
+  local target="$2"
+  python3 - "$(dirname "$source")/status-sinks" "$(dirname "$target")/status-sinks" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+canonical_dir, local_dir = map(Path, sys.argv[1:])
+if not local_dir.is_dir():
+    raise SystemExit(0)
+canonical_dir.mkdir(parents=True, exist_ok=True)
+
+
+def read_cursor(path):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ts = payload["ts"]
+        count = payload["n"]
+        if (
+            not isinstance(ts, str)
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+        ):
+            raise ValueError
+        return ts, count
+    except (KeyError, OSError, UnicodeError, ValueError):
+        return None
+
+
+def atomic_cursor(path, cursor):
+    payload = json.dumps({"ts": cursor[0], "n": cursor[1]}, separators=(",", ":"))
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+
+
+for local_path in local_dir.glob("*.cursor"):
+    local = read_cursor(local_path)
+    if local is None:
+        continue
+    canonical_path = canonical_dir / local_path.name
+    canonical = read_cursor(canonical_path)
+    if canonical is None or local[0] < canonical[0]:
+        # The merged journal places canonical rows before the local segment.
+        # Reset the occurrence index at the earlier timestamp: replay is legal
+        # for the at-least-once sink, while skipping a delayed local row is not.
+        atomic_cursor(canonical_path, (local[0], 0))
+PY
+}
+
 append_migrated_events() {
   local source="$1"
   local local_events="$2"
@@ -803,6 +866,30 @@ link_events_journal() {
     fi
     EVENTS_MIGRATION_DIRS+=("$second_cursor_lock")
   fi
+  local source_fanout_dir="$(dirname "$source")/status-sinks"
+  local target_fanout_dir="$(dirname "$target")/status-sinks"
+  mkdir -p "$source_fanout_dir" "$target_fanout_dir"
+  local first_fanout_lock="${source_fanout_dir}/.tick.lock.d"
+  local second_fanout_lock="${target_fanout_dir}/.tick.lock.d"
+  if [[ "$second_fanout_lock" < "$first_fanout_lock" ]]; then
+    local swap_fanout_lock="$first_fanout_lock"
+    first_fanout_lock="$second_fanout_lock"
+    second_fanout_lock="$swap_fanout_lock"
+  fi
+  if ! acquire_events_dir "$first_fanout_lock" "$token"; then
+    cleanup_events_migration
+    echo "setup-worktree: status fanout migration timed out on $first_fanout_lock" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$first_fanout_lock")
+  if [[ "$second_fanout_lock" != "$first_fanout_lock" ]]; then
+    if ! acquire_events_dir "$second_fanout_lock" "$token"; then
+      cleanup_events_migration
+      echo "setup-worktree: status fanout migration timed out on $second_fanout_lock" >&2
+      return 1
+    fi
+    EVENTS_MIGRATION_DIRS+=("$second_fanout_lock")
+  fi
 
   # Another setup may have completed while this process waited for the locks.
   # Re-read both the link and recovery receipts before choosing a mutation path.
@@ -901,6 +988,10 @@ link_events_journal() {
     if (( rc == 0 )); then
       command -p rm -f "${backup}.landed"
     fi
+  fi
+
+  if (( rc == 0 )); then
+    reconcile_status_fanout_cursors "$source" "$target" || rc=$?
   fi
 
   if ! stop_events_migration_keepalive; then
