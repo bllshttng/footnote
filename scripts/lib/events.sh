@@ -130,7 +130,7 @@ emit_event() {
     _append_bounded_event emit_event "$event" "$EVENTS_FILE" || true
 }
 
-# emit_event_raw TYPE JSON
+# emit_event_raw TYPE JSON [SOURCE]
 #
 # Gate-provenance events (phase_init, phase_transition, phase_rolled_back)
 # use this form: the caller passes a top-level `type` and a JSON data
@@ -144,14 +144,17 @@ emit_event_raw() {
     # default-case and the arg-case. Assign-then-default avoids the
     # parser ambiguity entirely.
     local json="${2:-}"
+    local source="${3:-}"
     [[ -z "$json" ]] && json='{}'
     local events_path="${EVENTS_FILE:-.fno/events.jsonl}"
     local event
     event=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg type "$type" \
+        --arg source "$source" \
         --argjson data "$json" \
-        '{ts: $ts, type: $type, data: $data}' 2>/dev/null) || return 0
+        '{ts: $ts, type: $type, data: $data}
+        + (if $source == "" then {} else {source: $source} end)' 2>/dev/null) || return 0
     _append_bounded_event emit_event_raw "$event" "$events_path" || true
 }
 

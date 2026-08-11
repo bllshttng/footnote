@@ -234,8 +234,9 @@ def test_gc_preserves_rows_that_anchor_a_fanout_occurrence_cursor(tmp_path: Path
     status_dir.mkdir(parents=True)
     events = state_dir / "events.jsonl"
     cursor_ts = "2026-07-01T00:00:00Z"
+    anchor_ts = "2026-07-01T00:00:00+00:00"
     older = _event("claim_acquired", "2026-06-30T00:00:00Z") + "\n"
-    anchor = _event("claim_acquired", cursor_ts) + "\n"
+    anchor = _event("claim_acquired", anchor_ts) + "\n"
     delivered = json.dumps(
         {"ts": cursor_ts, "type": "blocked", "source": "target", "data": {}}
     ) + "\n"

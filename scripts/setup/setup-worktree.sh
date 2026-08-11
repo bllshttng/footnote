@@ -512,7 +512,8 @@ PY
 reconcile_status_fanout_cursors() {
   local source="$1"
   local target="$2"
-  python3 - "$(dirname "$source")/status-sinks" "$(dirname "$target")/status-sinks" <<'PY'
+  shift 2
+  python3 - "$(dirname "$source")/status-sinks" "$(dirname "$target")/status-sinks" "$@" <<'PY'
 import json
 import os
 import re
@@ -522,9 +523,8 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-canonical_dir, local_dir = map(Path, sys.argv[1:])
-if not local_dir.is_dir():
-    raise SystemExit(0)
+canonical_dir, local_dir = map(Path, sys.argv[1:3])
+migrated_segments = [Path(value) for value in sys.argv[3:]]
 canonical_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -590,10 +590,27 @@ def retire_cursor(local_path, canonical_path):
             pass
 
 
-for local_path in local_dir.glob("*.cursor"):
+earliest_migrated = None
+for segment in migrated_segments:
+    try:
+        with segment.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    raw = json.loads(line).get("ts")
+                    parsed = timestamp(raw)
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if earliest_migrated is None or parsed < earliest_migrated[1]:
+                    earliest_migrated = (raw, parsed)
+    except (OSError, UnicodeError):
+        continue
+
+local_names = set()
+for local_path in local_dir.glob("*.cursor") if local_dir.is_dir() else ():
     local = read_cursor(local_path)
     if local is None:
         continue
+    local_names.add(local_path.name)
     canonical_path = canonical_dir / local_path.name
     try:
         if os.path.samefile(local_path, canonical_path):
@@ -607,6 +624,14 @@ for local_path in local_dir.glob("*.cursor"):
         # for the at-least-once sink, while skipping a delayed local row is not.
         atomic_cursor(canonical_path, (local[0], 0))
     retire_cursor(local_path, canonical_path)
+
+if earliest_migrated is not None:
+    for canonical_path in canonical_dir.glob("*.cursor"):
+        if canonical_path.name in local_names:
+            continue
+        canonical = read_cursor(canonical_path)
+        if canonical is None or earliest_migrated[1] <= canonical[2]:
+            atomic_cursor(canonical_path, (earliest_migrated[0], 0))
 PY
 }
 
@@ -1052,6 +1077,7 @@ link_events_journal() {
 
   local rc=0
   local leases_owned=1
+  local -a migrated_segments=()
   local stamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
   local backup="${target}.pre-share.pending.${stamp}"
   local completed_backup="${target}.pre-share.${stamp}"
@@ -1097,6 +1123,7 @@ link_events_journal() {
       if (( rc == 0 )) && verify_events_migration_leases; then
         mv "$pending" "$completed" || rc=$?
         if (( rc == 0 )); then
+          migrated_segments+=("$completed")
           command -p rm -f "${pending}.landed"
         fi
       elif (( rc == 0 )); then
@@ -1134,12 +1161,17 @@ link_events_journal() {
       return 1
     fi
     if (( rc == 0 )); then
+      migrated_segments+=("$completed_backup")
       command -p rm -f "${backup}.landed"
     fi
   fi
 
   if (( rc == 0 )) && verify_events_migration_leases; then
-    reconcile_status_fanout_cursors "$source" "$target" || rc=$?
+    if (( ${#migrated_segments[@]} > 0 )); then
+      reconcile_status_fanout_cursors "$source" "$target" "${migrated_segments[@]}" || rc=$?
+    else
+      reconcile_status_fanout_cursors "$source" "$target" || rc=$?
+    fi
   elif (( rc == 0 )); then
     rc=1
     leases_owned=0

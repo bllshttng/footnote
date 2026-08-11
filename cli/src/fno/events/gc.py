@@ -103,9 +103,9 @@ def _read_cursor(path: Path) -> int:
     return max(value, 0)
 
 
-def _fanout_cursor_timestamps(status_dir: Path) -> set[str]:
+def _fanout_cursor_timestamps(status_dir: Path) -> set[datetime]:
     """Return timestamps whose same-second occurrence indexes must stay stable."""
-    timestamps: set[str] = set()
+    timestamps: set[datetime] = set()
     try:
         cursor_paths = list(status_dir.glob("*.cursor"))
     except OSError:
@@ -117,13 +117,9 @@ def _fanout_cursor_timestamps(status_dir: Path) -> set[str]:
             count = payload["n"]
         except (KeyError, OSError, TypeError, UnicodeError, ValueError):
             continue
-        if (
-            isinstance(timestamp, str)
-            and isinstance(count, int)
-            and not isinstance(count, bool)
-            and count >= 0
-        ):
-            timestamps.add(timestamp)
+        parsed = _timestamp(timestamp)
+        if parsed is not None and isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            timestamps.add(parsed)
     return timestamps
 
 
@@ -314,7 +310,7 @@ def gc_events(
                         mapped_cursor += len(line)
                     source_offset = line_end
                     continue
-                if timestamp < cutoff and timestamp_value not in fanout_cursor_timestamps:
+                if timestamp < cutoff and timestamp not in fanout_cursor_timestamps:
                     result["deleted"] += 1
                     source_offset = line_end
                     continue

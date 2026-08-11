@@ -3089,7 +3089,7 @@ event_types:
   - name: operator_initiated
     retention: durable
     description: "An action completed while a human held a drive-authority window. The action remains successful if this best-effort audit emit fails."
-    sources: [target, backlog, test]
+    sources: [target, backlog, hook, test]
     data:
       required: [action_type]
       properties:

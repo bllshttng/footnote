@@ -243,6 +243,15 @@ assert "repeated setup cannot rewind a retired fanout cursor" \
   bash -c 'jq -e '\''.ts == "2026-08-11T12:00:00Z" and .n == 4'\'' "$1" >/dev/null' \
   _ "$canonical/.fno/status-sinks/ops.cursor"
 
+cursorless_fanout_worktree="$TMP/cursorless-fanout-worktree"
+mkdir -p "$cursorless_fanout_worktree/.fno"
+printf '%s\n' '{"ts":"2026-08-11T07:00:00Z","v":1,"type":"blocked","source":"target","run":"cursorless-run","data":{"reason":"pending-without-local-cursor"}}' > "$cursorless_fanout_worktree/.fno/events.jsonl"
+printf '%s' '{"ts":"2026-08-11T11:00:00Z","n":1}' > "$canonical/.fno/status-sinks/cursorless.cursor"
+CANONICAL="$canonical" WORKTREE="$cursorless_fanout_worktree" bash "$SETUP" >/dev/null 2>&1
+assert "migration lowers canonical sinks for pending rows without a local cursor" \
+  bash -c 'jq -e '\''.ts == "2026-08-11T07:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
+  _ "$canonical/.fno/status-sinks/cursorless.cursor"
+
 fractional_cursor_worktree="$TMP/fractional-cursor-worktree"
 mkdir -p "$fractional_cursor_worktree/.fno/status-sinks"
 printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","v":1,"type":"blocked","source":"target","run":"local-run","data":{"reason":"mixed-precision"}}' > "$fractional_cursor_worktree/.fno/events.jsonl"
