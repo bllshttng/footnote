@@ -80,6 +80,14 @@ printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' >
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
 export FNO_REPO_ROOT="$SBX"
+# Ambient harness identity is a FIXTURE, not something inherited. The hook asks
+# `fno mail send --to-self`, which derives its recipient from these markers, so a
+# developer machine leaked the REAL session id in and CI (which has none) took a
+# different branch than the local run: the local pass was environment-dependent.
+# Pin it to the fixture session and scrub every other family, since --to-self
+# refuses when two harness families are present.
+export CLAUDE_CODE_SESSION_ID="$KING_SID"
+unset CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID
 cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events all land under $SBX
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
