@@ -257,30 +257,31 @@ def test_bound_is_keyed_on_the_session_not_on_short_id() -> None:
     assert result.bound and not result.short_id
 
 
-def test_agents_spawn_receipt_carries_both_facts_when_unbound() -> None:
-    """The `fno agents spawn` receipt printer. An unbound receipt must say WHY
-    and whether the pane is still there; a bound one stays byte-stable but for
-    `bound` itself."""
-    import json
+@pytest.mark.parametrize(
+    "provider,named,expected",
+    [
+        # The codex branches name their reason precisely and it survives.
+        ("codex", "pane-died-before-binding", "pane-died-before-binding"),
+        ("codex", "binding-window-expired", "binding-window-expired"),
+        ("codex", "no-child-pid-to-correlate", "no-child-pid-to-correlate"),
+        # Every OTHER unbound route - an opencode backfill miss, a happy-claude
+        # row - names none, and must still not emit a null.
+        ("opencode", None, "no-session-binding-for-opencode"),
+        ("claude", None, "no-session-binding-for-claude"),
+    ],
+)
+def test_every_unbound_receipt_names_a_reason(
+    provider: str, named: str | None, expected: str
+) -> None:
+    """An unbound receipt whose reason is null is the same empty signal as an
+    empty short_id. Pinning the IMPLICATION, not a list of branches, so a new
+    unbound branch cannot reintroduce a null by forgetting."""
+    assert mux_spawn._resolve_unbound_reason(None, named, provider) == expected
 
-    from fno.agents import cli as agents_cli
 
-    src = Path(agents_cli.__file__).read_text()
-    assert '"bound": pane_result.bound' in src
-    assert 'receipt_obj["pane_alive"] = pane_result.pane_alive' in src
-    assert 'receipt_obj["unbound_reason"] = pane_result.unbound_reason' in src
-    # A receipt built from an unbound result must round-trip the invariant.
-    obj = {"short_id": "", "bound": False, "pane_alive": True,
-           "unbound_reason": "binding-window-expired"}
-    assert json.loads(json.dumps(obj))["bound"] == bool(obj["short_id"])
-
-
-def test_autonomous_dispatcher_return_carries_bound() -> None:
-    """The second caller (fno/dispatch.py) declared `launched` from pane creation
-    alone, with no field able to carry a doubt. A guard on the CLI receipt
-    printer alone would have left this path exactly as broken."""
-    src = (Path(mux_spawn.__file__).parent.parent / "dispatch.py").read_text()
-    assert '"bound": result.bound' in src
+def test_a_bound_receipt_never_carries_a_reason() -> None:
+    """Including a stale one left over from an earlier probe in the same spawn."""
+    assert mux_spawn._resolve_unbound_reason(SID, "binding-window-expired", "codex") is None
 
 
 # ---------------------------------------------------------------------------

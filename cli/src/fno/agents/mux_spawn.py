@@ -1200,6 +1200,10 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
 _BINDING_WINDOW_S = 20.0
 _BINDING_WINDOW_ENV = "FNO_PANE_BINDING_WINDOW_S"
 _BINDING_POLL_S = 0.75
+#: How long the wait may stay silent before it says what it is doing. A spawn
+#: that used to return in 3s can now take the full window, and a silent block on
+#: an interactive verb reads as a hang, so the wait announces itself once.
+_BINDING_ANNOUNCE_S = 3.0
 #: Pane scrollback retained per tick, and the slice echoed to stderr on death.
 _PANE_TAIL_LINES = 200
 _PANE_TAIL_ECHO_LINES = 10
@@ -1264,6 +1268,7 @@ def _await_pane_binding(
     window_s: Optional[float] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     sleep: Optional[Callable] = None,
+    label: str = "the worker",
 ) -> PaneBinding:
     """Wait out the gap between "a pane exists" and "a worker reached its provider".
 
@@ -1297,11 +1302,17 @@ def _await_pane_binding(
     part), though only the codex route is wired onto it today.
     """
     naptime = sleep or time.sleep
-    deadline = time.monotonic() + max(window_s if window_s is not None else _binding_window_s(), 0.0)
+    window = max(window_s if window_s is not None else _binding_window_s(), 0.0)
+    started = time.monotonic()
+    deadline = started + window
     tail = ""
+    announced = False
     while True:
         sid = bind_probe()
         if sid:
+            # pane_alive True is OBSERVED, not assumed: the probe read the id
+            # from a rollout fd held open by a live process in the pane's tree,
+            # so a dead pane cannot produce one.
             return PaneBinding(sid, True, "", tail)
         # Keep the newest NON-EMPTY read: a TUI that has not painted yet reads
         # empty, and a later empty read must not erase real earlier evidence.
@@ -1315,7 +1326,31 @@ def _await_pane_binding(
         # exactly one look rather than skipping the loop entirely.
         if time.monotonic() >= deadline:
             return PaneBinding(None, alive, "binding-window-expired", tail)
+        if not announced and time.monotonic() - started >= _BINDING_ANNOUNCE_S:
+            announced = True
+            print(
+                f"spawn: pane {mux.get('pane_id')} is up; waiting up to "
+                f"{window:.0f}s for {label} to bind its session",
+                file=sys.stderr,
+            )
         naptime(_BINDING_POLL_S)
+
+
+def _resolve_unbound_reason(
+    session_uuid: Optional[str], reason: Optional[str], provider: str
+) -> Optional[str]:
+    """The reason an unbound receipt carries; None when it is bound.
+
+    Structural, not per-branch: the codex path names its reason precisely, but
+    every OTHER way to end up unbound (an opencode backfill miss, a happy-claude
+    route) would otherwise emit ``unbound_reason: null`` - the same empty signal
+    as an empty ``short_id``, which is what this whole change exists to remove.
+    Defaulting here means a new unbound branch cannot reintroduce a null by
+    forgetting, and a bound spawn can never carry a stale reason.
+    """
+    if session_uuid is not None:
+        return None
+    return reason or f"no-session-binding-for-{provider}"
 
 
 def _write_pane_death_log(name: str, tail: str) -> str:
@@ -1837,6 +1872,7 @@ def dispatch_spawn_pane(
                         attempts=1,
                     ),
                     runner=runner,
+                    label="codex",
                 )
                 session_uuid = binding.session_id
                 pane_alive = binding.pane_alive
@@ -2161,6 +2197,7 @@ def dispatch_spawn_pane(
     # transport key is not short_id (opencode, gemini, agy - US8) leaves
     # short_id empty while being perfectly bound. For claude and codex, where
     # short_id IS the handle, the two agree, and a test pins that.
+    #
     return MuxSpawnResult(
         name=name,
         provider=provider,
@@ -2172,7 +2209,7 @@ def dispatch_spawn_pane(
         status=row_status,
         bound=session_uuid is not None,
         pane_alive=pane_alive,
-        unbound_reason=unbound_reason,
+        unbound_reason=_resolve_unbound_reason(session_uuid, unbound_reason, provider),
         log_path=death_log_path,
         effective_message=effective_message,
         placement=placement_receipt,
