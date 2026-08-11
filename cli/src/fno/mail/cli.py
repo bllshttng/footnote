@@ -235,6 +235,59 @@ def _enforce_body_cap(body: str) -> None:
         )
 
 
+def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
+    """Refuse a body that breaks the five style rules.
+
+    Fail-open: an empty body, the kill switch (``FNO_STYLE_ENFORCE=0``), a
+    ``style-exception:`` line, or a non-empty ``--style-exception`` reason skips
+    the check. The refusal names each broken rule and the offending sentence,
+    and the message itself passes the five rules.
+    """
+    if os.environ.get("FNO_STYLE_ENFORCE") == "0" or not body:
+        return
+    if allow_reason and allow_reason.strip():
+        return
+    from fno import style
+
+    if style.has_exception(body):
+        return
+    violations = style.check(body, surface="mail")
+    if violations:
+        _emit_style_refusal(violations)
+        print(style.format_violations(violations), file=sys.stderr)
+        raise typer.Exit(code=1)
+
+
+def _emit_style_refusal(violations: list) -> None:
+    """Record one style_refusal event so the retry rate is a query over events.jsonl.
+
+    Best-effort and never blocks a refusal: a measurement hook that wedged the
+    gate it measures would silence the distress channel. Carries the rule ids
+    that fired and the ambient session id, so a refusal paired with a later
+    passing send in the same session is the retry signal.
+    """
+    try:
+        from fno.events import _build, append_event
+        from fno.harness_identity import resolve_harness_identity
+
+        data: dict = {
+            "surface": "mail",
+            "rule_ids": sorted({v.rule for v in violations}),
+            "violation_count": len(violations),
+        }
+        ident = resolve_harness_identity()
+        if ident.session_id:
+            data["session_id"] = ident.session_id
+            source = "target"
+        else:
+            source = "test"
+        append_event(_build("style_refusal", source, data))
+    except Exception:
+        pass
+
+
+
+
 def _validate_kind(kind: str) -> str:
     """Validate a CLI ``--kind`` value. Hint at replacement for deprecated kinds."""
     if kind in VALID_KINDS:
@@ -542,6 +595,10 @@ def cmd_reply(
     cascade_of: Optional[str] = typer.Option(None, "--cascade-of", help="Originating msg-id for cascades"),
     from_project: Optional[str] = typer.Option(None, "--from", help="Sender project (overrides settings.yaml)"),
     json_out: bool = typer.Option(False, "--json", "-J", help="Print {msg_id, thread_path} as JSON"),
+    style_exception: str | None = typer.Option(
+        None, "--style-exception",
+        help="Bypass the style check for this body with a stated reason.",
+    ),
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
@@ -568,6 +625,7 @@ def cmd_reply(
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
     _enforce_body_cap(body_text)
+    _enforce_style(body_text, allow_reason=style_exception)
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
     # and answer name/session/node mail back to its original sender. Anything else
@@ -2105,6 +2163,10 @@ def cmd_send(
             "unwrapped payload carries no `from`."
         ),
     ),
+    style_exception: str | None = typer.Option(
+        None, "--style-exception",
+        help="Bypass the style check for this body with a stated reason.",
+    ),
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
@@ -2287,6 +2349,7 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
         _enforce_body_cap(content)
+        _enforce_style(content, allow_reason=style_exception)
 
         # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
         # (question -> wake-signal, fyi -> memory). Addressed to an agent they
@@ -2450,6 +2513,7 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
         _enforce_body_cap(content)
+        _enforce_style(content, allow_reason=style_exception)
         try:
             result = dispatch_send_to_project(
                 to_project,
@@ -2499,6 +2563,7 @@ def cmd_send(
                 print(f"usage: fno mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
             _enforce_body_cap(message)
+            _enforce_style(message, allow_reason=style_exception)
             _job_lane_send(message, name, from_name=stamp_from(from_name))
             return
 
@@ -2512,6 +2577,7 @@ def cmd_send(
         raise typer.Exit(code=2)
 
     _enforce_body_cap(message)
+    _enforce_style(message, allow_reason=style_exception)
     try:
         result = dispatch_send(
             name=name,

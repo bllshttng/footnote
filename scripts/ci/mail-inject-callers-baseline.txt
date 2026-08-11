@@ -1,0 +1,12 @@
+# Known mail-inject argv construction sites, held by the CI ratchet.
+# Each entry is exact: <file>::<enclosing-function>. Keyed on function, not
+# line, so a reorder inside an existing caller does not trip the gate; a NEW
+# caller does. Remove or add a line only in the same PR that removes or adds the
+# caller, and carry a reason the payload is framed or a slash command.
+#
+# Forgetting is refused at runtime. Adding is refused at CI. Neither one passes
+# forever by describing today.
+cli/src/fno/agents/dispatch.py::mail_inject_probe  # --probe: reads no payload, injects nothing
+cli/src/fno/agents/dispatch.py::_mail_inject_claude  # framed <fno_mail>/<cross-session-message>, or _raw_send slash
+cli/src/fno/agents/dispatch.py::_mail_inject_codex  # framed <fno_mail>/<cross-session-message>, or slash
+cli/src/fno/relay/roundtrip.py::submit_via_control_reply  # framed <cross-session-message> relay hop (param is `framed`)

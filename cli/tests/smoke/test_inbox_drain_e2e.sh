@@ -42,7 +42,7 @@ FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --body "please file as a graph node"
 FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind question \
-  --body "should we proceed with rollback"
+  --body "do we proceed with the rollback"
 FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" fno-py mail send \
   --to-project "$PROJECT" --from-name "sender-proj" --kind fyi \
   --body "build complete in 4 minutes"

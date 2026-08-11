@@ -1,0 +1,37 @@
+name: mail-inject-callers
+
+# Ratchet on every Python site that builds a `mail-inject` argv. The Rust
+# binary is the second unwrapped door onto the transport; a new caller piping
+# unframed prose would bypass the command-only predicate's premise. A new caller
+# fails CI until it is recorded in the baseline with a reason. Pure stdlib, so
+# no uv or fno setup is needed.
+
+on:
+  pull_request:
+    paths:
+      - cli/src/**
+      - scripts/ci/check-mail-inject-callers.sh
+      - scripts/ci/mail-inject-callers-baseline.txt
+      - .github/workflows/mail-inject-callers.yml
+  push:
+    branches: [main]
+    paths:
+      - cli/src/**
+
+concurrency:
+  group: mail-inject-callers-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: mail-inject caller ratchet
+        run: bash scripts/ci/check-mail-inject-callers.sh

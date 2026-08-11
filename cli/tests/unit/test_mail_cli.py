@@ -205,7 +205,7 @@ def test_handle_question_and_fyi_are_refused_before_any_write(
     result = runner.invoke(
         app,
         [
-            "mail", "send", "worker-a", "Should this route?",
+            "mail", "send", "worker-a", "Does this route?",
             "--kind", kind, "--from-name", "sender",
         ],
     )
@@ -233,14 +233,14 @@ def test_all_explicit_project_kinds_remain_valid(
         app,
         [
             "mail", "send", "--to-project", "ready-web", "--kind", kind,
-            "Which contract should win?", "--from-name", "sender",
+            "Which contract wins?", "--from-name", "sender",
         ],
     )
 
     assert result.exit_code == 0, result.output
     messages = list(iter_messages())
     assert [(message.to, message.kind, message.body) for message in messages] == [
-        ("ready-web", kind, "Which contract should win?")
+        ("ready-web", kind, "Which contract wins?")
     ]
 
 

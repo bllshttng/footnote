@@ -50,7 +50,7 @@ run_fno() {
 
 # 1) proj-a sends a heads-up to proj-b.
 SEND_OUT=$(cd "$PROJ_A" && run_fno mail send --to-project proj-b --kind heads-up \
-    --body "region data source live in PR 112; please plumb region column" \
+    --body "region data source is live in PR 112, please plumb the region column" \
     --ref-pr 112 --json)
 SENT_MSG=$(echo "$SEND_OUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read().splitlines()[-1])['msg_id'])")
 
