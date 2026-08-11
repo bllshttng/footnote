@@ -963,8 +963,15 @@ def _silent_switch_report() -> dict[str, Any]:
                 "command": "fno config set dispatch.auto_merge false",
             }
         )
+    # A manifest's per-run approval is inert while the kill-switch
+    # (auto_merge.enabled) is off: the sanctioned merge path checks that switch
+    # first, so a green PR cannot merge unattended no matter how many manifests
+    # carry auto_merge_approved. Counting them as an active irreversible risk in
+    # that state is a false alarm; the kill-switch-off inaction finding above
+    # already names that state. Only when the switch is ON do armed manifests
+    # become a live, silent irreversible action worth a doctor line.
     armed = _auto_merge_armed_manifests()
-    if armed:
+    if armed and am is True:
         findings.append(
             {
                 "direction": "irreversible",

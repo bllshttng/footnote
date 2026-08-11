@@ -103,6 +103,26 @@ def test_auto_merge_armed_named_as_irreversible(monkeypatch: pytest.MonkeyPatch)
         assert "false" in f["command"]
 
 
+def test_armed_manifests_not_irreversible_when_kill_switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manifest's auto_merge_approved is inert while auto_merge.enabled is off.
+
+    The sanctioned merge path checks that switch first, so no green PR can merge
+    unattended no matter how many manifests carry approval. Counting them as an
+    active irreversible risk in that state is the false alarm this guards.
+    """
+    _patch_silent(
+        monkeypatch,
+        settings=_fake_settings(active_backlog=True, think_spawn=True, auto_merge=False, dispatch_am=False),
+        armed=4,
+    )
+    report = doctor._silent_switch_report()
+    assert not any(
+        f["switch"] == "auto_merge_approved (worktree manifests)"
+        for f in report["findings"]
+    )
+    assert not any(f["direction"] == "irreversible" for f in report["findings"])
+
+
 def test_both_directions_when_drain_off_and_merge_armed(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_silent(
         monkeypatch,
