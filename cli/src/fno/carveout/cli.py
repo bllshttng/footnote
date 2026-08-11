@@ -254,13 +254,31 @@ def resolve_carveouts(
     Without the reason that same removal is indistinguishable from dropping the
     work on the floor.
     """
-    from fno.carveout.core import consume_carveouts, resolve_carveout_root
+    from fno.carveout.core import (
+        consume_carveouts,
+        read_carveouts,
+        resolve_carveout_root,
+    )
 
     # Dedupe (order-preserving) so a repeated id does not inflate the requested
     # count and trip a false shortfall warning - consume_carveouts dedupes
     # internally, so removed is by unique id.
     unique_ids = list(dict.fromkeys(ids))
-    removed = consume_carveouts(resolve_carveout_root(), unique_ids)
+    root = resolve_carveout_root()
+    # Which requested ids are actually ON the ledger, read BEFORE the removal.
+    # consume_carveouts returns only a count, so without this the event below
+    # would name every id the operator typed - asserting that an absent id was
+    # retired for that reason while it sits on some other ledger, or nowhere.
+    # An unreadable ledger degrades to "cannot attribute" rather than guessing.
+    try:
+        present = {
+            str(r.get("id"))
+            for r in read_carveouts(root)
+            if str(r.get("id")) in set(unique_ids)
+        }
+    except Exception:
+        present = set()
+    removed = consume_carveouts(root, unique_ids)
     if removed < len(unique_ids):
         # consume_carveouts returns the count actually removed and is best-effort
         # (a lock timeout or unwritable ledger also returns a low count). A
@@ -297,7 +315,10 @@ def resolve_carveouts(
                     # validation at emit time, which is how this was caught.
                     "backlog",
                     {
-                        "carveout_ids": ",".join(unique_ids),
+                        # The ids actually retired, not every id requested.
+                        "carveout_ids": ",".join(
+                            i for i in unique_ids if i in present
+                        ) or ",".join(unique_ids),
                         "reason": reason,
                         "removed": removed,
                     },

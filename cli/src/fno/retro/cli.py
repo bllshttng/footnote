@@ -801,25 +801,33 @@ def run(
         except Exception as _exc:
             typer.echo(f"WARN gate_escape summary failed: {_exc}", err=True)
 
-    # The sentinel loop below only sees carve-outs a TRIGGER points it at. A
-    # carve-out with no session, or one whose PR never dropped a sentinel, is
-    # invisible to it - so "no sentinels" read as "nothing to do" while the
-    # ledger filled up, and the close gate (condition D) then refused every node
-    # with no verb that could clear it. Name the backlog here.
-    #
-    # Deliberately OUTSIDE the plain-run branch: a --pr-number run is how
-    # /fno:pr merged calls this, and that is exactly the caller a merging
-    # session most needs the count from. Reporting only - the sweep mutates the
-    # graph, and no caller of `retro run` may file nodes unattended.
-    pending = _pending_carveout_count(carveout_root)
-    if pending:
-        typer.echo(
-            f"carve-outs: {pending} unharvested on the ledger (no trigger "
-            f"covers them); preview with `fno retro sweep-carveouts`"
-        )
+    def _report_pending_carveouts() -> None:
+        """Name what the triggers left behind, AFTER they have run.
+
+        The sentinel loop only sees carve-outs a trigger points it at. A
+        carve-out with no session, or one whose PR never dropped a sentinel, is
+        invisible to it - so "no sentinels" read as "nothing to do" while the
+        ledger filled up, and the close gate then refused every node with no
+        verb that could clear it.
+
+        Counted at the END, on every run including --pr-number (how /fno:pr
+        merged calls this). Counting up front announced the rows this very run
+        was about to harvest as "no trigger covers them", which is false while
+        it is being printed and stale by the time the run finishes. Reporting
+        only: the sweep mutates the graph, and no caller of `retro run` may
+        file nodes unattended.
+        """
+        pending = _pending_carveout_count(carveout_root)
+        if pending:
+            typer.echo(
+                f"carve-outs: {pending} left unharvested on the ledger after "
+                f"this run (no trigger covers them); preview with "
+                f"`fno retro sweep-carveouts`"
+            )
 
     if not candidates and pr is None:
         typer.echo("(no retro-pending sentinels to triage)")
+        _report_pending_carveouts()
         raise typer.Exit(1 if pm_failed else 0)
 
     any_retained = pm_failed
@@ -907,6 +915,8 @@ def run(
         except Exception as exc:
             typer.echo(f"WARN --pr {pr}: {exc}", err=True)
             any_retained = True
+
+    _report_pending_carveouts()
 
     # Non-zero when something was retained for retry (AC4-ERR), so a loop knows.
     raise typer.Exit(1 if any_retained else 0)

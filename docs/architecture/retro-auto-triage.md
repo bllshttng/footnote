@@ -82,12 +82,17 @@ Each row is matched against every node in the graph, done nodes included, by thr
 
 | Match | Outcome |
 |---|---|
-| cv-id quoted verbatim in a node's title or details (**exact**) | `resolve`: consume the row, file nothing, name the tracking node. Every node the sweep files cites its own cv-id, so a re-run is a no-op. |
-| an existing `retro-triage` trailer whose `finding_hash` equals the description hash, **ignoring** the trailer's `source_pr` (**exact**) | `resolve`: an earlier PR-scoped harvest already filed it. |
+| cv-id quoted verbatim in a node's title or details (**exact**) | `resolve`: consume the row, file nothing, name the tracking node. This is the ONLY match that consumes. Every carve-out node cites its cv-id, whichever harvest filed it, so it covers a re-run and a PR-harvested node alike. |
+| an existing `retro-triage` trailer whose `finding_hash` equals the description hash, **ignoring** the trailer's `source_pr` (**ambiguous**) | `review`: the hash covers the description alone, so two carve-outs can share generic text ("unrelated", "no reliable repro") while differing in kind, need and scope. Resolving on that would consume the later row without filing its distinct work. |
 | normalized-title similarity at or above 0.85, minimum 20 chars (**fuzzy**) | `review`: neither filed (would duplicate) nor consumed (a wrong guess loses the work). A human decides, and a parked `deferred` row keeps blocking its close, which is the correct outcome. |
 | the same text already claimed by an earlier row in this same sweep (**within-batch**) | `review`: one blocker carved out from two sessions is still one piece of work. It parks rather than resolving, because the twin's node does not exist yet and nothing is consumed without a node. |
 | the row carries no `id` | `review`: `read_carveouts` does not require one, and a row without an id has no cite, so it can never be filed. Named once rather than failing every future sweep. |
 | nothing matched | `file`: mint the node (queued behind `fno backlog pick` in interactive mode), then consume. |
+
+The cv-id is also the key across the two harvest paths.
+The content-hash dedup key is `{source_pr}:{hash}`, so a node the sweep filed (`source_pr=None`) and the same carve-out arriving later through a PR-scoped harvest (`source_pr=123`) produce different keys for identical work and both would file.
+That is reachable whenever a sweep's consume falls short, which it can: `consume_carveouts` is best-effort and returns 0 on a lock timeout.
+`cv_ids_cited_in_nodes` is shared by both paths so neither files what the other already tracks.
 
 The fuzzy matcher compares the title the sweep would actually file, not the carve-out's `need`.
 Those diverged once and left the sweep blind to every node it had filed itself.

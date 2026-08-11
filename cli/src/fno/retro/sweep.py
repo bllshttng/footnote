@@ -60,7 +60,7 @@ from typing import Callable, Optional
 
 from fno.carveout.core import BACKFILL_KIND
 from fno.retro.classify import classify_item, derive_title
-from fno.retro.dedup import assign_hashes, content_hash
+from fno.retro.dedup import assign_hashes, content_hash, cv_ids_cited_in_nodes
 from fno.retro.land import MODE_INTERACTIVE, land_candidates
 from fno.retro.types import KIND_CARVEOUT, Candidate, RawItem
 
@@ -144,7 +144,7 @@ def find_tracking_node(
     re-filing it would be the duplicate this sweep exists to avoid.
     """
     cv_id = str(rec.get("id") or "")
-    if cv_id:
+    if cv_id and cv_ids_cited_in_nodes(nodes, [cv_id]):
         for node in nodes:
             if cv_id in _node_text(node):
                 return str(node.get("id") or ""), f"cv-id cited in {node.get('id')}", True
@@ -348,6 +348,15 @@ def sweep_carveouts(
 def render_sweep(report: SweepReport) -> list[str]:
     """Human-readable sweep report, one line per carve-out plus a summary."""
     lines: list[str] = []
+    # A ledger that exists but could not be read must NEVER render as a count.
+    # "0 unharvested" on stdout is the same silent success read_carveouts raises
+    # to prevent, and a caller reading stdout with stderr redirected away would
+    # see a clean ledger for one that could not be opened.
+    if report.read_failed:
+        return [
+            "carve-out sweep: FAILED to read the ledger; no count is available "
+            "(this is NOT an empty ledger)"
+        ]
     verb = "applied" if report.applied else "dry run"
     counts = {
         d: len(report.by_disposition(d))

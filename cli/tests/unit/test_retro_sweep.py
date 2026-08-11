@@ -283,6 +283,48 @@ def test_an_unreadable_ledger_reports_failed_so_the_verb_can_exit_nonzero():
     assert report.failed  # drives the CLI exit code
 
 
+def test_the_pr_scoped_path_skips_a_carveout_the_sweep_already_filed():
+    """The hash key carries source_pr, so a sweep-filed node (None) and the same
+    carve-out under a PR (123) key differently and both file. Reachable whenever
+    a sweep's consume fell short, which is a documented best-effort failure."""
+    from fno.retro.dedup import cv_ids_cited_in_nodes
+
+    swept_node = {
+        "id": "x-swept",
+        "title": "some work",
+        "details": "body\n\nSource: source `cv-cross001`\n\n"
+        + trailer(None, content_hash("some work")),
+    }
+
+    # The PR-scoped path keys on "123:<hash>" and finds nothing...
+    from fno.retro.dedup import existing_keys_from_nodes
+
+    assert f"123:{content_hash('some work')}" not in existing_keys_from_nodes([swept_node])
+    # ...so the cv-id is what has to catch it, and does.
+    assert cv_ids_cited_in_nodes([swept_node], ["cv-cross001"]) == {"cv-cross001"}
+
+
+def test_cv_id_scan_does_not_match_an_unrelated_node():
+    """Positive control for the helper above: it really discriminates."""
+    from fno.retro.dedup import cv_ids_cited_in_nodes
+
+    node = {"id": "x-other", "title": "unrelated", "details": "cites cv-99999999"}
+
+    assert cv_ids_cited_in_nodes([node], ["cv-cross001"]) == set()
+
+
+def test_render_never_prints_a_count_for_an_unreadable_ledger():
+    """'0 unharvested' on stdout is the masquerade read_failed exists to stop;
+    a caller with stderr redirected away would read a clean ledger."""
+    from fno.retro.sweep import SweepReport, render_sweep
+
+    out = "\n".join(render_sweep(SweepReport(read_failed=True)))
+
+    assert "unharvested" not in out or "FAILED" in out
+    assert "0 file" not in out
+    assert "FAILED to read the ledger" in out
+
+
 def test_an_unreadable_ledger_is_not_an_empty_one():
     def _boom(root, kind=None):
         raise OSError("ledger is unreadable")
