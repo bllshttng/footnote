@@ -12,6 +12,7 @@
 //! a working supervisor end-to-end.
 
 use crate::events::EventEmitter;
+use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
 use crate::protocol::{
     read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
@@ -3040,6 +3041,27 @@ where
                 .as_deref()
                 .map(|s| Value::String(s.to_string()))
                 .unwrap_or(Value::Null);
+            // The mailbox address, mirroring `fno.agents.format.row_address`.
+            // This projection is the one `fno agents list` takes whenever an
+            // installed binary is present, so a column emitted Python-side only
+            // would be missing from the path nearly every reader uses -- which
+            // is exactly how this row shape drifted before. `short_id` is a
+            // fallback for claude ONLY, where the transport key IS the first
+            // eight; elsewhere it is a daemon worker key and would advertise a
+            // mailbox nothing drains.
+            let address: Value = e
+                .harness_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| Value::String(canonical_handle(s)))
+                .or_else(|| {
+                    if e.harness_name() == "claude" {
+                        e.transport_short().map(|s| Value::String(s.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(Value::Null);
             // Same formatter as Python's `AgentEntry.crown_label`, so the two
             // surfaces render an identical descriptor for the same row. Python
             // tests the scope for falsiness (`self.crown_scope or '?'`), so the
@@ -3066,6 +3088,7 @@ where
                 "harness_session_id": e.harness_session_id,
                 "short_id": short_id,
                 "session_id": session_id,
+                "address": address,
                 "cwd": e.cwd,
                 "created_at": e.created_at,
                 "last_message_at": e.last_message_at,
@@ -6886,6 +6909,15 @@ done
             row["harness_session_id"],
             "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
         );
+        // The mailbox address, asserted by VALUE and not merely by presence.
+        // This row is the exact shape the address column exists for: a pane
+        // worker with no transport key, whose only copyable identifier before
+        // this key was `name` -- and a name-lane durable write is the largest
+        // still-growing category of stranded mail on the bus. The value must
+        // equal what `mail drain-self` computes for itself, which is the first
+        // eight; the retired `<harness>-<short>` form is refused by the
+        // resolver, so emitting it here would advertise an unreachable mailbox.
+        assert_eq!(row["address"], "e6f78b98");
         // The pre-fix surface reported this row as having no identity at all:
         // session_id is legitimately null for a pane row (no transport key), so
         // harness_session_id is what has to carry it.

@@ -63,6 +63,7 @@ Returns a canonical object suitable for scripts:
       "harness_session_id": "e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
       "short_id": "e6f78b98",
       "session_id": "e6f78b98",
+      "address": "e6f78b98",
       "cwd": "/Users/foo/code/proj",
       "created_at": "2026-05-20T17:00:00Z",
       "last_message_at": "2026-05-20T17:30:12Z",
@@ -109,6 +110,17 @@ The value is a discriminated object, and the five kinds never collapse into one 
 
 ```bash
 fno agents list --json | jq -r '.agents[] | "\(.name)\t\(.harness)\t\(.observed_model.model // .observed_model.kind)"'
+```
+
+`address` is the one field in the row you can send mail to: the first eight of the session id, the same string `fno mail drain-self` computes for itself.
+Every other identifier names something else.
+`name` is a spawn label, `short_id` is a transport key that is `null` for most rows, `session_id` is a resume target, and the discovered lane's `LABEL` is a friendly alias.
+A reader with no address column copies `name`, and a name-lane durable write queues under a key no drain reads; that is the largest still-growing category of stranded mail on the bus.
+`address` is `null` when the row recorded no identity at all, which is reported as absence rather than as a plausible-looking handle.
+It is deliberately not promoted to the full session id when two rows share a first eight: ambiguity detection lives in the send resolver, which fails closed and names the candidates, and a second implementation here would be a second answer to one question.
+
+```bash
+fno agents list --json | jq -r '.agents[] | select(.address) | "\(.address)\t\(.name)"'
 ```
 
 `session_id` is the unified, harness-resolving resume target: `short_id` for claude, `harness_session_id` for codex, gemini, and opencode. `short_id` is the transport key and stays claude-only for back-compat (the claude jobId, by construction the leading 8 hex of the session uuid), so for a codex agent you get `short_id: null` but `session_id: "<uuid>"`, and that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` when the id was never captured, and for a claude pane row, which has no transport key for it to resolve from.

@@ -25,6 +25,33 @@ from fno.agents.registry import AgentEntry
 JSON_SCHEMA_VERSION = 2
 
 
+def row_address(
+    harness: Optional[str],
+    harness_session_id: Optional[str],
+    short_id: Optional[str] = None,
+) -> Optional[str]:
+    """The mailbox address a row can actually receive at.
+
+    One derivation, reached by both lanes (registry rows via
+    :func:`serialize_entry`, discovered rows via the table renderer) so the two
+    cannot advertise different addresses for the same session. The Rust
+    ``agent.list`` projection carries a parity-pinned mirror because it cannot
+    import Python; ``schemas/agents-list-row.json`` is what keeps them honest.
+
+    ``short_id`` is a fallback for claude ONLY, where the transport key IS the
+    first eight. A codex or opencode ``short_id`` is a daemon worker key, so
+    using it here would advertise a mailbox nothing drains - the exact failure
+    this column exists to stop.
+    """
+    from fno.harness_identity import canonical_handle
+
+    if harness_session_id:
+        return canonical_handle(harness_session_id)
+    if harness == "claude" and short_id:
+        return short_id
+    return None
+
+
 def serialize_entry(
     entry: AgentEntry,
     live_status: Optional[str],
@@ -75,6 +102,14 @@ def serialize_entry(
         "harness_session_id": entry.harness_session_id,
         "short_id": entry.short_id or None,
         "session_id": entry.session_id,
+        # The one identifier in this row that mail can be sent to. Every other
+        # one names something else: `name` is a spawn label, `short_id` is a
+        # transport key and is null for most rows, `session_id` is a resume
+        # target. A reader with no address column copies `name`, and a name-lane
+        # durable write queues under a key no drain reads.
+        "address": row_address(
+            entry.harness, entry.harness_session_id, entry.short_id or None
+        ),
         "cwd": entry.cwd,
         "created_at": entry.created_at,
         "last_message_at": entry.last_message_at,
@@ -134,15 +169,19 @@ def render_json(
 
 # --- Human table rendering ---------------------------------------------------
 #
-# Column layout (in order): NAME, HARNESS, STATUS, LIVE, LAST MESSAGE, CWD.
-# Width auto-sizes to terminal columns. STATUS and LIVE never truncate —
-# they are short-text columns. NAME and CWD truncate with right-aligned
-# ellipsis if needed; LAST MESSAGE is rendered as a relative-time string
-# from ``last_message_at``.
+# Column layout (in order): NAME, ADDRESS, HARNESS, STATUS, LIVE, LAST
+# MESSAGE, CWD. Width auto-sizes to terminal columns. STATUS and LIVE never
+# truncate — they are short-text columns. NAME and CWD truncate with
+# right-aligned ellipsis if needed; LAST MESSAGE is rendered as a relative-time
+# string from ``last_message_at``.
+#
+# ADDRESS never truncates either, and not for cosmetic reasons: a truncated
+# address is a WRONG address, and mail sent to it queues under a key no drain
+# reads. Overflow comes out of CWD then NAME, which lose meaning gracefully.
 
 # HARNESS, not PROVIDER: the column has always shown the harness, and the old
 # heading made a claude-hosted worker on a zai route read as running on claude.
-_HEADERS = ("NAME", "HARNESS", "STATUS", "LIVE", "LAST MESSAGE", "CWD")
+_HEADERS = ("NAME", "ADDRESS", "HARNESS", "STATUS", "LIVE", "LAST MESSAGE", "CWD")
 _HOME_PREFIX_PLACEHOLDER = "~"
 
 
@@ -261,6 +300,7 @@ def render_table(
         display_rows.append(
             {
                 "name": name,
+                "address": row.get("address") or "-",
                 "harness": row.get("harness") or "-",
                 "status": row.get("status") or "-",
                 "live": live,
@@ -273,6 +313,7 @@ def render_table(
     # NAME and CWD are the truncation candidates if the row overflows.
     min_widths = {
         "name": len("NAME"),
+        "address": len("ADDRESS"),
         "harness": len("HARNESS"),
         "status": len("STATUS"),
         "live": len("LIVE"),
@@ -285,8 +326,8 @@ def render_table(
             col_widths[key] = max(col_widths[key], len(str(r[key])))
 
     # Pad widths produce total row width; check overflow and truncate
-    # NAME / CWD if necessary. The 5 single-space separators contribute 5.
-    pad_total = sum(col_widths.values()) + 5
+    # NAME / CWD if necessary. The 6 single-space separators contribute 6.
+    pad_total = sum(col_widths.values()) + 6
     if pad_total > width:
         overflow = pad_total - width
         # Take from CWD first, then NAME.
@@ -298,7 +339,7 @@ def render_table(
             col_widths["name"] -= name_shrink
 
     def _format_row(values: list[str]) -> str:
-        keys = ["name", "harness", "status", "live", "last_message", "cwd"]
+        keys = ["name", "address", "harness", "status", "live", "last_message", "cwd"]
         cells = []
         for key, val in zip(keys, values):
             cell_text = str(val)
@@ -313,6 +354,7 @@ def render_table(
             _format_row(
                 [
                     r["name"],
+                    r["address"],
                     r["harness"],
                     r["status"],
                     r["live"],
@@ -328,33 +370,44 @@ def render_table(
     return out
 
 
-_DISCOVERED_HEADERS = ("HANDLE", "STATUS", "PROJECT", "HEX", "CWD")
+_DISCOVERED_HEADERS = ("ADDRESS", "LABEL", "STATUS", "PROJECT", "CWD")
 
 
 def _render_discovered_section(discovered: list[dict], width: int) -> str:
     """Render the host-local discovered-live-sessions lane (AC1-UI).
 
     A blank line + a banner separate it from the registry table so the two
-    lanes are unmistakable. Columns: HANDLE (friendly alias), STATUS
-    (idle/busy/waiting), PROJECT, HEX (the addressable short-id), CWD.
+    lanes are unmistakable. Columns: ADDRESS (the mailbox address), LABEL (the
+    friendly alias), STATUS (idle/busy/waiting), PROJECT, CWD.
+
+    ADDRESS leads and the alias is demoted to LABEL because the alias led this
+    table for its whole life, which made it the leftmost thing a reader copied
+    - and ``<project>-<short8>`` is not an address. The old HEX column already
+    held the right value in position four, where nobody read it.
     """
     display = []
     for r in discovered:
+        # Same derivation the registry lane uses. The discovered lane records a
+        # full session id, so this resolves for every row that has one and falls
+        # back to the lane's own short_id otherwise.
+        address = row_address("claude", r.get("session_id"), r.get("short_id")) or str(
+            r.get("short_id") or "-"
+        )
         display.append(
             {
-                "handle": str(r.get("handle") or "-"),
+                "address": address,
+                "label": str(r.get("handle") or "-"),
                 "status": str(r.get("status") or "-"),
                 "project": str(r.get("project") or "-"),
-                "hex": str(r.get("short_id") or "-"),
                 "cwd": _collapse_home(str(r.get("cwd") or "")),
             }
         )
 
     col_widths = {
-        "handle": len("HANDLE"),
+        "address": len("ADDRESS"),
+        "label": len("LABEL"),
         "status": len("STATUS"),
         "project": len("PROJECT"),
-        "hex": len("HEX"),
         "cwd": len("CWD"),
     }
     for r in display:
@@ -367,7 +420,7 @@ def _render_discovered_section(discovered: list[dict], width: int) -> str:
         cwd_shrink = min(overflow, max(0, col_widths["cwd"] - len("CWD")))
         col_widths["cwd"] -= cwd_shrink
 
-    keys = ["handle", "status", "project", "hex", "cwd"]
+    keys = ["address", "label", "status", "project", "cwd"]
 
     def _row(values: list[str]) -> str:
         cells = []
@@ -381,5 +434,7 @@ def _render_discovered_section(discovered: list[dict], width: int) -> str:
     banner = f"\nDISCOVERED LIVE SESSIONS ({len(display)}, host-local)\n"
     section = [banner.rstrip("\n"), _row(list(_DISCOVERED_HEADERS))]
     for r in display:
-        section.append(_row([r["handle"], r["status"], r["project"], r["hex"], r["cwd"]]))
+        section.append(
+            _row([r["address"], r["label"], r["status"], r["project"], r["cwd"]])
+        )
     return "\n".join(section) + "\n"
