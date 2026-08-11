@@ -94,10 +94,10 @@ It is binary-direct (a Python subprocess), NOT a routable `fno agents` verb: it 
 
 The verb confirms that the recipient transcript grew after the inject, i.e. the injected USER turn was recorded. For the target case (a session idle or blocked at a prompt) the turn records promptly, so growth fires within a poll interval. Two bounded edges remain:
 
-- A BUSY recipient (mid tool call) queues the injected turn; if it is not recorded within the poll budget the verb reports `not-confirmed`, Python writes the durable fallback, yet the queued inject still lands later. That is a bounded DOUBLE delivery.
+- A BUSY recipient (mid tool call) queues the injected turn; if it is not recorded within the poll budget the verb reports `not-confirmed`, Python writes the durable fallback, yet the queued inject still lands later. That bounded DOUBLE delivery is now suppressed at the recipient's drain: `cmd_drain_self` skips a durable copy whose `msg_id` already appears in the recipient transcript.
 - Live-first writes durable only after a failed live attempt, so a process kill during the up-to-20s live window loses the message, a window the old durable-first did not have.
 
-Both are accepted tradeoffs of live-inject-first. Hard exactly-once would carry the `msg_id` in the envelope and dedup at the recipient's drain (a follow-up, not built here).
+Both are accepted tradeoffs of live-inject-first. The double-delivery edge is deduped at the recipient's drain: the envelope carries the `msg_id`, and `cmd_drain_self` skips a durable copy whose id already landed in the recipient transcript, emitting an `agent_mail_drained` receipt with `reason="skipped-duplicate"`. The crash-window edge (a process kill during the live attempt) remains open until write-ahead durable.
 
 ## The relay variant
 
