@@ -94,10 +94,14 @@ It is binary-direct (a Python subprocess), NOT a routable `fno agents` verb: it 
 
 The verb confirms that the recipient transcript grew after the inject, i.e. the injected USER turn was recorded. For the target case (a session idle or blocked at a prompt) the turn records promptly, so growth fires within a poll interval. Two bounded edges remain:
 
-- A BUSY recipient (mid tool call) queues the injected turn; if it is not recorded within the poll budget the verb reports `not-confirmed`, Python writes the durable fallback, yet the queued inject still lands later. That bounded DOUBLE delivery is now suppressed at the recipient's drain: `cmd_drain_self` skips a durable copy whose `msg_id` already appears in the recipient transcript.
-- Live-first writes durable only after a failed live attempt, so a process kill during the up-to-20s live window loses the message, a window the old durable-first did not have. Write-ahead durable (W3) closes this: the durable placeholder is written BEFORE the live attempt and retracted on hosted confirm, so a kill during the live window leaves the message on the bus for the recipient's next drain.
+- A BUSY recipient queues the injected turn past the poll budget.
+  The verb writes the durable fallback while the queued inject still lands later.
+  That bounded DOUBLE delivery is now deduped at the drain (W2).
+- Live-first writes durable only after a failed live attempt.
+  A kill during the live window used to lose the message.
+  Write-ahead durable (W3) closes that window.
 
-Both were accepted tradeoffs of live-inject-first; both are now closed. The double-delivery edge is deduped at the recipient's drain: the envelope carries the `msg_id`, and `cmd_drain_self` skips a durable copy whose id already landed in the recipient transcript, emitting an `agent_mail_drained` receipt with `reason="skipped-duplicate"` (W2). The crash-window edge is closed by write-ahead durable (W3).
+Both tradeoffs are now closed.
 
 ## The relay variant
 
