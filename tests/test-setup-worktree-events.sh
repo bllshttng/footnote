@@ -135,6 +135,15 @@ CANONICAL="$canonical" WORKTREE="$newer_gate" bash "$SETUP" >/dev/null 2>&1
 newer_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "newer-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration keeps a newer passing re-review" test "$newer_verdict" = pass
 
+untimed_gate="$TMP/untimed-gate"
+mkdir -p "$untimed_gate/.fno"
+printf '%s\n' '{"ts":"2026-08-11T08:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"untimed-head","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"type":"review_attestation","source":"target","data":{"reviewer":"/code-review","head_sha":"untimed-head","verdict":"pass","session_id":"local"}}' > "$untimed_gate/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$untimed_gate" bash "$SETUP" >/dev/null 2>&1
+untimed_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "untimed-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
+assert "migration cannot restore an untimed passing review" test "$untimed_verdict" = fail
+
 malformed_gate="$TMP/malformed-gate"
 mkdir -p "$malformed_gate/.fno"
 printf '%s\n' '{"type":"review_attestation","data":{"reviewer":[],"head_sha":"abc","verdict":"fail"}}' >> "$canonical/.fno/events.jsonl"

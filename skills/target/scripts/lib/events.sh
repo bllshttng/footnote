@@ -58,8 +58,7 @@ _begin_shell_event_append() {
             printf '%s' "$token"
             return 0
         fi
-        rmdir "$token" 2>/dev/null || true
-        rmdir "$active_dir" 2>/dev/null || true
+        _end_shell_event_append "$token"
     done
 }
 

@@ -293,6 +293,45 @@ assert_contains "setup handoff canonical token" "$handoff_result" "TOKEN=${hando
 line=$(tail -1 "$handoff_canonical" 2>/dev/null)
 assert_contains "setup handoff append" "$line" '"type":"handoff_probe"'
 
+# A collector can publish its marker after token registration but before the
+# writer's second marker check. Retrying must remove the token's owner file too,
+# or collector and writer wait on each other until both time out.
+registration_events="$WORK/registration-race/events.jsonl"
+mkdir -p "$(dirname "$registration_events")"
+: > "$registration_events"
+registration_result=$(
+    (
+        # shellcheck disable=SC1090
+        source "$EVENTS_LIB"
+        identity_once="$WORK/registration-marker-created"
+        _event_process_identity() {
+            if [[ ! -e "$identity_once" ]]; then
+                : > "$identity_once"
+                mkdir "${registration_events}.gc.d"
+            fi
+            printf '%s' test-process
+        }
+        _wait_for_event_gc() {
+            local marker="${1}.gc.d"
+            if [[ -d "$marker" ]]; then
+                local active="${1}.shell-writers.d"
+                shopt -s nullglob
+                local entries=("$active"/*)
+                shopt -u nullglob
+                [[ -z "${entries[0]:-}" ]] || return 1
+                rmdir "$marker"
+            fi
+            return 0
+        }
+        token=$(_begin_shell_event_append "$registration_events" "${BASHPID:-$$}") || exit 1
+        printf 'TOKEN=%s\n' "$token"
+        _end_shell_event_append "$token"
+    )
+)
+rc=$?
+assert_eq "registration marker race rc" 0 "$rc"
+assert_contains "registration marker race retries" "$registration_result" "TOKEN=${registration_events}.shell-writers.d/"
+
 # AC-VALIDATOR: validator accepts canonical envelope (when validator is loadable)
 if declare -F validate_event >/dev/null 2>&1; then
     canonical='{"ts":"2026-05-07T09:30:42Z","type":"polling_external_review","source":"target","data":{"pr_number":204,"reviewer_bot":"gemini-code-assist[bot]","wait_kind":"cron","session_id":"s","next_check_at":"2026-05-08T16:00:00Z"}}'

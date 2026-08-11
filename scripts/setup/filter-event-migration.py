@@ -111,9 +111,9 @@ def main() -> int:
             and isinstance(row, dict)
             and _favorable(row)
             and key in existing
-            and timestamp is not None
-            and existing[key] is not None
-            and timestamp <= existing[key]
+            and (
+                timestamp is None or existing[key] is None or timestamp <= existing[key]
+            )
         ):
             local_offset = line_end
             continue
