@@ -41,7 +41,18 @@ _steal_stale_event_dir() {
     mv "$lock_dir" "$reap" 2>/dev/null || return 1
     owner_after=$(cat "$reap/owner" 2>/dev/null || true)
     if [[ "$owner_after" != "$owner_before" ]]; then
-        mv "$reap" "$lock_dir" 2>/dev/null || true
+        # Reserve the canonical name before restoring the owner file. A direct
+        # `mv "$reap" "$lock_dir"` nests the reaped directory when another
+        # holder acquired lock_dir after our rename, leaving its lock non-empty.
+        if mkdir "$lock_dir" 2>/dev/null; then
+            if mv "$reap/owner" "$lock_dir/owner" 2>/dev/null; then
+                rmdir "$reap" 2>/dev/null || true
+                return 1
+            fi
+            rmdir "$lock_dir" 2>/dev/null || true
+        fi
+        command -p rm -f "$reap/owner" 2>/dev/null || true
+        rmdir "$reap" 2>/dev/null || true
         return 1
     fi
     command -p rm -f "$reap/owner" 2>/dev/null || true

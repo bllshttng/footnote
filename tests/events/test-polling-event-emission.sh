@@ -233,6 +233,52 @@ identity_result=$(
 assert_contains "stale identity replacement preserved" "$identity_result" PRESERVED
 assert_contains "fresh stale-marker owner preserved" "$identity_result" OWNER=fresh-holder
 
+# A third holder can acquire the canonical path after the mismatched holder was
+# reaped but before it is restored. A directory-targeting mv must not nest the
+# reaped lock inside that third holder and leave the visible lock non-empty.
+restore_race_lock="$WORK/stale-restore-race.gc.d"
+mkdir "$restore_race_lock"
+printf '%s' old-holder > "$restore_race_lock/owner"
+touch -t 202001010000 "$restore_race_lock"
+restore_race_result=$(
+    (
+        # shellcheck disable=SC1090
+        source "$EVENTS_LIB"
+        old_modified=$(command stat -c %Y "$restore_race_lock" 2>/dev/null || command stat -f %m "$restore_race_lock")
+        stat() {
+            printf '%s\n' "$old_modified"
+        }
+        restore_move_seen="$WORK/stale-restore-move-seen"
+        mv() {
+            if mkdir "$restore_move_seen" 2>/dev/null; then
+                command rm -f "$restore_race_lock/owner"
+                rmdir "$restore_race_lock"
+                mkdir "$restore_race_lock"
+                printf '%s' fresh-holder > "$restore_race_lock/owner"
+                command mv "$@"
+                local rc=$?
+                mkdir "$restore_race_lock"
+                printf '%s' newest-holder > "$restore_race_lock/owner"
+                return "$rc"
+            fi
+            command mv "$@"
+        }
+        if _steal_stale_event_dir "$restore_race_lock"; then
+            printf '%s\n' STOLEN
+        else
+            printf '%s\n' PRESERVED
+        fi
+        printf 'OWNER=%s\n' "$(cat "$restore_race_lock/owner" 2>/dev/null || true)"
+        if find "$restore_race_lock" -mindepth 1 -maxdepth 1 -type d -name '*.reap.*' -print -quit | grep -q .; then
+            printf '%s\n' NESTED
+        else
+            printf '%s\n' FLAT
+        fi
+    )
+)
+assert_contains "stale restore race preserves newest holder" "$restore_race_result" OWNER=newest-holder
+assert_contains "stale restore race never nests reaped lock" "$restore_race_result" FLAT
+
 # Explicit paths passed by hook fallbacks must share the canonical journal's
 # GC marker and writer rendezvous when the worktree leaf is a symlink.
 canonical_events="$WORK/canonical/events.jsonl"
