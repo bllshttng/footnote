@@ -162,12 +162,12 @@ def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
     return float(rows[0][0]) / 1000.0
 
 
-def _resolve_transcript_path(
+def resolve_transcript_path(
     agent: str,
     session_id: str,
     cwd: str,
-    projects_root: Optional[Path],
-    codex_sessions_dir: Optional[Path],
+    projects_root: Optional[Path] = None,
+    codex_sessions_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """The session's own transcript FILE, for the harnesses that keep one.
 
@@ -176,6 +176,11 @@ def _resolve_transcript_path(
     Resolved once per call and handed to every reader below, so the tail read,
     the age probe, and the model read all agree on which file they are looking
     at instead of each running its own discovery.
+
+    Public because :func:`observed_model` takes a path rather than finding one,
+    so every caller outside this module needs this to reach it -- see
+    ``fno.graph.store._observe_model``. Never raises; an unresolvable pointer is
+    ``None``, which ``observed_model`` reports as ``no-transcript``.
     """
     if agent not in {"claude", "codex"}:
         return None
@@ -277,7 +282,7 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
     here and the disagreement with the requested route is visible without
     anyone having to trust the spawn.
 
-    Four outcomes, deliberately not collapsed into one "unknown" -- the whole
+    Five outcomes, deliberately not collapsed into one "unknown" -- the whole
     point of the ``no-model-yet`` variant is that a worker which came up and
     never processed a turn is a different thing from one whose transcript does
     not exist yet::
@@ -376,7 +381,7 @@ def resolve_session_truth(
     observed_model, suggestions}``. ``state`` is one of done | watching |
     your-move | working | stalled | unknown; ``reason`` is set only for
     ``unknown`` (``not-found`` / ``no-records``); ``observed_model`` is the
-    four-variant reading documented on :func:`observed_model` and is present on
+    five-variant reading documented on :func:`observed_model` and is present on
     every path, including the ``unknown`` ones (a row that cannot be classified
     still renders)."""
     from fno.agents.peek import recent_records
@@ -415,7 +420,7 @@ def resolve_session_truth(
     transcript_path = (
         Path(raw_transcript_path)
         if raw_transcript_path
-        else _resolve_transcript_path(
+        else resolve_transcript_path(
             agent, sid, cwd, projects_root, codex_sessions_dir
         )
     )
