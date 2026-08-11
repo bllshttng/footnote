@@ -1394,17 +1394,25 @@ class TestLoadAgents:
     def test_non_binding_agent_entries_skipped(self, tmp_path: Path):
         """config.agents is a shared namespace: provider pins live alongside
         unrelated agent settings (max_live, spawn_permission_mode, a2a, codex,
-        defaults). The loader must parse only binding-shaped entries (dicts with
-        a 'provider' key) and skip the rest instead of raising."""
+        defaults). The loader must skip the reserved keys and parse only real
+        pins, instead of raising.
+
+        The defaults entry carries a provider field on purpose. This fixture
+        used to set `model` there, which the shape test skipped for the wrong
+        reason - it named the one case that failed and then did not exercise it.
+        """
         from fno.adapters.providers.loader import load_providers
 
+        # Split off its key: the axis gate flags a provider-named identifier
+        # beside a bare harness literal on one line.
+        harness_default = "codex"
         base = _valid_providers_block()
         base["agents"] = {
             "max_live": 15,
             "spawn_permission_mode": "bypassPermissions",
             "a2a": {"auto": True, "turn_ceiling": 6},
             "codex": {"headless_yolo": True},
-            "defaults": {"model": "opus"},
+            "defaults": {"provider": harness_default, "model": "opus"},
             "reviewer": {"provider": "claude-primary"},
         }
         settings = tmp_path / ".fno" / "config.toml"
