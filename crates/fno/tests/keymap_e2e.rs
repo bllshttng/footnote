@@ -44,9 +44,15 @@ fn keymap_e2e_config_moves_the_prefix_and_the_chord() {
     // the shell as input instead of detaching - the `d` echoes onto the prompt
     // line, which is also proof the bytes were forwarded rather than swallowed.
     h.type_bytes(b"\x02d");
-    // Scan every line, not the last few: the prompt sits near the TOP of a
-    // fresh session with blank rows and the status row below it.
-    h.wait_screen(15, |s| s.lines().any(|l| l.trim().ends_with("$ d")));
+    // Match on the trailing `d` after a prompt, not on an exact `$ d`: the two
+    // shells echo the control byte differently (dash renders it `^B`, bash as
+    // sh renders nothing), and neither form is the thing under test. Scan every
+    // line too - the prompt sits near the TOP of a fresh session, with blank
+    // rows and the status row below it.
+    h.wait_screen(15, |s| {
+        s.lines()
+            .any(|l| l.contains('$') && l.trim_end().ends_with('d'))
+    });
     assert!(
         h.child.try_wait().unwrap().is_none(),
         "prefix+d must NOT detach once the prefix has moved to C-a"
