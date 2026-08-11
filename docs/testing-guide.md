@@ -11,6 +11,7 @@ Testing guide for the footnote Claude Code plugin. Covers test infrastructure, v
   - [Validation Scripts](#validation-scripts)
   - [Python Utilities](#python-utilities)
 - [Running Tests](#running-tests)
+  - [Reading a gate's result](#reading-a-gates-result-assert-a-positive-marker)
 - [TDD Discipline](#tdd-discipline)
 - [Quality Gates](#quality-gates)
 - [Review Agent Testing](#review-agent-testing)
@@ -124,6 +125,45 @@ python skills/do/orchestrator.py path/to/00-INDEX.md
 # Route a task description to the correct agent
 python skills/do/orchestrator.py --agent "Build React component" --tags ui,frontend
 ```
+
+### Reading a gate's result (assert a positive marker)
+
+A gate that runs is not a gate that passed, and the usual way to lose the difference is to pipe it.
+
+```bash
+bash scripts/ci/check-preamble-budget.sh | tail -5   # WRONG
+echo $?                                              # tail's status, always 0
+```
+
+`$?` after a pipeline is the LAST command's status.
+`tail` succeeds at printing whatever it was handed, including a failure report, so the gate's own exit code is discarded before you ever see it.
+The output still looks like a failure if you read it, which is what makes this quiet: the text says one thing and the status line says another.
+This is not hypothetical here.
+A PR reported every gate passing under exactly that shape while `check-preamble-budget` was failing the whole time, and the byte ceiling it enforces was over by 476.
+
+Redirect to a file, capture the status before anything else touches it, then read the file:
+
+```bash
+bash scripts/ci/check-preamble-budget.sh > /tmp/gate.log 2>&1; echo "EXIT=$?"
+tail -5 /tmp/gate.log
+```
+
+`set -o pipefail` also fixes the pipeline case, but it is a property of the shell you happen to be in rather than of the command you are reading, so it does not travel with a command pasted into a review, a hook, or a chat message.
+
+The same rule covers watchers and monitors, where it matters more because they announce completion:
+
+```bash
+until ! grep -q pending out; do sleep 45; done          # WRONG: fails OPEN
+until grep -q '"settled": true' out; do sleep 45; done  # fails safe
+```
+
+Both wait on a file, and they are one line apart.
+The first tests for an ABSENCE, and an absence has two explanations: the checks really finished, or the command never produced usable output.
+When `gh` failed with a transient TLS error, the error text went into the file, contained no "pending", and the watcher announced that CI had settled while it was still running.
+The second waits for a string that only the real outcome produces, so a broken command leaves it waiting rather than declaring success.
+
+Pin the pattern to the thing being measured, too.
+A monitor armed on `verdict=` fired on `PASS: verdict=canonical-protected` from an unrelated harness while its gate was at step 10 of 124.
 
 ### Validation Scripts
 
