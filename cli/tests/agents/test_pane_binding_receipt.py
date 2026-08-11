@@ -285,12 +285,81 @@ def test_every_unbound_receipt_names_a_reason(
     """An unbound receipt whose reason is null is the same empty signal as an
     empty short_id. Pinning the IMPLICATION, not a list of branches, so a new
     unbound branch cannot reintroduce a null by forgetting."""
-    assert mux_spawn._resolve_unbound_reason(None, named, harness) == expected
+    assert mux_spawn._resolve_unbound_reason(False, named, harness) == expected
 
 
 def test_a_bound_receipt_never_carries_a_reason() -> None:
     """Including a stale one left over from an earlier probe in the same spawn."""
-    assert mux_spawn._resolve_unbound_reason(SID, "binding-window-expired", "codex") is None
+    assert mux_spawn._resolve_unbound_reason(True, "binding-window-expired", "codex") is None
+
+
+# ---------------------------------------------------------------------------
+# `bound` is TRI-state: a harness that binds no session asserts nothing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode"])
+def test_a_session_binding_harness_reports_a_real_boolean(harness: str) -> None:
+    assert mux_spawn._resolve_bound(SID, harness) is True
+    assert mux_spawn._resolve_bound(None, harness) is False
+
+
+@pytest.mark.parametrize("harness", ["gemini", "agy"])
+def test_a_harness_with_no_spawn_time_session_asserts_nothing(harness: str) -> None:
+    """gemini and agy are pane-hostable but expose no session id at all.
+
+    Reporting False would call a healthy worker a failure; reporting True would
+    be the same unverified "it's live" this change exists to remove. None says
+    the spawn made no claim, and carries no reason because there is no failure
+    to explain.
+    """
+    assert mux_spawn._resolve_bound(None, harness) is None
+    assert mux_spawn._resolve_unbound_reason(None, None, harness) is None
+
+
+def test_the_doubt_field_defaults_to_no_claim() -> None:
+    """A field whose job is to carry doubt must not default to certainty: every
+    construction that omits it would otherwise assert a bound worker."""
+    from dataclasses import fields
+
+    default = next(f for f in fields(MuxSpawnResult) if f.name == "bound").default
+    assert default is None
+
+
+# ---------------------------------------------------------------------------
+# A probe never fails a spawn (the pane already exists by the time it runs)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("boom", [PermissionError("denied"), OSError("ENOMEM"), RuntimeError("x")])
+def test_a_raising_liveness_probe_answers_unknown_instead_of_escaping(boom) -> None:
+    """An escape here orphans a live pane with no registry row, which is worse
+    than every reason the probe might have failed. Held to the same standard as
+    the tail read it sits beside."""
+
+    def run(_argv, **_kw):
+        raise boom
+
+    assert mux_spawn._mux_pane_alive(MUX, run) is None
+
+
+def test_the_death_message_names_the_rm_that_a_respawn_needs() -> None:
+    """The row is kept as evidence and the collision guard is status-blind, so
+    "just retry" would be refused with exit 2 forever."""
+    import inspect
+
+    src = inspect.getsource(mux_spawn.dispatch_spawn_pane)
+    assert "fno agents rm {name}" in src
+
+
+def test_repeat_deaths_do_not_overwrite_each_others_evidence(tmp_path, monkeypatch) -> None:
+    """The deaths worth reading are usually repeats, so a name-stable path would
+    destroy the run you wanted to compare against."""
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    first = _write_pane_death_log("w", "first corpse\n", pane_id=81)
+    second = _write_pane_death_log("w", "second corpse\n", pane_id=84)
+    assert first != second
+    assert Path(first).read_text() == "first corpse\n"
 
 
 # ---------------------------------------------------------------------------

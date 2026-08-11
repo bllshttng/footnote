@@ -1260,10 +1260,13 @@ def cmd_spawn(
                 # pane about to bind and one already dead read identically.
                 "bound": pane_result.bound,
             }
-            if not pane_result.bound:
-                # Only on the unbound receipt, so a bound one stays byte-stable
-                # apart from `bound` itself. An empty short_id is a SIGNAL, and
-                # these two keys are what it signals.
+            if pane_result.bound is False:
+                # `is False`, not falsy: `bound` is tri-state and None means this
+                # harness binds no session at all (gemini, agy), which is not a
+                # failure and owes no explanation. Only on the genuinely unbound
+                # receipt, so a bound one stays byte-stable apart from `bound`
+                # itself. An empty short_id is a SIGNAL, and these two keys are
+                # what it signals.
                 receipt_obj["pane_alive"] = pane_result.pane_alive
                 receipt_obj["unbound_reason"] = pane_result.unbound_reason
             # Three orthogonal axes: harness always; provider (the model vendor)

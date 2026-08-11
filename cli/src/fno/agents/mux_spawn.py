@@ -99,17 +99,27 @@ class MuxSpawnResult:
     # addressable. Keep that transition explicit instead of calling it live.
     status: str = "live"
     # Two facts that must never collapse into one field. `bound` answers "did
-    # the worker reach its provider", true only when a session id was read out
-    # of the worker's own open rollout. `pane_alive` answers "does the pane
-    # exist", probed and never assumed (None = the mux could not answer).
+    # the worker bind a session identity", true only when one was actually
+    # obtained. `pane_alive` answers "does the pane exist", probed and never
+    # assumed (None = the mux could not answer).
     # Before these existed, a pane that would bind in 4s and one that had
     # already died produced byte-identical receipts, so a caller could not tell
     # a slow worker from a corpse and would re-prompt the corpse.
     #
-    # `short_id` is a PROJECTION of `bound`, never an independent claim:
-    # `bound == bool(short_id)` is an invariant with a test on it, which is what
-    # makes an empty short_id a signal rather than a formatting detail.
-    bound: bool = True
+    # THREE values, not two. None means this harness has no spawn-time session
+    # identity at all (see _SESSION_BINDING_HARNESSES), so the spawn asserts
+    # nothing rather than inventing an answer - claiming True there would be the
+    # same unverified "it's live" this change exists to remove. A consumer
+    # treats False as doubt and None as "no better than before".
+    #
+    # It defaults to None for the same reason: a field whose job is to carry
+    # doubt must not default to certainty.
+    #
+    # For the harnesses where short_id IS the handle, `short_id` is a PROJECTION
+    # of `bound`, never an independent claim: `bound == bool(short_id)` is an
+    # invariant with a test on it, which is what makes an empty short_id a
+    # signal rather than a formatting detail.
+    bound: Optional[bool] = None
     pane_alive: Optional[bool] = None
     # Why this spawn is unbound, in the receipt whenever `bound` is False. Never
     # set when bound.
@@ -759,7 +769,11 @@ def _backfill_codex_session_id(
     # the next probe -- a transiently-unique sibling then grows to an ambiguous
     # pair (-> None below) or is displaced first (Codex P1 residual, #603).
     prev: Optional[str] = None
-    for attempt in range(tries):
+    # Floored at 2: the stability gate below accepts an id only when the SAME
+    # single id repeats, and `prev` is None on the first pass, so one attempt
+    # can never return anything. A caller passing attempts=1 here would get a
+    # guaranteed silent miss rather than one honest probe.
+    for attempt in range(max(tries, 2)):
         if attempt:
             naptime(_CODEX_BACKFILL_DELAY_S)
         ids = codex_session_ids_started_in(cwd, since_ms, sessions_dir=sessions_dir)
@@ -1182,7 +1196,14 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
             ],
             runner,
         )
-    except (KeyError, DispatchAskError):
+    except Exception:  # noqa: BLE001 -- see below: a probe never fails a spawn
+        # Deliberately as broad as _read_pane_tail's. This runs at the same
+        # point, after the pane exists and under the registry lock, and its whole
+        # contract is "None = the mux could not answer" - so an unhandled
+        # PermissionError or a fork failure escaping here would orphan a live
+        # pane with no registry row, which is a worse outcome than every reason
+        # the probe might have failed. A narrow catch held the liveness probe to
+        # a weaker standard than the tail read it sits next to.
         return None
     if proc.returncode == _WAIT_EXITED:
         return False
@@ -1336,10 +1357,29 @@ def _await_pane_binding(
         naptime(_BINDING_POLL_S)
 
 
+#: Harnesses whose pane spawn binds a session identity, so `bound` is a claim
+#: the spawn can actually make: claude pins one up front, codex and opencode
+#: discover one afterwards.
+#:
+#: gemini and agy are pane-hostable but expose no spawn-time session id at all,
+#: so the spawn asserts NOTHING for them (`bound: None`). Reporting False would
+#: call a healthy worker a failure; reporting True would be the same unverified
+#: "it's live" this change exists to remove. Their receipts are exactly as
+#: trustworthy as before, and now say so.
+_SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
+
+
+def _resolve_bound(session_uuid: Optional[str], harness: str) -> Optional[bool]:
+    """Tri-state: bound / not bound / this harness binds no session at all."""
+    if harness not in _SESSION_BINDING_HARNESSES:
+        return None
+    return session_uuid is not None
+
+
 def _resolve_unbound_reason(
-    session_uuid: Optional[str], reason: Optional[str], harness: str
+    bound: Optional[bool], reason: Optional[str], harness: str
 ) -> Optional[str]:
-    """The reason an unbound receipt carries; None when it is bound.
+    """The reason a receipt carries; None unless ``bound`` is exactly False.
 
     Structural, not per-branch: the codex path names its reason precisely, but
     every OTHER way to end up unbound (an opencode backfill miss, a happy-claude
@@ -1348,20 +1388,28 @@ def _resolve_unbound_reason(
     Defaulting here means a new unbound branch cannot reintroduce a null by
     forgetting, and a bound spawn can never carry a stale reason.
 
+    A harness that binds no session (``bound is None``) carries no reason
+    either: there is no failure to explain, only a claim never made.
+
     ``harness`` is the axis word on purpose: the thing that failed to bind is the
     BINARY (claude, codex, opencode), not a model vendor. `dispatch_spawn_pane`
     still calls its local `provider`, which is the older spelling.
     """
-    if session_uuid is not None:
+    if bound is not False:
         return None
     return reason or f"no-session-binding-for-{harness}"
 
 
-def _write_pane_death_log(name: str, tail: str) -> str:
+def _write_pane_death_log(name: str, tail: str, pane_id: Optional[int] = None) -> str:
     """Persist a dead pane's captured scrollback; return its path, "" on failure.
 
     An unwritable log dir must not fail the spawn: the caller still reports the
     death and still echoes the tail to stderr, it just cannot point at a file.
+
+    The filename carries the pane id and a timestamp because the deaths worth
+    reading are usually REPEATS of one another: a name-stable path would let the
+    respawn's corpse overwrite the first, destroying the very run you wanted to
+    compare against.
     """
     if not tail.strip():
         return ""
@@ -1370,7 +1418,9 @@ def _write_pane_death_log(name: str, tail: str) -> str:
 
         log_dir = _paths.state_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        path = log_dir / f"{name}.pane.log"
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        suffix = f"pane{pane_id}-{stamp}" if pane_id is not None else stamp
+        path = log_dir / f"{name}.{suffix}.pane.log"
         path.write_text(tail, encoding="utf-8")
         return str(path)
     except Exception:  # noqa: BLE001 -- see docstring: evidence never fails a spawn
@@ -1890,7 +1940,9 @@ def dispatch_spawn_pane(
                         # unexplained for weeks.
                         pane_died = True
                         forced_row_status = "failed"
-                        death_log_path = _write_pane_death_log(name, binding.tail)
+                        death_log_path = _write_pane_death_log(
+                            name, binding.tail, pane_id=pane_id
+                        )
                         death_tail = binding.tail
             else:
                 # No pid means nothing to correlate the rollout against, so the
@@ -2112,8 +2164,10 @@ def dispatch_spawn_pane(
                 f"agent {name!r} never reached codex: the pane was created and its "
                 f"child exited before a session was bound, so nothing is running. "
                 f"The registry row is `failed` (not live) and {where}. "
-                "Read that output for the cause, then retry, or spawn with "
-                "--substrate bg.",
+                f"Read that output for the cause, then 'fno agents rm {name}' "
+                "before respawning - the row is kept as evidence and the "
+                "name-collision guard is status-blind, so a bare retry under the "
+                "same name is refused. Or spawn with --substrate bg.",
                 exit_code=13,
             )
 
@@ -2197,11 +2251,12 @@ def dispatch_spawn_pane(
             else ""
         )
 
-    # `bound` is keyed on the session uuid, NOT on short_id: a provider whose
-    # transport key is not short_id (opencode, gemini, agy - US8) leaves
-    # short_id empty while being perfectly bound. For claude and codex, where
-    # short_id IS the handle, the two agree, and a test pins that.
-    #
+    # `bound` is keyed on the session uuid, NOT on short_id: opencode's
+    # transport key is not short_id (US8), so it leaves short_id empty while
+    # being perfectly bound. For claude and codex, where short_id IS the handle,
+    # the two agree, and a test pins that. gemini and agy bind no session at all
+    # and resolve to None rather than to either lie.
+    bound_val = _resolve_bound(session_uuid, provider)
     return MuxSpawnResult(
         name=name,
         provider=provider,
@@ -2211,9 +2266,9 @@ def dispatch_spawn_pane(
         session_uuid=session_uuid,
         short_id=short_id_val,
         status=row_status,
-        bound=session_uuid is not None,
+        bound=bound_val,
         pane_alive=pane_alive,
-        unbound_reason=_resolve_unbound_reason(session_uuid, unbound_reason, provider),
+        unbound_reason=_resolve_unbound_reason(bound_val, unbound_reason, provider),
         log_path=death_log_path,
         effective_message=effective_message,
         placement=placement_receipt,
