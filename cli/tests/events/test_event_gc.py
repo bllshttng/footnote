@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -347,6 +348,37 @@ def test_gc_reaps_reused_pid_writer_token_by_process_identity(
     event_gc._wait_for_shell_writers(events, 0.2)
 
     assert not token.exists()
+
+
+def test_process_identity_uses_shell_writer_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="Tue Aug 11 09:13:37 2026\n")
+
+    monkeypatch.setattr(event_gc.subprocess, "run", run)
+
+    assert event_gc._process_identity(os.getpid()) == "Tue Aug 11 09:13:37 2026"
+    env = observed["env"]
+    assert isinstance(env, dict)
+    assert env["LC_ALL"] == "C"
+
+
+def test_gc_keeps_live_writer_when_identity_probe_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    token = tmp_path / "events.jsonl.shell-writers.d" / f"{os.getpid()}.writer"
+    token.mkdir(parents=True)
+    (token / "owner").write_text("live-process", encoding="utf-8")
+    monkeypatch.setattr(event_gc, "_process_identity", lambda pid: None)
+
+    with pytest.raises(TimeoutError, match="shell writer rendezvous timeout"):
+        event_gc._wait_for_shell_writers(events, 0.05)
+
+    assert token.exists()
 
 
 def test_gc_renews_both_long_held_mutex_leases(

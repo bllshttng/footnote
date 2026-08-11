@@ -29,6 +29,7 @@ def _process_identity(pid: int) -> str | None:
             capture_output=True,
             text=True,
             check=False,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         )
     except OSError:
         return None
@@ -61,6 +62,8 @@ def _wait_for_shell_writers(path: Path, timeout_seconds: float) -> None:
                 pid = int(entry.name.split(".", 1)[0])
                 recorded_identity = (entry / "owner").read_text(encoding="utf-8").strip()
                 current_identity = _process_identity(pid)
+                if current_identity is None:
+                    continue
                 if current_identity == recorded_identity:
                     continue
                 (entry / "owner").unlink(missing_ok=True)

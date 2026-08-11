@@ -696,10 +696,8 @@ fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
 /// on daemon hot paths; a wedged lock logs and skips rather than blocking. The
 /// lockfile write is authoritative; this log is observability only.
 fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String, Value>) {
-    let base = events_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let events_path = base.join(".fno/events.jsonl");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let events_path = claim_events_path(events_dir, &cwd);
     let event = json!({
         "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         "type": type_name,
@@ -709,6 +707,13 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
     if let Err(e) = append_event_line(&events_path, &event, Duration::from_secs(2)) {
         eprintln!("claims: failed to emit {type_name:?}: {e}");
     }
+}
+
+fn claim_events_path(events_dir: Option<&Path>, cwd: &Path) -> PathBuf {
+    events_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| crate::paths::worktree_repo_root(cwd))
+        .join(".fno/events.jsonl")
 }
 
 /// Age past which a mkdir mutex dir is a corpse left by a killed holder.
@@ -1595,6 +1600,24 @@ mod tests {
         text.lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn default_claim_events_path_resolves_from_repo_subdirectory() {
+        let td = TempDir::new().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(td.path())
+            .status()
+            .unwrap()
+            .success());
+        let nested = td.path().join("crates/fno/src");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            claim_events_path(None, &nested),
+            td.path().canonicalize().unwrap().join(".fno/events.jsonl")
+        );
     }
 
     // ---- lease renewal (x-ba4b) -----------------------------------------
