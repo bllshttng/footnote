@@ -356,7 +356,12 @@ marker = {
     "source": "migration",
     "data": {"migration_id": migration_id},
 }
-with open(staged, "ab") as handle:
+with open(staged, "ab+") as handle:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() > 0:
+        handle.seek(-1, os.SEEK_END)
+        if handle.read(1) != b"\n":
+            handle.write(b"\n")
     handle.write(json.dumps(marker, separators=(",", ":")).encode("ascii") + b"\n")
     handle.flush()
     os.fsync(handle.fileno())
@@ -598,6 +603,7 @@ link_events_journal() {
   local pending_backups=()
   local pending_candidate
   local recover_pending=0
+  local fresh_target=0
   EVENTS_MIGRATION_TOKEN="$token"
   EVENTS_MIGRATION_DIRS=()
   EVENTS_MIGRATION_PUBLISHED=0
@@ -619,10 +625,6 @@ link_events_journal() {
   fi
   if [[ -L "$target" ]]; then
     recover_pending=1
-  fi
-  if [[ ! -e "$target" && ${#pending_backups[@]} -eq 0 ]]; then
-    ln -s "$source" "$target" 2>/dev/null || [[ -L "$target" ]]
-    return 0
   fi
   if [[ -e "$target" && ! -f "$target" ]]; then
     echo "setup-worktree: refusing to replace non-file events journal: $target" >&2
@@ -728,6 +730,13 @@ link_events_journal() {
     recover_pending=1
   elif (( ${#pending_backups[@]} > 0 )); then
     recover_pending=1
+  elif [[ ! -e "$target" ]]; then
+    fresh_target=1
+    recover_pending=0
+  elif [[ ! -f "$target" ]]; then
+    cleanup_events_migration
+    echo "setup-worktree: refusing to replace non-file events journal: $target" >&2
+    return 1
   else
     recover_pending=0
   fi
@@ -753,7 +762,9 @@ link_events_journal() {
   local backup="${target}.pre-share.pending.${stamp}"
   local completed_backup="${target}.pre-share.${stamp}"
   ensure_trailing_newline "$source" || rc=$?
-  if (( recover_pending == 1 )); then
+  if (( fresh_target == 1 )); then
+    ln -s "$source" "$target" 2>/dev/null || rc=$?
+  elif (( recover_pending == 1 )); then
     local pending completed
     if [[ ! -L "$target" ]]; then
       if [[ -f "$target" ]]; then
@@ -818,7 +829,9 @@ link_events_journal() {
     fi
     echo "setup-worktree: events migration failed; local journal retained: $target" >&2
   else
-    if (( recover_pending == 1 )); then
+    if (( fresh_target == 1 )); then
+      echo "setup-worktree: linked fresh worktree events journal" >&2
+    elif (( recover_pending == 1 )); then
       echo "setup-worktree: completed pending events journal migration" >&2
     else
       echo "setup-worktree: migrated events journal; backup retained at $completed_backup" >&2

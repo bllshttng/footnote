@@ -33,6 +33,19 @@ assert "fresh worktree gets an events symlink" test -L "$fresh/.fno/events.jsonl
 assert "fresh symlink targets the canonical journal" test "$canonical/.fno/events.jsonl" -ef "$fresh/.fno/events.jsonl"
 assert "fresh worktree shares the offer cursor" test -L "$fresh/.fno/.think-offer-cursor"
 assert "offer cursor initializes at the start without consuming existing offers" test "$(cat "$canonical/.fno/.think-offer-cursor")" -eq 0
+
+fresh_locked="$TMP/fresh-locked"
+mkdir -p "$fresh_locked/.fno/events.jsonl.lock.d"
+printf '%s' "test:$$:fresh-writer" > "$fresh_locked/.fno/events.jsonl.lock.d/owner"
+CANONICAL="$canonical" WORKTREE="$fresh_locked" bash "$SETUP" >/dev/null 2>&1 &
+fresh_locked_setup=$!
+sleep 0.2
+assert "fresh journal handoff waits for an active local writer" test ! -L "$fresh_locked/.fno/events.jsonl"
+rm -f "$fresh_locked/.fno/events.jsonl.lock.d/owner"
+rmdir "$fresh_locked/.fno/events.jsonl.lock.d"
+wait "$fresh_locked_setup"
+assert "fresh journal handoff links after the local writer exits" test -L "$fresh_locked/.fno/events.jsonl"
+
 resolved_shell_path=$(
   EVENTS_FILE="$fresh/.fno/events.jsonl"
   # shellcheck disable=SC1090
@@ -82,6 +95,13 @@ assert "unterminated worktree row survives once" test "$(grep -c 'worktree_befor
 while IFS= read -r row; do
   assert "migrated row remains valid JSON" jq -e . <<< "$row"
 done < "$canonical/.fno/events.jsonl"
+assert "migration keeps exactly one JSON object per physical line" python3 -c '
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        json.loads(line)
+' "$canonical/.fno/events.jsonl"
 
 shopt -s nullglob
 backups=("$existing/.fno/events.jsonl.pre-share."*)
