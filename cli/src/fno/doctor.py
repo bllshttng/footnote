@@ -815,48 +815,70 @@ def _launch_agent_failures() -> dict[str, Any]:
 def _mission_active_count() -> int:
     """Backlog epics carrying ``mission_active`` (the drain's input set).
 
-    Direct read of the graph is advisory-only here (doctor never mutates); a
-    torn or unreadable graph reads as 0 rather than crashing the report."""
+    Delegates to the canonical fail-safe reader so a torn graph reads as 0
+    rather than crashing the report. A hand-rolled json walk raised TypeError on
+    ``{"entries": null}`` because the null value iterated outside the try, which
+    broke this function's own ``never crashes`` promise."""
     try:
-        from fno import paths as _paths
+        from fno.active_backlog import _active_missions
 
-        data = json.loads(_paths.graph_json().read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - paths.graph_json may resolve canonical via git
+        return len(_active_missions())
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
         return 0
-    entries = data.get("entries", []) if isinstance(data, dict) else []
-    iterable = entries.values() if isinstance(entries, dict) else entries
-    return sum(1 for e in iterable if isinstance(e, dict) and e.get("mission_active"))
 
 
 def _auto_merge_armed_manifests() -> int:
     """Worktree manifests whose resolved ``auto_merge_approved`` is true.
 
     Each is one run's standing merge authority; the count is the legibility
-    point (an armed manifest set against an operator who expects to review)."""
+    point (an armed manifest set against an operator who expects to review).
+    Scans BOTH worktree homes: the fno-managed base (``paths.worktrees_base()``)
+    and the harness-native ``<repo>/.claude/worktrees`` (the default policy's
+    location, which the fno base does not cover, so without it the count reads
+    0 on a default-config machine). Uses ``parse_target_state`` so a quoted
+    ``"true"`` coerces instead of string-matching to nothing. Fixed-depth globs
+    avoid descending into each worktree's own tree the way rglob would.
+    """
+    bases: list[Path] = []
     try:
         from fno import paths as _paths
 
-        base = _paths.worktrees_base()
+        bases.append(_paths.worktrees_base())
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
+        pass
+    try:
+        from fno import paths as _paths
+
+        repo = _paths.resolve_repo_root()
+        if repo:
+            bases.append(Path(repo) / ".claude" / "worktrees")
+    except Exception:  # noqa: BLE001 - resolve_repo_root may shell out to git
+        pass
+
+    try:
+        from fno.cost._register import parse_target_state
     except Exception:
         return 0
-    if not base.is_dir():
-        return 0
+
     count = 0
     seen: set[Path] = set()
-    for mf in base.rglob("target-state.md"):
-        real = mf.resolve()
-        if real in seen:
+    for base in bases:
+        if not base.is_dir():
             continue
-        seen.add(real)
-        try:
-            txt = mf.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in txt.splitlines():
-            ls = line.strip()
-            if ls.startswith("auto_merge_approved:") and ls.split(":", 1)[1].strip() == "true":
-                count += 1
-                break
+        # Two layouts live under these bases: <base>/<name>/.fno/target-state.md
+        # (harness-native) and <base>/<repo>/<name>/.fno/target-state.md
+        # (fno-managed). Fixed-depth globs skip each worktree's interior.
+        for pattern in ("*/.fno/target-state.md", "*/*/.fno/target-state.md"):
+            for mf in base.glob(pattern):
+                real = mf.resolve()
+                if real in seen:
+                    continue
+                seen.add(real)
+                try:
+                    if parse_target_state(str(mf)).get("auto_merge_approved") is True:
+                        count += 1
+                except (OSError, ValueError):
+                    continue
     return count
 
 
