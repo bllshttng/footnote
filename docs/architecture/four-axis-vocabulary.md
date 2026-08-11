@@ -35,7 +35,7 @@ Every provider that ships a harness shares a colloquial name with it.
 `claude` is a harness whose provider is Anthropic, and "claude" also reads as the vendor in ordinary speech; `codex` and `gemini` are the same, and `gemini` additionally names a model family.
 That shared name is why `provider = "claude"` looked reasonable to whoever wrote it, and why four prior surface-local renames did not stick: the collision is the domain, not a typo.
 
-## The two rules
+## The three rules
 
 **Value rule.** The correct value under a `provider` key for a `claude` harness is `anthropic`, never `claude`.
 The provider-to-harness mapping is fixed:
@@ -54,6 +54,45 @@ The defect is the value under the name, not the name alone.
 **Guard rule.** The guard flags only a harness value bound to a provider-named identifier.
 `anthropic` under `provider` is correct; `claude` under `provider` is the defect.
 A guard that flags the legal case fires on correct code, gets disabled, and the conflation regrows, so the predicate stays narrow.
+
+**Name rule.** A directory named for one axis may not hold another axis's implementation.
+This is the rule the first two could not reach.
+Both read the contents of files; a path is only a traversal input, so for a long time `cli/src/fno/agents/providers/` held harness adapters while `cli/src/fno/adapters/providers/` held real providers and accounts, and nothing failed.
+Two directories, one name, two axes: a reader who learned one could not predict the other.
+The harness package is now `cli/src/fno/agents/harnesses/`, and the harness docs are now `docs/harnesses/`.
+
+## Declared directory axes
+
+Directory names are judged against `DECLARED_PATH_AXIS`, a map at the top of `scripts/ci/check-axis-vocabulary.sh`.
+Each entry states the axis a directory's contents implement:
+
+```python
+DECLARED_PATH_AXIS = {
+    "cli/src/fno/adapters/providers": "provider",
+    "cli/src/fno/agents/harnesses": "harness",
+    "docs/harnesses": "harness",
+}
+```
+
+**To add a directory whose name contains `provider`, `harness`, or `model`:** add one line naming its repo-relative path and the axis its contents implement.
+The check fails on two things.
+An axis-named directory absent from the map fails as undeclared, because nothing vouches for the name it carries.
+A declared directory whose declaration disagrees with the axis its own name states fails as a conflict.
+
+**The entry is a human assertion, and the gate never verifies it.**
+It compares your declaration against the directory's name and stops there; it does not open the directory to check that the declaration is true, so a wrong entry passes green.
+Review is the only thing that verifies a declaration, which is why the value is spelled out rather than the path merely being listed as permitted.
+
+Classifying a directory by its contents was measured and rejected rather than assumed unworkable.
+The harness-adapter package held 298 harness literals to 5 vendor; the correctly named provider package held 1024 to 49, because rotation and failover legitimately name the harnesses whose accounts they rotate.
+Any threshold that flags the wrong directory also flags the right one.
+
+Two further limits, both printed by the gate on every scan run so a green is not read as more than it is:
+
+- **File names are not judged.** Fifty-two tracked files carry an axis word and most are correct (`harness_map.py`, `model_routing.py`). A directory name is inherited by every import path beneath it, which is why one of them reached 82 files; a file name is local.
+- **Symbol names are not judged.** `ProviderResult` and the `Provider*Error` classes are the content scan's subject and sit in the baseline.
+
+**This rule governs package and directory names only. It does not rename the `provider` config field**, which stays exactly where the value rule puts it, with `route` and `account` added beside it and the allowlisted config sites parked.
 
 ## Ambiguous values
 
