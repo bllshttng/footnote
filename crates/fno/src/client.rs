@@ -4780,6 +4780,17 @@ impl View {
         };
         // Two columns of inverse margin each side, clamped to the terminal.
         let w = (text.chars().count() + 4).min(cols);
+        // A name longer than the strip scrolls, keeping the CURSOR end visible.
+        // Stamping the head instead cut the `_` off the right edge, so on a
+        // narrow terminal the operator typed a name they could not see - the
+        // one thing a name prompt has to get right.
+        let text = if text.chars().count() + 4 > w {
+            let drop = text.chars().count() + 4 - w;
+            let kept: String = text.chars().skip(drop + 1).collect();
+            format!("…{kept}")
+        } else {
+            text
+        };
         let c0 = cols.saturating_sub(w) / 2;
         let r = rows / 2;
         let put = |cells: &mut [Cell], row: usize, s: &str| {
@@ -5342,9 +5353,24 @@ impl View {
         }
     }
 
+    /// The transient notice, right-aligned, clipped to the strip.
+    ///
+    /// Clipping ELLIPSIZES. A silently cut notice reads as a whole sentence, so
+    /// on a 40-column strip "…is not TOML, keys are on defaults" became a path
+    /// fragment that looked like the entire message. Write notices meaning-first
+    /// for the same reason: whatever the strip cannot hold is what a narrow
+    /// terminal loses.
     fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
-        let (text, _) = self.notice.as_ref()?;
-        let text: String = text.chars().take(cols.saturating_sub(1)).collect();
+        let (full, _) = self.notice.as_ref()?;
+        let room = cols.saturating_sub(1);
+        let text: String = if full.chars().count() > room {
+            full.chars()
+                .take(room.saturating_sub(1))
+                .chain(std::iter::once('…'))
+                .collect()
+        } else {
+            full.clone()
+        };
         let start = cols.saturating_sub(text.chars().count() + 1);
         Some((start, text))
     }
@@ -23464,6 +23490,74 @@ mod tests {
         assert!(
             text.contains("rename tab: release_"),
             "prompt missing: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_name_scrolls_so_the_cursor_stays_visible() {
+        // Stamping the head of the prompt cut the `_` off the right edge, so on
+        // a narrow terminal the operator typed a name they could not see. Same
+        // shape as the clipped notice and the clipped action id: the payload
+        // sits at the end, and the end is what a narrow render drops.
+        let view = shot_view(
+            (24, 40),
+            vec![named_meta(1, "footnote", &["main"], 0)],
+            vec![],
+        );
+        let (rows, cols) = (24usize, 40usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        let long = "a-really-quite-long-release-branch-name";
+        view.draw_name_modal(&mut cells, rows, cols, "rename tab", long, None);
+
+        let r = rows / 2;
+        let line: String = (0..cols).map(|c| cells[r * cols + c].c).collect();
+        assert!(
+            line.contains("name_"),
+            "the cursor and the tail of what was typed must be visible: {line:?}"
+        );
+        assert!(
+            line.contains('…'),
+            "and the scroll has to be visible as a scroll: {line:?}"
+        );
+        // A name that fits is untouched: no ellipsis, label still shown.
+        let mut cells = vec![Cell::default(); rows * cols];
+        view.draw_name_modal(&mut cells, rows, cols, "rename tab", "short", None);
+        let line: String = (0..cols).map(|c| cells[r * cols + c].c).collect();
+        assert!(line.contains("rename tab: short_"), "got {line:?}");
+        assert!(!line.contains('…'), "nothing to scroll: {line:?}");
+    }
+
+    #[test]
+    fn a_clipped_notice_reads_as_clipped() {
+        // The keymap warnings this PR added are long, and the strip clips from
+        // the right. Silently, a cut notice reads as a whole sentence, which is
+        // how "$FNO_CONFIG points at /long/path.yaml, which the mux reads as
+        // TOML" rendered on a 40-column strip as a path fragment and nothing
+        // else: technically a warning, practically the silence it replaced.
+        let mut view = shot_view(
+            (24, 200),
+            vec![named_meta(1, "footnote", &["main"], 0)],
+            vec![],
+        );
+        let long = "keys on defaults: $FNO_CONFIG not TOML (/a/very/long/path/settings.yaml)";
+        view.set_notice(long.to_string());
+
+        let (_, wide) = view.notice_overlay(200).expect("a notice is set");
+        assert_eq!(wide, long, "with room to spare nothing is cut");
+
+        let (start, narrow) = view.notice_overlay(40).expect("a notice is set");
+        assert!(
+            narrow.ends_with('…'),
+            "a cut notice must say it was cut: {narrow:?}"
+        );
+        assert!(
+            narrow.chars().count() + start < 40,
+            "and still fit the strip: {narrow:?} at {start}"
+        );
+        // What survives is the part that tells the operator what happened.
+        assert!(
+            narrow.contains("defaults") && narrow.contains("not TOML"),
+            "the meaning has to survive the clip, not the path: {narrow:?}"
         );
     }
 
