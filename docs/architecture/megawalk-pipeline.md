@@ -1,3 +1,5 @@
+<!-- prescribed-verbs: describe -->
+
 # Do-Roadmap: Multi-Session Task Orchestration
 
 > Architecture doc for the megawalk skill - vision-to-backlog generation, one-task-per-session execution, and cross-task discovery relay.

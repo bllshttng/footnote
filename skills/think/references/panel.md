@@ -51,7 +51,7 @@ Extract subcommands and flags from arguments:
 - `startup` / `adversarial` - persona set (default: default)
 
 **Flags** (dashed, combine with any mode):
-- `--chain` (think/plan/megawalk/none) - default: none
+- `--chain` (think/plan/none) - default: none
 - `--rounds N` - override debate rounds (default: from depth preset)
 - `--no-user-seat` - opt out of formal user seat on the panel
 - `--user-role "Role"` - custom name for the user's panel seat
@@ -72,7 +72,7 @@ If no decision text in arguments, ask (batched, one AskUserQuestion):
 - What decision are you trying to make?
 - What perspective matters most? (product fit / technical / market / all)
 - How deep? (shallow: 3 personas 1 round / standard: 5 personas 2 rounds / deep: all personas 3 rounds)
-- Chain after? (think / plan / megawalk / none)
+- Chain after? (think / plan / none)
 
 ### 2. Gather Context
 
@@ -129,11 +129,11 @@ note dissent. Produce ranked recommendations with rationale.
 Load [output-template.md](output-template.md).
 
 Save report to plans directory or `.fno/think-tank-{date}-{slug}.md`.
-If `--chain`: invoke the chained skill with top recommendation.
+If `--chain`: invoke the chained skill (think or plan) with top recommendation.
 If no chain: present options:
 - `/think "{top recommendation}"` - design in depth
 - `/blueprint full "{top recommendation}"` - jump to execution planning
-- `/megawalk` - feed into roadmap
+- `/fno:target "{top recommendation}"` - execute it end to end (multi-feature: `fno backlog next`, then `/fno:target` per node)
 - "Done for now" - keep the report
 
 ## Key Principles

@@ -158,13 +158,13 @@ footnote has five levels of execution, each wrapping the one below:
 
 | Level | Skill | What it does | When to use |
 |-------|-------|-------------|-------------|
-| 5 | `/megawalk` | Vision to shipped product. Reads feature graph, picks ready features, dispatches target. | Multi-feature roadmap |
+| 5 | `/fno:target` per node | Multi-feature roadmap: pick ready features (`fno backlog next`), run `/fno:target` on each. | Multi-feature roadmap |
 | 4 | `/target` | Idea to shipped PR. Won't quit until done. | Single feature |
 | 3 | `/do waves` | Execute multi-phase plans with waves and verification. | Plan already exists |
 | 2 | `/do` | Execute a focused plan in one shot. | Bug fix, small change |
 | 1 | `archer` (agent) | Execute a single task with TDD. | Called by operator |
 
-Each level composes the one below. Megawalk calls target. Target calls operator. Operator dispatches archer. You pick the level that matches your task.
+Each level composes the one below. A roadmap runs `/fno:target` per node. Target calls operator. Operator dispatches archer. You pick the level that matches your task.
 
 Most of the time you'll use target (S/M/L). Megawalk is for when you have a vision document and want to ship multiple features continuously.
 

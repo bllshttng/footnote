@@ -402,7 +402,7 @@ Save the report and offer next steps.
 4. Present handoff options:
    - `/think "{top recommendation}"` - design the recommendation in depth
    - `/blueprint full "{top recommendation}"` - jump to execution planning
-   - `/megawalk` - feed into roadmap generation
+   - `/fno:target "{top recommendation}"` - execute it end to end (multi-feature: `fno backlog next`, then `/fno:target` per node)
    - `/think panel continue {slug}` - resume this debate later with new information
    - "Done for now" - just keep the report
 5. If `--chain` flag was set: invoke the chained skill automatically

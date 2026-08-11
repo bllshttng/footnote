@@ -2,6 +2,8 @@
 note: "Shared reference. Linked from removal redirect messages in megawalk SKILL and from CLAUDE.md."
 ---
 
+<!-- prescribed-verbs: describe -->
+
 # Megawalk Migration (2026-04-20)
 
 Four subcommands were removed as part of the megawalk surface cleanup. This page is the single source of truth for the before/after so users who hit a "command was removed" message can see the whole shape in one place.
