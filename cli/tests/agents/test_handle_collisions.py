@@ -56,7 +56,7 @@ def _census(tmp_path: Path, codex_rows, opencode_rows):
 
 
 def test_ac1_hp_measures_uuidv7_and_ses_prefix_clusters_without_duplicates(tmp_path):
-    """AC1-HP: full/window metrics compare legacy prefixes with canonical tails."""
+    """AC1-HP: full/window metrics compare legacy last-eight with canonical first-eight."""
     codex_a = "019fb417-aaaa-7e73-b8b4-000000000001"
     opencode_a = "ses_abcd11111111"
     reports = _census(
@@ -77,11 +77,11 @@ def test_ac1_hp_measures_uuidv7_and_ses_prefix_clusters_without_duplicates(tmp_p
 
     for report in reports.values():
         assert report.full.session_count == 3
-        assert report.full.legacy == handle_collisions.CollisionMetrics(1, 2, 2)
-        assert report.full.canonical == handle_collisions.CollisionMetrics(0, 0, 1)
+        assert report.full.legacy == handle_collisions.CollisionMetrics(0, 0, 1)
+        assert report.full.canonical == handle_collisions.CollisionMetrics(1, 2, 2)
         assert report.window.session_count == 2
-        assert report.window.legacy == handle_collisions.CollisionMetrics(1, 2, 2)
-        assert report.window.canonical == handle_collisions.CollisionMetrics(0, 0, 1)
+        assert report.window.legacy == handle_collisions.CollisionMetrics(0, 0, 1)
+        assert report.window.canonical == handle_collisions.CollisionMetrics(1, 2, 2)
 
 
 def test_ac1_edge_reads_legacy_opencode_created_time_when_database_is_absent(tmp_path):
@@ -220,10 +220,16 @@ def test_ac1_hp_main_prints_every_metric_and_exits_zero_for_collision_free_tails
     """AC1-HP: the runnable command reports both rules and both scopes."""
     codex = tmp_path / "codex"
     database = tmp_path / "opencode.db"
-    _rollouts(codex, [("codex-aa-one", RECENT), ("codex-aa-two", RECENT)])
+    _rollouts(
+        codex,
+        [
+            ("019fb417-aaaa-7e73-b8b4-000000000001", RECENT),
+            ("019fa000-bbbb-7e73-b8b4-000000000001", RECENT),
+        ],
+    )
     _database(
         database,
-        [("ses_abcd11111111", _epoch_ms(RECENT)), ("ses_abcd22222222", _epoch_ms(RECENT))],
+        [("ses_abcd11111111", _epoch_ms(RECENT)), ("ses_bbcd11111111", _epoch_ms(RECENT))],
     )
     code = handle_collisions.main(
         ["--codex-sessions-dir", str(codex), "--opencode-db", str(database)],

@@ -117,8 +117,8 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "0164189c"  # sender resolved to its canonical handle
-    assert replies[0].from_ == "66667777"  # my canonical handle, not a project
+    assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
+    assert replies[0].from_ == "11111111"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
@@ -381,7 +381,7 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     assert r.exit_code == 0, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "0164189c"  # migrated to the live session's canonical handle
+    assert replies[0].to == "9a063cd3"  # migrated to the live session's canonical handle
 
 
 def test_reply_to_retired_sender_offline_fails_without_queuing_an_unsafe_prefix(
@@ -468,7 +468,8 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
     )
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
-    assert "has no live pane" in (r.stderr or "")
+    assert "is not live" in (r.stderr or "")
+    assert "may never" in (r.stderr or "")
     assert "queued (durable)" in r.stdout
 
 
@@ -486,3 +487,73 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     assert r.exit_code == 0, r.output
     assert "delivered (hosted)" in r.stdout
     assert "no live pane" not in (r.stderr or "")
+
+
+# --- the body may be positional, exactly as it is on `send` --------------------
+#
+# `send` takes its body positionally; `reply` took only --body. The mismatch was
+# not merely inelegant: click rejects the stray argument with exit 2 and echoes
+# the body back, which looks enough like a delivery receipt that two agents read
+# it as one and believed their mail had been sent. These pin the shape, so the
+# positional cannot quietly stop binding.
+
+
+def _seeded_reply(runner, monkeypatch, tmp_path, argv_tail):
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    # Force the DURABLE path. A hosted delivery deliberately writes no bus
+    # record, so asserting the body on the bus after a successful inject reads
+    # as "nothing was sent" when in fact everything worked.
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
+    msg = _seed_name_lane_inbound(to="claude-meeeeeee", from_="9a063cd3", body="ping")
+    return msg, runner.invoke(app, ["mail", "reply", "--to", msg] + argv_tail)
+
+
+def test_a_positional_body_is_accepted_like_send(runner, mailbox, monkeypatch, tmp_path):
+    msg, r = _seeded_reply(runner, monkeypatch, tmp_path, ["ack"])
+
+    assert r.exit_code == 0, r.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert len(replies) == 1
+    assert "ack" in replies[0].body
+
+
+def test_the_positional_and_body_flag_agree(runner, mailbox, monkeypatch, tmp_path):
+    """Same body, two spellings, same delivered payload - the point of the change.
+
+    Compared on the payload, not the whole envelope: every message mints its own
+    id, so full-body equality is unachievable and asserting it would only ever
+    test the id generator.
+    """
+    import re
+
+    def _payload(body: str) -> str:
+        return re.sub(r"^<fno_mail[^>]*>|</fno_mail>$", "", body.strip()).strip()
+
+    msg_a, r_a = _seeded_reply(runner, monkeypatch, tmp_path, ["ack"])
+    via_positional = _payload([m for m in _bus_msgs() if m.in_reply_to == msg_a][0].body)
+
+    msg_b, r_b = _seeded_reply(runner, monkeypatch, tmp_path, ["--body", "ack"])
+    via_flag = _payload([m for m in _bus_msgs() if m.in_reply_to == msg_b][0].body)
+
+    assert r_a.exit_code == r_b.exit_code == 0
+    assert via_positional == via_flag == "ack"
+
+
+def test_two_bodies_at_once_is_an_explicit_error_not_a_precedence_rule(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A silent winner would relocate the trap rather than remove it."""
+    msg, r = _seeded_reply(runner, monkeypatch, tmp_path, ["ack", "--body", "different"])
+
+    assert r.exit_code == 1
+    assert "once" in (r.stderr or "") + r.output
+    assert not [m for m in _bus_msgs() if m.in_reply_to == msg], "nothing may be sent"
+
+
+def test_no_body_at_all_still_refuses(runner, mailbox, monkeypatch, tmp_path):
+    msg, r = _seeded_reply(runner, monkeypatch, tmp_path, [])
+
+    assert r.exit_code == 1
+    assert not [m for m in _bus_msgs() if m.in_reply_to == msg]

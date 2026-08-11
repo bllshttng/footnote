@@ -53,7 +53,7 @@ def _register_claude_peer(name: str = "red", short_id: str = "abcd1234") -> None
         AgentEntry(
             name=name,
             harness="claude",
-            harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
+            harness_session_id="abcd1234-1111-7222-8333-444455556666",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id=short_id,
@@ -581,7 +581,7 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
         AgentEntry(
             name="red",
             harness="claude",
-            harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
+            harness_session_id="abcd1234-1111-7222-8333-444455556666",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id="abcd1234",
@@ -686,7 +686,7 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
         AgentEntry(
             name="red",
             harness="claude",
-            harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
+            harness_session_id="abcd1234-1111-7222-8333-444455556666",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id="abcd1234",
@@ -914,7 +914,7 @@ def test_dispatch_send_codex_peer_queued_durable(tmp_path: Path, monkeypatch) ->
     assert result.msg_id.startswith("msg-")
 
     # Envelope is in the store
-    threads = read_all_threads("00000001")
+    threads = read_all_threads("deadbeef")
     assert len(threads) == 1
 
 

@@ -86,8 +86,8 @@ def test_resolve_parent_by_identity_not_display_name(monkeypatch) -> None:
         lambda *a, **k: HarnessIdentity(session_id="03401fb3-92b2-cafe", harness="claude"),
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda *a, **k: [FakeEntry()])
-    # canonical_handle("parentsess123") -> "tsess123"
-    assert clim._resolve_parent_handle(None) == "tsess123"
+    # canonical_handle("parentsess123") -> "parentse" (first-eight)
+    assert clim._resolve_parent_handle(None) == "parentse"
 
 
 # -- no lineage -> silent skip, no mail send --

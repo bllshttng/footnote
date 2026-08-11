@@ -292,7 +292,7 @@ def test_peek_requested_name_reads_repaired_codex_thread(tmp_path):
 
     assert rc == 0
     assert err.getvalue() == ""
-    assert f"peer {requested_name}: agent=codex short_id={session_id[-8:]}" in out.getvalue()
+    assert f"peer {requested_name}: agent=codex short_id={session_id[:8]}" in out.getvalue()
     assert "assistant: READY" in out.getvalue()
 
 

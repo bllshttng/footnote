@@ -175,7 +175,7 @@ def test_raw_self_ok_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "/compact", self_ok=True)
     assert exc.value.exit_code == 0
-    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[-8:])]
+    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[:8])]
     assert "/compact" in capsys.readouterr().out
 
 
@@ -246,7 +246,7 @@ def test_to_self_raw_derives_recipient_with_no_positional(runner, mailbox, monke
     res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
     assert res.exit_code == 0, res.output + (res.stderr or "")
     assert "injected" in res.output
-    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[-8:])]
+    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[:8])]
 
 
 def test_to_self_no_ambient_identity_exits_2(runner, mailbox, monkeypatch):

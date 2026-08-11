@@ -142,7 +142,6 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
         from fno.harness_identity import (
             canonical_handle,
-            legacy_prefix_handle,
             resolve_harness_identity,
         )
 
@@ -157,7 +156,7 @@ def _resolve_parent_handle(explicit: Optional[str]) -> Optional[str]:
         # variants are accepted; a canonically-named row still matches too.
         my_handle = canonical_handle(ident.session_id)
         session_field = HARNESS_SESSION_ID_FIELDS.get(ident.harness)
-        sid_variants = {ident.session_id, legacy_prefix_handle(ident.session_id)}
+        sid_variants = {ident.session_id, canonical_handle(ident.session_id)}
         for entry in load_registry():
             same_session = (
                 entry.harness == ident.harness

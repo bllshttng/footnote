@@ -5498,9 +5498,9 @@ def _lineage_seed_prefix(root_uuid: str) -> str:
     resolution across transcripts).
     """
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    from fno.harness_identity import legacy_prefix_handle
+    from fno.harness_identity import canonical_handle
 
-    short_root = legacy_prefix_handle(root_uuid or "")
+    short_root = canonical_handle(root_uuid or "")
     return (
         f"[lineage: forked from {short_root} at {ts}; "
         f"you are the claim-holding incarnation of {short_root}]"
@@ -5589,7 +5589,7 @@ def wake_and_deliver(
     if not session_uuid:
         return False, "no-session-uuid"
 
-    from fno.harness_identity import claude_transport_short_id, legacy_prefix_handle
+    from fno.harness_identity import claude_transport_short_id, canonical_handle
 
     # Rung 2 (x-eea5 1.1): an exited-but-rostered session revives IN PLACE via
     # `claude respawn <shortid>` (identity-preserving: same uuid, one roster
@@ -5623,7 +5623,7 @@ def wake_and_deliver(
 
     try:
         result = dispatch_spawn(
-            name=f"{_WAKE_NAME_PREFIX}{legacy_prefix_handle(session_uuid)}",
+            name=f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}",
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
@@ -5648,7 +5648,7 @@ def wake_and_deliver(
     # names both the new handle and the old lineage, and the seed prompt above
     # carried the lineage prefix. A fork is never silent.
     print(
-        f"forked new incarnation {short} from lineage {legacy_prefix_handle(session_uuid)}",
+        f"forked new incarnation {short} from lineage {canonical_handle(session_uuid)}",
         file=sys.stderr,
     )
     return True, short

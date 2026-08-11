@@ -39,7 +39,7 @@ from typing import Any, Callable, Iterator, Literal, Optional
 from fno import paths
 from fno.harness_identity import (
     canonical_handle,
-    legacy_prefix_handle,
+    legacy_suffix_handle,
     session_handle_tier,
     session_identity_key,
     sync_harness_aliases,
@@ -538,7 +538,7 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
         ("name", [e for e in entries if getattr(e, "name", None) == token]),
         ("short_id", [e for e in entries if getattr(e, "short_id", None) == token]),
         ("canonical_handle", [e for e in entries if _session_tier(e, token) == 1]),
-        ("legacy_prefix", [e for e in entries if _session_tier(e, token) == 2]),
+        ("legacy_suffix", [e for e in entries if _session_tier(e, token) == 2]),
     )
     hits = [entry for _matched_by, category in categories for entry in category]
     if hits:
@@ -1365,7 +1365,7 @@ def _validate_changed_identities(
             strong_tokens.add(candidate.short_id)
         if sid:
             strong_tokens.update((sid, canonical_handle(sid)))
-        legacy = legacy_prefix_handle(sid) if sid else ""
+        legacy = legacy_suffix_handle(sid) if sid else ""
         for other_index, other in enumerate(entries):
             if index == other_index:
                 continue

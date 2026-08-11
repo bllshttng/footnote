@@ -48,8 +48,8 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
     assert entry.status == "idle"
-    # Derived name is the canonical random tail, the mailbox id a peer addresses.
-    assert entry.name == "ca7119f6"
+    # Derived name is the canonical first-eight, the mailbox id a peer addresses.
+    assert entry.name == "ef9982cc"
 
     # AC7-UI: a fresh load shows the row with provider/cwd/status intact.
     rows = load_registry()
@@ -102,10 +102,12 @@ def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypat
         register_existing_session,
     )
 
-    a = register_existing_session(provider="claude", session_id="session-A-tail0001", cwd="/s")
+    a = register_existing_session(
+        provider="claude", session_id="tail0001-aaaa-bbbb-cccc-dddddddddddd", cwd="/s"
+    )
     with pytest.raises(AgentResolutionError, match="canonical handle.*collision"):
         register_existing_session(
-            provider="claude", session_id="session-B-tail0001", cwd="/s"
+            provider="claude", session_id="tail0001-1111-2222-3333-444455556666", cwd="/s"
         )
 
     assert a.name == "tail0001"
@@ -142,10 +144,10 @@ def test_friendly_name_is_suffixed_away_from_existing_handle_namespace(
     from fno.agents.registry import register_existing_session
 
     register_existing_session(
-        provider="claude", session_id="session-A-deadbeef", cwd="/s", name="worker"
+        provider="claude", session_id="deadbeef-0000-0000-0000-000000000000", cwd="/s", name="worker"
     )
     entry = register_existing_session(
-        provider="claude", session_id="session-B-cafebabe", cwd="/s", name="deadbeef"
+        provider="claude", session_id="cafebabe-0000-0000-0000-000000000000", cwd="/s", name="deadbeef"
     )
     assert entry.name == "deadbeef-2"
 
@@ -157,12 +159,12 @@ def test_transport_short_id_cannot_collide_with_existing_handle_namespace(
     from fno.agents.registry import AgentResolutionError, register_existing_session
 
     register_existing_session(
-        provider="codex", session_id="session-A-deadbeef", cwd="/s", name="worker"
+        provider="codex", session_id="deadbeef-0000-0000-0000-000000000000", cwd="/s", name="worker"
     )
     with pytest.raises(AgentResolutionError, match="transport short id.*collision"):
         register_existing_session(
             provider="codex",
-            session_id="session-B-cafebabe",
+            session_id="cafebabe-0000-0000-0000-000000000000",
             cwd="/s",
             name="other",
             short_id="deadbeef",
@@ -176,11 +178,11 @@ def test_reregister_cannot_refresh_transport_short_id_into_a_collision(
     from fno.agents.registry import AgentResolutionError, register_existing_session
 
     register_existing_session(
-        provider="codex", session_id="session-A-deadbeef", cwd="/s", name="worker"
+        provider="codex", session_id="deadbeef-0000-0000-0000-000000000000", cwd="/s", name="worker"
     )
     register_existing_session(
         provider="codex",
-        session_id="session-B-cafebabe",
+        session_id="cafebabe-0000-0000-0000-000000000000",
         cwd="/s",
         name="other",
         short_id="transport",
@@ -188,7 +190,7 @@ def test_reregister_cannot_refresh_transport_short_id_into_a_collision(
     with pytest.raises(AgentResolutionError, match="refreshing session"):
         register_existing_session(
             provider="codex",
-            session_id="session-B-cafebabe",
+            session_id="cafebabe-0000-0000-0000-000000000000",
             cwd="/s",
             short_id="deadbeef",
         )
@@ -328,7 +330,7 @@ _MARKERS = (
 
 
 def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch) -> None:
-    """A claude session self-registers under its canonical ambient-id tail."""
+    """A claude session self-registers under its canonical ambient-id first-eight."""
     use_tmpdir(monkeypatch, tmp_path)
     for m in _MARKERS:
         monkeypatch.delenv(m, raising=False)
@@ -341,9 +343,9 @@ def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(agents_app, ["register"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload == {"registered": True, "name": "55556666", "harness": "claude"}
+    assert payload == {"registered": True, "name": "deadbeef", "harness": "claude"}
     rows = load_registry()
-    assert len(rows) == 1 and rows[0].name == "55556666" and rows[0].status == "idle"
+    assert len(rows) == 1 and rows[0].name == "deadbeef" and rows[0].status == "idle"
 
 
 def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) -> None:
@@ -365,7 +367,7 @@ def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) ->
     result = runner.invoke(agents_app, ["whoami", "--json"])
     assert result.exit_code == 0, result.output  # exit 3 == unregistered (the bug)
     assert '"registered": true' in result.output
-    assert '"name": "ca7119f6"' in result.output
+    assert '"name": "ef9982cc"' in result.output
 
 
 def test_register_verb_exit3_without_ambient_identity(tmp_path: Path, monkeypatch) -> None:
