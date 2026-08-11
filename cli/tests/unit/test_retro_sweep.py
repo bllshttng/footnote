@@ -54,9 +54,11 @@ def test_cv_id_quoted_in_a_node_resolves_instead_of_filing():
     assert item.node_id == "x-1234"
 
 
-def test_existing_retro_trailer_hash_resolves_across_a_different_source_pr():
-    """A PR-scoped harvest already filed this one; the sweep has no PR of its
-    own, so the match must ignore the trailer's source_pr."""
+def test_a_bare_description_hash_parks_rather_than_consuming():
+    """The hash covers the description ONLY. Two carve-outs can share a generic
+    description while differing in kind, need, and scope, so resolving on it
+    would consume the later row without filing its distinct work. Provable
+    identity is the cv-id, which a PR-harvested node cites too."""
     description = "the mux pane send exits 0 without a submit key"
     cv = _cv("cv-33334444", description, kind="oos-bug")
     nodes = [
@@ -69,8 +71,26 @@ def test_existing_retro_trailer_hash_resolves_across_a_different_source_pr():
 
     (item,) = plan_sweep([cv], nodes)
 
-    assert item.disposition == DISPOSITION_RESOLVE
+    assert item.disposition == DISPOSITION_REVIEW
     assert item.node_id == "x-5678"
+
+
+def test_a_pr_harvested_node_still_resolves_by_its_cited_cv_id():
+    """The reason downgrading the hash matcher costs nothing: a carve-out node
+    cites its cv-id whichever harvest filed it."""
+    cv = _cv("cv-33335555", "the mux pane send exits 0 without a submit key")
+    nodes = [
+        {
+            "id": "x-5679",
+            "title": "pane send",
+            "details": "...\n\nSource: PR #604, source `cv-33335555`",
+        }
+    ]
+
+    (item,) = plan_sweep([cv], nodes)
+
+    assert item.disposition == DISPOSITION_RESOLVE
+    assert item.node_id == "x-5679"
 
 
 def test_fuzzy_subject_match_parks_for_review_and_never_files():

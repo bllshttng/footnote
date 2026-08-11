@@ -16,16 +16,19 @@ already tracked turns into a pile of duplicates that no verb can delete.
 
 ``resolve``
     An EXACT match proves the carve-out is already tracked: its cv-id appears
-    verbatim in a node (every node this sweep files cites its cv-id, so a
-    re-run is a no-op), or a retro-triage trailer carries the same content hash
-    from an earlier PR-scoped harvest. Consume the ledger row, file nothing.
+    verbatim in a node. Every carve-out node cites its cv-id, whether this
+    sweep or a PR-scoped harvest filed it, so this covers both and makes a
+    re-run a no-op. Consume the ledger row, file nothing.
 
 ``review``
-    A FUZZY subject match. Never auto-consumed and never filed: a wrong fuzzy
-    match would either lose the work (consume) or duplicate it (file), so the
-    only safe move is to name the suspected node and let a human decide. A
-    ``deferred`` item parked here keeps blocking its node's close, which is the
-    correct outcome - the gate exists to force exactly that look.
+    An AMBIGUOUS match: a fuzzy subject hit, a bare description-hash hit (the
+    hash omits kind, need, and scope, so a generic description can collide
+    across genuinely different work), or a twin earlier in the same batch.
+    Never auto-consumed and never filed: a wrong match would either lose the
+    work (consume) or duplicate it (file), so the only safe move is to name the
+    suspected node and let a human decide. A ``deferred`` item parked here
+    keeps blocking its node's close, which is the correct outcome - the gate
+    exists to force exactly that look.
 
 ``file``
     No match at all. Mint a node (queued in interactive mode, so a human still
@@ -146,9 +149,17 @@ def find_tracking_node(
             if cv_id in _node_text(node):
                 return str(node.get("id") or ""), f"cv-id cited in {node.get('id')}", True
 
-    # An earlier PR-scoped harvest writes `finding_hash=<h>` into the node's
-    # details. Match on the hash alone, ignoring the trailer's source_pr: this
-    # sweep has no PR, and the same carve-out filed under PR #N is still filed.
+    # An earlier harvest writes `finding_hash=<h>` into the node's details.
+    # Match on the hash alone, ignoring the trailer's source_pr, since this
+    # sweep has no PR.
+    #
+    # NOT exact, deliberately. The hash covers the description only: two
+    # carve-outs can share a generic description ("unrelated", "no reliable
+    # repro") while differing in kind, need, and scope, which is different
+    # work. Resolving on that consumes the later row without filing it - the
+    # one thing this sweep must never do. Provable identity is the cv-id match
+    # above, which also covers a PR-harvested node, since a carve-out node's
+    # cite quotes its cv-id either way. So this stays a review signal.
     digest = content_hash(str(rec.get("description") or ""))
     if digest:
         needle = f"finding_hash={digest}"
@@ -156,8 +167,9 @@ def find_tracking_node(
             if needle in str(node.get("details") or ""):
                 return (
                     str(node.get("id") or ""),
-                    f"retro-triage content hash matches {node.get('id')}",
-                    True,
+                    f"same description hash as {node.get('id')} "
+                    f"(kind/need/scope not compared)",
+                    False,
                 )
 
     # Compare on the SAME string the node would be titled with. Matching on

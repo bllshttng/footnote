@@ -282,7 +282,13 @@ def resolve_carveouts(
         # reasoned removal is the untraceable drop the flag exists to prevent.
         try:
             from fno.events import _build, append_event
+            from fno.paths import project_log
 
+            # Explicit events_path, rooted where the LEDGER lives. Without it
+            # append_event writes to a relative ./.fno/events.jsonl under the
+            # caller's cwd: run from a subdirectory or a linked worktree, the
+            # row is removed from the canonical ledger while its only trace
+            # lands somewhere that does not survive the worktree's archival.
             append_event(
                 _build(
                     "carveout_resolved",
@@ -295,7 +301,10 @@ def resolve_carveouts(
                         "reason": reason,
                         "removed": removed,
                     },
-                )
+                ),
+                events_path=project_log(
+                    "events.jsonl", project_root=resolve_carveout_root()
+                ),
             )
         except Exception as exc:
             typer.echo(
