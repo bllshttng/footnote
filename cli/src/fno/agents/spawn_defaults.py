@@ -638,23 +638,40 @@ def inject_spawn_defaults(
     explicit_vendor_and_model = (
         _flag_present(out[1:], "-P") or _flag_present(out[1:], "--provider")
     ) and has_model
+    explicit_route = _flag_present(out[1:], "--route")
     route_injected = False
-    if cfg_route and not _flag_present(out[1:], "--route") and not explicit_vendor_and_model:
+    if cfg_route and not explicit_route and not explicit_vendor_and_model:
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", route_rung))  # type: ignore[arg-type]
+    # route_present covers BOTH ways --route ends up in the final argv: injected
+    # from config just above, or already explicit on the caller's argv. Gating
+    # the model-suppression below on route_injected alone missed the explicit
+    # case - an operator-typed `--route zai/... ` with no `-m` still fell through
+    # to the config-model branch and injected `--model opus` alongside it, the
+    # exact route+model collision (five-opus-workers defect) this field exists
+    # to prevent.
+    route_present = route_injected or explicit_route
     # Accounts are Claude-only (cmd_spawn rejects --account on any other
     # harness), so a configured account must not follow an explicit non-Claude
     # harness - e.g. an autonomous Claude-to-Codex quota cutover (-H codex)
     # would otherwise carry a Claude account into a spawn that can't use it and
     # abort instead of cutting over.
-    if (
-        cfg_account
-        and not _flag_present(out[1:], "--account")
-        and resolved_provider() == "claude"
-    ):
-        inject += ["--account", cfg_account]
-        from_config.append(("account", account_rung))  # type: ignore[arg-type]
+    if cfg_account and not _flag_present(out[1:], "--account"):
+        prov = resolved_provider()
+        if prov == "claude":
+            inject += ["--account", cfg_account]
+            from_config.append(("account", account_rung))  # type: ignore[arg-type]
+        else:
+            # AC9-UI: config-sourced routing is never invisible - a substrate/
+            # permission skip already warns here, so account must too rather than
+            # silently dropping the pin on a Claude-to-Codex cutover.
+            print(
+                f"fno agents spawn: account skipped (accounts are claude-only, "
+                f"resolved provider {prov!r}); {account_rung}.account "
+                f"{cfg_account!r} ignored",
+                file=err,
+            )
 
     if cfg_model and not has_model:
         # The config model is suppressed when something else already owns the
@@ -662,10 +679,10 @@ def inject_spawn_defaults(
         # resolves to a real route (the route owns the model via env). Either
         # would collide with a config --model. An explicit -m already won via
         # has_model, which short-circuited this whole branch.
-        if route_injected:
+        if route_present:
             print(
-                f"fno agents spawn: route {cfg_route!r} owns the model; not "
-                f"injecting {model_rung}.model {cfg_model!r}",
+                f"fno agents spawn: --route owns the model; not injecting "
+                f"{model_rung}.model {cfg_model!r}",
                 file=err,
             )
         elif role and _role_resolves(role, settings, env):

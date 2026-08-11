@@ -636,6 +636,33 @@ def test_config_account_not_injected_over_explicit_non_claude_harness():
     assert "--account" not in out
 
 
+def test_config_account_skip_is_not_silent():
+    # AC9-UI: config-sourced routing is never invisible. The substrate/
+    # permission_mode skip paths already warn to stderr; the account skip on a
+    # non-claude harness must too, not silently drop the pin.
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "-H", "codex", "/fno:target x-1"],
+        err=err, account="secondary",
+    )
+    msg = err.getvalue()
+    assert "account skipped" in msg
+    assert "secondary" in msg
+
+
+def test_explicit_route_with_no_model_flag_still_suppresses_config_model():
+    # An operator-typed --route with no -m must suppress the config model too,
+    # not only a config-injected route: route_injected alone missed this case,
+    # letting a config model land alongside an explicit --route (the exact
+    # route+model collision this field exists to prevent).
+    out = _inject(
+        ["spawn", "--name", "w", "--route", "zai/glm-5.2[1m]", "/fno:target x-1"],
+        model="opus",
+    )
+    assert "--model" not in out
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+
+
 # --------------------------------------------------------------------------- #
 # Autonomous lane reads the stage table (task 1.3)
 #
