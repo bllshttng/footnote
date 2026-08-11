@@ -294,7 +294,14 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     (
         "Pytest (unit + integration)",
         "cli",
-        "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup",
+        # The canary is EXPECTED to fail under --ambient dirty; that failure is
+        # the positive control, not a defect. Running it as part of the ordinary
+        # suite would make smoke-dirty red on every commit, and a job that is
+        # always red teaches people to ignore it exactly as fast as one that is
+        # always green. It is exercised deliberately, in BOTH lanes, by
+        # tests/ci/test_hermetic_lanes.sh, which is where the assertion belongs.
+        "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup "
+        "--ignore=tests/unit/test_ambient_canary.py",
     ),
     ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),

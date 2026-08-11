@@ -16,6 +16,11 @@ that self-test goes red, and the silent disarming is caught.
 
 Do NOT "fix" a dirty-lane failure here by pinning the canary. Its failure IS
 the feature.
+
+This file is `--ignore`d by the smoke pytest step for that reason: as part of
+the ordinary suite it would make smoke-dirty red on every commit, and a job
+that is always red gets ignored exactly as fast as one that is always green.
+The self-test runs it by path, in both lanes, and asserts each outcome.
 """
 from __future__ import annotations
 
