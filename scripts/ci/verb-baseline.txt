@@ -289,6 +289,7 @@ plugins inspect
 plugins ls
 plugins verify
 pr base-check
+pr base-lineage-check
 pr evidence-check
 pr evidence-required
 pr global-receipt-events-path
