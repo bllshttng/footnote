@@ -23619,6 +23619,54 @@ mod tests {
         write_shot(&frame, "01-rename-prompt", "rename prompt (after)");
     }
 
+    /// The needs-attention accent, measured on every theme rather than filed.
+    ///
+    /// `LATTICE_ACCENT` is `Indexed(3)`, and on a real light scheme that is
+    /// `#b58900` on `#fdf6e3` - 2.98:1 plain, under the 3:1 non-text floor and
+    /// under that scheme's own body text. A blocked row also carries BOLD
+    /// (`lattice_style`), and bold brightens the foreground, which on a cream
+    /// background makes it WORSE: **1.70:1**, near-invisible. So the lowest-
+    /// contrast chrome in the mux is the one signal that means look here, and
+    /// the attribute meant to emphasise it is what finishes it off.
+    ///
+    /// Not fixed here, and the reason is worth stating because it is not
+    /// squeamishness: mux cannot detect the reader's background polarity, so
+    /// choosing a different index only moves which polarity loses. The two kinds
+    /// of use site also want different answers - a blocked agent row carries
+    /// `▲` and BOLD as well, so colour is a redundant channel there, while the
+    /// focus outline and the drop zones are colour ALONE.
+    ///
+    /// This test exists so the numbers live in the repo instead of a ledger:
+    /// it fails the moment the accent gets worse on any theme, and it is the
+    /// thing to relax deliberately when someone picks the real fix.
+    #[test]
+    fn accent_contrast_is_measured_on_every_theme() {
+        use crate::frame_html::{body_contrast, contrast_ratio, THEMES};
+        let accent = Cell {
+            c: '\u{25b2}',
+            fg: LATTICE_ACCENT,
+            bg: Color::Default,
+            flags: cell_flags::BOLD,
+        };
+        let mut worst = f64::MAX;
+        for theme in THEMES {
+            let r = contrast_ratio(&accent, theme);
+            eprintln!(
+                "accent on {:22} {r:5.2}:1   (body {:.2}:1)",
+                theme.name,
+                body_contrast(theme)
+            );
+            worst = worst.min(r);
+        }
+        // 1.70:1 is where it stands today, on Solarized Light with BOLD. This
+        // guards the direction only: it fails if the accent gets WORSE, and
+        // stays green when someone fixes it properly.
+        assert!(
+            worst > 1.6,
+            "the accent regressed past its known-bad floor: {worst:.2}:1"
+        );
+    }
+
     /// Item 2. A workspace header has to separate from its own contents.
     ///
     /// It cannot do it by SIZE (one cell grid, one font) and it cannot do it by
