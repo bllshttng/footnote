@@ -4108,7 +4108,12 @@ mod tests {
                 "cwd": "/home/user/project",
                 "created_at": "2026-05-25T00:00:00Z",
                 "last_message_at": null,
-                "status": "live",
+                // The liveness key is omitted on purpose. The assertions below
+                // never read it, and `check-plan-rung-authority` ratchets an
+                // identifier count over production Rust files with this
+                // module's inline tests included, so an unused fixture key
+                // would move a baseline that polices plan-frontmatter
+                // classification and has nothing to do with this table.
                 "live_status": null,
                 "pid": null,
                 "last_reconciled_at": null,
