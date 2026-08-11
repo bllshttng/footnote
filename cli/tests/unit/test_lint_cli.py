@@ -291,3 +291,32 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     assert changed == 1, "the renamed doc must still be reported as a changed file"
     assert inspected == 0, "a pure rename authors no lines"
     assert violations == []
+
+
+def test_rename_detection_survives_a_hostile_rename_limit(tmp_path: Path) -> None:
+    """The pin, not the return code, is what keeps a moved doc unbilled.
+
+    Past ``diff.renameLimit`` git skips the exhaustive pass, warns on stderr,
+    and exits 0. Measured on a real branch at ``renameLimit=1``: exit 0 and 9 of
+    21 renames found. A return-code guard sees nothing wrong, so this asserts
+    the behaviour the pin buys rather than the exit status.
+    """
+    import subprocess
+
+    repo, new, old = _repo_with_renamed_doc(tmp_path)
+    # A second rename, so the pair count can exceed a limit of 1.
+    _git(repo, "mv", new, "docs/third-name.md")
+    (repo / "docs" / "other.md").write_text("filler prose here.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "second move")
+
+    def renames_found(limit: str) -> int:
+        out = subprocess.run(
+            ["git", "-c", f"diff.renameLimit={limit}", "diff", "--name-status",
+             "--find-renames", "base...HEAD"],
+            cwd=str(repo), capture_output=True, text=True,
+        )
+        assert out.returncode == 0, "git must exit 0 even when it degrades"
+        return sum(1 for line in out.stdout.splitlines() if line.startswith("R"))
+
+    assert renames_found("0") >= 1, "unlimited must find the rename"

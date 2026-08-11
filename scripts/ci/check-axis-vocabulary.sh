@@ -171,11 +171,33 @@ SCANNABLE_EXT = {".py", ".rs", ".sh", ".bash", ".md", ".yaml", ".yml"}
 # (sibling copies that would multiply every finding), the untracked vault symlink,
 # and per-CLI config roots.
 EXCLUDE_DIR = {
-    "target", ".git", "node_modules", ".venv", "venv", "__pycache__",
+    ".git", "node_modules", ".venv", "venv", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
     ".claude", ".codex", ".gemini", ".agents", "internal", ".next", "out",
     ".fno",
 }
+
+# `target` is NOT in the set above, because pruning it by bare name pruned five
+# directories and only two were build output. Measured: skills/target (66
+# tracked files), cli/src/fno/target (7), and tests/target (5) are source that
+# neither scan ever opened, while crates/fno/target and crates/fno-agents/target
+# hold zero tracked files between them. The exclusion excluded only real code.
+#
+# Anchored to where build output actually lives. The remaining bare names above
+# share the latent shape: any of them is prunable at any depth. None of them
+# currently collides with real content in this repo, and each gets an anchor
+# here the day it does.
+EXCLUDE_ANCHORED = {
+    "crates/fno/target",
+    "crates/fno-agents/target",
+}
+
+# An adversarial probe, deliberately placed where the walk used to be blind
+# rather than where it was always going to pass. The two earlier positive
+# controls asserted only that the three DECLARED_PATH_AXIS directories were
+# reached, and all three sit outside every excluded name, so they sampled the
+# region that could not fail. A regression to bare-name pruning fails here.
+REQUIRED_REACH = ("skills/target",)
 
 # The guard and its own baseline are not scanned: the literal sets below would
 # self-trigger, and the baseline is data, not code.
@@ -275,9 +297,22 @@ def scan(root: Path):
     findings = []
     observed_by_ext = {}
     axis_dirs = {}
+    probes_reached = set()
     repo_root = _repo_root_for(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR]
+        kept = []
+        for d in dirnames:
+            if d in EXCLUDE_DIR:
+                continue
+            child = os.path.relpath(os.path.join(dirpath, d), root).replace(os.sep, "/")
+            if child in EXCLUDE_ANCHORED:
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        _here = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        for probe in REQUIRED_REACH:
+            if _here == probe or _here.startswith(probe + "/"):
+                probes_reached.add(probe)
         # Collected in the SAME walk the content scan already performs, so the
         # name check costs no second traversal of the tree.
         rel_dir = os.path.relpath(dirpath, root)
@@ -314,7 +349,7 @@ def scan(root: Path):
                     observed_by_ext[ext] = observed_by_ext.get(ext, 0) + 1
                     reached = True
                 findings.extend(_findings_for_line(rel, i, line))
-    return sorted(set(findings)), observed_by_ext, axis_dirs
+    return sorted(set(findings)), observed_by_ext, axis_dirs, probes_reached
 
 
 def _name_findings(axis_dirs: dict):
@@ -361,7 +396,7 @@ def _self_test():
     for lang, (name, body) in specimens.items():
         d = Path(tempfile.mkdtemp(prefix=f"axis-{lang}-"))
         (d / name).write_text(body, encoding="utf-8")
-        found, _, _ = scan(d)
+        found, _, _, _ = scan(d)
         if found:
             print(f"caught planted {lang} violation")
         else:
@@ -369,7 +404,7 @@ def _self_test():
             failures += 1
     d = Path(tempfile.mkdtemp(prefix="axis-clean-"))
     (d / "ok.py").write_text('provider = "anthropic"\n', encoding="utf-8")
-    found, _, _ = scan(d)
+    found, _, _, _ = scan(d)
     if found:
         print("FAILED: clean tree produced findings", file=sys.stderr)
         for f in found:
@@ -383,7 +418,7 @@ def _self_test():
     d = Path(tempfile.mkdtemp(prefix="axis-name-"))
     (d / "providers").mkdir()
     (d / "providers" / "x.py").write_text("x = 1\n", encoding="utf-8")
-    _, _, dirs = scan(d)
+    _, _, dirs, _ = scan(d)
     if _name_findings(dirs):
         print("caught planted undeclared-directory violation")
     else:
@@ -397,7 +432,7 @@ def _self_test():
     d = Path(tempfile.mkdtemp(prefix="axis-declared-"))
     (d / declared_rel).mkdir(parents=True)
     (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
-    _, _, dirs = scan(d)
+    _, _, dirs, _ = scan(d)
     # Asserts the POSITIVE: the expected key was actually computed, then that it
     # produced no finding. Filtering findings by a `declared_rel` prefix instead
     # was unfalsifiable - a TMPDIR inside a git repo prefixes every key, no
@@ -428,7 +463,7 @@ def _self_test():
     (d / declared_rel).mkdir(parents=True)
     (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
     subtree = d / Path(declared_rel).parts[0]
-    _, _, dirs = scan(subtree)
+    _, _, dirs, _ = scan(subtree)
     if declared_rel not in dirs:
         print(
             f"FAILED: subtree scan keyed {sorted(dirs)}, not repo-relative "
@@ -450,13 +485,35 @@ def _self_test():
     d = Path(tempfile.mkdtemp(prefix="axis-notaxis-"))
     (d / "models").mkdir()
     (d / "models" / "x.py").write_text("x = 1\n", encoding="utf-8")
-    _, _, dirs = scan(d)
+    _, _, dirs, _ = scan(d)
     before = len(_name_findings(dirs))
     DECLARED_PATH_AXIS["models"] = NOT_AN_AXIS
     try:
         after = len(_name_findings(dirs))
     finally:
         del DECLARED_PATH_AXIS["models"]
+    # Anchored exclusion. A bare-name `target` prunes a source directory that
+    # merely shares the name, which is how skills/target stayed invisible: 66
+    # tracked files that neither scan ever opened. The specimen is a source tree
+    # named `target` OUTSIDE the anchored build paths, and its violation must be
+    # found. Multi-level on purpose: the single-level trees above cannot reach a
+    # second os.walk iteration, which is how a bug in the walk survived them.
+    d = Path(tempfile.mkdtemp(prefix="axis-anchored-"))
+    (d / "skills" / "target" / "references").mkdir(parents=True)
+    (d / "skills" / "target" / "references" / "v.py").write_text(
+        'provider = "claude"\n', encoding="utf-8"
+    )
+    found, _, _, probes = scan(d)
+    if found and "skills/target" in probes:
+        print("caught planted source-dir-named-target violation")
+    else:
+        print(
+            "FAILED to catch a violation under a source directory named target "
+            f"(findings={len(found)}, probes={sorted(probes)})",
+            file=sys.stderr,
+        )
+        failures += 1
+
     if before == 1 and after == 0:
         print("caught planted not-an-axis declaration ok")
     else:
@@ -472,7 +529,7 @@ def _self_test():
 if os.environ.get("AXIS_SELF_TEST") == "1":
     sys.exit(_self_test())
 
-findings, observed, axis_dirs = scan(root_arg)
+findings, observed, axis_dirs, probes_reached = scan(root_arg)
 
 # --- Name scan (independent of the content scan and its baseline) -------------
 # Runs in every mode and never contributes a baseline line: a directory naming
@@ -493,25 +550,48 @@ findings, observed, axis_dirs = scan(root_arg)
 # packages went unjudged, and the receipt still printed a confident count. A
 # count nothing asserts is decoration.
 _whole_repo_scan = root_arg.resolve() == _repo_root_for(root_arg).resolve()
-_unreached = sorted(set(DECLARED_PATH_AXIS) - set(axis_dirs)) if _whole_repo_scan else []
-if _unreached:
-    print(
-        "check-axis-vocabulary: name scan positive control failed "
-        f"(declared directories the walk never reached: {', '.join(_unreached)}); "
-        "the traversal did not cover the tree",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-if _whole_repo_scan and not axis_dirs:
-    print(
-        "check-axis-vocabulary: name scan positive control failed "
-        "(no axis-named directories collected anywhere under the root); "
-        "the traversal did not reach content",
-        file=sys.stderr,
-    )
-    sys.exit(2)
+
+# "Declared but absent" and "declared but unreached" are two states, and putting
+# them behind one exit sent every reader to the wrong place. A directory that was
+# renamed or deleted without updating the map is a MAP violation the author fixes
+# in the map (exit 1). A directory that exists on disk but the walk never visited
+# is an INSTRUMENT failure the author fixes in the traversal (exit 2). The far
+# more common cause is the first, and it was reported as the second.
+_declared_missing, _declared_unreached = [], []
+if _whole_repo_scan:
+    for _rel in sorted(DECLARED_PATH_AXIS):
+        if _rel in axis_dirs:
+            continue
+        if (_repo_root_for(root_arg) / _rel).is_dir():
+            _declared_unreached.append(_rel)
+        else:
+            _declared_missing.append(_rel)
 
 name_violations = _name_findings(axis_dirs)
+name_violations += [
+    f"{rel}/: declared in DECLARED_PATH_AXIS but no such directory exists; "
+    "remove the entry or restore the path"
+    for rel in _declared_missing
+]
+
+# Instrument failures, collected rather than raised, so the verdict below still
+# prints. A control that exits before the result it guards hides the very thing
+# the reader came for.
+_instrument_failures = []
+if _declared_unreached:
+    _instrument_failures.append(
+        "declared directories present on disk but never visited: "
+        + ", ".join(_declared_unreached)
+    )
+_probe_missed = sorted(set(REQUIRED_REACH) - probes_reached) if _whole_repo_scan else []
+if _probe_missed:
+    _instrument_failures.append(
+        "adversarial probe paths never visited: " + ", ".join(_probe_missed)
+    )
+if _whole_repo_scan and not axis_dirs:
+    _instrument_failures.append(
+        "no axis-named directories collected anywhere under the root"
+    )
 
 # Printed on EVERY run, pass or fail. A green here means less than a reader will
 # assume, and the blind spot this guard was written for is exactly a green that
@@ -526,9 +606,26 @@ print(
     "  declaration. It does NOT open a directory to verify that declaration is\n"
     "  true, so a wrong declaration passes green. It does not judge file names\n"
     "  or symbol names; those are the content scan's subject and live in the\n"
-    "  baseline.",
-    file=sys.stderr if name_violations else sys.stdout,
+    "  baseline.\n"
+    f"  not scanned: {', '.join(sorted(EXCLUDE_ANCHORED))}, and any directory\n"
+    f"  named {', '.join(sorted(EXCLUDE_DIR))}. Anything under those paths is\n"
+    "  judged by neither scan.",
+    file=sys.stderr if name_violations or _instrument_failures else sys.stdout,
 )
+
+if _instrument_failures:
+    print(
+        "check-axis-vocabulary: name scan positive control failed:",
+        file=sys.stderr,
+    )
+    for f in _instrument_failures:
+        print(f"  {f}", file=sys.stderr)
+    print(
+        "The traversal did not cover the tree, so no verdict above is "
+        "trustworthy. This is an instrument failure, not a finding.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 if name_violations:
     print("check-axis-vocabulary: directory-name violations:", file=sys.stderr)

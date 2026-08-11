@@ -485,14 +485,19 @@ def _style_added_lines(
     # Pre-rename paths, keyed by new path. Resolved from an UNSCOPED name-status
     # pass because rename detection needs both sides visible, which a per-file
     # pathspec denies it.
-    # Failing loud rather than degrading: an empty result here is
-    # indistinguishable from "no renames", and the fallback is the exact bug
-    # this resolution exists to prevent. Every moved doc would silently have
-    # its whole body billed as authored prose while the gate still reported N
-    # files inspected.
+    # Prevention first, detection second. A return-code guard cannot catch this
+    # on its own: past `diff.renameLimit` git skips the exhaustive pass, warns on
+    # stderr, and exits 0, having truthfully answered "did I run" rather than
+    # "did I compare every path". Measured on this branch at renameLimit=1: exit
+    # 0, a warning, and 9 of 21 renames found. `renameLimit=0` means unlimited
+    # and finds all 21, so the limit is pinned here rather than inherited from
+    # whatever the caller's git config happens to be.
     renames: dict[str, str] = {}
     name_status = subprocess.run(
-        ["git", "diff", "--name-status", "--find-renames", f"{diff_base}...HEAD"],
+        [
+            "git", "-c", "diff.renameLimit=0",
+            "diff", "--name-status", "--find-renames", f"{diff_base}...HEAD",
+        ],
         cwd=str(repo),
         capture_output=True,
         text=True,
@@ -501,6 +506,16 @@ def _style_added_lines(
         typer.echo(
             "style: rename detection failed "
             f"({diff_base}...HEAD): {name_status.stderr.strip()}",
+            err=True,
+        )
+        raise typer.Exit(2)
+    # Backstop for the degradation the pin is meant to prevent, kept because a
+    # silent partial answer here mis-bills every moved doc as authored prose.
+    if "rename detection was skipped" in name_status.stderr:
+        typer.echo(
+            "style: git skipped rename detection despite the pinned limit "
+            f"({name_status.stderr.strip()}); refusing to bill moved files as "
+            "authored prose",
             err=True,
         )
         raise typer.Exit(2)
@@ -548,7 +563,10 @@ def _git_added_line_nums(
     """
     pathspec = [rel] if old_rel is None else [rel, old_rel]
     proc = subprocess.run(
-        ["git", "diff", "-U0", "--find-renames", f"{diff_base}...HEAD", "--", *pathspec],
+        [
+            "git", "-c", "diff.renameLimit=0",
+            "diff", "-U0", "--find-renames", f"{diff_base}...HEAD", "--", *pathspec,
+        ],
         cwd=str(repo),
         capture_output=True,
         text=True,
