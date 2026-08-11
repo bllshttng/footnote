@@ -826,9 +826,14 @@ mod tests {
     fn command_only_passes_framed_envelopes_and_slash_commands() {
         // Framed envelopes skip the predicate (a `<fno_mail>` body is Python-capped
         // and wrapped; a relay hop must never be refused here).
-        assert_eq!(command_only_decision("<fno_mail from=\"a\">body</fno_mail>"), None);
         assert_eq!(
-            command_only_decision("  <cross-session-message from-name=\"p\">hop</cross-session-message>"),
+            command_only_decision("<fno_mail from=\"a\">body</fno_mail>"),
+            None
+        );
+        assert_eq!(
+            command_only_decision(
+                "  <cross-session-message from-name=\"p\">hop</cross-session-message>"
+            ),
             None
         );
         // An unwrapped single-line slash command is the documented unframed shape.
@@ -840,9 +845,15 @@ mod tests {
     fn command_only_refuses_unwrapped_prose() {
         // The hole: a direct binary call piping authored prose. Refused at the door.
         assert_eq!(command_only_decision("hello there"), Some(1));
-        assert_eq!(command_only_decision("the build broke and I need help"), Some(1));
+        assert_eq!(
+            command_only_decision("the build broke and I need help"),
+            Some(1)
+        );
         // A framed-looking word that does not start the payload is still prose.
-        assert_eq!(command_only_decision("see <fno_mail> mid-sentence"), Some(1));
+        assert_eq!(
+            command_only_decision("see <fno_mail> mid-sentence"),
+            Some(1)
+        );
     }
 
     #[test]
