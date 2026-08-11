@@ -139,6 +139,17 @@ def release_dir_mutex(lock_dir: Path, token: str) -> None:
     )
 
 
+def renew_dir_mutex(lock_dir: Path, token: str) -> bool:
+    """Refresh a long-held mutex lease only while its owner token still matches."""
+    if _read_owner(lock_dir) != token:
+        return False
+    try:
+        os.utime(lock_dir, None)
+    except OSError:
+        return False
+    return _read_owner(lock_dir) == token
+
+
 def steal_if_stale(lock_dir: Path) -> bool:
     """Rename-steal ``lock_dir`` when it is older than ``STALE_MUTEX_STEAL_S``.
 

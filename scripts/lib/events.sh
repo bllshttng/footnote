@@ -80,6 +80,9 @@ _append_bounded_event() {
     local label="${1:?label required}"
     local event="${2:?event required}"
     local events_path="${3:?events path required}"
+    if [[ -L "$events_path" ]]; then
+        events_path=$(_resolve_event_symlink "$events_path") || return 1
+    fi
     local event_bytes
     event_bytes=$(printf '%s\n' "$event" | wc -c | tr -d '[:space:]')
     if (( event_bytes > EVENTS_ATOMIC_LINE_MAX_BYTES )); then

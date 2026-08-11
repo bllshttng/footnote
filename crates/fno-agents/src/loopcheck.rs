@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -4647,7 +4647,7 @@ pub(crate) fn now_rfc3339_utc() -> String {
     now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Append a target-stream event to a file (O_APPEND, create if missing).
+/// Append a target-stream event through the shared Branch-A mkdir mutex.
 /// Failure is loud on stderr but never fatal to the decision.
 fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
     let env = LoopEventEnvelope {
@@ -4656,36 +4656,17 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
         source: "hook",
         data,
     };
-    let Ok(mut line) = serde_json::to_string(&env) else {
+    let Ok(event) = serde_json::to_value(&env) else {
         eprintln!("loop-check: failed to serialize event {event_type}");
         return;
     };
-    line.push('\n');
-
-    // Create parent dirs
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    if let Err(error) =
+        crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2))
     {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(line.as_bytes()) {
-                eprintln!(
-                    "loop-check: failed to write event {event_type} to {}: {e}",
-                    path.display()
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!(
-                "loop-check: failed to open events file {}: {e}",
-                path.display()
-            );
-        }
+        eprintln!(
+            "loop-check: failed to write event {event_type} to {}: {error}",
+            path.display()
+        );
     }
 }
 
@@ -9032,6 +9013,32 @@ mod tests {
                 Freshness::Stale
             }
         }
+    }
+
+    #[test]
+    fn target_stream_emit_waits_for_shared_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("events.jsonl");
+        let global = dir.path().join("global-events.jsonl");
+        let lock = dir.path().join("events.jsonl.lock.d");
+        std::fs::create_dir(&lock).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let thread_barrier = std::sync::Arc::clone(&barrier);
+
+        let handle = std::thread::spawn(move || {
+            thread_barrier.wait();
+            emit_to_both(&project, &global, "mutex_probe", serde_json::json!({}));
+            project
+        });
+        barrier.wait();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!dir.path().join("events.jsonl").exists());
+
+        std::fs::remove_dir_all(lock).unwrap();
+        let project = handle.join().unwrap();
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("mutex_probe"));
     }
 
     /// The list half of the scan. Production reads the count too, so this

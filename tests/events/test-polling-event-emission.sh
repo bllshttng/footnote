@@ -193,6 +193,30 @@ wait "$gc_release_pid"
 line=$(tail -1 "$EVENTS_FILE" 2>/dev/null)
 assert_contains "GC barrier append" "$line" '"type":"gc_barrier_probe"'
 
+# Explicit paths passed by hook fallbacks must share the canonical journal's
+# GC marker and writer rendezvous when the worktree leaf is a symlink.
+canonical_events="$WORK/canonical/events.jsonl"
+linked_events="$WORK/linked/events.jsonl"
+mkdir -p "$(dirname "$canonical_events")" "$(dirname "$linked_events")"
+ln -s "$canonical_events" "$linked_events"
+mkdir "${canonical_events}.gc.d"
+(
+    sleep 0.2
+    rmdir "${canonical_events}.gc.d"
+) &
+linked_gc_release_pid=$!
+(
+    _append_bounded_event explicit_symlink_probe '{"type":"explicit_symlink_probe"}' "$linked_events"
+    touch "$WORK/explicit-symlink-done"
+) &
+linked_append_pid=$!
+sleep 0.05
+[[ ! -e "$WORK/explicit-symlink-done" ]] || { echo "FAIL explicit symlink: append bypassed canonical GC marker"; fail=1; }
+wait "$linked_gc_release_pid"
+wait "$linked_append_pid"
+line=$(tail -1 "$canonical_events" 2>/dev/null)
+assert_contains "explicit symlink GC barrier append" "$line" '"type":"explicit_symlink_probe"'
+
 # AC-VALIDATOR: validator accepts canonical envelope (when validator is loadable)
 if declare -F validate_event >/dev/null 2>&1; then
     canonical='{"ts":"2026-05-07T09:30:42Z","type":"polling_external_review","source":"target","data":{"pr_number":204,"reviewer_bot":"gemini-code-assist[bot]","wait_kind":"cron","session_id":"s","next_check_at":"2026-05-08T16:00:00Z"}}'

@@ -10,7 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fno.events import RETENTION_MINIMUM_TTL_HOURS, retention_for
-from fno.mutex import acquire_dir_mutex, release_dir_mutex
+from fno.mutex import acquire_dir_mutex, release_dir_mutex, renew_dir_mutex
+
+_LEASE_RENEW_EVERY_S = 30
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -95,42 +97,57 @@ def gc_events(
         if lock_token is None:
             raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
 
+        next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
+
+        def renew_leases_if_due() -> None:
+            nonlocal next_lease_renewal
+            if time.monotonic() < next_lease_renewal:
+                return
+            if not renew_dir_mutex(gc_dir, gc_token) or not renew_dir_mutex(
+                lock_dir, lock_token
+            ):
+                raise RuntimeError("events.jsonl GC mutex ownership was lost")
+            next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
+
         kept: list[str] = []
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            if not raw.strip():
-                kept.append(raw)
-                continue
-            result["scanned"] += 1
-            try:
-                event = json.loads(raw)
-            except json.JSONDecodeError:
-                result["malformed"] += 1
-                result["kept"] += 1
-                kept.append(raw)
-                continue
-            if not isinstance(event, dict):
-                result["malformed"] += 1
-                result["kept"] += 1
-                kept.append(raw)
-                continue
-            event_type = event.get("type")
-            timestamp = _timestamp(event.get("ts") or event.get("timestamp"))
-            if not isinstance(event_type, str):
-                result["malformed"] += 1
-                result["kept"] += 1
-                kept.append(raw)
-                continue
-            if retention_for(event_type) != "ephemeral" or timestamp is None:
-                if timestamp is None:
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                renew_leases_if_due()
+                raw = line.rstrip("\r\n")
+                if not raw.strip():
+                    kept.append(raw)
+                    continue
+                result["scanned"] += 1
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
                     result["malformed"] += 1
+                    result["kept"] += 1
+                    kept.append(raw)
+                    continue
+                if not isinstance(event, dict):
+                    result["malformed"] += 1
+                    result["kept"] += 1
+                    kept.append(raw)
+                    continue
+                event_type = event.get("type")
+                timestamp = _timestamp(event.get("ts") or event.get("timestamp"))
+                if not isinstance(event_type, str):
+                    result["malformed"] += 1
+                    result["kept"] += 1
+                    kept.append(raw)
+                    continue
+                if retention_for(event_type) != "ephemeral" or timestamp is None:
+                    if timestamp is None:
+                        result["malformed"] += 1
+                    result["kept"] += 1
+                    kept.append(raw)
+                    continue
+                if timestamp < cutoff:
+                    result["deleted"] += 1
+                    continue
                 result["kept"] += 1
                 kept.append(raw)
-                continue
-            if timestamp < cutoff:
-                result["deleted"] += 1
-                continue
-            result["kept"] += 1
-            kept.append(raw)
 
         if not dry_run and result["deleted"]:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,12 +159,14 @@ def gc_events(
                 delete=False,
             ) as handle:
                 temp_path = Path(handle.name)
-                handle.write("\n".join(kept))
-                if kept:
+                for raw in kept:
+                    handle.write(raw)
                     handle.write("\n")
+                    renew_leases_if_due()
                 handle.flush()
                 os.fsync(handle.fileno())
             try:
+                renew_leases_if_due()
                 temp_path.chmod(path.stat().st_mode)
                 os.replace(temp_path, path)
             finally:

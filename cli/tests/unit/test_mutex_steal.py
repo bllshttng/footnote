@@ -27,7 +27,13 @@ from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import now_ms
 from fno.claims.types import Claim
 from fno.events import append_event, mission_started
-from fno.mutex import STALE_MUTEX_STEAL_S, acquire_dir_mutex, release_dir_mutex, steal_if_stale
+from fno.mutex import (
+    STALE_MUTEX_STEAL_S,
+    acquire_dir_mutex,
+    release_dir_mutex,
+    renew_dir_mutex,
+    steal_if_stale,
+)
 
 HOLDER_A = "target-session:sid-a"
 HOLDER_B = "target-session:sid-b"
@@ -462,6 +468,29 @@ class TestEventsMutex:
         # The new holder releases cleanly (token matches -> rmtree).
         release_dir_mutex(lock, new_token)
         assert not lock.exists()
+
+    def test_long_holder_can_renew_its_lease(self, tmp_path):
+        lock = tmp_path / "events.jsonl.lock.d"
+        token = acquire_dir_mutex(lock, 5)
+        assert token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+
+        assert renew_dir_mutex(lock, token) is True
+        assert time.time() - lock.lstat().st_mtime < STALE_MUTEX_STEAL_S
+
+        release_dir_mutex(lock, token)
+
+    def test_non_owner_cannot_renew_a_lease(self, tmp_path):
+        lock = tmp_path / "events.jsonl.lock.d"
+        token = acquire_dir_mutex(lock, 5)
+        assert token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+        stale_mtime = lock.lstat().st_mtime
+
+        assert renew_dir_mutex(lock, "different-owner") is False
+        assert lock.lstat().st_mtime == stale_mtime
+
+        release_dir_mutex(lock, token)
 
 
 class TestRecoveryMutex:

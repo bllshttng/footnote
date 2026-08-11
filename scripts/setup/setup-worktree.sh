@@ -210,6 +210,17 @@ wait_for_shell_event_writers() {
     shopt -s nullglob
     entries=("$active_dir"/*)
     shopt -u nullglob
+    local entry name pid
+    for entry in "${entries[@]}"; do
+      name="$(basename "$entry")"
+      pid="${name%%.*}"
+      if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+        rmdir "$entry" 2>/dev/null || true
+      fi
+    done
+    shopt -s nullglob
+    entries=("$active_dir"/*)
+    shopt -u nullglob
     if (( ${#entries[@]} == 0 )); then
       rmdir "$active_dir" 2>/dev/null || true
       return 0
@@ -305,22 +316,25 @@ link_events_journal() {
   EVENTS_MIGRATION_DIRS+=("$second_lock")
 
   local rc=0
-  ensure_trailing_newline "$source" || rc=$?
-  if (( rc == 0 )) && [[ ! "$source" -ef "$target" && -s "$target" ]]; then
-    cat "$target" >> "$source" || rc=$?
-    if (( rc == 0 )); then
-      ensure_trailing_newline "$source" || rc=$?
-    fi
-  fi
-
   local backup="${target}.pre-share.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  ensure_trailing_newline "$source" || rc=$?
   if (( rc == 0 )); then
     mv "$target" "$backup" || rc=$?
   fi
   if (( rc == 0 )); then
     ln -s "$source" "$target" || rc=$?
   fi
+  if (( rc == 0 )) && [[ -s "$backup" ]]; then
+    cat "$backup" >> "$source" || rc=$?
+    if (( rc == 0 )); then
+      ensure_trailing_newline "$source" || rc=$?
+    fi
+  fi
+
   if (( rc != 0 )); then
+    if [[ -L "$target" ]]; then
+      rm -f "$target" 2>/dev/null || true
+    fi
     if [[ ! -e "$target" && -e "$backup" ]]; then
       mv "$backup" "$target" 2>/dev/null || true
     fi

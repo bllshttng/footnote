@@ -90,7 +90,9 @@ assert "migration waits for an in-flight mutex writer" grep -q '"type":"during_l
 assert "contended journal becomes the shared symlink" test -L "$contended/.fno/events.jsonl"
 
 shell_active="$TMP/shell-active"
-mkdir -p "$shell_active/.fno/events.jsonl.shell-writers.d/999999.1"
+sleep 30 &
+shell_writer_pid=$!
+mkdir -p "$shell_active/.fno/events.jsonl.shell-writers.d/${shell_writer_pid}.1"
 printf '%s\n' '{"type":"before_shell"}' > "$shell_active/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$shell_active" bash "$SETUP" >/dev/null 2>&1 &
 setup_pid=$!
@@ -101,10 +103,36 @@ done
 assert "migration publishes its GC marker" test -d "$shell_active/.fno/events.jsonl.gc.d"
 sleep 0.2
 assert "migration does not switch an active shell writer" test ! -L "$shell_active/.fno/events.jsonl"
-rmdir "$shell_active/.fno/events.jsonl.shell-writers.d/999999.1"
+kill "$shell_writer_pid" 2>/dev/null || true
+wait "$shell_writer_pid" 2>/dev/null || true
+rmdir "$shell_active/.fno/events.jsonl.shell-writers.d/${shell_writer_pid}.1"
 rmdir "$shell_active/.fno/events.jsonl.shell-writers.d"
 wait "$setup_pid"
 assert "shell-rendezvous journal becomes the shared symlink" test -L "$shell_active/.fno/events.jsonl"
+
+dead_shell="$TMP/dead-shell"
+mkdir -p "$dead_shell/.fno/events.jsonl.shell-writers.d/999999.1"
+printf '%s\n' '{"type":"before_dead_shell"}' > "$dead_shell/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$dead_shell" bash "$SETUP" >/dev/null 2>&1
+assert "migration reaps a dead shell-writer token" test -L "$dead_shell/.fno/events.jsonl"
+
+failed_once="$TMP/failed-once"
+mkdir -p "$failed_once/.fno"
+printf '%s\n' '{"type":"failed_once_row"}' > "$failed_once/.fno/events.jsonl"
+cat > "$TMP/fail-env" <<'STUB'
+mv() {
+  if [[ "$1" == *"/.fno/events.jsonl" ]]; then
+    return 1
+  fi
+  command /bin/mv "$@"
+}
+export -f mv
+STUB
+CANONICAL="$canonical" WORKTREE="$failed_once" BASH_ENV="$TMP/fail-env" bash "$SETUP" >/dev/null 2>&1
+assert "failed link leaves canonical journal unmodified" test "$(grep -c 'failed_once_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 0
+CANONICAL="$canonical" WORKTREE="$failed_once" bash "$SETUP" >/dev/null 2>&1
+assert "migration retry appends a failed row exactly once" test "$(grep -c 'failed_once_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+assert "migration retry installs the shared symlink" test -L "$failed_once/.fno/events.jsonl"
 
 if (( fail )); then
   exit 1

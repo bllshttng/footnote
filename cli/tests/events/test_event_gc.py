@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import fno.events.gc as event_gc
+
 from fno.events import (
     EVENT_TYPES,
     SCHEMA,
@@ -151,6 +153,29 @@ def test_gc_waits_for_registered_shell_writer(tmp_path: Path) -> None:
     assert not thread.is_alive()
     assert result["deleted"] == 1
     assert events.read_text(encoding="utf-8") == ""
+
+
+def test_gc_renews_both_long_held_mutex_leases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        _event("claim_released", "2026-07-01T00:00:00Z") + "\n",
+        encoding="utf-8",
+    )
+    renewed: list[str] = []
+
+    def record_renewal(lock_dir: Path, token: str) -> bool:
+        renewed.append(lock_dir.name)
+        return True
+
+    monkeypatch.setattr(event_gc, "_LEASE_RENEW_EVERY_S", 0)
+    monkeypatch.setattr(event_gc, "renew_dir_mutex", record_renewal)
+
+    event_gc.gc_events(events, now=NOW, ttl_hours=672)
+
+    assert "events.jsonl.gc.d" in renewed
+    assert "events.jsonl.lock.d" in renewed
 
 
 def test_gc_cli_reports_and_rejects_short_horizon(tmp_path: Path) -> None:

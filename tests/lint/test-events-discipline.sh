@@ -48,6 +48,15 @@ rc=$?
 [[ "$out" == *"events bypass at"* ]] || { echo "FAIL AC2-bypass diag: $out"; fail=1; }
 cleanup "$d"
 
+# AC2-ERR direct printf append from a hook is the same writer bypass.
+d=$(make_fixture)
+echo 'printf "%s\\n" "$line" >> "${ROOT}/.fno/events.jsonl"' > "$d/hooks/bad.sh"
+out=$(cd "$d" && bash "$LINT" 2>&1)
+rc=$?
+[[ $rc -eq 1 ]] || { echo "FAIL AC2-hook-printf rc=$rc out=$out"; fail=1; }
+[[ "$out" == *"events bypass at"* ]] || { echo "FAIL AC2-hook-printf diag: $out"; fail=1; }
+cleanup "$d"
+
 # AC4-EDGE: migrate-events-shape.py is allowed (legitimate rewrite)
 d=$(make_fixture)
 echo 'fout.write(json.dumps(new_row) + "\n")' > "$d/scripts/migrate-events-shape.py"
