@@ -57,7 +57,7 @@ from typing import Callable, Optional
 
 from fno.carveout.core import BACKFILL_KIND
 from fno.retro.classify import classify_item, derive_title
-from fno.retro.dedup import content_hash
+from fno.retro.dedup import assign_hashes, content_hash
 from fno.retro.land import MODE_INTERACTIVE, land_candidates
 from fno.retro.types import KIND_CARVEOUT, Candidate, RawItem
 
@@ -104,13 +104,18 @@ class SweepReport:
     applied: bool = False
     consumed: int = 0
     warnings: list[str] = field(default_factory=list)
+    # The ledger exists but could not be read. NOT the same as an empty ledger:
+    # read_carveouts raises rather than returning [] precisely so a failed read
+    # is never a silent success, and the report must carry that distinction to
+    # the exit code or the CLI re-introduces the masquerade.
+    read_failed: bool = False
 
     def by_disposition(self, disposition: str) -> list[SweepItem]:
         return [i for i in self.items if i.disposition == disposition]
 
     @property
     def failed(self) -> bool:
-        return any(i.error for i in self.items)
+        return self.read_failed or any(i.error for i in self.items)
 
 
 def _normalize_subject(text: str) -> str:
@@ -155,9 +160,10 @@ def find_tracking_node(
                     True,
                 )
 
-    subject = _normalize_subject(
-        rec.get("need") or derive_title(_raw_item(rec))
-    )
+    # Compare on the SAME string the node would be titled with. Matching on
+    # `need` instead left the sweep blind to every node it had filed itself
+    # whenever need was set, since the filed title comes from the description.
+    subject = _normalize_subject(derive_title(_raw_item(rec)))
     if len(subject) >= TITLE_MATCH_MIN_LEN:
         best_id, best_ratio = None, 0.0
         for node in nodes:
@@ -189,10 +195,28 @@ def _raw_item(rec: dict) -> RawItem:
 
 def plan_sweep(carveouts: list[dict], nodes: list[dict]) -> list[SweepItem]:
     """Decide a disposition for every carve-out. Pure: reads nothing, writes
-    nothing, so the dry run and the applied run cannot diverge."""
+    nothing, so the dry run and the applied run cannot diverge.
+
+    Within-batch duplicates are caught here rather than at land time, for that
+    same reason: the dry run has to show the collapse it is going to perform.
+    """
     items: list[SweepItem] = []
+    seen_hashes: dict[str, str] = {}  # content hash -> the cv-id that claimed it
     for rec in carveouts:
         if rec.get("kind") == BACKFILL_KIND:
+            continue
+        cv_id = str(rec.get("id") or "")
+        if not cv_id:
+            # read_carveouts does not require an id, and a row without one has
+            # no cite, so it can never be filed. Say that once rather than
+            # failing the whole sweep on every future run.
+            items.append(
+                SweepItem(
+                    rec,
+                    DISPOSITION_REVIEW,
+                    match_reason="row carries no id; cannot be cited or consumed",
+                )
+            )
             continue
         node_id, reason, exact = find_tracking_node(rec, nodes)
         if node_id and exact:
@@ -205,9 +229,29 @@ def plan_sweep(carveouts: list[dict], nodes: list[dict]) -> list[SweepItem]:
                 SweepItem(rec, DISPOSITION_REVIEW, node_id=node_id, match_reason=reason)
             )
             continue
-        items.append(
-            SweepItem(rec, DISPOSITION_FILE, candidate=classify_item(_raw_item(rec)))
-        )
+        candidate = classify_item(_raw_item(rec))
+        # assign_hashes fills content_hash, which land writes into the node's
+        # dedup trailer. Skipping it left every filed node with an empty
+        # `finding_hash=`, matching no trailer pattern, so neither this sweep
+        # nor the PR-scoped harvest could ever dedup against what it filed.
+        (candidate,) = assign_hashes([candidate])
+        twin = seen_hashes.get(candidate.content_hash)
+        if twin:
+            # The same text twice in one batch (one blocker carved out from two
+            # sessions). Filing both mints two permanent nodes for one piece of
+            # work. Park rather than resolve: the twin's node does not exist
+            # yet, and nothing is consumed without a node.
+            items.append(
+                SweepItem(
+                    rec,
+                    DISPOSITION_REVIEW,
+                    candidate=candidate,
+                    match_reason=f"same text as {twin} earlier in this sweep",
+                )
+            )
+            continue
+        seen_hashes[candidate.content_hash] = cv_id
+        items.append(SweepItem(rec, DISPOSITION_FILE, candidate=candidate))
     return items
 
 
@@ -240,6 +284,7 @@ def sweep_carveouts(
         rows = reader(carveout_root, kind=kind)
     except Exception as exc:  # a present-but-unreadable ledger is not "empty"
         report.warnings.append(f"cannot read carve-out ledger: {exc}")
+        report.read_failed = True
         return report
 
     report.items = plan_sweep(rows, nodes)

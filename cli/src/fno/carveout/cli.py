@@ -273,7 +273,10 @@ def resolve_carveouts(
             "remainder absent or ledger unwritable",
             err=True,
         )
-    if reason:
+    # `removed > 0`, not just `reason`: consume_carveouts is best-effort and
+    # returns 0 on a lock timeout or an unwritable ledger, so emitting there
+    # would record a retirement of rows still sitting on the ledger.
+    if reason and removed:
         # Best-effort: the rows are already gone, so a failed emit must not read
         # as a failed resolve. It must not be silent either - an unrecorded
         # reasoned removal is the untraceable drop the flag exists to prevent.

@@ -599,15 +599,25 @@ def sweep_carveouts_cmd(
     tracks. A row is consumed only once its work has a node (or an inbox line)
     to live in.
     """
-    from fno.carveout.core import VALID_KINDS, resolve_carveout_root
+    from fno.carveout.core import BACKFILL_KIND, VALID_KINDS, resolve_carveout_root
     from fno.graph.store import read_graph
     from fno.paths import graph_json, resolve_canonical_repo_root, resolve_repo_root
     from fno.retro.land import MODE_AUTONOMOUS, MODE_INTERACTIVE
     from fno.retro.sweep import render_sweep, sweep_carveouts
 
-    if kind is not None and kind not in VALID_KINDS:
+    sweepable = [k for k in VALID_KINDS if k != BACKFILL_KIND]
+    if kind is not None and kind not in sweepable:
+        # backfill is a VALID carve-out kind but never a sweepable one. Letting
+        # it through validation reported "0 unharvested" for rows that exist and
+        # are simply owned by another verb, which reads as "nothing to do".
+        detail = (
+            " (backfill belongs to /fno:pr merged's backfill slot and is never swept)"
+            if kind == BACKFILL_KIND
+            else ""
+        )
         typer.echo(
-            f"retro: invalid --kind '{kind}' (expected one of: {', '.join(VALID_KINDS)})",
+            f"retro: invalid --kind '{kind}' (expected one of: "
+            f"{', '.join(sweepable)}){detail}",
             err=True,
         )
         raise typer.Exit(2)
@@ -791,19 +801,22 @@ def run(
         except Exception as _exc:
             typer.echo(f"WARN gate_escape summary failed: {_exc}", err=True)
 
-        # The sentinel loop below only sees carve-outs a TRIGGER points it at.
-        # A carve-out with no session, or one whose PR never dropped a sentinel,
-        # is invisible to it - so "no sentinels" read as "nothing to do" while
-        # the ledger filled up, and the close gate (condition D) then refused
-        # every node with no verb that could clear it. Name the backlog here.
-        # Reporting only: the sweep MUTATES the graph, and a background
-        # SessionStart run is the wrong place to file nodes unattended.
-        pending = _pending_carveout_count(carveout_root)
-        if pending:
-            typer.echo(
-                f"carve-outs: {pending} unharvested on the ledger (no trigger "
-                f"covers them); preview with `fno retro sweep-carveouts`"
-            )
+    # The sentinel loop below only sees carve-outs a TRIGGER points it at. A
+    # carve-out with no session, or one whose PR never dropped a sentinel, is
+    # invisible to it - so "no sentinels" read as "nothing to do" while the
+    # ledger filled up, and the close gate (condition D) then refused every node
+    # with no verb that could clear it. Name the backlog here.
+    #
+    # Deliberately OUTSIDE the plain-run branch: a --pr-number run is how
+    # /fno:pr merged calls this, and that is exactly the caller a merging
+    # session most needs the count from. Reporting only - the sweep mutates the
+    # graph, and no caller of `retro run` may file nodes unattended.
+    pending = _pending_carveout_count(carveout_root)
+    if pending:
+        typer.echo(
+            f"carve-outs: {pending} unharvested on the ledger (no trigger "
+            f"covers them); preview with `fno retro sweep-carveouts`"
+        )
 
     if not candidates and pr is None:
         typer.echo("(no retro-pending sentinels to triage)")

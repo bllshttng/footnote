@@ -104,7 +104,16 @@ def build_body(item: RawItem, *, cap: int = BODY_CAP) -> str:
     # the cap (the marker length is known, so the final body cannot overflow).
     link = item.url or (f"PR #{item.source_pr}" if item.source_pr else "source")
     marker = f"\n\n[... truncated; full text at {link} ...]"
-    overhead = len(marker) + (len(cite) + 2 if cite else 0)
+    # The "Blocked on:" block below is appended AFTER this reservation, so its
+    # length has to be reserved here too or a long --need overflows the cap.
+    blocked = ""
+    if item.kind == KIND_CARVEOUT and (item.title_hint or "").strip():
+        blocked = f"Blocked on: {item.title_hint.strip()}"
+    overhead = (
+        len(marker)
+        + (len(cite) + 2 if cite else 0)
+        + (len(blocked) + 2 if blocked else 0)
+    )
     budget = max(cap - overhead, 200)
     if len(reasoning) > budget:
         reasoning = reasoning[:budget].rstrip() + marker
@@ -112,8 +121,8 @@ def build_body(item: RawItem, *, cap: int = BODY_CAP) -> str:
     parts = [reasoning.strip()]
     # A carve-out's `need` is the open question or precondition it is blocked
     # on. It stopped being the title, so carry it here or it is lost.
-    if item.kind == KIND_CARVEOUT and (item.title_hint or "").strip():
-        parts.append(f"Blocked on: {item.title_hint.strip()}")
+    if blocked:
+        parts.append(blocked)
     if cite:
         parts.append(cite)
     return "\n\n".join(p for p in parts if p)

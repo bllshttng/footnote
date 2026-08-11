@@ -24,6 +24,26 @@ def _cv(cid: str, description: str, kind: str = "deferred", **extra) -> dict:
     return {"id": cid, "kind": kind, "description": description, **extra}
 
 
+def test_body_stays_within_the_cap_with_a_long_need():
+    """`Blocked on:` is appended after build_body reserves its overhead, so a
+    long --need used to push the body past BODY_CAP."""
+    from fno.retro.classify import BODY_CAP, classify_item
+    from fno.retro.types import KIND_CARVEOUT, RawItem
+
+    c = classify_item(
+        RawItem(
+            kind=KIND_CARVEOUT,
+            text="x" * (BODY_CAP * 2),
+            source_id="cv-long0001",
+            title_hint="y" * 900,
+            subkind="deferred",
+        )
+    )
+
+    assert len(c.body) <= BODY_CAP
+    assert "Blocked on:" in c.body
+
+
 def test_cv_id_quoted_in_a_node_resolves_instead_of_filing():
     cv = _cv("cv-11112222", "migrate the spawn adapters")
     nodes = [{"id": "x-1234", "title": "spawn seam", "details": "tracks cv-11112222"}]
@@ -163,6 +183,84 @@ def test_a_failed_mint_leaves_the_row_in_the_ledger():
     assert consumed == []
     assert report.failed
     assert report.by_disposition(DISPOSITION_FILE)[0].error
+
+
+def test_a_filed_candidate_carries_a_real_dedup_hash():
+    """The trailer land writes is the ONLY key a later harvest can dedup on.
+    Landing without assign_hashes wrote `finding_hash=` empty, which matches no
+    trailer pattern, so every node the sweep filed was invisible to dedup."""
+    cv = _cv("cv-99990000", "some work nothing tracks")
+
+    (item,) = plan_sweep([cv], [])
+
+    assert item.candidate.content_hash
+    assert item.candidate.content_hash == content_hash("some work nothing tracks")
+    # And the trailer built from it round-trips through the reader.
+    from fno.retro.dedup import existing_keys_from_nodes
+
+    node = {"id": "x-1", "details": trailer(None, item.candidate.content_hash)}
+    assert existing_keys_from_nodes([node])
+
+
+def test_two_rows_with_the_same_text_do_not_both_file():
+    """One blocker carved out from two sessions. Filing both mints two
+    permanent nodes for one piece of work, and there is no delete verb."""
+    rows = [
+        _cv("cv-dup00001", "the same blocker, written twice"),
+        _cv("cv-dup00002", "the same blocker, written twice"),
+    ]
+
+    first, second = plan_sweep(rows, [])
+
+    assert first.disposition == DISPOSITION_FILE
+    assert second.disposition == DISPOSITION_REVIEW
+    assert "cv-dup00001" in second.match_reason
+
+
+def test_a_row_with_no_id_parks_instead_of_failing_the_sweep():
+    """read_carveouts does not require an id. Such a row cannot be cited, so it
+    can never land; treating that as an error made the verb exit 1 forever."""
+    rows = [{"kind": "deferred", "description": "no id on this row"}]
+
+    (item,) = plan_sweep(rows, [])
+
+    assert item.disposition == DISPOSITION_REVIEW
+    assert item.error is None
+
+
+def test_the_fuzzy_matcher_compares_the_title_the_sweep_would_file():
+    """Matching on `need` left the sweep blind to nodes it filed itself, since
+    the filed title comes from the description."""
+    cv = _cv(
+        "cv-aaaa9999",
+        "consolidate the duplicated stub_exec test fixture",
+        need="which conftest should own it",
+    )
+    nodes = [{"id": "x-7777", "title": "consolidate the duplicated stub_exec test fixtures"}]
+
+    (item,) = plan_sweep([cv], nodes)
+
+    assert item.disposition == DISPOSITION_REVIEW
+    assert item.node_id == "x-7777"
+
+
+def test_an_unreadable_ledger_reports_failed_so_the_verb_can_exit_nonzero():
+    """A present-but-unreadable ledger printing '0 unharvested' and exiting 0
+    is the silent success read_carveouts raises specifically to prevent."""
+
+    def _boom(root, kind=None):
+        raise OSError("ledger is unreadable")
+
+    report = sweep_carveouts(
+        repo_root=Path("/nonexistent"),
+        carveout_root=Path("/nonexistent"),
+        nodes=[],
+        apply=False,
+        read_fn=_boom,
+    )
+
+    assert report.read_failed
+    assert report.failed  # drives the CLI exit code
 
 
 def test_an_unreadable_ledger_is_not_an_empty_one():
