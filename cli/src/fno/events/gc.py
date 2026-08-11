@@ -207,7 +207,8 @@ def gc_events(
                     source_offset = line_end
                     continue
                 event_type = event.get("type")
-                timestamp = _timestamp(event.get("ts") or event.get("timestamp"))
+                timestamp_value = event["ts"] if "ts" in event else event.get("timestamp")
+                timestamp = _timestamp(timestamp_value)
                 if not isinstance(event_type, str):
                     result["malformed"] += 1
                     result["kept"] += 1

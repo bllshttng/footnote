@@ -4660,13 +4660,23 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
         eprintln!("loop-check: failed to serialize event {event_type}");
         return;
     };
-    if let Err(error) =
-        crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2))
-    {
-        eprintln!(
-            "loop-check: failed to write event {event_type} to {}: {error}",
-            path.display()
-        );
+    loop {
+        match crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2)) {
+            Ok(()) => return,
+            Err(error)
+                if error.contains("events.jsonl lock timeout")
+                    && crate::claims::event_maintenance_active(path) =>
+            {
+                crate::claims::wait_for_event_maintenance(path);
+            }
+            Err(error) => {
+                eprintln!(
+                    "loop-check: failed to write event {event_type} to {}: {error}",
+                    path.display()
+                );
+                return;
+            }
+        }
     }
 }
 
@@ -9039,6 +9049,34 @@ mod tests {
         assert!(std::fs::read_to_string(project)
             .unwrap()
             .contains("mutex_probe"));
+    }
+
+    #[test]
+    fn target_stream_emit_waits_through_expected_maintenance_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("events.jsonl");
+        let lock = dir.path().join("events.jsonl.lock.d");
+        let maintenance = dir.path().join("events.jsonl.gc.d");
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::create_dir(&maintenance).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            append_loop_event(&project, "review_coverage", serde_json::json!({}));
+            project
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(2_300));
+        assert!(
+            !handle.is_finished(),
+            "review coverage was dropped during expected maintenance"
+        );
+
+        std::fs::remove_dir_all(lock).unwrap();
+        std::fs::remove_dir_all(maintenance).unwrap();
+        let project = handle.join().unwrap();
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("review_coverage"));
     }
 
     /// The list half of the scan. Production reads the count too, so this

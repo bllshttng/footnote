@@ -345,6 +345,9 @@ append_migrated_events() {
   local local_cursor="${4:-}"
   local cursor="$(dirname "$source")/.think-offer-cursor"
   recover_event_cursor_pending "$source" "$cursor" || return 1
+  if [[ "$deduplicate_suffix" == "true" ]] && journal_ends_with "$source" "$local_events"; then
+    return 0
+  fi
   local filtered mapping
   filtered=$(mktemp "${source}.migration.XXXXXX") || return 1
   mapping=$(mktemp "${source}.migration-cursor.XXXXXX") || {
@@ -797,5 +800,10 @@ link_dir ".agents"
 link_dir ".codex"
 link_dir ".codex-plugin"
 link_dir ".gemini"
+
+if (( events_journal_shared == 0 )); then
+  echo "setup-worktree: linked independent state but events journal is not shared" >&2
+  exit 1
+fi
 
 echo "setup-worktree: linked shared state from $CANONICAL into $WORKTREE"

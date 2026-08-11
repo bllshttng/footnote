@@ -94,6 +94,8 @@ printf '%s\n' '{"type":"must_wait_for_canonical_offer"}' > "$pending_canonical/.
 printf '%s' 0 > "$pending_canonical/.fno/.think-offer-cursor"
 canonical_size_with_pending=$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')
 CANONICAL="$canonical" WORKTREE="$pending_canonical" bash "$SETUP" >/dev/null 2>&1
+pending_setup_rc=$?
+assert "migration refusal makes setup fail" test "$pending_setup_rc" -ne 0
 assert "migration refuses to cross a pending canonical offer" test ! -L "$pending_canonical/.fno/events.jsonl"
 assert "refused migration preserves the local offer cursor boundary" test -f "$pending_canonical/.fno/.think-offer-cursor"
 printf '%s' "$canonical_size_with_pending" > "$canonical/.fno/.think-offer-cursor"
@@ -282,6 +284,19 @@ printf '%s\n' '{"type":"post_append_row"}' > "$post_append/.fno/events.jsonl.pre
 ln -s "$canonical/.fno/events.jsonl" "$post_append/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$post_append" bash "$SETUP" >/dev/null 2>&1
 assert "post-append recovery does not duplicate landed rows" test "$(grep -c 'post_append_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+
+filtered_recovery="$TMP/filtered-recovery"
+mkdir -p "$filtered_recovery/.fno"
+filtered_first='{"type":"filtered_recovery_first"}'
+filtered_gate='{"ts":"2026-08-11T11:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"filtered-head","verdict":"pass","session_id":"filtered"}}'
+filtered_last='{"type":"filtered_recovery_last"}'
+printf '%s\n%s\n%s\n' "$filtered_first" "$filtered_gate" "$filtered_last" >> "$canonical/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+printf '%s\n%s\n%s\n' "$filtered_first" "$filtered_gate" "$filtered_last" > "$filtered_recovery/.fno/events.jsonl.pre-share.pending.crash"
+ln -s "$canonical/.fno/events.jsonl" "$filtered_recovery/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$filtered_recovery" bash "$SETUP" >/dev/null 2>&1
+assert "filtered recovery does not duplicate the leading ordinary row" test "$(grep -c 'filtered_recovery_first' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+assert "filtered recovery does not duplicate the trailing ordinary row" test "$(grep -c 'filtered_recovery_last' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 
 failed_recovery="$TMP/failed-recovery"
 mkdir -p "$failed_recovery/.fno"

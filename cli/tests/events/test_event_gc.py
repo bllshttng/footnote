@@ -239,6 +239,30 @@ def test_gc_preserves_ephemeral_row_with_noncanonical_timestamp(tmp_path: Path) 
     assert events.read_text(encoding="utf-8") == row
 
 
+def test_gc_does_not_fallback_when_canonical_timestamp_is_present_but_invalid(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    row = (
+        json.dumps(
+            {
+                "ts": "",
+                "timestamp": "2026-07-01T00:00:00Z",
+                "type": "claim_released",
+                "source": "test",
+                "data": {},
+            }
+        )
+        + "\n"
+    )
+    events.write_text(row, encoding="utf-8")
+
+    result = gc_events(events, now=NOW, ttl_hours=672)
+
+    assert result == {"scanned": 1, "deleted": 0, "kept": 1, "malformed": 1}
+    assert events.read_text(encoding="utf-8") == row
+
+
 def test_gc_waits_for_registered_shell_writer(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     events.write_text(
