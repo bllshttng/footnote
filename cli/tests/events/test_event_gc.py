@@ -127,6 +127,36 @@ def test_gc_preserves_symlink_and_compacts_its_target(tmp_path: Path) -> None:
     assert '"type": "node_closed"' in target.read_text(encoding="utf-8")
 
 
+def test_gc_remaps_offer_cursor_without_skipping_pending_rows(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    consumed = _event("node_closed", "2026-07-01T00:00:00Z") + "\n"
+    expired = _event("claim_acquired", "2026-07-01T00:00:00Z") + "\n"
+    pending = _event("think_offered", "2026-08-11T00:00:00Z") + "\n"
+    tail = _event("node_closed", "2026-08-11T00:01:00Z") + "\n"
+    events.write_text(consumed + expired + pending + tail, encoding="utf-8")
+    cursor = tmp_path / ".think-offer-cursor"
+    cursor.write_text(str(len((consumed + expired).encode())), encoding="ascii")
+
+    gc_events(events, now=NOW, ttl_hours=672)
+
+    remapped = int(cursor.read_text(encoding="ascii"))
+    assert remapped == len(consumed.encode())
+    assert b"think_offered" in events.read_bytes()[remapped:]
+    assert not cursor.with_name(cursor.name + ".gc-pending").exists()
+
+
+def test_gc_preserves_malformed_utf8_bytes(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    malformed = b'{"type":"note","data":{"text":"caf\xc3"}}\n'
+    expired = (_event("claim_released", "2026-07-01T00:00:00Z") + "\n").encode()
+    events.write_bytes(malformed + expired)
+
+    result = gc_events(events, now=NOW, ttl_hours=672)
+
+    assert result == {"scanned": 2, "deleted": 1, "kept": 1, "malformed": 1}
+    assert events.read_bytes() == malformed
+
+
 def test_gc_waits_for_registered_shell_writer(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     events.write_text(

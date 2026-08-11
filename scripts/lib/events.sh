@@ -14,27 +14,6 @@ if [[ -z "${EVENTS_FILE:-}" ]]; then
     unset _events_repo_root
 fi
 
-_resolve_event_symlink() {
-    local path="${1:?events path required}"
-    local link_target
-    local hops=0
-    while [[ -L "$path" ]]; do
-        if (( hops >= 40 )); then
-            return 1
-        fi
-        link_target=$(readlink "$path") || return 1
-        if [[ "$link_target" == /* ]]; then
-            path="$link_target"
-        else
-            path="$(dirname "$path")/$link_target"
-        fi
-        hops=$((hops + 1))
-    done
-    local physical_dir
-    physical_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
-    printf '%s/%s' "$physical_dir" "$(basename "$path")"
-}
-
 # Resolve only an existing symlink leaf. Already-running shells retain the old
 # path until their next setup migration, while newly sourced writers share the
 # canonical GC marker and mutex neighbourhood immediately.

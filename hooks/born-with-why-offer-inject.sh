@@ -33,6 +33,9 @@ source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 EVENTS="$REPO_ROOT/.fno/events.jsonl"
 CURSOR="$REPO_ROOT/.fno/.think-offer-cursor"
+if [[ -L "$CURSOR" ]]; then
+    CURSOR=$(_resolve_event_symlink "$CURSOR") || exit 0
+fi
 CURSOR_LOCK="${CURSOR}.lock.d"
 CURSOR_LOCK_TOKEN="$(hostname):$$:$(date -u +%s):$RANDOM"
 
@@ -60,6 +63,46 @@ trap cleanup_cursor_lock EXIT
 # No events file yet -> nothing to surface.
 [[ -f "$EVENTS" ]] || exit 0
 
+# Both tools are required before the cursor can move. A GC rewrite publishes a
+# recoverable inode-pinned cursor mapping before replacing the journal; finish
+# that mapping here if GC died in the narrow replace-to-cursor window.
+command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || exit 0
+CURSOR_PENDING="${CURSOR}.gc-pending"
+if [[ -f "$CURSOR_PENDING" ]]; then
+    python3 - "$EVENTS" "$CURSOR" "$CURSOR_PENDING" <<'PY' 2>/dev/null || exit 0
+import json
+import os
+import sys
+
+events, cursor, pending = sys.argv[1:]
+temp = None
+try:
+    payload = json.loads(open(pending, encoding="ascii").read())
+    stat = os.stat(events)
+    value = payload["cursor"]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid cursor")
+    if payload.get("device") != stat.st_dev or payload.get("inode") != stat.st_ino:
+        raise SystemExit(0)
+    temp = f"{cursor}.recover.{os.getpid()}"
+    with open(temp, "x", encoding="ascii") as handle:
+        handle.write(str(value))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, cursor)
+    os.unlink(pending)
+except SystemExit:
+    raise
+except Exception:
+    if temp is not None:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+    raise SystemExit(1)
+PY
+fi
+
 size=$(wc -c < "$EVENTS" 2>/dev/null | tr -d ' ')
 [[ "$size" =~ ^[0-9]+$ ]] || exit 0
 
@@ -75,8 +118,6 @@ offset=0
 # and both tools are used unconditionally after it. jq is NOT a given here -
 # session-start.sh exits silently without it - and losing the slice is worse
 # than re-scanning it next turn.
-command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || exit 0
-
 # Scan only the slice [offset, size): bound the read with `head -c` so events
 # appended AFTER we captured `size` are NOT consumed here -- the cursor only
 # advances to `size`, so a racing append belongs to the next run, never both

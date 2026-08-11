@@ -26,7 +26,8 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 # shellcheck source=../lib/events-lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/events-lock.sh"
-EVENTS_MIGRATION_FILTER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/filter-event-migration.py"
+EVENTS_MIGRATION_FILTER="${EVENTS_MIGRATION_FILTER:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/filter-event-migration.py}"
+EVENTS_MIGRATION_RENEW_SECONDS="${EVENTS_MIGRATION_RENEW_SECONDS:-30}"
 
 # Resolve canonical project root (where the shared files live). Priority:
 #   1. CANONICAL env var (manual override)
@@ -159,6 +160,7 @@ acquire_events_dir() {
   local token="$2"
   local attempts=0
   while ! mkdir "$lock_dir" 2>/dev/null; do
+    renew_events_migration_dirs || return 1
     if _steal_stale_event_dir "$lock_dir"; then
       continue
     fi
@@ -184,11 +186,61 @@ release_events_dir() {
   rmdir "$lock_dir" 2>/dev/null || true
 }
 
+renew_events_dir() {
+  local lock_dir="$1"
+  local token="$2"
+  [[ -r "$lock_dir/owner" ]] || return 1
+  [[ "$(< "$lock_dir/owner")" == "$token" ]] || return 1
+  touch "$lock_dir" 2>/dev/null || return 1
+  [[ "$(< "$lock_dir/owner")" == "$token" ]]
+}
+
 EVENTS_MIGRATION_TOKEN=""
 EVENTS_MIGRATION_DIRS=()
+EVENTS_MIGRATION_KEEPALIVE_PID=""
+EVENTS_MIGRATION_LEASE_FAILED=""
+
+renew_events_migration_dirs() {
+  local lock_dir
+  for lock_dir in "${EVENTS_MIGRATION_DIRS[@]}"; do
+    renew_events_dir "$lock_dir" "$EVENTS_MIGRATION_TOKEN" || return 1
+  done
+}
+
+start_events_migration_keepalive() {
+  EVENTS_MIGRATION_LEASE_FAILED=$(mktemp -t fno-events-migration-lease.XXXXXX) || return 1
+  command -p rm -f "$EVENTS_MIGRATION_LEASE_FAILED"
+  (
+    trap - EXIT INT TERM
+    while sleep "$EVENTS_MIGRATION_RENEW_SECONDS"; do
+      local lock_dir
+      for lock_dir in "${EVENTS_MIGRATION_DIRS[@]}"; do
+        if ! renew_events_dir "$lock_dir" "$EVENTS_MIGRATION_TOKEN"; then
+          : > "$EVENTS_MIGRATION_LEASE_FAILED"
+          exit 1
+        fi
+      done
+    done
+  ) &
+  EVENTS_MIGRATION_KEEPALIVE_PID=$!
+}
+
+stop_events_migration_keepalive() {
+  local failed=0
+  if [[ -n "$EVENTS_MIGRATION_KEEPALIVE_PID" ]]; then
+    kill "$EVENTS_MIGRATION_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$EVENTS_MIGRATION_KEEPALIVE_PID" 2>/dev/null || true
+  fi
+  [[ -n "$EVENTS_MIGRATION_LEASE_FAILED" && -e "$EVENTS_MIGRATION_LEASE_FAILED" ]] && failed=1
+  [[ -n "$EVENTS_MIGRATION_LEASE_FAILED" ]] && command -p rm -f "$EVENTS_MIGRATION_LEASE_FAILED"
+  EVENTS_MIGRATION_KEEPALIVE_PID=""
+  EVENTS_MIGRATION_LEASE_FAILED=""
+  return "$failed"
+}
 
 cleanup_events_migration() {
   local index
+  stop_events_migration_keepalive || true
   for ((index=${#EVENTS_MIGRATION_DIRS[@]} - 1; index >= 0; index--)); do
     release_events_dir "${EVENTS_MIGRATION_DIRS[index]}" "$EVENTS_MIGRATION_TOKEN"
   done
@@ -243,6 +295,7 @@ wait_for_shell_event_writers() {
   local attempts=0
   local entries=()
   while [[ -d "$active_dir" ]]; do
+    renew_events_migration_dirs || return 1
     shopt -s nullglob
     entries=("$active_dir"/*)
     shopt -u nullglob
@@ -257,7 +310,7 @@ wait_for_shell_event_writers() {
     shopt -s nullglob
     entries=("$active_dir"/*)
     shopt -u nullglob
-    if (( ${#entries[@]} == 0 )); then
+    if [[ -z "${entries[0]:-}" ]]; then
       rmdir "$active_dir" 2>/dev/null || true
       return 0
     fi
@@ -299,11 +352,11 @@ link_events_journal() {
   if [[ -L "$target" ]]; then
     recover_pending=1
   fi
-  if [[ ! -e "$target" ]]; then
+  if [[ ! -e "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     ln -s "$source" "$target" 2>/dev/null || [[ -L "$target" ]]
     return 0
   fi
-  if [[ ! -f "$target" ]]; then
+  if [[ -e "$target" && ! -f "$target" ]]; then
     echo "setup-worktree: refusing to replace non-file events journal: $target" >&2
     return 0
   fi
@@ -346,6 +399,11 @@ link_events_journal() {
   fi
   # Pre-rendezvous shells do not register, so retain one bounded rollout grace.
   sleep 0.1
+  if ! renew_events_migration_dirs; then
+    cleanup_events_migration
+    echo "setup-worktree: events migration lost a mutex lease before writer lock" >&2
+    return 1
+  fi
   if ! acquire_events_dir "$first_lock" "$token"; then
     cleanup_events_migration
     echo "setup-worktree: events migration timed out on $first_lock" >&2
@@ -370,8 +428,16 @@ link_events_journal() {
   fi
   if [[ -L "$target" ]]; then
     recover_pending=1
+  elif (( ${#pending_backups[@]} > 0 )); then
+    recover_pending=1
   else
     recover_pending=0
+  fi
+
+  if ! start_events_migration_keepalive; then
+    cleanup_events_migration
+    echo "setup-worktree: could not start events migration lease renewal" >&2
+    return 1
   fi
 
   local rc=0
@@ -381,6 +447,17 @@ link_events_journal() {
   ensure_trailing_newline "$source" || rc=$?
   if (( recover_pending == 1 )); then
     local pending completed
+    if [[ ! -L "$target" ]]; then
+      if [[ -f "$target" ]]; then
+        mv "$target" "$backup" || rc=$?
+        if (( rc == 0 )); then
+          pending_backups+=("$backup")
+        fi
+      fi
+      if (( rc == 0 )); then
+        ln -s "$source" "$target" || rc=$?
+      fi
+    fi
     for pending in "${pending_backups[@]}"; do
       if (( rc == 0 )); then
         append_migrated_events "$source" "$pending" true || rc=$?
@@ -409,6 +486,11 @@ link_events_journal() {
       cleanup_events_migration
       return 1
     fi
+  fi
+
+  if ! stop_events_migration_keepalive; then
+    rc=1
+    echo "setup-worktree: events migration lost a mutex lease" >&2
   fi
 
   if (( rc != 0 )); then

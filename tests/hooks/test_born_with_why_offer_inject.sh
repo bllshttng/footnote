@@ -156,17 +156,38 @@ pass "AC2-ERR: consumed offer does not re-surface"
 # without consuming the slice; the holder's successor can surface it once.
 offered_line "2026-06-30T04:30:00Z" "x-lock1111" >> "$EVENTS"
 cursor_before=$(cat "$CURSOR")
-mkdir "${CURSOR}.lock.d"
-printf '%s' "test:$$:holder" > "${CURSOR}.lock.d/owner"
+CANONICAL_CURSOR="$WORK/.fno/canonical-think-offer-cursor"
+mv "$CURSOR" "$CANONICAL_CURSOR"
+ln -s "$CANONICAL_CURSOR" "$CURSOR"
+mkdir "${CANONICAL_CURSOR}.lock.d"
+printf '%s' "test:$$:holder" > "${CANONICAL_CURSOR}.lock.d/owner"
 out="$(run_hook)" || fail "cursor lock: hook nonzero while another session held the cursor"
 [[ -z "$out" ]] || fail "cursor lock: contending hook emitted output"
 [[ "$(cat "$CURSOR")" == "$cursor_before" ]] || fail "cursor lock: contending hook consumed the shared slice"
-rm -f "${CURSOR}.lock.d/owner"
-rmdir "${CURSOR}.lock.d"
+rm -f "${CANONICAL_CURSOR}.lock.d/owner"
+rmdir "${CANONICAL_CURSOR}.lock.d"
 out="$(run_hook)" || fail "cursor lock: successor hook nonzero"
 ctx="$(printf '%s' "$out" | extract_ctx)"
 [[ "$ctx" == *"x-lock1111"* ]] || fail "cursor lock: successor did not surface the preserved offer"
-pass "cursor lock serializes once-per-project offer consumption"
+pass "cursor lock resolves the shared target and serializes once-per-project consumption"
+
+# GC publishes an inode-pinned recovery mapping before replacing the journal.
+# If it dies after replacement, the next hook must finish the cursor update
+# before scanning or the old byte offset can skip a pending offer.
+cursor_before=$(wc -c < "$EVENTS" | tr -d ' ')
+offered_line "2026-06-30T04:40:00Z" "x-gcrecover1" >> "$EVENTS"
+printf '%s' "$(wc -c < "$EVENTS" | tr -d ' ')" > "$CANONICAL_CURSOR"
+python3 - "$EVENTS" "${CANONICAL_CURSOR}.gc-pending" "$cursor_before" <<'PY'
+import json, os, sys
+events, pending, cursor = sys.argv[1:]
+stat = os.stat(events)
+open(pending, "w", encoding="ascii").write(json.dumps({"device": stat.st_dev, "inode": stat.st_ino, "cursor": int(cursor)}))
+PY
+out="$(run_hook)" || fail "cursor recovery: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-gcrecover1"* ]] || fail "cursor recovery: pending offer was skipped"
+[[ ! -e "${CANONICAL_CURSOR}.gc-pending" ]] || fail "cursor recovery: pending mapping was not cleared"
+pass "cursor recovery completes an interrupted GC cursor update"
 
 # ── AC2-EDGE: malformed line skipped, later valid offer still surfaces ─
 printf '{this is not json\n' >> "$EVENTS"
@@ -501,7 +522,7 @@ pass "resolve-guard: unreadable graph (rc 3) degrades to surfacing, not suppress
 # jq/python3 are used unconditionally after the one-way cursor advance, so a
 # missing one must leave the slice unconsumed rather than silently eat it.
 MINBIN="$WORK/minbin"; mkdir -p "$MINBIN"
-for t in bash cat date dirname git head hostname jq kill mkdir mv python3 rm rmdir sleep stat tail tr wc; do
+for t in bash cat date dirname git head hostname jq kill mkdir mv python3 readlink rm rmdir sleep stat tail tr wc; do
     p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$MINBIN/$t"
 done
 # POSITIVE CONTROL first. A stripped PATH missing some unrelated tool would make

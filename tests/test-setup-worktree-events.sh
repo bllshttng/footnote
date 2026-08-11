@@ -19,6 +19,10 @@ assert() {
   fi
 }
 
+mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
 canonical="$TMP/canonical"
 fresh="$TMP/fresh"
 mkdir -p "$canonical/.fno" "$fresh"
@@ -89,11 +93,62 @@ CANONICAL="$canonical" WORKTREE="$ordered" bash "$SETUP" >/dev/null 2>&1
 last_verdict=$(jq -r 'select(.type == "review_attestation" and .data.reviewer == "code-review" and .data.head_sha == "abc") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration cannot restore older passing gate evidence" test "$last_verdict" = fail
 
+malformed_gate="$TMP/malformed-gate"
+mkdir -p "$malformed_gate/.fno"
+printf '%s\n' '{"type":"review_attestation","data":{"reviewer":[],"head_sha":"abc","verdict":"fail"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"type":"malformed_gate_survivor"}' > "$malformed_gate/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$malformed_gate" bash "$SETUP" >/dev/null 2>&1
+assert "malformed gate keys do not abort migration" grep -q 'malformed_gate_survivor' "$canonical/.fno/events.jsonl"
+
 invalid_utf8="$TMP/invalid-utf8"
 mkdir -p "$invalid_utf8/.fno"
 printf '{"type":"note","data":{"text":"caf\xc3"}}\n' > "$invalid_utf8/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$invalid_utf8" bash "$SETUP" >/dev/null 2>&1
 assert "migration preserves malformed UTF-8 rows" python3 -c 'import sys; assert b"caf\xc3" in open(sys.argv[1], "rb").read()' "$canonical/.fno/events.jsonl"
+
+prelink_pending="$TMP/prelink-pending"
+mkdir -p "$prelink_pending/.fno"
+printf '%s\n' '{"type":"prelink_pending_row"}' > "$prelink_pending/.fno/events.jsonl.pre-share.pending.crash"
+CANONICAL="$canonical" WORKTREE="$prelink_pending" bash "$SETUP" >/dev/null 2>&1
+assert "pre-link interruption installs the shared symlink" test -L "$prelink_pending/.fno/events.jsonl"
+assert "pre-link interruption recovers pending rows" test "$(grep -c 'prelink_pending_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+shopt -s nullglob
+pending_prelink=("$prelink_pending/.fno/events.jsonl.pre-share.pending."*)
+shopt -u nullglob
+assert "pre-link interruption clears the pending name" test "${#pending_prelink[@]}" -eq 0
+
+slow_filter="$TMP/slow-filter.py"
+cat > "$slow_filter" <<'PY'
+import os
+import sys
+import time
+
+time.sleep(2.5)
+os.execv(sys.executable, [sys.executable, os.environ["REAL_EVENTS_MIGRATION_FILTER"], *sys.argv[1:]])
+PY
+lease_renewal="$TMP/lease-renewal"
+mkdir -p "$lease_renewal/.fno"
+printf '%s\n' '{"type":"lease_renewal_row"}' > "$lease_renewal/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$lease_renewal" \
+  EVENTS_MIGRATION_FILTER="$slow_filter" \
+  REAL_EVENTS_MIGRATION_FILTER="$REPO_ROOT/scripts/setup/filter-event-migration.py" \
+  EVENTS_MIGRATION_RENEW_SECONDS=0.2 \
+  bash "$SETUP" >/dev/null 2>&1 &
+lease_setup=$!
+for _ in $(seq 1 100); do
+  [[ -d "$canonical/.fno/events.jsonl.lock.d" && -d "$lease_renewal/.fno/events.jsonl.lock.d" ]] && break
+  sleep 0.05
+done
+lease_mtime_before=$(mtime "$canonical/.fno/events.jsonl.lock.d")
+lease_mtime_after="$lease_mtime_before"
+for _ in $(seq 1 40); do
+  sleep 0.1
+  lease_mtime_after=$(mtime "$canonical/.fno/events.jsonl.lock.d" 2>/dev/null || echo "$lease_mtime_after")
+  (( lease_mtime_after > lease_mtime_before )) && break
+done
+assert "long migration renews held mutex leases" test "$lease_mtime_after" -gt "$lease_mtime_before"
+wait "$lease_setup"
+assert "lease-renewed migration completes" test -L "$lease_renewal/.fno/events.jsonl"
 
 contended="$TMP/contended"
 mkdir -p "$contended/.fno"

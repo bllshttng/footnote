@@ -15,11 +15,20 @@ def _gate_key(row: object) -> tuple[object, ...] | None:
     data = row["data"]
     if row.get("type") == "review_attestation":
         reviewer = data.get("reviewer")
-        if isinstance(reviewer, str):
-            reviewer = reviewer.lstrip("/")
-        return ("review_attestation", reviewer, data.get("head_sha"))
+        head_sha = data.get("head_sha")
+        if not isinstance(reviewer, str) or not isinstance(head_sha, str):
+            return None
+        return ("review_attestation", reviewer.lstrip("/"), head_sha)
     if row.get("type") == "review_coverage":
-        return ("review_coverage", data.get("pr"), data.get("head_sha"))
+        pr = data.get("pr")
+        head_sha = data.get("head_sha")
+        if (
+            not isinstance(pr, int)
+            or isinstance(pr, bool)
+            or not isinstance(head_sha, str)
+        ):
+            return None
+        return ("review_coverage", pr, head_sha)
     return None
 
 
@@ -27,9 +36,9 @@ def _favorable(row: dict[str, object]) -> bool:
     data = row.get("data")
     if not isinstance(data, dict):
         return False
-    return (row.get("type") == "review_attestation" and data.get("verdict") == "pass") or (
-        row.get("type") == "review_coverage" and data.get("coverage") == "covered"
-    )
+    return (
+        row.get("type") == "review_attestation" and data.get("verdict") == "pass"
+    ) or (row.get("type") == "review_coverage" and data.get("coverage") == "covered")
 
 
 def _rows(path: Path) -> Iterator[tuple[bytes, object | None]]:
@@ -46,10 +55,17 @@ def main() -> int:
         print("usage: filter-event-migration.py CANONICAL LOCAL", file=sys.stderr)
         return 2
     canonical, local = map(Path, sys.argv[1:])
-    existing = {key for _, row in _rows(canonical) if (key := _gate_key(row)) is not None}
+    existing = {
+        key for _, row in _rows(canonical) if (key := _gate_key(row)) is not None
+    }
     for raw, row in _rows(local):
         key = _gate_key(row)
-        if key is not None and isinstance(row, dict) and _favorable(row) and key in existing:
+        if (
+            key is not None
+            and isinstance(row, dict)
+            and _favorable(row)
+            and key in existing
+        ):
             continue
         sys.stdout.buffer.write(raw)
         if key is not None:

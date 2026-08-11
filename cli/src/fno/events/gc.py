@@ -59,6 +59,28 @@ def _wait_for_shell_writers(path: Path, timeout_seconds: float) -> None:
         time.sleep(0.05)
 
 
+def _read_cursor(path: Path) -> int:
+    try:
+        value = int(path.read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as handle:
+        temp_path = Path(handle.name)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def gc_events(
     events_path: Path,
     *,
@@ -88,6 +110,9 @@ def gc_events(
         raise TimeoutError(f"events.jsonl gc lock timeout: {gc_dir}")
     lock_dir = path.with_name(path.name + ".lock.d")
     lock_token: str | None = None
+    cursor = path.parent / ".think-offer-cursor"
+    cursor_lock_dir = cursor.with_name(cursor.name + ".lock.d")
+    cursor_token: str | None = None
     try:
         # The marker stops new shell writers. A writer that passed its first
         # marker check must register and recheck before appending, so an empty
@@ -96,6 +121,9 @@ def gc_events(
         lock_token = acquire_dir_mutex(lock_dir, 30)
         if lock_token is None:
             raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
+        cursor_token = acquire_dir_mutex(cursor_lock_dir, 30)
+        if cursor_token is None:
+            raise TimeoutError(f"event cursor lock timeout: {cursor_lock_dir}")
 
         next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
 
@@ -103,19 +131,39 @@ def gc_events(
             nonlocal next_lease_renewal
             if time.monotonic() < next_lease_renewal:
                 return
-            if not renew_dir_mutex(gc_dir, gc_token) or not renew_dir_mutex(
-                lock_dir, lock_token
+            if (
+                not renew_dir_mutex(gc_dir, gc_token)
+                or not renew_dir_mutex(lock_dir, lock_token)
+                or not renew_dir_mutex(cursor_lock_dir, cursor_token)
             ):
                 raise RuntimeError("events.jsonl GC mutex ownership was lost")
             next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
 
-        kept: list[str] = []
-        with path.open(encoding="utf-8") as source:
+        cursor_exists = cursor.exists()
+        old_cursor = _read_cursor(cursor) if cursor_exists else 0
+        mapped_cursor = 0
+        source_offset = 0
+        kept: list[bytes] = []
+        with path.open("rb") as source:
             for line in source:
                 renew_leases_if_due()
-                raw = line.rstrip("\r\n")
+                line_end = source_offset + len(line)
+                raw_bytes = line.rstrip(b"\r\n")
+                decode_failed = False
+                try:
+                    raw = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    raw = ""
+                    decode_failed = True
                 if not raw.strip():
-                    kept.append(raw)
+                    if decode_failed:
+                        result["scanned"] += 1
+                        result["malformed"] += 1
+                        result["kept"] += 1
+                    kept.append(line)
+                    if line_end <= old_cursor:
+                        mapped_cursor += len(line)
+                    source_offset = line_end
                     continue
                 result["scanned"] += 1
                 try:
@@ -123,37 +171,55 @@ def gc_events(
                 except json.JSONDecodeError:
                     result["malformed"] += 1
                     result["kept"] += 1
-                    kept.append(raw)
+                    kept.append(line)
+                    if line_end <= old_cursor:
+                        mapped_cursor += len(line)
+                    source_offset = line_end
                     continue
                 if not isinstance(event, dict):
                     result["malformed"] += 1
                     result["kept"] += 1
-                    kept.append(raw)
+                    kept.append(line)
+                    if line_end <= old_cursor:
+                        mapped_cursor += len(line)
+                    source_offset = line_end
                     continue
                 event_type = event.get("type")
                 timestamp = _timestamp(event.get("ts") or event.get("timestamp"))
                 if not isinstance(event_type, str):
                     result["malformed"] += 1
                     result["kept"] += 1
-                    kept.append(raw)
+                    kept.append(line)
+                    if line_end <= old_cursor:
+                        mapped_cursor += len(line)
+                    source_offset = line_end
                     continue
                 if retention_for(event_type) != "ephemeral" or timestamp is None:
                     if timestamp is None:
                         result["malformed"] += 1
                     result["kept"] += 1
-                    kept.append(raw)
+                    kept.append(line)
+                    if line_end <= old_cursor:
+                        mapped_cursor += len(line)
+                    source_offset = line_end
                     continue
                 if timestamp < cutoff:
                     result["deleted"] += 1
+                    source_offset = line_end
                     continue
                 result["kept"] += 1
-                kept.append(raw)
+                kept.append(line)
+                if line_end <= old_cursor:
+                    mapped_cursor += len(line)
+                source_offset = line_end
+
+        if old_cursor > source_offset:
+            mapped_cursor = 0
 
         if not dry_run and result["deleted"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
+                mode="wb",
                 dir=path.parent,
                 prefix=f".{path.name}.gc-",
                 delete=False,
@@ -161,18 +227,36 @@ def gc_events(
                 temp_path = Path(handle.name)
                 for raw in kept:
                     handle.write(raw)
-                    handle.write("\n")
                     renew_leases_if_due()
                 handle.flush()
                 os.fsync(handle.fileno())
             try:
                 renew_leases_if_due()
                 temp_path.chmod(path.stat().st_mode)
+                pending = cursor.with_name(cursor.name + ".gc-pending")
+                if cursor_exists:
+                    replacement = temp_path.stat()
+                    _atomic_write(
+                        pending,
+                        json.dumps(
+                            {
+                                "device": replacement.st_dev,
+                                "inode": replacement.st_ino,
+                                "cursor": mapped_cursor,
+                            },
+                            separators=(",", ":"),
+                        ).encode("ascii"),
+                    )
                 os.replace(temp_path, path)
+                if cursor_exists:
+                    _atomic_write(cursor, str(mapped_cursor).encode("ascii"))
+                    pending.unlink(missing_ok=True)
             finally:
                 temp_path.unlink(missing_ok=True)
         return result
     finally:
+        if cursor_token is not None:
+            release_dir_mutex(cursor_lock_dir, cursor_token)
         if lock_token is not None:
             release_dir_mutex(lock_dir, lock_token)
         release_dir_mutex(gc_dir, gc_token)

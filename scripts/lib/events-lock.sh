@@ -2,6 +2,25 @@
 
 EVENTS_STALE_MUTEX_SECONDS=120
 
+_resolve_event_symlink() {
+    local path="${1:?path required}"
+    local link_target
+    local hops=0
+    while [[ -L "$path" ]]; do
+        (( hops < 40 )) || return 1
+        link_target=$(readlink "$path") || return 1
+        if [[ "$link_target" == /* ]]; then
+            path="$link_target"
+        else
+            path="$(dirname "$path")/$link_target"
+        fi
+        hops=$((hops + 1))
+    done
+    local physical_dir
+    physical_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s' "$physical_dir" "$(basename "$path")"
+}
+
 _steal_stale_event_dir() {
     local lock_dir="${1:?event lock directory required}"
     local modified now age owner_before owner_after reap

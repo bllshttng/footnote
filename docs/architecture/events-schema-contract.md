@@ -71,9 +71,10 @@ The project journal treats a lock timeout as fatal, while its global observabili
 The three general shell helpers, five hook emitters, and target-handoff fallback remain unlocked and reject serialized rows above 4000 bytes before appending.
 They register unique entries under `<events-file>.shell-writers.d`, recheck `<events-file>.gc.d`, and remove the entry after appending, so they remain unserialized with each other while compaction can prove no append targets the old inode.
 Hook-provided explicit paths resolve a symlink leaf before deriving the marker and rendezvous, keeping their emergency writes in the canonical worktree journal neighbourhood.
-Shell writers and worktree setup age-steal an abandoned owner-token marker after 120 seconds; active GC renews that marker lease during long compactions.
-Worktree setup rechecks the journal after taking both migration locks and filters favorable gate rows that would supersede an existing canonical verdict for the same key.
-The `.think-offer-cursor` is shared beside the journal and uses its own owner-token mutex, preserving once-per-project offer consumption across worktrees.
+Shell writers and worktree setup age-steal an abandoned owner-token marker after 120 seconds; active GC and worktree migration renew every held marker lease during long rewrites.
+Worktree setup rechecks the journal after taking both migration locks, recovers pending backups even when interruption preceded symlink creation, and filters favorable gate rows that would supersede an existing canonical verdict for the same valid scalar gate key.
+Malformed JSON and UTF-8 rows remain byte-preserved rather than blocking migration.
+The `.think-offer-cursor` is shared beside the journal and resolves its symlink before taking its owner-token mutex, preserving once-per-project offer consumption across worktrees.
 
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
@@ -249,8 +250,9 @@ The minimum ephemeral horizon is 672 hours because `human_touch` and claim conte
 `fno event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
 It preserves gate, durable, undeclared, unknown, and malformed rows, including a malformed row whose timestamp cannot be evaluated.
 The collector rewrites through an fsynced same-directory temporary file while holding the shared writer mutex, a shell-visible GC marker, and an empty shell-writer rendezvous.
-It renews both mutex leases during the scan and rewrite so a journal larger than the stale-lock horizon cannot be age-stolen mid-compaction.
+It renews the GC, writer, and offer-cursor mutex leases during the scan and rewrite so a journal larger than the stale-lock horizon cannot be age-stolen mid-compaction.
 When a worktree journal is a symlink, collection resolves and rewrites its target without replacing the symlink.
+Collection also holds the canonical offer-cursor mutex, maps the consumed byte prefix onto the compacted journal, and publishes an inode-pinned pending mapping before replacement so the offer hook can finish an interrupted cursor update without skipping a pending offer.
 
 ```bash
 fno event gc --dry-run
