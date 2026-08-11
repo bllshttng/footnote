@@ -93,11 +93,10 @@ check_session_satisfied() {
     # grep -F is a cheap pre-filter; the jq select() also matches on .type
     # to avoid false positives if another event type's payload happens to
     # contain the literal string (Gemini PR #286 review). The `|| true`
-    # wrapper isolates grep's exit code from the rest of the pipeline
-    # under the `set -o pipefail` this file assumes (see the header: no
-    # caller establishes it today). grep returning 1 for
-    # "no matches" is the common case for fresh sessions. Without the
-    # wrapper, the pipeline rc would be 1 on every empty-events
+    # wrapper isolates grep's exit code from the rest of the pipeline under the
+    # `set -o pipefail` this file assumes (see the header: no caller sets it).
+    # grep returning 1 for "no matches" is the common case for a fresh session;
+    # without the wrapper the pipeline rc would be 1 on every empty-events
     # iteration, triggering the "possibly corrupt entries" log spuriously.
     event_json=$( (grep -F '"type":"session_satisfied"' "$events_file" 2>/dev/null || true) \
         | jq -c --arg sid "$sid" --arg hash "$current_hash" \
