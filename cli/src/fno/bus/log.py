@@ -446,6 +446,44 @@ def iter_messages(*, warn: bool = True) -> Iterator[Envelope]:
             continue
 
 
+#: The tombstone kind. A withdrawal cannot delete a line (the log is
+#: append-only) and must not advance the RECIPIENT's cursor, which is a
+#: last-seen position rather than a per-message flag - moving it would swallow
+#: every other unread message addressed to them. So a withdrawal is one more
+#: appended envelope naming the message it retracts, and readers skip the pair.
+WITHDRAW_KIND = "withdraw"
+
+
+def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
+    """Ids retracted by a tombstone, plus the tombstone ids themselves.
+
+    Both halves are returned because a reader that hid the target but rendered
+    the tombstone would deliver a bare "this was withdrawn" line to a recipient
+    who never saw the original.
+
+    A tombstone counts only when it retracts a message the same sender sent to
+    the same address. That check lives here, at the read side, rather than only
+    at the write verb: the write verb is one reachable path, and a hand-appended
+    or replayed line must not be able to retract someone else's mail.
+    """
+    by_id = {m.id: m for m in msgs}
+    out: set[str] = set()
+    for m in msgs:
+        if m.kind != WITHDRAW_KIND:
+            continue
+        # A tombstone is control traffic and is never itself deliverable, so it
+        # is suppressed BEFORE the sender check rather than after. An invalid
+        # one that fell through would arrive in the recipient's inbox as a bare
+        # "withdrawn: msg-xxxx" line about a message it had no power to retract.
+        out.add(m.id)
+        target_id = (m.meta or {}).get("withdraws")
+        target = by_id.get(target_id) if isinstance(target_id, str) else None
+        if target is None or target.from_ != m.from_ or target.to != m.to:
+            continue
+        out.add(target.id)
+    return out
+
+
 def iter_thread(thread_id: str, *, warn: bool = True) -> Iterator[Envelope]:
     """Yield every envelope in ``thread_id``, oldest -> newest."""
     for env in iter_messages(warn=warn):
