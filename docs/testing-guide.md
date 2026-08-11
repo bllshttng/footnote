@@ -153,11 +153,13 @@ tail -5 /tmp/gate.log
 The same rule covers watchers and monitors, where it matters more because they announce completion:
 
 ```bash
-until ! grep -q pending out; do sleep 45; done          # WRONG: fails OPEN
-until grep -q '"settled": true' out; do sleep 45; done  # fails safe
+# WRONG: fails OPEN
+until ! grep -q pending out; do sleep 45; fno pr status "$PR" --json > out; done
+# fails safe
+until grep -q '"settled": true' out; do sleep 45; fno pr status "$PR" --json > out; done
 ```
 
-Both wait on a file, and they are one line apart.
+Both wait on a file the loop keeps rewriting, and they are one condition apart.
 The first tests for an ABSENCE, and an absence has two explanations: the checks really finished, or the command never produced usable output.
 When `gh` failed with a transient TLS error, the error text went into the file, contained no "pending", and the watcher announced that CI had settled while it was still running.
 The second waits for a string that only the real outcome produces, so a broken command leaves it waiting rather than declaring success.
@@ -168,7 +170,7 @@ A monitor armed on `verdict=` fired on `PASS: verdict=canonical-protected` from 
 A fail-fast gate hides the same way, with no pipe and no pattern involved.
 Once one step is permanently red, every step behind it stops running, and a check that never ran reports exactly what a passing check reports, which is nothing.
 A local gate stopped at step 32 on a known baseline failure and never reached the verb-surface ratchet around step 40, so "the gate did not complain about the ratchet" only meant "the gate never looked at it", and CI caught it instead.
-Once a step is known red, run with `--keep-going` so the steps behind it still report.
+Once a step is known red, run `fno test --keep-going` so the steps behind it still report (`--keep-going` belongs to `fno test`; `scripts/ci/preflight.sh` rejects it as an unknown arg and exits 2).
 
 Last, and it is the one a control does not save you from: believe the reading once you have it.
 A helper in this repo was fixed for a bug it really had, and the search proving nothing sources the file had already been run and its result written down, by two people, before either drew the conclusion that the fix therefore executed nowhere.

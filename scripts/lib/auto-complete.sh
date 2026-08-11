@@ -5,8 +5,8 @@
 #
 # Lifted from hooks/target-stop-hook.sh (Phase 2 of stop-hook refactor).
 # UNSOURCED as of 2026-08-10: nothing sources this file and the stop hook now shims `fno-agents loop-check`, so edits here are inert.
-# A reviver must fix two defects first: `jq_rc` below is read after a pipeline ending in `tail -1`, so malformed input yields 0 not jq's 5,
-# and no caller establishes the `pipefail` the grep wrapper assumes. Fix both when reviving, or delete this file rather than maintaining it.
+# A reviver must fix one defect first: no caller establishes the `pipefail` this file assumes, and without it `jq_rc` reads `tail -1`'s 0
+# instead of jq's 5 on malformed input. Set it in the caller (verified: pipefail alone restores rc=5), or delete this file rather than maintaining it.
 #
 # Constrained sources (check_pr, pr_merge, ci_watcher, fno_gate_manual)
 # emit session_satisfied events; the LLM cannot forge one because the
@@ -93,8 +93,9 @@ check_session_satisfied() {
     # grep -F is a cheap pre-filter; the jq select() also matches on .type
     # to avoid false positives if another event type's payload happens to
     # contain the literal string (Gemini PR #286 review). The `|| true`
-    # wrapper isolates grep's exit code from the rest of the pipeline:
-    # the caller runs under `set -o pipefail`, and grep returning 1 for
+    # wrapper isolates grep's exit code from the rest of the pipeline
+    # under the `set -o pipefail` this file assumes (see the header: no
+    # caller establishes it today). grep returning 1 for
     # "no matches" is the common case for fresh sessions. Without the
     # wrapper, the pipeline rc would be 1 on every empty-events
     # iteration, triggering the "possibly corrupt entries" log spuriously.

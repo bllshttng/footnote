@@ -264,7 +264,7 @@ fi
 #    caller can cover this: the defect being fixed was six implementations of one
 #    operation, five of which capped nothing, and two of those were found only by
 #    running this grep by hand. The positive control matters as much as the
-#    absence - an empty search result is a claim (AGENTS.md).
+#    absence - assert a positive marker, never an absence (AGENTS.md).
 defs="$(grep -rlE '^[[:space:]]*(_?with_timeout|_timeout)\(\)' "$REPO_ROOT/hooks" "$REPO_ROOT/scripts" --include='*.sh' 2>/dev/null | sort)"
 if [[ "$defs" == "$REPO_ROOT/scripts/lib/with-timeout.sh" ]]; then
     # Scope named honestly: this proves uniqueness across hooks/ and scripts/,
