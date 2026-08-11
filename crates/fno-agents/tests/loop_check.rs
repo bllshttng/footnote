@@ -1555,7 +1555,11 @@ fn ac5_hp_declared_no_ci_skipped() {
     )
     .unwrap();
     fs::write(&transcript_path, transcript_with_promise()).unwrap();
-    fs::write(&settings_path, "[ci]\ndeclared_none = true\n").unwrap();
+    fs::write(
+        &settings_path,
+        "[ci]\ndeclared_none = true\n[review]\nself_review_required = false\n",
+    )
+    .unwrap();
 
     // gh: returns no checks (empty array) but we declared no-ci so it should skip
     let dir = TempDir::new().unwrap();
@@ -1606,8 +1610,8 @@ exit 1
     ]);
 
     assert_eq!(d.decision, "allow");
-    // x-0eaf: no review lane configured (settings is [ci] only) -> DonePRGreen
-    // (the boundary fix: a stock install still completes nodes).
+    // x-0eaf: the fixture explicitly opts out of the local self-review floor,
+    // so the no-review configuration reaches DonePRGreen.
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 }
 
@@ -2721,7 +2725,11 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     fs::create_dir_all(cwd.join(".fno")).unwrap();
 
     let settings_path = cwd.join(".fno/config.toml");
-    fs::write(&settings_path, "[review]\nrequired_bots = []\n").unwrap();
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -2757,9 +2765,8 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
         "declared no-review repo must complete (not block) on PR+CI alone: {}",
         d.message
     );
-    // x-0eaf: no review lane configured -> zero coverage is the configured
-    // state, not a defect -> DonePRGreen (the boundary fix; a stock install
-    // still completes nodes).
+    // x-0eaf: the fixture explicitly opts out of local self-review, so zero
+    // coverage is the configured state rather than a defect.
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // AC3-UI: the skip is recorded in the loop_check event.
@@ -3076,7 +3083,11 @@ fn ac3_fr_restoring_required_bots_reenforces() {
 
     // Fire 1: required_bots [] -> passes without review.
     let empty_settings = cwd.join("empty-config.toml");
-    fs::write(&empty_settings, "[review]\nrequired_bots = []\n").unwrap();
+    fs::write(
+        &empty_settings,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
     let (_, d1) = fire(&[
         "loop-check",
         "--state",
@@ -3094,8 +3105,8 @@ fn ac3_fr_restoring_required_bots_reenforces() {
         "--events",
         events_path.to_str().unwrap(),
     ]);
-    // x-0eaf: required_bots [] means no review lane -> DonePRGreen (the boundary
-    // fix; fire 2 is what tests re-enforcement with a lane restored).
+    // x-0eaf: the explicit self-review opt-out makes fire 1 a no-review lane;
+    // fire 2 tests re-enforcement after a lane is restored.
     assert_eq!(d1.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // Fire 2: operator restores the list -> gate enforces again immediately.
@@ -5424,7 +5435,11 @@ fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     let settings = cwd.join(".fno/config.toml");
-    fs::write(&settings, "[review]\nrequired_bots = []\n").unwrap();
+    fs::write(
+        &settings,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
 
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
@@ -5451,8 +5466,8 @@ fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
     ]);
 
     assert_eq!(d.decision, "allow");
-    // x-0eaf boundary: no review lane -> DonePRGreen even with auto_merge consent
-    // (zero coverage is the configured state, not a defect).
+    // x-0eaf boundary: the explicit no-review configuration reaches
+    // DonePRGreen even with auto_merge consent.
     assert_eq!(
         d.termination_reason.as_deref(),
         Some("DonePRGreen"),
