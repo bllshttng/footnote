@@ -132,6 +132,14 @@ def _find_by_session(
                 # stores the 8-hex jobId prefix. De-hyphenate so the prefix match
                 # accepts either shape - else a /fno-me claude session reports
                 # unregistered despite a written row.
+                #
+                # ponytail: the prefix match is 32 bits of jobId. A same-harness
+                # row whose jobId prefix collides with this session's uuid would
+                # match the wrong row - in succession (is_caller_row) that vacates
+                # a crown that is not the abdicating king's. ~1/2^32 per pair, and
+                # harness scoping above already cut it to same-harness rows. The
+                # upgrade is storing the FULL session id on spawn rows, not
+                # tightening the matcher here: that re-diverges auth and succession.
                 sid = (entry.short_id or "").replace("-", "").lower()
                 if sid and norm.startswith(sid):
                     return entry
