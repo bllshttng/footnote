@@ -103,6 +103,30 @@ def _read_cursor(path: Path) -> int:
     return max(value, 0)
 
 
+def _fanout_cursor_timestamps(status_dir: Path) -> set[str]:
+    """Return timestamps whose same-second occurrence indexes must stay stable."""
+    timestamps: set[str] = set()
+    try:
+        cursor_paths = list(status_dir.glob("*.cursor"))
+    except OSError:
+        return timestamps
+    for cursor_path in cursor_paths:
+        try:
+            payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+            timestamp = payload["ts"]
+            count = payload["n"]
+        except (KeyError, OSError, UnicodeError, ValueError):
+            continue
+        if (
+            isinstance(timestamp, str)
+            and isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= 0
+        ):
+            timestamps.add(timestamp)
+    return timestamps
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     with tempfile.NamedTemporaryFile(
         mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
@@ -178,6 +202,9 @@ def gc_events(
     cursor = path.parent / ".think-offer-cursor"
     cursor_lock_dir = cursor.with_name(cursor.name + ".lock.d")
     cursor_token: str | None = None
+    fanout_dir = path.parent / "status-sinks"
+    fanout_lock_dir = fanout_dir / ".tick.lock.d"
+    fanout_token: str | None = None
     try:
         # The marker stops new shell writers. A writer that passed its first
         # marker check must register and recheck before appending, so an empty
@@ -189,7 +216,11 @@ def gc_events(
         cursor_token = acquire_dir_mutex(cursor_lock_dir, 30)
         if cursor_token is None:
             raise TimeoutError(f"event cursor lock timeout: {cursor_lock_dir}")
+        fanout_token = acquire_dir_mutex(fanout_lock_dir, 30)
+        if fanout_token is None:
+            raise TimeoutError(f"status fanout lock timeout: {fanout_lock_dir}")
         _recover_cursor_pending(path, cursor)
+        fanout_cursor_timestamps = _fanout_cursor_timestamps(fanout_dir)
 
         next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
 
@@ -199,6 +230,7 @@ def gc_events(
                 not renew_dir_mutex(gc_dir, gc_token)
                 or not renew_dir_mutex(lock_dir, lock_token)
                 or not renew_dir_mutex(cursor_lock_dir, cursor_token)
+                or not renew_dir_mutex(fanout_lock_dir, fanout_token)
             ):
                 raise RuntimeError("events.jsonl GC mutex ownership was lost")
             next_lease_renewal = time.monotonic() + _LEASE_RENEW_EVERY_S
@@ -282,7 +314,7 @@ def gc_events(
                         mapped_cursor += len(line)
                     source_offset = line_end
                     continue
-                if timestamp < cutoff:
+                if timestamp < cutoff and timestamp_value not in fanout_cursor_timestamps:
                     result["deleted"] += 1
                     source_offset = line_end
                     continue
@@ -338,6 +370,8 @@ def gc_events(
                 temp_path.unlink(missing_ok=True)
         return result
     finally:
+        if fanout_token is not None:
+            release_dir_mutex(fanout_lock_dir, fanout_token)
         if cursor_token is not None:
             release_dir_mutex(cursor_lock_dir, cursor_token)
         if lock_token is not None:

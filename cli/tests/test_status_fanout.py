@@ -397,6 +397,30 @@ def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
     assert sf._cursor_path("s", canonical) == sf._cursor_path("s", worktree)
 
 
+def test_tick_orders_migrated_older_rows_before_the_canonical_tail(tmp_path):
+    from fno import status_fanout as sf
+
+    _write_events(
+        tmp_path,
+        [
+            _ev("2026-08-11T10:00:00Z", "blocked"),
+            _ev("2026-08-11T09:00:00Z", "blocked"),
+        ],
+    )
+    state_dir = tmp_path / ".fno" / "status-sinks"
+    state_dir.mkdir()
+    _seed_cursor(state_dir, "s", "2026-08-11T08:00:00Z")
+    recorder = _Recorder()
+
+    sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=recorder)
+
+    assert recorder.calls == [
+        ("s", "2026-08-11T09:00:00Z"),
+        ("s", "2026-08-11T10:00:00Z"),
+    ]
+    assert _cursor(state_dir, "s") == {"ts": "2026-08-11T10:00:00Z", "n": 1}
+
+
 # ── US3: json-webhook adapter (failure classes) ─────────────────────────────
 
 

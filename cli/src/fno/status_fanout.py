@@ -312,6 +312,12 @@ def _run_locked(
     # boundary events; the per-sink (ts, n) tiebreak below decides what is new.
     min_ts = min(c[0] for c in start.values())
     events, skipped = _stream_since(active, min_ts)
+    # Setup migration appends a worktree segment after the canonical tail, so
+    # append order is not necessarily timestamp order. The cursor compares by
+    # timestamp; process a stable timestamp ordering so an older migrated row
+    # cannot follow a newer row that advanced the cursor past it. Stability
+    # preserves the occurrence order of same-second peers.
+    events.sort(key=lambda event: event["ts"])
 
     state = {s.name: SinkResult(name=s.name, new_cursor=start[s.name]) for s in sinks}
 

@@ -225,6 +225,52 @@ def test_gc_remaps_offer_cursor_without_skipping_pending_rows(tmp_path: Path) ->
     assert not cursor.with_name(cursor.name + ".gc-pending").exists()
 
 
+def test_gc_preserves_rows_that_anchor_a_fanout_occurrence_cursor(tmp_path: Path) -> None:
+    from fno import status_fanout
+    from fno.config import StatusSinkConfig
+
+    state_dir = tmp_path / ".fno"
+    status_dir = state_dir / "status-sinks"
+    status_dir.mkdir(parents=True)
+    events = state_dir / "events.jsonl"
+    cursor_ts = "2026-07-01T00:00:00Z"
+    older = _event("claim_acquired", "2026-06-30T00:00:00Z") + "\n"
+    anchor = _event("claim_acquired", cursor_ts) + "\n"
+    delivered = json.dumps(
+        {"ts": cursor_ts, "type": "blocked", "source": "target", "data": {}}
+    ) + "\n"
+    pending = json.dumps(
+        {
+            "ts": cursor_ts,
+            "type": "blocked",
+            "source": "target",
+            "data": {"reason": "pending"},
+        }
+    ) + "\n"
+    events.write_text(older + anchor + delivered + pending, encoding="utf-8")
+    (status_dir / "s.cursor").write_text(
+        json.dumps({"ts": cursor_ts, "n": 2}), encoding="utf-8"
+    )
+
+    result = gc_events(events, now=NOW, ttl_hours=672)
+
+    assert result["deleted"] == 1
+    assert events.read_text(encoding="utf-8").count('"type": "claim_acquired"') == 1
+    dispatched: list[str] = []
+    sink = StatusSinkConfig(
+        name="s", type="json-webhook", events=["blocked"], url="https://x"
+    )
+    status_fanout.run_tick(
+        tmp_path,
+        [sink],
+        dispatch_fn=lambda _sink, event: (
+            dispatched.append(str(event["data"].get("reason", "")))
+            or (status_fanout.DELIVERED, "")
+        ),
+    )
+    assert dispatched == ["pending"]
+
+
 def test_gc_recovers_cursor_mapping_left_by_interrupted_migration(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     row = _event("node_closed", "2026-08-11T00:00:00Z") + "\n"
