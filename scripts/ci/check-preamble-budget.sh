@@ -20,7 +20,13 @@ set -euo pipefail
 # prior preamble had 8B headroom so any meaningful contract required a raise.
 # The DoneUnreviewed terminal in the ship-vocabulary line took 45 more, since
 # the auto-loaded preamble must name every public TerminationReason.
-CEILING_BYTES=38000
+# Raised from 38000 to 38100 by the prescribed-verbs fix (x-e90f). AGENTS.md's
+# search line prescribed `rg -uu` as the over-exclusion remedy, which is inert:
+# the trap has two layers (a ripgreprc `--glob=!target` and an unanchored
+# `target/` in ~/.ignore), and `-u` governs ignore files, never a `--glob`. The
+# working remedy `RIPGREP_CONFIG_PATH= rg -uu` plus a one-clause why is longer
+# than the inert form it replaces, and the preamble sat at 37999/38000 (1B spare).
+CEILING_BYTES=38100
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 JSON_MODE=0

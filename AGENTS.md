@@ -62,7 +62,7 @@ An absence has two explanations, the real outcome and "the instrument never ran"
 Require a string only the real outcome produces, pinned to the thing measured rather than any line carrying the word.
 `until ! grep -q pending out` called CI settled when `gh` died on a TLS error, since an error carries no "pending"; `grep -q '"settled": true'` is one line apart and fails safe.
 
-- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; `git worktree list | head -20` truncated a present worktree into absence; an unanchored `rg --glob '!target/**'` also hides `skills/target/`, so live callers survived every sweep of a rename; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
+- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; `git worktree list | head -20` truncated a present worktree into absence; an unanchored `rg --glob=!target` also hides `skills/target/`, so live callers survived every sweep of a rename; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
 - graduates-to: an assert helper refusing an absence-only success condition and failing a zero-hit probe with no positive control; it cannot catch an honest exit code answering a different question, which needs the verdict verb.
 - added: 2026-07-27
 
@@ -92,7 +92,7 @@ footnote/
 ### Conventions
 
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
-- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees); scope any `grep -r` to a path. Re-run a load-bearing sweep with `rg -uu`; the over-exclusion trap is a pitfalls entry above.
+- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees); scope any `grep -r` to a path. For a load-bearing sweep use `RIPGREP_CONFIG_PATH= rg -uu`, not a bare `rg -uu` (`-u` ignores files, not globs); the over-exclusion trap is a pitfalls entry above.
 - **Markdown prose:** one full sentence per physical line (semantic line breaks); never wrap a sentence across lines. Governs prose paragraphs, not bullets/fences/tables.
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. See [docs/HARNESSES.md](docs/HARNESSES.md), [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md).
 
