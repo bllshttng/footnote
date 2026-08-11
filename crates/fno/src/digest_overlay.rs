@@ -173,11 +173,7 @@ fn warn_if_not_toml(path: &Path) -> Option<crate::keys::KeymapWarning> {
 fn mux_keys_table(cwd: &Path) -> (Vec<(String, String)>, Vec<crate::keys::KeymapWarning>) {
     let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
     let mut read = |path: &Path| -> Vec<(String, String)> {
-        // An absent file is the normal case, not a problem worth a notice.
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return Vec::new();
-        };
-        let (entries, mut found) = keys_from_toml(path, &content);
+        let (entries, mut found) = read_layer(path);
         warnings.append(&mut found);
         entries
     };
@@ -205,6 +201,29 @@ fn mux_keys_table(cwd: &Path) -> (Vec<(String, String)>, Vec<crate::keys::Keymap
     };
     let merged = merge_key_layers(layers.iter().map(|p| read(p)));
     (merged, warnings)
+}
+
+/// One config layer: its `[mux.keys]`, plus everything about it that stopped
+/// the reader.
+///
+/// Only `NotFound` is absence. Every other read error - permissions, invalid
+/// UTF-8, an I/O fault - means a file the operator DOES have and the mux cannot
+/// use, and collapsing those into "no config here" is the same silent drop as
+/// discarding a value the resolver should have refused. `mux_str` reads these
+/// same paths for the prefix and the other knobs, so one warning per file
+/// covers both rather than firing once per key.
+fn read_layer(path: &Path) -> (Vec<(String, String)>, Vec<crate::keys::KeymapWarning>) {
+    match std::fs::read_to_string(path) {
+        Ok(content) => keys_from_toml(path, &content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), Vec::new()),
+        Err(e) => (
+            Vec::new(),
+            vec![crate::keys::KeymapWarning(format!(
+                "keys on defaults: cannot read {} ({e})",
+                path.display()
+            ))],
+        ),
+    }
 }
 
 /// One config file's `[mux.keys]`, plus everything it could not use.
@@ -648,6 +667,39 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&orphan).ok();
+    }
+
+    #[test]
+    fn an_unreadable_config_is_not_the_same_as_an_absent_one() {
+        // Absence is the normal case and stays quiet. Every OTHER read error is
+        // a file the operator DOES have and the mux cannot use, and collapsing
+        // those into "no config here" is the same silent drop as discarding a
+        // value the resolver should have refused.
+        let dir = std::env::temp_dir().join(format!("fno-readlayer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+
+        let absent = dir.join("config.toml");
+        assert_eq!(read_layer(&absent), (Vec::new(), Vec::new()), "quiet");
+
+        // Invalid UTF-8 reproduces the class deterministically, with no
+        // permission games that a root-run CI would skip straight past.
+        let bad = dir.join("invalid-utf8.toml");
+        std::fs::write(&bad, [0xff, 0xfe, 0x00]).expect("write");
+        let (entries, warnings) = read_layer(&bad);
+        assert!(entries.is_empty());
+        assert_eq!(warnings.len(), 1, "must not read as absent: {warnings:?}");
+        assert!(
+            warnings[0].0.starts_with("keys on defaults: cannot read"),
+            "meaning first, so a 40-column strip keeps it: {:?}",
+            warnings[0].0
+        );
+
+        // A directory where a file belongs is the other everyday shape.
+        let as_dir = dir.join("adir.toml");
+        std::fs::create_dir_all(&as_dir).expect("dir");
+        assert_eq!(read_layer(&as_dir).1.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
