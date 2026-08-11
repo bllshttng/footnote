@@ -208,6 +208,14 @@ CANONICAL="$canonical" WORKTREE="$newer_gate" bash "$SETUP" >/dev/null 2>&1
 newer_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "newer-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration keeps a newer passing re-review" test "$newer_verdict" = pass
 
+distinct_attester="$TMP/distinct-attester"
+mkdir -p "$distinct_attester/.fno"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"multi-attester-head","verdict":"pass","attester_session_id":"author"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"/code-review","head_sha":"multi-attester-head","verdict":"pass","attester_session_id":"peer"}}' > "$distinct_attester/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$distinct_attester" bash "$SETUP" >/dev/null 2>&1
+attester_count=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "multi-attester-head") | .data.attester_session_id' "$canonical/.fno/events.jsonl" | sort -u | wc -l | tr -d ' ')
+assert "migration preserves independent attester identities" test "$attester_count" -eq 2
+
 untimed_gate="$TMP/untimed-gate"
 mkdir -p "$untimed_gate/.fno"
 printf '%s\n' '{"ts":"2026-08-11T08:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"untimed-head","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
@@ -227,6 +235,23 @@ CANONICAL="$canonical" WORKTREE="$fanout_cursor_worktree" bash "$SETUP" >/dev/nu
 assert "migration lowers a shared fanout cursor before older pending rows" \
   bash -c 'jq -e '\''.ts == "2026-08-11T08:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
   _ "$canonical/.fno/status-sinks/ops.cursor"
+assert "migration retires the worktree-local fanout cursor" \
+  test "$canonical/.fno/status-sinks/ops.cursor" -ef "$fanout_cursor_worktree/.fno/status-sinks/ops.cursor"
+printf '%s' '{"ts":"2026-08-11T12:00:00Z","n":4}' > "$canonical/.fno/status-sinks/ops.cursor"
+CANONICAL="$canonical" WORKTREE="$fanout_cursor_worktree" bash "$SETUP" >/dev/null 2>&1
+assert "repeated setup cannot rewind a retired fanout cursor" \
+  bash -c 'jq -e '\''.ts == "2026-08-11T12:00:00Z" and .n == 4'\'' "$1" >/dev/null' \
+  _ "$canonical/.fno/status-sinks/ops.cursor"
+
+fractional_cursor_worktree="$TMP/fractional-cursor-worktree"
+mkdir -p "$fractional_cursor_worktree/.fno/status-sinks"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","v":1,"type":"blocked","source":"target","run":"local-run","data":{"reason":"mixed-precision"}}' > "$fractional_cursor_worktree/.fno/events.jsonl"
+printf '%s' '{"ts":"2026-08-11T10:00:00Z","n":1}' > "$fractional_cursor_worktree/.fno/status-sinks/fractional.cursor"
+printf '%s' '{"ts":"2026-08-11T10:00:00.100000Z","n":1}' > "$canonical/.fno/status-sinks/fractional.cursor"
+CANONICAL="$canonical" WORKTREE="$fractional_cursor_worktree" bash "$SETUP" >/dev/null 2>&1
+assert "migration orders mixed-precision cursor timestamps by instant" \
+  bash -c 'jq -e '\''.ts == "2026-08-11T10:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
+  _ "$canonical/.fno/status-sinks/fractional.cursor"
 
 fanout_locked="$TMP/fanout-locked"
 mkdir -p "$fanout_locked/.fno" "$canonical/.fno/status-sinks/.tick.lock.d"

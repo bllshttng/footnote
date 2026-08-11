@@ -963,6 +963,33 @@ def test_tick_same_second_across_ticks_not_dropped(tmp_path):
     assert _cursor(ss, "s") == {"ts": "2026-07-12T00:00:05Z", "n": 2}
 
 
+def test_tick_orders_mixed_precision_timestamps_by_instant(tmp_path):
+    from fno import status_fanout as sf
+
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
+    _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
+    _write_events(tmp_path, [
+        _ev("2026-07-12T00:00:00.100000Z", "blocked", node="later"),
+        _ev("2026-07-12T00:00:00Z", "blocked", node="earlier"),
+    ])
+    rec = _Recorder()
+    sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert [ts for _, ts in rec.calls] == [
+        "2026-07-12T00:00:00Z",
+        "2026-07-12T00:00:00.100000Z",
+    ]
+
+    _write_events(tmp_path, [
+        _ev("2026-07-12T00:00:00.100000Z", "blocked", node="later"),
+        _ev("2026-07-12T00:00:00Z", "blocked", node="earlier"),
+        _ev("2026-07-12T00:00:00.200000Z", "blocked", node="latest"),
+    ])
+    rec = _Recorder()
+    sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
+    assert rec.calls == [("s", "2026-07-12T00:00:00.200000Z")]
+
+
 def test_tick_cmd_exits_0_and_logs_counts_on_drop(tmp_path, monkeypatch):
     # AC1-ERR (tick exits 0) + AC1-UI (real tick logs counts), at the CLI surface.
     from typer.testing import CliRunner

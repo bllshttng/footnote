@@ -515,8 +515,11 @@ reconcile_status_fanout_cursors() {
   python3 - "$(dirname "$source")/status-sinks" "$(dirname "$target")/status-sinks" <<'PY'
 import json
 import os
+import re
+import secrets
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 canonical_dir, local_dir = map(Path, sys.argv[1:])
@@ -525,20 +528,35 @@ if not local_dir.is_dir():
 canonical_dir.mkdir(parents=True, exist_ok=True)
 
 
+def timestamp(value):
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
+            value,
+        )
+        is None
+    ):
+        raise ValueError
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.utcoffset() != timedelta(0):
+        raise ValueError
+    return parsed
+
+
 def read_cursor(path):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         ts = payload["ts"]
         count = payload["n"]
         if (
-            not isinstance(ts, str)
-            or not isinstance(count, int)
+            not isinstance(count, int)
             or isinstance(count, bool)
             or count < 0
         ):
             raise ValueError
-        return ts, count
-    except (KeyError, OSError, UnicodeError, ValueError):
+        return ts, count, timestamp(ts)
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return None
 
 
@@ -558,17 +576,37 @@ def atomic_cursor(path, cursor):
             pass
 
 
+def retire_cursor(local_path, canonical_path):
+    temp = local_path.with_name(
+        f".{local_path.name}.{os.getpid()}.{secrets.token_hex(8)}"
+    )
+    try:
+        os.symlink(canonical_path.resolve(strict=True), temp)
+        os.replace(temp, local_path)
+    finally:
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+
+
 for local_path in local_dir.glob("*.cursor"):
     local = read_cursor(local_path)
     if local is None:
         continue
     canonical_path = canonical_dir / local_path.name
+    try:
+        if os.path.samefile(local_path, canonical_path):
+            continue
+    except OSError:
+        pass
     canonical = read_cursor(canonical_path)
-    if canonical is None or local[0] < canonical[0]:
+    if canonical is None or local[2] < canonical[2]:
         # The merged journal places canonical rows before the local segment.
         # Reset the occurrence index at the earlier timestamp: replay is legal
         # for the at-least-once sink, while skipping a delayed local row is not.
         atomic_cursor(canonical_path, (local[0], 0))
+    retire_cursor(local_path, canonical_path)
 PY
 }
 

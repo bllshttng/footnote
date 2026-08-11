@@ -21,7 +21,10 @@ def _gate_key(row: object) -> tuple[object, ...] | None:
         head_sha = data.get("head_sha")
         if not isinstance(reviewer, str) or not isinstance(head_sha, str):
             return None
-        return ("review_attestation", reviewer.lstrip("/"), head_sha)
+        attester = data.get("attester_session_id")
+        if not isinstance(attester, str) or not attester:
+            attester = None
+        return ("review_attestation", reviewer.lstrip("/"), head_sha, attester)
     if row.get("type") == "review_coverage":
         pr = data.get("pr")
         head_sha = data.get("head_sha")

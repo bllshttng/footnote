@@ -28,6 +28,7 @@ import json
 import os
 import string
 import threading
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -37,6 +38,7 @@ import typer
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
 from fno.env_file import read_var_from_env_file
+from fno.events import _utc_timestamp
 from fno.mutex import acquire_dir_mutex, release_dir_mutex, renew_dir_mutex
 from fno.plan._stamp import _atomic_write as _atomic_write_plan
 from fno.plan.locking import plan_doc_lock
@@ -74,6 +76,16 @@ class TickResult:
 # ── event stream (rotation-aware, skip-and-count) ───────────────────────────
 
 
+def _timestamp_key(value: str) -> datetime:
+    """Return one chronological key for every schema-valid timestamp spelling."""
+    if value == "":
+        return datetime.min.replace(tzinfo=timezone.utc)
+    parsed = _utc_timestamp(value)
+    if parsed is None:
+        raise ValueError(f"invalid event timestamp: {value!r}")
+    return parsed
+
+
 def _parse_line(line: str) -> Optional[dict[str, Any]]:
     line = line.strip()
     if not line:
@@ -82,7 +94,9 @@ def _parse_line(line: str) -> Optional[dict[str, Any]]:
         obj = json.loads(line)
     except (ValueError, TypeError):
         return None
-    return obj if isinstance(obj, dict) and isinstance(obj.get("ts"), str) else None
+    if not isinstance(obj, dict) or not isinstance(obj.get("ts"), str):
+        return None
+    return obj if _utc_timestamp(obj["ts"]) is not None else None
 
 
 def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
@@ -103,7 +117,7 @@ def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, A
                     if raw.strip():
                         skipped += 1
                     continue
-                if since_ts is None or ev["ts"] >= since_ts:
+                if since_ts is None or _timestamp_key(ev["ts"]) >= _timestamp_key(since_ts):
                     events.append(ev)
     except FileNotFoundError:
         return [], 0
@@ -171,7 +185,11 @@ def _stream_pass(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str,
     # so .1 still holds same-ts events whose occurrence index must be counted
     # ahead of the active file's - dropping .1 here would reset the index to 0 and
     # mis-align it against the cursor's n, losing same-second events (codex peer).
-    if since_ts is not None and active_first is not None and since_ts > active_first:
+    if (
+        since_ts is not None
+        and active_first is not None
+        and _timestamp_key(since_ts) > _timestamp_key(active_first)
+    ):
         return active_events, active_skipped
     rotated_events, rotated_skipped = _read_events(rotated, since_ts)
     return rotated_events + active_events, active_skipped + rotated_skipped
@@ -183,6 +201,7 @@ def _eof_cursor(active: Path) -> "tuple[str, int]":
     still delivered (it lands at occurrence index >= count). ("", 0) for an
     empty/absent log means "deliver everything henceforth" (nothing to backfill)."""
     last_ts = ""
+    last_key = _timestamp_key(last_ts)
     count = 0
     try:
         with active.open("r", encoding="utf-8") as fh:
@@ -191,11 +210,12 @@ def _eof_cursor(active: Path) -> "tuple[str, int]":
                 if ev is None:
                     continue
                 ts = ev["ts"]
-                if ts == last_ts:
+                key = _timestamp_key(ts)
+                if key == last_key:
                     count += 1
-                elif ts > last_ts:
-                    last_ts, count = ts, 1
-                # ts < last_ts (clock skew): leave the max-ts count untouched.
+                elif key > last_key:
+                    last_ts, last_key, count = ts, key, 1
+                # An older instant (clock skew) leaves the max-ts count untouched.
     except FileNotFoundError:
         pass
     return last_ts, count
@@ -226,7 +246,17 @@ def _read_cursor(name: str, project_root: Optional[Path]) -> "Optional[tuple[str
         return None
     try:
         obj = json.loads(raw)
-        return str(obj["ts"]), int(obj["n"])
+        ts = obj["ts"]
+        count = obj["n"]
+        if (
+            not isinstance(ts, str)
+            or (ts != "" and _utc_timestamp(ts) is None)
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+        ):
+            return None
+        return ts, count
     except (ValueError, KeyError, TypeError):
         return None  # a torn/legacy cursor reads as fresh (harmless re-init at EOF)
 
@@ -313,33 +343,35 @@ def _run_locked(
 
     # Read from the oldest cursor ts INCLUSIVE so every sink sees its own same-ts
     # boundary events; the per-sink (ts, n) tiebreak below decides what is new.
-    min_ts = min(c[0] for c in start.values())
+    min_ts = min((c[0] for c in start.values()), key=_timestamp_key)
     events, skipped = _stream_since(active, min_ts)
     # Setup migration appends a worktree segment after the canonical tail, so
     # append order is not necessarily timestamp order. The cursor compares by
     # timestamp; process a stable timestamp ordering so an older migrated row
     # cannot follow a newer row that advanced the cursor past it. Stability
     # preserves the occurrence order of same-second peers.
-    events.sort(key=lambda event: event["ts"])
+    events.sort(key=lambda event: _timestamp_key(event["ts"]))
 
     state = {s.name: SinkResult(name=s.name, new_cursor=start[s.name]) for s in sinks}
 
-    # occurrence index of each event among its same-ts peers, in file order. The
-    # ts is seconds-granularity, so two events routinely share one ts; (ts, idx)
-    # is the stable identity a bare-ts cursor lacked (the same-second drop bug).
-    occ: dict[str, int] = {}
+    # Occurrence index among equal-instant peers, in stable file order. Events
+    # routinely share one timestamp; (ts, idx) is the stable identity a bare-ts
+    # cursor lacked (the same-second drop bug).
+    occ: dict[datetime, int] = {}
     for event in events:
         ets = event["ts"]
-        idx = occ.get(ets, 0)
-        occ[ets] = idx + 1
+        event_key = _timestamp_key(ets)
+        idx = occ.get(event_key, 0)
+        occ[event_key] = idx + 1
         for s in sinks:
             st = state[s.name]
             if st.short_circuited:
                 continue
             cts, cn = st.new_cursor  # type: ignore[misc]  # always a tuple here
+            cursor_key = _timestamp_key(cts)
             # Already processed: a strictly-older ts, or a same-ts occurrence the
             # cursor already advanced past.
-            if ets < cts or (ets == cts and idx < cn):
+            if event_key < cursor_key or (event_key == cursor_key and idx < cn):
                 continue
             if not _matches(s, event):
                 continue
