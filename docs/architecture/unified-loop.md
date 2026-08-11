@@ -273,7 +273,7 @@ Coverage of the eight reachable merge paths, stated honestly rather than implied
 | `fno pr merge` (`_merge.py`), and its worktree API fallback | checked, refuses with `outcome=blocked` |
 | `fno pr verify --kind merged` bounded remediation (`_verify.py`) | checked, refuses the remediation |
 | `finalize.rs` autonomous `--auto` arm | checked, refuses to arm |
-| a PR update, via `.github/workflows/stacked-base-guard.yml` | checked; blocks only once marked a required status check |
+| a PR update, via `.github/workflows/stacked-base-guard.yml` | checked for same-repo PRs; blocks only once marked a required status check. Fork PRs are skipped: their `GITHUB_TOKEN` cannot post the status |
 | GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |
 | an agent-run bare `gh pr merge`, via `hooks/git-protection.py` | checked, denies before the two-factor path so the merge-gate override cannot buy past it |
 | the GitHub web / mobile merge button | NOT covered until the context is marked required; reachable from no code here |
@@ -287,6 +287,7 @@ The residual hole is a human typing gh in a terminal, which only the required st
 Marking the `stacked-base-guard` context required is a repository-settings action; no code in this repo can take it, and this repo commits no branch-protection or ruleset config.
 Until someone does, the workflow reports and does not block.
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.
+The `guard` job therefore skips fork PRs outright rather than running and failing on the POST, which would have hung a permanently red check on every external contribution.
 Marking it required while fork PRs are accepted blocks every one of them permanently, waiting on a context no run can produce, so the setting is safe only on a repo that takes no fork PRs; covering forks needs a privileged second workflow, which is a security decision this PR does not make.
 The in-process callers fail OPEN on a probe that could not evaluate (a gh outage must not wedge a merge, matching `_merge._behind_by`), while CI fails CLOSED on the same condition, because a check that could not run has verified nothing.
 `FNO_PR_BASE_LINEAGE_OK=stale-acknowledged` bypasses a refusal and records a `gate_escape`.

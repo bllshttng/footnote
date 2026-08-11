@@ -45,7 +45,17 @@ permissions:
 
 jobs:
   guard:
-    if: github.event_name == 'pull_request'
+    # Fork PRs are skipped rather than run-and-failed. A `pull_request` event
+    # from a fork gets a read-only GITHUB_TOKEN whatever `permissions:` says, so
+    # the status POST 403s, `check-stacked-base.sh` treats a failed POST as a
+    # failed check (correctly - it published nothing), and every external
+    # contributor's PR would carry a red `guard` job it cannot ever make green.
+    # A skip matches what the header already states: the context is simply never
+    # created for a fork PR. Covering forks needs the privileged second workflow
+    # described above, which this PR deliberately does not add.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
