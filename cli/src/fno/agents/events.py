@@ -142,6 +142,80 @@ def emit_identity_resolution(owned: Any, *, path: Optional[Path] = None) -> None
 
 
 # ---------------------------------------------------------------------
+# Spawn-lifecycle births (x-8cd5 Wave 6): deaths already land in the daemon's
+# agent-lifecycle log (~/.fno/agents/events.jsonl) — agent_orphan_reaped,
+# agent_row_reaped, agent_stopped, agent_removed. A birth that lands anywhere
+# else splits the lineage tree across two files, so it is unreconstructible:
+# the daemon records every way an agent can END and nothing about how it began.
+# These helpers write the birth to the SAME log the daemon writes deaths to, so
+# a parent->child->death tree is joinable from one file.
+#
+# Co-writing the daemon's log from Python is safe: single-line JSONL appends
+# are atomic below PIPE_BUF, so concurrent writers (this process and the
+# daemon) interleave only at line boundaries. The daemon's advisory flock is
+# not held across writes, so not taking it here cannot deadlock or corrupt a
+# line.
+KIND_AGENT_SPAWNED = "agent_spawned"
+KIND_AGENT_SPAWN_FAILED = "agent_spawn_failed"
+
+
+def daemon_lifecycle_log() -> Path:
+    """The daemon's agent-lifecycle log: where births and deaths are joinable."""
+    return paths.agents_home_dir() / "events.jsonl"
+
+
+def emit_spawned(
+    *,
+    name: str,
+    short_id: Optional[str],
+    provider: str,
+    spawned_by_session: Optional[str] = None,
+    spawned_by_harness: Optional[str] = None,
+    spawned_by_cwd: Optional[str] = None,
+) -> None:
+    """Record one agent birth in the daemon lifecycle log.
+
+    Carries the parent edge the registry row already captures
+    (spawned_by_session/harness/cwd) so the lineage tree is reconstructable:
+    birth(parent_session, child) joins death(child) on the child name.
+    Exactly one per successful create; best-effort (OSError swallowed).
+    """
+    emit(
+        KIND_AGENT_SPAWNED,
+        path=daemon_lifecycle_log(),
+        name=name,
+        short_id=short_id,
+        provider=provider,
+        spawned_by_session=spawned_by_session,
+        spawned_by_harness=spawned_by_harness,
+        spawned_by_cwd=spawned_by_cwd,
+    )
+
+
+def emit_spawn_failed(
+    *,
+    name: str,
+    provider: Optional[str] = None,
+    short_id: Optional[str] = None,
+    reason: str = "",
+) -> None:
+    """Record a spawn attempt that did not produce a live row.
+
+    The birth's failure counterpart: a spawn that exits via an error path still
+    leaves a trace in the daemon log, so a name with a death but no birth is
+    distinguishable from a name whose only event is a failed start.
+    """
+    emit(
+        KIND_AGENT_SPAWN_FAILED,
+        path=daemon_lifecycle_log(),
+        name=name,
+        provider=provider,
+        short_id=short_id,
+        reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------
 # Phase 5 — MCP channel + streaming event kinds
 # ---------------------------------------------------------------------
 

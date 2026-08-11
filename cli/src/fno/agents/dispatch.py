@@ -1510,6 +1510,12 @@ def _claude_create_path(
                 file=sys.stderr,
             )
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+        # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
+        # but no registry row names it, so without this the orphan's later
+        # death would join no birth in the daemon log.
+        events.emit_spawn_failed(
+            name=name, provider=chosen, short_id=short_id, reason=f"registry-write: {exc}"
+        )
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -1570,10 +1576,10 @@ def _claude_create_path(
             file=sys.stderr,
         )
 
-    # Spawn event (Task 2.2, x-30f6): exactly one per successful create.
-    # Open schema — flattens onto the JSONL record alongside ts/kind.
-    events.emit(
-        "agent_spawned",
+    # Spawn birth (x-30f6, x-8cd5 Wave 6): exactly one per successful create,
+    # written to the daemon lifecycle log so it joins the death events the
+    # daemon emits there (agent_orphan_reaped / agent_row_reaped / etc.).
+    events.emit_spawned(
         name=name,
         short_id=short_id,
         provider=chosen,

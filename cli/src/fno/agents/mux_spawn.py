@@ -2316,7 +2316,29 @@ def dispatch_spawn_pane(
                     f"session to {name} (succession). You no longer hold it.",
                     file=sys.stderr,
                 )
+            # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now
+            # exists in the registry. Emit to the daemon lifecycle log so this
+            # birth joins the daemon's death events for the same name; without
+            # it the pane path leaves a death with no birth to join. A pane that
+            # dies was still born (its row is `failed`, soon reaped).
+            from fno.agents import events as _spawn_events
+
+            _spawn_events.emit_spawned(
+                name=name,
+                short_id=pane_id,
+                provider=provider,
+                spawned_by_session=spawned_by_session,
+                spawned_by_harness=spawned_by_harness,
+                spawned_by_cwd=spawned_by_cwd,
+            )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
+            # No row was written, so the orphan's later death would join no
+            # birth. Record the failed start in the daemon log (x-8cd5 Wave 6).
+            from fno.agents import events as _spawn_events
+
+            _spawn_events.emit_spawn_failed(
+                name=name, provider=provider, short_id=pane_id, reason=f"registry-write: {exc}"
+            )
             reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
             if reaped:
                 raise DispatchAskError(
