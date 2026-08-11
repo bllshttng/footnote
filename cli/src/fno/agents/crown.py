@@ -275,7 +275,10 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     # outer_members is canonicalized - a raw 'a' would never match a canonical
     # 'alpha', so a king over 'alpha' would be falsely refused an epic filed as
     # 'a'. Same alias-normalization the _canon helper applies to the scopes.
-    proj = _canonical_project(entry.get("project")) or entry.get("project")
+    raw_proj = entry.get("project")
+    if not raw_proj:
+        return False
+    proj = _canonical_project(raw_proj) or raw_proj
     return proj in outer_members
 
 

@@ -156,7 +156,7 @@ def _find_by_session(
     return None
 
 
-def is_caller_row(row, session_uuid: str) -> bool:
+def is_caller_row(row, session_uuid: Optional[str]) -> bool:
     """Is ``row`` the session that issued the current spawn - the king whose
     crown a succession would transfer?
 

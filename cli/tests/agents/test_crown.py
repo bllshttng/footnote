@@ -147,14 +147,11 @@ def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypat
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
     use_tmpdir(monkeypatch, tmp_path)
-    monkeypatch.delenv("FNO_SESSION", raising=False)
-    for var in ("CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
-    # The grantor is a REGISTERED king over epic-x, so the child spawn is a
-    # succession (it hands its own scope to the heir). An agent identity with no
-    # registry row is now refused at the grantor check, so the agent must be
-    # seated - this is the corrected opposite of the fail-open these tests rode.
+    # Seat the grantor as a registered king over epic-x; the spawn is then a
+    # succession. An agent identity with no registry row is now refused at the
+    # grantor check, so the agent must be seated - the corrected opposite of the
+    # fail-open these tests rode. Reuse _spawn_crowned so the provider axis
+    # binding stays on its baselined line rather than adding a new one inline.
     update_registry(
         lambda rows: rows
         + [
@@ -172,17 +169,10 @@ def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypat
             )
         ]
     )
-
-    from fno.agents.mux_spawn import dispatch_spawn_pane
-
-    dispatch_spawn_pane(
-        name="king-epic",
-        message="reign",
-        provider="claude",
-        cwd=tmp_path,
-        runner=_FakeRunner(),
-        crown_level=1,
-        crown_scope="epic-x",
+    _spawn_crowned(
+        monkeypatch, tmp_path,
+        grantor_env="parent-sess-abc",
+        crown_level=1, crown_scope="epic-x",
     )
     heir = next(e for e in load_registry() if e.name == "king-epic")
     assert heir.crown_level == 1
