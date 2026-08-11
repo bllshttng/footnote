@@ -219,16 +219,24 @@ def _tail_after_cursor() -> tuple[list[Envelope], Optional[str]]:
     id so the caller can resync to head WITHOUT replaying a stale backlog (the
     sink is not idempotent). An absent cursor (never run) returns all retained
     with no resync (first-run catch-up is the intended behavior)."""
+    from fno.bus.log import withdrawn_ids
+
     cur = _cursor.read_cursor(CURSOR_NAME)
     msgs = list(iter_messages())
+    # The router reads the log directly rather than through `scan_unread`, so it
+    # needs its own tombstone filter: a withdrawn message routed here would be
+    # delivered by the one path that never consulted the retraction. Cursor
+    # arithmetic below still runs over the UNFILTERED list, because the cursor
+    # names a line in the log and a filtered list can lose the line it names.
+    retracted = withdrawn_ids(msgs)
     if cur is None:
-        return msgs, None
+        return [m for m in msgs if m.id not in retracted], None
     if all(m.id != cur for m in msgs):
         return [], (msgs[-1].id if msgs else None)  # rotated out -> resync to head
     after: list[Envelope] = []
     passed = False
     for m in msgs:
-        if passed:
+        if passed and m.id not in retracted:
             after.append(m)
         if m.id == cur:
             passed = True  # cur is guaranteed present (rotated-out handled above)

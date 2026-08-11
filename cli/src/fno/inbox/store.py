@@ -524,15 +524,46 @@ def read_thread(path: Path) -> Optional[ThreadHandle]:
     return _parse_thread_text(text, path)
 
 
+def _withdrawn_thread_ids() -> set[str]:
+    """Thread ids retracted on the bus, or an empty set if the bus is unreadable.
+
+    Fail-open by design: an unreadable bus must SHOW a thread rather than hide
+    it. Every other failure posture in this module errs toward never losing
+    unprocessed mail, and a withdrawal is not important enough to invert that.
+    """
+    try:
+        from fno.bus.log import iter_messages, withdrawn_ids
+
+        return withdrawn_ids(list(iter_messages(warn=False)))
+    except Exception:  # noqa: BLE001 - the inbox must never break on the bus
+        return set()
+
+
 def read_all_threads(recipient: str) -> list[ThreadHandle]:
-    """Return every thread file in ``{recipient}/inbox/`` (oldest-first)."""
+    """Return every thread file in ``{recipient}/inbox/`` (oldest-first).
+
+    Withdrawn threads are omitted. The filter lives HERE rather than in
+    ``read_unread_threads`` because this is the one function every reader of the
+    markdown lane passes through - the drain, ``mail list``, ``mail status``,
+    and ``find_thread_by_msg_id``. That lane is a separate delivery path from
+    the bus: ``write_new_thread`` renders a file the drain consumes without ever
+    consulting the bus, so the three bus-side tombstone filters left this one
+    reachable path able to triage, wake on, and persist a message the sender had
+    already retracted.
+
+    A thread is matched by its ROOT id (``thread_id``), which for a fresh send
+    is the withdrawn message's own id. Replies appended later are not surgically
+    excised; a withdrawal retracts a message, and the thread it rooted goes with
+    it while it is still unanswered.
+    """
     inbox = inbox_dir_for(recipient)
     if not inbox.exists():
         return []
+    withdrawn = _withdrawn_thread_ids()
     out: list[ThreadHandle] = []
     for p in sorted(inbox.glob("*.md")):
         h = read_thread(p)
-        if h is not None:
+        if h is not None and h.thread_id not in withdrawn:
             out.append(h)
     return out
 

@@ -2255,8 +2255,16 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
     // on claude. Same rename on the Python renderer.
+    // ADDRESS sits second, mirroring the Python renderer. `list` auto-routes
+    // here whenever an installed binary is present, so a column added only to
+    // the Python table would be missing from the surface nearly every reader
+    // sees -- and the whole point of the column is that a reader with no
+    // address copies NAME, whose durable write queues under a key no drain
+    // reads. The value is read off the row (both projections emit `address`),
+    // never re-derived, so the two tables cannot disagree.
     let headers = [
         "NAME",
+        "ADDRESS",
         "HARNESS",
         "STATUS",
         "CHECKED",
@@ -2269,10 +2277,11 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     let now = chrono::Utc::now();
 
     // Compute display values for each row
-    let display: Vec<[String; 7]> = rows
+    let display: Vec<[String; 8]> = rows
         .iter()
         .map(|r| {
             let name = r["name"].as_str().unwrap_or("-").to_string();
+            let address = r["address"].as_str().unwrap_or("-").to_string();
             let harness = r["harness"].as_str().unwrap_or("-").to_string();
             let status = r["status"].as_str().unwrap_or("-").to_string();
             let checked = render_checked(r["last_reconciled_at"].as_str(), now);
@@ -2282,7 +2291,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
                 .unwrap_or_else(|| "-".to_string());
             let last_msg = r["last_message_at"].as_str().unwrap_or("-").to_string();
             let cwd = r["cwd"].as_str().unwrap_or("-").to_string();
-            [name, harness, status, checked, pid, last_msg, cwd]
+            [name, address, harness, status, checked, pid, last_msg, cwd]
         })
         .collect();
 
@@ -2295,6 +2304,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
         headers[4].len(),
         headers[5].len(),
         headers[6].len(),
+        headers[7].len(),
     ];
     for row in &display {
         for (i, cell) in row.iter().enumerate() {
@@ -2330,18 +2340,26 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
 
 /// Render the host-local discovered-live-sessions lane below the registry
 /// table (ab-098967b4, AC1-UI). A blank line + banner make it visually
-/// distinct. Columns: HANDLE (friendly alias) STATUS PROJECT HEX CWD.
+/// distinct. Columns: ADDRESS (the mailbox) LABEL (friendly alias) STATUS
+/// PROJECT CWD.
+///
+/// ADDRESS leads and the alias is demoted to LABEL, matching the Python
+/// renderer. The alias led this table for its whole life, which made it the
+/// leftmost thing a reader copied, and `<project>-<short8>` is not an address.
+/// The value is read off the row rather than derived here: `to_row` resolves it
+/// from the session's own harness, so this renderer and the Python one cannot
+/// answer differently about the same session.
 fn render_discovered_section(discovered: &[Value]) -> String {
-    let headers = ["HANDLE", "STATUS", "PROJECT", "HEX", "CWD"];
+    let headers = ["ADDRESS", "LABEL", "STATUS", "PROJECT", "CWD"];
     let display: Vec<[String; 5]> = discovered
         .iter()
         .map(|r| {
-            let handle = r["handle"].as_str().unwrap_or("-").to_string();
+            let address = r["address"].as_str().unwrap_or("-").to_string();
+            let label = r["handle"].as_str().unwrap_or("-").to_string();
             let status = r["status"].as_str().unwrap_or("-").to_string();
             let project = r["project"].as_str().unwrap_or("-").to_string();
-            let hex = r["short_id"].as_str().unwrap_or("-").to_string();
             let cwd = r["cwd"].as_str().unwrap_or("-").to_string();
-            [handle, status, project, hex, cwd]
+            [address, label, status, project, cwd]
         })
         .collect();
 
@@ -4035,6 +4053,7 @@ mod tests {
         let filters = json!({"cwd": null, "provider": null, "status": null});
         let discovered = vec![json!({
             "handle": "fno-aaaa1111",
+            "address": "aaaa1111",
             "short_id": "aaaa1111",
             "session_id": "uuid-1",
             "pid": 4242,
@@ -4051,9 +4070,73 @@ mod tests {
 
         let table = render_list_table(&agents, &discovered);
         assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
-        assert!(table.contains("HANDLE"));
+        // ADDRESS leads and the alias is demoted to LABEL. The alias led this
+        // table for its whole life, so it was the leftmost thing a reader
+        // copied, and `<project>-<short8>` is not a mailbox.
+        // Anchored on the banner: the registry header above now carries
+        // ADDRESS too, so a bare `contains` search finds the wrong line.
+        let lines: Vec<&str> = table.lines().collect();
+        let banner = lines
+            .iter()
+            .position(|l| l.contains("DISCOVERED LIVE"))
+            .expect("banner present");
+        let header = lines[banner + 1];
+        assert!(
+            header.find("ADDRESS") < header.find("LABEL"),
+            "address must lead the discovered lane, got: {header:?}"
+        );
+        assert!(!table.contains("HANDLE"), "HANDLE was renamed to LABEL");
+        assert!(table.contains("aaaa1111"));
         assert!(table.contains("fno-aaaa1111"));
         assert!(table.contains("busy"));
+    }
+
+    /// The registry table is the surface nearly every reader sees: `list`
+    /// auto-routes here whenever an installed binary is present. An address
+    /// column that existed only on the Python table would leave that reader
+    /// copying NAME, whose durable write queues under a key no drain reads --
+    /// the exact stranded-mail failure the column exists to end.
+    #[test]
+    fn render_list_table_carries_the_mailbox_address() {
+        let agents = json!([
+            {
+                "name": "pane-worker",
+                "address": "e6f78b98",
+                "harness": "claude",
+                "short_id": null,
+                "session_id": null,
+                "cwd": "/home/user/project",
+                "created_at": "2026-05-25T00:00:00Z",
+                "last_message_at": null,
+                // The liveness key is omitted on purpose. The assertions below
+                // never read it, and `check-plan-rung-authority` ratchets an
+                // identifier count over production Rust files with this
+                // module's inline tests included, so an unused fixture key
+                // would move a baseline that polices plan-frontmatter
+                // classification and has nothing to do with this table.
+                "live_status": null,
+                "pid": null,
+                "last_reconciled_at": null,
+                "log_path": null,
+            }
+        ]);
+
+        let table = render_list_table(&agents, &[]);
+        let lines: Vec<&str> = table.lines().collect();
+
+        assert!(
+            lines[0].find("NAME") < lines[0].find("ADDRESS"),
+            "ADDRESS sits second, mirroring the Python renderer: {:?}",
+            lines[0]
+        );
+        // By value, not by header presence: a column that is always `-` is the
+        // same lie in a different shape. This row is the shape the column
+        // exists for -- a pane worker whose only other identifier was its name.
+        assert!(
+            lines[1].contains("e6f78b98"),
+            "address value must reach the row: {:?}",
+            lines[1]
+        );
     }
 
     /// AC5-UI: render_list_table drops LIVE and adds CHECKED + PID; AC2-UI: a

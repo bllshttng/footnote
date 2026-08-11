@@ -405,8 +405,7 @@ def _sent_unclaimed_count() -> int:
         return 0
     try:
         handle = canonical_handle(ident.session_id)
-        n, _ = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
-        return n
+        return len(_sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl))
     except Exception as exc:  # noqa: BLE001 - status is advisory; never crash on it
         # Advisory-degrade to 0, but leave a breadcrumb (matches _active_session)
         # so a structural break doesn't render `sent unclaimed: 0` forever silently.
@@ -1030,7 +1029,11 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
             f"    fno agents resume {target}   # idle session -> live, then re-send\n"
-            f"    fno agents attach {target}   # drive it yourself (claude)"
+            f"    fno agents attach {target}   # drive it yourself (claude)\n"
+            # The rung that was missing. Every option above tries to reach the
+            # recipient; when none of them can, the sender was left holding a
+            # message that nagged every turn and could not be taken back.
+            "    fno mail withdraw <id>      # none of the above? retract it"
         )
     print(msg, file=sys.stderr)
 
@@ -2113,6 +2116,12 @@ def cmd_send(
     The envelope is written durably BEFORE delivery is attempted so it survives
     every failure path.
 
+    Address it by the ADDRESS column of ``fno agents list`` (or the full session
+    id). The NAME column is a spawn label and the discovered lane's LABEL is a
+    friendly alias; neither is a mailbox, and a durable write keyed to one
+    queues under a key no drain reads. If a send does strand, ``fno mail sent
+    --unclaimed`` finds it and ``fno mail withdraw <id>`` retracts it.
+
     Stdout contract (US3 AC3-UI / US6 AC6-UI): exactly one line, either
     ``msg-<id> delivered (hosted)`` or ``msg-<id> queued (durable)``.
     Exit 0 for both outcomes. Failures surface on stderr with nonzero exit.
@@ -2647,6 +2656,188 @@ def cmd_unread(
     print('\nto answer one: fno mail reply --to <id> --body "..."')
 
 
+@mail_app.command("sent")
+def cmd_sent(
+    unclaimed_only: bool = typer.Option(
+        False, "--unclaimed", "-u",
+        help="Only mail still past its recipient's cursor AND older than "
+             "config.inbox.unclaimed_ttl - the ones the nag counts.",
+    ),
+    from_name: Optional[str] = typer.Option(
+        None, "--from-name",
+        help="List mail sent under this label instead of the ambient handle "
+             "(the same label `mail send --from-name` stamps).",
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON regardless of TTY."
+    ),
+) -> None:
+    """List mail THIS session sent, with claim state.
+
+    The outbound half of ``fno mail unread``. It exists because the sender could
+    previously see only a tally: ``mail status`` said "sent unclaimed: 1" and the
+    every-prompt nudge repeated it, with no way to learn which message, to whom,
+    or how old - so a strand was something you were told about hourly and could
+    do nothing about.
+
+    ``--unclaimed`` applies exactly the predicate the nag applies, so what this
+    prints is what that line is counting, never a differently-scoped set.
+    """
+    from fno.agents.self_stamp import stamp_from
+    from fno.config import load_settings
+
+    # `stamp_from`, not the precedence-only resolver: this must be the SAME
+    # handle the send path stamped into `from`, or the outbox lists mail this
+    # session did not send and hides mail it did. A session that inherited a
+    # foreign marker stamps "fno" and resolves to its spawner by precedence, so
+    # the two answers genuinely differ. Passing `--from-name` through is what
+    # makes the labelled send path listable at all: `stamp_from` returns an
+    # explicit label verbatim, so mail sent under one is invisible here without
+    # it -- an entire supported send path with no way to see its own strands.
+    handle = stamp_from(from_name)
+
+    is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    if unclaimed_only:
+        msgs = _sent_unclaimed(handle, load_settings().inbox.unclaimed_ttl)
+        claimed_flag = {m.id: False for m in msgs}
+    else:
+        from fno.bus.log import iter_messages, withdrawn_ids
+
+        all_msgs = list(iter_messages())
+        retracted = withdrawn_ids(all_msgs)
+        # TTL of -1, not 0: `_age_exceeds` is strict `>` and bus timestamps are
+        # whole seconds, so a message sent this second has age 0.0 and a TTL of 0
+        # would classify it CLAIMED - reporting a just-sent, unread message as
+        # picked up, which is the opposite of the truth this verb exists to tell.
+        unclaimed_ids = {m.id for m in _sent_unclaimed(handle, -1)}
+        msgs = [
+            m for m in all_msgs if m.from_ == handle and m.id not in retracted
+        ]
+        claimed_flag = {m.id: m.id not in unclaimed_ids for m in msgs}
+
+    if json_out or not is_tty:
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": m.id, "to": m.to, "to_kind": m.to_kind,
+                        "kind": m.kind, "ts": m.ts,
+                        "claimed": claimed_flag[m.id],
+                    }
+                    for m in msgs
+                ],
+                ensure_ascii=False,
+            )
+        )
+        return
+    if not msgs:
+        scope = "unclaimed " if unclaimed_only else ""
+        print(f"no {scope}mail sent from {handle}")
+        return
+    for m in msgs:
+        state = "claimed" if claimed_flag[m.id] else "UNCLAIMED"
+        lane = m.to_kind or "?"
+        print(f"{m.id}  -> {m.to}  [{lane}]  {m.ts}  {state}")
+    print("\nto retract one: fno mail withdraw <id>")
+
+
+@mail_app.command("withdraw")
+def cmd_withdraw(
+    msg_id: str = typer.Argument(..., help="Message id to retract."),
+    from_name: Optional[str] = typer.Option(
+        None, "--from-name",
+        help="Prove ownership as this label instead of the ambient handle "
+             "(needed for mail sent with `mail send --from-name`).",
+    ),
+) -> None:
+    """Retract a message you sent that the recipient has not picked up.
+
+    The bus log is append-only and read state is a per-consumer cursor, so a
+    withdrawal is neither a delete nor a cursor move. It cannot delete a line,
+    and it must not advance the RECIPIENT's cursor: a cursor is a last-seen
+    position rather than a per-message flag, so moving it would mark every other
+    message queued for that recipient as seen - trading one strand for many.
+
+    So this appends a tombstone naming the message, and every reader that
+    decides delivery skips the pair.
+
+    Refuses when the message is already past the recipient's cursor. They have
+    read it; a tombstone then would only hide it from you.
+    """
+    from fno.bus.cursor import read_cursor
+    from fno.bus.log import (
+        WITHDRAW_KIND,
+        Envelope,
+        append,
+        iter_messages,
+        withdrawn_ids,
+    )
+    from fno.agents.self_stamp import stamp_from
+
+    # The ownership check is the ONLY authz gate on this verb, so it compares
+    # against the same resolver that stamped the envelope's `from`. The
+    # precedence-only resolver would answer differently for a session carrying
+    # an inherited marker: it would refuse that session's own mail (stamped
+    # "fno") and let it retract its spawner's. `--from-name` is passed through
+    # for the same reason `mail sent` takes it: `stamp_from` returns an explicit
+    # label verbatim, so mail sent under one could otherwise never be retracted
+    # by anyone. This widens no authority a sender did not already have - the
+    # label is unauthenticated on the send side too.
+    handle = stamp_from(from_name)
+
+    all_msgs = list(iter_messages())
+    target = next((m for m in all_msgs if m.id == msg_id), None)
+    if target is None:
+        print(f"no such message on the bus: {msg_id}", file=sys.stderr)
+        raise typer.Exit(code=1)
+    if target.from_ != handle:
+        print(
+            f"{msg_id} was sent by {target.from_}, not you ({handle}); "
+            "only its sender can withdraw it",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+    if msg_id in withdrawn_ids(all_msgs):
+        print(f"{msg_id} is already withdrawn")
+        raise typer.Exit(code=0)
+
+    cursor = read_cursor(target.to)
+    if cursor is not None:
+        pos = {m.id: i for i, m in enumerate(all_msgs)}
+        cursor_pos = pos.get(cursor)
+        if cursor_pos is not None and pos[msg_id] <= cursor_pos:
+            print(
+                f"{msg_id} was already claimed by {target.to}; "
+                "a withdrawal now would hide it from you, not from them",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=1)
+
+    append(
+        Envelope.new(
+            from_=handle,
+            to=target.to,
+            kind=WITHDRAW_KIND,
+            body=f"withdrawn: {msg_id}",
+            thread=target.thread,
+            meta={"withdraws": msg_id},
+            to_kind=target.to_kind,
+        )
+    )
+    # Deliberately NOT "it will not be delivered". The cursor read above and
+    # this append are not one atomic step, and nothing locks the recipient out
+    # in between: a concurrent drain can print and flush the body and only then
+    # advance its cursor, so a withdrawal that observed an un-advanced cursor
+    # can still land after delivery. The honest receipt names the boundary the
+    # tombstone actually guarantees - no drain from here on - rather than
+    # claiming an outcome this command cannot verify.
+    print(
+        f"withdrew {msg_id} (to {target.to}); no drain will deliver it from now on. "
+        "A drain already in flight when this ran may have delivered it: "
+        f"`fno agents peek {target.to}` to check."
+    )
+
+
 @mail_app.command("ack")
 def cmd_bus_ack(
     msg_id: str = typer.Argument(..., help="Message id to acknowledge up through."),
@@ -2918,9 +3109,8 @@ def _age_exceeds(ts: str, ttl_seconds: int, now: "datetime") -> bool:
         return False
 
 
-def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
-    """Count + distinct recipients (first-seen) of my sent mail unclaimed past TTL.
-
+def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
+    """My sent mail still unclaimed past TTL, oldest -> newest.
 
     Unclaimed = still past the recipient's consume cursor AND strictly older than
     ``ttl_seconds``. Reads the bus ONCE (a single ``iter_messages`` snapshot) and
@@ -2930,18 +3120,28 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
     the nudge. Stat-only: recipient cursors are read fresh every call (never
     cached), so a just-consumed message stops being flagged immediately; no
     cursor is advanced.
+
+    Returns the envelopes rather than a count because for its whole life this
+    computed exactly the rows a sender needs to act -- id, recipient, age -- and
+    threw all but the tally away, which is why the nag could say "1 unclaimed"
+    every turn and offer no way to find or stop it. Callers that only want the
+    tally take ``len()``.
     """
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
     from fno.bus.cursor import read_cursor
-    from fno.bus.log import iter_messages
+    from fno.bus.log import iter_messages, withdrawn_ids
 
     now = _dt.now(tz=_tz.utc)
     all_msgs = list(iter_messages())
-    sent = [m for m in all_msgs if m.from_ == handle]
+    # A withdrawn message stops being unclaimed the moment it is retracted; this
+    # reader takes `iter_messages` directly and so is NOT covered by the filter
+    # in `scan_unread`. Without this line the nag survives its own withdrawal.
+    retracted = withdrawn_ids(all_msgs)
+    sent = [m for m in all_msgs if m.from_ == handle and m.id not in retracted]
     if not sent:
-        return 0, []
+        return []
     pos = {m.id: i for i, m in enumerate(all_msgs)}
     # Per recipient, its consume-cursor position in the single snapshot. A
     # message to r is unread iff it sits AFTER that position; an absent, corrupt,
@@ -2957,17 +3157,23 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
             cursor_pos[r] = len(all_msgs)
             continue
         cursor_pos[r] = pos.get(cid, -1) if cid else -1
-    count = 0
-    recipients: list[str] = []
+    out = []
     for m in sent:
         if pos[m.id] <= cursor_pos.get(m.to, len(all_msgs)):  # claimed / unresolvable
             continue
         if not _age_exceeds(m.ts, ttl_seconds, now):  # still fresh (strict >)
             continue
-        count += 1
-        if m.to not in recipients:
-            recipients.append(m.to)
-    return count, recipients
+        out.append(m)
+    return out
+
+
+def _distinct_recipients(msgs: list) -> list[str]:
+    """Recipients in first-seen order, one entry each."""
+    seen: list[str] = []
+    for m in msgs:
+        if m.to not in seen:
+            seen.append(m.to)
+    return seen
 
 
 @mail_app.command("notify-self", hidden=True)
@@ -3004,12 +3210,17 @@ def cmd_notify_self() -> None:
         )
 
     ttl = load_settings().inbox.unclaimed_ttl
-    n_sent, recipients = _sent_unclaimed(handle, ttl)
-    if n_sent:
-        who = _bounded_names(recipients)
+    unclaimed = _sent_unclaimed(handle, ttl)
+    if unclaimed:
+        who = _bounded_names(_distinct_recipients(unclaimed))
+        # Name the exits. This line fired every turn for hours with no way to
+        # see which message it meant or to stop it, which is what made an
+        # unclaimed message a standing tax on the sender rather than a notice.
         lines.append(
-            f"{n_sent} sent fno mail unclaimed (to {who}, >{ttl // 60}m): "
-            "recipient has not picked it up"
+            f"{len(unclaimed)} sent fno mail unclaimed (to {who}, >{ttl // 60}m): "
+            "recipient has not picked it up; "
+            "`fno mail sent --unclaimed` to see them, "
+            "`fno mail withdraw <id>` to retract one"
         )
 
     if not lines:

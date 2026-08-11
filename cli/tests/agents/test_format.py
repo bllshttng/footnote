@@ -329,3 +329,86 @@ def test_serialize_entry_emits_no_key_that_names_a_vendor(_unused=None) -> None:
 
     assert "provider" not in row
     assert row["harness"] == "claude"
+
+
+# ---------------------------------------------------------------------------
+# `address`: the form drain-self actually reads
+#
+# Before this key existed, every registry row on a live host carried
+# `handle: null` and `short_id: null` and the table had no address column, so
+# the only copyable identifier in a row was `name` -- and a name-lane durable
+# write is the largest still-growing category of stranded mail on the bus.
+# ---------------------------------------------------------------------------
+
+
+def test_address_is_the_canonical_first_eight_of_the_session_id() -> None:
+    """The address a row advertises must equal what `drain-self` computes for
+    itself, which is ``canonical_handle(session_id)`` -- the first eight, NOT
+    the retired ``<harness>-<short>`` form and NOT the friendly alias."""
+    entry = _claude_entry(harness_session_id="E6F78B98-e594-47ed-ad81-84f8a78b8bb7")
+
+    row = serialize_entry(entry, live_status=None)
+
+    assert row["address"] == "e6f78b98"
+
+
+def test_address_falls_back_to_the_transport_key_only_for_claude() -> None:
+    """A claude row's ``short_id`` IS its first-eight, so it is an honest
+    fallback when no full session id was recorded. A codex/opencode
+    ``short_id`` is a daemon worker key, not an address, so guessing one there
+    would advertise a key nothing drains."""
+    claude = _claude_entry(harness_session_id=None, short_id="abc12345")
+    assert serialize_entry(claude, live_status=None)["address"] == "abc12345"
+
+    codex = _codex_entry(harness_session_id=None, short_id="abc12345")
+    assert serialize_entry(codex, live_status=None)["address"] is None
+
+
+def test_address_is_null_when_no_identity_was_recorded() -> None:
+    """Absence is reported as absence. A row with nothing addressable must not
+    invent a plausible-looking handle -- that is how a strand starts."""
+    entry = _codex_entry(harness_session_id=None, short_id=None)
+
+    assert serialize_entry(entry, live_status=None)["address"] is None
+
+
+def test_table_shows_address_and_never_truncates_it() -> None:
+    """A truncated address is a wrong address, so NAME and CWD absorb overflow
+    and the address column does not."""
+    row = serialize_entry(
+        _claude_entry(
+            name="a-very-long-worker-name-that-will-be-truncated-for-sure",
+            cwd="/Users/foo/code/some/deeply/nested/project/path/that/is/long",
+            harness_session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+        ),
+        live_status=None,
+    )
+
+    out = render_table([row], terminal_width=60)
+
+    assert "ADDRESS" in out.splitlines()[0]
+    assert "e6f78b98" in out
+
+
+def test_discovered_lane_leads_with_the_address_not_the_label() -> None:
+    """The alias is a display label. It led the discovered table, so it was the
+    leftmost thing a reader copied, and it is not an address."""
+    discovered = [
+        {
+            "handle": "etl-3ad1f42d",
+            "session_id": "3ad1f42d-1111-2222-3333-444455556666",
+            "short_id": "3ad1f42d",
+            "status": "idle",
+            "project": "etl",
+            "cwd": "/Users/foo/code/etl",
+        }
+    ]
+
+    out = render_table([], discovered=discovered)
+
+    lines = out.splitlines()
+    banner = next(i for i, ln in enumerate(lines) if "DISCOVERED LIVE" in ln)
+    header = lines[banner + 1]
+    assert header.index("ADDRESS") < header.index("LABEL")
+    assert "3ad1f42d" in out
+    assert "etl-3ad1f42d" in out
