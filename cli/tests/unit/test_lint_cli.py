@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -293,30 +294,42 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     assert violations == []
 
 
-def test_rename_detection_survives_a_hostile_rename_limit(tmp_path: Path) -> None:
-    """The pin, not the return code, is what keeps a moved doc unbilled.
+def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> None:
+    """Deleting either pin must fail this test.
 
     Past ``diff.renameLimit`` git skips the exhaustive pass, warns on stderr,
     and exits 0. Measured on a real branch at ``renameLimit=1``: exit 0 and 9 of
-    21 renames found. A return-code guard sees nothing wrong, so this asserts
-    the behaviour the pin buys rather than the exit status.
+    21 renames found, so a return-code guard sees nothing wrong. The earlier
+    version of this test called its helper once with the UNLIMITED value and
+    asserted unlimited detection works, which was never in doubt and stayed
+    green with both pins deleted. This asserts the pin itself, on every call
+    that resolves or reads a rename.
     """
-    import subprocess
+    import subprocess as sp
 
-    repo, new, old = _repo_with_renamed_doc(tmp_path)
-    # A second rename, so the pair count can exceed a limit of 1.
-    _git(repo, "mv", new, "docs/third-name.md")
-    (repo / "docs" / "other.md").write_text("filler prose here.\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "second move")
+    from fno.lint_cli import _style_added_lines
 
-    def renames_found(limit: str) -> int:
-        out = subprocess.run(
-            ["git", "-c", f"diff.renameLimit={limit}", "diff", "--name-status",
-             "--find-renames", "base...HEAD"],
-            cwd=str(repo), capture_output=True, text=True,
-        )
-        assert out.returncode == 0, "git must exit 0 even when it degrades"
-        return sum(1 for line in out.stdout.splitlines() if line.startswith("R"))
+    repo, _new, _old = _repo_with_renamed_doc(tmp_path)
+    seen: list[list[str]] = []
+    real_run = sp.run
 
-    assert renames_found("0") >= 1, "unlimited must find the rename"
+    def _spy(argv, *a, **k):
+        if isinstance(argv, list) and argv and argv[0] == "git":
+            seen.append(list(argv))
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr("fno.lint_cli.subprocess.run", _spy)
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
+    try:
+        _style_added_lines("base", None)
+    finally:
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    diffs = [c for c in seen if "diff" in c]
+    assert diffs, "positive control: no git diff call was observed at all"
+    unpinned = [c for c in diffs if "diff.renameLimit=0" not in c]
+    assert not unpinned, f"git diff calls missing the rename-limit pin: {unpinned}"

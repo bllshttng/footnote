@@ -304,7 +304,17 @@ def scan(root: Path):
         for d in dirnames:
             if d in EXCLUDE_DIR:
                 continue
-            child = os.path.relpath(os.path.join(dirpath, d), root).replace(os.sep, "/")
+            # Keyed from the REPO root, exactly as axis_dirs is. Keying from the
+            # scan root made every anchor inert under a subtree scan: with root
+            # at crates/fno-agents the child key is `target`, never
+            # `crates/fno-agents/target`, so the walk descended into the build
+            # tree while the same run's receipt printed it as not scanned.
+            child_abs = os.path.join(dirpath, d)
+            try:
+                child = os.path.relpath(os.path.realpath(child_abs), repo_root)
+            except ValueError:
+                child = os.path.relpath(child_abs, root)
+            child = child.replace(os.sep, "/")
             if child in EXCLUDE_ANCHORED:
                 continue
             kept.append(d)
@@ -583,10 +593,28 @@ if _declared_unreached:
         "declared directories present on disk but never visited: "
         + ", ".join(_declared_unreached)
     )
-_probe_missed = sorted(set(REQUIRED_REACH) - probes_reached) if _whole_repo_scan else []
+# Same split the declared map already got. A probe path that no longer exists is
+# a STALE CONSTANT the author fixes in REQUIRED_REACH, not a broken traversal,
+# and this repo renames directories routinely. Reporting it as an instrument
+# failure sends the reader into os.walk when the fix is three hundred lines away.
+_probe_stale, _probe_missed = [], []
+if _whole_repo_scan:
+    for _probe in REQUIRED_REACH:
+        if _probe in probes_reached:
+            continue
+        if (_repo_root_for(root_arg) / _probe).is_dir():
+            _probe_missed.append(_probe)
+        else:
+            _probe_stale.append(_probe)
+name_violations += [
+    f"{probe}/: REQUIRED_REACH names a path that does not exist; update the "
+    "probe to a live directory inside an excluded region"
+    for probe in sorted(_probe_stale)
+]
 if _probe_missed:
     _instrument_failures.append(
-        "adversarial probe paths never visited: " + ", ".join(_probe_missed)
+        "adversarial probe paths present on disk but never visited: "
+        + ", ".join(sorted(_probe_missed))
     )
 if _whole_repo_scan and not axis_dirs:
     _instrument_failures.append(

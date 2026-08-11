@@ -476,8 +476,15 @@ def _style_added_lines(
     if rev.returncode != 0:
         typer.echo(f"style: bad diff-base {diff_base!r}: {rev.stderr.strip()}", err=True)
         raise typer.Exit(2)
+    # Pinned identically to the name-status pass below. Left inheriting the
+    # caller's config, `diff.renames=false` splits a rename into separate D and
+    # A entries, so the deleted old path counts as a changed file and the
+    # inspected-file receipt over-counts on that machine and not on this one.
     diff_files = subprocess.run(
-        ["git", "diff", "--name-only", f"{diff_base}...HEAD", "--", *scope],
+        [
+            "git", "-c", "diff.renames=true", "-c", "diff.renameLimit=0",
+            "diff", "--name-only", f"{diff_base}...HEAD", "--", *scope,
+        ],
         cwd=str(repo),
         capture_output=True,
         text=True,
