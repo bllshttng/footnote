@@ -6339,8 +6339,7 @@ def dispatch_send(
                 # W2 makes this safe: write-ahead gives every send a durable copy,
                 # so the bounded double-delivery it would reintroduce is deduped at
                 # the drain, and a hosted send retracts the placeholder below.
-                writeahead = durable_recipient is not None
-                if writeahead:
+                if durable_recipient is not None:
                     _write_durable()
                 delivery = "durable"
                 demotion_notice: Optional[str] = None
@@ -6359,7 +6358,7 @@ def dispatch_send(
                     sender_entry=sender_entry,
                 ):
                     delivery = "hosted"
-                    if writeahead:
+                    if durable_recipient is not None:
                         # Live confirmed: retract the placeholder so it neither
                         # double-delivers nor surfaces as a false dead-letter. A
                         # tombstone write failure only leaves the placeholder
@@ -6372,7 +6371,7 @@ def dispatch_send(
                             )
                         except (OSError, ValueError, RuntimeError):
                             pass
-                elif not writeahead:
+                elif durable_recipient is None:
                     # No durable recipient and live missed: the legacy durable
                     # write, which raises durable-address exit 12 when the session
                     # id is genuinely missing.
