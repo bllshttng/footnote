@@ -389,16 +389,12 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
 def _role_of(toks: Sequence[str]) -> Optional[str]:
     """The ``--role`` value if present, else None. Stops at the ``--argv``
     payload boundary like the other spawn scans."""
-    i = 0
-    while i < len(toks):
-        t = toks[i]
-        if t == "--argv":
-            break
+    toks = list(toks)
+    for i, t in _spawn_tokens(toks):
         if t == "--role":
             return toks[i + 1] if i + 1 < len(toks) else None
         if t.startswith("--role="):
             return t.split("=", 1)[1]
-        i += 1
     return None
 
 
@@ -451,31 +447,44 @@ def _has_permission_mode(toks: Sequence[str]) -> bool:
     return False
 
 
+def _spawn_tokens(toks: Sequence[str]):
+    """Yield ``(index, token)`` from ``toks`` up to the ``--argv`` boundary,
+    skipping any token that is another value-flag's consumed VALUE - so a
+    literal occurrence of one flag can never be misread out of a different
+    flag's value (e.g. ``--session-id --route`` names a session id of
+    ``--route``, not a ``--route`` flag)."""
+    it = enumerate(toks)
+    for i, t in it:
+        if t == "--argv":
+            break
+        yield i, t
+        if t in _SPAWN_VALUE_FLAGS and "=" not in t:
+            next(it, None)
+
+
 def _flag_present(toks: Sequence[str], flag: str) -> bool:
     """Whether a value ``flag`` appears as ``--flag`` or ``--flag=...`` in toks,
     up to the ``--argv`` payload boundary."""
-    for t in toks:
-        if t == "--argv":
-            break
+    for _, t in _spawn_tokens(toks):
         if t == flag or t.startswith(flag + "="):
             return True
     return False
 
 
 def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
-    """Value of the first of ``flags`` found as ``--flag value`` or
-    ``--flag=value``, else None. Stops at the ``--argv`` payload boundary."""
-    i = 0
-    while i < len(toks):
-        t = toks[i]
-        if t == "--argv":
-            break
+    """Value of the first of ``flags`` found as ``--flag value``,
+    ``--flag=value``, or - for a 2-char short flag like ``-P`` - the glued
+    ``-Pvalue`` form typer/click also accepts, else None. Stops at the
+    ``--argv`` payload boundary."""
+    toks = list(toks)
+    for i, t in _spawn_tokens(toks):
         for f in flags:
             if t == f:
                 return toks[i + 1] if i + 1 < len(toks) else None
             if t.startswith(f + "="):
                 return t.split("=", 1)[1]
-        i += 1
+            if len(f) == 2 and f[1] != "-" and t != f and t.startswith(f):
+                return t[len(f):]
     return None
 
 

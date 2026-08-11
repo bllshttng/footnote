@@ -30,7 +30,7 @@ class _Settings:
         # profiles: {verb: {field: value}} -> {verb: _Defaults}
         prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
         self.agents = type("A", (), {"defaults": _Defaults(**kw), "profiles": prof})()
-        # x-8cd5: a real ModelRoutingBlock so resolve_route can resolve a lane.
+        # a real ModelRoutingBlock so resolve_route can resolve a lane.
         self.model_routing = model_routing
 
 
@@ -472,7 +472,7 @@ def test_only_harness_flags_feed_the_provider_aware_default_scan():
 
 
 # --------------------------------------------------------------------------- #
-# Role-aware model injection (x-8cd5 task 1.1)
+# Role-aware model injection
 #
 # inject_spawn_defaults was role-blind: --role appeared only in the value-flag
 # skip list, never in the routing decision, so a spawn carrying --role build
@@ -653,6 +653,31 @@ def test_bare_explicit_vendor_wins_over_config_route():
     )
     assert "--route" not in out
     assert out[out.index("-P") + 1] == "zai"
+
+
+def test_glued_short_vendor_flag_wins_over_config_route():
+    # typer/click accepts the glued short-option form -Pzai for -P (a value
+    # option), equivalent to -P zai. The vendor-detection scan must recognize
+    # it too, or a config route still injects alongside an operator's already-
+    # pinned vendor - the same collision the spaced -P zai form is guarded
+    # against just above.
+    out = _inject(
+        ["spawn", "-Pzai", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert "-Pzai" in out
+
+
+def test_flag_scan_does_not_misread_another_flags_consumed_value():
+    # A literal "--route" that is --session-id's VALUE (not a real --route
+    # flag) must not be misread as an explicit route: the config route still
+    # injects, since the caller never actually passed --route.
+    out = _inject(
+        ["spawn", "--session-id", "--route", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "zai/glm-5.2[1m]" in out
 
 
 def test_bare_explicit_vendor_suppresses_config_model():
