@@ -4,7 +4,7 @@
 //! agent: it runs its own background daemon, a rendezvous Unix socket, and a
 //! transcript/state dir under `~/.claude/jobs/<short-id>/`. The fno daemon
 //! cannot PTY-manage it, so the Rust **client** replicates Python's
-//! `harnesses/claude.py` + `providers/_claude_session_registry.py` +
+//! `harnesses/claude.py` + `harnesses/_claude_session_registry.py` +
 //! `dispatch.py` ask path directly, bypassing the daemon RPC.
 //!
 //! **Byte-parity is the contract.** Every observable (stdout reply, exit code,

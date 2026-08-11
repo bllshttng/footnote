@@ -144,7 +144,7 @@ The JSON-when-non-TTY default aligns with the orchestrator-first audience: a pip
 The CLI's `AgentStatusFilter` Typer enum exposes the family-1 read verdicts `live`, `orphaned`, and `unknown`.
 It intentionally does not mirror `registry.KNOWN_STATUSES`: stored lifecycle metadata and rendered transcript liveness answer different questions.
 
-The `KNOWN_LIVE_STATUSES` allowlist in `harnesses/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift: `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
+The `KNOWN_LIVE_STATUSES` allowlist in `harnesses/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift. `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through, because we do not fail closed on an unknown enum from an external CLI. A forensic warning lands on stderr instead, so operators see the change rather than getting silently-stale table values.
 
 ## Known gaps
 
@@ -153,4 +153,7 @@ The `KNOWN_LIVE_STATUSES` allowlist in `harnesses/claude.py` catches the orthogo
 
 ## Test surface
 
-`list` + `logs` coverage lives in `cli/tests/agents/`: `test_format.py` (serialize_entry / render_json / render_table), `test_read.py` (list_agents filters, fallback paths, pure-read invariant), `test_harnesses_claude_read.py` (claude_agents_json failure modes and logs() streaming + SIGINT), `test_cli_list_logs.py` (CLI plumbing, exit codes, the `--json` Claude branch), and `test_follow_signal.py` (a real subprocess `python -m fno.cli` invocation with SIGINT delivery). The acceptance-criterion-to-test mapping lives in the design doc.
+`list` + `logs` coverage lives in `cli/tests/agents/`, across five files.
+`test_format.py` (serialize_entry / render_json / render_table), `test_read.py` (list_agents filters, fallback paths, pure-read invariant), and `test_harnesses_claude_read.py` (claude_agents_json failure modes and logs() streaming + SIGINT).
+Then `test_cli_list_logs.py` (CLI plumbing, exit codes, the `--json` Claude branch) and `test_follow_signal.py` (a real subprocess `python -m fno.cli` invocation with SIGINT delivery).
+The acceptance-criterion-to-test mapping lives in the design doc.

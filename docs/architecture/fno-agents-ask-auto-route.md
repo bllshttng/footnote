@@ -46,7 +46,7 @@ Returns `None` on any failure (missing registry, perm denied, corrupt JSON, agen
 
 ### Why ask stays in `PYTHON_AGENT_VERBS`
 
-The contract test `AUTO_ROUTE_VERBS == RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` is the routing-drift tripwire. If a future change removes `ask` from `PYTHON_AGENT_VERBS` before gemini is ported, gemini `ask` would silently route to the binary, which has no gemini-ask path. Keeping `ask` in `PYTHON_AGENT_VERBS` and handling routing via the explicit provider-conditional branch keeps the tripwire honest. The membership of `RUST_CLIENT_ASK_PROVIDERS` is itself pinned by a contract test that flags drift if gemini is added without porting `harnesses/gemini.py`.
+The contract test `AUTO_ROUTE_VERBS == RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` is the routing-drift tripwire. If a future change removes `ask` from `PYTHON_AGENT_VERBS` before gemini is ported, gemini `ask` routes silently to the binary, which has no gemini-ask path. Keeping `ask` in `PYTHON_AGENT_VERBS` and routing via the explicit provider-conditional branch keeps the tripwire honest. A second contract test pins the membership of `RUST_CLIENT_ASK_PROVIDERS`. If gemini is added without porting `harnesses/gemini.py`, that test flags the drift.
 
 ## Codex `ask` client-side port
 

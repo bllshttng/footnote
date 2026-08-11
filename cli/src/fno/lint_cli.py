@@ -482,6 +482,20 @@ def _style_added_lines(
         capture_output=True,
         text=True,
     )
+    # Pre-rename paths, keyed by new path. Resolved from an UNSCOPED name-status
+    # pass because rename detection needs both sides visible, which a per-file
+    # pathspec denies it.
+    renames: dict[str, str] = {}
+    name_status = subprocess.run(
+        ["git", "diff", "--name-status", "--find-renames", f"{diff_base}...HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    for line in name_status.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].startswith("R"):
+            renames[parts[2]] = parts[1]
     # Markdown only: the gate is "changed markdown", so a PR adding a shell or
     # Python file under skills/ is not style-checked as prose.
     changed = [
@@ -498,7 +512,7 @@ def _style_added_lines(
         whole = full.read_text(encoding="utf-8")
         if style_mod.has_exception(whole):
             continue
-        nums = _git_added_line_nums(rel, diff_base, repo)
+        nums = _git_added_line_nums(rel, diff_base, repo, renames.get(rel))
         inspected += len(nums)
         if nums:
             # Mask the WHOLE file and check only the added lines, so an added
@@ -507,12 +521,22 @@ def _style_added_lines(
     return violations, inspected, len(changed)
 
 
-def _git_added_line_nums(rel: str, diff_base: str, repo: Path) -> "set[int]":
+def _git_added_line_nums(
+    rel: str, diff_base: str, repo: Path, old_rel: Optional[str] = None
+) -> "set[int]":
     """Return 1-based line numbers (in the new file) of added ('+') lines from
     ``git diff -U0 <base>...HEAD -- <rel>``. Position advances on context and
-    added lines, not on deleted lines, matching how the new file is laid out."""
+    added lines, not on deleted lines, matching how the new file is laid out.
+
+    ``old_rel`` is the pre-rename path, and passing it is what keeps a MOVED
+    file from reading as an authored one. Restricting the pathspec to the new
+    path alone hides the rename source from git's detection, so the file comes
+    back as ``new file mode`` and every pre-existing line counts as added. A
+    pure ``git mv`` of a doc then bills its whole body to whoever moved it.
+    """
+    pathspec = [rel] if old_rel is None else [rel, old_rel]
     proc = subprocess.run(
-        ["git", "diff", "-U0", f"{diff_base}...HEAD", "--", rel],
+        ["git", "diff", "-U0", "--find-renames", f"{diff_base}...HEAD", "--", *pathspec],
         cwd=str(repo),
         capture_output=True,
         text=True,

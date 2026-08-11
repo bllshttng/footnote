@@ -1,6 +1,6 @@
 # Comment-prose reading list (prose > code)
 
-Functions where docstring + inline comment lines exceed code lines. A reading list, NOT a gate: there is no defensible threshold (the reference exemplar `cli/src/fno/agents/harnesses/base.py` ranks badly on this ratio because over half its lines are docstring, which is legitimate). Use it as "start reading here" when looking for narration-heavy functions to split or trim.
+Functions where docstring + inline comment lines exceed code lines. A reading list, NOT a gate, because there is no defensible threshold. The reference exemplar `cli/src/fno/agents/harnesses/base.py` ranks badly on this ratio, since over half its lines are docstring, which is legitimate. When looking for narration-heavy functions to split or trim, use it as "start reading here".
 
 - functions with >= 4 code lines: 4693
 - where prose > code: 529 (11%)

@@ -30,7 +30,7 @@ The protocol over the AF_UNIX socket per `BG8`/`CE7`/`Ag5`: SOCK_STREAM, single-
 | `cli/src/fno/agents/cli.py` | `--from-name` option, kind-discriminated stdout |
 | `cli/src/fno/agents/registry.py` | `AgentEntry.status` + `last_message_at`, `AgentStatus` Literal, `KNOWN_STATUSES`, schema-version read-time synthesis |
 
-`lock.py` (`hold_agent_lock`), `events.py` (`emit`), and `providers/base.py` (`ProviderResult`) are touched as readers only. The per-agent flock model is unchanged from the create path.
+`lock.py` (`hold_agent_lock`), `events.py` (`emit`), and `harnesses/base.py` (`ProviderResult`) are touched as readers only. The per-agent flock model is unchanged from the create path.
 
 ## Lifecycle of one follow-up call
 

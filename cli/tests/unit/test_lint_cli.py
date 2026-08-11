@@ -214,3 +214,80 @@ def test_flock_pattern_forwards_dispatch_path(tmp_path: Path, monkeypatch) -> No
 
     assert result.exit_code == 0
     assert "/tmp/dispatch.py" in calls["argv"]
+
+
+# --------------------------------------------------------------------------- #
+# markdown style gate: a renamed doc is not authored prose
+# --------------------------------------------------------------------------- #
+
+
+def _git(repo: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _repo_with_renamed_doc(tmp_path: Path) -> tuple[Path, str, str]:
+    """A repo whose only change since 'base' is one pure `git mv` of a doc."""
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo.parent, "init", "-q", "repo")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    old = "docs/old-name.md"
+    new = "docs/new-name.md"
+    # Prose that breaks rule 1 and rule 2, so a gate that reads it as added
+    # cannot come back clean by accident.
+    (repo / old).write_text(
+        "This existing sentence is deliberately far longer than the twenty five "
+        "word cap that the style checker enforces on ordinary prose lines; it "
+        "also carries a semicolon.\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "base")
+    _git(repo, "mv", old, new)
+    _git(repo, "commit", "-qm", "rename")
+    return repo, new, old
+
+
+def test_added_line_nums_ignores_a_pure_rename(tmp_path: Path) -> None:
+    from fno.lint_cli import _git_added_line_nums
+
+    repo, new, old = _repo_with_renamed_doc(tmp_path)
+
+    # Positive control: without the pre-rename path, the pathspec hides the
+    # rename source and git reports the whole body as added. This asserts the
+    # bug is reachable, so the fix below is not passing on an empty diff.
+    assert _git_added_line_nums(new, "base", repo) != set()
+
+    assert _git_added_line_nums(new, "base", repo, old) == set()
+
+
+def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> None:
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo, _new, _old = _repo_with_renamed_doc(tmp_path)
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        violations, inspected, changed = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert changed == 1, "the renamed doc must still be reported as a changed file"
+    assert inspected == 0, "a pure rename authors no lines"
+    assert violations == []
