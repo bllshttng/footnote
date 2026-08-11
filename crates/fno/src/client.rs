@@ -1096,18 +1096,26 @@ fn build_keys_modal() -> KeysModal {
                 PopupRow::Entry {
                     glyph: kb.disp.to_string(),
                     label: kb.label.to_string(),
-                    hint: String::new(),
+                    // The stable id, in the row's own hint column. Rebinding is
+                    // configured by action id, so the id has to be readable
+                    // somewhere; next to the key it replaces is the only place
+                    // that needs no cross-referencing. Documenting the ids only
+                    // in a settings reference would make this modal advertise a
+                    // contract it does not show.
+                    hint: kb.action.to_string(),
                 },
                 Some(kb.event.clone()),
             );
         }
-        // Display-only rows (1-9 select tab, C-b C-b literal): selectable so the
-        // reference shows them, but not single-event chords, so Enter BELs.
+        // Display-only rows (1-9 select tab, prefix-prefix literal): selectable
+        // so the reference shows them, but not single-event chords, so Enter
+        // BELs. No action id - `chord()` handles them structurally, so there is
+        // nothing for `[mux.keys]` to name.
         for (disp, label, _) in meta_rows().iter().filter(|(_, _, s)| *s == section) {
             add(
                 PopupRow::Entry {
-                    glyph: (*disp).to_string(),
-                    label: (*label).to_string(),
+                    glyph: disp.clone(),
+                    label: label.clone(),
                     hint: String::new(),
                 },
                 None,
@@ -5310,6 +5318,16 @@ impl View {
             });
         }
         out.push(plus);
+        // Narrow-mode fallback. `fit_end` can return `start` when not even one
+        // whole tab fits beside the pinned label, counter and `+` - reachable at
+        // the 40-column content minimum with a long workspace name and a long
+        // tab name - and forcing that tab in whole would push the counter and
+        // the `+` past the right edge, where `draw_tab_bar` clips them. Clipping
+        // the `+` is the worse failure: it is the only mouse route to a new tab.
+        // So the ACTIVE TAB condenses instead, which is the one thing here that
+        // degrades gracefully - a truncated label still says which tab you are
+        // on and still hit-tests to it.
+        condense_to_width(&mut out, width);
         out
     }
 
@@ -6462,6 +6480,53 @@ fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
 
 /// One clickable span in the tab bar (label + render flags + what a click does;
 /// `None` = inert, e.g. the squad-name label).
+/// Shrink `spans` until they fit `width`, taking the columns off the tab labels
+/// and never off the pinned chrome.
+///
+/// Order matters: the widest tab label yields first, so one long name condenses
+/// before a short one loses anything, and a tab is only dropped outright once it
+/// cannot show even one character plus its brackets. The squad label, the
+/// overflow counters and the `+` are never touched - the counters are how you
+/// reach a hidden tab and the `+` is the only mouse route to a new one, so
+/// clipping either would take away reachability to save a character.
+fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
+    let w = |s: &TabSpan| s.text.chars().count();
+    let total = |v: &Vec<TabSpan>| v.iter().map(w).sum::<usize>();
+    while total(spans) > width {
+        // The widest condensable tab: a `[label]`/` label ` span with room to
+        // give. Index 0 is the squad label; `hit == NewTab` is the `+`; the
+        // counters carry a Tab hit but are already minimal, so guard on length.
+        let victim = spans
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, s)| matches!(s.hit, Some(TabHit::Tab(_))) && w(s) > 3)
+            .max_by_key(|(_, s)| w(s))
+            .map(|(i, _)| i);
+        match victim {
+            Some(i) => {
+                let text = &spans[i].text;
+                let mut chars: Vec<char> = text.chars().collect();
+                // Drop one interior character, keeping the first and last (the
+                // brackets or padding spaces that mark the active tab).
+                chars.remove(chars.len() - 2);
+                spans[i].text = chars.into_iter().collect();
+            }
+            // Nothing left to condense: shed the last non-pinned span instead of
+            // letting the pinned chrome fall off the edge.
+            None => match spans
+                .iter()
+                .rposition(|s| matches!(s.hit, Some(TabHit::Tab(_))))
+            {
+                Some(i) => {
+                    spans.remove(i);
+                }
+                None => break,
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TabSpan {
     text: String,
@@ -23719,6 +23784,46 @@ mod tests {
             if active == 13 {
                 let frame = view.compose();
                 write_shot(&frame, "03-twenty-tabs", "twenty tabs, active 14 (after)");
+            }
+        }
+    }
+
+    /// The narrow end of item 3. At the 40-column content minimum with a long
+    /// workspace name and long tab names, not one whole tab fits beside the
+    /// pinned chrome. The strip must condense rather than overflow: clipping is
+    /// what took the `+` away, and the `+` is the only mouse route to a new tab.
+    #[test]
+    fn tab_strip_condenses_instead_of_overflowing_a_narrow_terminal() {
+        let names: Vec<String> = (1..=20)
+            .map(|i| format!("release-candidate-{i:02}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for cols in [68u16, 72, 80, 100] {
+            let view = shot_view(
+                (24, cols),
+                vec![named_meta(1, "readyrule/readyrule-web", &refs, 13)],
+                vec![],
+            );
+            let window = view.tab_bar_window();
+            let painted: usize = window.iter().map(|s| s.text.chars().count()).sum();
+            let avail = (cols as usize).saturating_sub(view.panel_w() as usize);
+            assert!(
+                painted <= avail,
+                "strip overflows at {cols} cols: {painted} > {avail}"
+            );
+            assert!(
+                window.iter().any(|s| matches!(s.hit, Some(TabHit::NewTab))),
+                "the + must survive condensation at {cols} cols"
+            );
+            // Every painted span still hit-tests, so condensing never leaves a
+            // decorative stub the operator cannot click.
+            for span in &window {
+                if span.text.chars().count() > 0 {
+                    assert!(
+                        span.hit.is_some() || std::ptr::eq(span, &window[0]),
+                        "a painted span lost its click target at {cols} cols"
+                    );
+                }
             }
         }
     }

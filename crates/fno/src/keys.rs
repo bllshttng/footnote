@@ -111,39 +111,55 @@ fn key_disp(b: u8) -> String {
 ///
 /// A rebind is refused (not silently applied) when it would make the keyboard
 /// unusable: an unparseable spec, an unknown action, a digit (the `1-9` tab
-/// range is structural), or a byte two actions would then share. Refusing keeps
-/// the previous behaviour, which is always reachable; accepting a collision
-/// would silently shadow one of the two.
+/// range is structural), a byte two actions would share, or the prefix byte
+/// itself. Refusing keeps the previous behaviour, which is always reachable;
+/// accepting a collision would silently shadow one of the two.
+///
+/// Collisions are judged against the FINAL assignment, not against a
+/// half-applied one. Applying entries one at a time and checking as you go
+/// rejects every swap and cycle by accident: `next-tab = "p"` with
+/// `prev-tab = "n"` is a legal exchange, but whichever entry the TOML map order
+/// happens to hand over first sees the other action still sitting on its target
+/// key. So this proposes all the moves, builds the keyboard they would produce,
+/// and only then drops whichever proposals still conflict.
+///
+/// The prefix participates in that check. `chord()` resolves the prefix byte to
+/// the literal-prefix escape BEFORE consulting the table, so an action left
+/// sitting on the prefix byte is unreachable while the key table still
+/// advertises it - help that lies. A prefix landing on a DEFAULT binding refuses
+/// the PREFIX (one refusal keeps every chord, where the alternative silently
+/// costs one), and says which action to move first; a REBIND landing on the
+/// prefix refuses the rebind, since the prefix is the more global choice.
 pub fn resolve_keymap(
     prefix_spec: Option<&str>,
     rebinds: &[(String, String)],
 ) -> (Keymap, Vec<KeymapWarning>) {
     let mut warnings = Vec::new();
-    let mut map = Keymap::default();
+    let mut prefix = DEFAULT_PREFIX;
     if let Some(spec) = prefix_spec.map(str::trim).filter(|s| !s.is_empty()) {
         match parse_key(spec) {
-            Some(b) => map.prefix = b,
+            Some(b) => prefix = b,
             None => warnings.push(KeymapWarning(format!(
                 "config.mux.prefix: cannot read {spec:?} as a key; keeping {}",
                 key_disp(DEFAULT_PREFIX)
             ))),
         }
     }
-    let defaults = default_bindings();
-    // Start from the defaults, then apply one rebind at a time so each collision
-    // check sees the keyboard as it will actually be, not as it shipped.
-    let mut taken: Vec<(String, u8)> = defaults
+    let defaults: Vec<(String, u8)> = default_bindings()
         .iter()
         .map(|kb| (kb.action.to_string(), kb.key))
         .collect();
+
+    // Pass 1: everything judgeable about an entry on its own.
+    let mut proposed: Vec<(String, u8)> = Vec::new();
     for (action, spec) in rebinds {
         let action = action.trim().to_ascii_lowercase();
-        let Some(slot) = taken.iter().position(|(a, _)| *a == action) else {
+        if !defaults.iter().any(|(a, _)| *a == action) {
             warnings.push(KeymapWarning(format!(
                 "config.mux.keys.{action}: no such action (see `prefix+?` for the list)"
             )));
             continue;
-        };
+        }
         let Some(byte) = parse_key(spec) else {
             warnings.push(KeymapWarning(format!(
                 "config.mux.keys.{action}: cannot read {spec:?} as a key"
@@ -156,17 +172,77 @@ pub fn resolve_keymap(
             )));
             continue;
         }
-        if let Some((other, _)) = taken.iter().find(|(a, k)| *k == byte && *a != action) {
-            warnings.push(KeymapWarning(format!(
-                "config.mux.keys.{action}: {} is already {other}",
-                key_disp(byte)
-            )));
+        proposed.retain(|(a, _)| *a != action); // a repeated action: last wins
+        proposed.push((action, byte));
+    }
+
+    // Pass 2: drop conflicts from the assignment they would actually produce,
+    // one per round, until it settles. Each round removes a proposal or gives up
+    // the configured prefix, so it terminates.
+    loop {
+        let mut final_map = defaults.clone();
+        for (action, byte) in &proposed {
+            if let Some(slot) = final_map.iter_mut().find(|(a, _)| a == action) {
+                slot.1 = *byte;
+            }
+        }
+        // A key sitting on the prefix byte can never dispatch.
+        if let Some((action, _)) = final_map.iter().find(|(_, k)| *k == prefix) {
+            let action = action.clone();
+            if let Some(i) = proposed.iter().position(|(a, _)| *a == action) {
+                warnings.push(KeymapWarning(format!(
+                    "config.mux.keys.{action}: {} is the prefix, so the chord \
+                     would never fire",
+                    key_disp(prefix)
+                )));
+                proposed.remove(i);
+            } else {
+                warnings.push(KeymapWarning(format!(
+                    "config.mux.prefix: {} is already {action}; rebind that \
+                     action first, or the prefix shadows it. Keeping {}",
+                    key_disp(prefix),
+                    key_disp(DEFAULT_PREFIX)
+                )));
+                prefix = DEFAULT_PREFIX;
+            }
             continue;
         }
-        taken[slot].1 = byte;
-        map.rebinds.push((action, byte));
+        // Two actions on one byte: the later PROPOSAL loses, so a swap survives
+        // (each half moves off the other's key) while a genuine double-booking
+        // is refused.
+        let dup = final_map.iter().enumerate().find_map(|(i, (_, k))| {
+            final_map[i + 1..]
+                .iter()
+                .find(|(_, k2)| k2 == k)
+                .map(|(a2, _)| (final_map[i].0.clone(), a2.clone(), *k))
+        });
+        let Some((first, second, byte)) = dup else {
+            break;
+        };
+        let loser = [&second, &first]
+            .into_iter()
+            .find_map(|a| proposed.iter().position(|(p, _)| p == a).map(|i| (i, a)));
+        match loser {
+            Some((i, action)) => {
+                let other = if action == &first { &second } else { &first };
+                warnings.push(KeymapWarning(format!(
+                    "config.mux.keys.{action}: {} would also be {other}",
+                    key_disp(byte)
+                )));
+                proposed.remove(i);
+            }
+            // Two DEFAULTS on one byte would be a table bug, not a config one;
+            // the parity test guards it, and there is nothing to drop here.
+            None => break,
+        }
     }
-    (map, warnings)
+    (
+        Keymap {
+            prefix,
+            rebinds: proposed,
+        },
+        warnings,
+    )
 }
 
 static KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
@@ -721,21 +797,39 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// structural specials (not simple byte lookups): the digit tab-select range
 /// and the prefix-prefix literal. Kept beside [`key_bindings`] so the modal's
 /// row set stays complete without polluting the executable table.
-pub fn meta_rows() -> &'static [(&'static str, &'static str, KeySection)] {
-    &[
-        ("1-9", "select tab", KeySection::WorkspacesTabs),
-        ("C-b C-b", "literal Ctrl-b", KeySection::Global),
+///
+/// The literal-prefix row is built from the LIVE prefix, not a frozen `C-b
+/// C-b`. `chord()` resolves whatever the prefix currently is, so a hardcoded row
+/// would advertise a sequence that stopped working the moment anyone set
+/// `config.mux.prefix` - the exact drift the one-table rule exists to stop.
+pub fn meta_rows() -> Vec<(String, String, KeySection)> {
+    let p = key_disp(prefix());
+    vec![
+        (
+            "1-9".into(),
+            "select tab".into(),
+            KeySection::WorkspacesTabs,
+        ),
+        (
+            format!("{p} {p}"),
+            format!("literal {p}"),
+            KeySection::Global,
+        ),
         // (x-f300) The dead-row removal paths. Bare sideline keys, not chords -
         // listed here so the reference names them; Enter on them BELs.
         (
-            "x",
-            "stop a live row · remove a dead one",
+            "x".into(),
+            "stop a live row · remove a dead one".into(),
             KeySection::SidelineRows,
         ),
-        ("X", "reap all exited agents", KeySection::SidelineRows),
         (
-            "right-click",
-            "row menu · on a header: clear dead",
+            "X".into(),
+            "reap all exited agents".into(),
+            KeySection::SidelineRows,
+        ),
+        (
+            "right-click".into(),
+            "row menu · on a header: clear dead".into(),
             KeySection::SidelineRows,
         ),
     ]
@@ -1062,7 +1156,7 @@ mod tests {
         // The id is case-folded, so `SEARCH` resolves - and then collides with
         // `?`, which is already the key table.
         assert!(
-            warn.iter().any(|w| w.0.contains("already show-keys")),
+            warn.iter().any(|w| w.0.contains("would also be show-keys")),
             "{warn:?}"
         );
         assert_eq!(map.prefix, 0x01);
@@ -1077,7 +1171,7 @@ mod tests {
             ("detach", "F5", "cannot read"),
             ("teleport", "T", "no such action"),
             ("detach", "3", "select tabs"),
-            ("detach", "c", "already new-tab"),
+            ("detach", "c", "would also be new-tab"),
         ];
         for (action, spec, expect) in cases {
             let (map, warn) = resolve_keymap(None, &[(action.into(), spec.into())]);
@@ -1094,26 +1188,85 @@ mod tests {
     }
 
     #[test]
-    fn resolve_keymap_allows_a_swap_through_its_vacated_slot() {
-        // `n` and `p` trading places: each rebind is checked against the
-        // keyboard as it will BE, not as it shipped, so the second half of a
-        // swap does not collide with the key the first half already moved.
+    fn resolve_keymap_swaps_two_bound_keys() {
+        // A REAL exchange: `n` and `p` trade places, neither moving to a free
+        // key first. Checking entries one at a time against a half-applied map
+        // refuses both (whichever comes first sees the other still parked on its
+        // target), so this is the case that pins judging the FINAL assignment.
+        for order in [
+            vec![("next-tab", "p"), ("prev-tab", "n")],
+            vec![("prev-tab", "n"), ("next-tab", "p")],
+        ] {
+            let entries: Vec<(String, String)> = order
+                .iter()
+                .map(|(a, k)| ((*a).to_string(), (*k).to_string()))
+                .collect();
+            let (map, warn) = resolve_keymap(None, &entries);
+            assert!(warn.is_empty(), "a swap is legal: {warn:?}");
+            assert_eq!(map.rebinds.len(), 2, "both halves of the swap apply");
+            let key = |a: &str| map.rebinds.iter().find(|(x, _)| x == a).map(|(_, k)| *k);
+            assert_eq!((key("next-tab"), key("prev-tab")), (Some(b'p'), Some(b'n')));
+        }
+    }
+
+    #[test]
+    fn resolve_keymap_keeps_a_three_way_cycle() {
+        // The same rule at one more step: no ordering of a cycle has a free key
+        // to start from, so any sequential check rejects all three.
         let (map, warn) = resolve_keymap(
             None,
-            // Sorted the way the config reader hands them over.
             &[
-                ("next-tab".into(), "N".into()),
-                ("prev-tab".into(), "n".into()),
+                ("focus-left".into(), "j".into()),
+                ("focus-down".into(), "k".into()),
+                ("focus-up".into(), "h".into()),
             ],
         );
-        assert!(warn.is_empty(), "{warn:?}");
-        assert_eq!(
-            map.rebinds,
-            vec![
-                ("next-tab".to_string(), b'N'),
-                ("prev-tab".to_string(), b'n')
-            ]
+        assert!(warn.is_empty(), "a cycle is legal: {warn:?}");
+        assert_eq!(map.rebinds.len(), 3);
+    }
+
+    #[test]
+    fn resolve_keymap_refuses_a_prefix_that_shadows_a_chord() {
+        // `chord()` matches the prefix byte BEFORE the table, so an action left
+        // on the prefix is unreachable while the key table still advertises it.
+        // The prefix loses, because refusing it keeps every chord while the
+        // alternative silently costs one.
+        let (map, warn) = resolve_keymap(Some("d"), &[]);
+        assert_eq!(map.prefix, DEFAULT_PREFIX);
+        assert!(
+            warn.iter().any(|w| w.0.contains("is already detach")),
+            "{warn:?}"
         );
+        // Moving the action out of the way first makes the same prefix legal.
+        let (map, warn) = resolve_keymap(Some("d"), &[("detach".into(), "Q".into())]);
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(map.prefix, b'd');
+        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+        // And a REBIND onto the prefix loses instead, since the prefix is the
+        // more global choice.
+        let (map, warn) = resolve_keymap(Some("C-a"), &[("detach".into(), "C-a".into())]);
+        assert_eq!(map.prefix, 0x01);
+        assert!(map.rebinds.is_empty());
+        assert!(
+            warn.iter().any(|w| w.0.contains("is the prefix")),
+            "{warn:?}"
+        );
+    }
+
+    #[test]
+    fn meta_rows_name_the_live_prefix() {
+        // The literal-prefix row is built from `prefix()`, so it cannot keep
+        // advertising `C-b C-b` after the prefix moves. Asserted against the
+        // default here (`install` is process-global and one-shot, so a test must
+        // not take it); the construction is what stops the drift.
+        let rows = meta_rows();
+        let literal = rows
+            .iter()
+            .find(|(_, label, _)| label.starts_with("literal"))
+            .expect("the literal-prefix row");
+        let p = key_disp(prefix());
+        assert_eq!(literal.0, format!("{p} {p}"));
+        assert_eq!(literal.1, format!("literal {p}"));
     }
 
     #[test]

@@ -111,32 +111,51 @@ pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarnin
     crate::keys::resolve_keymap(prefix.as_deref(), &mux_keys_table(cwd))
 }
 
-/// `[mux.keys]` as raw `(action, spec)` pairs, from the first config.toml in the
-/// precedence chain that HAS the table. Sorted so a warning list is stable
-/// rather than following TOML map order.
+/// `[mux.keys]` as raw `(action, spec)` pairs, MERGED action-by-action across
+/// the precedence chain, lowest first.
+///
+/// Not first-table-wins. The Python loader deep-merges nested tables key by key
+/// (`config_io::_deep_merge`), and `mux_str` above falls through per scalar key,
+/// so a project table that named one action used to silently reset every global
+/// rebind to its shipped key - a divergence between the two readers of the same
+/// file, which is worse than either behaviour on its own. Sorted at the end so a
+/// warning list is stable rather than following TOML map order.
 fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
     let read = |path: &Path| -> Option<Vec<(String, String)>> {
         let content = std::fs::read_to_string(path).ok()?;
         let t = content.parse::<toml::Table>().ok()?;
         let keys = t.get("mux")?.as_table()?.get("keys")?.as_table()?;
-        let mut out: Vec<(String, String)> = keys
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect();
-        out.sort();
-        Some(out)
+        Some(
+            keys.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect(),
+        )
     };
-    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return read(Path::new(&explicit)).unwrap_or_default();
+    // `$FNO_CONFIG` is the SOLE candidate when set, mirroring the Python loader.
+    let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
+        Some(explicit) => vec![PathBuf::from(explicit)],
+        None => {
+            let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+                .map(|p| PathBuf::from(p).with_file_name("config.toml"))
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
+                });
+            // Lowest precedence first: global, then project on top.
+            global
+                .into_iter()
+                .chain(std::iter::once(cwd.join(".fno/config.toml")))
+                .collect()
+        }
+    };
+    let mut merged: Vec<(String, String)> = Vec::new();
+    for path in layers {
+        for (action, spec) in read(&path).unwrap_or_default() {
+            merged.retain(|(a, _)| *a != action);
+            merged.push((action, spec));
+        }
     }
-    if let Some(v) = read(&cwd.join(".fno/config.toml")) {
-        return v;
-    }
-    non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-        .map(|p| PathBuf::from(p).with_file_name("config.toml"))
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")))
-        .and_then(|g| read(&g))
-        .unwrap_or_default()
+    merged.sort();
+    merged
 }
 
 /// A `config.mux.<key>` boolean with a fail-open default. The four readers above
