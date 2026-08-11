@@ -26,8 +26,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 HOOK = REPO_ROOT / "hooks" / "context-nudge.sh"
 BASELINE = REPO_ROOT / "scripts" / "ci" / "verb-baseline.txt"
 
-# The three variables the hook assigns its emitted (user-facing) strings to.
-_OUTPUT_VAR = re.compile(r"^\s*(REASON|ORPHAN_REASON|FLUSH_REASON)=", re.MULTILINE)
+# The three variables the hook assigns its emitted (user-facing) strings to,
+# plus compact_instruction()'s `printf '%s'` returns: REASON only embeds their
+# result via `${_compact_ask}`, so a literal `fno ...` string inside that
+# function is invisible to a scan of the REASON= line alone.
+_OUTPUT_VAR = re.compile(r"^\s*(?:(?:REASON|ORPHAN_REASON|FLUSH_REASON)=|printf '%s')", re.MULTILINE)
 _FNO = re.compile(r"\bfno\b\s+")
 _WORD = re.compile(r"[A-Za-z][\w-]*")
 # `fno-agents` binary verbs are a separate surface, hidden from the fno ratchet.
@@ -52,13 +55,18 @@ def _output_lines(hook_text: str) -> list[str]:
     return [ln for ln in hook_text.splitlines() if _OUTPUT_VAR.match(ln)]
 
 
-def _extract_fno_verbs(line: str, leaves: set[str]) -> list[str]:
+def _extract_fno_verbs(line: str, leaves: set[str], first_words: set[str]) -> list[str]:
     """Resolve each `fno ...` in a line to its longest baseline-leaf prefix.
 
     Captures word tokens after `fno` until a non-verb token (flag, quote,
     placeholder, path) and resolves to the longest prefix that is a real leaf,
     so prose like 'fno mail send is the door' resolves to 'mail send' rather
     than over-capturing the trailing words.
+
+    A mention whose first token is not any leaf's first word is prose about
+    the binary itself ('no fno on PATH'), not a prescribed command - skipped
+    rather than flagged, since a leading-word check is enough to tell "fno" as
+    a CLI name apart from "fno" as the sentence's subject.
     """
     resolved: list[str] = []
     for m in _FNO.finditer(line):
@@ -74,6 +82,8 @@ def _extract_fno_verbs(line: str, leaves: set[str]) -> list[str]:
                 pos = nxt + 1
             else:
                 break
+        if not tokens or tokens[0] not in first_words:
+            continue
         hit: str | None = None
         for k in range(len(tokens), 0, -1):
             cand = " ".join(tokens[:k])
@@ -86,12 +96,13 @@ def _extract_fno_verbs(line: str, leaves: set[str]) -> list[str]:
 
 def test_hook_output_commands_resolve() -> None:
     leaves = _baseline_leaves()
+    first_words = {leaf.split(" ", 1)[0] for leaf in leaves}
     lines = _output_lines(HOOK.read_text(encoding="utf-8"))
     assert lines, "no REASON/ORPHAN_REASON/FLUSH_REASON assignments found"
 
     prescribed: list[str] = []
     for ln in lines:
-        prescribed.extend(_extract_fno_verbs(ln, leaves))
+        prescribed.extend(_extract_fno_verbs(ln, leaves, first_words))
 
     # Positive control: the scan reached real content, not an empty parse.
     # An absence here has two explanations and only the positive marker tells
