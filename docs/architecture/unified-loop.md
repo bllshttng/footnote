@@ -264,6 +264,8 @@ Why the base was never retargeted is unexplained, so the guard asserts nothing a
 
 `cli/src/fno/pr/_base_lineage.py` is the one predicate: for a base that is not the default branch, it refuses if a MERGED PR already carried that base, or if the base tip is already an ancestor of the default branch.
 Both checks are kept because they go blind in opposite directions - under `merge_strategy = "squash"` a landed base is not an ancestor of main, and a base that landed leaving no merged PR is invisible to the first check.
+A third check covers where both go blind at once: `delete_branch_on_merge` removes the base as it lands, so a fresh clone (every CI runner) has no `origin/<base>` to compare a tip against or resolve ancestry from, and the confirmed deletion is the verdict on its own.
+It fires only once `git ls-remote` answers, so a dead network still reads as `unknown` rather than forging a refusal.
 It tests for a MERGED PR rather than requiring an OPEN one on purpose: stacking onto a base whose PR nobody has opened yet is legitimate work, and a guard that refuses it gets switched off.
 
 Coverage of the eight reachable merge paths, stated honestly rather than implied:

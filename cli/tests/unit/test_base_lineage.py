@@ -83,13 +83,27 @@ class FakeRun:
                 gone = self.base_fetch_fails and f"refs/heads/{self.base}:" in cmd[-1]
                 return Result(1 if (self.fetch_fails or gone) else 0, "", "")
             if cmd[1] == "ls-remote":
+                # `fetch_fails` models git/network being down wholesale, so the
+                # remote query fails too. Answering "empty, therefore deleted"
+                # there would let a dead network forge a deletion; only
+                # `base_fetch_fails` (one ref, others fine) reaches a verdict.
+                if self.fetch_fails:
+                    return Result(128, "", "could not read from remote")
                 # Empty stdout = the branch is really gone; a line = still there.
                 if self.base_still_on_remote:
                     return Result(0, f"{MOVED}\trefs/heads/{self.base}\n", "")
                 return Result(0, "", "")
             if cmd[1] == "rev-parse":
+                # An empty base_tip models a ref this checkout does not have -
+                # what a fresh clone sees once the base was deleted on merge.
+                # git exits 128 there; answering LANDED regardless was how the
+                # deleted-base test passed without exercising the deletion.
+                if not self.base_tip:
+                    return Result(128, "", "unknown revision")
                 return Result(0, self.base_tip + "\n", "")
             if cmd[1] == "merge-base":
+                if not self.base_tip:
+                    return Result(128, "", "Not a valid object name")
                 return Result(0 if self.contained else 1, "", "")
         return Result(0, "", "")
 
@@ -181,6 +195,44 @@ def test_deleted_base_branch_still_refuses(patch_run):
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"
     assert "#789" in why
+
+
+def test_deleted_base_with_no_local_ref_still_refuses(patch_run):
+    """The state a FRESH clone sees, which is every CI runner.
+
+    `delete_branch_on_merge` removes the base as it lands, and a checkout that
+    never fetched the branch has no `origin/<base>` to pin - so (i) has no tip
+    to compare and (ii) cannot resolve ancestry. That read `unknown`, and every
+    in-process caller treats `unknown` as proceed, so the guard failed OPEN in
+    exactly its headline scenario. The confirmed deletion is verdict enough.
+    """
+    patch_run(
+        FakeRun(base_fetch_fails=True, merged_pr="789", merged_head=LANDED, base_tip="")
+    )
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "stale"
+    assert "no longer exists on the remote" in why
+    assert "gh pr edit 800 --base main" in why
+
+
+def test_deleted_base_with_no_local_ref_and_no_merged_pr_still_refuses(patch_run):
+    """(iii) does not lean on the gh probe: a deleted branch carries nothing
+    onward whatever killed it, so it refuses with the merged-PR probe empty."""
+    patch_run(FakeRun(base_fetch_fails=True, merged_pr="", base_tip=""))
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "stale"
+    assert "no longer exists on the remote" in why
+
+
+def test_missing_local_ref_without_a_confirmed_deletion_stays_unknown(patch_run):
+    """(iii) fires only on a CONFIRMED deletion. A base still on the remote that
+    this checkout simply cannot resolve is an unanswered question, not a
+    refusal - forging one here would block healthy stacked PRs on a git hiccup.
+    """
+    patch_run(FakeRun(base_still_on_remote=True, merged_pr="789", base_tip=""))
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "unknown"
+    assert "ancestry probe" in why
 
 
 def test_transient_base_fetch_failure_does_not_forge_a_refusal(patch_run):

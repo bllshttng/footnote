@@ -18,6 +18,10 @@ EITHER of two independent checks fires:
        landed, so nothing is left to carry these commits onward.
   (ii) the base branch tip is already an ancestor of the default branch - the
        base is fully contained in main.
+  (iii) the base branch is confirmed absent from the remote and this checkout
+       has no ``origin/<base>`` to reason from - the state a fresh clone sees
+       whenever ``delete_branch_on_merge`` removed the base, where (i) and (ii)
+       are both blind.
 
 Both are kept because they go blind in different directions. Under
 ``config.auto_merge.merge_strategy = "squash"`` a landed base is NOT an ancestor
@@ -184,8 +188,8 @@ def _base_ref_gone(base: str, cwd: str) -> bool:
     return res is not None and res.ok and not res.stdout.strip()
 
 
-def _fetch_refs(base: str, default: str, cwd: str) -> Tuple[bool, bool]:
-    """Refresh both refs; ``(default_current, base_ref_trustworthy)``.
+def _fetch_refs(base: str, default: str, cwd: str) -> Tuple[bool, bool, bool]:
+    """Refresh both refs; ``(default_current, base_ref_trustworthy, base_gone)``.
 
     One fetch carrying both refspecs fails wholesale when either ref is gone,
     and the base ref being gone is not an edge case: `delete_branch_on_merge`
@@ -195,8 +199,12 @@ def _fetch_refs(base: str, default: str, cwd: str) -> Tuple[bool, bool]:
     in-process caller treats as proceed. Fetched separately, a deleted base
     ref costs nothing: `origin/<base>` still exists locally, pinned at the
     commit that landed, so (i) matches it against the merged PR's head and (ii)
-    still resolves ancestry. A base that never existed locally leaves
-    `_rev` empty and the verdict stays `unknown`, as before.
+    still resolves ancestry. A base that never existed locally leaves `_rev`
+    empty, which is why ``base_gone`` rides along: a fresh clone (every CI
+    runner, and any worktree that never fetched the branch) has no
+    `origin/<base>` to pin, so both git-side checks go blind in exactly the
+    scenario this module was written for, and `unknown` is proceed. The third
+    flag lets :func:`lineage_verdict` answer from the deletion itself.
 
     A FAILED base fetch is not the same as a deleted branch, though, and the
     fetch alone cannot tell them apart. Trusting the local ref either way cuts
@@ -207,8 +215,10 @@ def _fetch_refs(base: str, default: str, cwd: str) -> Tuple[bool, bool]:
     confirms the branch is actually gone.
     """
     default_ok = _fetch_ref(default, cwd)
-    base_ok = _fetch_ref(base, cwd) or _base_ref_gone(base, cwd)
-    return default_ok, base_ok
+    if _fetch_ref(base, cwd):
+        return default_ok, True, False
+    base_gone = _base_ref_gone(base, cwd)
+    return default_ok, base_gone, base_gone
 
 
 def _rev(ref: str, cwd: str) -> str:
@@ -257,7 +267,7 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
         return ("ok", f"base is the default branch ({default})")
 
     merged, merged_head = _merged_pr_for_head(base, cwd)
-    fetched, base_current = _fetch_refs(base, default, cwd)
+    fetched, base_current, base_gone = _fetch_refs(base, default, cwd)
     git_ok = fetched and base_current
     base_tip = _rev(f"origin/{base}", cwd) if git_ok else ""
     contained = _base_contained_in_default(base, default, cwd) if git_ok else None
@@ -277,6 +287,24 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
             f"base branch '{base}' already landed via merged PR #{merged} and has not "
             f"moved since ({base_tip[:8]}), so merging PR #{pr_number} into it would "
             f"report MERGED while the commits never reach '{default}'; {retarget}",
+        )
+    # (iii) The branch is confirmed absent from the remote and this checkout has
+    # no `origin/<base>` to reason from, so (i) and (ii) are both blind - on a
+    # fresh clone (every CI runner, and any worktree that never fetched the
+    # branch) that is the NORMAL state for the very case this module exists to
+    # catch, since `delete_branch_on_merge` removes the base the moment it
+    # lands. Leaving it `unknown` there fails OPEN in every in-process caller,
+    # which is the whole defect. The deletion is verdict enough on its own: a
+    # base branch that does not exist carries nothing onward, whatever killed
+    # it. `base_gone` is only ever True after `git ls-remote` answered, so a
+    # network failure still lands in `unknown` below.
+    if base_gone and not base_tip:
+        landed = f" (it landed via merged PR #{merged})" if merged > 0 else ""
+        return (
+            "stale",
+            f"base branch '{base}' no longer exists on the remote{landed}, so merging "
+            f"PR #{pr_number} into it would report MERGED while the commits never reach "
+            f"'{default}'; {retarget}",
         )
     if contained is True:
         # Known, accepted false positive: a base branch created off the default
