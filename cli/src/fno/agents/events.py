@@ -199,6 +199,7 @@ def emit_spawned(
     name: str,
     short_id: Optional[str],
     provider: str,
+    pid: Optional[int] = None,
     spawned_by_session: Optional[str] = None,
     spawned_by_harness: Optional[str] = None,
     spawned_by_cwd: Optional[str] = None,
@@ -206,21 +207,26 @@ def emit_spawned(
     """Record one agent birth in the daemon lifecycle log (envelope format).
 
     Carries the parent edge the registry row already captures
-    (spawned_by_session/harness/cwd) so the lineage tree is reconstructable:
-    birth(parent_session, child) joins death(child) on ``data.name``.
+    (spawned_by_session/harness/cwd), plus the child ``pid`` where the caller
+    has it. The pane path in particular leaves the registry row's short_id
+    empty (mux is its one live transport ref) and keys the row on pid, so the
+    daemon death that reads that row carries pid, not the mux pane_id. A birth
+    that recorded the pane_id as short_id could not join that death; recording
+    pid (and leaving short_id empty to match the row) makes the birth join the
+    death on ``data.name`` and, for the pane path, on ``data.pid``.
     Exactly one per successful create.
     """
-    _emit_daemon_envelope(
-        KIND_AGENT_SPAWNED,
-        {
-            "name": name,
-            "short_id": short_id,
-            "provider": provider,
-            "spawned_by_session": spawned_by_session,
-            "spawned_by_harness": spawned_by_harness,
-            "spawned_by_cwd": spawned_by_cwd,
-        },
-    )
+    data: dict[str, object] = {
+        "name": name,
+        "short_id": short_id,
+        "provider": provider,
+        "spawned_by_session": spawned_by_session,
+        "spawned_by_harness": spawned_by_harness,
+        "spawned_by_cwd": spawned_by_cwd,
+    }
+    if pid is not None:
+        data["pid"] = pid
+    _emit_daemon_envelope(KIND_AGENT_SPAWNED, data)
 
 
 def emit_spawn_failed(

@@ -2318,14 +2318,19 @@ def dispatch_spawn_pane(
                 )
             # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now
             # exists in the registry. Emit to the daemon lifecycle log so this
-            # birth joins the daemon's death events for the same name; without
-            # it the pane path leaves a death with no birth to join. A pane that
-            # dies was still born (its row is `failed`, soon reaped).
+            # birth joins the daemon's death events. The registry row leaves
+            # short_id empty (mux is its one live transport ref) and carries
+            # pid=child_pid, and the daemon death reads that row, so the durable
+            # birth<->death key is name (always) and pid (the child pid) - not
+            # the mux pane_id, which no death event carries. short_id stays None
+            # to match the row the death reads, rather than naming an id
+            # (pane_id) the death will never repeat.
             from fno.agents import events as _spawn_events
 
             _spawn_events.emit_spawned(
                 name=name,
-                short_id=str(pane_id),
+                short_id=None,
+                pid=child_pid,
                 provider=provider,
                 spawned_by_session=spawned_by_session,
                 spawned_by_harness=spawned_by_harness,
@@ -2337,7 +2342,7 @@ def dispatch_spawn_pane(
             from fno.agents import events as _spawn_events
 
             _spawn_events.emit_spawn_failed(
-                name=name, provider=provider, short_id=str(pane_id), reason=f"registry-write: {exc}"
+                name=name, provider=provider, short_id=None, reason=f"registry-write: {exc}"
             )
             reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
             if reaped:

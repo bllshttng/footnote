@@ -99,3 +99,37 @@ def test_birth_and_death_joinable_in_one_file(daemon_log: Path) -> None:
     assert names == {"wkD"}
     types = [r["type"] for r in recs]
     assert "agent_spawned" in types and "agent_stopped" in types
+
+
+def test_emit_spawned_pid_optional_and_omitted_when_absent(daemon_log: Path) -> None:
+    """pid is optional; absent it does not appear, so non-pane births keep their
+    envelope shape (backward compatible)."""
+    events.emit_spawned(name="wkE", short_id="abab1234", provider=_CLAUDE)
+    d = _read_records(daemon_log)[0]["data"]
+    assert "pid" not in d
+
+
+def test_pane_birth_joins_death_on_pid(daemon_log: Path) -> None:
+    """The pane path leaves the registry row's short_id empty and keys on pid.
+
+    A daemon death that reads that row carries name + short_id="" + pid. A birth
+    that recorded the mux pane_id as short_id could not join it; the birth must
+    carry the child pid (and leave short_id empty to match the row).
+    """
+    child_pid = 70123
+    events.emit_spawned(name="wkPane", short_id=None, pid=child_pid, provider=_CLAUDE)
+    # The death envelope the daemon writes from the registry row: short_id empty,
+    # pid carried (the row's pid field is child_pid).
+    events._emit_daemon_envelope(
+        "agent_orphan_reaped",
+        {"name": "wkPane", "short_id": "", "pid": child_pid},
+        source="daemon",
+    )
+    recs = {r["type"]: r["data"] for r in _read_records(daemon_log)}
+    birth, death = recs["agent_spawned"], recs["agent_orphan_reaped"]
+    # Joinable on name (always) and on pid (the durable pane key).
+    assert birth["name"] == death["name"] == "wkPane"
+    assert birth.get("pid") == death.get("pid") == child_pid
+    # The birth's short_id matches the row the death reads (empty), not a pane_id.
+    assert birth["short_id"] is None
+    assert death["short_id"] == ""
