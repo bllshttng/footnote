@@ -220,6 +220,23 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         )
         + "\n"
     )
+    # Say what to DO about a non-zero counter, on stderr so the JSON contract is
+    # untouched. Answering a finding does NOT clear it: a review thread stays
+    # unresolved until it is resolved EXPLICITLY, so a PR whose every finding has
+    # a reply can sit at ready=false indefinitely while reading as handled. That
+    # cost a session tonight, and it is invisible from this number alone - which
+    # is exactly why the instruction belongs in the output that prints the number
+    # rather than in a PR body nobody re-reads.
+    if isinstance(unresolved, int) and unresolved > 0:
+        sys.stderr.write(
+            f"note: {unresolved} optional review finding(s) unresolved, so ready "
+            "stays false. A REPLY DOES NOT RESOLVE A THREAD. Fix each one, or "
+            "answer it in-thread, then resolve the thread explicitly: the "
+            '"Resolve conversation" button, or `gh api graphql -f query='
+            "'mutation($t: ID!){resolveReviewThread(input:{threadId: $t})"
+            "{thread{isResolved}}}' -F t=<threadId>` (thread ids come from "
+            "`reviewThreads` on the pullRequest).\n"
+        )
     return code
 
 

@@ -236,6 +236,57 @@ def test_equal_timestamp_tie_preserves_fail():
     assert counts["total"] == 1
 
 
+def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, capsys):
+    """The counter alone cannot distinguish "not answered" from "answered but not
+    resolved", and the second state reads as handled while holding ready at false.
+    So the instruction travels with the number, on stderr so the JSON contract is
+    untouched. A session lost time to this; a PR body would not have reached it.
+    """
+    monkeypatch.setattr(
+        _status, "_fetch",
+        lambda pr, cwd: {
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        },
+    )
+    monkeypatch.setattr(
+        _status, "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 2},
+    )
+    monkeypatch.setattr(
+        _status, "read_review_coverage",
+        lambda pr, cwd: {"coverage": "unknown", "reviewed_count": None},
+    )
+    _status.run_status("42")
+    cap = capsys.readouterr()
+    import json
+
+    assert json.loads(cap.out)["ready"] is False, "stdout stays pure JSON"
+    assert "REPLY DOES NOT RESOLVE" in cap.err
+    assert "resolveReviewThread" in cap.err, "name the mutation, not just the problem"
+
+
+def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
+    """The hint is advice, not decoration: silent when there is nothing to do."""
+    monkeypatch.setattr(
+        _status, "_fetch",
+        lambda pr, cwd: {
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        },
+    )
+    monkeypatch.setattr(
+        _status, "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _status, "read_review_coverage",
+        lambda pr, cwd: {"coverage": "unknown", "reviewed_count": None},
+    )
+    _status.run_status("42")
+    assert capsys.readouterr().err == ""
+
+
 def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
