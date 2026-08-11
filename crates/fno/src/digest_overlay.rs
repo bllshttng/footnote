@@ -102,6 +102,43 @@ pub fn backlog_section_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "show_backlog", true)
 }
 
+/// The key layer from `config.mux.prefix` + `[mux.keys]`, plus every entry the
+/// resolver had to refuse. Read here because this module owns the `fno` crate's
+/// `config.mux.*` reader; the parsing and collision rules live in
+/// [`crate::keys::resolve_keymap`], which is pure.
+pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarning>) {
+    let prefix = mux_str(cwd, "prefix");
+    crate::keys::resolve_keymap(prefix.as_deref(), &mux_keys_table(cwd))
+}
+
+/// `[mux.keys]` as raw `(action, spec)` pairs, from the first config.toml in the
+/// precedence chain that HAS the table. Sorted so a warning list is stable
+/// rather than following TOML map order.
+fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
+    let read = |path: &Path| -> Option<Vec<(String, String)>> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let t = content.parse::<toml::Table>().ok()?;
+        let keys = t.get("mux")?.as_table()?.get("keys")?.as_table()?;
+        let mut out: Vec<(String, String)> = keys
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+        out.sort();
+        Some(out)
+    };
+    if let Some(explicit) = non_empty_env("FNO_CONFIG") {
+        return read(Path::new(&explicit)).unwrap_or_default();
+    }
+    if let Some(v) = read(&cwd.join(".fno/config.toml")) {
+        return v;
+    }
+    non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
+        .map(|p| PathBuf::from(p).with_file_name("config.toml"))
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")))
+        .and_then(|g| read(&g))
+        .unwrap_or_default()
+}
+
 /// A `config.mux.<key>` boolean with a fail-open default. The four readers above
 /// are one line each now; the coercion lives in one place.
 fn mux_bool(cwd: &Path, key: &str, default: bool) -> bool {

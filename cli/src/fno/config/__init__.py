@@ -2767,6 +2767,18 @@ class MuxBlock(BaseModel):
     by the Rust mux via ``FNO_MUX_SHELL_INTEGRATION``; absent env reads as
     ``mux-panes`` (the Rust default is on).
 
+    ``prefix`` and ``keys`` are the keyboard. The mux prefix shipped as Ctrl-b
+    with no way to move it, which collides with readline, vim and emacs for
+    anyone who did not choose tmux's default on purpose. ``prefix`` takes a key
+    spec (``C-a``, ``Ctrl-a``, ``^a``, or a bare printable character) and
+    ``keys`` maps a stable action id to the key that should run it, e.g.
+    ``keys.detach = "D"``. The action ids are the ones ``prefix+?`` lists; the
+    Rust client reads both straight from config.toml (the same split-brain as
+    ``attach_digest``, since the interactive attach path has no Python launcher)
+    and refuses any rebind that is unparseable, names no action, lands on the
+    structural ``1``-``9`` tab range, or collides with another action, saying so
+    in a notice rather than silently running the shipped default.
+
     ``notify_on_blocked`` / ``notify_on_done`` (x-dd84) fire an OS notification
     when a badge enters blocked / done. The Rust daemon reads these straight from
     settings.yaml (``agents_config.rs``, the same split-brain as
@@ -2785,6 +2797,13 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
+    # The prefix key, as a spec the Rust client parses (`C-a`, `Ctrl-a`, `^a`, or
+    # a bare printable char). None keeps the built-in Ctrl-b.
+    prefix: Optional[str] = None
+    # Per-action rebinds: `{action_id: key_spec}`, e.g. `{"detach": "D"}`. The
+    # action ids are stable and listed by `prefix+?`; an unknown id is refused
+    # (and reported), never silently dropped.
+    keys: dict[str, str] = Field(default_factory=dict)
     # Fire an OS notification when a badge ENTERS `blocked` (any authority: hook
     # report or screen-manifest verdict). Episode-gated: once per blocked spell.
     notify_on_blocked: bool = True

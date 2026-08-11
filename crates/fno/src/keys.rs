@@ -38,8 +38,154 @@ use std::time::{Duration, Instant};
 use crate::proto::{BlockDir, Command};
 use crate::tree::Dir;
 
-/// The prefix byte: Ctrl-b (0x02).
-pub const PREFIX: u8 = 0x02;
+/// The built-in prefix byte: Ctrl-b (0x02), tmux's. `config.mux.prefix`
+/// replaces it; [`prefix`] is what the scanner actually compares against.
+pub const DEFAULT_PREFIX: u8 = 0x02;
+
+/// The resolved key layer for this process: the prefix byte plus any per-action
+/// rebinds from `config.mux`.
+///
+/// Installed ONCE, before the scanner runs, by whichever front door owns the
+/// client (see [`install`]). Everything downstream - the chord dispatcher, the
+/// which-key modal, the parity test - reads it through [`key_bindings`], so a
+/// rebind cannot reach the dispatcher without also reaching the help that
+/// documents it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keymap {
+    pub prefix: u8,
+    /// `(action id, post-prefix byte)`, overriding that action's table default.
+    pub rebinds: Vec<(String, u8)>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap {
+            prefix: DEFAULT_PREFIX,
+            rebinds: Vec::new(),
+        }
+    }
+}
+
+/// One rejected config entry, so the caller can say WHY a rebind did not take
+/// rather than silently running the default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeymapWarning(pub String);
+
+/// Parse a key spec into the byte a terminal sends for it.
+///
+/// Accepted: `C-a` / `Ctrl-a` / `^a` for a control byte, or a single printable
+/// ASCII character for itself. Deliberately narrow: a spec vocabulary wider than
+/// the scanner (which dispatches on ONE post-prefix byte) would advertise binds
+/// that could never fire.
+pub fn parse_key(spec: &str) -> Option<u8> {
+    let s = spec.trim();
+    let ctrl_letter = |c: char| -> Option<u8> {
+        c.is_ascii_alphabetic()
+            .then(|| (c.to_ascii_lowercase() as u8) - b'a' + 1)
+    };
+    let mut chars = s.chars();
+    match (chars.next(), s.len()) {
+        (Some(c), 1) if c.is_ascii_graphic() => Some(c as u8),
+        (Some('^'), 2) => ctrl_letter(s.chars().nth(1)?),
+        _ => {
+            let lower = s.to_ascii_lowercase();
+            let rest = lower
+                .strip_prefix("ctrl-")
+                .or_else(|| lower.strip_prefix("c-"))?;
+            (rest.chars().count() == 1).then(|| ctrl_letter(rest.chars().next()?))?
+        }
+    }
+}
+
+/// How a byte prints in the which-key modal: `C-b` for a control byte, the
+/// character itself otherwise.
+fn key_disp(b: u8) -> String {
+    match b {
+        1..=26 => format!("C-{}", (b - 1 + b'a') as char),
+        _ => (b as char).to_string(),
+    }
+}
+
+/// Build a [`Keymap`] from raw config strings, reporting every entry it had to
+/// reject. Pure, so the resolution rules are testable without a config file.
+///
+/// A rebind is refused (not silently applied) when it would make the keyboard
+/// unusable: an unparseable spec, an unknown action, a digit (the `1-9` tab
+/// range is structural), or a byte two actions would then share. Refusing keeps
+/// the previous behaviour, which is always reachable; accepting a collision
+/// would silently shadow one of the two.
+pub fn resolve_keymap(
+    prefix_spec: Option<&str>,
+    rebinds: &[(String, String)],
+) -> (Keymap, Vec<KeymapWarning>) {
+    let mut warnings = Vec::new();
+    let mut map = Keymap::default();
+    if let Some(spec) = prefix_spec.map(str::trim).filter(|s| !s.is_empty()) {
+        match parse_key(spec) {
+            Some(b) => map.prefix = b,
+            None => warnings.push(KeymapWarning(format!(
+                "config.mux.prefix: cannot read {spec:?} as a key; keeping {}",
+                key_disp(DEFAULT_PREFIX)
+            ))),
+        }
+    }
+    let defaults = default_bindings();
+    // Start from the defaults, then apply one rebind at a time so each collision
+    // check sees the keyboard as it will actually be, not as it shipped.
+    let mut taken: Vec<(String, u8)> = defaults
+        .iter()
+        .map(|kb| (kb.action.to_string(), kb.key))
+        .collect();
+    for (action, spec) in rebinds {
+        let action = action.trim().to_ascii_lowercase();
+        let Some(slot) = taken.iter().position(|(a, _)| *a == action) else {
+            warnings.push(KeymapWarning(format!(
+                "config.mux.keys.{action}: no such action (see `prefix+?` for the list)"
+            )));
+            continue;
+        };
+        let Some(byte) = parse_key(spec) else {
+            warnings.push(KeymapWarning(format!(
+                "config.mux.keys.{action}: cannot read {spec:?} as a key"
+            )));
+            continue;
+        };
+        if byte.is_ascii_digit() && byte != b'0' {
+            warnings.push(KeymapWarning(format!(
+                "config.mux.keys.{action}: 1-9 select tabs and cannot be rebound"
+            )));
+            continue;
+        }
+        if let Some((other, _)) = taken.iter().find(|(a, k)| *k == byte && *a != action) {
+            warnings.push(KeymapWarning(format!(
+                "config.mux.keys.{action}: {} is already {other}",
+                key_disp(byte)
+            )));
+            continue;
+        }
+        taken[slot].1 = byte;
+        map.rebinds.push((action, byte));
+    }
+    (map, warnings)
+}
+
+static KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+
+/// Install the resolved keymap. First call wins; later calls are ignored, so a
+/// re-attach in the same process cannot swap the keyboard mid-session.
+pub fn install(map: Keymap) {
+    let _ = KEYMAP.set(map);
+}
+
+fn keymap() -> &'static Keymap {
+    KEYMAP.get_or_init(Keymap::default)
+}
+
+/// The prefix byte in force. The scanner compares against THIS, never the
+/// const, so `config.mux.prefix` reaches every chord.
+pub fn prefix() -> u8 {
+    keymap().prefix
+}
 
 /// After a resize chord fires, bare resize keys (`H/J/K/L`) keep resizing for
 /// this long without re-pressing prefix (tmux `bind -r` / `repeat-time`, 500ms
@@ -181,7 +327,7 @@ impl Scanner {
         for &b in bytes {
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
-                    if b == PREFIX {
+                    if b == prefix() {
                         // Prefix disarms first, then chords normally (Locked 5);
                         // a prefix+resize re-arms at its emission site below.
                         self.repeat_until = None;
@@ -341,68 +487,97 @@ impl KeySection {
 pub struct KeyBinding {
     /// The post-prefix byte. `disp` is how it prints (`%`, `hjkl`, `[`).
     pub key: u8,
-    pub disp: &'static str,
+    pub disp: String,
     pub event: Event,
     pub section: KeySection,
     /// The action phrase the modal's right column shows.
     pub label: &'static str,
+    /// The stable id `config.mux.keys.<action>` rebinds. Distinct from `label`
+    /// (prose, free to be reworded) and from `disp` (which IS the thing being
+    /// rebound), so a config file written today keeps working when the help text
+    /// is rephrased tomorrow.
+    pub action: &'static str,
 }
 
-/// The authoritative prefix-chord table. `chord()` looks a byte up here; the
-/// modal renders these rows. The two `1-9` (select tab) and `C-b C-b` (literal)
-/// chords are structural specials handled directly in `chord()` and shown by
-/// [`meta_rows`], so they are deliberately absent here.
-pub fn key_bindings() -> Vec<KeyBinding> {
+/// The authoritative prefix-chord table AS SHIPPED, before `config.mux.keys` is
+/// applied. Call [`key_bindings`] instead unless you specifically want the
+/// defaults (the rebind resolver does, to know which actions exist).
+fn default_bindings() -> Vec<KeyBinding> {
     use Command as C;
     use Event::*;
     use KeySection::*;
-    let b = |key, disp, event, section, label| KeyBinding {
+    let b = |key: u8, action, event, section, label| KeyBinding {
         key,
-        disp,
+        disp: key_disp(key),
         event,
         section,
         label,
+        action,
     };
     vec![
         // panes
-        b(b'%', "%", Cmd(C::SplitH), Panes, "split horizontal"),
-        b(b'"', "\"", Cmd(C::SplitV), Panes, "split vertical"),
-        b(b'h', "h", Cmd(C::FocusDir(Dir::Left)), Panes, "focus left"),
-        b(b'j', "j", Cmd(C::FocusDir(Dir::Down)), Panes, "focus down"),
-        b(b'k', "k", Cmd(C::FocusDir(Dir::Up)), Panes, "focus up"),
+        b(b'%', "split-h", Cmd(C::SplitH), Panes, "split horizontal"),
+        b(b'"', "split-v", Cmd(C::SplitV), Panes, "split vertical"),
+        b(
+            b'h',
+            "focus-left",
+            Cmd(C::FocusDir(Dir::Left)),
+            Panes,
+            "focus left",
+        ),
+        b(
+            b'j',
+            "focus-down",
+            Cmd(C::FocusDir(Dir::Down)),
+            Panes,
+            "focus down",
+        ),
+        b(
+            b'k',
+            "focus-up",
+            Cmd(C::FocusDir(Dir::Up)),
+            Panes,
+            "focus up",
+        ),
         b(
             b'l',
-            "l",
+            "focus-right",
             Cmd(C::FocusDir(Dir::Right)),
             Panes,
             "focus right",
         ),
         b(
             b'H',
-            "H",
+            "resize-left",
             Cmd(C::ResizeDir(Dir::Left)),
             Panes,
             "resize left",
         ),
         b(
             b'J',
-            "J",
+            "resize-down",
             Cmd(C::ResizeDir(Dir::Down)),
             Panes,
             "resize down",
         ),
-        b(b'K', "K", Cmd(C::ResizeDir(Dir::Up)), Panes, "resize up"),
+        b(
+            b'K',
+            "resize-up",
+            Cmd(C::ResizeDir(Dir::Up)),
+            Panes,
+            "resize up",
+        ),
         b(
             b'L',
-            "L",
+            "resize-right",
             Cmd(C::ResizeDir(Dir::Right)),
             Panes,
             "resize right",
         ),
-        b(b'x', "x", Cmd(C::ClosePane), Panes, "close pane"),
+        b(b'x', "close-pane", Cmd(C::ClosePane), Panes, "close pane"),
         b(
             b'D',
-            "D",
+            "diff-pane",
             Cmd(C::ToggleDiffPane {
                 agent: None,
                 pane: None,
@@ -411,75 +586,129 @@ pub fn key_bindings() -> Vec<KeyBinding> {
             "toggle git diff pane",
         ),
         // workspaces & tabs
-        b(b'c', "c", Cmd(C::NewTab), WorkspacesTabs, "new tab"),
-        b(b'n', "n", Cmd(C::NextTab), WorkspacesTabs, "next tab"),
-        b(b'p', "p", Cmd(C::PrevTab), WorkspacesTabs, "prev tab"),
-        b(b'&', "&", Cmd(C::CloseTab), WorkspacesTabs, "close tab"),
-        b(b',', ",", OpenRename, WorkspacesTabs, "rename tab"),
+        b(b'c', "new-tab", Cmd(C::NewTab), WorkspacesTabs, "new tab"),
+        b(b'n', "next-tab", Cmd(C::NextTab), WorkspacesTabs, "next tab"),
+        b(b'p', "prev-tab", Cmd(C::PrevTab), WorkspacesTabs, "prev tab"),
+        b(
+            b'&',
+            "close-tab",
+            Cmd(C::CloseTab),
+            WorkspacesTabs,
+            "close tab",
+        ),
+        b(
+            b',',
+            "rename-tab",
+            OpenRename,
+            WorkspacesTabs,
+            "rename tab",
+        ),
         b(
             b'z',
-            "z",
+            "cycle-section",
             CycleSection,
             WorkspacesTabs,
             "cycle section view",
         ),
-        b(b'<', "<", ReorderTab(-1), WorkspacesTabs, "move tab left"),
-        b(b'>', ">", ReorderTab(1), WorkspacesTabs, "move tab right"),
+        b(
+            b'<',
+            "move-tab-left",
+            ReorderTab(-1),
+            WorkspacesTabs,
+            "move tab left",
+        ),
+        b(
+            b'>',
+            "move-tab-right",
+            ReorderTab(1),
+            WorkspacesTabs,
+            "move tab right",
+        ),
         // navigation (scrollback blocks + goto/search)
         b(
             b'[',
-            "[",
+            "prev-block",
             BlockJump(BlockDir::Prev),
             Navigation,
             "jump prev block",
         ),
         b(
             b']',
-            "]",
+            "next-block",
             BlockJump(BlockDir::Next),
             Navigation,
             "jump next block",
         ),
         b(
             b'v',
-            "v",
+            "select-block",
             BlockSelect(BlockDir::Prev),
             Navigation,
             "select block",
         ),
         b(
             b'y',
-            "y",
+            "copy-selection",
             Cmd(C::CopySelection),
             Navigation,
             "copy selection",
         ),
-        b(b'r', "r", BlockRerun, Navigation, "rerun block"),
-        b(b'/', "/", SearchOpen, Navigation, "search scrollback"),
-        b(b'f', "f", OpenNav, Navigation, "find: goto pane/agent"),
+        b(b'r', "rerun-block", BlockRerun, Navigation, "rerun block"),
+        b(b'/', "search", SearchOpen, Navigation, "search scrollback"),
+        b(b'f', "find", OpenNav, Navigation, "find: goto pane/agent"),
         // global
-        b(b'w', "w", OpenSelector, Global, "panel selector"),
-        b(b'a', "a", OpenAnswers, Global, "answer queue"),
-        b(b'b', "b", TogglePanel, Global, "toggle sideline"),
-        b(b'B', "B", CycleDensity, Global, "cycle sideline density"),
+        b(b'w', "selector", OpenSelector, Global, "panel selector"),
+        b(b'a', "answers", OpenAnswers, Global, "answer queue"),
+        b(b'b', "toggle-sideline", TogglePanel, Global, "toggle sideline"),
+        b(
+            b'B',
+            "cycle-density",
+            CycleDensity,
+            Global,
+            "cycle sideline density",
+        ),
         b(
             b'o',
-            "o",
+            "sort-agents",
             ToggleAgentSort,
             Global,
             "sort agents: squad/status",
         ),
-        b(b's', "s", ToggleStatus, Global, "toggle status"),
-        b(b'?', "?", ShowKeys, Global, "this key table"),
+        b(
+            b's',
+            "toggle-status",
+            ToggleStatus,
+            Global,
+            "toggle status",
+        ),
+        b(b'?', "show-keys", ShowKeys, Global, "this key table"),
         b(
             b'g',
-            "g",
+            "grab-work",
             DispatchNext,
             Global,
             "grab work (dispatch next ready)",
         ),
-        b(b'd', "d", Detach, Global, "detach"),
+        b(b'd', "detach", Detach, Global, "detach"),
     ]
+}
+
+/// The prefix-chord table IN FORCE: [`default_bindings`] with the installed
+/// keymap's rebinds applied. `chord()` looks a byte up here and the which-key
+/// modal renders these rows, so a rebound key dispatches and documents itself
+/// from the same place - the help cannot advertise a chord the scanner does not
+/// run. The `1-9` (select tab) and prefix-prefix (literal) chords are structural
+/// specials handled in `chord()` and shown by [`meta_rows`], so they are
+/// deliberately absent here and refused as rebind targets.
+pub fn key_bindings() -> Vec<KeyBinding> {
+    let mut rows = default_bindings();
+    for (action, byte) in &keymap().rebinds {
+        if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
+            kb.key = *byte;
+            kb.disp = key_disp(*byte);
+        }
+    }
+    rows
 }
 
 /// Display-only pseudo-bindings the modal shows but `chord()` handles as
@@ -519,7 +748,8 @@ pub fn resolve_chord(byte: u8) -> Event {
 
 fn chord(b: u8) -> Event {
     match b {
-        PREFIX => Event::Forward(vec![PREFIX]), // prefix-prefix = literal
+        // prefix-prefix = one literal prefix byte, whatever the prefix now is.
+        _ if b == prefix() => Event::Forward(vec![b]),
         b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
         _ => key_bindings()
             .into_iter()
@@ -792,7 +1022,122 @@ mod tests {
 
     #[test]
     fn client_keys_prefix_prefix_sends_one_literal_prefix() {
-        assert_eq!(scan_all(&[b"\x02\x02"]), vec![Event::Forward(vec![PREFIX])]);
+        assert_eq!(
+            scan_all(&[b"\x02\x02"]),
+            vec![Event::Forward(vec![DEFAULT_PREFIX])]
+        );
+    }
+
+    #[test]
+    fn parse_key_reads_the_spec_forms_and_refuses_the_rest() {
+        assert_eq!(parse_key("C-a"), Some(0x01));
+        assert_eq!(parse_key("Ctrl-a"), Some(0x01));
+        assert_eq!(parse_key("^a"), Some(0x01));
+        assert_eq!(parse_key("c-B"), Some(0x02), "case-insensitive");
+        assert_eq!(parse_key(" C-b "), Some(0x02), "trimmed");
+        assert_eq!(parse_key("q"), Some(b'q'));
+        assert_eq!(parse_key("?"), Some(b'?'));
+        // Nothing the scanner could dispatch on: it reads ONE post-prefix byte,
+        // so a spec it cannot reduce to one byte must be refused, not guessed.
+        assert_eq!(parse_key("C-"), None);
+        assert_eq!(parse_key("C-ab"), None);
+        assert_eq!(parse_key("alt-x"), None);
+        assert_eq!(parse_key("F5"), None);
+        assert_eq!(parse_key(""), None);
+        assert_eq!(parse_key("C-1"), None, "control of a non-letter");
+    }
+
+    #[test]
+    fn resolve_keymap_applies_a_prefix_and_a_rebind() {
+        let (map, warn) = resolve_keymap(
+            Some("C-a"),
+            &[("detach".into(), "Q".into()), ("SEARCH".into(), "?".into())],
+        );
+        // The id is case-folded, so `SEARCH` resolves - and then collides with
+        // `?`, which is already the key table.
+        assert!(warn.iter().any(|w| w.0.contains("already show-keys")), "{warn:?}");
+        assert_eq!(map.prefix, 0x01);
+        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+    }
+
+    #[test]
+    fn resolve_keymap_refuses_rather_than_breaking_the_keyboard() {
+        // Each refusal keeps a keyboard that WORKS. Applying any of these would
+        // shadow a binding or bind a chord that can never fire.
+        let cases: [(&str, &str, &str); 4] = [
+            ("detach", "F5", "cannot read"),
+            ("teleport", "T", "no such action"),
+            ("detach", "3", "select tabs"),
+            ("detach", "c", "already new-tab"),
+        ];
+        for (action, spec, expect) in cases {
+            let (map, warn) = resolve_keymap(None, &[(action.into(), spec.into())]);
+            assert!(map.rebinds.is_empty(), "{action}={spec} should not apply");
+            assert!(
+                warn.iter().any(|w| w.0.contains(expect)),
+                "{action}={spec} should say {expect:?}, said {warn:?}"
+            );
+        }
+        // A bad prefix keeps Ctrl-b rather than leaving the session prefixless.
+        let (map, warn) = resolve_keymap(Some("meta-q"), &[]);
+        assert_eq!(map.prefix, DEFAULT_PREFIX);
+        assert!(warn[0].0.contains("config.mux.prefix"));
+    }
+
+    #[test]
+    fn resolve_keymap_allows_a_swap_through_its_vacated_slot() {
+        // `n` and `p` trading places: each rebind is checked against the
+        // keyboard as it will BE, not as it shipped, so the second half of a
+        // swap does not collide with the key the first half already moved.
+        let (map, warn) = resolve_keymap(
+            None,
+            // Sorted the way the config reader hands them over.
+            &[("next-tab".into(), "N".into()), ("prev-tab".into(), "n".into())],
+        );
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(
+            map.rebinds,
+            vec![("next-tab".to_string(), b'N'), ("prev-tab".to_string(), b'n')]
+        );
+    }
+
+    #[test]
+    fn rebinding_moves_the_chord_and_its_help_together() {
+        // The key-table parity rule, carried onto rebinds: whatever the modal
+        // prints is what the dispatcher runs. Applied to a LOCAL table copy -
+        // `install` is process-global and one-shot, so a test must not take it.
+        let (map, _) = resolve_keymap(None, &[("detach".into(), "C-q".into())]);
+        let mut rows = default_bindings();
+        for (action, byte) in &map.rebinds {
+            if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
+                kb.key = *byte;
+                kb.disp = key_disp(*byte);
+            }
+        }
+        let detach = rows.iter().find(|kb| kb.action == "detach").unwrap();
+        assert_eq!(detach.key, 0x11);
+        assert_eq!(detach.disp, "C-q", "the key table prints the NEW key");
+        assert_eq!(detach.event, Event::Detach);
+    }
+
+    #[test]
+    fn every_binding_has_a_unique_stable_action_id() {
+        // The config surface: `config.mux.keys.<action>`. A duplicate id would
+        // make one of the two unrebindable, and a stray uppercase or space would
+        // make the id undiscoverable from the help text.
+        let mut seen = std::collections::HashSet::new();
+        for kb in default_bindings() {
+            assert!(seen.insert(kb.action), "duplicate action id {:?}", kb.action);
+            assert!(
+                !kb.action.is_empty()
+                    && kb
+                        .action
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-'),
+                "action id {:?} is not kebab-case",
+                kb.action
+            );
+        }
     }
 
     #[test]
@@ -820,9 +1165,9 @@ mod tests {
                 "chord({:?}) diverged from its key_bindings() row",
                 kb.key as char
             );
-            // The digit range and PREFIX are structural specials, never table rows.
+            // The digit range and the prefix are structural specials, never rows.
             assert!(
-                !(b'1'..=b'9').contains(&kb.key) && kb.key != PREFIX,
+                !(b'1'..=b'9').contains(&kb.key) && kb.key != prefix(),
                 "structural special {:?} must not appear in key_bindings()",
                 kb.key as char
             );
