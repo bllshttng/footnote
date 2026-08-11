@@ -55,6 +55,7 @@ from fno.agents.registry import (
     update_registry,
 )
 from fno.agents.crown import calling_agent_row, crown_validation_error, grant_error
+from fno.agents.whoami import is_caller_row
 from fno.harness_identity import (
     canonical_handle,
     resolve_harness_identity,
@@ -1477,16 +1478,10 @@ def _claude_create_path(
                 if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
             ]
 
-            def _is_caller(row) -> bool:
-                return bool(
-                    spawned_by_session
-                    and row.harness_session_id == spawned_by_session
-                )
-
-            if holders and all(_is_caller(h) for h in holders):
+            if holders and all(is_caller_row(h, spawned_by_session, spawned_by_harness) for h in holders):
                 entries = [
                     replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
-                    if e.crown_scope == crown_scope and _is_caller(e)
+                    if e.crown_scope == crown_scope and is_caller_row(e, spawned_by_session, spawned_by_harness)
                     else e
                     for e in entries
                 ]

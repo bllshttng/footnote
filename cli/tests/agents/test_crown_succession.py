@@ -110,9 +110,15 @@ def test_the_scope_is_never_doubly_ruled_nor_unruled(court) -> None:
     assert holders[0].name == "heir"
 
 
-def test_a_stranger_s_crown_is_declined_not_stolen(court) -> None:
+def test_a_stranger_s_crown_is_declined_not_stolen(court, monkeypatch) -> None:
     """Succession is the caller handing down what it holds. Someone ELSE's live
-    crown is untouchable: the spawn succeeds uncrowned rather than seizing it."""
+    crown is untouchable: the spawn succeeds uncrowned rather than seizing it.
+
+    The caller is an attended human (no agent identity), so it is authorized to
+    attempt the grant; the one-live-crown guard then declines it because another
+    live king holds the scope. An agent caller holding nothing over the scope
+    would be refused earlier at the grantor check, which is a different path."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("other-king", "a-different-session")
 
     _spawn_heir()
@@ -131,12 +137,50 @@ def test_a_dead_king_does_not_need_succession(court) -> None:
     assert _row("heir").crown_level == 2
 
 
-def test_an_uncrowned_caller_grants_normally(court) -> None:
-    """No sitting holder at all: nothing to transfer, nothing to decline."""
+def test_succession_matches_cc_session_id_for_a_partially_backfilled_row(court) -> None:
+    """A claude row born with harness_session_id=None (a raced uuid-resolution
+    miss reconciled later) but carrying its id in cc_session_id must still be
+    recognized as the caller, so its abdication TRANSFERS rather than being
+    declined. calling_agent_row finds the row via cc_session_id (the same field
+    _find_by_session matches for claude); the succession check (is_caller_row)
+    must agree, or a sitting king spawns an uncrowned heir."""
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="sitting-king",
+                cwd="/tmp",
+                log_path="",
+                harness="claude",
+                harness_session_id=None,
+                cc_session_id=CALLER_SESSION,
+                short_id="sk",
+                status="busy",
+                crown_level=2,
+                crown_scope=SCOPE,
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    _spawn_heir()
+
+    king, heir = _row("sitting-king"), _row("heir")
+    assert (king.crown_level, king.crown_scope) == (None, None), "the king vacates"
+    assert heir.crown_level == 2, "the heir receives the transferred crown"
+    assert heir.crown_scope == SCOPE
+
+
+def test_an_uncrowned_caller_grants_normally(court, monkeypatch) -> None:
+    """No sitting holder at all: nothing to transfer, nothing to decline. The
+    caller is an attended human (authorized to grant any scope); with no holder,
+    the spawn is a plain grant. An uncrowned AGENT cannot grant at all - that
+    refusal is covered by test_an_uncrowned_agent_cannot_bestow_a_crown."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _spawn_heir()
 
     assert _row("heir").crown_scope == SCOPE
-    assert _row("heir").crown_grantor == CALLER_SESSION
+    assert _row("heir").crown_grantor == "human"
 
 
 # --- you cannot hand down authority you do not hold --------------------------

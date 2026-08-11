@@ -132,6 +132,14 @@ def _find_by_session(
                 # stores the 8-hex jobId prefix. De-hyphenate so the prefix match
                 # accepts either shape - else a /fno-me claude session reports
                 # unregistered despite a written row.
+                #
+                # ponytail: the prefix match is 32 bits of jobId. A same-harness
+                # row whose jobId prefix collides with this session's uuid would
+                # match the wrong row - in succession (is_caller_row) that vacates
+                # a crown that is not the abdicating king's. ~1/2^32 per pair, and
+                # harness scoping above already cut it to same-harness rows. The
+                # upgrade is storing the FULL session id on spawn rows, not
+                # tightening the matcher here: that re-diverges auth and succession.
                 sid = (entry.short_id or "").replace("-", "").lower()
                 if sid and norm.startswith(sid):
                     return entry
@@ -154,6 +162,28 @@ def _find_by_session(
         if sid and norm.startswith(sid):
             return entry
     return None
+
+
+def is_caller_row(
+    row, session_uuid: Optional[str], harness: Optional[str] = None
+) -> bool:
+    """Is ``row`` the session that issued the current spawn - the king whose
+    crown a succession would transfer?
+
+    Delegates to :func:`_find_by_session` so the succession check can NEVER
+    diverge from the authorization check (:func:`calling_agent_row` runs the same
+    ``_find_by_session`` over the full registry). The matching is harness-scoped
+    (a codex session id cannot match a claude row and vacate an unrelated crown),
+    and for claude spans ``harness_session_id``, ``cc_session_id``, and the
+    ``short_id`` prefix - the complete matcher. Re-implementing any of it here is
+    the bug: a partial copy diverged from the auth check and either declined a
+    legitimate abdication (a field missed) or transferred the wrong crown (no
+    harness scoping). One matcher, two callers; if the auth check found the king,
+    this finds the same king.
+    """
+    if not session_uuid:
+        return False
+    return _find_by_session([row], session_uuid, harness) is not None
 
 
 def resolve_self(

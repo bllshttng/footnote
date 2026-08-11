@@ -41,6 +41,37 @@ def test_split_is_the_inverse_of_canonical() -> None:
     assert split_scope(None) == []
 
 
+def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) -> None:
+    """scope_contains must canonicalize the graph node's project field before
+    comparing it to the canonicalized crown scope. Graph intake stores the
+    project field RAW (the short_name alias a node was filed under), so without
+    canonicalization a king over 'alpha' is falsely refused an epic filed as
+    'a' - a legitimate delegation blocked."""
+    import fno.projects.resolve as proj_resolve
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha", short_name = "a" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+
+    from fno.agents import crown
+
+    # An epic filed under the alias 'a' (the raw spelling intake stores).
+    monkeypatch.setattr(
+        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "a"}
+    )
+    assert crown.scope_contains("alpha", "epic-1") is True
+
+    # A genuinely different project is still not contained.
+    monkeypatch.setattr(
+        crown, "_graph_entry", lambda nid: {"id": nid, "type": "epic", "project": "beta"}
+    )
+    assert crown.scope_contains("alpha", "epic-1") is False
+
+
 @pytest.mark.parametrize(
     "level,scope",
     [
@@ -113,19 +144,42 @@ def _spawn_crowned(monkeypatch, tmp_path, *, grantor_env: Optional[str], **crown
 
 
 def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypatch) -> None:
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
 
+    use_tmpdir(monkeypatch, tmp_path)
+    # Seat the grantor as a registered king over epic-x; the spawn is then a
+    # succession. An agent identity with no registry row is now refused at the
+    # grantor check, so the agent must be seated - the corrected opposite of the
+    # fail-open these tests rode. Reuse _spawn_crowned so the provider axis
+    # binding stays on its baselined line rather than adding a new one inline.
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="parent",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="parent-sess-abc",
+                short_id="parent",
+                status="busy",
+                crown_level=1,
+                crown_scope="epic-x",
+                crown_grantor="human",
+            )
+        ]
+    )
     _spawn_crowned(
         monkeypatch, tmp_path,
         grantor_env="parent-sess-abc",
         crown_level=1, crown_scope="epic-x",
     )
-    row = load_registry()[0]
-    assert row.crown_level == 1
-    assert row.crown_scope == "epic-x"
+    heir = next(e for e in load_registry() if e.name == "king-epic")
+    assert heir.crown_level == 1
+    assert heir.crown_scope == "epic-x"
     # Provenance, not self-declared: the grantor is who actually spawned it.
-    assert row.crown_grantor == "parent-sess-abc"
-    assert row.crown_label == "L1 epic-x"
+    assert heir.crown_grantor == "parent-sess-abc"
+    assert heir.crown_label == "L1 epic-x"
 
 
 def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monkeypatch) -> None:
@@ -274,10 +328,12 @@ def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkey
         short_id="inc", status="live",
         crown_level=1, crown_scope="epic-x", crown_grantor="human",
     )])
-    # Spawn a new worker with --crown level=1,scope=epic-x (same scope)
+    # Spawn a new worker with --crown level=1,scope=epic-x (same scope). The
+    # caller is an attended human (no agent identity), so it is authorized to
+    # attempt the grant; the guard declines it because the incumbent holds it.
     _spawn_crowned(
         monkeypatch, tmp_path,
-        grantor_env="parent-sess-xyz",
+        grantor_env=None,
         crown_level=1, crown_scope="epic-x",
     )
     rows = load_registry()

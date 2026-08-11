@@ -395,9 +395,27 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a == "--role" or a.startswith("--role=") for a in _args_before_argv(args)
-    )
+    return _has_flag(args, longs=("--role",))
+
+
+def _has_flag(
+    args: Sequence[str], short: str = "", longs: tuple[str, ...] = ()
+) -> bool:
+    """True if the pre-argv args carry ``short`` or any of ``longs``.
+
+    Covers every Click spelling: a short flag as ``-X``, ``-X=V``, and the
+    attached ``-XV`` (the form per-detector copies kept missing, so a
+    ``--substrate bg`` spawn spelled that way routed to the Rust binary and
+    exited ``unknown flag``); a long flag as ``--foo`` and ``--foo=V``. One
+    matcher for every routing detector so the attached-short blind spot cannot
+    recur one flag at a time.
+    """
+    for a in _args_before_argv(args):
+        if short and a.startswith(short):
+            return True
+        if any(a == lng or a.startswith(lng + "=") for lng in longs):
+            return True
+    return False
 
 
 def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -414,7 +432,9 @@ def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     BOTH spellings must be listed. The short form is not cosmetic: it is the one
     the docs teach for a portfolio (``-k etl -k web``), so a detector that knew
     only the long form would route exactly the multi-scope case into a binary
-    that cannot parse it.
+    that cannot parse it. The attached short-option form (``-kVAL``, no space -
+    Click accepts it and parses it as ``-k VAL``) must be listed too, or a spawn
+    spelled that way falls through to the Rust binary that exits ``unknown flag``.
 
     Load-bearing on ``--substrate bg``, where it is what makes the crown land at
     all: bg spawns otherwise exec the binary. The pane substrate diverts on its
@@ -422,20 +442,14 @@ def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a in ("--crown", "-k") or a.startswith(("--crown=", "-k="))
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, "-k", ("--crown",))
 
 
 def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """Keep ``--monitor`` on the Python path that owns its pane-only guards."""
     if verb != "spawn":
         return False
-    return any(
-        a == "--monitor" or a.startswith("--monitor=")
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, longs=("--monitor",))
 
 
 def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -450,10 +464,7 @@ def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a == "--dispatch-account" or a.startswith("--dispatch-account=")
-        for a in args
-    )
+    return _has_flag(args, longs=("--dispatch-account",))
 
 
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -467,12 +478,7 @@ def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a in ("--resume", "-r")
-        or a.startswith("--resume=")
-        or a.startswith("-r=")
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, "-r", ("--resume",))
 
 
 def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -486,11 +492,7 @@ def _is_route_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     exit ``unknown flag: --route`` or silently launch on the primary model."""
     if verb != "spawn":
         return False
-    return any(
-        a in ("--route", "--provider", "-P")
-        or a.startswith(("--route=", "--provider="))
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, "-P", ("--route", "--provider"))
 
 
 #: Flags that compose a COMPLETE route (endpoint + auth + model) before any
