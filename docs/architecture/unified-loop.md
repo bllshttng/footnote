@@ -275,8 +275,14 @@ Coverage of the seven reachable merge paths, stated honestly rather than implied
 | `finalize.rs` autonomous `--auto` arm | checked, refuses to arm |
 | a PR update, via `.github/workflows/stacked-base-guard.yml` | checked; blocks only once marked a required status check |
 | GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |
+| an agent-run bare `gh pr merge`, via `hooks/git-protection.py` | checked, denies before the two-factor path so the merge-gate override cannot buy past it |
 | the GitHub web / mobile merge button | NOT covered until the context is marked required; reachable from no code here |
-| a bare `gh pr merge` | NOT covered until the context is marked required. `hooks/git-protection.py` is a `PreToolUse` chokepoint that already parses the PR number, so the predicate could be wired there, but it would bind only that command typed into a Claude Code session - not a plain terminal, not another harness. Left unwired: a guard over one of the ways a human runs a command invites the belief that the command is guarded |
+| a human's `gh pr merge` in a plain terminal, or an unwired harness | NOT covered until the context is marked required |
+
+The hook was nearly left unwired, on the argument that a guard over one of the ways a human runs a command invites the belief that the command is guarded.
+That reasoning assumed a single harness and a mostly-human population; it is wired on both `hooks/hooks.json` and `hooks/codex-hooks.json`, and most merges here are agents running gh through a tool call.
+It also already gated `gh pr merge` with its own two-factor check, so omitting lineage would have made that gate the incomplete one.
+The residual hole is a human typing gh in a terminal, which only the required status context closes.
 
 Marking the `stacked-base-guard` context required is a repository-settings action; no code in this repo can take it, and this repo commits no branch-protection or ruleset config.
 Until someone does, the workflow reports and does not block.

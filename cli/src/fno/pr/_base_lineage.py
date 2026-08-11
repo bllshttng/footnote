@@ -35,20 +35,23 @@ paths is decorative. The reachable paths in this repo:
   - ``_verify.py``  the bounded ``gh pr merge --auto`` remediation -> checked
   - ``finalize.rs`` the autonomous arm, via ``fno pr base-lineage-check`` -> checked
   - ``.github/workflows/stacked-base-guard.yml``, same verb        -> checked
+  - ``hooks/git-protection.py`` for an agent-run bare ``gh pr merge`` -> checked
   - the GitHub web/mobile merge button                             -> NOT reachable
-  - a bare ``gh pr merge``                                         -> see below
 
-The web button is reachable from no code here at all. A bare ``gh pr merge`` is
-partly reachable: ``hooks/git-protection.py`` is a ``PreToolUse`` chokepoint
-that already parses the target PR number, so the predicate COULD be wired there
-- but it would bind only that command typed into a Claude Code session, never
-the same command in a plain terminal or under another harness. It is left
-unwired deliberately: a guard that covers one of the ways a human runs a command
-invites the belief that the command is guarded.
+The hook is a ``PreToolUse`` chokepoint that already gated ``gh pr merge`` with
+its own two-factor check, and it is wired on BOTH harnesses
+(``hooks/hooks.json``, ``hooks/codex-hooks.json``), so it covers most of the
+merge population here: agents running gh through a tool call. It was very nearly
+left unwired on the argument that a guard over one of the ways a human runs a
+command invites the belief that the command is guarded - but that reasoning
+assumed a single harness and a mostly-human population, and both are wrong.
+Leaving lineage out of a gate that already claims to gate this command would
+have made THAT gate the incomplete one.
 
-Both are covered properly only once an operator marks the workflow's
-``stacked-base-guard`` status context required, which nothing in this repo can
-do from code.
+What the hook does not reach: a human typing ``gh pr merge`` in a plain
+terminal, and any harness not wired to it. Those, and the web button, are
+covered only once an operator marks the workflow's ``stacked-base-guard`` status
+context required, which nothing in this repo can do from code.
 
 Verdicts are ``ok`` / ``stale`` / ``unknown``. ``unknown`` is a real third
 answer, not a pass: an in-loop CLI caller proceeds with a stderr breadcrumb

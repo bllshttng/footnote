@@ -536,6 +536,45 @@ def _parse_merge_pr(command):
     return None
 
 
+def _stacked_base_refusal(command=""):
+    """Refusal text when the PR's base no longer leads to the default branch.
+
+    A PR merged into a base that already landed reports MERGED and ships
+    nothing. `fno pr merge`, `fno pr verify` and the Rust auto-merge arm all
+    call the same predicate; this hook is the fourth caller, and it is the only
+    one that sees a BARE `gh pr merge`. Both harness wirings route through here
+    (`hooks/hooks.json`, `hooks/codex-hooks.json`), which is most of the merge
+    population in this repo - agents running gh through a tool call. A human
+    typing gh in a plain terminal still bypasses it; only a required
+    `stacked-base-guard` status context closes that.
+
+    Shells to the CLI rather than importing it: this hook is stdlib-only and
+    runs under bare python3 on a fresh plugin install, the same constraint that
+    keeps it from importing `fno.paths`.
+
+    Fails OPEN on everything except a confirmed refusal (exit 3). A missing
+    `fno`, a timeout, an unevaluated probe (exit 4) - none of them may block a
+    merge, because a guard whose own machinery is down must not become an
+    outage. Exit 0 also covers the operator's documented bypass.
+    """
+    pr_number = _parse_merge_pr(command)
+    if not pr_number:
+        return None  # branch-name or current-branch form: nothing to check
+    try:
+        proc = subprocess.run(
+            ["fno", "pr", "base-lineage-check", pr_number],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
+        return None
+    if proc.returncode != 3:
+        return None
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return detail[0] if detail else f"PR {pr_number}: base no longer leads to the default branch"
+
+
 def _check_pr_merge_allowed(command=""):
     """Return a reason string if gh pr merge is authorized, else None.
 
@@ -1632,6 +1671,16 @@ def main():
             sys.exit(0)
 
     if merge_seg is not None:
+        # Checked BEFORE the two-factor path, so it vetoes every route that
+        # would otherwise allow - including the merge-gate override marker.
+        # That marker buys out the review ceremony; a base that no longer leads
+        # to the default branch is not a ceremony, it is a merge that ships
+        # nothing. The lineage check carries its own documented bypass
+        # (FNO_PR_BASE_LINEAGE_OK), which the CLI verb honours by exiting 0.
+        stacked = _stacked_base_refusal(merge_seg)
+        if stacked:
+            _emit("deny", f"[fno stacked-base] {stacked}")
+            sys.exit(0)
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
             _emit("allow", f"[fno auto-merge] {allow_reason}")
