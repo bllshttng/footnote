@@ -293,6 +293,29 @@ def _repo_root_for(root: Path) -> Path:
     return root.resolve()
 
 
+def _repo_key(path, root: Path, repo_root: Path) -> str:
+    """THE repo-root-relative POSIX key for any path in this gate.
+
+    Every keying decision routes through here, and adding one that does not is
+    how this class recurs. Four separate constants in this branch were each
+    anchored to the wrong root and each fixed alone: the declared map, the
+    baseline path, the bare `target` exclusion, and the anchored exclusion. A
+    review pass found one instance every round, including the rounds that fixed
+    it, because a fix at one call site is not a fix of the class.
+
+    Resolved on both sides, since git prints real paths while a caller's root
+    can carry a symlinked prefix (macOS /var against /private/var). A key that
+    escapes the repo root falls back to scan-relative rather than being trusted.
+    """
+    try:
+        key = os.path.relpath(os.path.realpath(path), repo_root)
+    except ValueError:
+        key = os.path.relpath(path, root)
+    if key.startswith(".."):
+        key = os.path.relpath(path, root)
+    return key.replace(os.sep, "/")
+
+
 def scan(root: Path):
     findings = []
     observed_by_ext = {}
@@ -304,47 +327,26 @@ def scan(root: Path):
         for d in dirnames:
             if d in EXCLUDE_DIR:
                 continue
-            # Keyed from the REPO root, exactly as axis_dirs is. Keying from the
-            # scan root made every anchor inert under a subtree scan: with root
-            # at crates/fno-agents the child key is `target`, never
-            # `crates/fno-agents/target`, so the walk descended into the build
-            # tree while the same run's receipt printed it as not scanned.
-            child_abs = os.path.join(dirpath, d)
-            try:
-                child = os.path.relpath(os.path.realpath(child_abs), repo_root)
-            except ValueError:
-                child = os.path.relpath(child_abs, root)
-            child = child.replace(os.sep, "/")
-            if child in EXCLUDE_ANCHORED:
+            if _repo_key(os.path.join(dirpath, d), root, repo_root) in EXCLUDE_ANCHORED:
                 continue
             kept.append(d)
         dirnames[:] = kept
-        _here = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        here = _repo_key(dirpath, root, repo_root)
         for probe in REQUIRED_REACH:
-            if _here == probe or _here.startswith(probe + "/"):
+            if here == probe or here.startswith(probe + "/"):
                 probes_reached.add(probe)
         # Collected in the SAME walk the content scan already performs, so the
         # name check costs no second traversal of the tree.
-        rel_dir = os.path.relpath(dirpath, root)
-        if rel_dir != ".":
+        if os.path.relpath(dirpath, root) != ".":
             stated = _stated_axis(os.path.basename(dirpath))
             if stated:
-                try:
-                    key = os.path.relpath(os.path.realpath(dirpath), repo_root)
-                except ValueError:
-                    key = rel_dir
-                if key.startswith(".."):
-                    key = rel_dir
-                axis_dirs[key.replace(os.sep, "/")] = stated
+                axis_dirs[here] = stated
         for fn in filenames:
             ext = os.path.splitext(fn)[1]
             if ext not in SCANNABLE_EXT:
                 continue
             path = os.path.join(dirpath, fn)
-            try:
-                rel = os.path.relpath(path, root)
-            except ValueError:
-                continue
+            rel = _repo_key(path, root, repo_root)
             if rel in SELF_FILES:
                 continue
             try:
