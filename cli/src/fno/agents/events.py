@@ -164,6 +164,36 @@ def daemon_lifecycle_log() -> Path:
     return paths.agents_home_dir() / "events.jsonl"
 
 
+def _emit_daemon_envelope(
+    kind: str, data: dict[str, Any], *, source: str = "python"
+) -> None:
+    """Write one record in the daemon's unified envelope (x-2901) to the daemon
+    lifecycle log.
+
+    The Rust daemon nests the payload under ``data`` and stamps the kind as
+    ``type`` (crates/fno-agents/src/events.rs). A Python birth that shared the
+    file but used the flat ``{..., ts, kind}`` shape would not be joinable with
+    a daemon death by one reader: ``rec["data"]["name"]`` works on the death and
+    KeyErrors on the flat birth. Writing the same envelope from both sides is
+    what makes the lineage tree reconstructable from a single file.
+    Best-effort: OSError is swallowed (a failed log write must not break spawn).
+    """
+    record = {
+        "ts": _utc_now_iso(),
+        "type": kind,
+        "source": source,
+        "data": data,
+    }
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    try:
+        target = daemon_lifecycle_log()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError as exc:
+        print(f"fno agents: warning: daemon envelope {kind}: {exc}", file=sys.stderr)
+
+
 def emit_spawned(
     *,
     name: str,
@@ -173,22 +203,23 @@ def emit_spawned(
     spawned_by_harness: Optional[str] = None,
     spawned_by_cwd: Optional[str] = None,
 ) -> None:
-    """Record one agent birth in the daemon lifecycle log.
+    """Record one agent birth in the daemon lifecycle log (envelope format).
 
     Carries the parent edge the registry row already captures
     (spawned_by_session/harness/cwd) so the lineage tree is reconstructable:
-    birth(parent_session, child) joins death(child) on the child name.
-    Exactly one per successful create; best-effort (OSError swallowed).
+    birth(parent_session, child) joins death(child) on ``data.name``.
+    Exactly one per successful create.
     """
-    emit(
+    _emit_daemon_envelope(
         KIND_AGENT_SPAWNED,
-        path=daemon_lifecycle_log(),
-        name=name,
-        short_id=short_id,
-        provider=provider,
-        spawned_by_session=spawned_by_session,
-        spawned_by_harness=spawned_by_harness,
-        spawned_by_cwd=spawned_by_cwd,
+        {
+            "name": name,
+            "short_id": short_id,
+            "provider": provider,
+            "spawned_by_session": spawned_by_session,
+            "spawned_by_harness": spawned_by_harness,
+            "spawned_by_cwd": spawned_by_cwd,
+        },
     )
 
 
@@ -205,13 +236,9 @@ def emit_spawn_failed(
     leaves a trace in the daemon log, so a name with a death but no birth is
     distinguishable from a name whose only event is a failed start.
     """
-    emit(
+    _emit_daemon_envelope(
         KIND_AGENT_SPAWN_FAILED,
-        path=daemon_lifecycle_log(),
-        name=name,
-        provider=provider,
-        short_id=short_id,
-        reason=reason,
+        {"name": name, "provider": provider, "short_id": short_id, "reason": reason},
     )
 
 
