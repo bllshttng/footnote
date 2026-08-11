@@ -1096,12 +1096,9 @@ fn build_keys_modal() -> KeysModal {
                 PopupRow::Entry {
                     glyph: kb.disp.to_string(),
                     label: kb.label.to_string(),
-                    // The stable id, in the row's own hint column. Rebinding is
-                    // configured by action id, so the id has to be readable
-                    // somewhere; next to the key it replaces is the only place
-                    // that needs no cross-referencing. Documenting the ids only
-                    // in a settings reference would make this modal advertise a
-                    // contract it does not show.
+                    // The stable id `[mux.keys]` names, beside the key it
+                    // rebinds. The config contract promises this modal lists
+                    // them.
                     hint: kb.action.to_string(),
                 },
                 Some(kb.event.clone()),
@@ -1109,8 +1106,7 @@ fn build_keys_modal() -> KeysModal {
         }
         // Display-only rows (1-9 select tab, prefix-prefix literal): selectable
         // so the reference shows them, but not single-event chords, so Enter
-        // BELs. No action id - `chord()` handles them structurally, so there is
-        // nothing for `[mux.keys]` to name.
+        // BELs. No action id - `chord()` handles them structurally.
         for (disp, label, _) in meta_rows().iter().filter(|(_, _, s)| *s == section) {
             add(
                 PopupRow::Entry {
@@ -4780,23 +4776,14 @@ impl View {
     /// operator is looking and names its target. The bottom chrome row stays
     /// blanked so a stale bottom row never shows under the modal.
     ///
-    /// Two contrast rules this modal learned the hard way, both reported as
-    /// "I can barely see the prompt":
+    /// Reported as "I can barely see the prompt", and the fix is the BLOCK: a
+    /// one-row strip hugging its own glyphs is hard to find in busy pane
+    /// content, which is a different complaint from hard to read. It already
+    /// measured 9.9:1 on the reporter's scheme.
     ///
-    /// 1. A modal must PAINT its colours, not inherit and invert them. The old
-    ///    prompt was `INVERSE | BOLD` over `Color::Default`, which makes its
-    ///    legibility a function of the reader's theme: bold sets a brighter
-    ///    foreground and reverse then swaps the pair, so the brightening lands
-    ///    on what became the BACKGROUND. On a dark theme that happens to look
-    ///    fine, which is how it shipped; on a light one the pair collapses
-    ///    toward each other and the prompt greys out. [`MODAL_FG`]/[`MODAL_BG`]
-    ///    name the pair outright, so the contrast is ours and not the theme's.
-    ///    The amber `LATTICE_ACCENT` is deliberately NOT used: it is reserved
-    ///    for needs-attention, and a rename prompt is not an alert.
-    /// 2. Pad it into a BLOCK. A one-row strip of text that hugs its own glyphs
-    ///    disappears into busy pane content; the blank margin around it is what
-    ///    makes it read as a panel, which is the shape every other overlay
-    ///    already uses.
+    /// Two things it must not do: stack `BOLD` on the inversion (bold brightens
+    /// the foreground, which reverse has made the background), or pick its own
+    /// colours - see [`MODAL_FG`].
     fn draw_name_modal(
         &self,
         cells: &mut [Cell],
@@ -4828,7 +4815,7 @@ impl View {
                         c: ch,
                         fg: MODAL_FG,
                         bg: MODAL_BG,
-                        flags: 0,
+                        flags: cell_flags::INVERSE,
                     };
                 }
             }
@@ -5212,28 +5199,14 @@ impl View {
     /// [`tab_bar_spans`] anchored on the active tab, with a clickable overflow
     /// counter at whichever edge is hiding tabs.
     ///
-    /// Before this, `draw_tab_bar` simply stopped painting at the right edge, so
-    /// past roughly the seventh tab the work was invisible AND unclickable
-    /// (`chrome_hit` walks the same spans, so a tab that never painted could
-    /// never be hit). The three candidate fixes and why this one:
-    ///
-    /// - Condensing every label buys nothing at twenty tabs (twenty times even
-    ///   four columns is eighty columns of chrome) and degrades the four-tab
-    ///   case to pay for it.
-    /// - Paging is a second mental model plus new keys, and a page can leave the
-    ///   tab you are ON off-screen, which is the one thing that must not happen.
-    /// - An overflow indicator alone names the hidden work without reaching it.
+    /// `draw_tab_bar` used to stop painting at the right edge, and `chrome_hit`
+    /// walks the same spans, so a tab past it was invisible AND unclickable.
     ///
     /// Anchoring on the active tab means the existing keys already drive the
-    /// viewport: `prefix+n`/`p` cycle and `prefix+<digit>` select, and the window
-    /// follows whatever they made active, so no new binding is needed to reach a
-    /// twentieth tab. The counters are clickable and select the nearest hidden
-    /// tab, which restores mouse reach. The squad label and the `+` affordance
-    /// are pinned outside the scroll region: they are identity and the only
-    /// mouse route to a new tab, so neither may scroll away.
-    ///
-    /// Below overflow this returns [`tab_bar_spans`] unchanged, so the common
-    /// few-tab strip paints exactly as it always did.
+    /// viewport, so reaching a twentieth tab needs no new binding. The squad
+    /// label and the `+` are pinned outside the scroll region: the `+` is the
+    /// only mouse route to a new tab. Below overflow this returns
+    /// [`tab_bar_spans`] unchanged.
     fn tab_bar_window(&self) -> Vec<TabSpan> {
         let width = (self.term.1 as usize).saturating_sub(self.panel_w() as usize);
         let span_w = |s: &TabSpan| s.text.chars().count();
@@ -5318,15 +5291,10 @@ impl View {
             });
         }
         out.push(plus);
-        // Narrow-mode fallback. `fit_end` can return `start` when not even one
-        // whole tab fits beside the pinned label, counter and `+` - reachable at
-        // the 40-column content minimum with a long workspace name and a long
-        // tab name - and forcing that tab in whole would push the counter and
-        // the `+` past the right edge, where `draw_tab_bar` clips them. Clipping
-        // the `+` is the worse failure: it is the only mouse route to a new tab.
-        // So the ACTIVE TAB condenses instead, which is the one thing here that
-        // degrades gracefully - a truncated label still says which tab you are
-        // on and still hit-tests to it.
+        // Narrow mode: `fit_end` can return `start` when not one whole tab fits
+        // beside the pinned chrome, and forcing it in would push the counter and
+        // the `+` off the edge to be clipped. A truncated label still says which
+        // tab you are on and still hit-tests; a missing `+` is unreachable.
         condense_to_width(&mut out, width);
         out
     }
@@ -6483,12 +6451,9 @@ fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
 /// Shrink `spans` until they fit `width`, taking the columns off the tab labels
 /// and never off the pinned chrome.
 ///
-/// Order matters: the widest tab label yields first, so one long name condenses
-/// before a short one loses anything, and a tab is only dropped outright once it
-/// cannot show even one character plus its brackets. The squad label, the
-/// overflow counters and the `+` are never touched - the counters are how you
-/// reach a hidden tab and the `+` is the only mouse route to a new one, so
-/// clipping either would take away reachability to save a character.
+/// The widest label yields first, and a tab is dropped only once it cannot show
+/// one character plus its brackets. The squad label, the counters and the `+`
+/// are never touched: clipping those trades reachability for a character.
 fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
     let w = |s: &TabSpan| s.text.chars().count();
     let total = |v: &Vec<TabSpan>| v.iter().map(w).sum::<usize>();
@@ -7027,20 +6992,15 @@ enum LatticeState {
 /// rather than a hardcoded RGB that would fight light themes.
 const LATTICE_ACCENT: Color = Color::Indexed(3);
 
-/// The name-entry modal's own pair: black text on a bright-white block. Explicit
-/// rather than inherited-and-inverted, because a modal that borrows the theme's
-/// default pair inherits its contrast too, and the prompt has to be readable on
-/// every theme (see [`View::draw_name_modal`]).
+/// The name-entry modal's pair: the theme's own, inverted.
 ///
-/// The palette EXTREMES specifically, not a hue. An indexed colour is defined by
-/// the user's scheme, so no coloured pair can promise a contrast ratio - a blue
-/// that is near-black in one scheme is mid-tone in another, and white-on-blue
-/// measures anywhere from 3:1 to 14:1 across common schemes. Index 0 and index
-/// 15 are the two every scheme keeps at the ends by definition, which is the
-/// only way to be theme-independent without hardcoding RGB and fighting the
-/// user's colours the way [`LATTICE_ACCENT`]'s comment warns against.
-const MODAL_FG: Color = Color::Indexed(0);
-const MODAL_BG: Color = Color::Indexed(15);
+/// Briefly `Indexed(0)` on `Indexed(15)`, on the theory that every scheme keeps
+/// 0 and 15 at the extremes. It does not: Macchiato's are `#494d64` and
+/// `#b8c0e0`, which measure 4.6:1 where the inverted default pair measures
+/// 9.9:1. A scheme's default pair is the one pair its author guaranteed
+/// readable. Pinned by `palette_extremes_are_not_extremes_in_a_real_scheme`.
+const MODAL_FG: Color = Color::Default;
+const MODAL_BG: Color = Color::Default;
 
 struct LatticeStyle {
     glyph: char,
@@ -7128,15 +7088,10 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
 /// header's, so a header carries zero standing INVERSE cells. The rollup counts
 /// (`header_band_text`) are unchanged and still fill the full width.
 ///
-/// EVERY header is BOLD, active or not. The earlier split (BOLD when active,
-/// plain otherwise) meant an inactive workspace header painted at exactly the
-/// weight of the agent rows beneath it, so a section did not read as a section
-/// at a glance - the operator's report. A terminal cannot vary font SIZE per
-/// line (one cell grid, one font: the only vocabulary is bold / italic /
-/// underline / inverse / dim plus colour), so weight is the size knob here, and
-/// spending it on active-vs-inactive left nothing for header-vs-row. Active
-/// stays legible through the `*` marker and the accented caret, which were added
-/// for precisely this reason: to survive a theme with weak BOLD.
+/// EVERY header is BOLD, active or not: the earlier split left an inactive
+/// header at exactly the weight of the agent rows beneath it. Active stays
+/// legible through the `*` marker and the accented caret. Weight alone does not
+/// separate a section though - see [`section_rule`].
 fn header_band_flags(_active: bool) -> u8 {
     cell_flags::BOLD
 }
@@ -7154,16 +7109,12 @@ fn header_band_flags(_active: bool) -> u8 {
 /// horizontal rule with a space of breathing room at each end (`gap < 3` stays
 /// blank - a one-cell dash reads as debris, not a rule).
 ///
-/// This is the section separator the sideline could not get any other way. A
-/// terminal grid has ONE font at ONE size, so "make the header bigger" is not
-/// available; the styling vocabulary is bold / italic / underline / inverse /
-/// dim plus colour, and on this panel almost all of it is already spoken for:
-/// BOLD is the agent-liveness signal (`lattice_style` bolds working, blocked and
-/// done rows, so a header cannot out-weigh a busy workspace), the full-width
-/// INVERSE band is the focused-row signal, DIM means dead, and the amber
-/// accent is reserved for needs-attention. A rule spends none of them. It also
-/// costs no rows, because it fills space the header was already padding with
-/// blanks.
+/// The section separator, and the only one available. A terminal grid has one
+/// font at one size, and the rest of the vocabulary is already spoken for: BOLD
+/// is agent liveness (`lattice_style` bolds working, blocked and done rows, so a
+/// header cannot out-weigh a busy workspace), full-width INVERSE is the focused
+/// row, DIM is dead, amber is needs-attention. A rule spends none of them and
+/// costs no rows, filling space the header already padded with blanks.
 fn section_rule(gap: usize) -> String {
     match gap {
         0..=2 => " ".repeat(gap),
@@ -16332,8 +16283,8 @@ mod tests {
         assert!(
             cells[mid * cols..(mid + 1) * cols]
                 .iter()
-                .any(|c| c.bg == MODAL_BG && c.fg == MODAL_FG),
-            "the centered modal paints its own pair, not the old plain bottom row"
+                .any(|c| c.flags & cell_flags::INVERSE != 0),
+            "the centered modal inverts the theme pair, not the old plain bottom row"
         );
         let bottom: String = cells[(rows - 1) * cols..rows * cols]
             .iter()
@@ -23569,7 +23520,7 @@ mod tests {
     /// recruit prompts are the same cells.
     #[test]
     fn ux_shot_rename_prompt_is_legible() {
-        use crate::frame_html::{worst_contrast, write_shot};
+        use crate::frame_html::{self, write_shot};
         let modal_at = |view: &View| -> (Frame, usize) {
             let frame = view.compose();
             let row = frame.rows as usize / 2;
@@ -23583,26 +23534,59 @@ mod tests {
         view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
         let (frame, row) = modal_at(&view);
         let cols = frame.cols as usize;
-        let is_modal = |c: &Cell| c.bg == MODAL_BG;
-        let prompt: Vec<&Cell> = (0..cols)
-            .map(|c| &frame.cells[row * cols + c])
-            .filter(|c| is_modal(c))
-            .collect();
-        assert!(!prompt.is_empty(), "the prompt row painted nothing");
+        // The modal is the contiguous inverse run through the centre column.
+        // Scoped rather than "every inverse cell on the row": the sideline's
+        // focused-row band and the divider accents are inverse too, and they
+        // are different rules with different styles (one of them BOLD), so a
+        // bare flag test would judge them against the modal's contract.
+        let modal_cols = |f: &Frame, row: usize| -> Option<std::ops::RangeInclusive<usize>> {
+            let inv = |c: usize| f.cells[row * cols + c].flags & cell_flags::INVERSE != 0;
+            let mid = cols / 2;
+            if !inv(mid) {
+                return None;
+            }
+            let lo = (0..=mid)
+                .rev()
+                .take_while(|&c| inv(c))
+                .last()
+                .unwrap_or(mid);
+            let hi = (mid..cols).take_while(|&c| inv(c)).last().unwrap_or(mid);
+            Some(lo..=hi)
+        };
+        let span = modal_cols(&frame, row).expect("the prompt row painted nothing");
+        let prompt: Vec<&Cell> = span.clone().map(|c| &frame.cells[row * cols + c]).collect();
         for cell in &prompt {
-            let (ratio, theme) = worst_contrast(cell);
-            assert!(
-                ratio >= 7.0,
-                "prompt cell {:?} paints at {ratio:.2}:1 on the {} theme, \
-                 under the 7:1 AAA floor",
-                cell.c,
-                theme.name
+            assert_eq!(
+                cell.flags & cell_flags::BOLD,
+                0,
+                "bold on top of the inversion makes the pair the reader's \
+                 terminal settings decide"
             );
+            // The bar is the THEME'S OWN body text, not an absolute ratio. An
+            // absolute floor asks the modal to beat the scheme its reader chose
+            // (Solarized Light is 4.1:1 by design), and the only way to meet it
+            // is to override their colours - which is exactly what failed here:
+            // Indexed(0) on Indexed(15) measured 21:1 against an idealised
+            // palette and 4.6:1 in the Macchiato the reporter actually runs.
+            for theme in frame_html::THEMES {
+                let (ratio, body) = (
+                    frame_html::contrast_ratio(cell, theme),
+                    frame_html::body_contrast(theme),
+                );
+                assert!(
+                    ratio + 0.01 >= body,
+                    "prompt cell {:?} paints at {ratio:.2}:1 on {}, below that \
+                     scheme's own body text at {body:.2}:1",
+                    cell.c,
+                    theme.name
+                );
+            }
         }
         // The block, not a text-hugging stripe: margin rows above and below.
         for r in [row - 1, row + 1] {
             assert!(
-                (0..cols).any(|c| is_modal(&frame.cells[r * cols + c])),
+                span.clone()
+                    .any(|c| frame.cells[r * cols + c].flags & cell_flags::INVERSE != 0),
                 "row {r} carries no margin, so the prompt is a stripe not a block"
             );
         }
@@ -23623,7 +23607,7 @@ mod tests {
         sib.create = Some("growth".into());
         let (sib_frame, sib_row) = modal_at(&sib);
         assert!(
-            (0..cols).any(|c| is_modal(&sib_frame.cells[sib_row * cols + c])),
+            modal_cols(&sib_frame, sib_row).is_some(),
             "the new-workspace prompt does not share the modal treatment"
         );
         write_shot(&frame, "01-rename-prompt", "rename prompt (after)");

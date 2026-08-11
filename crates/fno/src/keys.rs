@@ -115,21 +115,14 @@ fn key_disp(b: u8) -> String {
 /// itself. Refusing keeps the previous behaviour, which is always reachable;
 /// accepting a collision would silently shadow one of the two.
 ///
-/// Collisions are judged against the FINAL assignment, not against a
-/// half-applied one. Applying entries one at a time and checking as you go
-/// rejects every swap and cycle by accident: `next-tab = "p"` with
-/// `prev-tab = "n"` is a legal exchange, but whichever entry the TOML map order
-/// happens to hand over first sees the other action still sitting on its target
-/// key. So this proposes all the moves, builds the keyboard they would produce,
-/// and only then drops whichever proposals still conflict.
+/// Collisions are judged against the FINAL assignment. Checking entries one at a
+/// time rejects every swap and cycle, because whichever the TOML map order hands
+/// over first sees the other action still on its target key.
 ///
-/// The prefix participates in that check. `chord()` resolves the prefix byte to
-/// the literal-prefix escape BEFORE consulting the table, so an action left
-/// sitting on the prefix byte is unreachable while the key table still
-/// advertises it - help that lies. A prefix landing on a DEFAULT binding refuses
-/// the PREFIX (one refusal keeps every chord, where the alternative silently
-/// costs one), and says which action to move first; a REBIND landing on the
-/// prefix refuses the rebind, since the prefix is the more global choice.
+/// The prefix participates: `chord()` resolves it before consulting the table,
+/// so an action left on the prefix byte is unreachable while the key table still
+/// advertises it. A prefix landing on a DEFAULT binding loses (one refusal keeps
+/// every chord); a REBIND landing on the prefix loses instead.
 pub fn resolve_keymap(
     prefix_spec: Option<&str>,
     rebinds: &[(String, String)],
@@ -798,10 +791,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// and the prefix-prefix literal. Kept beside [`key_bindings`] so the modal's
 /// row set stays complete without polluting the executable table.
 ///
-/// The literal-prefix row is built from the LIVE prefix, not a frozen `C-b
-/// C-b`. `chord()` resolves whatever the prefix currently is, so a hardcoded row
-/// would advertise a sequence that stopped working the moment anyone set
-/// `config.mux.prefix` - the exact drift the one-table rule exists to stop.
+/// The literal-prefix row is built from the LIVE prefix: a frozen `C-b C-b`
+/// would advertise a dead sequence the moment anyone set `config.mux.prefix`.
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
     vec![

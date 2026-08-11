@@ -1,74 +1,129 @@
 //! Render a composed [`Frame`] to standalone HTML, so a chrome change can be
 //! LOOKED AT rather than argued about from cell assertions.
 //!
-//! A cell assertion proves a flag is set. It cannot tell you that reverse video
-//! plus bold washes a prompt out to light-on-light, which is the class of defect
-//! this module exists to make visible: the operator reports what they can see,
-//! and the reply has to be evidence in the same currency.
+//! A cell assertion proves a flag is set. It cannot tell you a prompt washed
+//! out, which is what an operator actually reports.
 //!
-//! The colour model deliberately imitates what mainstream terminals actually do,
-//! not what the spec permits:
+//! The colour model imitates what terminals do, not what the spec permits:
+//! `INVERSE` swaps the resolved pair, `BOLD` brightens the foreground BEFORE
+//! that swap (the default in iTerm2, Terminal.app and GNOME Terminal), `DIM`
+//! drops it toward the background.
 //!
-//! - `INVERSE` swaps the resolved foreground and background, as SGR 7 does.
-//! - `BOLD` brightens the foreground, which is the DEFAULT in iTerm2,
-//!   Terminal.app and GNOME Terminal ("draw bold text in bright colors"). This
-//!   is the whole reason `BOLD` over `INVERSE` is a bug: the brightening lands
-//!   on the swapped-in background.
-//! - `DIM` drops the foreground toward the background.
-//!
-//! Test-only: this is a debugging lens on the render path, never shipped chrome.
+//! Test-only: a lens on the render path, never shipped chrome.
 
 use crate::proto::{cell_flags, Cell, Color, Frame};
 
-/// A terminal theme's default pair. Chrome has to survive BOTH: the same
-/// `INVERSE` cell that reads beautifully on a dark theme can wash out on a light
-/// one, so a single-theme check certifies nothing.
+/// A terminal theme: its default pair AND its 16-colour palette.
+///
+/// The palette is the half that is easy to forget. An `Indexed` colour is a
+/// LOOKUP into the reader's scheme, so checking one against an idealised xterm
+/// palette certifies something nobody runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub fg: (u8, u8, u8),
     pub bg: (u8, u8, u8),
     pub name: &'static str,
+    /// ANSI 0-15 as this scheme defines them.
+    pub ansi: [(u8, u8, u8); 16],
 }
+
+/// The idealised xterm 16, where 0 is black and 15 is white. No real scheme
+/// ships exactly this, which is why it must not be the only palette a contrast
+/// check sees; the two named schemes below carry their own.
+const XTERM_16: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00),
+    (0xcc, 0x33, 0x33),
+    (0x33, 0xcc, 0x33),
+    (0xcc, 0xcc, 0x33),
+    (0x33, 0x66, 0xcc),
+    (0xcc, 0x33, 0xcc),
+    (0x33, 0xcc, 0xcc),
+    (0xcc, 0xcc, 0xcc),
+    (0x66, 0x66, 0x66),
+    (0xff, 0x66, 0x66),
+    (0x66, 0xff, 0x66),
+    (0xff, 0xff, 0x66),
+    (0x66, 0x99, 0xff),
+    (0xff, 0x66, 0xff),
+    (0x66, 0xff, 0xff),
+    (0xff, 0xff, 0xff),
+];
 
 /// Close to the common dark defaults (Tomorrow Night / One Dark family).
 pub const DARK: Theme = Theme {
     fg: (0xc5, 0xc8, 0xc6),
     bg: (0x1d, 0x1f, 0x21),
     name: "dark",
+    ansi: XTERM_16,
 };
 
-/// Close to the common light defaults (Solarized Light / macOS Basic family).
+/// Solarized Light, transcribed from `iTerm2 Solarized Light` as Ghostty ships
+/// it. A REAL light scheme, not a white background wearing [`XTERM_16`]: that
+/// pairing is itself a fiction, since the xterm 16 were picked for dark
+/// terminals, and it reports a yellow accent at 1.7:1 that no light scheme
+/// actually ships (Solarized darkens its yellow to `#b58900` for exactly this).
 pub const LIGHT: Theme = Theme {
-    fg: (0x33, 0x33, 0x33),
-    bg: (0xff, 0xff, 0xff),
-    name: "light",
+    fg: (0x65, 0x7b, 0x83),
+    bg: (0xfd, 0xf6, 0xe3),
+    name: "solarized light",
+    ansi: [
+        (0x07, 0x36, 0x42),
+        (0xdc, 0x32, 0x2f),
+        (0x85, 0x99, 0x00),
+        (0xb5, 0x89, 0x00),
+        (0x26, 0x8b, 0xd2),
+        (0xd3, 0x36, 0x82),
+        (0x2a, 0xa1, 0x98),
+        (0xbb, 0xb5, 0xa2),
+        (0x00, 0x2b, 0x36),
+        (0xcb, 0x4b, 0x16),
+        (0x58, 0x6e, 0x75),
+        (0x65, 0x7b, 0x83),
+        (0x83, 0x94, 0x96),
+        (0x6c, 0x71, 0xc4),
+        (0x93, 0xa1, 0xa1),
+        (0xfd, 0xf6, 0xe3),
+    ],
 };
 
-pub const THEMES: [Theme; 2] = [DARK, LIGHT];
+/// Catppuccin Macchiato, transcribed from the palette Ghostty ships at
+/// `Ghostty.app/Contents/Resources/ghostty/themes/Catppuccin Macchiato`.
+///
+/// A scheme this project is actually read in, and the counter-example that pays
+/// for the `ansi` field: index 0 is `#494d64` and index 15 is `#b8c0e0`, so
+/// 0-on-15 measures 4.6:1 here against 21:1 on the idealised palette. The
+/// Catppuccin / Nord / Gruvbox family all compress their ends this way.
+pub const MACCHIATO: Theme = Theme {
+    fg: (0xca, 0xd3, 0xf5),
+    bg: (0x24, 0x27, 0x3a),
+    name: "catppuccin macchiato",
+    ansi: [
+        (0x49, 0x4d, 0x64),
+        (0xed, 0x87, 0x96),
+        (0xa6, 0xda, 0x95),
+        (0xee, 0xd4, 0x9f),
+        (0x8a, 0xad, 0xf4),
+        (0xf5, 0xbd, 0xe6),
+        (0x8b, 0xd5, 0xca),
+        (0xa5, 0xad, 0xcb),
+        (0x5b, 0x60, 0x78),
+        (0xec, 0x74, 0x86),
+        (0x8c, 0xcf, 0x7f),
+        (0xe1, 0xc6, 0x82),
+        (0x78, 0xa1, 0xf6),
+        (0xf2, 0xa9, 0xdd),
+        (0x63, 0xcb, 0xc0),
+        (0xb8, 0xc0, 0xe0),
+    ],
+};
 
-/// The xterm 256-colour cube, enough of it for chrome (the 16 system colours
-/// plus a linear approximation of the cube and greys).
-fn indexed_rgb(i: u8) -> (u8, u8, u8) {
-    const SYSTEM: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00),
-        (0xcc, 0x33, 0x33),
-        (0x33, 0xcc, 0x33),
-        (0xcc, 0xcc, 0x33),
-        (0x33, 0x66, 0xcc),
-        (0xcc, 0x33, 0xcc),
-        (0x33, 0xcc, 0xcc),
-        (0xcc, 0xcc, 0xcc),
-        (0x66, 0x66, 0x66),
-        (0xff, 0x66, 0x66),
-        (0x66, 0xff, 0x66),
-        (0xff, 0xff, 0x66),
-        (0x66, 0x99, 0xff),
-        (0xff, 0x66, 0xff),
-        (0x66, 0xff, 0xff),
-        (0xff, 0xff, 0xff),
-    ];
+pub const THEMES: [Theme; 3] = [DARK, LIGHT, MACCHIATO];
+
+/// Resolve a palette index against `theme`: its own 16 for the system colours,
+/// the standard cube and greyscale ramp above that.
+fn indexed_rgb(i: u8, theme: Theme) -> (u8, u8, u8) {
     match i {
-        0..=15 => SYSTEM[i as usize],
+        0..=15 => theme.ansi[i as usize],
         16..=231 => {
             let i = i - 16;
             let step = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -81,10 +136,10 @@ fn indexed_rgb(i: u8) -> (u8, u8, u8) {
     }
 }
 
-fn resolve(c: Color, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
+fn resolve(c: Color, fallback: (u8, u8, u8), theme: Theme) -> (u8, u8, u8) {
     match c {
         Color::Default => fallback,
-        Color::Indexed(i) => indexed_rgb(i),
+        Color::Indexed(i) => indexed_rgb(i, theme),
         Color::Rgb(r, g, b) => (r, g, b),
     }
 }
@@ -109,8 +164,8 @@ fn hex((r, g, b): (u8, u8, u8)) -> String {
 /// Exposed so a test can assert the CONTRAST a rule produces, not merely which
 /// flag bits are set.
 pub fn cell_colors(cell: &Cell, theme: Theme) -> ((u8, u8, u8), (u8, u8, u8)) {
-    let mut fg = resolve(cell.fg, theme.fg);
-    let mut bg = resolve(cell.bg, theme.bg);
+    let mut fg = resolve(cell.fg, theme.fg, theme);
+    let mut bg = resolve(cell.bg, theme.bg, theme);
     // Bold brightens the foreground BEFORE the inverse swap, exactly as a
     // terminal does: SGR 1 sets a foreground attribute and SGR 7 then swaps the
     // resolved pair. That order is what turns bold-over-inverse into a bright
@@ -150,6 +205,25 @@ pub fn contrast_ratio(cell: &Cell, theme: Theme) -> f64 {
     let (a, b) = (luminance(fg), luminance(bg));
     let (hi, lo) = if a > b { (a, b) } else { (b, a) };
     (hi + 0.05) / (lo + 0.05)
+}
+
+/// The contrast `theme` gives its own body text - every ordinary character its
+/// user reads all day.
+///
+/// This, not an absolute ratio, is the bar chrome has to clear. An absolute
+/// floor asks the modal to be MORE readable than the scheme its user chose,
+/// which can only be met by overriding their colours, which is the thing that
+/// already failed here once. Solarized Light sits at 4.1:1 on purpose.
+pub fn body_contrast(theme: Theme) -> f64 {
+    contrast_ratio(
+        &Cell {
+            c: ' ',
+            fg: Color::Default,
+            bg: Color::Default,
+            flags: 0,
+        },
+        theme,
+    )
 }
 
 /// The WORST contrast this cell reaches across [`THEMES`]. Chrome is judged on
@@ -257,14 +331,11 @@ fn frame_body(frame: &Frame, theme: Theme) -> String {
     body
 }
 
-/// Write `frame` to `<dir>/<name>.html`, where `dir` is `$FNO_UX_SHOTS` or, by
-/// default, this crate's own `target/ux-shots`. Defaulting rather than requiring
-/// the env var is deliberate: `cargo test ux_shot` should leave the pictures on
-/// disk without anyone having to know a variable exists. Inside `target/` so the
-/// output is gitignored by construction - generated evidence, never committed.
+/// Write `frame` to `<dir>/<name>.html`; `dir` is `$FNO_UX_SHOTS`, else this
+/// crate's `target/ux-shots` so `cargo test ux_shot` leaves the pictures on disk
+/// with no variable to know about, gitignored by construction.
 ///
-/// Best-effort by construction - a failed write returns `None` and the caller
-/// carries on, because the assertions are the gate and these files are evidence.
+/// Best-effort: a failed write returns `None`. The assertions are the gate.
 pub fn write_shot(frame: &Frame, name: &str, title: &str) -> Option<std::path::PathBuf> {
     let dir = match std::env::var_os("FNO_UX_SHOTS").filter(|d| !d.is_empty()) {
         Some(d) => std::path::PathBuf::from(d),
@@ -319,11 +390,78 @@ mod tests {
     }
 
     #[test]
+    fn palette_extremes_are_not_extremes_in_a_real_scheme() {
+        // The premise that killed a fix: "index 0 and index 15 are the two
+        // colours every scheme keeps at the ends, so painting them is
+        // theme-independent." It is false, and this is the counter-example.
+        //
+        // Left here as an executable one, not a comment, because the idea is
+        // reasonable enough to be reinvented: whoever next reaches for a
+        // "guaranteed contrast" indexed pair gets the numbers instead of the
+        // argument.
+        let pair = |fg, bg| Cell {
+            c: 'x',
+            fg,
+            bg,
+            flags: 0,
+        };
+        let extremes = pair(Color::Indexed(0), Color::Indexed(15));
+        let ideal = contrast_ratio(&extremes, DARK); // idealised xterm 16
+        let real = contrast_ratio(&extremes, MACCHIATO);
+        assert!(
+            ideal > 20.0,
+            "on an idealised palette 0-on-15 is black on white: {ideal:.2}"
+        );
+        assert!(
+            real < 5.0,
+            "in Macchiato 0 is #494d64 and 15 is #b8c0e0, so the same cell is \
+             muted: expected under 5:1, got {real:.2}"
+        );
+        // And the thing it was supposed to improve on beats it there, which is
+        // the whole lesson: a scheme's default pair is the one pair its author
+        // guaranteed readable, because every character its user reads uses it.
+        let inverted = pair(Color::Default, Color::Default);
+        let inverted = Cell {
+            flags: cell_flags::INVERSE,
+            ..inverted
+        };
+        let inherited = contrast_ratio(&inverted, MACCHIATO);
+        assert!(
+            inherited > real * 2.0,
+            "inheriting and inverting ({inherited:.2}) should beat naming the \
+             palette extremes ({real:.2}) on a real low-contrast scheme"
+        );
+    }
+
+    #[test]
     fn worst_contrast_reports_the_losing_theme() {
-        // A default-coloured inverse cell is strong on dark and weaker on light,
-        // so the worst case must name light. This is the guard that stops a
-        // single-theme spot check from certifying chrome.
+        // Bold over inverse brightens what became the background, so its worst
+        // case is a LIGHT-background scheme. Asserted as the property rather
+        // than a theme name, which is what actually makes it a guard against a
+        // single-theme spot check.
         let (_, theme) = worst_contrast(&cell(cell_flags::INVERSE | cell_flags::BOLD));
-        assert_eq!(theme.name, "light");
+        assert!(
+            luminance(theme.bg) > luminance(theme.fg),
+            "expected a light-background scheme to be the worst case, got {}",
+            theme.name
+        );
+    }
+
+    #[test]
+    fn inverting_the_default_pair_costs_a_scheme_nothing() {
+        // The guarantee that replaced the absolute floor: reversing a theme's
+        // own pair keeps its exact contrast on every theme, so chrome built that
+        // way is never less readable than the text around it. No named pair can
+        // promise this - `palette_extremes_are_not_extremes_in_a_real_scheme`
+        // is the counter-example.
+        for theme in THEMES {
+            let inverted = contrast_ratio(&cell(cell_flags::INVERSE), theme);
+            let body = body_contrast(theme);
+            assert!(
+                (inverted - body).abs() < 0.01,
+                "{}: inverted {inverted:.2} should equal body {body:.2}",
+                theme.name
+            );
+        }
     }
 }

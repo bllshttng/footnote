@@ -114,12 +114,10 @@ pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarnin
 /// `[mux.keys]` as raw `(action, spec)` pairs, MERGED action-by-action across
 /// the precedence chain, lowest first.
 ///
-/// Not first-table-wins. The Python loader deep-merges nested tables key by key
-/// (`config_io::_deep_merge`), and `mux_str` above falls through per scalar key,
-/// so a project table that named one action used to silently reset every global
-/// rebind to its shipped key - a divergence between the two readers of the same
-/// file, which is worse than either behaviour on its own. Sorted at the end so a
-/// warning list is stable rather than following TOML map order.
+/// Not first-table-wins: the Python loader deep-merges nested tables key by key
+/// (`config_io::_deep_merge`) and `mux_str` above falls through per scalar key,
+/// so a project table naming one action used to reset every global rebind.
+/// Sorted so a warning list is stable rather than following TOML map order.
 fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
     let read = |path: &Path| -> Option<Vec<(String, String)>> {
         let content = std::fs::read_to_string(path).ok()?;
