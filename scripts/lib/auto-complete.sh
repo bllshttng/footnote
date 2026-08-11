@@ -4,8 +4,9 @@
 # waiting for the LLM to emit <promise>.
 #
 # Lifted from hooks/target-stop-hook.sh (Phase 2 of stop-hook refactor).
-# Behavior is identical to the inline definitions; the helper's only
-# consumer is the promise-branch entry condition in the hook.
+# UNSOURCED as of 2026-08-10: nothing sources this file and the stop hook now shims `fno-agents loop-check`, so edits here are inert.
+# A reviver must fix one defect first: no caller establishes the `pipefail` this file assumes, and without it `jq_rc` reads `tail -1`'s 0
+# instead of jq's 5 on malformed input. Set it in the caller (verified: pipefail alone restores rc=5), or delete this file rather than maintaining it.
 #
 # Constrained sources (check_pr, pr_merge, ci_watcher, fno_gate_manual)
 # emit session_satisfied events; the LLM cannot forge one because the
@@ -18,8 +19,7 @@
 #   STATE_FILE - path to target-state.md
 #   STATE_DIR  - directory containing target-state.md (typically .fno/)
 #   log()      - logging function from the hook
-#   read_state_field KEY - single-arg form (uses global STATE_FILE);
-#                          defined in the hook below the source block.
+#   read_state_field KEY - single-arg form, uses global STATE_FILE.
 #
 # Side effects:
 #   AUTO_COMPLETE_TRIGGER - global; set to the matched event's
@@ -93,10 +93,10 @@ check_session_satisfied() {
     # grep -F is a cheap pre-filter; the jq select() also matches on .type
     # to avoid false positives if another event type's payload happens to
     # contain the literal string (Gemini PR #286 review). The `|| true`
-    # wrapper isolates grep's exit code from the rest of the pipeline:
-    # the caller runs under `set -o pipefail`, and grep returning 1 for
-    # "no matches" is the common case for fresh sessions. Without the
-    # wrapper, the pipeline rc would be 1 on every empty-events
+    # wrapper isolates grep's exit code from the rest of the pipeline under the
+    # `set -o pipefail` this file assumes (see the header: no caller sets it).
+    # grep returning 1 for "no matches" is the common case for a fresh session;
+    # without the wrapper the pipeline rc would be 1 on every empty-events
     # iteration, triggering the "possibly corrupt entries" log spuriously.
     event_json=$( (grep -F '"type":"session_satisfied"' "$events_file" 2>/dev/null || true) \
         | jq -c --arg sid "$sid" --arg hash "$current_hash" \
