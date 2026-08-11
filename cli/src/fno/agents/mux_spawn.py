@@ -58,6 +58,7 @@ from fno.agents.crown import (
     crown_validation_error,
     grant_error,
 )
+from fno.agents.whoami import is_caller_row
 
 #: Bound on the `pane run` / `pane ls` subprocesses. `pane run` includes a
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
@@ -1744,15 +1745,9 @@ def dispatch_spawn_pane(
                     and r.status not in TERMINAL_STATUSES
                 ]
 
-                def _is_caller(row) -> bool:
-                    return bool(
-                        spawned_by_session
-                        and row.harness_session_id == spawned_by_session
-                    )
-
-                if holders and all(_is_caller(h) for h in holders):
+                if holders and all(is_caller_row(h, spawned_by_session) for h in holders):
                     for idx, r in enumerate(rows):
-                        if r.crown_scope == crown_scope and _is_caller(r):
+                        if r.crown_scope == crown_scope and is_caller_row(r, spawned_by_session):
                             rows[idx] = replace(
                                 r,
                                 crown_level=None,

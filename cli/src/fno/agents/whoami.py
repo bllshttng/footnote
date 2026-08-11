@@ -156,6 +156,29 @@ def _find_by_session(
     return None
 
 
+def is_caller_row(row, session_uuid: str) -> bool:
+    """Is ``row`` the session that issued the current spawn - the king whose
+    crown a succession would transfer?
+
+    Mirrors the exact-match pass of :func:`_find_by_session`: ``harness_session_id``,
+    plus ``cc_session_id`` for claude (the field a partially-backfilled claude row
+    carries before reconcile backfills ``harness_session_id``). Without the
+    ``cc_session_id`` fallback, a claude row born with ``harness_session_id=None``
+    is seen as a stranger and a legitimate abdication is DECLINED instead of
+    transferred - while the authorization check (:func:`calling_agent_row` ->
+    :func:`_find_by_session`) finds the SAME row via this fallback and authorizes
+    it. The two checks must agree, or a king spawns an uncrowned heir.
+
+    ``cc_session_id`` is a claude-only field (``None`` on every other harness), so
+    the fallback is claude-scoped by construction.
+    """
+    if not session_uuid:
+        return False
+    if row.harness_session_id == session_uuid:
+        return True
+    return row.cc_session_id == session_uuid
+
+
 def resolve_self(
     env: Mapping[str, str],
     registry: list[AgentEntry],

@@ -137,6 +137,40 @@ def test_a_dead_king_does_not_need_succession(court) -> None:
     assert _row("heir").crown_level == 2
 
 
+def test_succession_matches_cc_session_id_for_a_partially_backfilled_row(court) -> None:
+    """A claude row born with harness_session_id=None (a raced uuid-resolution
+    miss reconciled later) but carrying its id in cc_session_id must still be
+    recognized as the caller, so its abdication TRANSFERS rather than being
+    declined. calling_agent_row finds the row via cc_session_id (the same field
+    _find_by_session matches for claude); the succession check (is_caller_row)
+    must agree, or a sitting king spawns an uncrowned heir."""
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="sitting-king",
+                cwd="/tmp",
+                log_path="",
+                harness="claude",
+                harness_session_id=None,
+                cc_session_id=CALLER_SESSION,
+                short_id="sk",
+                status="busy",
+                crown_level=2,
+                crown_scope=SCOPE,
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    _spawn_heir()
+
+    king, heir = _row("sitting-king"), _row("heir")
+    assert (king.crown_level, king.crown_scope) == (None, None), "the king vacates"
+    assert heir.crown_level == 2, "the heir receives the transferred crown"
+    assert heir.crown_scope == SCOPE
+
+
 def test_an_uncrowned_caller_grants_normally(court, monkeypatch) -> None:
     """No sitting holder at all: nothing to transfer, nothing to decline. The
     caller is an attended human (authorized to grant any scope); with no holder,
