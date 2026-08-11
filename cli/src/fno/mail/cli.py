@@ -253,8 +253,38 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         return
     violations = style.check(body, surface="mail")
     if violations:
+        _emit_style_refusal(violations)
         print(style.format_violations(violations), file=sys.stderr)
         raise typer.Exit(code=1)
+
+
+def _emit_style_refusal(violations: list) -> None:
+    """Record one style_refusal event so the retry rate is a query over events.jsonl.
+
+    Best-effort and never blocks a refusal: a measurement hook that wedged the
+    gate it measures would silence the distress channel. Carries the rule ids
+    that fired and the ambient session id, so a refusal paired with a later
+    passing send in the same session is the retry signal.
+    """
+    try:
+        from fno.events import _build, append_event
+        from fno.harness_identity import resolve_harness_identity
+
+        data: dict = {
+            "surface": "mail",
+            "rule_ids": sorted({v.rule for v in violations}),
+            "violation_count": len(violations),
+        }
+        ident = resolve_harness_identity()
+        if ident.session_id:
+            data["session_id"] = ident.session_id
+            source = "target"
+        else:
+            source = "test"
+        append_event(_build("style_refusal", source, data))
+    except Exception:
+        pass
+
 
 
 

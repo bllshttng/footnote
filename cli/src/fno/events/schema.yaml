@@ -784,6 +784,28 @@ event_types:
           description: "The gh-reported state of the PR at force-close time (OPEN/CLOSED/MERGED/UNKNOWN)."
     consumers: [operator]
 
+  - name: style_refusal
+    description: "A mail body was refused by the five-rule style gate before delivery. The retry rate (a refusal followed by a passing send in the same session) is a query over events.jsonl."
+    sources: [target, subagent, test]
+    data:
+      required: [surface, rule_ids]
+      properties:
+        surface:
+          type: string
+          description: "The surface the check ran on (mail today; the pr-body and markdown gates run at CI, not here)."
+        rule_ids:
+          type: array
+          description: "The rule numbers (1-5) that fired on the refused body."
+          items:
+            type: integer
+        violation_count:
+          type: integer
+          description: "Total violations found; a body can break several rules at once."
+        session_id:
+          type: string
+          description: "The refusing session's id, when ambient identity is present. Pairs a refusal with a later passing send for the retry-rate query."
+    consumers: [operator]
+
   - name: claim_acquired
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
     sources: [fno-loop, target, megawalk, megatron, hook]
