@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Enforce the four-axis vocabulary: no identifier, dict/JSON key, or env var named
-# for one axis (provider / harness / model) may hold a literal from another.
-# See docs/architecture/four-axis-vocabulary.md for the axis definitions this guards.
+# Enforce the four-axis vocabulary in two independent scans:
+#   contents - no identifier, dict/JSON key, or env var named for one axis
+#              (provider / harness / model) may hold a literal from another;
+#   names    - no DIRECTORY named for one axis may hold another axis's
+#              implementation, judged against the DECLARED_PATH_AXIS map below.
+# Only the contents scan is baselined. See docs/architecture/four-axis-vocabulary.md
+# for the axis definitions this guards.
 set -euo pipefail
 
 MODE="baseline"
