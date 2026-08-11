@@ -15,16 +15,12 @@ Acceptance criteria (operator-locked):
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from fno.paths_testing import use_tmpdir
 from fno.agents import events as events_mod
 from fno.agents.registry import (
-    AgentEntry,
     load_registry,
 )
 

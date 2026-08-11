@@ -2325,7 +2325,7 @@ def dispatch_spawn_pane(
 
             _spawn_events.emit_spawned(
                 name=name,
-                short_id=pane_id,
+                short_id=str(pane_id),
                 provider=provider,
                 spawned_by_session=spawned_by_session,
                 spawned_by_harness=spawned_by_harness,
@@ -2337,7 +2337,7 @@ def dispatch_spawn_pane(
             from fno.agents import events as _spawn_events
 
             _spawn_events.emit_spawn_failed(
-                name=name, provider=provider, short_id=pane_id, reason=f"registry-write: {exc}"
+                name=name, provider=provider, short_id=str(pane_id), reason=f"registry-write: {exc}"
             )
             reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
             if reaped:

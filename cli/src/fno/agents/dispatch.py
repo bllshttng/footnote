@@ -5283,7 +5283,6 @@ def _mux_pane_send(
             return
         try:
             from fno.events import agent_raw_inject, append_event
-            from fno.paths import agents_home_dir
 
             # Write the CANONICAL {type, source, data} envelope to the SAME log
             # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That

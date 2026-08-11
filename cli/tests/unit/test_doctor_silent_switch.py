@@ -7,7 +7,6 @@ irreversible action owes one too. Advisory only, never changes the exit code.
 from __future__ import annotations
 
 import types
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
