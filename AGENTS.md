@@ -56,12 +56,14 @@ A subprocess seeing only a tail of structured signals makes wrong calls with ful
 - graduates-to: a check that refuses to route a judgment call to a headless or bg subprocess.
 - added: 2026-07-23
 
-### An empty search result is a claim, and `rg` globs silently over-exclude
+### Assert a positive marker, never an absence
 
-Before concluding "no callers left", verify the search found something it should have. A ripgrep `--glob '!target/**'` is unanchored and matches at ANY depth, so it also excludes `skills/target/`. Truncated match lists ("43 matches in 9 files") read as complete. Cross-check a load-bearing sweep with `grep -rn` over explicit trees, and confirm a known-present hit appears before trusting an empty result.
+An absence has two explanations, the real outcome and "the instrument never ran", and a condition built on one cannot tell them apart.
+Require a string only the real outcome produces, pinned to the thing measured rather than any line carrying the word.
+`until ! grep -q pending out` called CI settled when `gh` died on a TLS error, since an error carries no "pending"; `grep -q '"settled": true'` is one line apart and fails safe.
 
-- specimens: `skills/target/references/pre-promise.md:125` and `usage-detail.md:82` (two live `fno providers` callers that survived every `rg` sweep of a rename that removed the verb, caught only by an external reviewer).
-- graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
+- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; `git worktree list | head -20` truncated a present worktree into a false absence; an unanchored `rg --glob '!target/**'` also hides `skills/target/`, so live callers survived every sweep of a rename; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
+- graduates-to: an assert helper refusing an absence-only success condition and failing a zero-hit probe with no positive control; it cannot catch an honest exit code answering a different question, which needs the owning verdict verb.
 - added: 2026-07-27
 
 ### A capability probe delivered over the mail bus can only ever return yes
@@ -90,7 +92,7 @@ footnote/
 ### Conventions
 
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
-- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees). Scope any `grep -r` to a path. Before concluding "no callers" from a sweep, re-run it with `rg -uu`: a `--glob=!target` in a personal `ripgreprc` (a common Rust default, since `crates/` builds into `target/`) silently hides all of `skills/target/`, and bundled copies live under `skills/*/scripts/`, so a plain `rg` can report zero hits for a symbol that exists twice.
+- **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees); scope any `grep -r` to a path. Re-run a load-bearing sweep with `rg -uu`; the over-exclusion trap is a pitfalls entry above.
 - **Markdown prose:** one full sentence per physical line (semantic line breaks); never wrap a sentence across lines. Governs prose paragraphs, not bullets/fences/tables.
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. See [docs/HARNESSES.md](docs/HARNESSES.md), [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md).
 
