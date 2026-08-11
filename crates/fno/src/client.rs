@@ -4883,9 +4883,7 @@ impl View {
             }
         };
         if self.hint {
-            let text = " % \" split · hjkl focus · HJKL resize · x close · c tab \
-                        · n/p cycle · 1-9 tab · & close-tab · w select · b sideline \
-                        · g grab · f find · / search · s status · d detach · ? all keys";
+            let text = crate::keys::prefix_hint();
             for (i, ch) in text.chars().take(cols).enumerate() {
                 put(cells, i, ch, 0);
             }

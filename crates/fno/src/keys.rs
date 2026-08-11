@@ -796,6 +796,67 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     rows
 }
 
+/// The one-line teaser shown while a prefix is pending, built from the LIVE
+/// bindings.
+///
+/// This was a hardcoded string of shipped keys. `config.mux.keys` moves the
+/// dispatch table underneath it, so a rebound action was advertised on a key
+/// that now BELs while the key it does answer on went unmentioned. Fixing the
+/// full `prefix+?` modal was not enough: this is a SECOND surface onto the same
+/// table, and a rebind has to reach every one of them or the feature reads as
+/// broken from whichever surface was missed.
+///
+/// A teaser, not the key list: it names one action per group and sends the
+/// reader to `?` for the rest. An action missing from the table drops silently
+/// rather than printing a gap.
+pub fn prefix_hint() -> String {
+    // (actions, how their keys join, the phrase that follows). No actions means
+    // a literal entry: the digit range is structural, not a binding.
+    const GROUPS: &[(&[&str], &str, &str)] = &[
+        (&["split-h", "split-v"], " ", "split"),
+        (
+            &["focus-left", "focus-down", "focus-up", "focus-right"],
+            "",
+            "focus",
+        ),
+        (
+            &["resize-left", "resize-down", "resize-up", "resize-right"],
+            "",
+            "resize",
+        ),
+        (&["close-pane"], "", "close"),
+        (&["new-tab"], "", "tab"),
+        (&["next-tab", "prev-tab"], "/", "cycle"),
+        (&[], "", "1-9 tab"),
+        (&["close-tab"], "", "close-tab"),
+        (&["selector"], "", "select"),
+        (&["toggle-sideline"], "", "sideline"),
+        (&["grab-work"], "", "grab"),
+        (&["find"], "", "find"),
+        (&["search"], "", "search"),
+        (&["toggle-status"], "", "status"),
+        (&["detach"], "", "detach"),
+        (&["show-keys"], "", "all keys"),
+    ];
+    let rows = key_bindings();
+    let mut parts: Vec<String> = Vec::new();
+    for (actions, sep, phrase) in GROUPS {
+        if actions.is_empty() {
+            parts.push(phrase.to_string());
+            continue;
+        }
+        let keys: Vec<String> = actions
+            .iter()
+            .filter_map(|a| rows.iter().find(|kb| kb.action == *a))
+            .map(|kb| kb.disp.clone())
+            .collect();
+        if !keys.is_empty() {
+            parts.push(format!("{} {phrase}", keys.join(sep)));
+        }
+    }
+    format!(" {}", parts.join(" \u{b7} "))
+}
+
 /// Display-only pseudo-bindings the modal shows but `chord()` handles as
 /// structural specials (not simple byte lookups): the digit tab-select range
 /// and the prefix-prefix literal. Kept beside [`key_bindings`] so the modal's
@@ -1186,6 +1247,62 @@ mod tests {
         let (map, warn) = resolve_keymap(Some("meta-q"), &[]);
         assert_eq!(map.prefix, DEFAULT_PREFIX);
         assert!(warn[0].0.contains("config.mux.prefix"));
+    }
+
+    #[test]
+    fn every_surface_that_shows_a_key_reads_the_same_table() {
+        // The pending-prefix hint was a hardcoded string, so a rebind reached
+        // the dispatch table and the `?` modal but not this line. Both surfaces
+        // are generated now; this asserts they agree rather than that either
+        // one contains a particular character.
+        let rows = key_bindings();
+        let hint = prefix_hint();
+        // Byte-identical to the string this generator replaced. Generating it
+        // was meant to change nothing an operator sees until they rebind
+        // something, so the shipped rendering is worth pinning.
+        assert_eq!(
+            hint,
+            " % \" split · hjkl focus · HJKL resize · x close · c tab · n/p cycle \
+             · 1-9 tab · & close-tab · w select · b sideline · g grab · f find \
+             · / search · s status · d detach · ? all keys"
+        );
+        let disp = |action: &str| {
+            rows.iter()
+                .find(|kb| kb.action == action)
+                .map(|kb| kb.disp.clone())
+                .expect("action is in the shipped table")
+        };
+        for action in ["detach", "find", "search", "show-keys", "new-tab"] {
+            assert!(
+                hint.contains(&disp(action)),
+                "the hint must name {action} on the key it actually answers on \
+                 ({}), hint was {hint:?}",
+                disp(action)
+            );
+        }
+        // A rebind moves the hint with it. Resolved locally rather than
+        // installed, since `install` is a process-global OnceLock.
+        let (map, warn) = resolve_keymap(None, &[("detach".into(), "Q".into())]);
+        assert!(warn.is_empty(), "Q is free: {warn:?}");
+        assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
+        let rebound: Vec<KeyBinding> = {
+            let mut rows = default_bindings();
+            for (action, byte) in &map.rebinds {
+                if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
+                    kb.key = *byte;
+                    kb.disp = key_disp(*byte);
+                }
+            }
+            rows
+        };
+        assert_eq!(
+            rebound
+                .iter()
+                .find(|kb| kb.action == "detach")
+                .map(|kb| kb.disp.as_str()),
+            Some("Q"),
+            "the table moved, so the hint built from it moves too"
+        );
     }
 
     #[test]
