@@ -503,6 +503,27 @@ class TestEventsMutex:
 
         release_dir_mutex(lock, token)
 
+    def test_renewal_between_age_check_and_rename_is_not_stolen(
+        self, tmp_path, monkeypatch
+    ):
+        lock = tmp_path / "events.jsonl.lock.d"
+        token = acquire_dir_mutex(lock, 5)
+        assert token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+        real_rename = mutex.os.rename
+
+        def renew_then_rename(source, destination):
+            assert renew_dir_mutex(source, token) is True
+            return real_rename(source, destination)
+
+        monkeypatch.setattr(mutex.os, "rename", renew_then_rename)
+
+        assert steal_if_stale(lock) is False
+        assert lock.exists()
+        assert (lock / "owner").read_text() == token
+
+        release_dir_mutex(lock, token)
+
     def test_non_owner_cannot_renew_a_lease(self, tmp_path):
         lock = tmp_path / "events.jsonl.lock.d"
         token = acquire_dir_mutex(lock, 5)

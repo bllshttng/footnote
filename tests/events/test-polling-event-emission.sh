@@ -193,6 +193,26 @@ wait "$gc_release_pid"
 line=$(tail -1 "$EVENTS_FILE" 2>/dev/null)
 assert_contains "GC barrier append" "$line" '"type":"gc_barrier_probe"'
 
+# Hook emitters must return well inside the harness's 30-second hook deadline
+# when maintenance stays live; losing this best-effort row must not suppress a
+# stop-hook decision that follows it.
+rm -f "$EVENTS_FILE"
+mkdir "${EVENTS_FILE}.gc.d"
+started=$(python3 -c 'import time; print(time.monotonic())')
+EVENTS_GC_WAIT_ATTEMPTS=2 emit_event target bounded_gc_wait_probe '{}'
+finished=$(python3 -c 'import time; print(time.monotonic())')
+rmdir "${EVENTS_FILE}.gc.d"
+if ! python3 - "$started" "$finished" <<'PY'
+import sys
+
+raise SystemExit(0 if float(sys.argv[2]) - float(sys.argv[1]) < 2 else 1)
+PY
+then
+    echo "FAIL GC barrier: shell emitter exceeded its bounded hook wait"
+    fail=1
+fi
+[[ ! -s "$EVENTS_FILE" ]] || { echo "FAIL GC barrier: bounded-out emitter appended during maintenance"; fail=1; }
+
 # A killed collector must not leave shell writers blocked forever.
 rm -f "$EVENTS_FILE"
 mkdir "${EVENTS_FILE}.gc.d"
@@ -232,6 +252,31 @@ identity_result=$(
 )
 assert_contains "stale identity replacement preserved" "$identity_result" PRESERVED
 assert_contains "fresh stale-marker owner preserved" "$identity_result" OWNER=fresh-holder
+
+# A long holder can renew after a stealer observes the old age. The owner token
+# is unchanged, so the post-rename mtime check is what preserves the live lease.
+renewed_lock="$WORK/stale-renewed.gc.d"
+mkdir "$renewed_lock"
+printf '%s' live-holder > "$renewed_lock/owner"
+touch -t 202001010000 "$renewed_lock"
+renewed_result=$(
+    (
+        # shellcheck disable=SC1090
+        source "$EVENTS_LIB"
+        mv() {
+            command touch "$1"
+            command mv "$@"
+        }
+        if _steal_stale_event_dir "$renewed_lock"; then
+            printf '%s\n' STOLEN
+        else
+            printf '%s\n' PRESERVED
+        fi
+        printf 'OWNER=%s\n' "$(cat "$renewed_lock/owner" 2>/dev/null || true)"
+    )
+)
+assert_contains "same-owner lease renewal preserved" "$renewed_result" PRESERVED
+assert_contains "renewed stale-marker owner preserved" "$renewed_result" OWNER=live-holder
 
 # A third holder can acquire the canonical path after the mismatched holder was
 # reaped but before it is restored. A directory-targeting mv must not nest the

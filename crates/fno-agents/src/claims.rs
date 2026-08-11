@@ -764,6 +764,7 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     // path, so what we move may be a LIVE lock. The owner token is the identity
     // check (inode recycling fooled the old inode+mtime compare).
     let before_token = read_owner(lock_dir);
+    let before_modified = before.modified().ok();
     // Unique per attempt (see the Python twin): one name per pid means a reap
     // dir left by a failed cleanup collides forever, silently disabling every
     // future steal by this process.
@@ -779,9 +780,10 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     ));
     match std::fs::rename(lock_dir, &reaped) {
         Ok(()) => {
-            // A live lock swapped in between the age check and the rename
-            // carries a different owner token: put it back and lose properly.
-            if !same_owner(&reaped, &before_token) {
+            // A live lock swapped in carries a different owner token; a holder
+            // that renewed after the age read keeps its token but changes the
+            // directory mtime. Either signal means put it back and lose.
+            if !same_stale_lease(&reaped, &before_token, before_modified) {
                 // A restored dir was disturbed once already: its holder may
                 // have released into the gap, leaving a lock nobody will
                 // remove. A fresh mtime would shield that orphan for the full
@@ -923,6 +925,14 @@ fn backdate_mtime(path: &Path, age: Duration) {
 fn same_owner(path: &Path, before_token: &str) -> bool {
     let after = read_owner(path);
     after.is_empty() || after == before_token
+}
+
+fn same_stale_lease(path: &Path, before_token: &str, before_modified: Option<SystemTime>) -> bool {
+    same_owner(path, before_token)
+        && std::fs::symlink_metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            == before_modified
 }
 
 /// Delete a reaped mutex, usually a directory but possibly a symlink
@@ -2533,6 +2543,22 @@ mod tests {
         // The new holder releases cleanly (token matches -> remove_dir_all).
         release_dir_mutex(&lock, &new_holder);
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn renewal_after_age_read_is_not_classified_as_stale() {
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+        let token = acquire_dir_mutex(&lock, Duration::from_secs(5), true).unwrap();
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+        let before = std::fs::symlink_metadata(&lock).unwrap();
+        let before_modified = before.modified().ok();
+
+        age_dir(&lock, 0);
+        assert_eq!(read_owner(&lock), token);
+        assert!(!same_stale_lease(&lock, &token, before_modified));
+
+        release_dir_mutex(&lock, &token);
     }
 
     #[test]

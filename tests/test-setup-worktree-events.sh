@@ -352,6 +352,25 @@ CANONICAL="$canonical" WORKTREE="$failed_once" bash "$SETUP" >/dev/null 2>&1
 assert "migration retry appends a failed row exactly once" test "$(grep -c 'failed_once_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 assert "migration retry installs the shared symlink" test -L "$failed_once/.fno/events.jsonl"
 
+lease_lost="$TMP/lease-lost"
+mkdir -p "$lease_lost/.fno"
+printf '%s\n' '{"type":"lease_lost_row"}' > "$lease_lost/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+cat > "$TMP/fail-lease-renewal-env" <<'STUB'
+touch() {
+  case "${1:-}" in
+    *.lock.d) return 1 ;;
+    *) command touch "$@" ;;
+  esac
+}
+export -f touch
+STUB
+CANONICAL="$canonical" WORKTREE="$lease_lost" BASH_ENV="$TMP/fail-lease-renewal-env" bash "$SETUP" >/dev/null 2>&1
+lease_lost_rc=$?
+assert "lost migration lease refuses publication" test "$lease_lost_rc" -ne 0
+assert "lost migration lease retains the local journal" bash -c 'test -f "$1" && test ! -L "$1" && grep -q lease_lost_row "$1"' _ "$lease_lost/.fno/events.jsonl"
+assert "lost migration lease does not publish canonical bytes" bash -c '! grep -q lease_lost_row "$1"' _ "$canonical/.fno/events.jsonl"
+
 partial_append="$TMP/partial-append"
 mkdir -p "$partial_append/.fno"
 printf '%s\n' '{"type":"partial_append_row"}' > "$partial_append/.fno/events.jsonl"

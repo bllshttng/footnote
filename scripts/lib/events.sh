@@ -26,7 +26,9 @@ _wait_for_event_gc() {
     local events_path="${1:?events path required}"
     local marker="${events_path}.gc.d"
     local attempts=0
-    while [[ -d "$marker" && "$attempts" -lt 600 ]]; do
+    local max_attempts="${EVENTS_GC_WAIT_ATTEMPTS:-20}"
+    [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=20
+    while [[ -d "$marker" && "$attempts" -lt "$max_attempts" ]]; do
         if _steal_stale_event_dir "$marker"; then
             continue
         fi

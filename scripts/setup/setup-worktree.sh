@@ -207,6 +207,11 @@ renew_events_migration_dirs() {
   done
 }
 
+verify_events_migration_leases() {
+  [[ -z "$EVENTS_MIGRATION_LEASE_FAILED" || ! -e "$EVENTS_MIGRATION_LEASE_FAILED" ]] \
+    && renew_events_migration_dirs
+}
+
 start_events_migration_keepalive() {
   EVENTS_MIGRATION_LEASE_FAILED=$(mktemp -t fno-events-migration-lease.XXXXXX) || return 1
   command -p rm -f "$EVENTS_MIGRATION_LEASE_FAILED"
@@ -597,7 +602,11 @@ reconcile_shared_events_fanout() {
     EVENTS_MIGRATION_DIRS+=("$second_fanout_lock")
   fi
   local rc=0
-  reconcile_status_fanout_cursors "$source" "$target" || rc=$?
+  if verify_events_migration_leases; then
+    reconcile_status_fanout_cursors "$source" "$target" || rc=$?
+  else
+    rc=1
+  fi
   cleanup_events_migration
   return "$rc"
 }
@@ -717,15 +726,19 @@ PY
     if (( rc == 0 )); then
       publish_events_migration_receipt "$staged" "$receipt" "$migration_id" "$local_events" || rc=$?
     fi
-    if (( rc == 0 )); then
+    if (( rc == 0 )) && verify_events_migration_leases; then
       if mv "$staged" "$source"; then
         EVENTS_MIGRATION_PUBLISHED=1
       else
         rc=$?
       fi
+    elif (( rc == 0 )); then
+      rc=1
     fi
-    if (( rc == 0 )); then
+    if (( rc == 0 )) && verify_events_migration_leases; then
       recover_event_cursor_pending "$source" "$cursor" || rc=$?
+    elif (( rc == 0 )); then
+      rc=1
     fi
     [[ -z "${staged:-}" ]] || rm -f "$staged"
   fi
@@ -937,7 +950,11 @@ link_events_journal() {
   shopt -u nullglob
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     local reconcile_rc=0
-    reconcile_status_fanout_cursors "$source" "$target" || reconcile_rc=$?
+    if verify_events_migration_leases; then
+      reconcile_status_fanout_cursors "$source" "$target" || reconcile_rc=$?
+    else
+      reconcile_rc=1
+    fi
     cleanup_events_migration
     return "$reconcile_rc"
   fi
@@ -973,50 +990,82 @@ link_events_journal() {
   fi
 
   local rc=0
+  local leases_owned=1
   local stamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
   local backup="${target}.pre-share.pending.${stamp}"
   local completed_backup="${target}.pre-share.${stamp}"
-  ensure_trailing_newline "$source" || rc=$?
-  if (( fresh_target == 1 )); then
+  verify_events_migration_leases || { rc=1; leases_owned=0; }
+  if (( rc == 0 )); then
+    ensure_trailing_newline "$source" || rc=$?
+  fi
+  if (( rc == 0 && fresh_target == 1 )); then
+    verify_events_migration_leases || { rc=1; leases_owned=0; }
+  fi
+  if (( rc == 0 && fresh_target == 1 )); then
     ln -s "$source" "$target" 2>/dev/null || rc=$?
   elif (( recover_pending == 1 )); then
     local pending completed
     if [[ ! -L "$target" ]]; then
-      if [[ -f "$target" ]]; then
+      if [[ -f "$target" ]] && verify_events_migration_leases; then
         mv "$target" "$backup" || rc=$?
         if (( rc == 0 )); then
           pending_backups+=("$backup")
         fi
+      elif [[ -f "$target" ]]; then
+        rc=1
+        leases_owned=0
       fi
-      if (( rc == 0 )); then
+      if (( rc == 0 )) && verify_events_migration_leases; then
         ln -s "$source" "$target" || rc=$?
+      elif (( rc == 0 )); then
+        rc=1
+        leases_owned=0
       fi
     fi
     for pending in "${pending_backups[@]}"; do
       if (( rc == 0 )); then
         append_migrated_events "$source" "$pending" true "$target_cursor" || rc=$?
-        if (( rc == 0 )); then
+        if (( rc == 0 )) && verify_events_migration_leases; then
           ensure_trailing_newline "$source" || rc=$?
+        elif (( rc == 0 )); then
+          rc=1
+          leases_owned=0
         fi
       fi
       completed="${pending/.pre-share.pending./.pre-share.}"
-      if (( rc == 0 )); then
+      if (( rc == 0 )) && verify_events_migration_leases; then
         mv "$pending" "$completed" || rc=$?
         if (( rc == 0 )); then
           command -p rm -f "${pending}.landed"
         fi
+      elif (( rc == 0 )); then
+        rc=1
+        leases_owned=0
       fi
     done
   elif (( rc == 0 )); then
-    mv "$target" "$backup" || rc=$?
+    verify_events_migration_leases || { rc=1; leases_owned=0; }
     if (( rc == 0 )); then
+      mv "$target" "$backup" || rc=$?
+    fi
+    if (( rc == 0 )) && verify_events_migration_leases; then
       ln -s "$source" "$target" || rc=$?
+    elif (( rc == 0 )); then
+      rc=1
+      leases_owned=0
     fi
     if (( rc == 0 )) && [[ -s "$backup" ]]; then
       append_migrated_events "$source" "$backup" false "$target_cursor" || rc=$?
-      if (( rc == 0 )); then
+      if (( rc == 0 )) && verify_events_migration_leases; then
         ensure_trailing_newline "$source" || rc=$?
+      elif (( rc == 0 )); then
+        rc=1
+        leases_owned=0
       fi
+    fi
+    if (( rc == 0 )) && ! verify_events_migration_leases; then
+      rc=1
+      leases_owned=0
     fi
     if (( rc == 0 )) && ! mv "$backup" "$completed_backup"; then
       echo "setup-worktree: events rows landed; pending backup retained for recovery: $backup" >&2
@@ -1028,17 +1077,22 @@ link_events_journal() {
     fi
   fi
 
-  if (( rc == 0 )); then
+  if (( rc == 0 )) && verify_events_migration_leases; then
     reconcile_status_fanout_cursors "$source" "$target" || rc=$?
+  elif (( rc == 0 )); then
+    rc=1
+    leases_owned=0
   fi
 
+  verify_events_migration_leases || { rc=1; leases_owned=0; }
   if ! stop_events_migration_keepalive; then
     rc=1
+    leases_owned=0
     echo "setup-worktree: events migration lost a mutex lease" >&2
   fi
 
   if (( rc != 0 )); then
-    if (( recover_pending == 0 && EVENTS_MIGRATION_PUBLISHED == 0 )); then
+    if (( leases_owned == 1 && recover_pending == 0 && EVENTS_MIGRATION_PUBLISHED == 0 )); then
       if [[ -L "$target" ]]; then
         rm -f "$target" 2>/dev/null || true
       fi

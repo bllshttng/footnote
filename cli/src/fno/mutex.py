@@ -194,9 +194,14 @@ def steal_if_stale(lock_dir: Path) -> bool:
         log.warning("could not steal stale mutex %s: %s", lock_dir, exc)
         return False
 
-    if not _same_owner(reaped, before_token):
-        # A live lock was swapped in between the age check and the rename: put
-        # it back and lose the race properly.
+    try:
+        lease_unchanged = reaped.lstat().st_mtime_ns == before.st_mtime_ns
+    except OSError:
+        lease_unchanged = False
+    if not _same_owner(reaped, before_token) or not lease_unchanged:
+        # A live lock was swapped in or renewed between the age check and the
+        # rename: put it back and lose the race properly. Renewal preserves the
+        # owner token, so the mtime check is independently load-bearing.
         #
         # A restored dir was disturbed once already: its holder may have
         # released into the gap, leaving a lock nobody will remove. A fresh
