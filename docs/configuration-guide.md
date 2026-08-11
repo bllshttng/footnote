@@ -166,6 +166,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `model_routing.roles` | dict[str, str] | `{}` | never | Per-role target map (role -> 'provider/model', e.g. tidy: 'zai/glm-4.7'; legacy 'provider,model' comma form also accepted); manage via `fno route set/unset`. The opt-in 'build' lane routes delivery spawns (/target bg). |
 | `model_routing.extra_env` | dict[str, str] | `{}` | never | Extra env merged into routed spawns (e.g. API_TIMEOUT_MS, per-tier model overrides). |
 | `mux.shell_integration` | str | `mux-panes` | advanced | Auto-inject OSC 133 block markers into mux-spawned shells: mux-panes (default) | off. Never edits your global shell rc. |
+| `mux.prefix` | str (optional) | _(none)_ | advanced | The mux prefix key, as C-a / Ctrl-a / ^a or a bare printable character. A digit 1-9 is refused (those select tabs), as is a key an action already holds. Unset keeps the built-in Ctrl-b. |
+| `mux.keys` | dict[str, str] | `{}` | advanced | Per-action key rebinds (action -> key), e.g. detach: 'Q'. Action ids are the ones prefix+? lists. An unreadable key, an unknown action, a digit (1-9 select tabs), or a collision is refused and reported rather than silently ignored. |
 | `mux.notify_on_blocked` | bool | `true` | advanced | Fire an OS notification when an agent badge enters 'blocked' (default on). |
 | `mux.notify_on_done` | bool | `false` | advanced | Also notify on a terminal 'done' hook transition (default off). |
 | `mux.attach_digest` | bool | `true` | advanced | Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on). |

@@ -286,11 +286,21 @@ impl Popup {
                     }
                 }
                 PopupRow::Entry { glyph, label, hint } => {
-                    let left = format!(" {glyph} {label}");
-                    let left_w = left.chars().count();
+                    // The right column is EXACT; the left one ellipsizes. Padding
+                    // the whole row and letting `pad` clip from the right ate the
+                    // hint on a narrow modal, and in the key modal the hint is the
+                    // stable action id an operator types into `config.mux.keys`.
+                    // A clipped `grab-…` there is worse than absent, because it
+                    // still looks like an id. The label is prose and survives
+                    // clipping as something a reader can still recognise.
                     let hint_w = hint.chars().count();
-                    let gap = width.saturating_sub(left_w + hint_w + 1);
-                    let text = pad(&format!("{left}{}{hint} ", " ".repeat(gap)), width);
+                    let left = format!(" {glyph} {label}");
+                    let text = if hint_w == 0 {
+                        pad(&left, width)
+                    } else {
+                        let room = width.saturating_sub(hint_w + 2);
+                        pad(&format!("{} {hint} ", pad(&left, room)), width)
+                    };
                     let ti = target_idx;
                     target_idx += 1;
                     RenderedLine {
