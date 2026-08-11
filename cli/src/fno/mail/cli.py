@@ -1717,7 +1717,7 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
-def _raw_send(name, payload, *, self_ok: bool) -> None:
+def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     """``fno mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
     REPL's slash parser runs it before the model sees it.
@@ -1729,11 +1729,29 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
 
     Never queues durable on any transport result: a not-confirmed raw inject may
     still land, and re-queueing it is how a verb fires twice at the wrong moment.
+
+    ``check`` runs every precondition and INJECTS NOTHING, printing ``injectable``
+    or ``not-injectable: <reason>``. It exists because advice is worse than
+    useless when the mechanism it prescribes cannot fire: a Stop hook that told
+    every session to self-inject ``/compact`` sent one session round the loop
+    twice before it gave up. A caller gates on this rather than guessing from the
+    session's shape, and gets the same resolution the real send would run.
     """
-    from fno.agents.dispatch import _mail_inject_claude, _mux_pane_send, keystroke_lane
+    from fno.agents.dispatch import (
+        _mail_inject_claude,
+        _mux_pane_send,
+        keystroke_lane,
+        mail_inject_probe,
+    )
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     def _refused(reason: str) -> None:
+        # Under --check every refusal is an ANSWER, not an error: "no injection
+        # path, and here is why" on stdout, so one caller reads one shape whether
+        # the miss was an unregistered session, a wrong lane, or an absent socket.
+        if check:
+            print(f"not-injectable: {reason}")
+            raise typer.Exit(code=1)
         print(f"refused: {reason}", file=sys.stderr)
         raise typer.Exit(code=2)
 
@@ -1776,14 +1794,20 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
     #    session_handle_tier returns None for an empty token, so a row carrying
     #    no harness_session_id (legacy/unmigrated) would sail past the self-check
     #    even when it IS this session. No id, no soundness.
-    if not session_id and not self_ok:
+    # --check is exempt from both self-address guards below. They are a usability
+    # redirect and a soundness floor for an ACTUAL keystroke; a check injects
+    # nothing, so there is no boundary to hold, and refusing here would answer
+    # "no path" to a caller that has one. It also lets a caller ask about itself by
+    # the session id it was HANDED (a Stop hook gets one in its payload) instead of
+    # reconstructing its own identity from the environment.
+    if not session_id and not (self_ok or check):
         _refused(
             f"{name!r} resolves to a registry row with no harness_session_id, so "
             "the self-send check cannot be decided; re-register the row "
             "(`fno agents register`), or if this IS your session address it with "
             "--to-self instead of a positional id"
         )
-    if _self_recipient(name, resolved_session_id=session_id) and not self_ok:
+    if _self_recipient(name, resolved_session_id=session_id) and not (self_ok or check):
         _refused(
             "you addressed this session. For a plain self-note the envelope is "
             "fine:\n    fno mail send <own-id> \"text\"\n"
@@ -1796,11 +1820,47 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
     #    with no TUI prompt line, so the slash never reaches a parser.
     lane, is_keystroke = keystroke_lane(entry)
     if not is_keystroke:
+        if check:
+            print(f"not-injectable: {lane} is not a prompt-line keystroke lane")
+            raise typer.Exit(code=1)
         _refused(
             f"{name!r} resolves to the {lane} lane, which is not a prompt-line "
             "keystroke path; a raw slash payload would reach the model as text, "
             "not fire. (Codex review forcing routes to the review/start RPC, not --raw.)"
         )
+
+    # --check stops here, one step short of the keystroke. Each lane is asked the
+    # strongest question it can answer cheaply, and neither answer is a promise the
+    # turn lands: no probe can see whether the prompt line is idle, so an idle-only
+    # refusal (a mid-turn pane, a busy control.sock) is invisible to both branches.
+    # "A path exists" is the whole claim.
+    if check:
+        if entry.mux:
+            # The pane paste never reaches the roster or a control socket, so the
+            # row recording a pane IS the path. Not verified against the mux server
+            # here: a pane that has since exited still reads injectable, and the
+            # send answers that in ~1s rather than a second subprocess answering it
+            # now.
+            print("injectable: mux-pane (a paste can still refuse a mid-turn pane)")
+            raise typer.Exit(code=0)
+        injectable, reason = mail_inject_probe(session_id)
+        if injectable:
+            print("injectable: control.sock (a paste can still refuse a busy prompt)")
+            raise typer.Exit(code=0)
+        if reason == "probe-unavailable":
+            # THIRD answer, not folded into the second. "I resolved and found no
+            # path" and "I could not resolve" are different claims, and a caller
+            # that gates advice on this must be able to tell them apart: the fno
+            # -agents binary being absent or stale (no --probe yet) says nothing
+            # about the session. Collapsing it into not-injectable would make this
+            # verb assert a verdict it never established.
+            print(
+                "unmeasurable: probe-unavailable (the fno-agents binary is absent, "
+                "too old to carry --probe, or did not answer; run `fno doctor`)"
+            )
+            raise typer.Exit(code=3)
+        print(f"not-injectable: {reason}")
+        raise typer.Exit(code=1)
 
     # 6 + 7. Inject UNWRAPPED (no _MailCtx -> none of the four wrap sites fire).
     #        Never durable on any result. Inject `stripped`, the string every
@@ -1950,6 +2010,23 @@ def cmd_send(
             "two-variable experiment - report any refusal verbatim and stop."
         ),
     ),
+    check: bool = typer.Option(
+        False, "--check",
+        help=(
+            "With --raw: report whether an injection path EXISTS and inject "
+            "nothing. Prints 'injectable: <lane>' (exit 0), 'not-injectable: "
+            "<reason>' (exit 1), or 'unmeasurable: <reason>' (exit 3) when it "
+            "could not resolve at all - that third answer is separate on purpose, "
+            "since an absent probe binary says nothing about the session. Gate on "
+            "this before you TELL anyone to "
+            "self-inject: a session with no registry row, a non-keystroke lane, or "
+            "no control socket has no path at all, and advice naming a mechanism "
+            "that cannot fire is worse than no advice. It resolves through the "
+            "same path the real send uses, so it cannot say yes where the send "
+            "says no. It reports a PATH, never a landing: no probe can see whether "
+            "the prompt line is idle."
+        ),
+    ),
     to_self: bool = typer.Option(
         False, "--to-self",
         help=(
@@ -2051,8 +2128,17 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        _raw_send(name, message, self_ok=to_self)
+        _raw_send(name, message, self_ok=to_self, check=check)
         return
+    if check:
+        # Only the --raw lane has a keystroke path to have or lack; a wrapped send
+        # always has the durable floor, so there is nothing to gate on.
+        print(
+            "error: --check applies to --raw (the keystroke lane); a wrapped send "
+            "always has the durable fallback",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
 
     # --from-self resolves this session's own canonical handle and threads it as
     # from_name, so every lane below (project-note / --to-project / name) stamps a

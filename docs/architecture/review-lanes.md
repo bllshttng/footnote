@@ -58,6 +58,10 @@ fno mail send <peer> '/code-review medium --fix' --raw
 fno mail send '/code-review medium --fix' --to-self --raw
 ```
 
+Before you tell anyone else to run one of those, ask whether they can: `fno mail send '<payload>' --to-self --raw --check` (or `fno mail send <peer> '<payload>' --raw --check`) reports `injectable: <lane>` or `not-injectable: <reason>` and injects nothing.
+It answers whether a PATH exists, never whether the turn lands, since no probe can see whether the prompt line is idle.
+See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Stop hook gates its compact advice on it.
+
 `fno mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
 A claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
 A mux-hosted session injects via `fno mux pane send`, a separate path that never reaches the mail-inject binary.
