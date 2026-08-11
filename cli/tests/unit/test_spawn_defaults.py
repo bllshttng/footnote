@@ -655,6 +655,22 @@ def test_bare_explicit_vendor_wins_over_config_route():
     assert out[out.index("-P") + 1] == "zai"
 
 
+def test_bare_explicit_vendor_suppresses_config_model():
+    # The model-path twin of test_bare_explicit_vendor_wins_over_config_route:
+    # a bare -P (no -m) must not receive an injected config model either, or
+    # the result pairs a config model with a DIFFERENT vendor - e.g. -P zai +
+    # injected --model opus -> route "zai/opus", an anthropic model at a zai
+    # endpoint. The exact invisible-billing shape this whole module exists to
+    # kill, previously reachable via the model path even though the route path
+    # was already guarded.
+    out = _inject(
+        ["spawn", "-P", "zai", "--name", "w", "/fno:target x-1"],
+        model="opus",
+    )
+    assert "--model" not in out
+    assert out[out.index("-P") + 1] == "zai"
+
+
 def test_config_account_not_injected_over_explicit_non_claude_harness():
     # Accounts are Claude-only; cmd_spawn rejects --account on any other
     # harness. A configured account must not follow an explicit -H codex (e.g.

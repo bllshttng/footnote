@@ -462,6 +462,23 @@ def _flag_present(toks: Sequence[str], flag: str) -> bool:
     return False
 
 
+def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
+    """Value of the first of ``flags`` found as ``--flag value`` or
+    ``--flag=value``, else None. Stops at the ``--argv`` payload boundary."""
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "--argv":
+            break
+        for f in flags:
+            if t == f:
+                return toks[i + 1] if i + 1 < len(toks) else None
+            if t.startswith(f + "="):
+                return t.split("=", 1)[1]
+        i += 1
+    return None
+
+
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
     resolved provider. ``bg`` is claude-only; ``pane``/``headless`` are universal.
@@ -646,7 +663,8 @@ def inject_spawn_defaults(
     # so injecting a config route here would turn a helpful "add --model" error
     # into a confusing route-collision one on an argv the operator never paired
     # with a route at all.
-    explicit_vendor_present = _flag_present(out[1:], "--provider") or _flag_present(out[1:], "-P")
+    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
+    explicit_vendor_present = explicit_vendor is not None
     explicit_route = _flag_present(out[1:], "--route")
     route_injected = False
     if cfg_route and not explicit_route and not explicit_model_present and not explicit_vendor_present:
@@ -692,6 +710,21 @@ def inject_spawn_defaults(
             print(
                 f"fno agents spawn: --route owns the model; not injecting "
                 f"{model_rung}.model {cfg_model!r}",
+                file=err,
+            )
+        elif explicit_vendor_present:
+            # A bare explicit -P/--provider (vendor, no -m) already names the
+            # vendor half of a route; cmd_spawn pairs it with whatever --model
+            # reaches it. Injecting the config model here would pair a DIFFERENT
+            # vendor's model behind the explicit vendor (e.g. -P zai + injected
+            # --model opus -> route "zai/opus", an anthropic model at a zai
+            # endpoint) - the same invisible-billing shape the route/vendor
+            # collision guards above exist to kill, just on the model path
+            # instead of the route path.
+            print(
+                f"fno agents spawn: --provider {explicit_vendor!r} names a "
+                f"vendor; not injecting {model_rung}.model {cfg_model!r} "
+                "(add --model yourself to complete the route)",
                 file=err,
             )
         elif role and _role_resolves(role, settings, env):
