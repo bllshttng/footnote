@@ -165,7 +165,14 @@ fn create_unparseable_stdout_is_parse_error() {
         fno_agents::claude_ask::HarnessFlags::default(),
     )
     .unwrap_err();
-    assert!(matches!(err, AskError::Parse { .. }));
+    // Name the variant we got. This assertion used to discard `err`, so when it
+    // failed once under a loaded CI runner the log could only say "not Parse" -
+    // and Subprocess{127} (the fake claude failed to exec) reads nothing like
+    // Parse but is indistinguishable from it in a bare `matches!`.
+    assert!(
+        matches!(err, AskError::Parse { .. }),
+        "expected a parse error, got: {err}"
+    );
 }
 
 #[test]
