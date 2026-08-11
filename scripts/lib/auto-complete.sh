@@ -3,9 +3,15 @@
 # event so the stop hook can take the auto-complete path instead of
 # waiting for the LLM to emit <promise>.
 #
-# Lifted from hooks/target-stop-hook.sh (Phase 2 of stop-hook refactor).
-# Behavior is identical to the inline definitions; the helper's only
-# consumer is the promise-branch entry condition in the hook.
+# Lifted from hooks/target-stop-hook.sh (Phase 2 of stop-hook refactor)
+# to serve the promise-branch entry condition there.
+#
+# UNSOURCED as of 2026-08-10: nothing in this repo sources this file.
+# The stop hook now shims `fno-agents loop-check`, which decides the
+# auto-complete path in Rust, so editing anything here changes no
+# running behavior. Verify a consumer exists before treating a fix here
+# as shipped - and if none appears, delete the file rather than
+# maintaining it.
 #
 # Constrained sources (check_pr, pr_merge, ci_watcher, fno_gate_manual)
 # emit session_satisfied events; the LLM cannot forge one because the
@@ -93,16 +99,14 @@ check_session_satisfied() {
     # grep -F is a cheap pre-filter; the jq select() also matches on .type
     # to avoid false positives if another event type's payload happens to
     # contain the literal string (Gemini PR #286 review). The `|| true`
-    # wrapper isolates grep's exit code from the rest of the pipeline:
-    # the caller runs under `set -o pipefail`, and grep returning 1 for
-    # "no matches" is the common case for fresh sessions. Without the
-    # wrapper, the pipeline rc would be 1 on every empty-events
-    # iteration, triggering the "possibly corrupt entries" log spuriously.
+    # wrapper isolates grep's exit code from the rest of the pipeline, so a
+    # caller running under `set -o pipefail` does not see rc=1 on every
+    # empty-events iteration (grep's "no matches" is the common case for a
+    # fresh session) and log "possibly corrupt entries" spuriously.
     # `tail -1` is applied AFTER the status is read, not inside the pipeline.
     # With it inline, `jq_rc` was whatever `tail` returned, which is 0 for any
-    # input including jq's failure output, so the variable named jq_rc reported
-    # jq's health only when the caller happened to set `pipefail`. Nothing here
-    # establishes that, so read jq's status directly instead of assuming it.
+    # input including jq's failure output. Do not assume the caller set
+    # `pipefail`; nothing here establishes it, so read jq's status directly.
     local jq_out
     jq_out=$( (grep -F '"type":"session_satisfied"' "$events_file" 2>/dev/null || true) \
         | jq -c --arg sid "$sid" --arg hash "$current_hash" \
