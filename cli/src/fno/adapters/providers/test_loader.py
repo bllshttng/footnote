@@ -4,6 +4,7 @@ Run: cd cli && uv run pytest src/fno/adapters/providers/test_loader.py -v
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -1484,7 +1485,55 @@ class TestLoadAgents:
 
         from fno.adapters.providers.loader import _AGENTS_RESERVED_KEYS
 
+        # The comparison is Python field NAME against TOML KEY, which holds only
+        # while no field carries an alias. ProviderRecord in this same module
+        # renames with AliasChoices("harness", "cli"), so the pattern is live
+        # here. Were AgentsBlock.defaults ever renamed that way, updating the
+        # literal to the new field name would keep this green while dropping the
+        # still-valid `defaults` key out of the exclusion - reintroducing exactly
+        # the bug the set exists to prevent. Refuse that setup rather than handle
+        # it: this fails, and whoever adds the alias switches to an alias-aware
+        # key set.
+        assert all(
+            f.validation_alias is None and f.alias is None
+            for f in AgentsBlock.model_fields.values()
+        ), "AgentsBlock gained a field alias; compare alias-aware keys, not names"
+
         assert set(_AGENTS_RESERVED_KEYS) == set(AgentsBlock.model_fields)
+
+    def test_reserved_key_carrying_a_pin_warns(self, tmp_path: Path, caplog):
+        """A reserved key that is ALSO binding-shaped is skipped, but not
+        silently: without a diagnostic the operator's worker routes to the
+        default account and nothing anywhere says why."""
+        from fno.adapters.providers.loader import load_providers
+
+        base = _valid_providers_block()
+        base["agents"] = {"codex": {"provider": "claude-primary"}}
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        with caplog.at_level(logging.WARNING):
+            result = load_providers(repo_root=tmp_path)
+
+        assert result.agents == {}
+        assert any("reserved settings key" in r.message for r in caplog.records)
+
+    def test_defaults_block_does_not_warn(self, tmp_path: Path, caplog):
+        """The shipped spawn default must stay quiet: it carries `provider` by
+        design, so warning there would fire on every valid config."""
+        from fno.adapters.providers.loader import load_providers
+
+        harness_default = "codex"
+        base = _valid_providers_block()
+        base["agents"] = {"defaults": {"provider": harness_default}}
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        with caplog.at_level(logging.WARNING):
+            result = load_providers(repo_root=tmp_path)
+
+        assert result.agents == {}
+        assert not any("reserved settings key" in r.message for r in caplog.records)
 
 
 class TestMutableAccountsBlockShapes:

@@ -341,6 +341,24 @@ def _parse_providers_block(
             # the two apart, because a reserved block is allowed any field it
             # likes and agents.defaults uses `provider` for the harness axis.
             if agent_name in _AGENTS_RESERVED_KEYS:
+                # An entry that is reserved AND binding-shaped is ambiguous: the
+                # operator may have meant a pin for an agent whose name collides
+                # with a settings key. Skipping is still right (the schema owns
+                # the name), but skipping SILENTLY would route that worker to the
+                # default account with no diagnostic anywhere. `defaults` is the
+                # known-benign case - its provider field is the spawn default, so
+                # warning there would fire on every valid config.
+                if (
+                    agent_name != "defaults"
+                    and isinstance(raw_binding, dict)
+                    and "provider" in raw_binding
+                ):
+                    logger.warning(
+                        "config.agents.%s is a reserved settings key, so its "
+                        "'provider' field is NOT read as a per-agent pin; rename "
+                        "the agent if you meant to pin one",
+                        agent_name,
+                    )
                 continue
             # Shape stays as the second filter: it skips scalars (max_live = 15)
             # and any other non-binding entry a future key adds.
