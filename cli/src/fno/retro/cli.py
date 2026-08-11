@@ -547,6 +547,118 @@ def drain_postmortems() -> None:
     raise typer.Exit(1 if failed else 0)
 
 
+def _pending_carveout_count(carveout_root: Path) -> int:
+    """Unharvested non-backfill carve-outs on the ledger (0 on any failure).
+
+    Read-only and best-effort: this only decides whether `retro run` mentions
+    the ledger, and a ledger problem must never sink the sentinel loop.
+    """
+    try:
+        from fno.carveout.core import BACKFILL_KIND, read_carveouts
+
+        rows = read_carveouts(carveout_root)
+    except Exception:
+        return 0
+    return sum(1 for r in rows if r.get("kind") != BACKFILL_KIND)
+
+
+@retro_app.command("sweep-carveouts")
+def sweep_carveouts_cmd(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help=(
+            "File and consume for real. Omitted, the sweep is a DRY RUN: it "
+            "prints what it would file, what is already tracked, and what needs "
+            "a human look, and writes nothing."
+        ),
+    ),
+    kind: Optional[str] = typer.Option(
+        None,
+        "--kind",
+        "-k",
+        help="Narrow to one carve-out kind (deferred | oos-bug). Dispositions "
+        "are unchanged; `backfill` is never swept (it belongs to /fno:pr merged).",
+    ),
+    autonomous: bool = typer.Option(
+        False,
+        "--autonomous",
+        help=(
+            "Land filed nodes ACTIVE instead of queued. Default (interactive) "
+            "queues them behind a `fno backlog pick` ack, so a human still sees "
+            "each one before it enters ready work."
+        ),
+    ),
+) -> None:
+    """Sweep the whole carve-out ledger, PR-independent; dry run by default.
+
+    The PR-scoped harvest only sees carve-outs a trigger points it at, so a
+    carve-out with no session, or one whose PR never dropped a sentinel, is
+    never harvested by any path. This sweep reads the ledger itself, dedups
+    every row against the live graph, and files ONLY what nothing already
+    tracks. A row is consumed only once its work has a node (or an inbox line)
+    to live in.
+    """
+    from fno.carveout.core import BACKFILL_KIND, VALID_KINDS, resolve_carveout_root
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json, resolve_canonical_repo_root, resolve_repo_root
+    from fno.retro.land import MODE_AUTONOMOUS, MODE_INTERACTIVE
+    from fno.retro.sweep import render_sweep, sweep_carveouts
+
+    sweepable = [k for k in VALID_KINDS if k != BACKFILL_KIND]
+    if kind is not None and kind not in sweepable:
+        # backfill is a VALID carve-out kind but never a sweepable one. Letting
+        # it through validation reported "0 unharvested" for rows that exist and
+        # are simply owned by another verb, which reads as "nothing to do".
+        detail = (
+            " (backfill belongs to /fno:pr merged's backfill slot and is never swept)"
+            if kind == BACKFILL_KIND
+            else ""
+        )
+        typer.echo(
+            f"retro: invalid --kind '{kind}' (expected one of: "
+            f"{', '.join(sweepable)}){detail}",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    repo_root = resolve_repo_root()
+    node_root = resolve_canonical_repo_root()
+    try:
+        nodes = read_graph(graph_json())
+    except Exception as exc:
+        # Without the graph there is no dedup, and filing blind is the failure
+        # this sweep exists to prevent. Refuse rather than duplicate.
+        typer.echo(f"retro: cannot read the graph for dedup ({exc}); refusing to sweep", err=True)
+        raise typer.Exit(1)
+
+    try:
+        from fno.graph._intake import detect_project_from_settings
+
+        project = detect_project_from_settings(str(node_root))
+    except Exception:
+        project = None
+
+    report = sweep_carveouts(
+        repo_root=repo_root,
+        carveout_root=resolve_carveout_root(),
+        nodes=nodes,
+        apply=apply,
+        mode=MODE_AUTONOMOUS if autonomous else MODE_INTERACTIVE,
+        project=project,
+        cwd=str(node_root),
+        kind=kind,
+    )
+    for line in render_sweep(report):
+        typer.echo(line)
+    for w in report.warnings:
+        typer.echo(f"WARN {w}", err=True)
+    if not apply and report.items:
+        typer.echo("")
+        typer.echo("re-run with --apply to file and consume.")
+    raise typer.Exit(1 if report.failed else 0)
+
+
 @retro_app.command("run")
 def run(
     node: Optional[str] = typer.Option(None, "--node", help="Triage only this node's sentinel."),
@@ -689,8 +801,33 @@ def run(
         except Exception as _exc:
             typer.echo(f"WARN gate_escape summary failed: {_exc}", err=True)
 
+    def _report_pending_carveouts() -> None:
+        """Name what the triggers left behind, AFTER they have run.
+
+        The sentinel loop only sees carve-outs a trigger points it at. A
+        carve-out with no session, or one whose PR never dropped a sentinel, is
+        invisible to it - so "no sentinels" read as "nothing to do" while the
+        ledger filled up, and the close gate then refused every node with no
+        verb that could clear it.
+
+        Counted at the END, on every run including --pr-number (how /fno:pr
+        merged calls this). Counting up front announced the rows this very run
+        was about to harvest as "no trigger covers them", which is false while
+        it is being printed and stale by the time the run finishes. Reporting
+        only: the sweep mutates the graph, and no caller of `retro run` may
+        file nodes unattended.
+        """
+        pending = _pending_carveout_count(carveout_root)
+        if pending:
+            typer.echo(
+                f"carve-outs: {pending} left unharvested on the ledger after "
+                f"this run (no trigger covers them); preview with "
+                f"`fno retro sweep-carveouts`"
+            )
+
     if not candidates and pr is None:
         typer.echo("(no retro-pending sentinels to triage)")
+        _report_pending_carveouts()
         raise typer.Exit(1 if pm_failed else 0)
 
     any_retained = pm_failed
@@ -778,6 +915,8 @@ def run(
         except Exception as exc:
             typer.echo(f"WARN --pr {pr}: {exc}", err=True)
             any_retained = True
+
+    _report_pending_carveouts()
 
     # Non-zero when something was retained for retry (AC4-ERR), so a loop knows.
     raise typer.Exit(1 if any_retained else 0)

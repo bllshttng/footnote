@@ -10,6 +10,8 @@ in-session:  executor --fno carveout add--> .fno/carveouts.jsonl
 merge (ship gate):   pr-merge.sh --> .fno/.triage-pending  (fast-path, /target only)
 merge (outside):     reconcile  --> ~/.fno/retro-pending/<node>.json  (universal)
                                                      |
+no trigger at all:   `fno retro sweep-carveouts` reads the ledger directly
+                                                     |
                               `fno retro run` (consumer)
                                                      v
    shared routine (cli/src/fno/retro/routine.py::triage_pr):
@@ -53,7 +55,54 @@ It appends one JSON line to `.fno/carveouts.jsonl` via the events.jsonl mkdir-mu
 | `dedup.py` | key = `source_pr + blake2b(normalized finding)`; badge/whitespace-insensitive so two reviewers on one issue collapse; reads existing keys from a machine trailer in node `details` (no schema fields). Idempotent. |
 | `land.py` | routes by mode — autonomous → active node; interactive → create + queue (adopt-stays-pure); low/nit → `backlog.inbox.add_item`. Mode from the trigger sentinel, absent → interactive (safe). Per-node failures recorded, not raised, so partial progress persists and a re-run dedups. |
 | `routine.py` | the one shared `triage_pr(...)` both triggers call. |
+| `sweep.py` | the PR-independent ledger sweep (see below): reads `.fno/carveouts.jsonl` with no trigger, dedups every row against the live graph, files only what nothing already tracks. `plan_sweep` is pure, so the dry run and the applied run cannot diverge. |
 | `cli.py` | `fno retro run` consumes `~/.fno/retro-pending/*.json` (universal) and `.fno/.triage-pending` (fast-path). Consume-then-remove: a sentinel is removed only on a clean land; a partial harvest (`gh_unavailable`) or land failure retains it for retry. Reloads live nodes per sentinel so dual triggers collapse to one node set. |
+
+### The PR-independent sweep (`fno retro sweep-carveouts`)
+
+Everything above is PER-PR: a trigger names a PR, and the carve-out read is scoped to that PR's owning session(s) from `ledger.json`.
+Two shapes of carve-out fall outside every one of those triggers.
+A carve-out written with no resolvable session (`session_id: null`) never matches a session scope, and an unresolvable owner degrades to read-only rather than filing.
+A PR that merged without ever dropping a sentinel leaves nothing to iterate, so `fno retro run` returns "no retro-pending sentinels to triage" and never opens the ledger.
+Both accumulate silently, and since the close gate's condition D refuses a close on any unharvested `deferred` carve-out, they eventually wedge unrelated nodes.
+
+`fno retro sweep-carveouts` closes that gap by reading the ledger itself, keyed off nothing.
+It is a DRY RUN by default; `--apply` is the only path that writes.
+Bare `fno retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:pr check`, `/fno:pr merged`, direct CLI) but never applies, and neither does `fno backlog groom`.
+
+**The harvest is manual by design, and that is the trade, not an oversight.**
+There is no `fno backlog delete`, so every filed node is permanent.
+An irreversible operation must not run unattended, and `fno retro run` fires from a background SessionStart hook.
+The measured consequence of that rule: condition D keeps refusing closes until a human runs the verb.
+A gate that clears itself unattended by minting permanent state is not a gate, and a harvest that files a duplicate has no undo.
+One project reached 23 surplus nodes that cannot be removed by taking the other side of this trade.
+
+Dedup is the feature, not polish. Filing one node per carve-out is worse than not harvesting, because a re-filed item becomes a duplicate and there is no `fno backlog delete`.
+Each row is matched against every node in the graph, done nodes included, by three matchers with two outcomes:
+
+| Match | Outcome |
+|---|---|
+| cv-id quoted verbatim in a node's title or details (**exact**) | `resolve`: consume the row, file nothing, name the tracking node. This is the ONLY match that consumes. Every carve-out node cites its cv-id, whichever harvest filed it, so it covers a re-run and a PR-harvested node alike. |
+| an existing `retro-triage` trailer whose `finding_hash` equals the description hash, **ignoring** the trailer's `source_pr` (**ambiguous**) | `review`: the hash covers the description alone, so two carve-outs can share generic text ("unrelated", "no reliable repro") while differing in kind, need and scope. Resolving on that would consume the later row without filing its distinct work. |
+| normalized-title similarity at or above 0.85, minimum 20 chars (**fuzzy**) | `review`: neither filed (would duplicate) nor consumed (a wrong guess loses the work). A human decides, and a parked `deferred` row keeps blocking its close, which is the correct outcome. |
+| the same text already claimed by an earlier row in this same sweep (**within-batch**) | `review`: one blocker carved out from two sessions is still one piece of work. It parks rather than resolving, because the twin's node does not exist yet and nothing is consumed without a node. |
+| the row carries no `id` | `review`: `read_carveouts` does not require one, and a row without an id has no cite, so it can never be filed. Named once rather than failing every future sweep. |
+| nothing matched | `file`: mint the node (queued behind `fno backlog pick` in interactive mode), then consume. |
+
+The cv-id is also the key across the two harvest paths.
+The content-hash dedup key is `{source_pr}:{hash}`, so a node the sweep filed (`source_pr=None`) and the same carve-out arriving later through a PR-scoped harvest (`source_pr=123`) produce different keys for identical work and both would file.
+That is reachable whenever a sweep's consume falls short, which it can: `consume_carveouts` is best-effort and returns 0 on a lock timeout.
+`cv_ids_cited_in_nodes` is shared by both paths so neither files what the other already tracks.
+
+The fuzzy matcher compares the title the sweep would actually file, not the carve-out's `need`.
+Those diverged once and left the sweep blind to every node it had filed itself.
+Filing assigns the content hash that `land` writes into the node's dedup trailer; skipping that step wrote `finding_hash=` empty, which matches no trailer pattern, so the filed node was invisible to every later dedup pass.
+
+No row is ever consumed without a node id attached to it.
+A failed mint leaves the row in the ledger; clearing it to turn the gate green with the work tracked nowhere is exactly what the gate exists to prevent.
+
+`deferred` and `oos-bug` are both swept and stay distinct: `deferred` is declared scope that did not ship and blocks a close, `oos-bug` is discovery and never blocks.
+`backfill` is skipped here as it is everywhere else, since it belongs to `/fno:pr merged`'s backfill slot.
 
 ### Classification is deterministic by design
 

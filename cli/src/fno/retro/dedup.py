@@ -66,6 +66,33 @@ def assign_hashes(candidates: Iterable[Candidate]) -> list[Candidate]:
     return out
 
 
+def cv_ids_cited_in_nodes(
+    nodes: Iterable[dict], cv_ids: Iterable[str]
+) -> "set[str]":
+    """Which of ``cv_ids`` are already cited verbatim by some node.
+
+    The content-hash key is ``{source_pr}:{hash}``, so a node the PR-independent
+    sweep filed (``source_pr=None``) and the same finding arriving later through
+    a PR-scoped harvest (``source_pr=123``) produce DIFFERENT keys for identical
+    work and both file. The cv-id is the one identifier stable across that
+    boundary: every carve-out node cites it, whichever harvest filed it. Shared
+    by both harvest paths so neither can drift into filing what the other
+    already tracks.
+    """
+    wanted = {str(c) for c in cv_ids if c}
+    if not wanted:
+        return set()
+    found: set[str] = set()
+    for node in nodes:
+        text = f"{node.get('title') or ''}\n{node.get('details') or ''}"
+        for cv in wanted - found:
+            if cv in text:
+                found.add(cv)
+        if found == wanted:
+            break
+    return found
+
+
 def existing_keys_from_nodes(nodes: Iterable[dict]) -> set[str]:
     """Scan live nodes' ``details`` for retro-triage trailers -> set of dedup keys."""
     keys: set[str] = set()

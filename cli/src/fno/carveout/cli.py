@@ -233,20 +233,53 @@ def resolve_carveouts(
         ...,
         help="Carve-out id(s) to remove from the ledger (e.g. cv-ab12cd34).",
     ),
+    reason: str = typer.Option(
+        None,
+        "--reason",
+        "-R",
+        help="Why these rows are being retired without a node. Recorded as a "
+        "`carveout_resolved` event - the only trace a row leaves when it is "
+        "removed without becoming tracked work.",
+    ),
 ) -> None:
     """Remove handled carve-out(s) from the ledger.
 
     Used by /fno:pr merged's backfill slot once a backfill is run or filed
     as a backlog node, so a later run never re-offers the same entry. Idempotent:
     an id not present is a silent no-op. Prints the count actually removed.
+
+    ``--reason`` exists for the row that should be retired WITHOUT filing
+    anything: test residue, a duplicate of work already tracked elsewhere, a
+    carve-out overtaken by events. The backlog has no delete verb, so a junk
+    node is permanent while a reasoned resolve is a cheap, recorded correction.
+    Without the reason that same removal is indistinguishable from dropping the
+    work on the floor.
     """
-    from fno.carveout.core import consume_carveouts, resolve_carveout_root
+    from fno.carveout.core import (
+        consume_carveouts,
+        read_carveouts,
+        resolve_carveout_root,
+    )
 
     # Dedupe (order-preserving) so a repeated id does not inflate the requested
     # count and trip a false shortfall warning - consume_carveouts dedupes
     # internally, so removed is by unique id.
     unique_ids = list(dict.fromkeys(ids))
-    removed = consume_carveouts(resolve_carveout_root(), unique_ids)
+    root = resolve_carveout_root()
+    # Which requested ids are actually ON the ledger, read BEFORE the removal.
+    # consume_carveouts returns only a count, so without this the event below
+    # would name every id the operator typed - asserting that an absent id was
+    # retired for that reason while it sits on some other ledger, or nowhere.
+    # An unreadable ledger degrades to "cannot attribute" rather than guessing.
+    try:
+        present = {
+            str(r.get("id"))
+            for r in read_carveouts(root)
+            if str(r.get("id")) in set(unique_ids)
+        }
+    except Exception:
+        present = set()
+    removed = consume_carveouts(root, unique_ids)
     if removed < len(unique_ids):
         # consume_carveouts returns the count actually removed and is best-effort
         # (a lock timeout or unwritable ledger also returns a low count). A
@@ -259,4 +292,46 @@ def resolve_carveouts(
             "remainder absent or ledger unwritable",
             err=True,
         )
+    # `removed > 0`, not just `reason`: consume_carveouts is best-effort and
+    # returns 0 on a lock timeout or an unwritable ledger, so emitting there
+    # would record a retirement of rows still sitting on the ledger.
+    if reason and removed:
+        # Best-effort: the rows are already gone, so a failed emit must not read
+        # as a failed resolve. It must not be silent either - an unrecorded
+        # reasoned removal is the untraceable drop the flag exists to prevent.
+        try:
+            from fno.events import _build, append_event
+            from fno.paths import project_log
+
+            # Explicit events_path, rooted where the LEDGER lives. Without it
+            # append_event writes to a relative ./.fno/events.jsonl under the
+            # caller's cwd: run from a subdirectory or a linked worktree, the
+            # row is removed from the canonical ledger while its only trace
+            # lands somewhere that does not survive the worktree's archival.
+            append_event(
+                _build(
+                    "carveout_resolved",
+                    # "backlog", not "carveout": the envelope source is a closed
+                    # enum and there is no carveout member. A wrong value fails
+                    # validation at emit time, which is how this was caught.
+                    "backlog",
+                    {
+                        # The ids actually retired, not every id requested.
+                        "carveout_ids": ",".join(
+                            i for i in unique_ids if i in present
+                        ) or ",".join(unique_ids),
+                        "reason": reason,
+                        "removed": removed,
+                    },
+                ),
+                events_path=project_log(
+                    "events.jsonl", project_root=resolve_carveout_root()
+                ),
+            )
+        except Exception as exc:
+            typer.echo(
+                f"carveout: resolved, but the reason was NOT recorded "
+                f"({type(exc).__name__}: {exc}); re-record it by hand",
+                err=True,
+            )
     typer.echo(f"resolved {removed} carve-out(s)")

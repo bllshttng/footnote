@@ -106,7 +106,13 @@ def test_ac3_fr_oversize_body_truncated_with_marker():
     assert "http://c/1" in c.body  # link back to source preserved
 
 
-def test_carveout_title_from_need_and_priority_inherited():
+def test_carveout_title_from_description_with_need_carried_in_the_body():
+    """`--need` is the blocker, not a summary, so it does not title the node.
+
+    This fixture is its own argument: "which auth provider" is the open
+    question, while "skipped SSO wiring pending provider choice" is the work.
+    Titling from need produced real nodes called "operator policy call".
+    """
     item = RawItem(
         kind=KIND_CARVEOUT,
         text="skipped SSO wiring pending provider choice",
@@ -117,9 +123,48 @@ def test_carveout_title_from_need_and_priority_inherited():
         subkind="deferred",
     )
     c = classify_item(item)
-    assert c.title == "which auth provider"
+    assert c.title == "skipped SSO wiring pending provider choice"
+    # The need is carried, not dropped.
+    assert "Blocked on: which auth provider" in c.body
     assert c.priority == "p1"  # carve-out --priority inherited
     assert c.tier == TIER_NODE
+
+
+def test_carveout_with_no_description_falls_back_to_need_for_a_title():
+    item = RawItem(
+        kind=KIND_CARVEOUT,
+        text="",
+        source_pr=5,
+        source_id="cv-def",
+        title_hint="which auth provider",
+        subkind="deferred",
+    )
+
+    assert classify_item(item).title == "which auth provider"
+
+
+def test_a_carveout_is_cited_by_its_ledger_id_with_no_pr():
+    """The PR-independent sweep has no source_pr. Requiring one rejected every
+    swept carve-out as uncited, so the ledger could not be harvested at all."""
+    item = RawItem(
+        kind=KIND_CARVEOUT,
+        text="declared scope that did not ship",
+        source_pr=None,
+        source_id="cv-ghi",
+        subkind="deferred",
+    )
+
+    c = classify_item(item)
+    assert not c.uncited
+    assert "cv-ghi" in c.body  # the cite is the ledger id itself
+
+
+def test_a_review_finding_without_a_pr_is_still_uncited():
+    """Positive control for the rule above: the cite widening is carve-out only.
+    A review finding with no PR has nothing to verify against."""
+    item = RawItem(kind="review", text="this looks wrong", source_pr=None, source_id="99")
+
+    assert classify_item(item).uncited
 
 
 def test_oos_bug_title_prefixed():

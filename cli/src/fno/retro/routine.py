@@ -20,7 +20,11 @@ from fno.retro.classify import (
     classify,
     classify_postmortem,
 )
-from fno.retro.dedup import dedup_candidates, existing_keys_from_nodes
+from fno.retro.dedup import (
+    cv_ids_cited_in_nodes,
+    dedup_candidates,
+    existing_keys_from_nodes,
+)
 from fno.retro.reconcile_findings import scan_addressed_findings
 from fno.retro.land import (
     MODE_AUTONOMOUS,
@@ -161,6 +165,24 @@ def triage_pr(
 
     existing_keys = existing_keys_from_nodes(existing_nodes or [])
     kept, skipped = dedup_candidates(cited, existing_keys=existing_keys)
+
+    # Cross-boundary dedup. The hash key carries the source PR, so a carve-out
+    # the PR-INDEPENDENT sweep already filed (source_pr=None) does not collide
+    # with the same carve-out arriving here under a PR number, and both file.
+    # Reachable whenever a sweep's consume fell short (it is best-effort) and
+    # left the row on the ledger. The cv-id is stable across both paths.
+    already = cv_ids_cited_in_nodes(
+        existing_nodes or [],
+        [c.source_id for c in kept if c.extra.get("kind") == KIND_CARVEOUT],
+    )
+    if already:
+        still_kept = []
+        for c in kept:
+            if c.extra.get("kind") == KIND_CARVEOUT and c.source_id in already:
+                skipped.append(c)
+                continue
+            still_kept.append(c)
+        kept = still_kept
 
     # Auto caused_by (W4 causal links, AC4-UI): a follow-up filed from this
     # PR's findings points back at the node that shipped the PR. Prefer the

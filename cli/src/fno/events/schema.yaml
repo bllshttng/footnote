@@ -3434,6 +3434,23 @@ event_types:
           type: string
     consumers: [operator]
 
+  - name: carveout_resolved
+    description: "Emitted by `fno carveout resolve --reason`. A carve-out removed from the ledger with no node filed leaves no trace anywhere else, so the reason is the only record that the work was dispositioned rather than dropped. Required when the ledger row is retired without becoming tracked work: the backlog has no delete verb, so a junk node is permanent and a reasoned resolve is the cheaper correction."
+    sources: [backlog]
+    data:
+      required: [carveout_ids, reason]
+      properties:
+        carveout_ids:
+          type: string
+          description: "Comma-separated carve-out ids removed by this call."
+        reason:
+          type: string
+          description: "Why these rows were retired without filing a node."
+        removed:
+          type: integer
+          description: "How many rows were actually removed (may be fewer than requested)."
+    consumers: [operator]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

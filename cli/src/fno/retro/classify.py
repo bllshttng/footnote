@@ -61,7 +61,13 @@ def _clean_line(text: str) -> str:
 def derive_title(item: RawItem) -> str:
     """One-line summary derived from the finding's own text (never a generic stub)."""
     if item.kind == KIND_CARVEOUT:
-        summary = (item.title_hint or "").strip() or _clean_line(item.text)
+        # The description first, NOT `need`. `fno carveout add --need` documents
+        # itself as "the dependency the work is blocked on" - a blocker, not a
+        # summary - so preferring it titled real rows "operator policy call" and
+        # "unsaturated worker slots or an attended session". The description is
+        # also always present, while need is optional. It survives as the
+        # fallback (and rides the body via build_body).
+        summary = _clean_line(item.text) or (item.title_hint or "").strip()
         if item.subkind == "oos-bug":
             summary = f"bug: {summary}" if not summary.lower().startswith("bug") else summary
     else:
@@ -98,20 +104,42 @@ def build_body(item: RawItem, *, cap: int = BODY_CAP) -> str:
     # the cap (the marker length is known, so the final body cannot overflow).
     link = item.url or (f"PR #{item.source_pr}" if item.source_pr else "source")
     marker = f"\n\n[... truncated; full text at {link} ...]"
-    overhead = len(marker) + (len(cite) + 2 if cite else 0)
+    # The "Blocked on:" block below is appended AFTER this reservation, so its
+    # length has to be reserved here too or a long --need overflows the cap.
+    need = (item.title_hint or "").strip()
+    blocked = f"Blocked on: {need}" if item.kind == KIND_CARVEOUT and need else ""
+    overhead = (
+        len(marker)
+        + (len(cite) + 2 if cite else 0)
+        + (len(blocked) + 2 if blocked else 0)
+    )
     budget = max(cap - overhead, 200)
     if len(reasoning) > budget:
         reasoning = reasoning[:budget].rstrip() + marker
 
     parts = [reasoning.strip()]
+    # A carve-out's `need` is the open question or precondition it is blocked
+    # on. It stopped being the title, so carry it here or it is lost.
+    if blocked:
+        parts.append(blocked)
     if cite:
         parts.append(cite)
     return "\n\n".join(p for p in parts if p)
 
 
 def classify_item(item: RawItem, *, body_cap: int = BODY_CAP) -> Candidate:
-    """Turn one RawItem into a Candidate. Marks ``uncited`` when it has no cite."""
-    cited = item.source_pr is not None and bool(item.source_id)
+    """Turn one RawItem into a Candidate. Marks ``uncited`` when it has no cite.
+
+    A review finding's cite is its PR: without one there is nothing to verify
+    the finding against, so it is rejected. A CARVE-OUT's cite is its own ledger
+    id - the row in ``.fno/carveouts.jsonl`` is the verifiable source, and the
+    PR-independent sweep (:mod:`fno.retro.sweep`) has no PR to offer. Requiring
+    a PR there rejected every swept carve-out as uncited, which is why the
+    ledger could not be harvested outside a merge.
+    """
+    cited = bool(item.source_id) and (
+        item.source_pr is not None or item.kind == KIND_CARVEOUT
+    )
     if not cited:
         return Candidate(
             title=derive_title(item),
