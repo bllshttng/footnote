@@ -25,6 +25,38 @@ def _timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _wait_for_shell_writers(path: Path, timeout_seconds: float) -> None:
+    active_dir = path.with_name(path.name + ".shell-writers.d")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            entries = list(active_dir.iterdir())
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise OSError(f"cannot inspect shell writer rendezvous {active_dir}: {exc}") from exc
+        if not entries:
+            try:
+                active_dir.rmdir()
+            except OSError:
+                pass
+            return
+        for entry in entries:
+            try:
+                pid = int(entry.name.split(".", 1)[0])
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                try:
+                    entry.rmdir()
+                except OSError:
+                    pass
+            except (OSError, ValueError, OverflowError):
+                pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"shell writer rendezvous timeout: {active_dir}")
+        time.sleep(0.05)
+
+
 def gc_events(
     events_path: Path,
     *,
@@ -55,10 +87,10 @@ def gc_events(
     lock_dir = path.with_name(path.name + ".lock.d")
     lock_token: str | None = None
     try:
-        # Shell writers check the GC marker before their unlocked append. Give
-        # an append that passed the check immediately before marker creation a
-        # bounded grace period to finish before the atomic rewrite.
-        time.sleep(0.1)
+        # The marker stops new shell writers. A writer that passed its first
+        # marker check must register and recheck before appending, so an empty
+        # rendezvous proves no unlocked shell append can target the old inode.
+        _wait_for_shell_writers(path, 30)
         lock_token = acquire_dir_mutex(lock_dir, 30)
         if lock_token is None:
             raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")

@@ -201,6 +201,27 @@ ensure_trailing_newline() {
   fi
 }
 
+wait_for_shell_event_writers() {
+  local events_path="$1"
+  local active_dir="${events_path}.shell-writers.d"
+  local attempts=0
+  local entries=()
+  while [[ -d "$active_dir" ]]; do
+    shopt -s nullglob
+    entries=("$active_dir"/*)
+    shopt -u nullglob
+    if (( ${#entries[@]} == 0 )); then
+      rmdir "$active_dir" 2>/dev/null || true
+      return 0
+    fi
+    if (( attempts >= 300 )); then
+      return 1
+    fi
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+}
+
 # Migrate a worktree-local journal before linking it to the canonical journal.
 # The GC markers pause the bounded shell appenders, and the ordinary mutexes
 # pause Python, Rust claims, and Journal writers. Locks are acquired in sorted
@@ -258,6 +279,17 @@ link_events_journal() {
     return 1
   fi
   EVENTS_MIGRATION_DIRS+=("$second_gc")
+  if ! wait_for_shell_event_writers "$source"; then
+    cleanup_events_migration
+    echo "setup-worktree: events migration timed out on ${source}.shell-writers.d" >&2
+    return 1
+  fi
+  if ! wait_for_shell_event_writers "$target"; then
+    cleanup_events_migration
+    echo "setup-worktree: events migration timed out on ${target}.shell-writers.d" >&2
+    return 1
+  fi
+  # Pre-rendezvous shells do not register, so retain one bounded rollout grace.
   sleep 0.1
   if ! acquire_events_dir "$first_lock" "$token"; then
     cleanup_events_migration
@@ -273,11 +305,9 @@ link_events_journal() {
   EVENTS_MIGRATION_DIRS+=("$second_lock")
 
   local rc=0
-  if [[ ! "$source" -ef "$target" && -s "$target" ]]; then
-    ensure_trailing_newline "$source" || rc=$?
-    if (( rc == 0 )); then
-      cat "$target" >> "$source" || rc=$?
-    fi
+  ensure_trailing_newline "$source" || rc=$?
+  if (( rc == 0 )) && [[ ! "$source" -ef "$target" && -s "$target" ]]; then
+    cat "$target" >> "$source" || rc=$?
     if (( rc == 0 )); then
       ensure_trailing_newline "$source" || rc=$?
     fi

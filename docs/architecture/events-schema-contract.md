@@ -69,7 +69,7 @@ Branch-A Python, Rust claims, and loop-journal writers serialize on the same mkd
 When `events.jsonl` is a worktree symlink, every writer resolves the leaf before deriving that mutex so sibling worktrees lock the canonical target rather than separate worktree paths.
 The project journal treats a lock timeout as fatal, while its global observability mirror remains best-effort so daemon progress does not depend on that mirror.
 The three fixed-shape shell helpers remain unlocked and reject serialized rows above 4000 bytes before appending.
-They also wait while `<events-file>.gc.d` exists so retention compaction cannot replace the journal during their append.
+They register unique entries under `<events-file>.shell-writers.d`, recheck `<events-file>.gc.d`, and remove the entry after appending, so they remain unserialized with each other while compaction can prove no append targets the old inode.
 
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
@@ -244,7 +244,7 @@ Declared join pairs must use the same retention class, and schema loading fails 
 The minimum ephemeral horizon is 672 hours because `human_touch` and claim context feed the scoreboard's default 28-day window.
 `fno event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
 It preserves gate, durable, undeclared, unknown, and malformed rows, including a malformed row whose timestamp cannot be evaluated.
-The collector rewrites through an fsynced same-directory temporary file while holding the shared writer mutex and a shell-visible GC marker.
+The collector rewrites through an fsynced same-directory temporary file while holding the shared writer mutex, a shell-visible GC marker, and an empty shell-writer rendezvous.
 When a worktree journal is a symlink, collection resolves and rewrites its target without replacing the symlink.
 
 ```bash

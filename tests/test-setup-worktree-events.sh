@@ -34,6 +34,14 @@ resolved_shell_path=$(
   printf '%s' "$EVENTS_FILE"
 )
 assert "shell writers resolve the shared target path" test "$resolved_shell_path" -ef "$canonical/.fno/events.jsonl"
+looped="$TMP/looped-events.jsonl"
+ln -s "$looped" "$looped"
+if (EVENTS_FILE="$looped" source "$REPO_ROOT/scripts/lib/events.sh") 2>/dev/null; then
+  echo "FAIL: looping events symlink was accepted"
+  fail=1
+else
+  echo "PASS: looping events symlink fails closed"
+fi
 
 existing="$TMP/existing"
 mkdir -p "$existing/.fno"
@@ -80,6 +88,23 @@ CANONICAL="$canonical" WORKTREE="$contended" bash "$SETUP" >/dev/null 2>&1
 wait "$holder_pid"
 assert "migration waits for an in-flight mutex writer" grep -q '"type":"during_lock"' "$canonical/.fno/events.jsonl"
 assert "contended journal becomes the shared symlink" test -L "$contended/.fno/events.jsonl"
+
+shell_active="$TMP/shell-active"
+mkdir -p "$shell_active/.fno/events.jsonl.shell-writers.d/999999.1"
+printf '%s\n' '{"type":"before_shell"}' > "$shell_active/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$shell_active" bash "$SETUP" >/dev/null 2>&1 &
+setup_pid=$!
+for _ in {1..100}; do
+  [[ -d "$shell_active/.fno/events.jsonl.gc.d" ]] && break
+  sleep 0.01
+done
+assert "migration publishes its GC marker" test -d "$shell_active/.fno/events.jsonl.gc.d"
+sleep 0.2
+assert "migration does not switch an active shell writer" test ! -L "$shell_active/.fno/events.jsonl"
+rmdir "$shell_active/.fno/events.jsonl.shell-writers.d/999999.1"
+rmdir "$shell_active/.fno/events.jsonl.shell-writers.d"
+wait "$setup_pid"
+assert "shell-rendezvous journal becomes the shared symlink" test -L "$shell_active/.fno/events.jsonl"
 
 if (( fail )); then
   exit 1

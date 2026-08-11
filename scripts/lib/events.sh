@@ -12,13 +12,18 @@ fi
 _resolve_event_symlink() {
     local path="${1:?events path required}"
     local link_target
+    local hops=0
     while [[ -L "$path" ]]; do
+        if (( hops >= 40 )); then
+            return 1
+        fi
         link_target=$(readlink "$path") || return 1
         if [[ "$link_target" == /* ]]; then
             path="$link_target"
         else
             path="$(dirname "$path")/$link_target"
         fi
+        hops=$((hops + 1))
     done
     local physical_dir
     physical_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
@@ -44,6 +49,33 @@ _wait_for_event_gc() {
     [[ ! -d "$marker" ]]
 }
 
+_begin_shell_event_append() {
+    local events_path="${1:?events path required}"
+    local writer_pid="${2:?writer pid required}"
+    local active_dir="${events_path}.shell-writers.d"
+    local token
+    while true; do
+        _wait_for_event_gc "$events_path" || return 1
+        mkdir -p "$active_dir" 2>/dev/null || return 1
+        token="$active_dir/${writer_pid}.${RANDOM}"
+        if ! mkdir "$token" 2>/dev/null; then
+            continue
+        fi
+        if [[ ! -d "${events_path}.gc.d" ]]; then
+            printf '%s' "$token"
+            return 0
+        fi
+        rmdir "$token" 2>/dev/null || true
+        rmdir "$active_dir" 2>/dev/null || true
+    done
+}
+
+_end_shell_event_append() {
+    local token="${1:?writer token required}"
+    rmdir "$token" 2>/dev/null || true
+    rmdir "$(dirname "$token")" 2>/dev/null || true
+}
+
 _append_bounded_event() {
     local label="${1:?label required}"
     local event="${2:?event required}"
@@ -55,9 +87,17 @@ _append_bounded_event() {
             "$label" "$event_bytes" "$EVENTS_ATOMIC_LINE_MAX_BYTES" >&2
         return 1
     fi
-    _wait_for_event_gc "$events_path" || return 1
-    mkdir -p "$(dirname "$events_path")" 2>/dev/null || return 1
-    printf '%s\n' "$event" >> "$events_path" 2>/dev/null
+    local writer_token
+    local writer_pid="${BASHPID:-$$}"
+    writer_token=$(_begin_shell_event_append "$events_path" "$writer_pid") || return 1
+    if ! mkdir -p "$(dirname "$events_path")" 2>/dev/null; then
+        _end_shell_event_append "$writer_token"
+        return 1
+    fi
+    local append_rc=0
+    printf '%s\n' "$event" >> "$events_path" 2>/dev/null || append_rc=$?
+    _end_shell_event_append "$writer_token"
+    return "$append_rc"
 }
 
 emit_event() {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -121,6 +123,34 @@ def test_gc_preserves_symlink_and_compacts_its_target(tmp_path: Path) -> None:
     assert link.is_symlink()
     assert '"type": "claim_released"' not in target.read_text(encoding="utf-8")
     assert '"type": "node_closed"' in target.read_text(encoding="utf-8")
+
+
+def test_gc_waits_for_registered_shell_writer(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        _event("claim_released", "2026-07-01T00:00:00Z") + "\n",
+        encoding="utf-8",
+    )
+    active = tmp_path / "events.jsonl.shell-writers.d" / "writer"
+    active.mkdir(parents=True)
+    result: dict[str, int] = {}
+
+    def collect() -> None:
+        result.update(gc_events(events, now=NOW, ttl_hours=672))
+
+    thread = threading.Thread(target=collect)
+    thread.start()
+    time.sleep(0.2)
+    assert thread.is_alive()
+    assert events.read_text(encoding="utf-8")
+
+    active.rmdir()
+    active.parent.rmdir()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert result["deleted"] == 1
+    assert events.read_text(encoding="utf-8") == ""
 
 
 def test_gc_cli_reports_and_rejects_short_horizon(tmp_path: Path) -> None:
