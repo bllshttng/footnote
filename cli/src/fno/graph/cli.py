@@ -6599,6 +6599,45 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
         node["merge_status"] = merge_status
 
 
+def _clear_completion_fields(node: dict, *, reason: str) -> None:
+    """Undo :func:`_apply_completion_fields`. Shared by ``reopen`` and its cascade.
+
+    It lives beside its forward counterpart for that function's own stated
+    reason: the close paths share one helper so they cannot drift, and an open
+    path that drifts from the close path is the same defect pointed the other
+    way.
+
+    Clearing ``completed_at`` IS the status change - ``recompute_statuses``
+    derives the node's underlying state from its absence, exactly as it derives
+    ``done`` from its presence.
+
+    ``completion_note`` is cleared rather than overwritten with the reopen
+    trail, and this is load-bearing rather than tidy: ``_cascade_close_parents``
+    only writes its ``auto-closed:`` note when that field is EMPTY, so an epic
+    carrying reopen prose would never be recognizable as cascade-closed again,
+    and a later reopen would leave it done under a live child. The trail goes in
+    dedicated ``reopened_at`` / ``reopened_reason`` fields instead.
+
+    Four things are deliberately NOT restored, because reopening a node is not
+    rewinding time:
+
+    - ``merge_status`` stays. It records that GitHub confirmed a merge, which is
+      still true after a reopen; clearing it would erase a fact to express an
+      opinion.
+    - ``cost_usd`` / ``cost_sessions`` stay. The spend happened.
+    - ``locked_by`` / ``claimed_at`` stay null. ``done`` cleared them, and
+      inventing a holder here would give the node a claim no lockfile backs;
+      claims are acquired by ``fno target init``.
+    - ``deferred_at`` / ``queued_at`` stay null. ``done`` cleared those too, and
+      re-parking is ``defer``'s job - the same policy ``cmd_unsupersede``
+      applies to un-containment.
+    """
+    node["completed_at"] = None
+    node["completion_note"] = None
+    node["reopened_at"] = datetime.now(timezone.utc).isoformat()
+    node["reopened_reason"] = reason
+
+
 def _auto_closed_note(entry: dict) -> str:
     """completion_note for a container closed by all-children-complete (x-b9a5).
 
@@ -7159,7 +7198,9 @@ def _done_gh_query(pr_number, **kwargs):
 
 @cli.command(
     "done",
-    epilog="Related: `fno backlog reconcile` closes nodes whose PR merged outside the gate (hidden).",
+    epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses this "
+    "(hidden; run its own --help). Related: `fno backlog reconcile` closes nodes "
+    "whose PR merged outside the gate (hidden).",
 )
 def cmd_done(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
@@ -7522,6 +7563,268 @@ def _run_advance_epic(
         raise typer.Exit(code=1)
 
 
+# -- reopen --
+#
+# The inverse of `done`, and a deliberate inversion of its gate: `done` refuses
+# when no referenced PR is merged, `reopen` refuses when one IS. Both gates ask
+# the same question of the same evidence and disagree only about which answer
+# permits the transition, which is what makes them a pair rather than two verbs
+# that happen to touch the same field.
+
+
+def _archived_entry(node_id: str) -> Optional[dict]:
+    """The node's row in graph-archive.json, or None. Read-only, never raises.
+
+    Reopen needs this to tell "archived" apart from "absent". Without it an
+    archived node reports "not found", which is the same message a typo gets,
+    while the node sits readable in the sibling file - an absence with two
+    explanations and no way to distinguish them.
+    """
+    from fno.graph._constants import _graph_archive_json
+    from fno.graph.store import read_graph
+
+    try:
+        path = _graph_archive_json()
+        if not path.exists():
+            return None
+        for e in read_graph(path):
+            if isinstance(e, dict) and e.get("id") == node_id:
+                return e
+    except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
+        return None
+    return None
+
+
+def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str], list[str]]:
+    """Reopen ancestor epics the cascade auto-closed. Returns (reopened, warned).
+
+    The inverse of :func:`_cascade_close_parents`, and not a refusal, because a
+    done epic with a live child is not a risky state to correct - it is an
+    inconsistent one. The epic's work IS its children; one of them is open again.
+
+    The judgment call is WHICH ancestors. An epic closed by the cascade carries
+    the ``auto-closed:`` note :func:`_auto_closed_note` wrote, so reopening it
+    just restores what the cascade would compute today. An epic closed WITHOUT
+    that note was closed on its own evidence - a real PR, an operator decision -
+    and silently reopening it would discard a judgment this verb never made. So
+    those are left done and NAMED, which is the refuse-and-say-why rule applied
+    to a case where either silent choice is wrong.
+
+    Walks up under the same 64-deep cap the close path uses, for the same reason.
+    """
+    id_to_entry = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    reopened: list[str] = []
+    warned: list[str] = []
+    cur = id_to_entry.get(node_id)
+    for _ in range(64):  # depth cap: guards against a malformed parent cycle
+        pid = cur.get("parent") if isinstance(cur, dict) else None
+        if not isinstance(pid, str):
+            break
+        parent = id_to_entry.get(pid)
+        if parent is None or not parent.get("completed_at"):
+            break  # missing or already-open ancestor -> stop this branch
+        note = str(parent.get("completion_note") or "")
+        if not note.startswith("auto-closed:"):
+            warned.append(pid)
+            break  # closed on its own evidence; stop rather than climb past it
+        _clear_completion_fields(parent, reason=f"child {node_id} reopened")
+        reopened.append(pid)
+        cur = parent
+    return reopened, warned
+
+
+@cli.command(
+    "reopen",
+    hidden=True,
+    epilog="Reverses `done` (and a close made by `reconcile`). Softer options: "
+    "`update` to correct a field without changing status, `note` to record "
+    "something the close missed.",
+)
+def cmd_reopen(
+    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        "-R",
+        help="Why the node is being reopened. Required: a close is evidenced by "
+        "a merged PR, a reopen by nothing but your judgment.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help="Reopen even though a referenced PR is MERGED. Records a deliberate "
+        "reopen of shipped work.",
+    ),
+) -> None:
+    """Clear a node's completion, returning it to its underlying state.
+
+    Every other lifecycle transition had an inverse (``defer``/``undefer``,
+    ``supersede``/``unsupersede``, ``queue``/``unqueue``); ``done`` was terminal
+    with none, so a node closed in error was corrected by hand-editing
+    ``graph.json``, which a PreToolUse hook forbids for good reason.
+
+    Refuses when a referenced PR is MERGED. That is ``done``'s gate inverted:
+    the work is in main, and clearing the completion would make the graph assert
+    that shipped work did not ship. The remedy is almost always to file the
+    remaining work as its own node (``fno backlog idea``) rather than to reopen
+    the record of the part that landed. ``--force`` records a deliberate reopen
+    of shipped work, and is journaled as such.
+
+    Ancestor epics the cascade auto-closed when this node closed are reopened
+    alongside it, since an epic is done exactly when its children are. An epic
+    closed on its own evidence is left done and named on stderr, because
+    reopening it would discard a judgment this verb never made.
+
+    Reopening does not reclaim, un-defer, or un-queue the node; see
+    :func:`_clear_completion_fields` for what it deliberately leaves alone.
+
+    Exit codes:
+        0  success (node reopened), or a no-op warning on a node that is not done
+        1  validation error (bad id, node not found in the graph or the archive)
+        2  usage error (blank --reason)
+        3  refused: a referenced PR is MERGED. Use --force --reason to override
+        4  archived, or a gh outage. Both are retryable: unarchive first, or
+           retry once gh is reachable. The node stays done either way
+    """
+    from fno.graph._constants import has_node_id_prefix
+    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph._intake import _find_node
+    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+
+    if not has_node_id_prefix(task_id):
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Validate at the CLI boundary the way cmd_defer validates its own reason, so
+    # a direct call cannot land a reasonless reopen that the event then records
+    # as an empty string.
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        typer.echo("Error: --reason cannot be blank", err=True)
+        raise typer.Exit(code=2)
+
+    # -- Step 1: locate the node (outside the lock, like cmd_done) --
+    entries = read_graph(_graph_path())
+    node = _find_node(entries, task_id)
+    if not node:
+        archived = _archived_entry(task_id)
+        if archived is not None:
+            when = archived.get("completed_at") or archived.get("updated") or "unknown"
+            typer.echo(
+                f"Refused: {task_id} is archived (terminal since {when}), not in the "
+                f"working graph. Run `fno backlog unarchive {task_id}` first, then "
+                f"reopen it.",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        typer.echo(f"Error: feature {task_id} not found", err=True)
+        raise typer.Exit(code=1)
+
+    if not node.get("completed_at"):
+        # Idempotent in the safe direction, matching cmd_unsupersede's
+        # "was not superseded": there is nothing to reverse, and touching the
+        # node's other fields to express that would be a mutation nobody asked
+        # for.
+        typer.echo(f"warning: {task_id} is not done; nothing to reopen", err=True)
+        return
+
+    # -- Step 2: the merged-PR gate (outside the lock, like cmd_done's) --
+    refs = node_pr_refs(node)
+    pr_number: Optional[int] = None
+    pr_state: Optional[str] = None
+    if refs:
+        pr_number, pr_url = refs[0]
+        try:
+            pr_state = _done_gh_query(pr_number, repo=repo_slug_from_url(pr_url)).state
+        except Exception as exc:  # noqa: BLE001 - gh outage is retryable, not a verdict
+            if not force:
+                typer.echo(
+                    f"Error: gh cross-check failed for {task_id}: {exc}\n"
+                    f"The check is retryable once gh is available again. Node stays done.",
+                    err=True,
+                )
+                raise typer.Exit(code=4)
+            pr_state = "UNKNOWN"
+        if pr_state == "MERGED" and not force:
+            typer.echo(
+                f"Refused: PR #{pr_number} is MERGED, so {task_id}'s work is in main. "
+                f"Reopening would make the graph assert that shipped work did not ship.\n"
+                f"  If work remains, file it: fno backlog idea \"<what is left>\"\n"
+                f"  If the close itself was wrong: reopen --force --reason \"...\"",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+
+    if force and pr_state == "MERGED":
+        typer.echo(
+            f"Warning: force-reopening {task_id} (reason: {cleaned_reason}). "
+            f"PR #{pr_number} is MERGED.",
+            err=True,
+        )
+
+    # -- Step 3: mutation under the lock --
+    cascade_out: list[str] = []
+    warned_out: list[str] = []
+
+    def mutator(entries):
+        n = _find_node(entries, task_id)
+        if not n:
+            typer.echo(f"Error: feature {task_id} not found", err=True)
+            raise typer.Exit(code=1)
+        if not n.get("completed_at"):
+            return entries  # raced with another reopen; the safe direction wins
+        _clear_completion_fields(n, reason=cleaned_reason)
+        reopened, warned = _cascade_reopen_parents(entries, task_id)
+        cascade_out.extend(reopened)
+        warned_out.extend(warned)
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    for pid in warned_out:
+        typer.echo(
+            f"warning: parent {pid} is done on its own evidence and now has an open "
+            f"child; `fno backlog reopen {pid} --reason \"...\"` if that is wrong",
+            err=True,
+        )
+    typer.echo(
+        f"Reopened {task_id}"
+        + (f" (cascade: {', '.join(cascade_out)})" if cascade_out else "")
+    )
+
+    try:
+        from fno import events as _evts
+
+        _evts.append_event(
+            _evts.backlog_reopened(
+                node_id=task_id,
+                reason=cleaned_reason,
+                forced=bool(force),
+                pr_number=pr_number,
+                pr_state=pr_state,
+                cascade_reopened=cascade_out,
+            )
+        )
+    except Exception:  # noqa: BLE001 - the graph is already correct; a failed emit is not a failed reopen
+        pass
+
+    # Force the plan doc off terminal `done`, then recompute. Both halves are
+    # cmd_unsupersede's tail and both are needed for the same reasons: the
+    # forward-only projector will not leave a terminal on its own, and the graph
+    # status was derived during the mutation while the plan still read `done`.
+    ids = [task_id, *cascade_out]
+    for nid in ids:
+        _project_plans_from_graph([nid], force_status_off_terminal_for=nid)
+    locked_mutate_graph(_graph_path(), lambda entries: entries)
+
+
 @cli.command("advance", hidden=True)
 def cmd_advance(
     closed: Optional[str] = typer.Option(
@@ -7744,7 +8047,13 @@ def cmd_reconcile_findings(
     typer.echo(f"reconcile-findings: closed {closed}/{len(findings)} node(s)")
 
 
-@cli.command("reconcile", hidden=True)
+@cli.command(
+    "reconcile",
+    hidden=True,
+    epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses a close "
+    "this made. It refuses on a merged PR, which is what closed the node here, so "
+    "an intentional correction of an auto-close needs --force.",
+)
 def cmd_reconcile(
     dry_run: bool = typer.Option(
         False,
