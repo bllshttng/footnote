@@ -4449,7 +4449,7 @@ def attach_agent(name: str) -> AttachResult:
 # per-agent lock and the rename is atomic.
 #
 # Design note: ``mcp_channel_id`` currently equals the claude jobId (``short_id``)
-# (1:1 mapping; see providers/claude.py module-level note). The value
+# (1:1 mapping; see harnesses/claude.py module-level note). The value
 # is generated here at registration time so a future UUIDv4 swap is a
 # one-line change.
 
@@ -4509,7 +4509,7 @@ def register_mcp_channel(
             return entry.mcp_channel_id
 
         # Today the mcp_channel_id IS the claude jobId in short_id (1:1; see
-        # providers/claude.py module note). A follow-up will swap in
+        # harnesses/claude.py module note). A follow-up will swap in
         # uuid.uuid4().hex here without a schema change.
         new_id = entry.short_id
 

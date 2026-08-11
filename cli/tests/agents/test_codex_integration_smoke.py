@@ -1,7 +1,7 @@
 """Live integration smoke against the real `codex` CLI (CODEX_SMOKE=1).
 
 Verifies that the JSONL event-type strings the running codex actually
-emits match the constants pinned in providers/codex.py's _EVENT_TYPES
+emits match the constants pinned in harnesses/codex.py's _EVENT_TYPES
 dict. This is the discriminator for Locked Decision 14 (warn-on-drift):
 if codex's vocabulary moves between versions, this test fails loudly
 rather than the parser silently going session_id=None.

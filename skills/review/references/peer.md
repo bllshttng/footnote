@@ -240,7 +240,7 @@ transport; the review model is the routed one (GLM via z.ai). Run `claude -p` wi
 the routed `ANTHROPIC_*` env built by the SAME model-routing layer the spawn path
 uses (`resolve_explicit_route`), so the z.ai env-var contract lives in one place
 and is never hand-rolled here. Clear the parent Anthropic credential first (exactly
-as `providers/claude.py` does) or a lingering key sends the run back to Anthropic:
+as `harnesses/claude.py` does) or a lingering key sends the run back to Anthropic:
 
 ```bash
 # $BRIEF = the review prompt (step 2); "zai,glm-5.2" = the peers entry's `model`.

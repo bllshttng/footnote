@@ -5,7 +5,7 @@
 //! EOF, the Rust client reads the whole blob and `json.loads`-parses it, and
 //! returns the `response` field. The fno daemon cannot handle this path
 //! because `handle_ask` renders a PTY screen; byte-parity with Python's
-//! `providers/gemini.py` requires a direct subprocess approach.
+//! `harnesses/gemini.py` requires a direct subprocess approach.
 //!
 //! **Byte-parity is the contract.** The observable behavior (stdout reply,
 //! exit code, events.jsonl fields) must match Python's implementation.

@@ -4,7 +4,7 @@
 //! it emits a JSONL stream to stdout, the Rust client drains and parses it,
 //! and returns the reply text. The fno daemon cannot handle this path because
 //! `handle_ask` renders a PTY screen; byte-parity with Python's
-//! `providers/codex.py` requires a direct subprocess approach.
+//! `harnesses/codex.py` requires a direct subprocess approach.
 //!
 //! **Byte-parity is the contract.** The observable behavior (stdout reply,
 //! exit code, events.jsonl fields) must match Python's implementation.

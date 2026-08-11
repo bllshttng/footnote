@@ -979,7 +979,7 @@ def cmd_spawn(
     # independent axes and COMPOSE (x-5ed4): `--account readyrule -P zai` runs
     # z.ai's model under readyrule's profile. Only a non-claude harness is
     # refused here (an account rides the claude binary). The composition is made
-    # atomic at the provider layer (providers/claude.py: the route wins
+    # atomic at the provider layer (harnesses/claude.py: the route wins
     # endpoint+auth+model as one unit, the account keeps CLAUDE_CONFIG_DIR), so
     # the x-2af5 split-brain (overlay winning endpoint+auth while the route won
     # the model) cannot recur. Refused BEFORE route resolution so a keyless route

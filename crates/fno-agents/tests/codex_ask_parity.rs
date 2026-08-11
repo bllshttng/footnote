@@ -1,6 +1,6 @@
 //! Wave B3: codex ask cross-language parity harness (ab-0429c6e1).
 //!
-//! Drives the SAME fake `codex` binary through BOTH Python (`providers/codex.py`
+//! Drives the SAME fake `codex` binary through BOTH Python (`harnesses/codex.py`
 //! `create`/`resume`) and the Rust `codex_ask` path, and asserts identical
 //! behavior: reply text, exit code, and key events.jsonl field presence.
 //!

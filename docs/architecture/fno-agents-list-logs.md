@@ -144,7 +144,7 @@ The JSON-when-non-TTY default aligns with the orchestrator-first audience: a pip
 The CLI's `AgentStatusFilter` Typer enum exposes the family-1 read verdicts `live`, `orphaned`, and `unknown`.
 It intentionally does not mirror `registry.KNOWN_STATUSES`: stored lifecycle metadata and rendered transcript liveness answer different questions.
 
-The `KNOWN_LIVE_STATUSES` allowlist in `providers/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift: `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
+The `KNOWN_LIVE_STATUSES` allowlist in `harnesses/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift: `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
 
 ## Known gaps
 

@@ -3,7 +3,7 @@
 //! Tests for: argv builders (create/resume), inject_from_name, sandbox_flag,
 //! single-blob `parse_response` + schema-drift guards, and the GeminiAskError
 //! exit-code map. All run against fixture data with no subprocess or
-//! filesystem dependency. Byte-parity contract is `providers/gemini.py`.
+//! filesystem dependency. Byte-parity contract is `harnesses/gemini.py`.
 
 use fno_agents::gemini_ask::{
     build_argv_create, build_argv_resume, inject_from_name, parse_response, sandbox_flag,

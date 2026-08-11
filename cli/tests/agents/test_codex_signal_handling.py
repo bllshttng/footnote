@@ -83,7 +83,7 @@ def test_create_timeout_sigterms_codex_and_raises_timeout_error(
     """AC2-FR analog: codex create wall-clock timeout → SIGTERM → exit 15.
 
     Uses a 1-second timeout against the fake shim that sleeps 60 seconds.
-    The watchdog inside providers/codex.py must SIGTERM the child and
+    The watchdog inside harnesses/codex.py must SIGTERM the child and
     raise CodexTimeoutError, which the dispatcher maps to exit 15.
     """
     from fno.agents.harnesses import codex as codex_mod

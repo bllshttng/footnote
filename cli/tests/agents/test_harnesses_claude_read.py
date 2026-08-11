@@ -1,4 +1,4 @@
-"""Tests for the US3 read-path additions to providers/claude.py.
+"""Tests for the US3 read-path additions to harnesses/claude.py.
 
 Covers:
 - ``claude_agents_json()`` — best-effort shellout, all-failure-modes return ({}, warnings).

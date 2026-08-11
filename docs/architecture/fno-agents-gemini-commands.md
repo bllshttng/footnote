@@ -109,12 +109,12 @@ Atomicity: SIGINT mid-loop or an OSError mid-write either commits ALL pending up
 
 ## The gemini provider
 
-`providers/gemini.py` is structurally a clone of `providers/codex.py` with three cleavages captured at runtime discovery:
+`harnesses/gemini.py` is structurally a clone of `harnesses/codex.py` with three cleavages captured at runtime discovery:
 
 ### Single-blob JSON parser
 
 ```python
-# providers/gemini.py
+# harnesses/gemini.py
 stdout_text = proc.stdout.read()
 session_id, reply = _parse_response(stdout_text)
 ```

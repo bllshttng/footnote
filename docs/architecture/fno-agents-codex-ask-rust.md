@@ -8,7 +8,7 @@ This document explains the architecture, the provider-conditional routing that d
 
 The fno daemon PTY-supervises codex and gemini for resident-agent interaction (`drive`, `attach`, long-lived `spawn`). Its `handle_ask` returns the whole rendered `TerminalGrid` screen of that resident worker. That is fundamentally different from what the `ask` verb wants:
 
-- Python `providers/codex.py` invokes `codex exec --json` as a one-shot subprocess and parses the JSONL event stream (`thread.started` → session_id, `item.completed`/`agent_message` → reply text, `turn.completed` → end-of-turn).
+- Python `harnesses/codex.py` invokes `codex exec --json` as a one-shot subprocess and parses the JSONL event stream (`thread.started` → session_id, `item.completed`/`agent_message` → reply text, `turn.completed` → end-of-turn).
 - The daemon's rendered-screen output cannot reach byte-parity with the parsed-JSON reply Python returns.
 
 The prior cutover that routed codex `ask` to the daemon (Task 4.1, commit c54c6d78) was reverted in sigma-review for exactly this reason. The correct shape is the same one claude already uses: a Rust-client module that ports the Python provider one-to-one, with the daemon untouched.
@@ -76,7 +76,7 @@ elif mode == "auto" and verb == "ask":
 
 `_resolve_ask_provider` scans args for `--provider` (or `--provider=`), else looks up the first positional non-flag token in `~/.fno/agents/registry.json`'s top-level `agents` list. Value-carrying flags (`--cwd`, `--timeout`, `--from-name`, `--message`) consume their value token so they don't get mistaken for the agent name. Any failure (no provider, missing registry, corrupt JSON, unresolvable name) returns `None`, and the Python dispatch handles it with its mature actionable error.
 
-`ask` deliberately stays in `PYTHON_AGENT_VERBS` so the `AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` identity contract test remains the routing-drift tripwire. The conditional routing lives on a separate code path; the `RUST_CLIENT_ASK_PROVIDERS` membership is its own contract test that flips red the moment gemini is added without porting `providers/gemini.py`.
+`ask` deliberately stays in `PYTHON_AGENT_VERBS` so the `AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` identity contract test remains the routing-drift tripwire. The conditional routing lives on a separate code path; the `RUST_CLIENT_ASK_PROVIDERS` membership is its own contract test that flips red the moment gemini is added without porting `harnesses/gemini.py`.
 
 ## End-to-end differential
 
@@ -88,7 +88,7 @@ This PR delivers the codex client-side ask + the provider-conditional flip for c
 
 | Node | Scope |
 |---|---|
-| gemini ask port | Port `providers/gemini.py` to a Rust client module (single JSON-blob parse + schema-drift guards), wire `maybe_run_gemini_ask`, add `"gemini"` to `RUST_CLIENT_ASK_PROVIDERS` |
+| gemini ask port | Port `harnesses/gemini.py` to a Rust client module (single JSON-blob parse + schema-drift guards), wire `maybe_run_gemini_ask`, add `"gemini"` to `RUST_CLIENT_ASK_PROVIDERS` |
 | MCP-channel transport | MCP-channel transport US6 (`ask_followup_via_mcp`, `mcp_channel_reachable`, demote-to-socket) — transport optimization over the now-correct one-shot path |
 | EventContext + polish | EventContext envelope + reconcile/list polish |
 

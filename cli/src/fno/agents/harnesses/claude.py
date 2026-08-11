@@ -1880,7 +1880,7 @@ def ask_followup_via_mcp(
             timeline_offset = 0
 
     # Imported lazily to keep MCP optional at provider-module import
-    # time — the MCP package is shipped alongside, but providers/claude.py
+    # time — the MCP package is shipped alongside, but harnesses/claude.py
     # is also imported by code paths that never touch the channel surface.
     from fno.mcp import build_channel_notification
     from fno.mcp import client as _mcp_client

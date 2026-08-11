@@ -16,7 +16,7 @@
 #              set.
 #
 # stdout is the JSONL stream the parser drains via Popen(stdout=PIPE).
-# stderr is intentionally NOT touched here because the real providers/codex.py
+# stderr is intentionally NOT touched here because the real harnesses/codex.py
 # sets stderr=subprocess.STDOUT, which would merge any stderr writes into
 # the same pipe and confuse the test's signal-handling assertions.
 
