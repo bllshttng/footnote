@@ -170,6 +170,11 @@ Once one step is permanently red, every step behind it stops running, and a chec
 A local gate stopped at step 32 on a known baseline failure and never reached the verb-surface ratchet around step 40, so "the gate did not complain about the ratchet" only meant "the gate never looked at it", and CI caught it instead.
 Once a step is known red, run with `--keep-going` so the steps behind it still report.
 
+Last, and it is the one a control does not save you from: believe the reading once you have it.
+A helper in this repo was fixed for a bug it really had, and the search proving nothing sources the file had already been run and its result written down, by two people, before either drew the conclusion that the fix therefore executed nowhere.
+Running the control is the cheap half.
+Acting on what it says is the half that gets skipped, because a truthful reading that contradicts the work you have already done is easier to note than to obey.
+
 ### Validation Scripts
 
 ```bash
