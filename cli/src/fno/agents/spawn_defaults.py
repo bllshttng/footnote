@@ -411,7 +411,7 @@ def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]
     from fno.agents.model_routing import resolve_route
 
     try:
-        return resolve_route(role, settings=settings, env=env) is not None
+        return resolve_route(role, settings=settings, env=env) is not None  # type: ignore[arg-type]
     except Exception:
         return False
 
