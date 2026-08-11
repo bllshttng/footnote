@@ -144,6 +144,28 @@ while IFS= read -r line; do
     fi
 done < "$EVENTS_FILE"
 
+# Unlocked shell writers must keep every append below the atomic line bound.
+large_value=$(printf '%05000d' 0)
+
+rm -f "$EVENTS_FILE"
+emit_event target size_probe "$(jq -nc --arg value "$large_value" '{value: $value}')" 2>/dev/null
+[[ ! -s "$EVENTS_FILE" ]] || { echo "FAIL size cap: emit_event appended an oversized line"; fail=1; }
+
+rm -f "$EVENTS_FILE"
+emit_event_raw size_probe "$(jq -nc --arg value "$large_value" '{value: $value}')" 2>/dev/null
+[[ ! -s "$EVENTS_FILE" ]] || { echo "FAIL size cap: emit_event_raw appended an oversized line"; fail=1; }
+
+rm -f "$EVENTS_FILE"
+out=$(emit_polling_external_review \
+    pr_number=1 \
+    reviewer_bot="$large_value" \
+    wait_kind=inline \
+    session_id=s 2>&1)
+rc=$?
+assert_eq "size cap polling rc" 2 "$rc"
+assert_contains "size cap polling message" "$out" "exceeds"
+[[ ! -s "$EVENTS_FILE" ]] || { echo "FAIL size cap: polling emitter appended an oversized line"; fail=1; }
+
 # AC-VALIDATOR: validator accepts canonical envelope (when validator is loadable)
 if declare -F validate_event >/dev/null 2>&1; then
     canonical='{"ts":"2026-05-07T09:30:42Z","type":"polling_external_review","source":"target","data":{"pr_number":204,"reviewer_bot":"gemini-code-assist[bot]","wait_kind":"cron","session_id":"s","next_check_at":"2026-05-08T16:00:00Z"}}'

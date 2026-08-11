@@ -27,7 +27,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
 use tempfile::TempDir;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -503,6 +504,70 @@ fn journal_write_failure_is_fatal() {
         result.is_err(),
         "journal write failure to project path must be fatal (Err)"
     );
+}
+
+#[test]
+fn journal_waits_for_shared_dir_mutex() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("events.jsonl.lock.d");
+    fs::create_dir(&lock_dir).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let thread_barrier = Arc::clone(&barrier);
+    let thread_events = project_events.clone();
+    let handle = std::thread::spawn(move || {
+        let journal = Journal::new_raw(thread_events, global_events);
+        thread_barrier.wait();
+        journal.append(
+            "mutex_probe",
+            serde_json::json!({"payload": "x".repeat(8_000)}),
+        )
+    });
+
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !project_events.exists(),
+        "Journal appended while the cross-language events mutex was held"
+    );
+
+    fs::remove_dir_all(lock_dir).unwrap();
+    handle.join().unwrap().unwrap();
+    let lines = read_jsonl(&project_events);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["type"], "mutex_probe");
+}
+
+#[test]
+fn journal_project_lock_timeout_is_fatal() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
+    let journal = Journal::new_raw(project_events, global_events);
+
+    let result = journal.append("timeout_probe", serde_json::json!({}));
+    assert!(
+        matches!(result, Err(LoopError::Journal(ref message)) if message.contains("lock timeout")),
+        "project journal lock timeout must stop the walk loudly: {result:?}"
+    );
+}
+
+#[test]
+fn journal_global_lock_timeout_is_best_effort() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    fs::create_dir(dir.path().join("global-events.jsonl.lock.d")).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events.clone());
+
+    journal
+        .append("timeout_probe", serde_json::json!({}))
+        .expect("a blocked global mirror must not fail the project journal");
+    assert_eq!(count_events(&project_events, "timeout_probe"), 1);
+    assert!(!global_events.exists());
 }
 
 // ── test 9: envelope shape ────────────────────────────────────────────────────

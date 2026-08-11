@@ -4,6 +4,22 @@
 # Usage: source this file, then call emit_event
 
 EVENTS_FILE="${EVENTS_FILE:-.fno/events.jsonl}"
+EVENTS_ATOMIC_LINE_MAX_BYTES=4000
+
+_append_bounded_event() {
+    local label="${1:?label required}"
+    local event="${2:?event required}"
+    local events_path="${3:?events path required}"
+    local event_bytes
+    event_bytes=$(printf '%s\n' "$event" | wc -c | tr -d '[:space:]')
+    if (( event_bytes > EVENTS_ATOMIC_LINE_MAX_BYTES )); then
+        printf '%s: serialized event is %s bytes and exceeds the %s-byte append cap\n' \
+            "$label" "$event_bytes" "$EVENTS_ATOMIC_LINE_MAX_BYTES" >&2
+        return 1
+    fi
+    mkdir -p "$(dirname "$events_path")" 2>/dev/null || return 1
+    printf '%s\n' "$event" >> "$events_path" 2>/dev/null
+}
 
 emit_event() {
     local source="${1:?source required}"
@@ -12,16 +28,15 @@ emit_event() {
     data="${3}"
     [[ -z "$data" ]] && data='{}'
 
-    mkdir -p "$(dirname "$EVENTS_FILE")" 2>/dev/null || true
-
     # Use jq for safe JSON construction (handles special chars)
-    jq -nc \
+    local event
+    event=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg src "$source" \
         --arg type "$type" \
         --argjson data "$data" \
-        '{timestamp: $ts, source: $src, type: $type, data: $data}' \
-        >> "$EVENTS_FILE" 2>/dev/null || true
+        '{timestamp: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || return 0
+    _append_bounded_event emit_event "$event" "$EVENTS_FILE" || true
 }
 
 # emit_event_raw TYPE JSON
@@ -40,13 +55,13 @@ emit_event_raw() {
     local json="${2:-}"
     [[ -z "$json" ]] && json='{}'
     local events_path="${EVENTS_FILE:-.fno/events.jsonl}"
-    mkdir -p "$(dirname "$events_path")" 2>/dev/null || true
-    jq -nc \
+    local event
+    event=$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg type "$type" \
         --argjson data "$json" \
-        '{ts: $ts, type: $type, data: $data}' \
-        >> "$events_path" 2>/dev/null || true
+        '{ts: $ts, type: $type, data: $data}' 2>/dev/null) || return 0
+    _append_bounded_event emit_event_raw "$event" "$events_path" || true
 }
 
 # emit_polling_external_review key=value [key=value ...]
@@ -152,8 +167,7 @@ emit_polling_external_review() {
     fi
 
     events_path="${EVENTS_FILE:-.fno/events.jsonl}"
-    mkdir -p "$(dirname "$events_path")" 2>/dev/null || true
-    if ! printf '%s\n' "$event" >> "$events_path" 2>/dev/null; then
+    if ! _append_bounded_event emit_polling_external_review "$event" "$events_path"; then
         printf 'emit_polling_external_review: append to %s failed\n' "$events_path" >&2
         return 2
     fi

@@ -689,11 +689,12 @@ fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
 /// envelope is kind-flat with a 500-byte payload cap, either of which would
 /// break record parity for these events.
 ///
-/// Serializes on the cross-language `events.jsonl.lock.d` mkdir mutex (the
-/// convention `fno.events.append_event` and the shell writers share), with a
-/// short bounded wait: this runs on daemon hot paths, so a wedged lock means
-/// we log and skip rather than block. The lockfile write is authoritative;
-/// this log is observability only.
+/// Serializes on the cross-language `events.jsonl.lock.d` mkdir mutex shared
+/// with `fno.events.append_event` and the loop Journal. The shell writers do
+/// not take this lock and instead cap their fixed-shape serialized lines below
+/// the atomic append bound. This path uses a short bounded wait because it runs
+/// on daemon hot paths; a wedged lock logs and skips rather than blocking. The
+/// lockfile write is authoritative; this log is observability only.
 fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String, Value>) {
     let base = events_dir
         .map(Path::to_path_buf)
@@ -935,7 +936,7 @@ fn remove_reaped(path: &Path) {
     }
 }
 
-fn append_event_line(
+pub(crate) fn append_event_line(
     events_path: &Path,
     event: &Value,
     lock_timeout: Duration,
