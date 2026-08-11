@@ -414,7 +414,9 @@ def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     BOTH spellings must be listed. The short form is not cosmetic: it is the one
     the docs teach for a portfolio (``-k etl -k web``), so a detector that knew
     only the long form would route exactly the multi-scope case into a binary
-    that cannot parse it.
+    that cannot parse it. The attached short-option form (``-kVAL``, no space -
+    Click accepts it and parses it as ``-k VAL``) must be listed too, or a spawn
+    spelled that way falls through to the Rust binary that exits ``unknown flag``.
 
     Load-bearing on ``--substrate bg``, where it is what makes the crown land at
     all: bg spawns otherwise exec the binary. The pane substrate diverts on its
@@ -423,7 +425,9 @@ def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     if verb != "spawn":
         return False
     return any(
-        a in ("--crown", "-k") or a.startswith(("--crown=", "-k="))
+        a == "--crown"
+        or a.startswith("--crown=")
+        or a.startswith("-k")  # -k VAL, -k=VAL, -kVAL (Click short attachment)
         for a in _args_before_argv(args)
     )
 

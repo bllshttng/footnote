@@ -28,6 +28,12 @@ def test_crown_bearing_spawn_detected_across_forms() -> None:
     assert _is_crown_bearing_spawn(
         "spawn", ["spawn", "w", "--crown=level=1,scope=x-d7e4"]
     )
+    # The short form and its Click attachments route the same way; the attached
+    # -kVAL form (no space, no =) is the one the old detector missed, routing a
+    # bg spawn to the Rust binary that exits 'unknown flag'.
+    assert _is_crown_bearing_spawn("spawn", ["spawn", "w", "-k", "x-d7e4"])
+    assert _is_crown_bearing_spawn("spawn", ["spawn", "w", "-k=x-d7e4"])
+    assert _is_crown_bearing_spawn("spawn", ["spawn", "w", "-kx-d7e4"])
     # A non-crown flag does not trip it; only spawn carries it.
     assert not _is_crown_bearing_spawn("spawn", ["spawn", "w", "--role", "build"])
     assert not _is_crown_bearing_spawn("crown", ["crown", "w", "--crown", "level=1,scope=x"])
