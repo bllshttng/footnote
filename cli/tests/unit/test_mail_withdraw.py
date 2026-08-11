@@ -312,6 +312,73 @@ def test_withdraw_does_not_delete_the_line(env):
     assert any(m.id == mid for m in iter_messages())
 
 
+def test_reader_4_the_markdown_inbox_lane_honors_it(env):
+    """The lane the three bus filters missed. `write_new_thread` renders a
+    markdown file that the project drain consumes without ever reading the bus,
+    so a withdrawn message could still be triaged, woken on, and persisted after
+    the sender was told it would not be delivered."""
+    from fno.inbox.store import read_unread_threads, write_new_thread
+
+    th = write_new_thread(
+        recipient="proj", sender=MY_HANDLE, kind="fyi", body="retract me"
+    )
+    from fno.bus.log import Envelope, append
+
+    append(
+        Envelope.new(
+            id=th.thread_id, from_=MY_HANDLE, to="proj", kind="send", body="retract me"
+        )
+    )
+    assert [h.thread_id for h in read_unread_threads("proj")] == [th.thread_id]
+
+    _run("mail", "withdraw", th.thread_id)
+
+    assert read_unread_threads("proj") == []
+
+
+def test_reader_4_fails_open_when_the_bus_is_unreadable(env):
+    """Every other failure posture in the inbox errs toward never losing
+    unprocessed mail. A withdrawal is not important enough to invert that, so an
+    unreadable bus shows the thread rather than hiding it."""
+    from fno.bus.log import bus_log_path
+    from fno.inbox.store import read_unread_threads, write_new_thread
+
+    th = write_new_thread(
+        recipient="proj", sender=MY_HANDLE, kind="fyi", body="keep me"
+    )
+    bus_log_path().parent.mkdir(parents=True, exist_ok=True)
+    bus_log_path().write_text("{not json at all\n", encoding="utf-8")
+
+    assert [h.thread_id for h in read_unread_threads("proj")] == [th.thread_id]
+
+
+def test_withdraw_accepts_the_label_the_send_path_stamped(env):
+    """`stamp_from` returns an explicit `--from-name` label verbatim, so mail
+    sent under one is owned by that label. Without a matching option the entire
+    labelled send path had no listing and no retraction."""
+    mid = _send("release-bot", PEER, "labelled", ts=_ts_ago(3600))
+
+    assert _run("mail", "withdraw", mid).exit_code == 1  # ambient handle is not the owner
+
+    res = _run("mail", "withdraw", mid, "--from-name", "release-bot")
+
+    assert res.exit_code == 0
+    rows = json.loads(_run("mail", "sent", "--from-name", "release-bot", "--json").stdout)
+    assert rows == []
+
+
+def test_withdraw_receipt_does_not_promise_an_outcome_it_cannot_verify(env):
+    """The cursor read and the tombstone append are not atomic, so a drain in
+    flight may already have delivered the body. The receipt names the boundary
+    the tombstone guarantees instead of claiming the message was never seen."""
+    mid = _send(MY_HANDLE, PEER, "retract me", ts=_ts_ago(3600))
+
+    out = _run("mail", "withdraw", mid).stdout
+
+    assert "no drain will deliver it from now on" in out
+    assert "may have delivered it" in out
+
+
 def test_a_forged_tombstone_cannot_retract_someone_elses_mail(env):
     """The sender check lives at the READ side as well as in the verb. The verb
     is one reachable path; a hand-appended or replayed line is another, and a

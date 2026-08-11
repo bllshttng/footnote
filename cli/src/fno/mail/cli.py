@@ -2663,6 +2663,11 @@ def cmd_sent(
         help="Only mail still past its recipient's cursor AND older than "
              "config.inbox.unclaimed_ttl - the ones the nag counts.",
     ),
+    from_name: Optional[str] = typer.Option(
+        None, "--from-name",
+        help="List mail sent under this label instead of the ambient handle "
+             "(the same label `mail send --from-name` stamps).",
+    ),
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit JSON regardless of TTY."
     ),
@@ -2681,12 +2686,15 @@ def cmd_sent(
     from fno.agents.self_stamp import stamp_from
     from fno.config import load_settings
 
-    # `stamp_from(None)`, not the precedence-only resolver: this must be the
-    # SAME handle the send path stamped into `from`, or the outbox lists mail
-    # this session did not send and hides mail it did. A session that inherited
-    # a foreign marker stamps "fno" and resolves to its spawner by precedence,
-    # so the two answers genuinely differ.
-    handle = stamp_from(None)
+    # `stamp_from`, not the precedence-only resolver: this must be the SAME
+    # handle the send path stamped into `from`, or the outbox lists mail this
+    # session did not send and hides mail it did. A session that inherited a
+    # foreign marker stamps "fno" and resolves to its spawner by precedence, so
+    # the two answers genuinely differ. Passing `--from-name` through is what
+    # makes the labelled send path listable at all: `stamp_from` returns an
+    # explicit label verbatim, so mail sent under one is invisible here without
+    # it -- an entire supported send path with no way to see its own strands.
+    handle = stamp_from(from_name)
 
     is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
     if unclaimed_only:
@@ -2736,6 +2744,11 @@ def cmd_sent(
 @mail_app.command("withdraw")
 def cmd_withdraw(
     msg_id: str = typer.Argument(..., help="Message id to retract."),
+    from_name: Optional[str] = typer.Option(
+        None, "--from-name",
+        help="Prove ownership as this label instead of the ambient handle "
+             "(needed for mail sent with `mail send --from-name`).",
+    ),
 ) -> None:
     """Retract a message you sent that the recipient has not picked up.
 
@@ -2765,8 +2778,12 @@ def cmd_withdraw(
     # against the same resolver that stamped the envelope's `from`. The
     # precedence-only resolver would answer differently for a session carrying
     # an inherited marker: it would refuse that session's own mail (stamped
-    # "fno") and let it retract its spawner's.
-    handle = stamp_from(None)
+    # "fno") and let it retract its spawner's. `--from-name` is passed through
+    # for the same reason `mail sent` takes it: `stamp_from` returns an explicit
+    # label verbatim, so mail sent under one could otherwise never be retracted
+    # by anyone. This widens no authority a sender did not already have - the
+    # label is unauthenticated on the send side too.
+    handle = stamp_from(from_name)
 
     all_msgs = list(iter_messages())
     target = next((m for m in all_msgs if m.id == msg_id), None)
@@ -2807,7 +2824,18 @@ def cmd_withdraw(
             to_kind=target.to_kind,
         )
     )
-    print(f"withdrew {msg_id} (to {target.to}); it will not be delivered")
+    # Deliberately NOT "it will not be delivered". The cursor read above and
+    # this append are not one atomic step, and nothing locks the recipient out
+    # in between: a concurrent drain can print and flush the body and only then
+    # advance its cursor, so a withdrawal that observed an un-advanced cursor
+    # can still land after delivery. The honest receipt names the boundary the
+    # tombstone actually guarantees - no drain from here on - rather than
+    # claiming an outcome this command cannot verify.
+    print(
+        f"withdrew {msg_id} (to {target.to}); no drain will deliver it from now on. "
+        "A drain already in flight when this ran may have delivered it: "
+        f"`fno agents peek {target.to}` to check."
+    )
 
 
 @mail_app.command("ack")
