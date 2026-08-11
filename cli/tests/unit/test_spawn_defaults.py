@@ -611,6 +611,31 @@ def test_explicit_account_wins_over_config_account():
     assert out[out.index("--account") + 1] == "explicit"
 
 
+def test_explicit_vendor_and_model_spelling_wins_over_config_route():
+    # -P <vendor> -m <model> carries the same two pieces of information as
+    # --route vendor/model. cmd_spawn rejects two route spellings together, so
+    # injecting the config route on top of this explicit pair would abort a
+    # spawn that already named its route, just spelled differently.
+    out = _inject(
+        ["spawn", "--name", "w", "-P", "zai", "-m", "glm-5.2[1m]", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert out[out.index("-P") + 1] == "zai"
+    assert out[out.index("-m") + 1] == "glm-5.2[1m]"
+
+
+def test_config_account_not_injected_over_explicit_non_claude_harness():
+    # Accounts are Claude-only; cmd_spawn rejects --account on any other
+    # harness. A configured account must not follow an explicit -H codex (e.g.
+    # an autonomous Claude-to-Codex quota cutover), or the cutover aborts.
+    out = _inject(
+        ["spawn", "--name", "w", "-H", "codex", "/fno:target x-1"],
+        account="secondary",
+    )
+    assert "--account" not in out
+
+
 # --------------------------------------------------------------------------- #
 # Autonomous lane reads the stage table (task 1.3)
 #

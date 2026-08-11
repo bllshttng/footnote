@@ -629,13 +629,30 @@ def inject_spawn_defaults(
     # it inherits the flag's fail-closed resolution - an unknown vendor or a
     # missing key refuses the spawn rather than silently billing the primary,
     # which is the invisible-billing shape this node exists to kill. account
-    # forwards --account. An explicit flag always wins.
+    # forwards --account. An explicit flag always wins - including the
+    # -P/--provider (vendor) + -m/--model spelling of an explicit route: it
+    # carries the same two pieces of information as --route and cmd_spawn
+    # rejects two route spellings together, so injecting the config route on
+    # top of an explicit vendor+model pair would abort a spawn that named its
+    # route explicitly, just spelled differently.
+    explicit_vendor_and_model = (
+        _flag_present(out[1:], "-P") or _flag_present(out[1:], "--provider")
+    ) and has_model
     route_injected = False
-    if cfg_route and not _flag_present(out[1:], "--route"):
+    if cfg_route and not _flag_present(out[1:], "--route") and not explicit_vendor_and_model:
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", route_rung))  # type: ignore[arg-type]
-    if cfg_account and not _flag_present(out[1:], "--account"):
+    # Accounts are Claude-only (cmd_spawn rejects --account on any other
+    # harness), so a configured account must not follow an explicit non-Claude
+    # harness - e.g. an autonomous Claude-to-Codex quota cutover (-H codex)
+    # would otherwise carry a Claude account into a spawn that can't use it and
+    # abort instead of cutting over.
+    if (
+        cfg_account
+        and not _flag_present(out[1:], "--account")
+        and resolved_provider() == "claude"
+    ):
         inject += ["--account", cfg_account]
         from_config.append(("account", account_rung))  # type: ignore[arg-type]
 
