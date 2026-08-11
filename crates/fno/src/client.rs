@@ -7586,16 +7586,17 @@ async fn attach_and_run(
     // your config is indistinguishable from one that ignored your keystroke.
     let (keymap, key_warnings) = crate::digest_overlay::keymap(Path::new(&cwd));
     crate::keys::install(keymap);
-    if let Some(first) = key_warnings.first() {
-        let more = key_warnings.len() - 1;
-        view.notice = Some((
-            match more {
-                0 => first.0.clone(),
-                n => format!("{} (+{n} more)", first.0),
-            },
-            Instant::now() + NOTICE_TTL,
-        ));
-    }
+    // Held, not stamped. The TTL is an absolute instant, and everything between
+    // here and the first paint - a handshake allowed ten seconds, then a
+    // catch-up fold - happens before anyone could read it. Stamped at the point
+    // the notice can first be SEEN, or a slow server turns "your config was
+    // refused" back into the silence this notice exists to break.
+    let key_notice = key_warnings
+        .first()
+        .map(|first| match key_warnings.len() - 1 {
+            0 => first.0.clone(),
+            n => format!("{} (+{n} more)", first.0),
+        });
     let (c_rows, c_cols) = view.content_dims();
     write_msg(
         &mut sock_w,
@@ -7745,6 +7746,10 @@ async fn attach_and_run(
     let guard = TerminalGuard::enter()?;
     if !stashed_modesync.is_empty() {
         raw_out(&stashed_modesync).map_err(|e| format!("mode sync: {e}"))?;
+    }
+    // The terminal is ours, so the keymap warning's clock can start.
+    if let Some(text) = key_notice {
+        view.set_notice(text);
     }
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
