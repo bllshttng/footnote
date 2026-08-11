@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -289,6 +290,21 @@ def test_gc_waits_for_registered_shell_writer(tmp_path: Path) -> None:
     assert not thread.is_alive()
     assert result["deleted"] == 1
     assert events.read_text(encoding="utf-8") == ""
+
+
+def test_gc_reaps_reused_pid_writer_token_by_process_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    token = tmp_path / "events.jsonl.shell-writers.d" / f"{os.getpid()}.writer"
+    token.mkdir(parents=True)
+    (token / "owner").write_text("original-process", encoding="utf-8")
+    monkeypatch.setattr(event_gc, "_process_identity", lambda pid: "reused-process", raising=False)
+
+    event_gc._wait_for_shell_writers(events, 0.2)
+
+    assert not token.exists()
 
 
 def test_gc_renews_both_long_held_mutex_leases(

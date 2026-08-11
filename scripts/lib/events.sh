@@ -40,13 +40,19 @@ _begin_shell_event_append() {
     local events_path="${1:?events path required}"
     local writer_pid="${2:?writer pid required}"
     local active_dir="${events_path}.shell-writers.d"
-    local token
+    local token identity
     while true; do
         _wait_for_event_gc "$events_path" || return 1
         mkdir -p "$active_dir" 2>/dev/null || return 1
         token="$active_dir/${writer_pid}.${RANDOM}"
         if ! mkdir "$token" 2>/dev/null; then
             continue
+        fi
+        identity=$(_event_process_identity "$writer_pid")
+        if [[ -z "$identity" ]] || ! printf '%s' "$identity" > "$token/owner"; then
+            command -p rm -f "$token/owner" 2>/dev/null || true
+            rmdir "$token" 2>/dev/null || true
+            return 1
         fi
         if [[ ! -d "${events_path}.gc.d" ]]; then
             printf '%s' "$token"
@@ -59,6 +65,7 @@ _begin_shell_event_append() {
 
 _end_shell_event_append() {
     local token="${1:?writer token required}"
+    command -p rm -f "$token/owner" 2>/dev/null || true
     rmdir "$token" 2>/dev/null || true
     rmdir "$(dirname "$token")" 2>/dev/null || true
 }

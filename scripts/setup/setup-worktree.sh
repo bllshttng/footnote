@@ -338,13 +338,64 @@ finally:
 PY
 }
 
+publish_events_migration_receipt() {
+  local staged="$1"
+  local receipt="$2"
+  python3 - "$staged" "$receipt" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+staged, receipt = sys.argv[1:]
+stat = os.stat(staged)
+payload = json.dumps(
+    {"device": stat.st_dev, "inode": stat.st_ino}, separators=(",", ":")
+).encode("ascii")
+fd, temp = tempfile.mkstemp(dir=os.path.dirname(receipt), prefix=f".{os.path.basename(receipt)}.")
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, receipt)
+finally:
+    try:
+        os.unlink(temp)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+migration_receipt_matches() {
+  local source="$1"
+  local receipt="$2"
+  python3 - "$source" "$receipt" <<'PY'
+import json
+import os
+import sys
+
+source, receipt = sys.argv[1:]
+try:
+    payload = json.loads(open(receipt, encoding="ascii").read())
+    stat = os.stat(source)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if payload.get("device") == stat.st_dev and payload.get("inode") == stat.st_ino else 1)
+PY
+}
+
 append_migrated_events() {
   local source="$1"
   local local_events="$2"
   local deduplicate_suffix="${3:-false}"
   local local_cursor="${4:-}"
   local cursor="$(dirname "$source")/.think-offer-cursor"
+  local receipt="${local_events}.landed"
   recover_event_cursor_pending "$source" "$cursor" || return 1
+  if [[ "$deduplicate_suffix" == "true" ]] && migration_receipt_matches "$source" "$receipt"; then
+    return 0
+  fi
   if [[ "$deduplicate_suffix" == "true" ]] && journal_ends_with "$source" "$local_events"; then
     return 0
   fi
@@ -410,6 +461,9 @@ PY
       publish_event_cursor_pending "$staged" "$cursor" "$((canonical_cursor + consumed_cursor))" || rc=$?
     fi
     if (( rc == 0 )); then
+      publish_events_migration_receipt "$staged" "$receipt" || rc=$?
+    fi
+    if (( rc == 0 )); then
       mv "$staged" "$source" || rc=$?
     fi
     if (( rc == 0 )); then
@@ -431,13 +485,22 @@ wait_for_shell_event_writers() {
     shopt -s nullglob
     entries=("$active_dir"/*)
     shopt -u nullglob
-    local entry name pid
+    local entry name pid recorded_identity current_identity
     if [[ -n "${entries[0]:-}" ]]; then
       for entry in "${entries[@]}"; do
         name="$(basename "$entry")"
         pid="${name%%.*}"
-        if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
-          rmdir "$entry" 2>/dev/null || true
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+          recorded_identity=$(cat "$entry/owner" 2>/dev/null || true)
+          if [[ -n "$recorded_identity" ]]; then
+            current_identity=$(_event_process_identity "$pid")
+            if [[ "$current_identity" != "$recorded_identity" ]]; then
+              command -p rm -f "$entry/owner" 2>/dev/null || true
+              rmdir "$entry" 2>/dev/null || true
+            fi
+          elif ! kill -0 "$pid" 2>/dev/null; then
+            rmdir "$entry" 2>/dev/null || true
+          fi
         fi
       done
     fi
@@ -494,7 +557,7 @@ link_events_journal() {
   fi
   if [[ -e "$target" && ! -f "$target" ]]; then
     echo "setup-worktree: refusing to replace non-file events journal: $target" >&2
-    return 0
+    return 1
   fi
 
   local source_gc="${source}.gc.d"
@@ -631,6 +694,9 @@ link_events_journal() {
       completed="${pending/.pre-share.pending./.pre-share.}"
       if (( rc == 0 )); then
         mv "$pending" "$completed" || rc=$?
+        if (( rc == 0 )); then
+          command -p rm -f "${pending}.landed"
+        fi
       fi
     done
   elif (( rc == 0 )); then
@@ -648,6 +714,9 @@ link_events_journal() {
       echo "setup-worktree: events rows landed; pending backup retained for recovery: $backup" >&2
       cleanup_events_migration
       return 1
+    fi
+    if (( rc == 0 )); then
+      command -p rm -f "${backup}.landed"
     fi
   fi
 
@@ -694,8 +763,7 @@ else
 fi
 if (( events_journal_shared == 1 )) && [[ -L "$WORKTREE/.fno/events.jsonl" ]]; then
   if [[ ! -e "$CANONICAL/.fno/.think-offer-cursor" ]]; then
-    canonical_events_size=$(wc -c < "$CANONICAL/.fno/events.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
-    (set -C; printf '%s' "${canonical_events_size:-0}" > "$CANONICAL/.fno/.think-offer-cursor") 2>/dev/null || true
+    (set -C; printf '%s' 0 > "$CANONICAL/.fno/.think-offer-cursor") 2>/dev/null || true
   fi
   link_artifact ".fno/.think-offer-cursor"
 fi

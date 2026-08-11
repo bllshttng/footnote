@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -42,6 +44,26 @@ def _favorable(row: dict[str, object]) -> bool:
     ) or (row.get("type") == "review_coverage" and data.get("coverage") == "covered")
 
 
+def _timestamp(row: object) -> datetime | None:
+    if not isinstance(row, dict):
+        return None
+    value = row["ts"] if "ts" in row else row.get("timestamp")
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)",
+            value,
+        )
+        is None
+    ):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.utcoffset() == timedelta(0) else None
+
+
 def _rows(path: Path) -> Iterator[tuple[bytes, object | None]]:
     with path.open("rb") as handle:
         for raw in handle:
@@ -56,9 +78,17 @@ def main() -> int:
         print("usage: filter-event-migration.py CANONICAL LOCAL", file=sys.stderr)
         return 2
     canonical, local = map(Path, sys.argv[1:])
-    existing = {
-        key for _, row in _rows(canonical) if (key := _gate_key(row)) is not None
-    }
+    existing: dict[tuple[object, ...], datetime | None] = {}
+    for _, row in _rows(canonical):
+        key = _gate_key(row)
+        if key is None:
+            continue
+        timestamp = _timestamp(row)
+        previous = existing.get(key)
+        if key not in existing or (
+            timestamp is not None and (previous is None or timestamp > previous)
+        ):
+            existing[key] = timestamp
     local_size = local.stat().st_size
     try:
         local_cursor = int(
@@ -75,11 +105,15 @@ def main() -> int:
     for raw, row in _rows(local):
         line_end = local_offset + len(raw)
         key = _gate_key(row)
+        timestamp = _timestamp(row)
         if (
             key is not None
             and isinstance(row, dict)
             and _favorable(row)
             and key in existing
+            and timestamp is not None
+            and existing[key] is not None
+            and timestamp <= existing[key]
         ):
             local_offset = line_end
             continue
@@ -87,7 +121,11 @@ def main() -> int:
         if line_end <= local_cursor:
             mapped_cursor += len(raw)
         if key is not None:
-            existing.add(key)
+            previous = existing.get(key)
+            if key not in existing or (
+                timestamp is not None and (previous is None or timestamp > previous)
+            ):
+                existing[key] = timestamp
         local_offset = line_end
     mapping_path = os.environ.get("EVENTS_MIGRATION_CURSOR_MAP")
     if mapping_path:

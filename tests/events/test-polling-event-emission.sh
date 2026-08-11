@@ -279,6 +279,7 @@ handoff_result=$(
         _end_shell_event_append() {
             local token="${1:?writer token required}"
             printf 'TOKEN=%s\n' "$token"
+            command -p rm -f "$token/owner" 2>/dev/null || true
             rmdir "$token" 2>/dev/null || true
             rmdir "$(dirname "$token")" 2>/dev/null || true
         }

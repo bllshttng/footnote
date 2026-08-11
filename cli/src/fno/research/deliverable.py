@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fno.events import _build, append_event
+from fno.events import SchemaUnavailableError, ValidationError, _build, append_event
 from fno.research.core import Source, read_sources, slugify
 
 # A claim snippet is short enough to scan, long enough to carry meaning.
@@ -185,7 +185,7 @@ def emit_done_advisory(events_path: Path, *, slug: str) -> None:
             },
         )
         append_event(event, events_path)
-    except (OSError, TimeoutError):
+    except (OSError, SchemaUnavailableError, TimeoutError, ValidationError):
         pass
 
 

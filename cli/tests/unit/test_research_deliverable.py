@@ -212,3 +212,19 @@ def test_emit_done_advisory_uses_coordinated_append(
         "message": "research deliverable topic-slug shipped",
         "slug": "topic-slug",
     }
+
+
+def test_emit_done_advisory_remains_nonfatal_on_schema_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    monkeypatch.setattr(
+        deli,
+        "_build",
+        lambda *args, **kwargs: (_ for _ in ()).throw(deli.ValidationError("drift")),
+    )
+
+    deli.emit_done_advisory(events, slug="topic-slug")
+
+    assert events.read_text(encoding="utf-8") == ""

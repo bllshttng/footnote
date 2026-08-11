@@ -2,6 +2,11 @@
 
 EVENTS_STALE_MUTEX_SECONDS=120
 
+_event_process_identity() {
+    local pid="${1:?pid required}"
+    LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
+}
+
 _resolve_event_symlink() {
     local path="${1:?path required}"
     local link_target

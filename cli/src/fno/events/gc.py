@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,20 @@ from fno.events import RETENTION_MINIMUM_TTL_HOURS, _utc_timestamp, retention_fo
 from fno.mutex import acquire_dir_mutex, release_dir_mutex, renew_dir_mutex
 
 _LEASE_RENEW_EVERY_S = 30
+
+
+def _process_identity(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    value = " ".join(result.stdout.split())
+    return value or None
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -38,7 +53,20 @@ def _wait_for_shell_writers(path: Path, timeout_seconds: float) -> None:
         for entry in entries:
             try:
                 pid = int(entry.name.split(".", 1)[0])
-                os.kill(pid, 0)
+                recorded_identity = (entry / "owner").read_text(encoding="utf-8").strip()
+                current_identity = _process_identity(pid)
+                if current_identity == recorded_identity:
+                    continue
+                (entry / "owner").unlink(missing_ok=True)
+                entry.rmdir()
+            except FileNotFoundError:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    try:
+                        entry.rmdir()
+                    except OSError:
+                        pass
             except ProcessLookupError:
                 try:
                     entry.rmdir()

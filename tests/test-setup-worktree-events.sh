@@ -32,7 +32,7 @@ CANONICAL="$canonical" WORKTREE="$fresh" bash "$SETUP" >/dev/null 2>&1
 assert "fresh worktree gets an events symlink" test -L "$fresh/.fno/events.jsonl"
 assert "fresh symlink targets the canonical journal" test "$canonical/.fno/events.jsonl" -ef "$fresh/.fno/events.jsonl"
 assert "fresh worktree shares the offer cursor" test -L "$fresh/.fno/.think-offer-cursor"
-assert "offer cursor initializes at canonical EOF" test "$(cat "$canonical/.fno/.think-offer-cursor")" -eq "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')"
+assert "offer cursor initializes at the start without consuming existing offers" test "$(cat "$canonical/.fno/.think-offer-cursor")" -eq 0
 resolved_shell_path=$(
   EVENTS_FILE="$fresh/.fno/events.jsonl"
   # shellcheck disable=SC1090
@@ -48,6 +48,12 @@ if (EVENTS_FILE="$looped" source "$REPO_ROOT/scripts/lib/events.sh") 2>/dev/null
 else
   echo "PASS: looping events symlink fails closed"
 fi
+
+unsupported="$TMP/unsupported"
+mkdir -p "$unsupported/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$unsupported" bash "$SETUP" >/dev/null 2>&1
+unsupported_rc=$?
+assert "unsupported journal object makes setup fail" test "$unsupported_rc" -ne 0
 
 existing="$TMP/existing"
 mkdir -p "$existing/.fno"
@@ -119,6 +125,15 @@ printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","type":"review_attestation","source"
 CANONICAL="$canonical" WORKTREE="$ordered" bash "$SETUP" >/dev/null 2>&1
 last_verdict=$(jq -r 'select(.type == "review_attestation" and .data.reviewer == "code-review" and .data.head_sha == "abc") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration cannot restore older passing gate evidence" test "$last_verdict" = fail
+
+newer_gate="$TMP/newer-gate"
+mkdir -p "$newer_gate/.fno"
+printf '%s\n' '{"ts":"2026-08-11T08:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"newer-head","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"/code-review","head_sha":"newer-head","verdict":"pass","session_id":"local"}}' > "$newer_gate/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$newer_gate" bash "$SETUP" >/dev/null 2>&1
+newer_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "newer-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
+assert "migration keeps a newer passing re-review" test "$newer_verdict" = pass
 
 malformed_gate="$TMP/malformed-gate"
 mkdir -p "$malformed_gate/.fno"
@@ -297,6 +312,24 @@ ln -s "$canonical/.fno/events.jsonl" "$filtered_recovery/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$filtered_recovery" bash "$SETUP" >/dev/null 2>&1
 assert "filtered recovery does not duplicate the leading ordinary row" test "$(grep -c 'filtered_recovery_first' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 assert "filtered recovery does not duplicate the trailing ordinary row" test "$(grep -c 'filtered_recovery_last' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+
+receipt_recovery="$TMP/receipt-recovery"
+mkdir -p "$receipt_recovery/.fno"
+printf '%s\n' '{"type":"receipt_recovery_row"}' > "$receipt_recovery/.fno/events.jsonl"
+cat > "$TMP/fail-completion-env" <<'STUB'
+mv() {
+  if [[ "${1:-}" == *events.jsonl.pre-share.pending.* && "${2:-}" == *events.jsonl.pre-share.* && "${2:-}" != *pending* ]]; then
+    return 1
+  fi
+  command /bin/mv "$@"
+}
+export -f mv
+STUB
+CANONICAL="$canonical" WORKTREE="$receipt_recovery" BASH_ENV="$TMP/fail-completion-env" bash "$SETUP" >/dev/null 2>&1
+printf '%s\n' '{"type":"intervening_after_landed_segment"}' >> "$canonical/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$receipt_recovery" bash "$SETUP" >/dev/null 2>&1
+assert "landed receipt survives an intervening append without replay" test "$(grep -c 'receipt_recovery_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 
 failed_recovery="$TMP/failed-recovery"
 mkdir -p "$failed_recovery/.fno"
