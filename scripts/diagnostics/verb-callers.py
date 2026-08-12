@@ -108,6 +108,22 @@ def load_leaves(root: Path) -> list[str]:
     return sorted(set(leaves))
 
 
+def load_curriculum(path: Path, leaves: set[str]) -> tuple[set[str], list[str]]:
+    """Taught verbs from a file, one per line, ``#`` comments (full-line or trailing).
+
+    Returns ``(taught ∩ leaves, sorted unknown)`` so a curriculum typo or a verb
+    that was cut surfaces loudly instead of silently shrinking the complement.
+    """
+    raw: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            raw.append(line)
+    taught = set(raw) & leaves
+    unknown = sorted(set(raw) - leaves)
+    return taught, unknown
+
+
 def iter_corpus(root: Path):
     for entry in CORPUS_DIRS + CORPUS_FILES:
         base = root / entry
@@ -261,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--summary", action="store_true", help="print counts, delta, clusters only")
     ap.add_argument("--self-check", action="store_true", help="controls + leaf parity; exit code")
     ap.add_argument("--out", help="also write the full table to this path")
+    ap.add_argument("--curriculum", type=Path,
+                    help="taught-verb file; report the untaught complement and its cull candidates")
     args = ap.parse_args(argv)
 
     root = repo_root()
@@ -289,6 +307,32 @@ def main(argv: list[str] | None = None) -> int:
         for l in not_subset[:10]:
             print(f"  {l}", file=sys.stderr)
         return 2
+
+    if args.curriculum:
+        # The complement (untaught leaves) intersected with the zero-caller set
+        # is the deletion-candidate list the curriculum forces. Reuses the same
+        # sweep, controls, and skills/target-safe walk as the rest of the tool;
+        # adds only the curriculum layer.
+        taught, unknown = load_curriculum(args.curriculum, leaves)
+        if unknown:
+            print("verb-callers: curriculum verbs not in baseline (typos or cut verbs):",
+                  file=sys.stderr)
+            for u in unknown:
+                print(f"  {u}", file=sys.stderr)
+            return 2
+        zero_set = set(zero_corr)
+        complement = [l for l in leaves_list if l not in taught]
+        cull = sorted(l for l in complement if l in zero_set)
+        print(f"baseline leaves: {len(leaves_list)}")
+        print(f"taught (curriculum): {len(taught)}")
+        print(f"complement (untaught): {len(complement)}")
+        print(f"cull candidates in complement (zero external callers): {len(cull)}")
+        print(f"complement kept (has external caller): {len(complement) - len(cull)}")
+        if cull:
+            print("cull candidates:")
+            for l in cull:
+                print(f"  {l}")
+        return 0
 
     enrichment = load_enrichment(root) if not args.self_check else {}
 
