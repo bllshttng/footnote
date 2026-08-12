@@ -1,9 +1,7 @@
 # Executor Routing Prompt
 
-**Load when:** `/blueprint` reaches the Executor Lock Transcription gate on a
-design doc that touches a frontend or mixed surface. Blueprint calls into this
-reference to detect surface mix, decide whether to prompt or auto-lock, and
-write the result to the design doc's `## Locked Decisions` section.
+When `/blueprint` reaches the Executor Lock Transcription gate on a design doc that touches a frontend or mixed surface, load this reference.
+It detects the surface mix, decides whether to prompt or auto-lock, and writes the result to the design doc's `## Locked Decisions` section.
 
 The output of this step is a single Locked Decision entry that `/blueprint`
 transcribes into the implementation plan's `executor:` frontmatter (see
@@ -74,22 +72,18 @@ Outputs:
 
 There are three call modes, in priority order:
 
-1. **CLI flag (`cli-flag` provenance).** If `FNO_EXECUTOR_OVERRIDE`
-   is set in the environment, write that value to Locked Decisions
-   immediately. No detection, no prompt. This is how `/target M
-   --executor <value>` plumbs intent down to /think. Acceptable values:
-   `do`, `impeccable`, `mixed` (case-insensitive). Garbage values must
-   be rejected at /target entry, not silently accepted here.
-2. **Target autonomous (`auto-detected` provenance).** If
-   `.fno/target-state.md` exists, /think is running inside an
-   autonomous target session and cannot block on user input. Run the
-   detection rules and lock the result without prompting. Pure-backend
-   sessions never lock at all. The absence of a lock is the signal.
-3. **Standalone interactive (`user-confirmed` provenance).** No CLI
-   flag, no target context. If the detection result is anything other
-   than `backend-only` or `unknown`, fire the prompt below and capture
-   the user's answer. If the detection is `backend-only` or `unknown`,
-   skip the prompt entirely.
+1. If `FNO_EXECUTOR_OVERRIDE` is set (the `cli-flag` path), write that value to Locked Decisions immediately.
+   No detection, no prompt.
+   This is how `/target M --executor <value>` plumbs intent down to `/blueprint`.
+   Acceptable values are `do`, `impeccable`, or `mixed` (case-insensitive).
+   Garbage values are rejected at `/target` entry, not accepted here.
+2. If `.fno/target-state.md` exists (the `auto-detected` path), `/blueprint` runs inside an autonomous target session and cannot block on user input.
+   Run the detection rules and lock the result without prompting.
+   Pure-backend sessions never lock at all.
+   The absence of a lock is the signal.
+3. With no CLI flag and no target context (the `user-confirmed` path), `/blueprint` runs standalone.
+   If the detection result is anything other than `backend-only` or `unknown`, fire the prompt below and capture the user's answer.
+   Otherwise skip the prompt entirely.
 
 ## Prompt template (standalone mode only)
 
@@ -140,9 +134,9 @@ N. **Executor routing**: plan-level `executor: do` (cli-flag).
 ```
 
 The provenance suffix is one of `(auto-detected)`, `(user-confirmed)`,
-`(cli-flag)`. `/blueprint` parses with tolerance for whitespace, casing, and
-absent suffixes (per Domain Pitfall #4) but writes the suffix through when
-present so the source of the decision survives PR review.
+`(cli-flag)`.
+`/blueprint` parses with tolerance for whitespace, casing, and absent suffixes (per Domain Pitfall #4).
+When the suffix is present, `/blueprint` writes it through so the source of the decision survives PR review.
 
 ## Mixed-mode per-task overrides
 

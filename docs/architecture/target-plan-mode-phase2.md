@@ -80,7 +80,7 @@ That capture-hook fix is in. The hook dispatch it was waiting for is closed unbu
 **At capture time there is nothing to dispatch.**
 The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id, a native plan has no `claims:` / `graph_node_id:`, and the sidecar path is not a plan the backlog knows.
 Nothing the hook has written is resolvable to a node by any of `autolaunch-on-ready.sh`'s three tiers, so a ready-gate placed there has no ready node to see.
-The plan is not executable at that moment either: `/blueprint` compiles acceptance criteria the native plan does not yet carry, and the backfill that synthesizes them runs inside a later `/target`, long after the hook has exited.
+The plan is not executable at that moment either. `/blueprint` compiles acceptance criteria the native plan does not yet carry. The backfill that synthesizes them runs inside a later `/target`, long after the hook has exited.
 See the "Why synthesis precedes /blueprint" section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
 
 **The native path inherits Layer 2 for free.**

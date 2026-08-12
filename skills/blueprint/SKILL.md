@@ -99,7 +99,7 @@ fi
 
 ### Process
 
-1. **Understand** the request (ask if unclear). If the design doc carries a
+1. **Understand** the request. Clarify anything ambiguous before proceeding. If the design doc carries a
    `## Failure Modes` section, use it as the seed for error-path acceptance
    criteria (AC4-EDGE) cited inline in the Changes section. A research doc
    without one is fine: the `what-if` brief asks that question against source.
@@ -361,7 +361,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 ```
 1. Read design doc + frontmatter
 2. Validate: status must be "design" (or "ready" if `rewrite` passed)
-3. Detect codebase state (skip if --mode greenfield|brownfield):
+3. Detect codebase state (--mode greenfield|brownfield skips this):
    - Read ## Architecture section, extract file path mentions
    - >= 50% exist -> brownfield; < 50% exist -> greenfield
 4. Build ## Execution Strategy (waves YAML block)

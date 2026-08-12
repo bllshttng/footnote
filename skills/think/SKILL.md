@@ -16,7 +16,7 @@ Read the argument left to right: an optional substrate token, an optional brief 
 
 **Substrate.** `bg` hands the question to a background worker (`fno think dispatch <node>`) and returns its receipt immediately. `subagent` runs the process below in a subagent. Neither token: run it here, inline.
 
-**Codex posture.** When `$CODEX_THREAD_ID` is nonblank, before routing, Print exactly once: `codex posture: think researches inline by default. The bg token dispatches a background worker and subagent a subagent.`
+**Codex posture**. When `$CODEX_THREAD_ID` is nonblank, before routing, Print exactly once: `codex posture: think researches inline by default. The bg token dispatches a background worker and subagent a subagent.`
 
 **Brief.** The question put to the sources. The process never varies. Only this row does.
 

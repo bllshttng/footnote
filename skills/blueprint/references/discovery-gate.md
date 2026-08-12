@@ -5,7 +5,7 @@ making assumptions and moving forward - this protocol forces unknowns into
 the open where they can be answered (by the user) or made explicit (by the
 model in autonomous mode).
 
-`/think` writes cited findings when it runs. A supplied design artifact
+When `/think` runs, it writes cited findings. A supplied design artifact
 carries them, and `/blueprint` consumes it without re-running this protocol.
 When think did not run, `/blueprint` grounds itself on the receipt in step 1
 below. The presence or absence of an exact `## Discovery` or `## Assumptions`
