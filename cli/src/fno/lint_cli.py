@@ -567,19 +567,35 @@ def _repo_scope(paths: list[Path], repo: Path) -> "list[str]":
     root = repo.resolve()
     out = []
     for p in paths:
+        full = Path(p).resolve()
         try:
-            out.append(Path(p).resolve().relative_to(root).as_posix())
+            rel = full.relative_to(root).as_posix()
         except ValueError:
             typer.echo(
                 f"style: --files path is outside the repository: {p}", err=True
             )
             raise typer.Exit(2)
+        # Existence is what separates a mis-resolved path from a real one. A
+        # caller standing in cli/ and passing `docs` resolves to cli/docs, which
+        # is inside the repo and does not exist, so it matched nothing and the
+        # gate exited 0 over a whole tree. Refusing on a ZERO MATCH instead
+        # punished the normal answer: an existing file with no changes since the
+        # base is correct, not an instrument failure, and per-file invocation is
+        # the advertised use of this flag.
+        if not full.exists():
+            typer.echo(
+                f"style: --files path does not exist: {p} (resolved to {full}). "
+                "Paths resolve against the current directory.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        out.append(rel)
     return out
 
 
 def _style_added_lines(
     diff_base: str, paths: Optional[list[Path]]
-) -> "tuple[list, int, int, int]":
+) -> "tuple[list, int, int, list[str]]":
     """Return (violations, added-line count, changed-file count, unexplained).
 
     Per file: a whole-file style-exception marker exempts it; otherwise only the
@@ -587,8 +603,8 @@ def _style_added_lines(
     not open: a malformed base that inspects nothing is the absence the pitfalls
     corpus names, indistinguishable from "no violations found".
 
-    ``unexplained`` counts changed files where GIT counted added lines and this
-    parser found none. That is an instrument failure and nothing else. Counting
+    ``unexplained`` collects the PATHS of changed files where GIT counted added
+    lines and this parser found none. That is an instrument failure and nothing else. Counting
     bare zeros instead swept in every legitimate zero: a pure rename, a
     deletion-only trim, a mode change. Two of those were measured failing real
     PRs, and the rename-resolution fix directly above is what creates the first.
@@ -649,20 +665,6 @@ def _style_added_lines(
         for line in diff_files.stdout.splitlines()
         if line.strip() and line.endswith(".md")
     ]
-    # A caller-supplied scope that matches NOTHING is almost always a path
-    # resolved against the wrong directory, and it exits 0 over a whole tree.
-    # `--files` resolves against the caller's cwd, so a caller standing
-    # somewhere other than the repo root and passing a repo-relative path lands
-    # inside the repo, keys to a real-looking prefix, and matches no file. The
-    # default scope is exempt: an untouched docs tree is a legitimate zero.
-    if paths and not diff_files.stdout.strip():
-        typer.echo(
-            f"style: --files matched no changed files under {scope}. "
-            "Paths resolve against the current directory, so check the scope "
-            "rather than reading this as a clean tree.",
-            err=True,
-        )
-        raise typer.Exit(2)
     violations = []
     inspected = 0
     unexplained: list[str] = []
@@ -711,7 +713,15 @@ def _git_added_line_nums(
     pos = 0
     in_hunk = False
     for line in proc.stdout.splitlines():
-        if line.startswith("@@"):
+        if line.startswith("diff --git"):
+            # Reset per FILE. The pathspec here carries two paths, so a diff
+            # that comes back as two separate entries rather than one paired
+            # rename would reach the second entry's `+++ b/<path>` with in_hunk
+            # still true from the previous file, count it as an added line, and
+            # style-check a line the author never wrote. Latent rather than
+            # live, and one line closes it.
+            in_hunk = False
+        elif line.startswith("@@"):
             match = re.search(r"\+(\d+)", line)
             pos = int(match.group(1)) if match else pos
             in_hunk = True

@@ -23,8 +23,10 @@
 //!   structural cleavage from codex established in US4-gemini).
 //!
 //! Argv shapes mirror the validated US4 Python adapters
-//! (`cli/src/fno/agents/harnesses/{claude,codex,gemini}.py`) so the Rust
-//! daemon invokes the CLIs identically to the proven implementations.
+//! (`cli/src/fno/agents/harnesses/{claude,codex}.py`) so the Rust daemon
+//! invokes the CLIs identically to the proven implementations. The gemini
+//! adapter that shape was also drawn from has since been deleted, so no
+//! Python counterpart remains for that provider.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

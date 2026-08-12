@@ -149,10 +149,15 @@ done
 # one-of-N-reachable-paths shape this repo's own pitfalls corpus names, sitting
 # inside the guard written to close that very class.
 #
-# Written WITHOUT spelling the patterns, because a guard that greps its own file
-# matches its own prose. The split-owner guard above hit that and needed a
-# count of two; this one would need an exemption on every explanatory line.
-_relpath_stray=$(grep -nE 'os\.path\.relpath\(|\.relative_to\(|from os\.path import|import relpath' "$SELF_PATH" | grep -v 'repo-key-exempt' || true)
+# The prose above deliberately does not spell the patterns, because a guard that
+# greps its own file matches its own prose. That was not enough: the ALTERNATION
+# itself contains one of them, so the definition line below matched, and it
+# survived only because that same line happens to carry the exemption string.
+# Tightening the exemption to a comment-anchored form, the natural next edit,
+# would have made this gate exit 2 on every invocation repo-wide. The guard's
+# own definition line is now excluded by name rather than by luck.
+_relpath_stray=$(grep -nE 'os\.path\.relpath\(|\.relative_to\(|from os\.path import|import relpath' "$SELF_PATH" \
+  | grep -v '_relpath_stray=' | grep -v 'repo-key-exempt' || true)
 if [[ -n "$_relpath_stray" ]]; then
   echo "check-axis-vocabulary: path key bypasses _repo_key:" >&2
   echo "$_relpath_stray" | sed 's/^/  /' >&2
@@ -248,6 +253,11 @@ EXCLUDE_ANCHORED = {
 }
 
 
+# Memoized: the scan calls this once and the receipt line calls it again, and a
+# second full walk of the tree to print the same answer is pure cost.
+_BUILD_DIR_CACHE: dict = {}
+
+
 def _build_output_dirs(repo_root: Path):
     """`<crate>/target` for every crate that exists, derived not listed.
 
@@ -265,18 +275,22 @@ def _build_output_dirs(repo_root: Path):
     "derived not listed" and delivered a narrower rule than the comment
     claimed, which is its own small lying receipt.
     """
+    if repo_root in _BUILD_DIR_CACHE:
+        return _BUILD_DIR_CACHE[repo_root]
     found = set()
     for dirpath, dirnames, filenames in os.walk(repo_root):
-        # Never descend into a build directory or a vendor tree to look for a
-        # manifest: that costs a full walk of generated sources to learn
-        # nothing, and the walk is the thing being avoided.
+        # Never descend into a build directory or anything the scans already
+        # exclude. Pruning only target/.git/node_modules walked the
+        # .claude/worktrees forest, which is the very thing EXCLUDE_DIR exists
+        # to keep out, and paid for it on a second call for the receipt.
         dirnames[:] = [
-            d for d in dirnames if d not in ("target", ".git", "node_modules")
+            d for d in dirnames if d != "target" and d not in EXCLUDE_DIR
         ]
         if "Cargo.toml" not in filenames:
             continue
         rel = _repo_key(dirpath, repo_root, repo_root)
         found.add("target" if rel == "." else f"{rel}/target")
+    _BUILD_DIR_CACHE[repo_root] = found
     return found
 
 # An adversarial probe, deliberately placed where the walk used to be blind
@@ -713,7 +727,12 @@ def _self_test():
     else:
         # Positive control: the same tree WITHOUT the derivation must find it,
         # else the absence above proves nothing about the exclusion.
+        # The cache is per-process and production scans a tree once, but this
+        # specimen deliberately scans the SAME tree twice with different
+        # contents, so it must clear the cache or it reads its own first answer.
+        # Caught by this control the moment the cache landed.
         (d / "crates" / "foo" / "Cargo.toml").unlink()
+        _BUILD_DIR_CACHE.clear()
         recheck, _, _, _ = scan(d)
         if any("crates/foo/target" in f for f in recheck):
             print("caught planted new-crate build output ok")
