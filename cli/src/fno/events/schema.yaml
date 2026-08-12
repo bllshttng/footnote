@@ -493,6 +493,18 @@ event_types:
         session_id: { type: string }
     consumers: [hooks/target-stop-hook.sh]
 
+  - name: target_denominator
+    description: "The scope denominator chosen at `fno target init` (x-cbab): a plan-backed run (plan_path set), a declared deliverable count (--deliverables N), or none. Feeds the deliverables-1 ratio measurement that detects when the cheap --deliverables exit is used as a bypass rather than an honest single-task declaration."
+    sources: [target]
+    data:
+      required: [denominator]
+      properties:
+        session_id: { type: string, description: "The run's fno_id; best-effort (used to dedup retried inits in the ratio)." }
+        denominator: { type: string, enum: [plan, deliverables, none] }
+        count: { type: integer, description: "The declared deliverable count when denominator=deliverables; absent otherwise." }
+        enumerated: { type: boolean, description: "Whether enumerated_scope fired on the node (withdrawing the cheap exit)." }
+    consumers: [operator]
+
   - name: phase_rolled_back
     description: "Existing event from set_gate rollback path. Retained for back-compat."
     sources: [hook]

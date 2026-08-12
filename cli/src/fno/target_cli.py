@@ -1047,6 +1047,78 @@ def resume_bind_cmd(
     raise typer.Exit(code=1)
 
 
+@target_app.command("denominator-ratio", hidden=True)
+def denominator_ratio(
+    since_days: int = typer.Option(
+        28, "--since-days", help="Events lookback window in days."
+    ),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the ratio as JSON."),
+) -> None:
+    """The deliverables-1 ratio (x-cbab): is the cheap --deliverables exit a bypass?
+
+    Reads ``target_denominator`` events. Of declared-denominator inits (plan or
+    deliverables), the fraction that used ``--deliverables 1``: past roughly 80
+    percent the exit is reflexive and ``enumerated_scope`` needs widening. A
+    stamped 1 still beats an absent denominator, so this measures drift, not
+    correctness.
+    """
+    import json as _json
+    from datetime import datetime, timedelta
+
+    from fno.paths import resolve_repo_root
+    from fno.scoreboard.fold import read_jsonl_events
+
+    events = read_jsonl_events(
+        [resolve_repo_root() / ".fno" / "events.jsonl"], {"target_denominator"}
+    )
+    cutoff = datetime.now() - timedelta(days=since_days)
+
+    def _ts(e):
+        raw = e.get("ts")
+        # naive-local compare; events are written naive-local (fold._parse_ts).
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", ""))
+        except (ValueError, TypeError):
+            return None
+
+    counts = {"plan": 0, "deliverables": 0, "none": 0}
+    ones = 0
+    for e in events:
+        if _ts(e) is None or _ts(e) < cutoff:
+            continue
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        d = data.get("denominator")
+        if d in counts:
+            counts[d] += 1
+        if d == "deliverables" and data.get("count") == 1:
+            ones += 1
+
+    declared = counts["plan"] + counts["deliverables"]
+    ratio = round(100 * ones / declared, 1) if declared else None
+    verdict = (
+        "no declared-denominator inits in window"
+        if declared == 0
+        else ("bypass: deliverables:1 dominates; widen enumerated_scope" if (ratio or 0) >= 80 else "healthy")
+    )
+    out = {
+        "deliverables_1_ratio_pct": ratio,
+        "deliverables_1": ones,
+        "plan_backed": counts["plan"],
+        "deliverables_declared": counts["deliverables"],
+        "none": counts["none"],
+        "since_days": since_days,
+        "verdict": verdict,
+    }
+    if json_out:
+        typer.echo(_json.dumps(out, indent=2))
+        return
+    typer.echo(
+        f"deliverables:1 ratio: {ratio if ratio is not None else 'n/a'}%  "
+        f"({ones} of {declared} declared; plan={counts['plan']}, "
+        f"deliverables={counts['deliverables']}, none={counts['none']})  {verdict}"
+    )
+
+
 @target_app.command("status")
 def status(
     node: Optional[str] = typer.Argument(
@@ -1400,7 +1472,43 @@ def init(
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
         _maybe_check_resume_receipt()
+        _record_denominator_choice(plan_path, deliverables, _dispatch_node)
     raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
+def _record_denominator_choice(
+    plan_path: Optional[str], deliverables: Optional[int], node: Optional[dict]
+) -> None:
+    """Emit a ``target_denominator`` event for the deliverables-1 ratio (x-cbab).
+
+    Best-effort: a recording failure never fails a successful init. The cheap
+    ``--deliverables`` exit is the load-bearing bypass risk (reflexive N=1
+    degrades the gate to a formality); this event is how that abuse gets measured
+    off the events log instead of noticed by hand.
+    """
+    try:
+        from fno.events import _build, append_event
+        from fno.target.denominator import enumerated_scope
+
+        if plan_path and plan_path.strip():
+            denominator = "plan"
+        elif deliverables is not None:
+            denominator = "deliverables"
+        else:
+            denominator = "none"
+        data: dict = {"denominator": denominator}
+        if deliverables is not None:
+            data["count"] = deliverables
+        if isinstance(node, dict):
+            data["enumerated"] = enumerated_scope(
+                str(node.get("title") or ""), str(node.get("details") or "")
+            )
+        # init's cwd IS the repo root (the manifest was just written to
+        # .fno/target-state.md relative), so the default events path lands beside
+        # it without a resolve_repo_root git round-trip on every successful init.
+        append_event(_build("target_denominator", "target", data))
+    except Exception:  # noqa: BLE001 - a measurement failure must not fail init
+        pass
 
 
 def _warn_no_merge_dropped() -> None:
