@@ -47,22 +47,23 @@ cd <printed-path>
 bash scripts/setup/setup-worktree.sh
 ```
 
-The setup script links config, backlog state, and the agents directory from the main checkout.
+The setup script links config and the agent files from the main checkout.
 Work from there.
 
 ## Clean up after a merge
 
 Leave a merged worktree around and the list grows fast.
-Two safe ways to remove one:
+Two ways to remove one:
 
 ```bash
-fno worktree cleanup --merged --apply     # reap every worktree whose branch landed
-fno worktree archive <name>               # remove one worktree, keep its branch
+fno worktree cleanup --merged --apply     # reap every landed worktree, with safety checks
+fno worktree archive <name>               # force-remove one worktree, keep its branch
 ```
 
 Never remove a worktree with `rm -rf`.
 That leaves dangling git refs.
-The archive and cleanup verbs run the safety checks for you: clean tree, no unpushed commits, no live session.
+The cleanup verb runs the safety checks for you: clean tree, no unpushed commits, no live session.
+The archive verb force-removes with no checks, so confirm the tree is clean first.
 
 ## Who holds what
 
