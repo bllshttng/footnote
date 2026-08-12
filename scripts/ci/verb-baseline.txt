@@ -22,11 +22,10 @@
 #   flag-exception: <rationale>
 # (same shape as `verb-exception:`; removals are free and need no line).
 #
-# Scope: the hidden-option coverage is fno-py only. The Rust front is
-# constant-listed in lint_verb_ratchet.py (RUST_FRONT_VERBS), not introspected,
-# so a clap `hide = true` option on it is invisible to this gate - and to
-# `fno mux --help`, which is how it stays hidden. The lint output names this
-# boundary on every green run.
+# Scope: the hidden-option coverage is fno-py only. The Rust front's VERBS are
+# read from its dispatchers and cross-checked against the live binary, but its
+# FLAGS are not enumerated, so a hidden flag on a mux verb is invisible to this
+# gate. The lint output names that boundary on every green run.
 agents adopt
 agents ask !--provider
 agents attach
@@ -252,11 +251,15 @@ mail view
 mail withdraw
 mcp send
 mux attach
+mux block annotate
 mux block pipe
 mux doctor
 mux kill-server
+mux layout apply
 mux layout get
+mux layout graft
 mux ls
+mux pane break
 mux pane claim
 mux pane kill
 mux pane ls
@@ -264,6 +267,7 @@ mux pane read
 mux pane release
 mux pane run
 mux pane send
+mux pane split
 mux pane wait
 mux serve
 mux server

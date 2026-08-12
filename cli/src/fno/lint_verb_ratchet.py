@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -42,55 +43,54 @@ class VerbRatchetError(Exception):
 
 BASELINE_REL = Path("scripts") / "ci" / "verb-baseline.txt"
 
-# The complete known leaf tree of the Rust front (``crates/fno``), sourced from
-# ``crates/fno/src/main.rs::decide_role`` and ``crates/fno/src/mux_cli.rs``.
-# The advertised subset (what ``fno mux --help`` prints) is verified against the
-# live binary at lint time; the hidden verbs below (``mux tab``, ``mux layout``,
-# ``mux where``) are constant-only because the Rust front exposes no structured
-# introspection and its own usage string omits them - the same "incomplete help"
-# defect this node is about, one layer down. Adding a Rust verb is a deliberate
-# two-file change: the Rust match arm AND this tuple (plus the baseline) - the
-# same review moment adding a Python verb to LAZY_SUBCOMMANDS is.
-RUST_FRONT_VERBS: tuple[str, ...] = (
-    "mux attach",
-    "mux block pipe",
-    "mux doctor",
-    "mux kill-server",
-    "mux layout get",
-    "mux ls",
-    "mux pane claim",
-    "mux pane kill",
-    "mux pane ls",
-    "mux pane read",
-    "mux pane release",
-    "mux pane run",
-    "mux pane send",
-    "mux pane wait",
-    "mux serve",
-    "mux server",
-    "mux shell-init",
-    "mux tab create",
-    "mux tab join",
-    "mux tab ls",
-    "mux tab rename",
-    "mux where",
-    "mux workspace prune",
-    "version",
+# The Rust front's leaf tree is READ FROM ITS DISPATCHERS, not listed here.
+#
+# It used to be a hand-typed tuple checked against a hand-typed usage string,
+# with an exemption set for whatever the usage string omitted. Both sides were
+# written by the same person in the same sitting and omitted the same verbs, so
+# the gate could not fail for the reason it existed: five live verbs (``mux
+# layout apply``, ``mux layout graft``, ``mux pane split``, ``mux pane break``,
+# ``mux block annotate``) sat unbaselined behind a green check.
+#
+# Two independent readings now have to agree, and neither is a Python constant:
+#
+#   SOURCE   the match arms and equality guards in the dispatchers themselves
+#            (:func:`scan_rust_source`). Adding an arm changes this set.
+#   BINARY   the alternation the live front prints when it refuses a bogus verb
+#            (:func:`probe_rust_families`), e.g. ``(ls|create|rename|join)``.
+#
+# Disagreement in EITHER direction is a hard failure. A new arm whose usage
+# string was not updated fails as "dispatches a verb it does not advertise"; an
+# arm the scan cannot see fails as "advertises a verb the scan missed". The only
+# way to green is to change the code and the baseline together, which is the
+# property the ratchet was supposed to have all along.
+RUST_SOURCES = (
+    Path("crates") / "fno" / "src" / "main.rs",
+    Path("crates") / "fno" / "src" / "mux_cli.rs",
 )
 
-# Verbs the Rust usage string omits by design; everything else in
-# RUST_FRONT_VERBS must appear in `fno mux --help`, and `enumerate_rust_leaves`
-# checks BOTH directions so a Rust verb added to or dropped from the help string
-# without a matching edit here (or in RUST_FRONT_VERBS) fails the ratchet.
-_RUST_USAGE_HIDDEN = frozenset(
-    {
-        "mux layout get",
-        "mux tab create",
-        "mux tab join",
-        "mux tab ls",
-        "mux tab rename",
-        "mux where",
-    }
+# A match arm (``"ls" =>``, ``Some("pipe") =>``, ``Some("get") | None =>``).
+_ARM_RE = re.compile(r'(?:Some\(\s*)?"([a-z][a-z0-9-]*)"\s*(?:\)\s*)?(?:\||=>)')
+
+# An early equality guard, which is how ``pane run`` and ``layout apply`` are
+# dispatched. Anchored to the DISPATCH variable rather than any ``==``: an
+# unanchored version also matched ``if v == "current"`` inside the ``pane run``
+# flag parser and proposed a verb that does not exist.
+_EQ_RE = re.compile(
+    r'\b(?:verb|sub|rest\.first\(\)[^=\n]*?)\s*==\s*(?:Some\(\s*)?"([a-z][a-z0-9-]*)"'
+)
+
+# The catch-all arm that ends a verb dispatch, and the family it belongs to.
+_UNKNOWN_VERB_RE = re.compile(r"unknown (?:(\w+) )?verb")
+_FAMILY_RE = re.compile(r"fno mux (\w+):")
+
+# The alternation the front prints alongside that refusal. Two shapes in the
+# wild: the usual ``(ls|create|rename|join)``, and ``(expected prune)`` where a
+# family has exactly one verb and the pipe form would read oddly. Both are read
+# rather than normalised, because normalising means editing Rust and rebuilding
+# the front, and a probe run against a stale binary is its own silent lie.
+_ALTERNATION_RE = re.compile(
+    r"\((?:expected\s+)?([a-z][a-z0-9-]*(?:\s*\|\s*[a-z][a-z0-9-]*)*)\)"
 )
 
 
@@ -311,6 +311,152 @@ def enumerate_python_leaves() -> list[str]:
     return sorted({_format_leaf(path, cmd) for path, cmd in iter_python_leaves()})
 
 
+def _strip_line_comments(text: str) -> list[str]:
+    """Source lines with ``//`` comments removed.
+
+    Doc comments narrate verbs in prose (```prune` exists today``) and the
+    catch-all arm is often explained a few lines above itself. Scanning them
+    proposes verbs that no arm dispatches.
+    """
+    return [line.split("//")[0] for line in text.splitlines()]
+
+
+def _enclosing_block_start(lines: list[str], idx: int) -> int:
+    """Index of the line that opens the innermost block containing ``idx``."""
+    depth = 0
+    for i in range(idx, -1, -1):
+        for ch in reversed(lines[i]):
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                if depth == 0:
+                    return i
+                depth -= 1
+    return 0
+
+
+def _arms_at_top_level(lines: list[str], lo: int, hi: int) -> set[str]:
+    """Verb literals dispatched directly by the match opening at ``lo``.
+
+    Depth-scoped on purpose. A flat scan of the enclosing function also picked
+    up ``"split"`` and ``"workspace"`` from the ``pane run`` flag parser nested
+    inside it, which are flag spellings rather than verbs.
+    """
+    verbs: set[str] = set()
+    depth = 0
+    for i in range(lo, hi):
+        line = lines[i]
+        if depth == 0:
+            verbs.update(_ARM_RE.findall(line))
+        depth += line.count("{") - line.count("}")
+        if i == lo:
+            depth = max(depth - 1, 0)  # discount the match's own opening brace
+    return verbs
+
+
+def _enclosing_fn_start(lines: list[str], idx: int) -> int:
+    for i in range(idx, -1, -1):
+        if re.match(r"^(?:pub )?fn \w+", lines[i]):
+            return i
+    return 0
+
+
+def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[str, set[str]]]:
+    """``(top-level mux verbs, {family: verbs})``, read from the dispatchers.
+
+    Top-level verbs come from ``decide_role``'s ``Some(Some("mux")) => match``
+    block; families come from every catch-all arm in ``mux_cli.rs`` that refuses
+    an unknown verb, scanned back to the match that owns it. A family with more
+    than one refusal site (``block`` has two) unions them.
+    """
+    root = repo_root or _repo_root()
+    main_lines = _strip_line_comments((root / RUST_SOURCES[0]).read_text(encoding="utf-8"))
+    mux_lines = _strip_line_comments((root / RUST_SOURCES[1]).read_text(encoding="utf-8"))
+
+    main_text = "\n".join(main_lines)
+    start = main_text.find('Some(Some("mux")) => match')
+    if start < 0:
+        raise VerbRatchetError(
+            "verb-ratchet: could not find the `mux` dispatch in "
+            f"{RUST_SOURCES[0]}. The scan reads real source, so a refactor of "
+            "decide_role must be reflected here rather than worked around: a "
+            "scan that silently finds nothing is the tautology this replaced."
+        )
+    end = main_text.find('Some(Some("version"))', start)
+    tops: set[str] = set()
+    for m in re.finditer(
+        r'Some\("([a-z][a-z0-9-]*)"((?:\s*\|\s*"[a-z][a-z0-9-]*")*)\)',
+        main_text[start:end if end > start else len(main_text)],
+    ):
+        tops.add(m.group(1))
+        tops.update(re.findall(r'"([a-z][a-z0-9-]*)"', m.group(2) or ""))
+    tops.discard("mux")
+
+    # Non-mux top-level verbs (`version`), same dispatcher, outer level.
+    outer = {
+        m.group(1)
+        for m in re.finditer(r'Some\(Some\("([a-z][a-z0-9-]*)"\)\)', main_text)
+    } - {"mux"}
+
+    families: dict[str, set[str]] = {}
+    for i, line in enumerate(mux_lines):
+        m = _UNKNOWN_VERB_RE.search(line)
+        if not m:
+            continue
+        fam = m.group(1) or ""
+        fm = _FAMILY_RE.search(line)
+        if fm:
+            fam = fm.group(1)
+        if not fam:
+            continue
+        arm_block = _enclosing_block_start(mux_lines, i)
+        match_block = _enclosing_block_start(mux_lines, arm_block - 1) if arm_block else 0
+        verbs = _arms_at_top_level(mux_lines, match_block, i)
+        fn_start = _enclosing_fn_start(mux_lines, i)
+        verbs |= set(_EQ_RE.findall("\n".join(mux_lines[fn_start:i])))
+        families.setdefault(fam, set()).update(verbs)
+
+    if not families:
+        raise VerbRatchetError(
+            "verb-ratchet: the source scan found no verb families in "
+            f"{RUST_SOURCES[1]}. An empty scan reads as 'no Rust verbs' and "
+            "would pass a baseline that omits all of them; refusing instead."
+        )
+    return tops | outer, families
+
+
+def probe_rust_families(binary: Path, families) -> dict[str, set[str]]:
+    """What the live front says each family accepts, from its own refusal.
+
+    ``fno mux tab __fno_verb_probe__`` prints ``unknown verb __fno_verb_probe__
+    (ls|create|rename|join)``. Parsing that alternation is a reading of the
+    BINARY, independent of the source scan, and the probe verb is guaranteed
+    bogus so nothing executes.
+
+    A family whose refusal does not fire is a hard failure, not an empty set: an
+    absence has two explanations here (the family accepted the probe, or the
+    probe never ran) and a silent empty set turns the second into a pass.
+    """
+    probed: dict[str, set[str]] = {}
+    for fam in sorted(families):
+        res = _run_front(binary, ["mux", fam, "__fno_verb_probe__"])
+        out = (res.stdout or "") + (res.stderr or "")
+        if "__fno_verb_probe__" not in out:
+            raise VerbRatchetError(
+                f"verb-ratchet: `fno mux {fam} __fno_verb_probe__` did not refuse "
+                f"the probe verb by name, so the negative control did not fire and "
+                f"this family's advertised set cannot be read. Output: {out.strip()[:200]}"
+            )
+        # Search only AFTER the probe token: the alternation belongs to the
+        # refusal, and a parenthesised word elsewhere in the output is not it.
+        tail = out[out.index("__fno_verb_probe__"):]
+        alts = _ALTERNATION_RE.search(tail)
+        probed[fam] = (
+            {a.strip() for a in alts.group(1).split("|") if a.strip()} if alts else set()
+        )
+    return probed
+
+
 def _locate_rust_front() -> Optional[Path]:
     """The Rust front binary, by explicit path first and then PATH.
 
@@ -325,39 +471,6 @@ def _locate_rust_front() -> Optional[Path]:
         return Path(override)
     found = shutil.which("fno")
     return Path(found) if found else None
-
-
-def _parse_mux_usage(usage: str) -> list[str]:
-    """Parse the ``fno mux --help`` usage string into advertised leaf verbs.
-
-    The grammar is ``fno <verb...> [opts] | fno <verb...> <a|b|c> ...``; a token
-    starting with ``[``/``<``/``-`` ends the verb path, and a ``|`` inside a path
-    token (``mux pane ls|read|...``) fans out to one leaf per alternative. A
-    parse that returns nothing it should have is itself a failure the caller
-    catches via the ``mux pane`` anchor.
-    """
-    leaves: list[str] = []
-    idx = usage.find("fno ")
-    text = usage[idx:] if idx >= 0 else usage
-    for seg in text.split(" | "):
-        seg = seg.strip()
-        if seg.startswith("fno "):
-            seg = seg[4:]
-        path: list[str] = []
-        expanded = False
-        for tok in seg.split():
-            if not tok or tok[0] in "[<-." or tok.startswith("-"):
-                break
-            if "|" in tok:
-                for alt in tok.split("|"):
-                    if alt:
-                        leaves.append(" ".join([*path, alt]))
-                expanded = True
-                break
-            path.append(tok)
-        if path and not expanded:
-            leaves.append(" ".join(path))
-    return sorted(set(leaves))
 
 
 def _run_front(binary: Path, args: list[str]):
@@ -382,11 +495,13 @@ def _run_front(binary: Path, args: list[str]):
 
 
 def enumerate_rust_leaves() -> list[str]:
-    """The Rust front's leaf verbs, reaching the binary to fail closed.
+    """The Rust front's leaf verbs, from two readings that must agree.
 
-    Verifies reachability (``fno version --json`` parseable) and that the
-    advertised mux surface is a subset of :data:`RUST_FRONT_VERBS` (so a Rust
-    addition is caught), then returns the full known Rust leaf tree.
+    Verifies reachability (``fno version --json`` parseable), scans the
+    dispatchers in ``crates/`` for their verb arms, probes the live front for
+    what each family says it accepts, and refuses on any disagreement. Neither
+    side is a list maintained by hand, which is the whole point: the previous
+    version compared two hand-typed sources that omitted the same five verbs.
     """
     binary = _locate_rust_front()
     if binary is None:
@@ -422,30 +537,40 @@ def enumerate_rust_leaves() -> list[str]:
             f"verb-ratchet: Rust front does not own mux - `fno mux --help` "
             f"lacks the `mux pane` anchor (rc={mux.returncode})."
         )
-    advertised = set(_parse_mux_usage(usage))
-    unknown = sorted(advertised - set(RUST_FRONT_VERBS))
-    if unknown:
-        raise VerbRatchetError(
-            "verb-ratchet: the Rust front advertises verb(s) not listed in "
-            "RUST_FRONT_VERBS in lint_verb_ratchet.py: "
-            + ", ".join(unknown)
-            + ". Add them to RUST_FRONT_VERBS and regenerate the baseline."
-        )
-    # Reverse check: every non-hidden constant verb must still be advertised.
-    # Without it, a maintainer who drops a Rust match arm + its usage line but
-    # leaves the verb in RUST_FRONT_VERBS gets a green ratchet over a dead entry,
-    # the guard-on-one-of-N-paths shape this module exists to catch. _RUST_USAGE_HIDDEN
-    # are the verbs the usage string omits by design, so they are exempt.
-    dropped = sorted((set(RUST_FRONT_VERBS) - _RUST_USAGE_HIDDEN) - advertised)
-    if dropped:
-        raise VerbRatchetError(
-            "verb-ratchet: RUST_FRONT_VERBS lists advertised verb(s) the Rust "
-            "front no longer shows in `fno mux --help`: "
-            + ", ".join(dropped)
-            + ". Remove them from RUST_FRONT_VERBS (or add to _RUST_USAGE_HIDDEN "
-            "if newly hidden) and regenerate the baseline."
-        )
-    return sorted(set(RUST_FRONT_VERBS))
+
+    tops, families = scan_rust_source()
+    probed = probe_rust_families(binary, families)
+
+    # Both directions, both hard. This is the whole guard: the source and the
+    # binary are read separately and must agree, so neither a new arm nor a
+    # stale usage string can pass unnoticed.
+    for fam in sorted(families):
+        src, live = families[fam], probed[fam]
+        if src - live:
+            raise VerbRatchetError(
+                f"verb-ratchet: `mux {fam}` dispatches verb(s) its own refusal "
+                f"message does not name: {', '.join(sorted(src - live))}. "
+                f"The dispatcher and its usage string disagree, so one of them "
+                f"is wrong - fix the message in crates/fno/src/mux_cli.rs (or "
+                f"remove the arm), then regenerate the baseline."
+            )
+        if live - src:
+            raise VerbRatchetError(
+                f"verb-ratchet: `mux {fam}` advertises verb(s) the source scan "
+                f"did not find: {', '.join(sorted(live - src))}. The scan reads "
+                f"the match arms and equality guards in mux_cli.rs; a verb "
+                f"dispatched some other way is invisible to it, which is the "
+                f"defect this gate replaced. Teach scan_rust_source that shape "
+                f"rather than adding the verb to a list."
+            )
+
+    leaves = {f"mux {fam} {verb}" for fam, verbs in families.items() for verb in verbs}
+    leaves |= {f"mux {t}" for t in tops if t not in families}
+    leaves |= {t for t in tops if t not in families and t == "version"}
+    # `version` is dispatched at the outer level, so it is a bare leaf, not
+    # `mux version`; every other outer verb reaches Python and is not ours.
+    leaves.discard("mux version")
+    return sorted(leaves)
 
 
 def enumerate_all_leaves() -> list[str]:
@@ -483,11 +608,10 @@ _HEADER = """\
 #   flag-exception: <rationale>
 # (same shape as `verb-exception:`; removals are free and need no line).
 #
-# Scope: the hidden-option coverage is fno-py only. The Rust front is
-# constant-listed in lint_verb_ratchet.py (RUST_FRONT_VERBS), not introspected,
-# so a clap `hide = true` option on it is invisible to this gate - and to
-# `fno mux --help`, which is how it stays hidden. The lint output names this
-# boundary on every green run.
+# Scope: the hidden-option coverage is fno-py only. The Rust front's VERBS are
+# read from its dispatchers and cross-checked against the live binary, but its
+# FLAGS are not enumerated, so a hidden flag on a mux verb is invisible to this
+# gate. The lint output names that boundary on every green run.
 """
 
 
@@ -531,10 +655,10 @@ def check() -> CheckReport:
     verb needs a ``flag-exception:`` line. Removals (verbs or options) are free;
     they pass once the baseline is regenerated and need no exception line.
 
-    The hidden-option coverage is fno-py only - the Rust front is
-    constant-listed (:data:`RUST_FRONT_VERBS`), not introspected, so a clap
-    ``hide = true`` option on it is invisible here. The ok line states that
-    boundary so it is visible in CI output, not only in the source.
+    The hidden-option coverage is fno-py only. The Rust front's verbs ARE read
+    from source now, but its flags are not enumerated, so a clap
+    ``hide = true`` option on a mux verb is invisible here. The ok line states
+    that boundary so it is visible in CI output, not only in the source.
     """
     live_lines = enumerate_all_leaves()  # raises VerbRatchetError on failure
     live: dict[str, tuple[frozenset[str], str]] = {}
@@ -565,8 +689,8 @@ def check() -> CheckReport:
             ok=True,
             message=(
                 f"verb-ratchet: ok ({len(live)} leaves, {n_hidden} hidden "
-                f"option{'s' if n_hidden != 1 else ''} - fno-py only; the Rust front "
-                f"is constant-listed and not introspected)"
+                f"option{'s' if n_hidden != 1 else ''} - fno-py only; the Rust front's "
+                f"verbs are read from source, its flags are not)"
             ),
         )
 

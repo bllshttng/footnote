@@ -48,8 +48,8 @@ impl Scratch {
         self.run_family("workspace", squad_args, unset_agents)
     }
 
-    /// The same run, with the verb family spelled explicitly, so the retired
-    /// `squad` alias can be driven through the identical assertions.
+    /// The same run, with the family spelled explicitly, so the removed `squad`
+    /// spelling can be driven through the identical harness and shown to refuse.
     fn run_family(
         &self,
         family: &str,
@@ -137,24 +137,37 @@ fn prune_dry_run_writes_nothing() {
     assert_eq!(s.store(), before, "dry-run must not change the store");
 }
 
-/// The retired `mux squad` spelling stays a working, unadvertised alias: same
-/// dispatch, same flags, same output as the canonical family.
+/// The retired `mux squad` spelling is removed, and reaching for it lands on
+/// the usage banner rather than a prune.
+///
+/// Asserted as a POSITIVE marker (exit 2 plus the banner naming the canonical
+/// spelling), not as "the prune did not happen": a prune that silently no-ops
+/// for an unrelated reason also fails to happen, and the two are
+/// indistinguishable from an absence.
 #[test]
-fn retired_squad_spelling_prunes_identically() {
-    // One scratch for both spellings: --dry-run writes nothing, so the second
-    // run sees the same store as the first and any difference in output is the
-    // alias, not the fixture.
+fn retired_squad_spelling_is_removed() {
     let s = Scratch::new("alias", ORPHAN_NAMED_SURVIVING);
-    let args = ["prune", "--dry-run", "--include-named", "--json"];
+    let before = s.store();
 
-    let (ok, want, stderr) = s.run_family("workspace", &args, false);
-    assert!(ok, "canonical spelling exited non-zero: {stderr}\n{want}");
-    let (ok, got, stderr) = s.run_family("squad", &args, false);
-    assert!(ok, "retired spelling exited non-zero: {stderr}\n{got}");
-    assert_eq!(got, want, "the alias must dispatch to the same prune");
+    let (ok, _stdout, stderr) = s.run_family("squad", &["prune", "--json"], false);
+    assert!(!ok, "the retired spelling must not succeed: {stderr}");
     assert!(
-        want.contains("\"pruned_count\":2"),
-        "the fixture must actually prune something, or equality is vacuous: {want}"
+        stderr.contains("fno mux workspace prune"),
+        "usage must name the surviving spelling: {stderr}"
+    );
+    assert_eq!(s.store(), before, "a usage exit must not touch the store");
+
+    // Positive control: the canonical spelling still prunes, so the assertion
+    // above is about the alias and not about a broken fixture.
+    let (ok, got, stderr) = s.run_family(
+        "workspace",
+        &["prune", "--dry-run", "--include-named", "--json"],
+        false,
+    );
+    assert!(ok, "canonical spelling exited non-zero: {stderr}\n{got}");
+    assert!(
+        got.contains("\"pruned_count\":2"),
+        "the fixture must actually prune something: {got}"
     );
 }
 
@@ -188,9 +201,9 @@ fn workspace_family_usage_names_prune() {
     }
 }
 
-/// The retired spelling is accepted but never advertised (AC2's second half).
-/// Without this, adding `squad` back to the usage banner is a silent
-/// un-deprecation that every other test stays green through.
+/// The removed spelling never returns to the usage banner. Without this,
+/// re-adding `squad` is a silent un-deprecation every other test stays green
+/// through.
 #[test]
 fn retired_squad_spelling_is_not_advertised() {
     let out = fno().args(["mux", "workspace"]).output().unwrap();

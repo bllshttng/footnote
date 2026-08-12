@@ -673,20 +673,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"vs the original {ORIGINAL_ZERO_BOUND} bound: {len(zero_corr)} now "
               f"({ORIGINAL_ZERO_BOUND - len(zero_corr)} below; remainder is corpus drift)")
         print(f"subset invariant: {'OK' if not not_subset else 'BROKEN'}")
-        # Parity: the sweep's leaf universe (the baseline file) must match the
-        # live registry, else a stale baseline silently drifts the zero count.
-        # Comparing enumerate_python_leaves vs iter_python_leaves would be
-        # tautological (both read the same iterator), so compare the file against
-        # enumerate_all_leaves - the same source the ratchet regenerates from.
+        # FRESHNESS, not parity. This compares the baseline file against the
+        # generator that wrote it, so agreement proves the file is current and
+        # nothing more. It was printed as "baseline/registry parity: identical"
+        # and read as independent corroboration of the surface, which it never
+        # was - the two sides share a source by construction.
+        #
+        # It is still worth running: a stale baseline silently drifts the zero
+        # count, and this sweep's whole universe comes from that file. The
+        # independent check on the surface lives in the ratchet itself, where
+        # the Rust dispatchers and the live binary are read separately and must
+        # agree.
         try:
             from fno.lint_verb_ratchet import enumerate_all_leaves
             registry = {l.split(' !')[0].strip() for l in enumerate_all_leaves()}
             baseline_set = set(leaves_list)
-            print(f"baseline/registry parity: baseline={len(baseline_set)} "
-                  f"registry={len(registry)} identical={baseline_set == registry}")
+            print(f"baseline freshness (file vs its own generator, NOT an "
+                  f"independent check): baseline={len(baseline_set)} "
+                  f"registry={len(registry)} current={baseline_set == registry}")
             ok = ok and (baseline_set == registry)
         except Exception as e:
-            print(f"baseline/registry parity: SKIPPED ({e})")
+            print(f"baseline freshness: SKIPPED ({e})")
         # Corpus coverage: skills/target/ is a real skill bundle, not a build
         # dir. A `target` exclusion that swallows it (the rg-glob pitfall) leaves
         # controls green while silently under-counting, so assert it is walked.
