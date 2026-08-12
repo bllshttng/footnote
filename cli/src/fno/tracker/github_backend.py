@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 
 from .types import NodeNotFound, TrackerError, TrackerNode, TrackerState
 
@@ -51,13 +52,31 @@ class GitHubIssuesTracker:
 
     # All gh I/O funnels here; tests patch this one method.
     def _gh(self, args: list[str]) -> tuple[int, str, str]:
-        proc = subprocess.run(
-            ["gh", *args], capture_output=True, text=True, timeout=30
-        )
+        try:
+            proc = subprocess.run(
+                ["gh", *args], capture_output=True, text=True, timeout=30
+            )
+        except FileNotFoundError as exc:
+            raise TrackerError(
+                "gh binary not found on PATH; install GitHub CLI to use the "
+                "github tracker backend"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TrackerError(f"gh timed out: {' '.join(args)}") from exc
         return proc.returncode, proc.stdout, proc.stderr
 
+    @staticmethod
+    def _loads(raw: str, label: str) -> dict:
+        # gh can return rc=0 with empty or non-JSON stdout (a deprecation
+        # notice on stdout, a truncated pipe); treat that as a backend fault,
+        # never a JSONDecodeError escaping past the TrackerError contract.
+        try:
+            return json.loads(raw) if (raw or "").strip() else {}
+        except json.JSONDecodeError as exc:
+            raise TrackerError(f"gh returned non-JSON for {label}: {exc}") from exc
+
     def read(self, id: str) -> TrackerNode:
-        owner, repo, number = parse_github_id(id)
+        owner, repo, number = self._parse_id(id)
         rc, out, err = self._gh(
             ["issue", "view", str(number), "-R", f"{owner}/{repo}",
              "--json", "title,state"]
@@ -67,7 +86,7 @@ class GitHubIssuesTracker:
             if any(frag in low for frag in _NOT_FOUND_FRAGMENTS):
                 raise NodeNotFound(id)
             raise TrackerError(f"gh issue view failed for {id}: {err.strip()}")
-        data = json.loads(out)
+        data = self._loads(out, id)
         return TrackerNode(
             id=id,
             title=data.get("title"),
@@ -78,8 +97,13 @@ class GitHubIssuesTracker:
 
     def list_open(self) -> list[TrackerNode]:
         if not self._default_repo:
-            # No repo scope configured: cannot enumerate. Callers fall back to
-            # the default backend's list_open for dispatch selection.
+            # No repo scope configured. There is no silent fallback to another
+            # backend: warn loudly so a user who set only FNO_TRACKER_BACKEND
+            # gets a signal that dispatch selection has no scope to enumerate.
+            sys.stderr.write(
+                "fno tracker: github backend has no FNO_TRACKER_GITHUB_REPO "
+                "scope; list_open returns nothing. Set it to enumerate issues.\n"
+            )
             return []
         # gh caps a single listing at 1000 rows. A repo with more than 1000
         # open issues is not fully enumerated here, which ships degraded like
@@ -92,7 +116,9 @@ class GitHubIssuesTracker:
             raise TrackerError(
                 f"gh issue list failed for {self._default_repo}: {err.strip()}"
             )
-        items = json.loads(out or "[]")
+        items = self._loads(out, self._default_repo) if (out or "").strip() else []
+        if isinstance(items, dict):
+            items = []
         prefix = self._default_repo
         return [
             TrackerNode(
@@ -106,7 +132,7 @@ class GitHubIssuesTracker:
         ]
 
     def close(self, id: str) -> None:
-        owner, repo, number = parse_github_id(id)
+        owner, repo, number = self._parse_id(id)
         rc, _out, err = self._gh(
             ["issue", "close", str(number), "-R", f"{owner}/{repo}"]
         )
@@ -115,3 +141,12 @@ class GitHubIssuesTracker:
             if any(frag in low for frag in _NOT_FOUND_FRAGMENTS):
                 raise NodeNotFound(id)
             raise TrackerError(f"gh issue close failed for {id}: {err.strip()}")
+
+    @staticmethod
+    def _parse_id(id_str: str) -> tuple[str, str, int]:
+        # parse_github_id raises ValueError on a malformed id; the NodeTracker
+        # contract speaks TrackerError, so convert at this boundary.
+        try:
+            return parse_github_id(id_str)
+        except ValueError as exc:
+            raise TrackerError(str(exc)) from exc

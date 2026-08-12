@@ -92,8 +92,13 @@ def save(sidecar: Sidecar) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = sidecar.model_dump_json(indent=2, exclude_unset=True) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=".sidecar-tmp-", dir=str(path.parent))
+    raw = payload.encode("utf-8")
     try:
-        os.write(fd, payload.encode("utf-8"))
+        # os.write may short-write; loop until every byte lands (mirrors
+        # fno.claims.io.atomic_create_exclusive).
+        view = memoryview(raw)
+        while view:
+            view = view[os.write(fd, view):]
     except BaseException:
         os.close(fd)
         try:

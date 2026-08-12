@@ -30,4 +30,24 @@ def test_partition_holds_on_real_models():
         ["bash", str(GATE)], capture_output=True, text=True, cwd=str(REPO)
     )
     assert r.returncode == 0, r.stderr
-    assert "overlap is key-only" in r.stdout
+    # Positive assertion of the join key, not an absence: the gate must report
+    # the overlap is exactly {id}, so a lockstep rename of `id` on both sides
+    # (overlap becomes empty) would fail this, not pass vacuously.
+    assert "exactly the join key ['id']" in r.stdout
+
+
+def test_gate_fails_when_id_key_missing(tmp_path):
+    # If `id` vanished from both models, an absence-based gate would pass. This
+    # proves the gate fails instead (the join key is required on both sides).
+    poisoned = tmp_path / "poison"
+    types = poisoned / "cli/src/fno/tracker/types.py"
+    sidecar = poisoned / "cli/src/fno/tracker/sidecar.py"
+    types.parent.mkdir(parents=True)
+    # Neither class declares `id`:
+    types.write_text("class TrackerNode:\n    title: str = None\n")
+    sidecar.write_text("class Sidecar:\n    cwd: str = None\n")
+    r = subprocess.run(
+        ["bash", str(GATE), str(poisoned)], capture_output=True, text=True
+    )
+    assert r.returncode == 1
+    assert "join key" in r.stderr

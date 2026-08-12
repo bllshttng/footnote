@@ -18,6 +18,7 @@ from fno.tracker import (
     GraphTracker,
     NodeNotFound,
     TrackerError,
+    TrackerNode,
     TrackerState,
     get_tracker,
 )
@@ -43,7 +44,7 @@ def test_read_projects_five_fields(tmp_path):
     assert node.state is TrackerState.open
     assert node.parent is None
     assert node.blocked_by == []
-    assert set(node.model_fields) == {"id", "title", "state", "parent", "blocked_by"}
+    assert set(TrackerNode.model_fields) == {"id", "title", "state", "parent", "blocked_by"}
 
 
 def test_read_missing_raises(tmp_path):
@@ -250,22 +251,75 @@ def test_github_tracker_satisfies_protocol():
     assert isinstance(GitHubIssuesTracker(), NodeTracker)
 
 
+# -- github backend contract hardening (exceptions stay in the contract) --
+
+
+def test_github_gh_missing_binary_raises_tracker_error(monkeypatch):
+    # FileNotFoundError (no gh on PATH) must surface as TrackerError, not escape
+    # past the NodeTracker contract a caller degrades on.
+    import fno.tracker.github_backend as ghmod
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(ghmod.subprocess, "run", _boom)
+    with pytest.raises(TrackerError):
+        GitHubIssuesTracker(default_repo="o/r").read("o/r#1")
+
+
+def test_github_read_non_json_raises_tracker_error():
+    # rc=0 with non-JSON stdout (a gh regression or truncated pipe) is a backend
+    # fault, not a JSONDecodeError escaping the contract.
+    t = _FakeGH({("issue", "view"): (0, "not json at all", "")})
+    with pytest.raises(TrackerError):
+        t.read("owner/repo#5")
+
+
+def test_github_bad_id_raises_tracker_error():
+    # parse_github_id raises ValueError; the read/close boundary must convert it
+    # to TrackerError so callers keyed on the contract degrade, not crash.
+    with pytest.raises(TrackerError):
+        GitHubIssuesTracker().read("ENG-441")
+    with pytest.raises(TrackerError):
+        GitHubIssuesTracker().close("not-a-github-id")
+
+
+def test_github_list_open_warns_when_no_repo(capsys):
+    # No repo scope is a misconfiguration: warn (a signal), not a silent empty
+    # list that lets dispatch stall with no clue.
+    items = GitHubIssuesTracker(default_repo=None).list_open()
+    assert items == []
+    err = capsys.readouterr().err
+    assert "FNO_TRACKER_GITHUB_REPO" in err
+
+
 # -- verb refusal on an external backend --
 
 
-def test_add_refuses_on_external_backend(monkeypatch):
-    # The guard fires before any graph read: creating work on an external
-    # backend belongs to the tracker, not graph.json. add/idea/new all route
-    # through _create_node_impl, so this covers the creation class.
+@pytest.mark.parametrize(
+    ("verb", "args"),
+    [
+        ("add", ["add", "t"]),
+        ("idea", ["idea", "t"]),
+        ("new", ["new", "t"]),
+        ("decompose", ["decompose", "ab-deadbeef", "--groups", "x"]),
+        ("intake", ["intake", "someplan.md"]),
+    ],
+)
+def test_create_verbs_refuse_on_external_backend(verb, args, monkeypatch):
+    # Every creation entry point must refuse on an external backend. The guard
+    # lives in _create_node_impl (add/idea) AND at the top of cmd_new,
+    # cmd_decompose, cmd_intake, which write through their own mutators. A guard
+    # on only some reachable paths is decorative, so this exercises each path:
+    # if a future creation verb bypasses the helper, this fails loudly.
     from typer.testing import CliRunner
 
     from fno.cli import app
 
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
-    result = CliRunner().invoke(app, ["backlog", "add", "phantom work"])
-    assert result.exit_code == 1
+    result = CliRunner().invoke(app, ["backlog", *args])
+    assert result.exit_code == 1, f"{verb} did not refuse: {result.output}"
     assert "github" in result.output
-    # The message must point the user at the tracker, not fail opaquely.
     assert "tracker" in result.output.lower()
 
 

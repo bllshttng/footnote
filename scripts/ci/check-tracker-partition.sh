@@ -88,7 +88,20 @@ ALLOWED_OVERLAP = frozenset({"id"})
 
 tracker = extract_fields(types_src, "TrackerNode")
 sidecar = extract_fields(sidecar_src, "Sidecar")
-extra = (tracker & sidecar) - ALLOWED_OVERLAP
+overlap = tracker & sidecar
+# Require the overlap to be EXACTLY {id}: the join key must be present on both
+# sides (an empty overlap is not "clean", it is a missing key) and nothing else
+# may be shared (a shared data field is the two-writer bug). Asserting the
+# positive key, not an absence, so a lockstep rename of `id` fails loudly.
+if "id" not in overlap:
+    print(
+        "check-tracker-partition: FAIL - the `id` join key is missing from one "
+        f"side (overlap is {sorted(overlap)}). Both TrackerNode and Sidecar must "
+        "carry `id`; without it the partition has no join key.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+extra = overlap - ALLOWED_OVERLAP
 if extra:
     print(
         "check-tracker-partition: FAIL - sidecar and tracker share non-key "
@@ -98,5 +111,5 @@ if extra:
         file=sys.stderr,
     )
     sys.exit(1)
-print(f"check-tracker-partition: OK - overlap is key-only {sorted(tracker & sidecar)}")
+print(f"check-tracker-partition: OK - overlap is exactly the join key {sorted(overlap)}")
 PY
