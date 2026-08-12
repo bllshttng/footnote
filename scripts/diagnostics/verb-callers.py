@@ -136,6 +136,21 @@ CONTROLS = {"agents spawn": 100, "mail send": 100, "target init": 25, "backlog n
 AST_CONTROLS = {"agents spawn": 2, "mail send": 1, "backlog done": 1}
 INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "target init": 20, "backlog update": 10}
 
+# Verbs reachable ONLY through shell command substitution, where the binary
+# name is glued to a variable assignment and is not a bare token:
+#   hooks/helpers/init-target-state.sh   _OWNED_OUT="$(fno target resolve-owned-identity
+#   skills/pr/SKILL.md                   policy_json="$(candidate_fno pr evidence-required
+# Both scored zero and sat in the dead set until an independent whole-repo walk
+# contradicted it. They are controls now: a tokenizer change that loses this
+# shape emits no candidate list instead of a wrong one.
+#   scripts/lib/eval-sweep-throttle.sh   status="$("$fno_cmd" loops status
+# is the third shape: the binary lives in a VARIABLE, resolved at runtime.
+SUBSTITUTION_CONTROLS = {
+    "target resolve-owned-identity": 1,
+    "pr evidence-required": 1,
+    "loops status": 1,
+}
+
 ORIGINAL_ZERO_BOUND = 92  # the uncorrected sweep's zero count; the delta baseline
 
 
@@ -190,6 +205,37 @@ def _clean(tok: str) -> str:
     return tok.strip(_STRIP)
 
 
+# Shell glues the binary name to whatever precedes it: `x="$(fno` and
+# `policy_json="$(candidate_fno` are single whitespace-delimited tokens, and
+# stripping OUTER punctuation leaves them intact because the leading characters
+# are letters. Both were read as "not a binary", so every verb reached only
+# through command substitution scored zero.
+#
+# Two live verbs were in that hole - `fno target resolve-owned-identity` (a
+# hook) and `fno pr evidence-required` (a skill) - and both sat in the dead set
+# until an independent whole-repo walk contradicted it. Splitting on shell
+# punctuation and keeping the last segment recovers them.
+_SHELL_GLUE = re.compile(r"[^\w./-]+")
+
+# A shell VARIABLE holding the binary: `"$fno_cmd" loops status` in
+# scripts/lib/eval-sweep-throttle.sh. The value is resolved at runtime (there,
+# by a function), so no static reading can prove what it holds; the name is the
+# only signal available. Any `$...` reference whose identifier contains "fno" is
+# treated as the binary, which is deliberately loose - a false positive keeps a
+# verb alive, a false negative deletes a live one.
+_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _binary_key(tok: str) -> str:
+    """The binary name a token ends in, ignoring shell glue and any path."""
+    if "$" in tok:
+        for name in _SHELL_VAR_RE.findall(tok):
+            if "fno" in name.lower():
+                return "fno"
+    tail = _SHELL_GLUE.split(tok)[-1] if tok else tok
+    return tail.rsplit("/", 1)[-1]
+
+
 def _verb_token(tok: str) -> str | None:
     # Markdown table cells escape the alternation pipe as `\|`; unescape it so a
     # `spawn\|ask\|peek` token fans out instead of being rejected at the backslash.
@@ -224,7 +270,9 @@ def sweep(
         for i, tok in enumerate(tokens):
             key = _clean(tok)
             if key not in prefixes:
-                continue
+                key = _binary_key(tok)
+                if key not in prefixes:
+                    continue
             start = ["agents"] if key == "fno-agents" else []
             path_tokens = list(start)
             j = i + 1
@@ -546,6 +594,9 @@ def dead_set(root: Path, leaves_list: list[str]):
     for name in ("user", "runtime", "tests"):
         ext_total.update(buckets[name])
     failures += [f"external/{f}" for f in check_controls(ext_total)]
+    failures += [
+        f"substitution/{f}" for f in check_controls(ext_total, SUBSTITUTION_CONTROLS)
+    ]
     failures += [f"ast/{f}" for f in check_controls(ast_counts, AST_CONTROLS)]
     failures += [f"internal-text/{f}" for f in check_controls(itext_counts, INTERNAL_TEXT_CONTROLS)]
 
