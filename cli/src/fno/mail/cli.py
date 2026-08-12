@@ -2921,7 +2921,7 @@ def cmd_bus_ack(
     Spelled out because the old one-liner read as if ``<name>`` came first and
     cost a reader two failed invocations before they resorted to ``--help``.
     """
-    from fno.bus.cursor import advance_cursor
+    from fno.bus.cursor import advance_cursor, scan_unread
     from fno.bus.log import iter_messages
 
     # The ack target must be a retained message addressed to `name`. Two failure
@@ -2931,7 +2931,8 @@ def cmd_bus_ack(
     #   - an id not in the log -> scan_unread can't find it -> re-surfaces ALL mail;
     #   - an id addressed to ANOTHER recipient but positioned after my unread ->
     #     advances me past my own earlier unread, hiding it.
-    target = next((m for m in iter_messages() if m.id == msg_id), None)
+    all_msgs = list(iter_messages())
+    target = next((m for m in all_msgs if m.id == msg_id), None)
     if target is None:
         print(
             f"unknown message id {msg_id!r}: not found in the retained bus log; "
@@ -2947,8 +2948,17 @@ def cmd_bus_ack(
         )
         raise typer.Exit(code=2)
 
+    # The advance consumes every message addressed to `name` up through msg_id.
+    # Emit a receipt for each so a manual ack does not leave them unread with no
+    # terminal event -- the same accounting gap drain-self closes. Captured
+    # before the advance (after it, scan_unread no longer returns them).
+    pos = {m.id: i for i, m in enumerate(all_msgs)}
+    acked = [m for m in scan_unread(name) if m.id in pos and pos[m.id] <= pos[msg_id]]
+
     if advance_cursor(name, msg_id):
         print(f"cursor for {name!r} advanced to {msg_id}")
+        for m in acked:
+            _emit_drain_marker(m.id, name, name, m.from_, "acked")
     else:
         # Forward-only: the id is at or before the current cursor (re-ack / older
         # message). Idempotent no-op, not an error - the cursor never rewinds.
@@ -3056,11 +3066,14 @@ def cmd_drain_self(
     # last-eight (pre-flip mail still on the bus). Each address has its own
     # cursor; a message has one `to`, so it matches exactly one form.
     last_by_form: dict[str, str] = {}
+    form_by_id: dict[str, str] = {}
     all_msgs: list = []
     for _form in (handle, session_identity_key(sid), legacy_suffix_handle(sid)):
         _got = scan_unread(_form)
         if _got:
             last_by_form[_form] = _got[-1].id
+            for _m in _got:
+                form_by_id.setdefault(_m.id, _form)
             all_msgs.extend(_got)
     _seen: set[str] = set()
     msgs = []
@@ -3078,15 +3091,33 @@ def cmd_drain_self(
     # independent of the handle/form cursors -- no double-delivery across them.
     job_addr, job_msgs = _scan_held_job_mail(ident)
 
+    # W2 cross-delivery dedup: a message whose id already landed in THIS
+    # session's transcript (a live inject that confirmed after the durable copy
+    # was written) is not surfaced again. The transcript is the ledger -- no new
+    # state -- built in one read per drain, not one per message. ``present`` is
+    # None when the transcript could not be read; a read failure is not evidence
+    # of absence, so we print everything rather than risk a drop (AC5-ERR).
+    from fno.mail.reply_resolve import present_mail_ids
+
+    present = present_mail_ids()
+
+    def _already_landed(m) -> bool:
+        return present is not None and getattr(m, "id", "") in present
+
+    to_print = [m for m in msgs if not _already_landed(m)]
+    skipped = [m for m in msgs if _already_landed(m)]
+    job_to_print = [m for m in job_msgs if not _already_landed(m)]
+    job_skipped = [m for m in job_msgs if _already_landed(m)]
+
     if json_out:
         out = [
             {
                 "id": m.id, "from": m.from_, "to": m.to,
                 "kind": m.kind, "ts": m.ts, "body": m.body,
             }
-            for m in msgs
+            for m in to_print
         ]
-        for m in job_msgs:
+        for m in job_to_print:
             out.append(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
@@ -3096,20 +3127,20 @@ def cmd_drain_self(
             )
         print(json.dumps(out, ensure_ascii=False))
     else:
-        if msgs:
-            print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
-            for m in msgs:
+        if to_print:
+            print(f"[fno mail] {len(to_print)} message(s) for {handle}:")
+            for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
                 print(m.body.rstrip("\n"))
-        if job_msgs:
-            print(f"\n[fno mail] {len(job_msgs)} job message(s) for {job_addr}:")
-            for m in job_msgs:
+        if job_to_print:
+            print(f"\n[fno mail] {len(job_to_print)} job message(s) for {job_addr}:")
+            for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
                 print(m.body.rstrip("\n"))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.
-        if msgs or job_msgs:
+        if to_print or job_to_print:
             print(
                 '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
             )
@@ -3125,10 +3156,67 @@ def cmd_drain_self(
     # is the opposite of what the paragraph above promises.
     if msgs or job_msgs:
         sys.stdout.flush()
+        # Per-form receipt (W1.1): advance one address form, then emit that
+        # form's drained markers before the next advance. A later form's cursor
+        # failure cannot strand the markers for an already-acked form, because
+        # each marker rides its own form's commit. The marker is emitted at the
+        # ack point, never the print point: this function is inject-before-ack,
+        # so a crash between print and here re-surfaces the message, and a marker
+        # at print would claim delivery for one about to be delivered again.
+        # Best-effort and swallowed (AC9-ERR): the message is already acked, so
+        # an observability gap must never become a delivery failure. A skipped
+        # duplicate still advances and still gets a marker (reason distinguishes
+        # it) so the dedup is observable, never a silent swallow (W2).
         for _form, _last_id in last_by_form.items():
             advance_cursor(_form, _last_id)
-    if job_addr and job_msgs:
-        advance_cursor(job_addr, job_msgs[-1].id)
+            for m in to_print:
+                if form_by_id.get(m.id, handle) == _form:
+                    _emit_drain_marker(m.id, handle, _form, m.from_, "printed")
+            for m in skipped:
+                if form_by_id.get(m.id, handle) == _form:
+                    _emit_drain_marker(m.id, handle, _form, m.from_, "skipped-duplicate")
+        if job_addr and job_msgs:
+            advance_cursor(job_addr, job_msgs[-1].id)
+            for m in job_to_print:
+                _emit_drain_marker(
+                    m.id, job_addr or handle, job_addr or handle, m.from_, "printed"
+                )
+            for m in job_skipped:
+                _emit_drain_marker(
+                    m.id, job_addr or handle, job_addr or handle, m.from_, "skipped-duplicate"
+                )
+
+
+def _emit_drain_marker(
+    msg_id: str,
+    recipient: str,
+    address_form: str,
+    sender: "str | None",
+    reason: str = "printed",
+) -> None:
+    """Best-effort ``agent_mail_drained`` receipt, one per drained message id (W1.1).
+
+    Lets a sender join ``events.jsonl`` on ``msg_id`` to a terminal 'drained'
+    state, and lets the dead-letter sweep prefer a positive marker over cursor
+    inference. ``reason`` distinguishes a message that was printed from one
+    skipped as a duplicate (W2), so the receipt never silently swallows a
+    message. Swallowed on any failure: the caller has already printed and acked
+    the message, so a missing receipt degrades to the cursor fallback rather than
+    failing the drain (AC9-ERR).
+    """
+    from fno.agents import events
+
+    try:
+        events.emit(
+            events.KIND_AGENT_MAIL_DRAINED,
+            msg_id=msg_id,
+            recipient=recipient,
+            address_form=address_form,
+            sender=sender or "",
+            reason=reason,
+        )
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -3262,9 +3350,17 @@ def cmd_notify_self() -> None:
     lines: list[str] = []
 
     unread = scan_unread(handle)
-    if unread:
-        lines.append(f"[fno mail] {len(unread)} message(s) for {handle}:")
-        for message in unread:
+    from fno.mail.reply_resolve import present_mail_ids
+
+    present = present_mail_ids()
+
+    def _dup(m: object) -> bool:
+        return present is not None and getattr(m, "id", "") in present
+
+    to_render = [m for m in unread if not _dup(m)]
+    if to_render:
+        lines.append(f"[fno mail] {len(to_render)} message(s) for {handle}:")
+        for message in to_render:
             lines.extend(
                 (
                     f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
@@ -3290,6 +3386,10 @@ def cmd_notify_self() -> None:
         )
 
     if not lines:
+        if unread:
+            advance_cursor(handle, unread[-1].id)
+            for m in unread:
+                _emit_drain_marker(m.id, handle, handle, m.from_, "skipped-duplicate")
         return
 
     try:
@@ -3314,6 +3414,9 @@ def cmd_notify_self() -> None:
 
     if unread:
         advance_cursor(handle, unread[-1].id)
+        for m in unread:
+            reason = "skipped-duplicate" if _dup(m) else "printed"
+            _emit_drain_marker(m.id, handle, handle, m.from_, reason)
 
 
 @mail_app.command("rebuild-render", hidden=True)

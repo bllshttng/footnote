@@ -1564,6 +1564,42 @@ def _stranded(m, *, cutoff, ref) -> bool:
     return ts is not None and ts <= cutoff
 
 
+def _drained_msg_ids() -> set[str]:
+    """msg_ids carrying an ``agent_mail_drained`` receipt (W1.1).
+
+    Read once per sweep so the dead-letter sweep prefers a positive drain marker
+    over cursor inference: a message with a marker was drained and never
+    escalates, while cursor logic stays as the fallback for legacy mail written
+    before the marker existed. A torn or unreadable log reads as empty, so the
+    sweep degrades to cursor-only (its prior behavior) rather than crashing or
+    silently clearing its findings.
+    """
+    from fno.paths import state_dir
+
+    path = state_dir() / "events.jsonl"
+    ids: set[str] = set()
+    try:
+        # Stream line-by-line: the events log grows unboundedly, so never slurp
+        # it whole just to collect drained ids (mirrors gate_escape.py's reader).
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "agent_mail_drained" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("kind") == "agent_mail_drained":
+                    mid = rec.get("msg_id")
+                    if isinstance(mid, str) and mid:
+                        ids.add(mid)
+    except OSError:
+        return ids
+    return ids
+
+
 def _stale_dead_letters(
     *,
     max_age_hours: float = _DEAD_LETTER_AGE_HOURS,
@@ -1604,6 +1640,13 @@ def _stale_dead_letters(
     except Exception:  # noqa: BLE001 — a torn bus contributes no findings
         return []
 
+    # Positive drain marker (W1.1): a message whose id has an agent_mail_drained
+    # receipt was drained (possibly under a different address form, or after a
+    # discarded injection) and never escalates. The cursor logic below stays as
+    # the fallback for legacy mail written before the marker existed, so the
+    # sweep asserts a presence first and an absence only where no better
+    # evidence can exist.
+    drained = _drained_msg_ids()
     out: list[dict] = []
     for handle in sorted(recips):
         try:
@@ -1611,6 +1654,8 @@ def _stale_dead_letters(
         except Exception:  # noqa: BLE001
             continue
         for m in unread:
+            if getattr(m, "id", "") in drained:
+                continue
             if _stranded(m, cutoff=cutoff, ref=ref):
                 meta = getattr(m, "meta", None) or {}
                 out.append(

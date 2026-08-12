@@ -6259,6 +6259,7 @@ def dispatch_send(
                         "agent_send_failed",
                         stage="durable-address",
                         name=name,
+                        msg_id=msg_id,
                         reason="missing_harness_session_id",
                     )
                     raise DispatchAskError(
@@ -6302,6 +6303,7 @@ def dispatch_send(
                         "agent_send_failed",
                         stage="envelope-write",
                         name=name,
+                        msg_id=msg_id,
                     )
                     raise DispatchAskError(
                         f"durable envelope write failed: {exc}",
@@ -6327,15 +6329,27 @@ def dispatch_send(
                     msg_id=msg_id,
                 )
 
-                delivery = "durable"
-                demotion_notice: Optional[str] = None
-
                 family1_state = _registered_family1_state(existing)
                 family1_live = family1_state in {"working", "watching", "your-move"}
                 # Unknown is hands-off, not dead. A registered peer still has a
                 # confirmable transport, so try it once and let delivery's ack
                 # decide; failure falls through to the durable bus.
                 family1_attemptable = family1_live or family1_state == "unknown"
+
+                # W3 write-ahead: a recipient we will not attempt live is asleep,
+                # so it cannot drain during a live window, and there is no live
+                # window to crash in. Write its durable placeholder BEFORE
+                # anything else so a sender crash before the recipient wakes does
+                # not lose the message. A recipient we WILL attempt live stays
+                # live-first: it can drain at its next SessionStart while the live
+                # turn is still in flight, before the id lands in its transcript,
+                # so W2 cannot skip a write-ahead placeholder there and the
+                # message would double-deliver.
+                if durable_recipient is not None and not family1_attemptable:
+                    _write_durable()
+                delivery = "durable"
+                demotion_notice: Optional[str] = None
+
                 if family1_attemptable and _deliver_live(
                     existing,
                     message,
@@ -6344,21 +6358,16 @@ def dispatch_send(
                     sender_entry=sender_entry,
                 ):
                     delivery = "hosted"
-                else:
-                    # Durable fallback: an offline recipient, or a live inject that
-                    # did not confirm. Persist ONLY here so a CONFIRMED live turn is
-                    # not also queued. At-most-once on the common path; a busy
-                    # recipient whose injected turn is queued past the verb's confirm
-                    # budget can still receive the durable copy too (bounded
-                    # double-delivery -- see mail_inject.rs). Live-first also widens
-                    # the crash-loss window vs the old durable-first; both are
-                    # accepted tradeoffs of the live-inject-first design (node
-                    # x-1f23). A live peer that fell through gets a demotion notice.
+                elif durable_recipient is None or family1_attemptable:
+                    # Live-first fallback: an attemptable recipient whose live
+                    # attempt missed, or a recipient with no durable address
+                    # (which raises durable-address exit 12 inside _write_durable).
                     _write_durable()
-                    if family1_live:
-                        demotion_notice = (
-                            f"live delivery failed for {name!r}; message queued durable ({msg_id})"
-                        )
+
+                if delivery == "durable" and family1_live:
+                    demotion_notice = (
+                        f"live delivery failed for {name!r}; message queued durable ({msg_id})"
+                    )
 
                 _emit_ev(
                     "agent_send_done",
@@ -6410,6 +6419,7 @@ def dispatch_send(
                             "agent_send_failed",
                             stage="registry-write",
                             name=name,
+                            msg_id=msg_id,
                             delivery=delivery,
                             reason="recipient_identity_changed",
                             error="recipient identity changed after delivery",
@@ -6428,6 +6438,7 @@ def dispatch_send(
                         "agent_send_failed",
                         stage="registry-write",
                         name=name,
+                        msg_id=msg_id,
                         delivery=delivery,
                         error=str(exc),
                         error_type=type(exc).__name__,

@@ -94,10 +94,16 @@ It is binary-direct (a Python subprocess), NOT a routable `fno agents` verb: it 
 
 The verb confirms that the recipient transcript grew after the inject, i.e. the injected USER turn was recorded. For the target case (a session idle or blocked at a prompt) the turn records promptly, so growth fires within a poll interval. Two bounded edges remain:
 
-- A BUSY recipient (mid tool call) queues the injected turn; if it is not recorded within the poll budget the verb reports `not-confirmed`, Python writes the durable fallback, yet the queued inject still lands later. That is a bounded DOUBLE delivery.
-- Live-first writes durable only after a failed live attempt, so a process kill during the up-to-20s live window loses the message, a window the old durable-first did not have.
+- A BUSY recipient queues the injected turn past the poll budget.
+  The verb writes the durable fallback while the queued inject still lands later.
+  That bounded DOUBLE delivery is now deduped at the drain (W2).
+- Live-first writes durable only after a failed live attempt.
+  A kill during the live window used to lose the message.
+  Write-ahead (W3) closes that window for an asleep recipient.
+  A live recipient stays live-first to avoid a drain-time double delivery.
 
-Both are accepted tradeoffs of live-inject-first. Hard exactly-once would carry the `msg_id` in the envelope and dedup at the recipient's drain (a follow-up, not built here).
+The double delivery is closed by drain-time dedup (W2).
+The crash window is closed for asleep recipients (W3).
 
 ## The relay variant
 

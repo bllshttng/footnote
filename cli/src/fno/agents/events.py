@@ -162,3 +162,9 @@ KIND_STREAMING_VIA_POLLING = "streaming_via_polling"
 
 # Autonomous switchboard continuation lifecycle.
 KIND_AGENT_RELAY_STOPPED = "agent_relay_stopped"
+
+# Drain receipt (W1.1). Emitted by cmd_drain_self at the ack point (the cursor
+# advance), one record per drained message id, so a sender can join events.jsonl
+# on msg_id to a terminal 'drained' state and the dead-letter sweep can prefer a
+# positive marker over cursor inference.
+KIND_AGENT_MAIL_DRAINED = "agent_mail_drained"
