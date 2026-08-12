@@ -425,19 +425,25 @@ def style(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
         if unexplained:
-            # Describes the condition that actually fired. The earlier text
-            # described the old bare-zero condition and prescribed a
-            # style-exception marker, which can never apply here: a
-            # deletion-only file has a numstat count of zero and cannot reach
-            # this branch at all. It sent the author to annotate a file instead
-            # of reporting the parser bug the branch detects.
+            # Reported AFTER the violations below, never instead of them.
+            # Raising here discarded every real finding in the same run: a PR
+            # with one parser gap and three genuine violations showed only the
+            # gap, and the author had nothing to fix and nothing to look at.
+            #
+            # Exit 2, not 1. This is an instrument failure, which is what the
+            # message says and what the sibling gate in this same PR reserves
+            # exit 2 for. Exiting 1 filed it as a finding against the author.
+            # The paths are named, because "1 file(s)" is not investigable.
+            if violations:
+                typer.echo(style_mod.format_violations(violations), err=True)
             typer.echo(
-                f"style: git counted added lines in {unexplained} file(s) that "
-                "this gate then read as having none. That is a parser failure "
-                "in the gate, not something to annotate in the file.",
+                "style: git counted added lines in these file(s) that this gate "
+                "then read as having none, which is a parser failure in the gate "
+                "rather than something to annotate in the file:\n  "
+                + "\n  ".join(unexplained),
                 err=True,
             )
-            raise typer.Exit(1)
+            raise typer.Exit(2)
     elif stdin:
         import sys
 
@@ -659,7 +665,7 @@ def _style_added_lines(
         raise typer.Exit(2)
     violations = []
     inspected = 0
-    unexplained = 0
+    unexplained: list[str] = []
     for rel in changed:
         full = repo / rel
         if not full.is_file():
@@ -676,8 +682,9 @@ def _style_added_lines(
         elif added_by_path.get(rel, 0) > 0:
             # git counted added lines for this path and the parser found none.
             # That is the only shape here that means the INSTRUMENT failed, and
-            # it is the shape the guard was always meant to catch.
-            unexplained += 1
+            # it is the shape the guard was always meant to catch. Paths are
+            # collected rather than counted, since a count is not investigable.
+            unexplained.append(rel)
     return violations, inspected, len(changed), unexplained
 
 

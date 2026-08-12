@@ -297,7 +297,7 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     # is a legitimate zero, and the rename resolution above is what produces it,
     # so counting bare zeros made the fix trip the guard it shares a function
     # with: a rename-only PR inspected nothing and exited 1.
-    assert unexplained == 0, "a pure rename is an explained zero, not a broken scan"
+    assert unexplained == [], "a pure rename is an explained zero, not a broken scan"
 
 
 def test_no_newline_marker_does_not_shift_added_line_numbers(tmp_path: Path) -> None:
@@ -438,7 +438,7 @@ def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
         _clear_repo_root_cache()
         os.chdir(cwd)
 
-    assert unexplained == 1, (
+    assert unexplained == ["docs/b.md"], (
         "git counted an added line on the renamed path and the parser found "
         "none, so the guard must fire for renamed files too"
     )
@@ -484,7 +484,7 @@ def test_a_deletion_only_edit_is_an_explained_zero(tmp_path: Path) -> None:
         os.chdir(cwd)
 
     assert changed == 2 and inspected == 1, "positive control: one line was added"
-    assert unexplained == 0, "a deletion-only edit authors nothing and is explained"
+    assert unexplained == [], "a deletion-only edit authors nothing and is explained"
 
 
 def test_style_gate_still_fails_when_the_parser_loses_added_lines(
@@ -531,7 +531,9 @@ def test_style_gate_still_fails_when_the_parser_loses_added_lines(
         os.chdir(cwd)
 
     assert changed == 1 and inspected == 0
-    assert unexplained == 1, "git counted an added line and the parser found none"
+    assert unexplained == ["docs/d.md"], (
+        "the guard must name the file, since a bare count is not investigable"
+    )
 
 
 @pytest.mark.parametrize(

@@ -142,7 +142,17 @@ for _sig in '_declared_missing, _declared_unreached = _partition_stale_vs_unvisi
   fi
 done
 
-_relpath_stray=$(grep -n 'os\.path\.relpath(' "$SELF_PATH" | grep -v 'repo-key-exempt' || true)
+# Every way this file can key a path, not just the one it happened to use.
+# Matching the os.path relpath call alone advertised an invariant it did not
+# enforce: a future site using Path.relative_to, or importing relpath under an
+# alias, keys against the wrong root while the guard stays green. That is the
+# one-of-N-reachable-paths shape this repo's own pitfalls corpus names, sitting
+# inside the guard written to close that very class.
+#
+# Written WITHOUT spelling the patterns, because a guard that greps its own file
+# matches its own prose. The split-owner guard above hit that and needed a
+# count of two; this one would need an exemption on every explanatory line.
+_relpath_stray=$(grep -nE 'os\.path\.relpath\(|\.relative_to\(|from os\.path import|import relpath' "$SELF_PATH" | grep -v 'repo-key-exempt' || true)
 if [[ -n "$_relpath_stray" ]]; then
   echo "check-axis-vocabulary: path key bypasses _repo_key:" >&2
   echo "$_relpath_stray" | sed 's/^/  /' >&2
@@ -247,13 +257,26 @@ def _build_output_dirs(repo_root: Path):
     breaks on the PR that adds a crate, never on the PR that wrote the
     exclusion, which is the worst place for a rule to fail. The literals stay
     as a floor for trees with no crates/ directory.
+
+    Derived from every Cargo.toml in the tree rather than from `crates/*` one
+    level deep. A workspace manifest at the repo root is the normal shape for a
+    two-crate repo and puts `target/` at the root, and a crate nested at
+    `crates/foo/bar/` puts one there. Enumerating a single level promised
+    "derived not listed" and delivered a narrower rule than the comment
+    claimed, which is its own small lying receipt.
     """
     found = set()
-    crates = repo_root / "crates"
-    if crates.is_dir():
-        for child in crates.iterdir():
-            if (child / "Cargo.toml").is_file():
-                found.add(f"crates/{child.name}/target")
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        # Never descend into a build directory or a vendor tree to look for a
+        # manifest: that costs a full walk of generated sources to learn
+        # nothing, and the walk is the thing being avoided.
+        dirnames[:] = [
+            d for d in dirnames if d not in ("target", ".git", "node_modules")
+        ]
+        if "Cargo.toml" not in filenames:
+            continue
+        rel = _repo_key(dirpath, repo_root, repo_root)
+        found.add("target" if rel == "." else f"{rel}/target")
     return found
 
 # An adversarial probe, deliberately placed where the walk used to be blind
