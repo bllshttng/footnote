@@ -37,7 +37,7 @@ pub enum Level {
 /// The chrome a block wears. `level` is private with no setter: it comes from
 /// [`Chrome::level_for`] of the anchor passed at construction, which is what
 /// makes the level a rule rather than a convention a call site can override.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chrome {
     pub title: String,
     pub subtitle: Option<String>,
@@ -110,6 +110,20 @@ impl Chrome {
     pub fn rows_overhead(&self) -> usize {
         self.rows_above() + self.rows_below()
     }
+
+    /// The minimum INNER width the chrome itself needs, so a title or the esc
+    /// chip can never make a border row wider than the body rows (which would
+    /// break the rectangle). Normal modals are far wider than this; it only
+    /// kicks in for a tiny body with a long title.
+    fn min_inner_w(&self) -> usize {
+        // ` esc ` is 5; every level reserves at least that plus a leading `─`.
+        const ESC_INNER: usize = 6;
+        match self.level {
+            Level::Bare => ESC_INNER,
+            Level::Full if self.title.is_empty() => ESC_INNER,
+            Level::Full => self.title.chars().count() + 9, // `─ {title} ─ esc `
+        }
+    }
 }
 
 /// Scrollbar geometry, when the body overflows its viewport. `pos` is the
@@ -173,7 +187,7 @@ pub struct Framed {
 /// one content column degrades to a border-only block rather than underflowing
 /// (the precedent `anchored_origin_degrades_when_block_exceeds_screen` sets).
 pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<Scroll>) -> Framed {
-    let body_w = body_w.max(1);
+    let body_w = body_w.max(1).max(chrome.min_inner_w());
     let has_scroll = scroll.is_some_and(|s| s.total > s.visible && s.visible > 0);
     let inner_w = body_w + usize::from(has_scroll);
     let width = chrome_frame_width(body_w, has_scroll);
@@ -516,13 +530,15 @@ mod tests {
 
     #[test]
     fn scrollbar_column_appears_only_on_overflow() {
-        let c = Chrome::new("T", Anchor::Center);
-        let fits = frame(&[bl("ab")], &c, 2, Some(Scroll { pos: 0, total: 2, visible: 2 }));
+        // Empty title + body_w above the chrome minimum, so the width math
+        // isolates the scrollbar from the title-widening floor.
+        let c = Chrome::new("", Anchor::Center);
+        let fits = frame(&[bl("ab")], &c, 8, Some(Scroll { pos: 0, total: 2, visible: 2 }));
         assert!(fits.lines.iter().flat_map(|l| l.roles.iter()).all(|r| !matches!(*r, Role::ScrollThumb | Role::ScrollTrack)));
-        assert_eq!(fits.width, chrome_frame_width(2, false));
+        assert_eq!(fits.width, chrome_frame_width(8, false));
 
-        let over = frame(&[bl("ab"), bl("cd")], &c, 2, Some(Scroll { pos: 0, total: 8, visible: 2 }));
-        assert_eq!(over.width, chrome_frame_width(2, true));
+        let over = frame(&[bl("ab"), bl("cd")], &c, 8, Some(Scroll { pos: 0, total: 8, visible: 2 }));
+        assert_eq!(over.width, chrome_frame_width(8, true));
         assert!(over.lines.iter().flat_map(|l| l.roles.iter()).any(|r| matches!(*r, Role::ScrollThumb | Role::ScrollTrack)));
         // Thumb is proportional: of 2 visible rows for 8 total, the thumb
         // covers >=1 row.

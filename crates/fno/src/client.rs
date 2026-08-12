@@ -4638,9 +4638,11 @@ impl View {
         self.draw_bottom_row(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(lines) = &self.digest {
-            // x-4e2d catch-up overlay: reuse the inverse-video chrome; any key
-            // dismisses (handled in handle_stdin, like the key-table overlay).
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, lines);
+            // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
+            // key-table overlay). Framed chrome so it reads as one product with
+            // the settings and connections modals.
+            let chrome = chrome::Chrome::new("catch up", Anchor::Center).footer("any key closes");
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, lines, &self.theme);
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
@@ -4660,31 +4662,31 @@ impl View {
             let (queue, dropped) = self.needs_view();
             let sel = sel.min(queue.len().saturating_sub(1));
             let lines = needs_overlay_lines(&queue, sel, dropped, self.needs_footer());
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
+            let chrome = chrome::Chrome::new("needs me", Anchor::Center).footer("q close");
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
         } else if let Some((src, squads)) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
-            // numbered line per candidate squad, on the same inverse-video
-            // overlay chrome.
+            // numbered line per candidate squad.
             let lines = self.move_pick_lines(src, squads);
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
+            let chrome = chrome::Chrome::new("move to", Anchor::Center).footer("esc cancel");
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
+            let chrome = chrome::Chrome::new("attach", Anchor::Center).footer("esc cancel");
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
         } else if let Some(conn) = &self.connections {
-            // x-84d7 Connections modal: accounts + combos lists on the shared
-            // inverse-video chrome. Drawn from the modal's own render (pure).
+            // x-84d7 Connections modal: accounts + combos lists. Drawn from the
+            // modal's own render (pure). This and the settings modal are the
+            // pair from the operator's screenshot - they now share one chrome.
+            let chrome = chrome::Chrome::new("connections", Anchor::Center).footer("esc close");
             draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &conn.render(),
+                &mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &conn.render(),
+                &self.theme,
             );
         } else if let Some(peek) = &self.peek {
             // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
-            // layout, navigator-style) header + transcript, on the shared
-            // inverse-video chrome. Drawn above nav (mutually exclusive modes).
+            // layout, navigator-style) header + transcript. Drawn above nav
+            // (mutually exclusive modes).
             let drows = self.display_rows();
             let agent = drows.get(peek.cursor).and_then(|r| match r {
                 DisplayRow::Agent(a) => Some(*a),
@@ -4696,14 +4698,17 @@ impl View {
                 .unwrap_or(0);
             let reply = self.peek_input.as_ref().map(|(_, buf)| buf.as_str());
             let lines = peek_overlay_lines(agent, peek, reply, now_secs);
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
+            let title = agent.map(|a| a.name.as_str()).unwrap_or("peek");
+            let chrome = chrome::Chrome::new(title, Anchor::Center).footer("esc close");
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
         } else if let Some(nav) = &self.nav {
-            // x-653d navigator: the filtered flat catalog + query/chip line, on
-            // the same inverse-video overlay chrome. Rows recompute per frame
-            // from the live layout (no cache), so a push repopulates it.
+            // x-653d navigator: the filtered flat catalog + query/chip line. Rows
+            // recompute per frame from the live layout (no cache), so a push
+            // repopulates it.
             let filtered = self.nav_filtered(nav);
             let lines = nav_overlay_lines(&filtered, nav);
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
+            let chrome = chrome::Chrome::new("navigator", Anchor::Center).footer("type to filter · esc close");
+            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -6973,49 +6978,45 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
     p.to_string()
 }
 
-/// Draw inverse-video overlay lines centered in the content viewport (right of
-/// the sideline, above any splits), one line per row, cell-bounds-checked (a
-/// tiny terminal clips rather than panics). `content_origin` is `(TAB_BAR_ROWS,
-/// panel_w)`; `content_dims` is the content viewport's `(rows, cols)` (status
-/// row excluded). Shared by every corner-anchored popover (key-table, needs
-/// queue, nav, peek, move-pick, attach-place, connections) so centering all of
-/// them is this one change (x-e9c3; placement policy per x-9f75).
+/// Draw overlay lines centered in the content viewport (right of the sideline,
+/// above any splits), framed with `chrome` and colored by `theme`. The seven
+/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
+/// peek, navigator) all route through here, so framing them all is this one
+/// change - the point of chrome being a frame function rather than a field on
+/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
+///
+/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
+/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
+/// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
 fn draw_lines_overlay<S: AsRef<str>>(
     cells: &mut [Cell],
     rows: usize,
     cols: usize,
     content_origin: (usize, usize),
     content_dims: (usize, usize),
+    chrome: &chrome::Chrome,
     lines: &[S],
+    theme: &Theme,
 ) {
     let (base_r, base_c) = content_origin;
     let (content_rows, content_cols) = content_dims;
-    let box_h = lines.len();
-    let box_w = lines
+    // Body width: the widest line, capped to the viewport minus the side borders.
+    let body_w = lines
         .iter()
         .map(|l| l.as_ref().chars().count())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(content_cols.saturating_sub(chrome::Chrome::FRAME_COLS));
+    let body: Vec<chrome::BodyLine> = lines
+        .iter()
+        .map(|l| chrome::BodyLine::from_str(l.as_ref()))
+        .collect();
+    let framed = chrome::frame(&body, chrome, body_w, None);
+    let box_h = framed.lines.len().min(content_rows);
+    let box_w = framed.width.min(content_cols);
     let origin_r = base_r + content_rows.saturating_sub(box_h) / 2;
     let origin_c = base_c + content_cols.saturating_sub(box_w) / 2;
-    for (i, line) in lines.iter().enumerate() {
-        let r = origin_r + i;
-        if r >= rows {
-            break;
-        }
-        for (j, ch) in line.as_ref().chars().enumerate() {
-            let c = origin_c + j;
-            if c >= cols {
-                break;
-            }
-            cells[r * cols + c] = Cell {
-                c: ch,
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: cell_flags::INVERSE,
-            };
-        }
-    }
+    chrome::blit(cells, rows, cols, (origin_r, origin_c), &framed, theme);
 }
 
 /// The answer-overlay content width; lines truncate to it (AC3-UI: a long
@@ -13085,17 +13086,30 @@ mod tests {
         let mut cells = vec![Cell::default(); rows * cols];
         let content_origin = (2usize, 4usize);
         let content_dims = (10usize, 30usize); // roomy viewport, right of a sideline
-        let lines = ["ab", "cd"]; // box_h=2, box_w=2
-        draw_lines_overlay(&mut cells, rows, cols, content_origin, content_dims, &lines);
-
-        // origin_r = 2 + (10-2)/2 = 6; origin_c = 4 + (30-2)/2 = 18
-        let (r, c) = (6, 18);
-        assert_eq!(cells[r * cols + c].c, 'a');
-        assert_eq!(
-            cells[r * cols + c].flags & cell_flags::INVERSE,
-            cell_flags::INVERSE
+        let lines = ["ab", "cd"];
+        let chrome = chrome::Chrome::new("t", Anchor::Center);
+        draw_lines_overlay(
+            &mut cells, rows, cols, content_origin, content_dims, &chrome, &lines,
+            &Theme::default_theme(),
         );
-        assert_eq!(cells[(r + 1) * cols + c].c, 'c');
+
+        // The framed block (top + 2 body + bottom = 4 rows) centers in the
+        // 10-row viewport: top margin (10-4)/2 = 3, border starts at row 2+3 = 5.
+        let origin_r = 2 + (10 - 4) / 2;
+        // 'a' sits one row + one col inside the frame; locate it by scan so the
+        // test does not hardcode the chrome-widened column.
+        let a_col = (0..cols)
+            .find(|&c| cells[(origin_r + 1) * cols + c].c == 'a')
+            .expect("body row 'a' was drawn");
+        assert_eq!(cells[(origin_r + 1) * cols + a_col].c, 'a');
+        assert_eq!(
+            cells[(origin_r + 1) * cols + a_col].flags & cell_flags::INVERSE,
+            cell_flags::INVERSE,
+            "body cells stay inverse under terminal"
+        );
+        assert_eq!(cells[(origin_r + 2) * cols + a_col].c, 'c');
+        // The top border corner sits one row up and one col left of the body.
+        assert_eq!(cells[origin_r * cols + (a_col - 1)].c, '┌');
         // Nothing painted at the old hardcoded top-left corner.
         assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
     }
