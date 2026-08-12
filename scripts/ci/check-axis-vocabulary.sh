@@ -92,12 +92,16 @@ ROOT="${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 BASELINE_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
 BASELINE_FILE="${BASELINE_FILE:-$BASELINE_ROOT/scripts/ci/axis-vocabulary-baseline.txt}"
 
-# Checked against MODE_SEEN, not MODE. MODE defaults to strict and --write-baseline
-# overrides it further down, so testing MODE let `--write-baseline --baseline-file
-# /tmp/x` through: the message said --baseline-file was valid only with --baseline
-# while the destructive regeneration quietly accepted a redirect to any path. The
-# read-only combination the guard WAS written for exited 2 the whole time.
-if [[ "$MODE_SEEN" != "baseline" && $BASELINE_FILE_SEEN -eq 1 ]]; then
+# Two things have to be refused here and neither is "MODE_SEEN is not baseline".
+# --write-baseline is checked by its own flag because it sets MODE further down,
+# after this line, so testing MODE alone let `--write-baseline --baseline-file
+# /tmp/x` redirect the destructive regeneration anywhere. Fixing that by testing
+# MODE_SEEN then broke the DEFAULT invocation: MODE defaults to "baseline" (line
+# 11) while MODE_SEEN stays empty until a mode flag is typed, so a bare
+# `--baseline-file <path>` exited 2 while running in exactly the mode the
+# message demands. Read the resolved MODE for the read modes, and the flag for
+# the write mode, since that is the one MODE cannot answer for yet.
+if [[ $BASELINE_FILE_SEEN -eq 1 ]] && { [[ "$MODE" != "baseline" ]] || [[ $WRITE_BASELINE -eq 1 ]]; }; then
   echo "check-axis-vocabulary: --baseline-file is valid only with --baseline" >&2
   exit 2
 fi
@@ -1486,16 +1490,18 @@ if new_or_changed or resolved:
         "new or changed violations are prohibited.",
         file=sys.stderr,
     )
+    # The note that used to sit here described a line-pinned baseline and told
+    # the reader that a drift is probably just renumbering, so regenerate. Both
+    # halves went false when the comparison moved to identity: renumbering
+    # cannot produce a drift any more, and the entries printed above carry no
+    # line at all. Left in place it was worse than nothing, because it handed
+    # an author who had hit a REAL new violation a confident explanation for
+    # ignoring it and the command to bury it in the baseline.
     print(
-        "Line-pinned-baseline note: the baseline keys violations by file:line, so "
-        "ANY PR that inserts lines above a baselined violation inherits a drift "
-        "here even when it changes no axis binding - the violation moved, it did "
-        "not change. That is renumbering, not a new finding; regenerate the "
-        "baseline in the same PR (--write-baseline, preserving allowlist entries "
-        "by hand if regeneration drops them). The drift is invisible until CI "
-        "runs, so a merge that shifts baselined lines turns main red on the NEXT "
-        "PR, not its own - keep this baseline regenerated alongside line-moving "
-        "changes, not deferred.",
+        "Drift here is a genuine change in the finding set. This comparison "
+        "ignores line numbers, so moving a violation cannot produce one: an "
+        "entry appears only when a binding, a literal, or a file changed, or "
+        "when the count of an identical binding in one file changed.",
         file=sys.stderr,
     )
     sys.exit(1)

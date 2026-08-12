@@ -169,7 +169,13 @@ import json, sys, time
 from pathlib import Path
 from fno.graph.load import GraphCorruptionError, load_graph
 
-g, stop, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+g, stop, out, ready = (Path(a) for a in sys.argv[1:5])
+# Announced only after the import that costs ~0.35s, and the writer blocks on
+# this file before its first mutation. Without the handshake a reader still
+# importing when STOP lands exits with loads == 0 and reddens the positive
+# control on a healthy graph - a startup race in the very test written to
+# remove a timing artifact, with the same shrinking margin on a loaded runner.
+ready.write_text("")
 false_corruption = missing_seed = loads = most = 0
 deadline = time.monotonic() + 120  # never outlive a dead parent
 while not stop.exists() and time.monotonic() < deadline:
@@ -207,13 +213,26 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path):
     readers = []
     for n in range(3):
         out = tmp_path / f"reader{n}.json"
+        ready = tmp_path / f"ready{n}"
         readers.append((
             subprocess.Popen(
-                [sys.executable, "-c", _READER, str(g), str(stop), str(out)]
+                [sys.executable, "-c", _READER, str(g), str(stop), str(out), str(ready)]
             ),
             out,
+            ready,
         ))
     try:
+        # Every reader is past its import before the writer starts. The writer
+        # loop takes a second or two and reader startup takes a fraction of
+        # one, so this only ever mattered on a loaded runner - which is exactly
+        # the machine this test keeps failing on.
+        deadline = time.monotonic() + 60
+        for proc, _out, ready in readers:
+            while not ready.exists() and time.monotonic() < deadline:
+                assert proc.poll() is None, "a reader exited before signalling ready"
+                time.sleep(0.01)
+            assert ready.exists(), "a reader never signalled ready"
+
         for i in range(200):
             def _mut(entries, i=i):
                 entries.append({"id": f"x-w{i:04x}", "title": f"n{i}",
@@ -222,11 +241,18 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path):
             locked_mutate_graph(g, _mut)
     finally:
         stop.write_text("")
-        for proc, _ in readers:
-            proc.wait(timeout=60)
+        for proc, _out, _ready in readers:
+            # kill() rather than a bare wait(timeout=...): a TimeoutExpired
+            # raised from this finally block replaces the real failure with a
+            # cleanup error and leaves the readers orphaned.
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
 
     reports = []
-    for _, out in readers:
+    for _proc, out, _ready in readers:
         assert out.exists(), "a reader process died before reporting"
         reports.append(json.loads(out.read_text()))
 
