@@ -93,6 +93,8 @@ def test_research_doc_without_frontmatter_is_first_filled(tmp_path: Path) -> Non
     fm = _load_frontmatter(doc)
     assert fm.get("status") == "design", f"first-fill must set status=design, got {fm.get('status')}"
     assert "created" in fm, "first-fill must set created"
+    assert fm.get("type") == "blueprint", f"first-fill must set type=blueprint, got {fm.get('type')}"
+    assert "sources" in fm, "first-fill must carry a sources slot (empty until cited)"
 
 
 def test_malformed_frontmatter_still_exits_three(tmp_path: Path) -> None:

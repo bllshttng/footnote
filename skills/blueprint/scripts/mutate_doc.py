@@ -117,19 +117,30 @@ _DEFAULT_KILL_CRITERIA = [
 
 
 def _first_fill_block() -> str:
-    """Minimal frontmatter block for a research doc that carries none.
+    """The locked frontmatter block for a doc that carries none.
 
-    Think is now a research skill and writes findings with no frontmatter, so
-    blueprint owns frontmatter outright. Only the fields that must be PRESENT
-    and valid are written: `status` (design, the blueprint entry rung) and
-    `created`. `node` binds at intake (missing required fields are tolerated by
-    the schema check), and `kill_criteria` / `execution_mode` default during
-    mutation. A doc that already opens with `---` is left untouched, so a
-    malformed block still surfaces as FrontmatterError rather than being
-    silently overwritten.
+    Blueprint owns frontmatter outright: think is a research skill and writes
+    findings with no frontmatter. The frontmatter is the one locked part of the
+    plan, so every field knowable at mutation time is present and valid the
+    moment blueprint touches the doc: `status` (design, the blueprint entry
+    rung), `created`, `type`, and `sources`. `node` and `claims` are omitted
+    here because they are not knowable until intake binds the backlog node; the
+    Claims-Ingestion gate refuses to adopt a plan whose node never bound, so a
+    shipped plan never carries a stale or empty identity. `title` and
+    `kill_criteria` are documented in the skill as part of the locked contract
+    and are written by the agent or defaulted during mutation. A doc that
+    already opens with `---` is left untouched, so a malformed block still
+    surfaces as FrontmatterError rather than being silently overwritten.
     """
     today = datetime.date.today().isoformat()
-    return f"---\nstatus: design\ncreated: {today}\n---\n\n"
+    return (
+        "---\n"
+        f"status: design\n"
+        f"created: {today}\n"
+        f"type: blueprint\n"
+        f"sources: []\n"
+        "---\n\n"
+    )
 
 
 # ---------------------------------------------------------------------------
