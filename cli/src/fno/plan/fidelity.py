@@ -15,6 +15,7 @@ shells ``fno plan fidelity --json``.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 
 __all__ = ["fidelity_refusal", "compute_plan_fidelity"]

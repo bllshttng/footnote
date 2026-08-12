@@ -1086,7 +1086,8 @@ def denominator_ratio(
     for e in events:
         if _ts(e) is None or _ts(e) < cutoff:
             continue
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        raw = e.get("data")
+        data = raw if isinstance(raw, dict) else {}
         d = data.get("denominator")
         if d in counts:
             counts[d] += 1
