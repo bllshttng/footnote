@@ -73,6 +73,16 @@ class NodeTracker(Protocol):
         """
         ...
 
+    def list_open(self) -> list[TrackerNode]:
+        """Return every open item, as ``read`` would project each.
+
+        ``fno backlog next`` enumerates these and applies footnote's own
+        ranking to them (the board-as-work-order contract ``advance``
+        depends on), so a backend must NOT pre-rank: it returns the open
+        set in any order and footnote orders it.
+        """
+        ...
+
     def close(self, id: str) -> None:
         """Mark ``id`` closed in the backend.
 

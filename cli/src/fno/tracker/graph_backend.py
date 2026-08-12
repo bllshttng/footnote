@@ -44,6 +44,15 @@ class GraphTracker:
                 return self._project(entry)
         raise NodeNotFound(id)
 
+    def list_open(self) -> list[TrackerNode]:
+        # Open == not yet terminal. The backend returns the set in storage
+        # order; footnote's caller ranks it.
+        return [
+            self._project(entry)
+            for entry in read_graph(self._path)
+            if _derive_status(entry) not in _CLOSED_RUNGS
+        ]
+
     def close(self, id: str) -> None:
         ts = _ts_now()
 
