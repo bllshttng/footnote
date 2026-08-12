@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import json
 import os
 import re
@@ -62,7 +63,7 @@ if str(_CLI_SRC) not in sys.path:
 
 # E402: these imports intentionally follow the sys.path.insert above so the
 # in-repo `fno.plan.*` package resolves when run as a standalone script.
-from fno.plan._doc import load_plan, FrontmatterError  # noqa: E402
+from fno.plan._doc import load_plan, load_plan_text, FrontmatterError  # noqa: E402
 from fno.plan._ownership import (  # noqa: E402
     BLUEPRINT_WRITE_ALLOWLIST,
     assert_blueprint_can_write,
@@ -114,6 +115,22 @@ _DEFAULT_KILL_CRITERIA = [
         "reason": "Same test failing 3+ iterations - root cause unclear",
     },
 ]
+
+
+def _first_fill_block() -> str:
+    """Minimal frontmatter block for a research doc that carries none.
+
+    Think is now a research skill and writes findings with no frontmatter, so
+    blueprint owns frontmatter outright. Only the fields that must be PRESENT
+    and valid are written: `status` (design, the blueprint entry rung) and
+    `created`. `node` binds at intake (missing required fields are tolerated by
+    the schema check), and `kill_criteria` / `execution_mode` default during
+    mutation. A doc that already opens with `---` is left untouched, so a
+    malformed block still surfaces as FrontmatterError rather than being
+    silently overwritten.
+    """
+    today = datetime.date.today().isoformat()
+    return f"---\nstatus: design\ncreated: {today}\n---\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -774,8 +791,15 @@ def mutate(
         return 1, msg
 
     # --- Load doc ---
+    # A research doc carries no frontmatter; blueprint first-fills the minimal
+    # block in memory before parsing. A doc that opens with `---` is parsed
+    # as-is, so malformed YAML still raises FrontmatterError (exit 3) rather
+    # than being papered over.
     try:
-        plan = load_plan(resolved)
+        raw_text = resolved.read_text(encoding="utf-8")
+        if not raw_text.startswith("---"):
+            raw_text = _first_fill_block() + raw_text
+        plan = load_plan_text(raw_text)
     except FrontmatterError as exc:
         return 3, f"Frontmatter parse error: {exc}"
     except OSError as exc:
