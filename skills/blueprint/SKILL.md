@@ -1,6 +1,6 @@
 ---
 name: blueprint
-description: "Create implementation blueprints (plans) as a single .md doc. Given a /think design doc, mutate it in place; given an idea, create one. 'quick' scales the sections down for bugs and 1-session work; every plan is one .md == one PR == one node. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
+description: "Create an implementation plan as a single .md doc that is a contract for the implementer. Take an idea, a node, or cited findings and produce a BDD-aware plan. One .md == one PR == one node. The frontmatter is locked. The body is whatever makes the plan understood. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
 argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <design-doc-path | feature-description> [--no-linear]"
 ---
 

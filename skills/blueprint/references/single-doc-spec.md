@@ -4,32 +4,30 @@ Reference for the `/blueprint` mutation behavior introduced in PR1 (2026-05-18, 
 
 ## Design doc shape
 
-A design doc is the input `/blueprint` mutates. `/think` writes it from cited primary sources. When the doc has no frontmatter, `/blueprint` first-fills it. `/blueprint` then appends an Execution Strategy and compiles `## User Stories` into the task skeleton. The shape:
+The frontmatter is the one locked part of the plan.
+When a doc carries no frontmatter, blueprint first-fills it.
+The Claims-Ingestion gate then refuses to adopt a plan whose node never bound.
+The locked fields:
 
 ```markdown
 ---
-title: "<title>"
-node: <node id>
-status: design
+status: design              # the blueprint entry rung
 created: <YYYY-MM-DD>
-claims: <node id>
+type: blueprint
+node: <node id>             # bound at intake
+claims: <node id>           # bound at intake (Claims-Ingestion gate)
 sources: [<artifacts actually read>]
+kill_criteria: <abort conditions>
 ---
-
-# <Title>
-
-## Problem
-
-## Recommended Design
-
-## User Stories
-
-**US1:** As a <role>, I can <capability>, so that <outcome>.
-
-## Acceptance Criteria
-
-## Open Questions
 ```
+
+The body is a contract for the implementer, not a rigid template.
+Include whatever makes the plan understood: the problem, the design decisions, the open questions.
+Two parts are load-bearing for compilation.
+`## User Stories` seeds the task skeleton.
+When that section is absent, blueprint emits a single default task.
+The BDD acceptance criteria carry the test contract the implementer must satisfy.
+Every other section is optional context, authored as the plan needs it.
 
 ## Status progression
 
