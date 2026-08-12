@@ -507,6 +507,39 @@ def _run_git(argv: "list[str]", repo: Path, *, label: str):
     return proc
 
 
+def _numstat_added(raw: str) -> "dict[str, int]":
+    """Added-line count per NEW path, from `git diff --numstat -z`.
+
+    `-z` is the whole point. Without it git compresses a rename into the single
+    display form `docs/{a.md => b.md}`, so the new path is never a key. Keyed
+    that way the guard below could never fire for a renamed file, which is
+    exactly the class the rename resolution above makes eligible for a
+    zero-inspection result. A renamed-and-edited doc whose line numbers the
+    parser lost would have exited 0 reporting a clean tree.
+
+    With `-z` a rename emits `added\\tdeleted\\t` followed by the old and new
+    paths as separate NUL-terminated fields, so the new path is recoverable.
+    """
+    added: dict[str, int] = {}
+    fields = raw.split("\0")
+    i = 0
+    while i < len(fields):
+        parts = fields[i].split("\t")
+        if len(parts) < 3:
+            i += 1
+            continue
+        count, path = parts[0], parts[2]
+        if path == "":
+            # Rename: the old path is the next field, the new path the one after.
+            path = fields[i + 2] if i + 2 < len(fields) else ""
+            i += 3
+        else:
+            i += 1
+        if count.isdigit() and path:
+            added[path] = int(count)
+    return added
+
+
 def _repo_scope(paths: list[Path], repo: Path) -> "list[str]":
     """Repo-root-relative POSIX pathspecs for git, from caller-relative paths.
 
@@ -592,15 +625,11 @@ def _style_added_lines(
     # the whole gate, demanding a style-exception marker in a file the author had
     # only shortened. A mode-only change did the same.
     numstat = _run_git(
-        _pinned_diff_argv("--numstat", f"{diff_base}...HEAD"),
+        _pinned_diff_argv("--numstat", "-z", f"{diff_base}...HEAD"),
         repo,
         label=f"counting changed lines ({diff_base}...HEAD)",
     )
-    added_by_path: dict[str, int] = {}
-    for line in numstat.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3 and parts[0].isdigit():
-            added_by_path[parts[2]] = int(parts[0])
+    added_by_path = _numstat_added(numstat.stdout)
     # Markdown only: the gate is "changed markdown", so a PR adding a shell or
     # Python file under skills/ is not style-checked as prose.
     changed = [

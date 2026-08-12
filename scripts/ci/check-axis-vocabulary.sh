@@ -580,6 +580,12 @@ def _self_test():
     # the answer was "0 axis-named directories" every time. Every specimen above
     # plants its subject BELOW the root, so none of them could see this.
     d = Path(tempfile.mkdtemp(prefix="axis-asroot-"))
+    # `git init` so the temp tree is its OWN repo root. Left uninitialised, a
+    # TMPDIR that happens to sit inside a git repo makes _repo_root_for return
+    # that outer repo, every key gains a long prefix, and the specimen fails for
+    # a reason unrelated to what it measures. The hazard is documented above and
+    # these specimens re-introduced it.
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
     (d / "providers").mkdir()
     (d / "providers" / "x.py").write_text("x = 1\n", encoding="utf-8")
     _, _, dirs, _ = scan(d / "providers")
@@ -642,6 +648,7 @@ def _self_test():
     # since a copy that swaps which state gets which exit is the failure an
     # independent reviewer named as shipping green today.
     d = Path(tempfile.mkdtemp(prefix="axis-split-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / "ondisk").mkdir()
     stale, unvisited = _partition_stale_vs_unvisited(
         ["ondisk", "gone"], set(), d, True
@@ -687,6 +694,7 @@ def _self_test():
         failures += 1
     else:
         d = Path(tempfile.mkdtemp(prefix="axis-wiring-"))
+        subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
         (d / "providers").mkdir()
         (d / "providers" / "v.py").write_text("x = 1\n", encoding="utf-8")
         env = dict(os.environ)

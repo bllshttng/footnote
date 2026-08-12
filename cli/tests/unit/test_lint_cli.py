@@ -331,6 +331,54 @@ def test_no_newline_marker_does_not_shift_added_line_numbers(tmp_path: Path) -> 
     )
 
 
+def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
+    """A renamed-and-edited doc must still be covered by the instrument guard.
+
+    `git --numstat` compresses a rename to `docs/{a.md => b.md}`, so keyed off
+    that output the NEW path is never present and the guard silently cannot
+    fire for any renamed file. That is precisely the class the rename
+    resolution makes eligible for a zero-inspection result, so the one file
+    type most likely to break the parser was the one the guard could not see.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "docs" / "a.md").write_text("One.\nTwo.\nThree.\nFour.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    _git(repo, "mv", "docs/a.md", "docs/b.md")
+    (repo / "docs" / "b.md").write_text(
+        "One.\nTwo.\nThree.\nFour.\nFive added.\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "rename and edit")
+
+    # The parser loses the authored line on the renamed path.
+    monkeypatch.setattr("fno.lint_cli._git_added_line_nums", lambda *a, **k: set())
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
+    try:
+        _v, _inspected, _changed, unexplained = _style_added_lines("base", None)
+    finally:
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert unexplained == 1, (
+        "git counted an added line on the renamed path and the parser found "
+        "none, so the guard must fire for renamed files too"
+    )
+
+
 def test_a_deletion_only_edit_is_an_explained_zero(tmp_path: Path) -> None:
     """A trimmed doc must not fail the gate.
 
