@@ -186,6 +186,28 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return oid or None
 
 
+def _plan_path_for_pr(pr_number: int) -> Optional[str]:
+    """The plan_path bound to this PR's delivery row in the ledger, or None.
+
+    The fidelity gate scopes to a plan; this resolves which plan a PR belongs to
+    from the global ledger (the cross-repo join key). None means the PR carries
+    no plan - no denominator to check, so the gate is a no-op for it. A ledger
+    read failure is also None: a missing ledger must not block a merge that has
+    no plan-fidelity signal to evaluate."""
+    try:
+        from fno import paths as _paths
+        from fno.scoreboard.fold import load_ledger_rows
+
+        for row in load_ledger_rows(_paths.ledger_json()):
+            if row.get("pr_number") == pr_number:
+                pp = row.get("plan_path")
+                if isinstance(pp, str) and pp.strip():
+                    return pp
+    except Exception:  # noqa: BLE001 - the gate is advisory on a missing ledger
+        return None
+    return None
+
+
 def _coverage_refused_reason(
     cov: Optional[dict],
     head: Optional[str] = None,
@@ -1073,6 +1095,34 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # staleness check above already refused a current mismatch; this makes gh
     # itself refuse if the head moves between here and the merge.
     covered_head = (cov.get("head_sha") or "") if cov and review_lane else ""
+
+    # (2c) Plan fidelity guard (x-cbab): the inverse of the coverage guard on the
+    # ownership axis - review_coverage is Rust-computed/Python-read; plan fidelity
+    # is Python-computed (fno.plan.fidelity)/read here. A plan whose declared
+    # deliverables did not all ship refuses the merge unless each shortfall
+    # carries a carveout (a PR-body sentence is not one). Skipped when the PR
+    # carries no plan (no denominator) or is not a code payload. The join is
+    # plan-grain, so an inline run with no separate planning thread has zero
+    # planned rows and passes; this catches an orphan plan that never shipped.
+    # A merge gate is required because a stop-gate-only check is skipped by a
+    # direct `fno pr merge`; the stop gate (loopcheck.rs) holds the other path.
+    _plan_path = _plan_path_for_pr(pr_number)
+    if _plan_path and _pr_payload_is_code(repo, pr_number):
+        from fno.plan.fidelity import compute_plan_fidelity
+
+        try:
+            _fid = compute_plan_fidelity(plan_path=_plan_path)
+        except Exception as exc:  # noqa: BLE001 - fail OPEN: a broken probe must not wedge a green merge
+            _fid = {"refused": False, "reason": f"fidelity probe degraded: {exc}"}
+        if _fid.get("refused"):
+            _emit(
+                pr_number,
+                "blocked",
+                f"plan fidelity refused: {_fid.get('reason', 'uncovered shortfall')}",
+                "none",
+                err=True,
+            )
+            return 2
 
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a

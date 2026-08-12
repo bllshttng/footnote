@@ -1604,3 +1604,85 @@ def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
 
     cov = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["coverage"] == "covered"
+
+
+# ---- plan fidelity guard (x-cbab) -------------------------------------------
+#
+# The merge-gate half of AC5: a plan whose declared deliverables did not all ship
+# refuses the merge unless each shortfall carries a carveout. Tested here in
+# isolation from the stop-gate half (loopcheck.rs) - the two readers are
+# independent by design, so a shared helper would let one drift while the other
+# stayed green.
+
+
+def _fid_plan_path(pr, *a, **k):
+    return "/x/plan.md"
+
+
+def test_fidelity_guard_blocks_an_uncovered_shortfall(enabled, monkeypatch, capsys, tmp_path):
+    """AC5: an unjoined planned row with no covering carveout refuses the merge."""
+    import fno.plan.fidelity as fid
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(_merge, "_plan_path_for_pr", _fid_plan_path)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(
+        fid, "compute_plan_fidelity",
+        lambda *, plan_path, **k: {"refused": True, "reason": "1 unjoined, 0 carveouts"},
+    )
+    rc = _merge.run_merge(["42"], cwd=str(tmp_path))
+    assert rc == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    assert "plan fidelity refused" in obj["reason"]
+
+
+def test_fidelity_guard_proceeds_when_the_shortfall_is_covered(enabled, monkeypatch, tmp_path):
+    """The same plan with a covering carveout (refused=False) reaches the merge."""
+    import fno.plan.fidelity as fid
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(_merge, "_plan_path_for_pr", _fid_plan_path)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(
+        fid, "compute_plan_fidelity", lambda *, plan_path, **k: {"refused": False},
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged PR 42", ""))
+    monkeypatch.setattr(_merge, "run", fake)
+    rc = _merge.run_merge(["42"], cwd=str(tmp_path))
+    assert rc == 0  # reached the merge; fidelity did not block
+
+
+def test_fidelity_guard_skipped_when_the_pr_carries_no_plan(enabled, monkeypatch, tmp_path):
+    """No plan_path -> no denominator to check -> the guard is a no-op."""
+    import fno.plan.fidelity as fid
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(_merge, "_plan_path_for_pr", lambda pr, *a, **k: None)
+    monkeypatch.setattr(
+        fid, "compute_plan_fidelity",
+        lambda *a, **k: pytest.fail("fidelity must not run without a plan"),
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged PR 42", ""))
+    monkeypatch.setattr(_merge, "run", fake)
+    rc = _merge.run_merge(["42"], cwd=str(tmp_path))
+    assert rc == 0
+
+
+def test_fidelity_guard_degrades_open_on_a_probe_crash(enabled, monkeypatch, capsys, tmp_path):
+    """A broken fidelity probe must not wedge a green merge: fail open, not block."""
+    import fno.plan.fidelity as fid
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(_merge, "_plan_path_for_pr", _fid_plan_path)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("fidelity exploded")
+
+    monkeypatch.setattr(fid, "compute_plan_fidelity", _boom)
+    fake = FakeRun(gh_merge=Result(0, "Merged PR 42", ""))
+    monkeypatch.setattr(_merge, "run", fake)
+    rc = _merge.run_merge(["42"], cwd=str(tmp_path))
+    assert rc == 0  # degraded open, merge proceeded
+
