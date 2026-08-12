@@ -182,3 +182,148 @@ def test_omitting_deliverables_does_not_set_the_env_carrier(
     r = CliRunner().invoke(app, ["target", "init", "--input", "some-feature"])
     assert r.exit_code == 0, r.output
     assert "TARGET_DELIVERABLES" not in captured["env"]
+
+
+# --- AC2-REFUSE: the denominator gate ----------------------------------------
+#
+# Unit tests pin the predicate's conditions; the wiring test pins that init
+# echoes the message, exits 2 (init's refusal contract - REVIEW_GATE_REFUSED=9
+# is the check-review-gate verb's code, re-stamped from this 2), and writes no
+# manifest.
+
+from fno.target.denominator import absent_denominator_refusal  # noqa: E402
+
+_CODE_NODE = {
+    "id": "x-test", "domain": "code", "slug": "do-the-thing",
+    "title": "do the thing", "details": "build it out", "plan_path": None,
+}
+
+
+def test_refusal_message_for_a_planless_code_node():
+    msg = absent_denominator_refusal(node=_CODE_NODE, plan_path="", deliverables=None)
+    assert msg is not None
+    assert "no scope denominator" in msg
+    assert "/fno:blueprint" in msg
+    assert "--deliverables" in msg
+
+
+def test_no_refusal_when_a_plan_is_bound():
+    assert absent_denominator_refusal(
+        node=_CODE_NODE, plan_path="/x/plan.md", deliverables=None
+    ) is None
+
+
+def test_no_refusal_when_deliverables_declared():
+    # The cheap N=1 exit satisfies the denominator; it is never a hole.
+    assert absent_denominator_refusal(
+        node=_CODE_NODE, plan_path="", deliverables=1
+    ) is None
+
+
+def test_no_refusal_for_a_non_code_node():
+    docs = {**_CODE_NODE, "domain": "docs"}
+    assert absent_denominator_refusal(
+        node=docs, plan_path="", deliverables=None
+    ) is None
+
+
+def test_no_refusal_for_a_free_text_idea():
+    # An idea input resolves no node and makes its own denominator via /blueprint.
+    assert absent_denominator_refusal(
+        node=None, plan_path="", deliverables=None
+    ) is None
+
+
+def test_enumerated_node_withdraws_the_deliverables_exit():
+    enum_node = {
+        **_CODE_NODE,
+        "title": "four bands",
+        "details": "(1) county; (2) state; (3) peers; (4) portfolio",
+    }
+    msg = absent_denominator_refusal(
+        node=enum_node, plan_path="", deliverables=None
+    )
+    assert msg is not None
+    assert "withdrawn" in msg
+
+
+def _invoke_init_node(monkeypatch: pytest.MonkeyPatch, node: dict, deliverables: bool):
+    """Drive the real `target init` with a resolved node, without running the
+    bootstrap script. The refusal sits after the script-resolution check, so the
+    real plugin root must resolve (no empty-root trick); subprocess.run is
+    stubbed so the script never actually runs on the proceeding path."""
+    monkeypatch.setattr("fno.target_cli._resolve_dispatch_node", lambda *a, **k: node)
+    monkeypatch.setattr("fno.target_cli.subprocess.run", lambda *a, **k: type("_P", (), {"returncode": 0})())
+    for helper in (
+        "_print_orientation_report", "_maybe_dispatch_work_start",
+        "_maybe_reconcile_lane_slot", "_maybe_check_resume_receipt",
+    ):
+        monkeypatch.setattr(f"fno.target_cli.{helper}", lambda *a, **k: None)
+    monkeypatch.setenv("FNO_CONFIG", str(Path("/nonexistent-config-xcbab.yaml")))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
+                "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    from fno.config import load_settings
+    from fno.cli import app
+
+    load_settings.cache_clear()
+    args = ["target", "init", "--input", "x-test"]
+    if deliverables:
+        args += ["--deliverables", "1"]
+    return CliRunner().invoke(app, args)
+
+
+def test_init_refuses_a_planless_code_node_and_names_both_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    r = _invoke_init_node(monkeypatch, _CODE_NODE, deliverables=False)
+    assert r.exit_code == 2
+    assert "no scope denominator" in r.output
+    assert "/fno:blueprint" in r.output
+    assert "--deliverables" in r.output
+
+
+def test_init_writes_no_manifest_when_it_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    monkeypatch.chdir(repo)
+    r = _invoke_init_node(monkeypatch, _CODE_NODE, deliverables=False)
+    assert r.exit_code == 2
+    assert not (repo / ".fno" / "target-state.md").exists()
+
+
+def test_init_proceeds_when_deliverables_satisfies_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The same node with --deliverables is NOT refused (the cheap exit works)."""
+    r = _invoke_init_node(monkeypatch, _CODE_NODE, deliverables=True)
+    assert r.exit_code == 0, r.output
+    assert "no scope denominator" not in r.output
+
+
+def test_init_never_refuses_a_node_with_a_bound_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A node whose plan back-fills is never refused for lacking one. The
+    back-fill reads the real graph (empty here), so simulate by giving the node
+    a plan_path the back-fill would have set: pass --plan-path directly."""
+    monkeypatch.setattr("fno.target_cli.subprocess.run", lambda *a, **k: type("_P", (), {"returncode": 0})())
+    for helper in ("_print_orientation_report", "_maybe_dispatch_work_start",
+                   "_maybe_reconcile_lane_slot", "_maybe_check_resume_receipt"):
+        monkeypatch.setattr(f"fno.target_cli.{helper}", lambda *a, **k: None)
+    monkeypatch.setenv("FNO_CONFIG", str(Path("/nonexistent-config-xcbab.yaml")))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
+                "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    from fno.config import load_settings
+    from fno.cli import app
+
+    load_settings.cache_clear()
+    r = CliRunner().invoke(app, ["target", "init", "--plan-path", str(tmp_path / "plan.md")])
+    assert r.exit_code == 0, r.output
+    assert "no scope denominator" not in r.output
+

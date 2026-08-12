@@ -1337,6 +1337,24 @@ def init(
                     err=True,
                 )
 
+    # Scope denominator gate (x-cbab): a code node dispatched with no plan and no
+    # --deliverables makes 'shipped M of N' inexpressible. Fires only for a
+    # resolved node - a free-text idea makes its own denominator via /blueprint,
+    # and a bound plan back-filled just above already satisfies it. Sits AFTER
+    # the back-fill so a node with a bound plan is never refused for lacking one,
+    # and BEFORE the manifest is written (no state on a refusal). enumerated_scope
+    # withdraws the cheap --deliverables exit for an unambiguously enumerated node.
+    # Exit 2 matches init's other refusals; REVIEW_GATE_REFUSED (9) is the
+    # check-review-gate verb's code, re-stamped from this 2 for shell callers.
+    from fno.target.denominator import absent_denominator_refusal
+
+    _denom_refusal = absent_denominator_refusal(
+        node=_dispatch_node, plan_path=plan_path, deliverables=deliverables
+    )
+    if _denom_refusal:
+        typer.echo(_denom_refusal, err=True)
+        raise typer.Exit(code=2)
+
     env = dict(os.environ)
     env["TARGET_START"] = "1"
     # Change D (x-a7be): resolve `attended` from the substrate before the bash

@@ -21,7 +21,12 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["enumerated_scope", "denominator_absent", "is_code_payload"]
+__all__ = [
+    "enumerated_scope",
+    "denominator_absent",
+    "is_code_payload",
+    "absent_denominator_refusal",
+]
 
 
 # ── enumerated_scope: the one-way ratchet ─────────────────────────────────────
@@ -124,3 +129,49 @@ def denominator_absent(
     """
     no_plan = not (plan_path and plan_path.strip())
     return bool(payload_is_code and no_plan and deliverables is None)
+
+
+def absent_denominator_refusal(
+    *, node: dict | None, plan_path: str | None, deliverables: int | None
+) -> str | None:
+    """The refusal message for a plan-less code node dispatch, or None.
+
+    None when the gate does not fire: a free-text idea input (it makes its own
+    denominator via /blueprint), a non-code payload (docs/infra - out of this
+    gate's scope per the plan), or a dispatch that already carries a denominator
+    (a bound plan, or a ``--deliverables`` declaration). Returns the message for
+    the caller to echo and exit on; this leaf module does no I/O.
+
+    When ``enumerated_scope`` fires on the node's title/details, the cheap
+    ``--deliverables`` exit is WITHDRAWN from the message: an enumerated node must
+    produce a real plan, because a declared count on it would let the run stamp 1
+    and ship one of several behind a falsifiable-but-cheap claim.
+    """
+    if not isinstance(node, dict):
+        return None
+    if not denominator_absent(
+        plan_path=plan_path,
+        deliverables=deliverables,
+        payload_is_code=node.get("domain") == "code",
+    ):
+        return None
+    enumerated = enumerated_scope(
+        str(node.get("title") or ""), str(node.get("details") or "")
+    )
+    lines = [
+        "fno target init: this code node has no scope denominator.",
+        "A plan-less code dispatch makes 'shipped M of N' inexpressible - the",
+        "shortfall surfaces only when a human counts by hand. Give it a denominator:",
+        '  - /fno:blueprint quick "<feature>"   (a plan enumerating the tasks;',
+        "    the plan_path fills and the denominator is its task count), OR",
+        "  - re-run with --deliverables N        (declare the count; a stamped N",
+        "    is falsifiable where an absent denominator is not).",
+    ]
+    if enumerated:
+        lines += [
+            "",
+            "This node reads as multi-deliverable, so --deliverables is withdrawn:",
+            "blueprint a plan that enumerates the work. A declared count on an",
+            "enumerated node would let the run stamp 1 and ship one of several.",
+        ]
+    return "\n".join(lines)
