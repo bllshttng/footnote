@@ -7136,7 +7136,10 @@ fn draw_lines_overlay<S: AsRef<str>>(
     let overhead = chrome.rows_overhead();
     let body_budget = content_rows.saturating_sub(overhead);
     let total = lines.len();
-    let (take, scroll) = if total > body_budget && body_budget > 0 {
+    let (take, scroll) = if total > body_budget {
+        // Covers body_budget == 0 (a viewport shorter than the chrome
+        // overhead): windows to zero body rows instead of painting the whole
+        // body plus its border past the content viewport.
         (
             body_budget,
             Some(chrome::Scroll {
@@ -10227,11 +10230,17 @@ async fn spawn_set_theme(name: &str) -> Result<(), String> {
     // (check-plan-rung-authority) watches for never appears here. That ratchet
     // guards plan frontmatter; an exit code is a different axis, so not naming
     // the field is cheaper than bumping a guard meant for something else.
+    //
+    // kill_on_drop: on the 3s timeout the future drops and this returns Err,
+    // but tokio leaves a spawned child running by default, so the config write
+    // could land after we already told the user the save failed. needs_overlay,
+    // digest_overlay, and connections_view set it for the same shell-out shape.
     let mut child = tokio::process::Command::new(crate::server::fno_bin())
         .args(["config", "set", "mux.theme", name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("fno config set spawn failed: {e}"))?;
     match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
@@ -13372,6 +13381,45 @@ mod tests {
             painted('█') || painted('░'),
             "an overflowing body must show a scrollbar"
         );
+    }
+
+    #[test]
+    fn draw_lines_overlay_zero_body_budget_paints_no_body() {
+        // x-f75e: a viewport exactly the chrome overhead leaves a zero body
+        // budget. The overlay must window to zero body rows rather than paint
+        // the whole body plus its border past the content viewport. A Full
+        // chrome is two rows of overhead; a two-row viewport fits the chrome
+        // and no body line.
+        let (rows, cols) = (6usize, 40usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        let chrome = chrome::Chrome::new("t", Anchor::Center);
+        let lines = ["111", "222", "333"];
+        draw_lines_overlay(
+            &mut cells,
+            rows,
+            cols,
+            (2usize, 4usize),
+            (2usize, 30usize),
+            &chrome,
+            &lines,
+            &Theme::default_theme(),
+        );
+        let painted = |c: char| cells.iter().any(|cell| cell.c == c);
+        // No body content reaches the buffer: the body budget was zero.
+        assert!(
+            !painted('1'),
+            "no body row should paint at zero body budget"
+        );
+        assert!(
+            !painted('2'),
+            "no body row should paint at zero body budget"
+        );
+        assert!(
+            !painted('3'),
+            "no body row should paint at zero body budget"
+        );
+        // Positive control: the chrome border still paints within the viewport.
+        assert!(painted('┌'), "the chrome border must still paint");
     }
 
     #[test]
