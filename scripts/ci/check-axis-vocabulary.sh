@@ -237,6 +237,25 @@ EXCLUDE_ANCHORED = {
     "crates/fno-agents/target",
 }
 
+
+def _build_output_dirs(repo_root: Path):
+    """`<crate>/target` for every crate that exists, derived not listed.
+
+    The two paths above were hard-coded with nothing tying them to the crate
+    list, so a NEW crate's build output would be walked by both scans and drop
+    thousands of generated files into the strict audit and the baseline. That
+    breaks on the PR that adds a crate, never on the PR that wrote the
+    exclusion, which is the worst place for a rule to fail. The literals stay
+    as a floor for trees with no crates/ directory.
+    """
+    found = set()
+    crates = repo_root / "crates"
+    if crates.is_dir():
+        for child in crates.iterdir():
+            if (child / "Cargo.toml").is_file():
+                found.add(f"crates/{child.name}/target")
+    return found
+
 # An adversarial probe, deliberately placed where the walk used to be blind
 # rather than where it was always going to pass. The two earlier positive
 # controls asserted only that the three DECLARED_PATH_AXIS directories were
@@ -393,12 +412,13 @@ def scan(root: Path):
     axis_dirs = {}
     probes_reached = set()
     repo_root = _repo_root_for(root)
+    build_dirs = EXCLUDE_ANCHORED | _build_output_dirs(repo_root)
     for dirpath, dirnames, filenames in os.walk(root):
         kept = []
         for d in dirnames:
             if d in EXCLUDE_DIR:
                 continue
-            if _repo_key(os.path.join(dirpath, d), root, repo_root) in EXCLUDE_ANCHORED:
+            if _repo_key(os.path.join(dirpath, d), root, repo_root) in build_dirs:
                 continue
             kept.append(d)
         dirnames[:] = kept
@@ -414,15 +434,23 @@ def scan(root: Path):
         # axis-named directories" about a directory whose name states an axis.
         # A receipt contradicting the walk it describes is the defect this gate
         # exists to catch, and the gate was committing it.
-        # Read off the real basename rather than the repo key. When the scan
-        # root IS the repo root the key is ".", which carries no name at all, so
-        # keying the check made the root invisible again in exactly the case a
-        # caller points the gate straight at a directory outside any repo. Not a
-        # repo key and not routed through the helper: this is a NAME.
-        _name = os.path.basename(os.path.abspath(dirpath))
-        stated = _stated_axis(_name)
-        if stated:
-            axis_dirs[here if here != "." else _name] = stated
+        # Judged for every directory INSIDE the repo, including the scan root
+        # when that root is a subdirectory. Keyed by the REPO key, which is the
+        # whole distinction: excluding the SCAN root made `--strict
+        # cli/src/fno/adapters/providers` print "0 axis-named directories"
+        # about the directory it was pointed at.
+        #
+        # The repo root itself (key ".") is skipped, and reading its basename
+        # instead was an overcorrection. That name is the checkout directory,
+        # which is machine-specific and unfixable from inside the repo: a
+        # worktree at .claude/worktrees/harness-fix is its own git root, so the
+        # gate failed there demanding a rename that no map entry can legally
+        # hold. A repo cannot be responsible for what a developer calls its
+        # directory.
+        if here != ".":
+            stated = _stated_axis(here.rsplit("/", 1)[-1])
+            if stated:
+                axis_dirs[here] = stated
         for fn in filenames:
             ext = os.path.splitext(fn)[1]
             if ext not in SCANNABLE_EXT:
@@ -643,6 +671,59 @@ def _self_test():
         )
         failures += 1
 
+    # A NEW crate's build output must be excluded without anyone editing this
+    # file. Two crate paths were hard-coded with nothing tying them to the crate
+    # list, so the rule would have broken on the PR that adds a crate rather
+    # than the PR that wrote the rule. Asserted both ways: the planted violation
+    # is absent WITH the derivation and present without it, since a zero on its
+    # own here has three explanations and this specimen only wants one.
+    d = Path(tempfile.mkdtemp(prefix="axis-newcrate-"))
+    (d / "crates" / "foo" / "target").mkdir(parents=True)
+    (d / "crates" / "foo" / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+    (d / "crates" / "foo" / "target" / "gen.py").write_text(
+        'provider = "claude"\n', encoding="utf-8"
+    )
+    found, _, _, _ = scan(d)
+    if any("crates/foo/target" in f for f in found):
+        print("FAILED: a new crate's build output was scanned", file=sys.stderr)
+        failures += 1
+    else:
+        # Positive control: the same tree WITHOUT the derivation must find it,
+        # else the absence above proves nothing about the exclusion.
+        (d / "crates" / "foo" / "Cargo.toml").unlink()
+        recheck, _, _, _ = scan(d)
+        if any("crates/foo/target" in f for f in recheck):
+            print("caught planted new-crate build output ok")
+        else:
+            print(
+                "FAILED: the new-crate specimen finds nothing either way, so it "
+                "cannot tell an exclusion from a broken walk",
+                file=sys.stderr,
+            )
+            failures += 1
+
+    # The repo root's own basename must NEVER be judged. It is the checkout
+    # directory name, so a worktree at .claude/worktrees/harness-fix is its own
+    # git root and the gate demanded a rename no map entry can legally hold.
+    # Unfixable from inside the repo, and reproduced before this specimen.
+    d = Path(tempfile.mkdtemp(prefix="axis-rootname-")) / "harness-fix"
+    (d / "cli" / "src" / "fno" / "adapters" / "providers").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+    (d / "cli" / "src" / "fno" / "adapters" / "providers" / "x.py").write_text(
+        "x = 1\n", encoding="utf-8"
+    )
+    _, _, dirs, _ = scan(d)
+    if any(k in ("harness-fix", ".") for k in dirs):
+        print(f"FAILED: the checkout basename was judged (dirs={sorted(dirs)})",
+              file=sys.stderr)
+        failures += 1
+    elif _name_findings(dirs):
+        print(f"FAILED: axis-named checkout flagged: {_name_findings(dirs)}",
+              file=sys.stderr)
+        failures += 1
+    else:
+        print("caught planted axis-named checkout directory ok")
+
     # The stale-vs-unvisited split, which had NO specimen at all: both callers
     # could be neutered and this suite stayed green. Asserts both directions,
     # since a copy that swaps which state gets which exit is the failure an
@@ -806,7 +887,7 @@ print(
     "  true, so a wrong declaration passes green. It does not judge file names\n"
     "  or symbol names; those are the content scan's subject and live in the\n"
     "  baseline.\n"
-    f"  not scanned: {', '.join(sorted(EXCLUDE_ANCHORED))}, and any directory\n"
+    f"  not scanned: {', '.join(sorted(EXCLUDE_ANCHORED | _build_output_dirs(_repo_root_for(root_arg))))}, and any directory\n"
     f"  named {', '.join(sorted(EXCLUDE_DIR))}. Anything under those paths is\n"
     "  judged by neither scan.",
     file=sys.stderr if name_violations or _instrument_failures else sys.stdout,

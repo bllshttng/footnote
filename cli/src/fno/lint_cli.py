@@ -425,10 +425,16 @@ def style(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
         if unexplained:
+            # Describes the condition that actually fired. The earlier text
+            # described the old bare-zero condition and prescribed a
+            # style-exception marker, which can never apply here: a
+            # deletion-only file has a numstat count of zero and cannot reach
+            # this branch at all. It sent the author to annotate a file instead
+            # of reporting the parser bug the branch detects.
             typer.echo(
-                f"style: {unexplained} changed file(s) contributed no added lines "
-                "and are not renames, deletions, or exception-marked. Add a "
-                "style-exception marker if the change is deletion-only.",
+                f"style: git counted added lines in {unexplained} file(s) that "
+                "this gate then read as having none. That is a parser failure "
+                "in the gate, not something to annotate in the file.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -637,6 +643,20 @@ def _style_added_lines(
         for line in diff_files.stdout.splitlines()
         if line.strip() and line.endswith(".md")
     ]
+    # A caller-supplied scope that matches NOTHING is almost always a path
+    # resolved against the wrong directory, and it exits 0 over a whole tree.
+    # `--files` resolves against the caller's cwd, so a caller standing
+    # somewhere other than the repo root and passing a repo-relative path lands
+    # inside the repo, keys to a real-looking prefix, and matches no file. The
+    # default scope is exempt: an untouched docs tree is a legitimate zero.
+    if paths and not diff_files.stdout.strip():
+        typer.echo(
+            f"style: --files matched no changed files under {scope}. "
+            "Paths resolve against the current directory, so check the scope "
+            "rather than reading this as a clean tree.",
+            err=True,
+        )
+        raise typer.Exit(2)
     violations = []
     inspected = 0
     unexplained = 0
@@ -682,11 +702,22 @@ def _git_added_line_nums(
     )
     nums: set[int] = set()
     pos = 0
+    in_hunk = False
     for line in proc.stdout.splitlines():
         if line.startswith("@@"):
             match = re.search(r"\+(\d+)", line)
             pos = int(match.group(1)) if match else pos
-        elif line.startswith("+++") or line.startswith("---"):
+            in_hunk = True
+        elif not in_hunk:
+            # File headers live BEFORE the first hunk, so position is what
+            # separates them from content, not the `+++` / `---` prefix.
+            # Matching by prefix anywhere swallowed an added markdown line whose
+            # own text begins with `++`, and swallowed it WITHOUT advancing the
+            # position, so every later added line in that file was numbered one
+            # too low: a real violation shipped while a different line was
+            # checked in its place. Repo docs carry fenced diff snippets, so a
+            # literal `+++ b/file` as CONTENT is reachable, and this is the same
+            # off-by-one the no-newline branch below was added to fix.
             continue
         elif line.startswith("\\"):
             # `\ No newline at end of file`. It is a NOTE about the adjacent

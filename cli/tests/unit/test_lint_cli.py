@@ -331,6 +331,71 @@ def test_no_newline_marker_does_not_shift_added_line_numbers(tmp_path: Path) -> 
     )
 
 
+def test_an_added_line_beginning_with_plus_plus_is_not_read_as_a_header(
+    tmp_path: Path,
+) -> None:
+    """Content that looks like a diff header must not shift line numbers.
+
+    An added markdown line whose own text starts with `++` renders as `+++` in
+    the diff. Matched by prefix it was swallowed as a file header AND did not
+    advance the position, so every later added line in that file was numbered
+    one too low: a real violation ships while a different line is checked.
+    Repo docs carry fenced diff snippets, so this is reachable content.
+    """
+    from fno.lint_cli import _git_added_line_nums
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    doc = repo / "docs" / "d.md"
+    doc.write_text("Intro line.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    doc.write_text(
+        "Intro line.\n++ plus marker\nA line; with a semicolon.\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a plus-prefixed line")
+
+    nums = _git_added_line_nums("docs/d.md", "base", repo)
+    assert nums == {2, 3}, (
+        "both added lines must be numbered; swallowing the `++` line as a "
+        f"header hides line 3, which carries a real violation (got {sorted(nums)})"
+    )
+
+
+def test_a_files_scope_matching_nothing_refuses(tmp_path: Path) -> None:
+    """A caller scope that matches no changed file must not read as clean.
+
+    `--files` resolves against the caller's cwd, so a caller standing anywhere
+    but the repo root and passing a repo-relative path lands somewhere real,
+    keys to a plausible prefix, and matches nothing. Exiting 0 there is the
+    absence-read-as-success shape this whole change set exists to remove.
+    """
+    import os
+
+    import typer
+
+    from fno.lint_cli import _style_added_lines
+
+    repo, _new, _old = _repo_with_renamed_doc(tmp_path)
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            _style_added_lines("base", [Path("docs/nothing-here")])
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+    assert exc.value.exit_code == 2
+
+
 def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
     """A renamed-and-edited doc must still be covered by the instrument guard.
 
