@@ -360,8 +360,8 @@ class AgentEntry:
         Resolves to whichever stored field the resume path consumes:
         ``short_id`` (``claude attach``) for a claude row that carries one,
         otherwise the canonical ``harness_session_id`` (``claude --resume``,
-        ``codex resume <uuid>``). ``None`` for unknown harnesses or when no id
-        was ever captured.
+        ``codex resume <uuid>``). ``None`` only when the row carries neither a
+        transport key nor a ``harness_session_id``.
 
         claude is the one harness whose transport key (``short_id``, the 8-hex
         jobId ``claude attach`` takes) is distinct from its canonical id: a

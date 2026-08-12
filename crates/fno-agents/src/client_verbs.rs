@@ -2315,18 +2315,27 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // process returns after the launch so the operator's terminal stays free.
     // Emit only on a successful launch so a failed pane start does not record a
     // misleading agent_resumed. The session single-writer claim above guards the
-    // same race as the in-terminal exec path (T4.2).
+    // LAUNCH window only: unlike the in-terminal exec (whose execvp preserves
+    // this pid so the claim lives as long as claude does), this process exits
+    // once the pane is up, so the claim does NOT persist for the resumed
+    // session's life. The truth probe is the primary guard against a later
+    // second writer - once the resumed claude is probe-live a second resumer
+    // attaches or refuses instead of relaunching - and the residual window
+    // (launch to probe-live) is the same shape as a spawn's pane-bind race.
     if let Some(session) = mux_session.as_deref() {
         let pane = mux_pane_run_argv(session, cwd, &argv);
         match std::process::Command::new("fno").args(&pane).status() {
             Ok(s) if s.success() => {
+                // session_id is the transport short_id, empty on a pane row;
+                // the resumed session's id is the uuid (claim_uuid).
+                let resumed_id = claim_uuid.as_deref().unwrap_or(session_id);
                 append_agents_event(
                     &trace_events_path(home),
                     "agent_resumed",
                     &[
                         ("name", Value::String(name.clone())),
                         ("provider", Value::String(harness.to_string())),
-                        ("session_id", Value::String(session_id.to_string())),
+                        ("session_id", Value::String(resumed_id.to_string())),
                         ("cwd", Value::String(cwd.to_string())),
                     ],
                 );
@@ -4013,7 +4022,7 @@ mod tests {
         )
         .unwrap();
         let entry = serde_json::json!({
-            "name": "pane-worker", "provider": "claude",
+            "name": "pane-worker", "harness": "claude",
             "claude_session_uuid": uuid,
             "route_settings_path": route.to_str().unwrap(),
             // short_id deliberately absent: this is the mux-row shape.
@@ -4041,7 +4050,7 @@ mod tests {
         // is Err(13) regardless of message - but it must not be reachable via the
         // dead arm (no uuid to relaunch).
         let entry_idless = serde_json::json!({
-            "name": "idless", "provider": "claude",
+            "name": "idless", "harness": "claude",
         });
         assert_eq!(
             claude_resume_argv_with_truth(&ch, &entry_idless, "idless", |_| Some("done".into())),
