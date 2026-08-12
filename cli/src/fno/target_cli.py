@@ -1133,6 +1133,16 @@ def init(
         "and so cannot pass the token through --input. There is deliberately no "
         "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
     ),
+    deliverables: Optional[int] = typer.Option(
+        None,
+        "--deliverables",
+        help="Declare the deliverable count for a plan-less code run: the scope "
+        "denominator. Stamps `deliverables: N` into the manifest so a run that "
+        "ships fewer than N leaves a falsifiable shortfall instead of an "
+        "inexpressible one. Omit for plan-backed runs (the plan is the "
+        "denominator). The cheap N=1 exit is deliberate; a stamped 1 is "
+        "falsifiable where an absent denominator is not.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -1146,6 +1156,22 @@ def init(
             "Refusing to write a stub state file (empty input + plan); the stop "
             "hook would archive it, and a re-running bootstrap loops.\n"
             'Example: fno target init --input "fix the login redirect bug"',
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # The denominator is a positive integer or absent. Zero/negative is refused
+    # at parse, never stored: a stamped 0 would read as "deliver nothing" and
+    # invert the gate. Absent (the default) leaves the field out of the manifest
+    # entirely, which is distinct from 0 - absence is the unmeasurable case the
+    # denominator gate keys on, never a measured-zero (AC1-DENOM). Runs before
+    # the review gates and plugin resolution: a usage error surfaces as itself,
+    # not as a later missing-plugin or unsatisfiable-reviewer message.
+    if deliverables is not None and deliverables <= 0:
+        typer.echo(
+            f"fno target init: --deliverables must be a positive integer (got "
+            f"{deliverables}). Omit it for plan-backed runs; the plan's task "
+            f"count is the denominator.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -1334,6 +1360,8 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
+    if deliverables is not None:
+        env["TARGET_DELIVERABLES"] = str(deliverables)
     # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns
     # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
     env["TARGET_BEASTMODE"] = "1" if beastmode else ""
