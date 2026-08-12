@@ -27,8 +27,9 @@ Use it for a small or routine diff, or as a check on a sigma pass you already ra
 /fno:review peer codex      # name the reviewing model
 ```
 
-The panel reviews your local commits by default.
-Aim it at a PR by passing the number.
+The panel reviews your current checkout, not a PR number.
+sigma ignores a number and reads the checkout.
+peer takes a PR number: `/fno:review peer 657`.
 
 ## Skip review on small diffs
 
@@ -38,10 +39,10 @@ Skip review on those, or narrow it with a focused prompt.
 
 ## Attestation
 
-peer can stamp a local review attestation the stop gate accepts.
-Pass `--attest` to produce one.
-sigma does not attest.
-It is advisory.
+A review attestation satisfies the stop gate's review requirement.
+peer produces one with `--attest`.
+When sigma returns `ready-to-merge`, it produces one too.
+An advisory one-off run of either does not attest.
 The full gate contract is in [review lanes](../architecture/review-lanes.md).
 
 ## Related

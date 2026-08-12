@@ -18,24 +18,35 @@ It reads them from GitHub through one decision verb.
 
 ## Watch a run that is still going
 
-Read the PR from outside the session:
+Read the PR's CI from outside the session:
 
 ```bash
 fno pr status <PR_NUMBER>
 ```
 
-It prints one verdict: green, red, pending, or unknown.
+It prints the CI verdict: green, red, pending, or unknown.
 Exit code 0 is green, 1 is red, 2 is pending.
-Pending means CI or a review has not settled yet.
+This is the CI verdict alone.
+A green CI with a required reviewer still pending still reads green.
 
-Then read the run's own manifest:
+Read the run's manifest:
 
 ```bash
 fno state show
 ```
 
-It prints the bound node, the plan, the claim holder, and the `done-when` line.
-The `done-when` line states exactly what the run is waiting for.
+It prints the node, the plan path, and the merge flags.
+For the live claim holder, check the claim:
+
+```bash
+fno claim status node:<id>
+```
+
+For full run orientation:
+
+```bash
+fno status
+```
 
 ## What "still going" usually means
 
@@ -49,7 +60,7 @@ It is waiting because the world has not caught up.
 The agent's own text is not evidence.
 "Almost done" in the transcript does not move the gate.
 The decision verb reads GitHub, not the transcript.
-Trust `fno pr status`.
+Trust `fno pr status` for CI, not the agent's self-report.
 
 ## Stop it yourself
 

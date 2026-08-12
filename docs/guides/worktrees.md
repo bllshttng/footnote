@@ -15,17 +15,19 @@ Two features in two worktrees do not collide.
 
 ## What happens by default
 
-`target` and `do` create a worktree before they write code.
-You do not have to do this yourself for a normal run.
+`target` creates a worktree before it writes code.
+`do` expects you to already be in one.
+For a normal target run, you do not create it yourself.
 The location depends on your worktree policy, which is config-driven.
 
 Check your resolved policy:
 
 ```bash
-fno worktree policy --repo .
+fno worktree policy --repo . --harness claude
 ```
 
-It prints one of three values: `never` (work in place), `harness-native` (the default), or `external` (a configured base).
+Pass your harness, or the result degrades to `external`.
+It prints one of three values: `never` (work in place), `harness-native` (the default for Claude), or `external` (a configured base).
 The rule file defines each one and what sets them.
 
 ## Start one by hand
