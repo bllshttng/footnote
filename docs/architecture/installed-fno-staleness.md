@@ -13,10 +13,9 @@ installed before that change has no such subcommand, so the documented
 invocation fails with `No such command`, the event never lands, and the gate is
 unsatisfiable through the documented path.
 
-That group was reachable as both `fno backlog capture` and `fno backlog inbox`
-at the time; the duplicate `inbox` spelling has since been removed and the
-surviving spelling is `capture`. The staleness failure is unchanged by that: it
-is about a deployed binary predating a verb, not about which name the verb has.
+That group was reachable as both `fno backlog capture` and `fno backlog inbox` at the time.
+The duplicate `inbox` spelling has since been removed, and the surviving spelling is `capture`.
+The staleness failure is unchanged by that: it is about a deployed binary predating a verb, not about which name the verb has.
 
 ## `fno doctor` (detection)
 
