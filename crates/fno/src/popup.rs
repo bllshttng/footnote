@@ -506,7 +506,12 @@ pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered, theme: &
             }
             let role = line.roles.get(j).copied().unwrap_or(Role::Body);
             let (fg, bg, flags) = cell_style(role, theme);
-            cells[sr * cols + sc] = Cell { c: ch, fg, bg, flags };
+            cells[sr * cols + sc] = Cell {
+                c: ch,
+                fg,
+                bg,
+                flags,
+            };
         }
     }
 }
@@ -648,7 +653,10 @@ mod tests {
         // Each body row reports one hit, offset past the left border (+1).
         assert_eq!(body0.hits.len(), 1);
         assert_eq!(body0.hits[0].0, 0);
-        assert_eq!(body0.hits[0].1, 1, "hit offset shifted past the left border");
+        assert_eq!(
+            body0.hits[0].1, 1,
+            "hit offset shifted past the left border"
+        );
         assert_eq!(body1.hits[0].0, 1);
     }
 
@@ -671,7 +679,10 @@ mod tests {
         // Over-scroll clamps to the last screenful (body rows 16..20).
         p.scroll_by(100);
         let r = p.render((6, 80));
-        assert!(r.lines[1].text.contains("row16"), "clamped to last screenful");
+        assert!(
+            r.lines[1].text.contains("row16"),
+            "clamped to last screenful"
+        );
         assert!(r.lines[4].text.contains("row19"));
     }
 

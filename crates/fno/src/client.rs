@@ -25,10 +25,9 @@ use crossterm::style::Color as CtColor;
 use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
-use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
 use crate::chrome;
+use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
-use crate::theme::{Theme};
 use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
     AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
@@ -36,6 +35,7 @@ use crate::proto::{
     PlacementFallback, ProtoError, ServerMsg, SquadMeta, BUILD_VERSION, MAX_MAIL_TEXT,
     MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
+use crate::theme::Theme;
 use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{self, next_view, AgentSort, Density, SectionKey, SectionView};
 
@@ -2401,7 +2401,11 @@ impl View {
                     rows.push(PopupRow::Entry {
                         glyph: if active { "●".into() } else { "○".into() },
                         label: name.into(),
-                        hint: if active { "active".into() } else { String::new() },
+                        hint: if active {
+                            "active".into()
+                        } else {
+                            String::new()
+                        },
                     });
                     actions.push(AuxAction::ApplyTheme(name.into()));
                 }
@@ -4678,17 +4682,44 @@ impl View {
             // key-table overlay). Framed chrome so it reads as one product with
             // the settings and connections modals.
             let chrome = chrome::Chrome::new("catch up", Anchor::Center).footer("any key closes");
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, lines, &self.theme);
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                lines,
+                &self.theme,
+            );
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term), &self.theme);
+            popup::draw(
+                &mut cells,
+                rows,
+                cols,
+                &m.popup.render(self.term),
+                &self.theme,
+            );
         } else if let Some(m) = &self.row_menu {
             // x-8ccf US2: the anchored row context menu, drawn at the pointer.
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term), &self.theme);
+            popup::draw(
+                &mut cells,
+                rows,
+                cols,
+                &m.popup.render(self.term),
+                &self.theme,
+            );
         } else if let Some(m) = &self.aux {
             // x-8ccf US4/US5: the sideline MENU popup or settings modal.
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term), &self.theme);
+            popup::draw(
+                &mut cells,
+                rows,
+                cols,
+                &m.popup.render(self.term),
+                &self.theme,
+            );
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -4699,24 +4730,57 @@ impl View {
             let sel = sel.min(queue.len().saturating_sub(1));
             let lines = needs_overlay_lines(&queue, sel, dropped, self.needs_footer());
             let chrome = chrome::Chrome::new("needs me", Anchor::Center).footer("q close");
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+            );
         } else if let Some((src, squads)) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
             let lines = self.move_pick_lines(src, squads);
             let chrome = chrome::Chrome::new("move to", Anchor::Center).footer("esc cancel");
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+            );
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
             let chrome = chrome::Chrome::new("attach", Anchor::Center).footer("esc cancel");
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+            );
         } else if let Some(conn) = &self.connections {
             // x-84d7 Connections modal: accounts + combos lists. Drawn from the
             // modal's own render (pure). This and the settings modal are the
             // pair from the operator's screenshot - they now share one chrome.
             let chrome = chrome::Chrome::new("connections", Anchor::Center).footer("esc close");
             draw_lines_overlay(
-                &mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &conn.render(),
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &conn.render(),
                 &self.theme,
             );
         } else if let Some(peek) = &self.peek {
@@ -4736,15 +4800,34 @@ impl View {
             let lines = peek_overlay_lines(agent, peek, reply, now_secs);
             let title = agent.map(|a| a.name.as_str()).unwrap_or("peek");
             let chrome = chrome::Chrome::new(title, Anchor::Center).footer("esc close");
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+            );
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
             // repopulates it.
             let filtered = self.nav_filtered(nav);
             let lines = nav_overlay_lines(&filtered, nav);
-            let chrome = chrome::Chrome::new("navigator", Anchor::Center).footer("type to filter · esc close");
-            draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &chrome, &lines, &self.theme);
+            let chrome = chrome::Chrome::new("navigator", Anchor::Center)
+                .footer("type to filter · esc close");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+            );
         }
 
         // Terminal cursor: the FOCUSED pane's, offset into its rect - the
@@ -13196,7 +13279,13 @@ mod tests {
         let lines = ["ab", "cd"];
         let chrome = chrome::Chrome::new("t", Anchor::Center);
         draw_lines_overlay(
-            &mut cells, rows, cols, content_origin, content_dims, &chrome, &lines,
+            &mut cells,
+            rows,
+            cols,
+            content_origin,
+            content_dims,
+            &chrome,
+            &lines,
             &Theme::default_theme(),
         );
 
@@ -17328,7 +17417,10 @@ mod tests {
         };
         // Centered (Full): keys modal, sideline MENU, settings.
         assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
-        assert_chrome(&build_sideline_menu(Anchor::Center).popup, chrome::Level::Full);
+        assert_chrome(
+            &build_sideline_menu(Anchor::Center).popup,
+            chrome::Level::Full,
+        );
         let v = two_pane_view();
         assert_chrome(&v.build_settings_modal().popup, chrome::Level::Full);
         // Anchored (Bare): the row context menu, opened next to the pointer.

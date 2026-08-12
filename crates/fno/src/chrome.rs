@@ -252,7 +252,12 @@ pub fn blit(
             }
             let role = line.roles.get(j).copied().unwrap_or(Role::Body);
             let (fg, bg, flags) = cell_style(role, theme);
-            cells[sr * cols + sc] = Cell { c: ch, fg, bg, flags };
+            cells[sr * cols + sc] = Cell {
+                c: ch,
+                fg,
+                bg,
+                flags,
+            };
         }
     }
 }
@@ -269,11 +274,21 @@ fn flatten(mut row: Vec<Seg>) -> FramedLine {
         text.push(ch);
         roles.push(role);
     }
-    FramedLine { text, roles, hits: Vec::new() }
+    FramedLine {
+        text,
+        roles,
+        hits: Vec::new(),
+    }
 }
 
 /// Pad `inner` with `fill` up to `inner_w`, then wrap in left/right edges.
-fn edge_row(left: char, right: char, fill: char, mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
+fn edge_row(
+    left: char,
+    right: char,
+    fill: char,
+    mut inner: Vec<Seg>,
+    inner_w: usize,
+) -> FramedLine {
     let used = inner.len();
     for _ in used..inner_w {
         inner.push((fill, Role::Border));
@@ -385,7 +400,13 @@ fn bottom_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
 /// from header/sel_span) + optional scrollbar char + `│`. Hit offsets shift by
 /// the left border so they land in framed coordinates. `row_idx` is this body
 /// line's position in the viewport (drives the scrollbar thumb).
-fn body_row(line: &BodyLine, row_idx: usize, body_w: usize, inner_w: usize, scroll: Option<Scroll>) -> FramedLine {
+fn body_row(
+    line: &BodyLine,
+    row_idx: usize,
+    body_w: usize,
+    inner_w: usize,
+    scroll: Option<Scroll>,
+) -> FramedLine {
     let chars: Vec<char> = line.text.chars().collect();
     let mut text = String::with_capacity(inner_w + 2);
     let mut roles = Vec::with_capacity(inner_w + 2);
@@ -393,7 +414,10 @@ fn body_row(line: &BodyLine, row_idx: usize, body_w: usize, inner_w: usize, scro
     text.push('│');
     roles.push(Role::Border);
 
-    let in_sel = |j: usize| line.sel_span.is_some_and(|(off, len)| j >= off && j < off + len);
+    let in_sel = |j: usize| {
+        line.sel_span
+            .is_some_and(|(off, len)| j >= off && j < off + len)
+    };
     for j in 0..body_w {
         let (ch, role) = match chars.get(j) {
             Some(&c) => {
@@ -459,13 +483,18 @@ mod tests {
     fn level_is_derived_from_anchor() {
         // Centered -> Full, anchored -> Bare. No set_level exists.
         assert_eq!(Chrome::new("t", Anchor::Center).level(), Level::Full);
-        assert_eq!(Chrome::new("t", Anchor::At { row: 1, col: 1 }).level(), Level::Bare);
+        assert_eq!(
+            Chrome::new("t", Anchor::At { row: 1, col: 1 }).level(),
+            Level::Bare
+        );
     }
 
     #[test]
     fn full_frame_dimensions_match_its_overhead() {
         // subtitle + footer each add a row under Full.
-        let c = Chrome::new("Title", Anchor::Center).subtitle("sub").footer("f");
+        let c = Chrome::new("Title", Anchor::Center)
+            .subtitle("sub")
+            .footer("f");
         let framed = frame(&[bl("a"), bl("b"), bl("c")], &c, 5, None);
         assert_eq!(c.rows_above(), 2);
         assert_eq!(c.rows_below(), 2);
@@ -481,7 +510,10 @@ mod tests {
         assert_eq!(c.level(), Level::Bare);
         let framed = frame(&[bl("x")], &c, 3, None);
         assert_eq!(framed.lines.len(), 3);
-        assert!(framed.lines.iter().all(|l| l.text.contains("ignored") == false));
+        assert!(framed
+            .lines
+            .iter()
+            .all(|l| l.text.contains("ignored") == false));
     }
 
     #[test]
@@ -523,7 +555,11 @@ mod tests {
         line.sel_span = Some((0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
-        let body = framed.lines.iter().find(|l| l.text.contains("hello")).unwrap();
+        let body = framed
+            .lines
+            .iter()
+            .find(|l| l.text.contains("hello"))
+            .unwrap();
         // The first body char (past the left border) is BodySel.
         assert_eq!(body.roles[1], Role::BodySel);
     }
@@ -533,16 +569,47 @@ mod tests {
         // Empty title + body_w above the chrome minimum, so the width math
         // isolates the scrollbar from the title-widening floor.
         let c = Chrome::new("", Anchor::Center);
-        let fits = frame(&[bl("ab")], &c, 8, Some(Scroll { pos: 0, total: 2, visible: 2 }));
-        assert!(fits.lines.iter().flat_map(|l| l.roles.iter()).all(|r| !matches!(*r, Role::ScrollThumb | Role::ScrollTrack)));
+        let fits = frame(
+            &[bl("ab")],
+            &c,
+            8,
+            Some(Scroll {
+                pos: 0,
+                total: 2,
+                visible: 2,
+            }),
+        );
+        assert!(fits
+            .lines
+            .iter()
+            .flat_map(|l| l.roles.iter())
+            .all(|r| !matches!(*r, Role::ScrollThumb | Role::ScrollTrack)));
         assert_eq!(fits.width, chrome_frame_width(8, false));
 
-        let over = frame(&[bl("ab"), bl("cd")], &c, 8, Some(Scroll { pos: 0, total: 8, visible: 2 }));
+        let over = frame(
+            &[bl("ab"), bl("cd")],
+            &c,
+            8,
+            Some(Scroll {
+                pos: 0,
+                total: 8,
+                visible: 2,
+            }),
+        );
         assert_eq!(over.width, chrome_frame_width(8, true));
-        assert!(over.lines.iter().flat_map(|l| l.roles.iter()).any(|r| matches!(*r, Role::ScrollThumb | Role::ScrollTrack)));
+        assert!(over
+            .lines
+            .iter()
+            .flat_map(|l| l.roles.iter())
+            .any(|r| matches!(*r, Role::ScrollThumb | Role::ScrollTrack)));
         // Thumb is proportional: of 2 visible rows for 8 total, the thumb
         // covers >=1 row.
-        let thumbs = over.lines.iter().flat_map(|l| l.roles.iter()).filter(|r| **r == Role::ScrollThumb).count();
+        let thumbs = over
+            .lines
+            .iter()
+            .flat_map(|l| l.roles.iter())
+            .filter(|r| **r == Role::ScrollThumb)
+            .count();
         assert!(thumbs >= 1);
     }
 

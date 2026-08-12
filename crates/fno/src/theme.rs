@@ -99,12 +99,16 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
         // branch is what keeps pre-theme renders byte-identical.
         return match role {
             Role::BodySel => (Color::Default, Color::Default, 0),
-            Role::BodyHead | Role::Title | Role::Chip | Role::Tab(true) | Role::ScrollThumb => {
-                (Color::Default, Color::Default, cell_flags::INVERSE | cell_flags::BOLD)
-            }
-            Role::Subtitle | Role::Tab(false) | Role::Footer | Role::ScrollTrack => {
-                (Color::Default, Color::Default, cell_flags::INVERSE | cell_flags::DIM)
-            }
+            Role::BodyHead | Role::Title | Role::Chip | Role::Tab(true) | Role::ScrollThumb => (
+                Color::Default,
+                Color::Default,
+                cell_flags::INVERSE | cell_flags::BOLD,
+            ),
+            Role::Subtitle | Role::Tab(false) | Role::Footer | Role::ScrollTrack => (
+                Color::Default,
+                Color::Default,
+                cell_flags::INVERSE | cell_flags::DIM,
+            ),
             // Body, Border: plain inverse.
             _ => (Color::Default, Color::Default, cell_flags::INVERSE),
         };
@@ -114,7 +118,11 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     match role {
         Role::Body => (Color::Default, Color::Default, cell_flags::INVERSE),
         Role::BodySel => (Color::Default, t.sel, 0),
-        Role::BodyHead => (Color::Default, Color::Default, cell_flags::INVERSE | cell_flags::BOLD),
+        Role::BodyHead => (
+            Color::Default,
+            Color::Default,
+            cell_flags::INVERSE | cell_flags::BOLD,
+        ),
         Role::Border => (t.border, Color::Default, 0),
         Role::Title => (t.title, Color::Default, cell_flags::BOLD),
         Role::Chip => (t.chip, Color::Default, cell_flags::BOLD),
@@ -240,8 +248,16 @@ mod tests {
             Role::ScrollThumb,
         ] {
             let (fg, bg, _) = cell_style(role, &t);
-            assert_eq!(fg, Color::Default, "{role:?} fg must be Default under terminal");
-            assert_eq!(bg, Color::Default, "{role:?} bg must be Default under terminal");
+            assert_eq!(
+                fg,
+                Color::Default,
+                "{role:?} fg must be Default under terminal"
+            );
+            assert_eq!(
+                bg,
+                Color::Default,
+                "{role:?} bg must be Default under terminal"
+            );
         }
     }
 
