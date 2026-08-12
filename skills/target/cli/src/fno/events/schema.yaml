@@ -806,6 +806,32 @@ event_types:
           description: "The refusing session's id, when ambient identity is present. Pairs a refusal with a later passing send for the retry-rate query."
     consumers: [operator]
 
+  - name: backlog_reopened
+    description: "fno backlog reopen cleared a node's completion. Every reopen carries a reason: a node that was done and now is not needs a why, or the graph records a state change nobody can account for."
+    sources: [backlog]
+    data:
+      required: [node_id, reason]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog node id that was reopened."
+        reason:
+          type: string
+          description: "The --reason text. Required by the verb, not merely accepted."
+        forced:
+          type: boolean
+          description: "True when --force bypassed the merged-PR refusal, i.e. the node's work is in main and was reopened anyway."
+        pr_number:
+          type: integer
+          description: "The first referenced PR number (if any)."
+        pr_state:
+          type: string
+          description: "The gh-reported state of that PR at reopen time (OPEN/CLOSED/MERGED/UNKNOWN)."
+        cascade_reopened:
+          type: string
+          description: "Comma-separated ancestor epic ids reopened alongside, because the cascade had auto-closed them when this node closed. Empty when none."
+    consumers: [operator]
+
   - name: claim_acquired
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
     sources: [fno-loop, target, megawalk, megatron, hook]
