@@ -1,6 +1,6 @@
 # Verbs the tutorial curriculum teaches.
 # One CLI leaf per line, exactly as it appears in scripts/ci/verb-baseline.txt.
-# Consumed by scripts/ci/verb-census.py --curriculum to compute the complement
+# Consumed by scripts/diagnostics/verb-callers.py --curriculum to compute the complement
 # (the deletion-candidate set the verb-cut decision consumes).
 #
 # Slash commands (/fno:think, /fno:blueprint, ...) are deliberately absent:

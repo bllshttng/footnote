@@ -285,10 +285,10 @@ def main(argv: list[str] | None = None) -> int:
     leaves_list = load_leaves(root)
     leaves = set(leaves_list)
 
-    # Dual sweep: uncorrected reproduces the original 92 bound; corrected applies
-    # both false-positive fixes. corrected_zero must be a subset of uncorrected_zero.
+    # Corrected sweep applies both false-positive fixes. The uncorrected sweep
+    # runs later (only when its self-consistency invariant is needed); --curriculum
+    # returns off the corrected sweep alone and skips that second corpus walk.
     counts_corr = sweep(root, leaves, binary_form=True, pipe_fan=True)
-    counts_unc = sweep(root, leaves, binary_form=False, pipe_fan=False)
 
     failed = check_controls(counts_corr)
     # A broken sweep emits no candidate list, even in self-check.
@@ -299,14 +299,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     zero_corr = [l for l in leaves_list if counts_corr.get(l, 0) == 0]
-    zero_unc = {l for l in leaves_list if counts_unc.get(l, 0) == 0}
-    not_subset = [l for l in zero_corr if l not in zero_unc]
-    if not_subset:
-        print("verb-callers: corrected zero set is NOT a subset of uncorrected - "
-              "a fix removed references, which is impossible:", file=sys.stderr)
-        for l in not_subset[:10]:
-            print(f"  {l}", file=sys.stderr)
-        return 2
 
     if args.curriculum:
         # The complement (untaught leaves) intersected with the zero-caller set
@@ -333,6 +325,18 @@ def main(argv: list[str] | None = None) -> int:
             for l in cull:
                 print(f"  {l}")
         return 0
+
+    # Uncorrected sweep + the corrected-is-subset-of-uncorrected invariant guard
+    # the zero-list output. Not needed for --curriculum, which returned above.
+    counts_unc = sweep(root, leaves, binary_form=False, pipe_fan=False)
+    zero_unc = {l for l in leaves_list if counts_unc.get(l, 0) == 0}
+    not_subset = [l for l in zero_corr if l not in zero_unc]
+    if not_subset:
+        print("verb-callers: corrected zero set is NOT a subset of uncorrected - "
+              "a fix removed references, which is impossible:", file=sys.stderr)
+        for l in not_subset[:10]:
+            print(f"  {l}", file=sys.stderr)
+        return 2
 
     enrichment = load_enrichment(root) if not args.self_check else {}
 
