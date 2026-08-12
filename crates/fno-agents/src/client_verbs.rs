@@ -1892,6 +1892,27 @@ where
     }
 }
 
+/// Build the `mux pane run` argv (everything after the `fno` binary) that
+/// relaunches `claude_argv` on a new pane in `session` at `cwd`. The `--` fence
+/// keeps a `--resume <uuid>` (or any flag-shaped inner arg) out of the mux
+/// parser, so the resumed command is transported verbatim - the one-verb form
+/// of the manual `fno mux pane run 'cd <wt> && exec claude --resume <uuid>'`
+/// recovery recipe (x-b84f D3).
+fn mux_pane_run_argv(session: &str, cwd: &str, claude_argv: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = vec![
+        "mux".into(),
+        "pane".into(),
+        "run".into(),
+        "--session".into(),
+        session.into(),
+        "--cwd".into(),
+        cwd.into(),
+        "--".into(),
+    ];
+    v.extend(claude_argv.iter().cloned());
+    v
+}
+
 /// Acquire the `session:<uuid>` single-writer claim for an interactive dead-row
 /// resume, anchored to THIS process. `exec` keeps the pid, so the claim is held
 /// by the resumed claude and self-releases when the operator quits (no explicit
@@ -2244,18 +2265,41 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         (v, None)
     };
 
+    // A pane (mux) row carries the session it was launched on; resume puts the
+    // worker back THERE via `fno mux pane run`, not in this terminal, so the
+    // operator keeps their shell and the resumed session stays drivable from the
+    // mux (x-b84f D3). A row with no mux ref keeps the in-terminal exec.
+    let mux_session = entry
+        .get("mux")
+        .and_then(|m| m.get("session"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     if !which_on_path(&argv[0]) {
         eprintln!("fno agents resume: {} CLI not on PATH", argv[0]);
         return 14;
     }
 
     if print_command {
-        let argv_q = argv
-            .iter()
-            .map(|a| shlex_quote(a))
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
+        if let Some(session) = mux_session.as_deref() {
+            // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
+            // from inside the route file reaches the printed command (AC5).
+            let pane = mux_pane_run_argv(session, cwd, &argv);
+            let pane_q = pane
+                .iter()
+                .map(|a| shlex_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("fno {}", pane_q);
+        } else {
+            let argv_q = argv
+                .iter()
+                .map(|a| shlex_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
+        }
         return 0;
     }
 
@@ -2267,6 +2311,44 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Err((code, msg)) = acquire_resume_session_claim(uuid, None) {
             eprintln!("{msg}");
             return code;
+        }
+    }
+
+    // Pane relaunch: the mux owns the cwd (--cwd) and the pane, and this
+    // process returns after the launch so the operator's terminal stays free.
+    // Emit only on a successful launch so a failed pane start does not record a
+    // misleading agent_resumed. The session single-writer claim above guards the
+    // same race as the in-terminal exec path (T4.2).
+    if let Some(session) = mux_session.as_deref() {
+        let pane = mux_pane_run_argv(session, cwd, &argv);
+        match std::process::Command::new("fno").args(&pane).status() {
+            Ok(s) if s.success() => {
+                append_agents_event(
+                    &trace_events_path(home),
+                    "agent_resumed",
+                    &[
+                        ("name", Value::String(name.clone())),
+                        ("provider", Value::String(harness.to_string())),
+                        ("session_id", Value::String(session_id.to_string())),
+                        ("cwd", Value::String(cwd.to_string())),
+                    ],
+                );
+                eprintln!("fno agents resume: {name} relaunched on mux session {session}");
+                return 0;
+            }
+            Ok(s) => {
+                eprintln!(
+                    "fno agents resume: mux pane run for {name} exited {} (no pane started)",
+                    s.code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".to_string())
+                );
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("fno agents resume: failed to launch {name} on a mux pane: {e}");
+                return 1;
+            }
         }
     }
 
@@ -3971,7 +4053,43 @@ mod tests {
         );
     }
 
-    fn _git(repo: &Path, args: &[&str]) {
+        #[test]
+    fn mux_pane_run_argv_fences_the_resumed_command() {
+        // x-b84f D3: the one-verb form of the manual `fno mux pane run` recovery.
+        // The `--` fence keeps the inner `--resume <uuid>` (and any flag-shaped
+        // arg) out of the mux parser, so the resumed command is transported
+        // verbatim. AC5: only a path appears, never a value from inside the file.
+        let claude = vec![
+            "claude".to_string(),
+            "--settings".into(),
+            "/route/path.json".into(),
+            "--resume".into(),
+            "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".into(),
+        ];
+        let pane = mux_pane_run_argv("main", "/wt", &claude);
+        assert_eq!(
+            pane,
+            vec![
+                "mux".to_string(),
+                "pane".into(),
+                "run".into(),
+                "--session".into(),
+                "main".into(),
+                "--cwd".into(),
+                "/wt".into(),
+                "--".into(),
+                "claude".into(),
+                "--settings".into(),
+                "/route/path.json".into(),
+                "--resume".into(),
+                "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".into(),
+            ]
+        );
+        // The fence sits exactly between the mux transport and the command.
+        assert_eq!(pane.iter().position(|a| a == "--"), Some(7));
+    }
+
+fn _git(repo: &Path, args: &[&str]) {
         let st = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
