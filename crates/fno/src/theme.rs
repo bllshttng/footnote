@@ -117,7 +117,12 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
     // stays the inverse block so content reads in the emulator's own colors.
     match role {
         Role::Body => (Color::Default, Color::Default, cell_flags::INVERSE),
-        Role::BodySel => (Color::Default, t.sel, 0),
+        // The selected row's fg is the theme's `title` (a light color in every
+        // shipped palette), not `Color::Default`: every shipped `sel` is a dark
+        // background, so a `Default` fg would read dark-on-dark on a light
+        // terminal. An explicit light fg stays readable regardless of the
+        // emulator's default pair, the property INVERSE gives the Body row.
+        Role::BodySel => (t.title, t.sel, cell_flags::BOLD),
         Role::BodyHead => (
             Color::Default,
             Color::Default,
@@ -295,8 +300,11 @@ mod tests {
         // terminal: normal video (flags 0) = the existing cut-out.
         let (_, _, flags) = cell_style(Role::BodySel, &theme_terminal());
         assert_eq!(flags, 0);
-        // named: a sel-colored background.
-        let (_, bg, _) = cell_style(Role::BodySel, &theme_catppuccin());
+        // named: a sel-colored background and an explicit (non-Default) fg, so a
+        // dark sel bg stays readable on a light terminal as well as a dark one.
+        let (fg, bg, _) = cell_style(Role::BodySel, &theme_catppuccin());
         assert_eq!(bg, theme_catppuccin().sel);
+        assert_ne!(fg, Color::Default, "named-theme sel fg must be explicit");
+        assert_eq!(fg, theme_catppuccin().title);
     }
 }

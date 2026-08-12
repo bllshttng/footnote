@@ -7119,18 +7119,40 @@ fn draw_lines_overlay<S: AsRef<str>>(
 ) {
     let (base_r, base_c) = content_origin;
     let (content_rows, content_cols) = content_dims;
-    // Body width: the widest line, capped to the viewport minus the side borders.
+    // Body width: the widest line (across the whole body, windowed-out rows
+    // included), capped to the viewport minus the side borders.
     let body_w = lines
         .iter()
         .map(|l| l.as_ref().chars().count())
         .max()
         .unwrap_or(0)
         .min(content_cols.saturating_sub(chrome::Chrome::FRAME_COLS));
-    let body: Vec<chrome::BodyLine> = lines
+    // Reserve the chrome overhead and window the body to the rows that remain.
+    // Before chrome the body had the whole viewport; the frame borrows `overhead`
+    // rows for its border/footer, so without windowing a body that filled the
+    // viewport loses its tail off-screen while those rows stay selectable. Top-
+    // pin matches the pre-chrome posture (centered when it fits, clipped at the
+    // top when it does not); the scrollbar marks the cut.
+    let overhead = chrome.rows_overhead();
+    let body_budget = content_rows.saturating_sub(overhead);
+    let total = lines.len();
+    let (take, scroll) = if total > body_budget && body_budget > 0 {
+        (
+            body_budget,
+            Some(chrome::Scroll {
+                pos: 0,
+                total,
+                visible: body_budget,
+            }),
+        )
+    } else {
+        (total, None)
+    };
+    let body: Vec<chrome::BodyLine> = lines[..take]
         .iter()
         .map(|l| chrome::BodyLine::from_str(l.as_ref()))
         .collect();
-    let framed = chrome::frame(&body, chrome, body_w, None);
+    let framed = chrome::frame(&body, chrome, body_w, scroll);
     let box_h = framed.lines.len().min(content_rows);
     let box_w = framed.width.min(content_cols);
     let origin_r = base_r + content_rows.saturating_sub(box_h) / 2;
@@ -13314,6 +13336,42 @@ mod tests {
         assert_eq!(cells[origin_r * cols + (a_col - 1)].c, '┌');
         // Nothing painted at the old hardcoded top-left corner.
         assert_eq!(cells[(TAB_BAR_ROWS as usize + 1) * cols + 2].c, ' ');
+    }
+
+    #[test]
+    fn draw_lines_overlay_windows_body_to_viewport_minus_chrome() {
+        // x-f75e: chrome's border/footer borrow rows from the viewport, so a body
+        // that filled it would lose its tail off-screen while those rows stayed
+        // selectable. The overlay reserves the chrome overhead and top-pins a
+        // window to the rows that remain, marking the cut with a scrollbar.
+        let (rows, cols) = (8usize, 40usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        // A 4-row viewport vs a Full chrome (overhead 2) leaves a 2-row body
+        // budget; four body lines must window to the first two.
+        let chrome = chrome::Chrome::new("t", Anchor::Center);
+        let lines = ["row0", "row1", "row2", "row3"];
+        draw_lines_overlay(
+            &mut cells,
+            rows,
+            cols,
+            (2usize, 4usize),
+            (4usize, 30usize),
+            &chrome,
+            &lines,
+            &Theme::default_theme(),
+        );
+        let painted = |c: char| cells.iter().any(|cell| cell.c == c);
+        // Positive markers: the windowed-in rows are painted.
+        assert!(painted('0'), "first windowed body row must paint");
+        assert!(painted('1'), "second windowed body row must paint");
+        // The clipped tail rows never reach the buffer.
+        assert!(!painted('2'), "third body row must be windowed out");
+        assert!(!painted('3'), "fourth body row must be windowed out");
+        // Positive control: a scrollbar glyph marks the cut.
+        assert!(
+            painted('█') || painted('░'),
+            "an overflowing body must show a scrollbar"
+        );
     }
 
     #[test]
