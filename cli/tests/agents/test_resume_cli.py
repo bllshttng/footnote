@@ -215,6 +215,48 @@ def test_claude_path_uses_attach_substrate() -> None:
 
 
 # ---------------------------------------------------------------------------
+# x-b84f - claude pane row: canonical id fallback + safe refusal
+# ---------------------------------------------------------------------------
+
+
+def test_session_id_for_falls_back_to_canonical_id_on_a_claude_pane_row() -> None:
+    # Parity (T2.3): a claude pane row has a canonical harness_session_id but no
+    # transport short_id (empty by design). Both implementations must resolve the
+    # same id - the Rust loader mirrors harness_session_id -> claude_session_uuid
+    # (pinned in client_verbs::tests), and the Python resolver falls back to
+    # harness_session_id here. Assert the uuid itself, not mutual refusal.
+    from fno.agents.resume_cli import _session_id_for
+
+    uuid = "44012de2-1528-44dd-a32d-a81f2f0db728"
+    entry = _FakeAgentEntry(
+        name="pane-worker", harness="claude", cwd="/cwd",
+        harness_session_id=uuid,  # no short_id: the mux-row shape
+    )
+    assert _session_id_for(entry) == uuid
+
+
+def test_claude_pane_row_refuses_pointing_at_the_smart_runtime() -> None:
+    # The Python fallback cannot restore the recorded route a happy pane worker
+    # was launched on, so it refuses a claude pane row (no short_id) rather than
+    # `claude attach ""` or a route-less `--resume` on the default (wrong)
+    # account. The smart (default) runtime owns the relaunch+route path.
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="pane-worker", harness="claude", cwd="/cwd",
+        harness_session_id="44012de2-1528-44dd-a32d-a81f2f0db728",
+    )
+    res = resume_logic(
+        name="pane-worker",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+    )
+    assert res.exit_code == 13
+    assert "FNO_AGENTS_RUNTIME=python" in res.stderr
+
+
+# ---------------------------------------------------------------------------
 # AC2-FR — missing session_id → exit 13
 # ---------------------------------------------------------------------------
 
