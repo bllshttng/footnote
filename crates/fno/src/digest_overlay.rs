@@ -102,6 +102,18 @@ pub fn backlog_section_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "show_backlog", true)
 }
 
+/// (x-f75e) `config.mux.theme`: the chrome palette name, latched once at client
+/// startup. An unset key reads as `None` (meaning "no preference") and resolves
+/// to `terminal`. An UNKNOWN name also resolves to `terminal` but carries a
+/// notice through the same channel a refused keymap rebind uses, because a
+/// config that is quietly ignored is indistinguishable from one never written.
+pub fn theme_for(cwd: &Path) -> (crate::theme::Theme, Option<crate::keys::KeymapWarning>) {
+    match mux_str(cwd, "theme") {
+        Some(name) => crate::theme::Theme::from_name(&name),
+        None => (crate::theme::Theme::default_theme(), None),
+    }
+}
+
 /// The key layer from `config.mux.prefix` + `[mux.keys]`, plus every entry the
 /// resolver had to refuse. Read here because this module owns the `fno` crate's
 /// `config.mux.*` reader; the parsing and collision rules live in

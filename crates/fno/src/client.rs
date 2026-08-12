@@ -26,7 +26,9 @@ use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
 use crate::keys::{key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner};
+use crate::chrome;
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
+use crate::theme::{Theme};
 use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentRow,
     AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
@@ -790,6 +792,12 @@ struct View {
     /// than collapsing it each session.
     show_missions: bool,
     show_backlog: bool,
+    /// (x-f75e) `config.mux.theme`: the chrome palette. Latched once at startup
+    /// from the same config ladder `hover_focus` reads, and swapped in memory on
+    /// an explicit apply from the settings modal. `terminal` (the default)
+    /// inherits the emulator's own colors so every pre-theme render is
+    /// byte-identical.
+    theme: Theme,
     /// (x-a496) Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
@@ -1639,6 +1647,7 @@ impl View {
             hover_focus: true,
             show_missions: true,
             show_backlog: true,
+            theme: Theme::default_theme(),
             hover_pending: None,
             hover_row: None,
             hover_seam: None,
@@ -2395,6 +2404,30 @@ impl View {
             .iter()
             .find(|(_, off, len)| cc >= *off && cc < *off + *len)
             .map(|(t, _, _)| *t)
+    }
+
+    // (x-f75e) In-block guards for the three popup click routers. A click that
+    // hits no target used to read as "off the popup" and dismiss, so clicking a
+    // Header (no target) closed the menu. These distinguish an in-block miss
+    // (swallow) from an off-block click (dismiss) - the same fix at every site,
+    // since guarding one router of three leaves the bug live on the other two.
+    fn row_menu_block_contains(&self, row: u16, col: u16) -> bool {
+        self.row_menu
+            .as_ref()
+            .map(|m| m.popup.render(self.term).contains(row, col))
+            .unwrap_or(false)
+    }
+    fn aux_block_contains(&self, row: u16, col: u16) -> bool {
+        self.aux
+            .as_ref()
+            .map(|m| m.popup.render(self.term).contains(row, col))
+            .unwrap_or(false)
+    }
+    fn keys_modal_block_contains(&self, row: u16, col: u16) -> bool {
+        self.keys_modal
+            .as_ref()
+            .map(|m| m.popup.render(self.term).contains(row, col))
+            .unwrap_or(false)
     }
 
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
@@ -4611,13 +4644,13 @@ impl View {
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term), &self.theme);
         } else if let Some(m) = &self.row_menu {
             // x-8ccf US2: the anchored row context menu, drawn at the pointer.
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term), &self.theme);
         } else if let Some(m) = &self.aux {
             // x-8ccf US4/US5: the sideline MENU popup or settings modal.
-            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term));
+            popup::draw(&mut cells, rows, cols, &m.popup.render(self.term), &self.theme);
         } else if let Some(sel) = self.answers {
             // x-feec needs-me queue (grown from the x-c929 answer overlay): the
             // severity-ranked union + the selected row's answer options, on the
@@ -7606,11 +7639,19 @@ async fn attach_and_run(
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
     view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
+    // (x-f75e) The chrome theme, same ladder. An unknown name falls back to
+    // `terminal` WITH a notice - silence here would hide a typo the operator
+    // cannot otherwise detect, the same reasoning the keymap notices make.
+    let (theme, theme_warn) = crate::digest_overlay::theme_for(Path::new(&cwd));
+    view.theme = theme;
     // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
     // scanner reads its first byte. A refused rebind surfaces as a notice rather
     // than silently running the shipped default: a keyboard that quietly ignores
     // your config is indistinguishable from one that ignored your keystroke.
-    let (keymap, key_warnings) = crate::digest_overlay::keymap(Path::new(&cwd));
+    let (keymap, mut key_warnings) = crate::digest_overlay::keymap(Path::new(&cwd));
+    if let Some(w) = theme_warn {
+        key_warnings.push(w);
+    }
     crate::keys::install(keymap);
     // Held, not stamped. The TTL is an absolute instant, and everything between
     // here and the first paint - a handshake allowed ten seconds, then a
@@ -9521,7 +9562,13 @@ async fn keys_modal_mouse(
                     return Ok(StdinFlow::Detach);
                 }
             }
-            None => view.keys_modal = None, // click off the popup dismisses
+            None => {
+                // A click inside the block that hit no target (a header, a border)
+                // is swallowed; only a click OFF the modal dismisses.
+                if !view.keys_modal_block_contains(rep.row, rep.col) {
+                    view.keys_modal = None;
+                }
+            }
         },
         _ => {}
     }
@@ -9903,7 +9950,13 @@ async fn row_menu_mouse(
                 }
                 row_menu_execute_selected(view, sock_w).await?;
             }
-            None => view.row_menu = None,
+            // A click inside the block that hit no target (a Header or Rule, which
+            // contribute none) is swallowed; only a click OFF the menu dismisses.
+            None => {
+                if !view.row_menu_block_contains(rep.row, rep.col) {
+                    view.row_menu = None;
+                }
+            }
         },
         MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
             // Re-anchor on the row under the second right-press (never stack two
@@ -9919,7 +9972,12 @@ async fn row_menu_mouse(
                     view.row_menu = None;
                 }
             }
-            None => view.row_menu = None,
+            // On the menu itself (not a sideline row): swallow, do not dismiss.
+            None => {
+                if !view.row_menu_block_contains(rep.row, rep.col) {
+                    view.row_menu = None;
+                }
+            }
         },
         _ => {}
     }
@@ -10096,7 +10154,12 @@ async fn aux_mouse(
                     return Ok(StdinFlow::Detach);
                 }
             }
-            None => view.aux = None,
+            None => {
+                // In-block miss (a header) is swallowed; off-block dismisses.
+                if !view.aux_block_contains(rep.row, rep.col) {
+                    view.aux = None;
+                }
+            }
         },
         _ => {}
     }
