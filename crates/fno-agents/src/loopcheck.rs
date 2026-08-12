@@ -11,8 +11,8 @@ use crate::{completion_output::allow_output, delivery_completion::pr_passes};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{Read, Write};
 use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -5194,8 +5194,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // fail-open on a stale/missing fno (the merge gate is the backstop).
                 let mut fidelity_block: Option<String> = None;
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
-                    let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN")
-                        .unwrap_or_else(|| "fno".into());
+                    let fno_bin =
+                        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
                     match evaluate_plan_fidelity(manifest.plan_path.as_deref(), &fno_bin, &cwd) {
                         FidelityGate::Refused { reason } => fidelity_block = Some(reason),
                         _ => {}
@@ -6016,7 +6016,9 @@ enum FidelityGate {
     /// backstop, and `fno doctor` flags the staleness. Fail open here.
     Absent,
     Pass,
-    Refused { reason: String },
+    Refused {
+        reason: String,
+    },
 }
 
 /// Run `fno plan fidelity --json` for the bound plan and classify the decision.
@@ -7045,7 +7047,10 @@ mod tests {
 
     #[test]
     fn plan_fidelity_gate_blocks_an_uncovered_shortfall() {
-        let stub = _write_fno_stub("refuse", r#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#);
+        let stub = _write_fno_stub(
+            "refuse",
+            r#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#,
+        );
         let cwd = std::env::temp_dir();
         match evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd) {
             FidelityGate::Refused { reason } => assert!(reason.contains("unjoined")),
