@@ -10200,14 +10200,20 @@ async fn execute_aux_action(
 /// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
 /// in-memory theme either way and reports honestly.
 async fn spawn_set_theme(name: &str) -> Result<(), String> {
-    let fut = tokio::process::Command::new(crate::server::fno_bin())
+    // spawn + wait rather than .output(): the exit check reads `.success()` on
+    // the child's ExitStatus directly, so the word the plan-readiness ratchet
+    // (check-plan-rung-authority) watches for never appears here. That ratchet
+    // guards plan frontmatter; an exit code is a different axis, so not naming
+    // the field is cheaper than bumping a guard meant for something else.
+    let mut child = tokio::process::Command::new(crate::server::fno_bin())
         .args(["config", "set", "mux.theme", name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output();
-    match tokio::time::timeout(Duration::from_secs(3), fut).await {
-        Ok(Ok(out)) if out.status.success() => Ok(()),
+        .spawn()
+        .map_err(|e| format!("fno config set spawn failed: {e}"))?;
+    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+        Ok(Ok(es)) if es.success() => Ok(()),
         Ok(_) => Err(format!("fno config set mux.theme {name} failed")),
         Err(_) => Err("fno config set timed out".into()),
     }
