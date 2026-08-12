@@ -1516,7 +1516,7 @@ fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Ancho
         for c in cards.iter().filter(|c| card_lane(c) == lane.as_str()) {
             let label = if c.slug.is_empty() { &c.id } else { &c.slug };
             rows.push(PopupRow::Entry {
-                glyph: lattice_style(card_lattice_state(c.state)).glyph.into(),
+                glyph: lattice_glyph(card_lattice_state(c.state)).0.into(),
                 label: label.clone(),
                 hint: if c.head {
                     "head".into()
@@ -4481,7 +4481,7 @@ impl View {
             };
             let lit = dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
             let (fg, flags) = if lit {
-                (LATTICE_ACCENT, cell_flags::BOLD)
+                (self.theme.accent, cell_flags::BOLD)
             } else {
                 (Color::Default, cell_flags::DIM)
             };
@@ -4598,11 +4598,11 @@ impl View {
                 let dropping =
                     drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
                 let (fg, flags) = if dropping {
-                    (LATTICE_ACCENT, cell_flags::INVERSE)
+                    (self.theme.accent, cell_flags::INVERSE)
                 } else if grabbable {
-                    (LATTICE_ACCENT, cell_flags::BOLD)
+                    (self.theme.accent, cell_flags::BOLD)
                 } else if outline {
-                    (LATTICE_ACCENT, 0)
+                    (self.theme.accent, 0)
                 } else {
                     (Color::Default, cell_flags::DIM)
                 };
@@ -4628,7 +4628,7 @@ impl View {
                 for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
                     if covered[r * cols + c] {
                         let cell = &mut cells[r * cols + c];
-                        cell.fg = LATTICE_ACCENT;
+                        cell.fg = self.theme.accent;
                         cell.flags |= cell_flags::INVERSE;
                     }
                 }
@@ -5193,7 +5193,7 @@ impl View {
             let (glyph_prefix, fg, glyph_flags) =
                 match tab_rollup_state(&self.layout.agents, s.id, t.id) {
                     Some(st) => {
-                        let style = lattice_style(st);
+                        let style = lattice_style(st, self.theme.accent);
                         (format!("{} ", style.glyph), style.fg, style.flags)
                     }
                     None => (String::new(), Color::Default, 0),
@@ -5354,7 +5354,7 @@ impl View {
                 } else {
                     cell_flags::BOLD
                 };
-                (LATTICE_ACCENT, f)
+                (self.theme.accent, f)
             } else if matches!((lifted_tab, span.hit), (Some(t), Some(TabHit::Tab(tid))) if t == tid)
             {
                 (span.fg, span.flags | cell_flags::DIM)
@@ -5909,7 +5909,7 @@ impl View {
                 // style and external DIM modifier, different text composition.
                 DisplayRow::Agent(a) if self.density == Density::Extended => {
                     let st = agent_lattice_state(a);
-                    let style = lattice_style(st);
+                    let style = lattice_style(st, self.theme.accent);
                     let mut flags = style.flags;
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
@@ -5922,7 +5922,7 @@ impl View {
                     // state->style mapping. Idle is now the outline `○`, not the
                     // near-invisible `·` this node exists to kill.
                     let st = agent_lattice_state(a);
-                    let style = lattice_style(st);
+                    let style = lattice_style(st, self.theme.accent);
                     let glyph = style.glyph;
                     // A recruit mark (x-8f11) replaces the leading space with a
                     // `*`, keeping the row width unchanged (same vocabulary as
@@ -6011,7 +6011,7 @@ impl View {
                     // filled running state, so the card vocabulary and the agent
                     // lattice are literally one mapping. Blocked now carries the
                     // accent instead of the old bare DIM (attention, not muted).
-                    let style = lattice_style(card_lattice_state(c.state));
+                    let style = lattice_style(card_lattice_state(c.state), self.theme.accent);
                     let glyph = style.glyph;
                     let label = if c.slug.is_empty() { &c.id } else { &c.slug };
                     // (x-1d91) The head of the queue is stated, not inferred from
@@ -6118,7 +6118,7 @@ impl View {
                 } else {
                     flags |= cell_flags::INVERSE;
                 }
-                fg = LATTICE_ACCENT;
+                fg = self.theme.accent;
             }
             // The selector cursor OR the mouse hover paints the INVERSE bar
             // (x-a496); both are display indices now (x-260a), so the bar can
@@ -6186,7 +6186,7 @@ impl View {
             // signal is the band above, not a gutter, so nothing is painted here
             // for it (x-4374).
             if mark_caret && text_w >= 1 {
-                cells[r * cols].fg = LATTICE_ACCENT;
+                cells[r * cols].fg = self.theme.accent;
             }
         }
         // (x-b186) The density button, painted LAST over the sideline's top row.
@@ -6226,7 +6226,7 @@ impl View {
         // cannot change the cursor shape, so this accent IS the affordance.
         let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
         let (border_fg, border_flags) = if border_active {
-            (LATTICE_ACCENT, cell_flags::BOLD)
+            (self.theme.accent, cell_flags::BOLD)
         } else {
             (Color::Default, cell_flags::DIM)
         };
@@ -7114,9 +7114,11 @@ enum LatticeState {
     Exited,
 }
 
-/// The one accent color, reserved for the needs-attention (`Blocked`) state.
-/// `Indexed` so it follows the user's terminal palette (index 3 = amber/yellow)
-/// rather than a hardcoded RGB that would fight light themes.
+/// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
+/// as the reference value the lattice tests assert against. Production reads the
+/// live theme's accent (`self.theme.accent`), so this is test-only - under the
+/// default `terminal` theme the two are the same `Indexed(3)` (x-f75e).
+#[cfg(test)]
 const LATTICE_ACCENT: Color = Color::Indexed(3);
 
 /// The name-entry modal's pair: the theme's own, inverted.
@@ -7138,7 +7140,13 @@ struct LatticeStyle {
 /// The single source of glyph/weight/color per state. Every state differs from
 /// every other by GLYPH alone (BOLD/DIM/accent are reinforcement, never the
 /// sole discriminator), so a weak-BOLD or monochrome terminal still reads.
-fn lattice_style(s: LatticeState) -> LatticeStyle {
+///
+/// `accent` is the needs-attention color, now the active theme's accent rather
+/// than a hardcoded yellow (x-f75e): under `terminal` it is `Indexed(3)` (the
+/// emulator's own amber, preserved exactly), under a named theme it is the
+/// palette's pick. Only the one caller that reads `.fg` supplies it; callers
+/// that want only the glyph/flags use [`lattice_glyph`] and stay out of color.
+fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
     match s {
         LatticeState::Working => LatticeStyle {
             glyph: '●',
@@ -7153,7 +7161,7 @@ fn lattice_style(s: LatticeState) -> LatticeStyle {
         LatticeState::Blocked => LatticeStyle {
             glyph: '▲',
             flags: cell_flags::BOLD,
-            fg: LATTICE_ACCENT,
+            fg: accent,
         },
         LatticeState::DoneUnseen => LatticeStyle {
             glyph: '✓',
@@ -7166,6 +7174,14 @@ fn lattice_style(s: LatticeState) -> LatticeStyle {
             fg: Color::Default,
         },
     }
+}
+
+/// The glyph + flags for a state, with no color. For every caller that does not
+/// read `.fg` (i.e. every caller except the one accent-colored span), so they
+/// do not have to thread a theme accent they never use.
+fn lattice_glyph(s: LatticeState) -> (char, u8) {
+    let st = lattice_style(s, Color::Default);
+    (st.glyph, st.flags)
 }
 
 /// (x-6851 US2) Severity order for the header rollup strip: most-severe first,
@@ -7252,7 +7268,7 @@ fn section_rule(gap: usize) -> String {
 fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> String {
     let mut pairs: Vec<String> = rollup
         .iter()
-        .map(|(s, n)| format!("{}{}", lattice_style(*s).glyph, n))
+        .map(|(s, n)| format!("{}{}", lattice_glyph(*s).0, n))
         .collect();
     loop {
         if pairs.is_empty() {
@@ -7288,7 +7304,7 @@ fn pane_to_lattice(s: PaneState) -> LatticeState {
 /// icon lattice (x-df4c) so nav and sideline read identically: blocked `▲`,
 /// working `●`, done `✓`, idle `○`.
 fn nav_glyph(s: PaneState) -> char {
-    lattice_style(pane_to_lattice(s)).glyph
+    lattice_glyph(pane_to_lattice(s)).0
 }
 
 /// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
@@ -7361,7 +7377,7 @@ fn humanize_ago(secs: u64) -> String {
 /// wrapping - a wrapped cell would paint two lines for one display row and break
 /// the x-260a single-enumeration invariant.
 fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
-    let glyph = lattice_style(agent_lattice_state(a)).glyph;
+    let glyph = lattice_glyph(agent_lattice_state(a)).0;
     let mut out = format!("{glyph} {}", pad_cols(&a.name, COL_NAME as usize - 1));
     if cols.tail {
         let tail = a.tail.as_deref().unwrap_or("");
@@ -7469,7 +7485,7 @@ fn peek_overlay_lines(
     // `agent_lattice_state` is both exit- and seen-aware (it routes the non-exit
     // case through `pane_state`), so the peek, the row, and the rollups agree
     // and no call site re-derives the precedence.
-    let glyph = lattice_style(agent_lattice_state(a)).glyph;
+    let glyph = lattice_glyph(agent_lattice_state(a)).0;
     // (x-c914) The account glyph rides the peek header next to the name, same
     // vocabulary as the selector row.
     let mut header = match a.account.as_deref() {
@@ -11995,7 +12011,7 @@ mod tests {
     fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
         use LatticeState::*;
         let states = [Working, Idle, Blocked, DoneUnseen, Exited];
-        let glyphs: Vec<char> = states.iter().map(|&s| lattice_style(s).glyph).collect();
+        let glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
         // Pairwise distinct: every state pair reads differently by GLYPH alone,
         // so a monochrome/weak-BOLD terminal never collapses two states
         // (AC1-ERR / AC1-EDGE).
@@ -12020,17 +12036,18 @@ mod tests {
     fn lattice_accent_only_on_blocked() {
         use LatticeState::*;
         // The accent is reserved for needs-attention (Blocked); every other
-        // state stays default-colored (US6 invariant).
-        assert_eq!(lattice_style(Blocked).fg, LATTICE_ACCENT);
+        // state stays default-colored (US6 invariant). The accent is now the
+        // theme's pick (x-f75e); pass it in and expect Blocked to wear it.
+        assert_eq!(lattice_style(Blocked, LATTICE_ACCENT).fg, LATTICE_ACCENT);
         for s in [Working, Idle, DoneUnseen, Exited] {
             assert_eq!(
-                lattice_style(s).fg,
+                lattice_style(s, LATTICE_ACCENT).fg,
                 Color::Default,
                 "{s:?} must not carry the accent"
             );
         }
         // Attention is never dimmed (AC1-UI): Blocked is BOLD, not DIM.
-        assert_eq!(lattice_style(Blocked).flags & cell_flags::DIM, 0);
+        assert_eq!(lattice_glyph(Blocked).1 & cell_flags::DIM, 0);
     }
 
     #[test]
@@ -12040,13 +12057,13 @@ mod tests {
         // viewed-done row never shows a stale needs-attention marker.
         let unseen = tab_agent(None, Some(AgentBadge::Done), false);
         assert_eq!(agent_lattice_state(&unseen), LatticeState::DoneUnseen);
-        assert_eq!(lattice_style(agent_lattice_state(&unseen)).glyph, '✓');
+        assert_eq!(lattice_glyph(agent_lattice_state(&unseen)).0, '✓');
         let seen = AgentRow {
             seen: true,
             ..tab_agent(None, Some(AgentBadge::Done), false)
         };
         assert_eq!(agent_lattice_state(&seen), LatticeState::Idle);
-        assert_eq!(lattice_style(agent_lattice_state(&seen)).glyph, '○');
+        assert_eq!(lattice_glyph(agent_lattice_state(&seen)).0, '○');
     }
 
     #[test]
