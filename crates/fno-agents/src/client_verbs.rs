@@ -1877,11 +1877,24 @@ where
         // hid the real bug.
         eprintln!("fno agents resume: {name} has no session id recorded; nothing to resume.");
         Err(13)
+    } else if live {
+        // Probe-live but no short_id to attach through: a pane/mux worker that
+        // is already running. There is no resume action here - `claude attach`
+        // needs a short_id this row does not carry, and relaunching would open a
+        // second writer on one transcript. Do not call this "inconclusive": the
+        // probe just answered live, and the old hint sent the operator to re-run
+        // a probe whose answer contradicts the message.
+        eprintln!(
+            "fno agents resume: {name} is live but has no attach short_id \
+             (a pane worker); it is already running - drive it via its mux session, \
+             or re-spawn with `fno agents spawn`."
+        );
+        Err(13)
     } else {
         // has_uuid but neither attachable-live nor affirmatively dead: genuinely
-        // inconclusive (a live fork holding the pane, or a silent-unreachable
-        // worker that may still be alive). Name the uuid the operator can probe,
-        // not the empty short_id the old hint interpolated.
+        // inconclusive (a silent-unreachable worker that may still be alive).
+        // Name the uuid the operator can probe, not the empty short_id the old
+        // hint interpolated.
         eprintln!(
             "fno agents resume: {name} liveness is inconclusive; refusing to open a second writer. Run 'fno agents truth {uuid}'."
         );
@@ -1918,12 +1931,27 @@ fn mux_pane_run_argv(session: &str, cwd: &str, claude_argv: &[String]) -> Vec<St
 /// one transcript - the residual double-writer window the liveness probe alone
 /// cannot close. `root` is `None` in prod (session: keys route to
 /// `$FNO_CLAIMS_ROOT`/`$HOME`); tests inject a temp root.
-fn acquire_resume_session_claim(uuid: &str, root: Option<&Path>) -> Result<(), (i32, String)> {
+/// How long the session single-writer claim guards a mux-pane relaunch.
+/// The launching process exits once the pane is up, so the claim cannot ride
+/// the holder pid the way the in-terminal exec's does (a PID-only claim goes
+/// Stale the moment that pid dies, so a second resumer would steal it before
+/// the resumed claude is probe-live). This TTL keeps the claim Live across
+/// that launch-to-probe-live window; once claude is probe-live the truth probe
+/// (not this claim) stops a second relaunch. Picked wide against slow startup;
+/// after it expires, a crashed worker can be re-resumed rather than blocked.
+const MUX_RESUME_CLAIM_TTL_MS: u64 = 120_000;
+
+fn acquire_resume_session_claim(
+    uuid: &str,
+    root: Option<&Path>,
+    ttl_ms: Option<u64>,
+) -> Result<(), (i32, String)> {
     use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
     let holder = format!("resume:{}", std::process::id());
     let opts = AcquireOpts {
         root: root.map(Path::to_path_buf),
         reason: Some("interactive resume single-writer".to_string()),
+        ttl_ms: ttl_ms.map(|t| t as i64),
         ..Default::default()
     };
     match acquire(&format!("session:{uuid}"), &holder, opts) {
@@ -2300,31 +2328,63 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 0;
     }
 
+    // Validate cwd for BOTH paths before claiming or launching. A deleted
+    // worktree is a cleanup job, not a resume. The exec path re-checks via
+    // set_current_dir below (race-free for its own chdir), but bailing here
+    // means a gone cwd never acquires the session claim on the failure path.
+    if !Path::new(cwd).is_dir() {
+        eprintln!(
+            "fno agents resume: cwd {} for {} is no longer reachable. Run `fno agents rm {}` to clean up.",
+            py_repr_str(cwd),
+            py_repr_str(&name),
+            name
+        );
+        return 13;
+    }
+
     // Guard a dead-row `claude --resume` with the session single-writer claim
     // before exec (--print-command already returned above, so it never claims).
-    // exec keeps this pid, so the claim is held by the resumed claude and
-    // self-releases when the operator quits.
+    // The in-terminal exec keeps this pid, so a PID-only claim (ttl=None) lives
+    // as long as claude does. The mux path exits after pane dispatch, so it
+    // passes a TTL: without one the claim would go Stale on the dead holder and
+    // a second resumer would steal it before the resumed claude is probe-live.
     if let Some(uuid) = &claim_uuid {
-        if let Err((code, msg)) = acquire_resume_session_claim(uuid, None) {
+        let ttl = if mux_session.is_some() {
+            Some(MUX_RESUME_CLAIM_TTL_MS)
+        } else {
+            None
+        };
+        if let Err((code, msg)) = acquire_resume_session_claim(uuid, None, ttl) {
             eprintln!("{msg}");
             return code;
         }
     }
 
-    // Pane relaunch: the mux owns the cwd (--cwd) and the pane, and this
-    // process returns after the launch so the operator's terminal stays free.
-    // Emit only on a successful launch so a failed pane start does not record a
-    // misleading agent_resumed. The session single-writer claim above guards the
-    // LAUNCH window only: unlike the in-terminal exec (whose execvp preserves
-    // this pid so the claim lives as long as claude does), this process exits
-    // once the pane is up, so the claim does NOT persist for the resumed
-    // session's life. The truth probe is the primary guard against a later
-    // second writer - once the resumed claude is probe-live a second resumer
-    // attaches or refuses instead of relaunching - and the residual window
-    // (launch to probe-live) is the same shape as a spawn's pane-bind race.
+    // Pane relaunch (claude only): the mux owns the cwd (--cwd) and the pane,
+    // and this process returns after the launch so the operator's terminal
+    // stays free. stdin is null'd so a mux pane run that reads stdin cannot
+    // stall against this terminal. The claim above carries a TTL (not a pid) on
+    // this path, so it stays Live across the launch-to-probe-live window; once
+    // the resumed claude is probe-live the truth probe (not the claim) stops a
+    // second relaunch. Emit only on a successful launch so a failed pane start
+    // does not record a misleading agent_resumed.
+    //
+    // Scoped to claude: the session claim that guards this path is claude-only,
+    // and launching a non-claude pane worker on an unguarded pane would widen
+    // that pre-existing no-claim gap. A non-claude pane row falls through to
+    // the in-terminal exec below (its prior behavior).
+    let mux_session = if harness == "claude" {
+        mux_session
+    } else {
+        None
+    };
     if let Some(session) = mux_session.as_deref() {
         let pane = mux_pane_run_argv(session, cwd, &argv);
-        match std::process::Command::new("fno").args(&pane).status() {
+        match std::process::Command::new("fno")
+            .args(&pane)
+            .stdin(std::process::Stdio::null())
+            .status()
+        {
             Ok(s) if s.success() => {
                 // session_id is the transport short_id, empty on a pane row;
                 // the resumed session's id is the uuid (claim_uuid).
@@ -4094,6 +4154,32 @@ mod tests {
         assert_eq!(pane.iter().position(|a| a == "--"), Some(7));
     }
 
+    #[test]
+    fn claude_resume_argv_live_pane_row_is_not_called_inconclusive() {
+        // x-b84f review #4: a live pane worker has no short_id, so the live
+        // attach arm (which gates on a present short_id) does not fire. Pre-fix
+        // it fell through to the else arm and printed "liveness is
+        // inconclusive" for a session the probe JUST answered live, then told
+        // the operator to re-run a probe that contradicts the message. The live
+        // arm now names the real state and points at the mux.
+        let uuid = "3c4d5e6f-7081-9203-a4b5-c6d7e8f9a0b1";
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let entry = serde_json::json!({
+            "name": "live-pane", "harness": "claude",
+            "claude_session_uuid": uuid,
+            // short_id deliberately absent: a live mux row.
+        });
+        // Pairs with the gone-verdict test: gone -> relaunch (Ok), live -> refuse
+        // (Err 13). The message is the actual fix (it no longer says
+        // "inconclusive" for a session the probe answered live); the return code
+        // pins that a live pane row neither attaches nor relaunches.
+        let code =
+            claude_resume_argv_with_truth(&ch, &entry, "live-pane", |_| Some("working".into()))
+                .expect_err("a live pane worker refuses cleanly instead of attaching");
+        assert_eq!(code, 13);
+    }
+
     fn _git(repo: &Path, args: &[&str]) {
         let st = std::process::Command::new("git")
             .arg("-C")
@@ -4224,13 +4310,35 @@ mod tests {
         assert!(matches!(pre, AcquireOutcome::Acquired(_)));
 
         // The racing resumer loses: refuses (exit 11) instead of a 2nd writer.
-        let err = acquire_resume_session_claim(uuid, Some(root.path())).unwrap_err();
+        let err = acquire_resume_session_claim(uuid, Some(root.path()), None).unwrap_err();
         assert_eq!(err.0, 11);
         assert!(err.1.contains("held live by another writer"));
 
         // A session with no holder: the resumer wins.
         let uuid2 = "1111abcd-2222-3333-4444-555566667777";
-        assert!(acquire_resume_session_claim(uuid2, Some(root.path())).is_ok());
+        assert!(acquire_resume_session_claim(uuid2, Some(root.path()), None).is_ok());
+    }
+
+    #[test]
+    fn acquire_resume_session_claim_records_an_expiry_for_the_mux_path() {
+        // The mux relaunch exits after pane dispatch, so its session claim cannot
+        // ride the holder pid. A PID-only claim (ttl=None) goes Stale the moment
+        // that pid dies, and a second resumer steals it before the resumed claude
+        // is probe-live. The TTL keeps it Live across that window, which only
+        // holds if the record actually carries an expires_at.
+        use crate::claims::{claim_path, read_claim_file};
+
+        let uuid = "2b3c4d5e-6f70-8192-03a4-b5c6d7e8f9a0";
+        let root = cv_tmpdir();
+        acquire_resume_session_claim(uuid, Some(root.path()), Some(MUX_RESUME_CLAIM_TTL_MS))
+            .expect("acquire with a ttl succeeds");
+        let path =
+            claim_path(&format!("session:{uuid}"), Some(root.path())).expect("claim path resolves");
+        let rec = read_claim_file(&path).expect("claim file is readable");
+        assert!(
+            rec.expires_at.is_some(),
+            "a TTL claim records an expiry; a PID-only claim would not"
+        );
     }
 
     #[test]
