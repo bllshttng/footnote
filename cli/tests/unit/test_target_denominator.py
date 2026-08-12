@@ -247,6 +247,22 @@ def test_enumerated_node_withdraws_the_deliverables_exit():
     assert "withdrawn" in msg
 
 
+def test_enumerated_node_refuses_a_declared_count():
+    # A singular node keeps the cheap --deliverables exit (the test above this
+    # one). An enumerated node forfeits it: its own prose declares several
+    # deliverables, so a count would ship one of N behind a falsifiable claim.
+    enum_node = {
+        **_CODE_NODE,
+        "title": "four bands",
+        "details": "(1) county; (2) state; (3) peers; (4) portfolio",
+    }
+    msg = absent_denominator_refusal(
+        node=enum_node, plan_path="", deliverables=1
+    )
+    assert msg is not None
+    assert "withdrawn" in msg
+
+
 def _invoke_init_node(monkeypatch: pytest.MonkeyPatch, node: dict, deliverables: bool):
     """Drive the real `target init` with a resolved node, without running the
     bootstrap script. The refusal sits after the script-resolution check, so the

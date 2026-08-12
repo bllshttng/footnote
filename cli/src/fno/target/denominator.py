@@ -142,22 +142,25 @@ def absent_denominator_refusal(
     (a bound plan, or a ``--deliverables`` declaration). Returns the message for
     the caller to echo and exit on; this leaf module does no I/O.
 
-    When ``enumerated_scope`` fires on the node's title/details, the cheap
-    ``--deliverables`` exit is WITHDRAWN from the message: an enumerated node must
-    produce a real plan, because a declared count on it would let the run stamp 1
-    and ship one of several behind a falsifiable-but-cheap claim.
+    The cheap exit is a declared count on a SINGULAR node: a stamped N is
+    falsifiable, so it is allowed. An enumerated node forfeits that exit - its own
+    prose declares several deliverables, so a count there is a lie that ships one
+    of N behind a falsifiable-but-cheap claim. So ``enumerated_scope`` firing
+    refuses a ``--deliverables`` invocation too, not only the no-denominator case.
     """
     if not isinstance(node, dict):
         return None
-    if not denominator_absent(
-        plan_path=plan_path,
-        deliverables=deliverables,
-        payload_is_code=node.get("domain") == "code",
-    ):
+    payload_is_code = node.get("domain") == "code"
+    has_plan = bool(plan_path and plan_path.strip())
+    if not payload_is_code or has_plan:
         return None
     enumerated = enumerated_scope(
         str(node.get("title") or ""), str(node.get("details") or "")
     )
+    # A declared count on a singular node is the allowed cheap exit. On an
+    # enumerated node it is withdrawn (fall through to the refusal below).
+    if deliverables is not None and not enumerated:
+        return None
     lines = [
         "fno target init: this code node has no scope denominator.",
         "A plan-less code dispatch makes 'shipped M of N' inexpressible - the",
