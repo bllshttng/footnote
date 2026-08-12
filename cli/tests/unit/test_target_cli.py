@@ -912,13 +912,21 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
 
 
 def _contained_graph(tmp_path, monkeypatch, *, owner="x-6320"):
-    """A graph with one delivery unit and one node contained in it."""
+    """A graph with one delivery unit and one node contained in it.
+
+    The owner binds a real plan file. A bound, resolving plan is one of the two
+    scope denominators, so the denominator gate at init must see it resolve; a
+    placeholder path gets emptied at back-fill and the node reads as plan-less.
+    """
     import json
 
+    plan = tmp_path / "one.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    plan_path = str(plan)
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": owner, "plan_path": "/p/one.md", "status": "ready"},
-        {"id": "x-261c", "plan_path": "/p/one.md", "status": "ready",
+        {"id": owner, "plan_path": plan_path, "status": "ready"},
+        {"id": "x-261c", "plan_path": plan_path, "status": "ready",
          "contained_in": owner},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
@@ -1027,8 +1035,9 @@ def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
     sail past the containment redirect AND the retro dedup gate: both read this
     one resolver, so the miss was doubled.
     """
-    _contained_graph(tmp_path, monkeypatch)
-    node = target_cli._resolve_dispatch_node(None, "/p/one.md")
+    gp = _contained_graph(tmp_path, monkeypatch)
+    plan_path = json.loads(gp.read_text(encoding="utf-8"))["entries"][0]["plan_path"]
+    node = target_cli._resolve_dispatch_node(None, plan_path)
     assert node is not None and node["id"] == "x-6320"
 
 
