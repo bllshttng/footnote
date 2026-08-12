@@ -2,6 +2,35 @@
 
 Reference for the `/blueprint` mutation behavior introduced in PR1 (2026-05-18, `ab-69f7ee8f`). The architectural overview lives at [docs/architecture/lean-blueprint.md](../../../docs/architecture/lean-blueprint.md).
 
+## Design doc shape
+
+A design doc is the input `/blueprint` mutates. `/think` writes it from cited primary sources; `/blueprint` first-fills its frontmatter if absent, appends an Execution Strategy, and compiles its `## User Stories` into the task skeleton. The shape:
+
+```markdown
+---
+title: "<title>"
+node: <node id>
+status: design
+created: <YYYY-MM-DD>
+claims: <node id>
+sources: [<artifacts actually read>]
+---
+
+# <Title>
+
+## Problem
+
+## Recommended Design
+
+## User Stories
+
+**US1:** As a <role>, I can <capability>, so that <outcome>.
+
+## Acceptance Criteria
+
+## Open Questions
+```
+
 ## Status progression
 
 ```
