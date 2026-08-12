@@ -1,6 +1,6 @@
 # Comment-prose reading list (prose > code)
 
-Functions where docstring + inline comment lines exceed code lines. A reading list, NOT a gate: there is no defensible threshold (the reference exemplar `cli/src/fno/agents/providers/base.py` ranks badly on this ratio because over half its lines are docstring, which is legitimate). Use it as "start reading here" when looking for narration-heavy functions to split or trim.
+Functions where docstring + inline comment lines exceed code lines. A reading list, NOT a gate, because there is no defensible threshold. The reference exemplar `cli/src/fno/agents/harnesses/base.py` ranks badly on this ratio, since over half its lines are docstring, which is legitimate. When looking for narration-heavy functions to split or trim, use it as "start reading here".
 
 - functions with >= 4 code lines: 4693
 - where prose > code: 529 (11%)
@@ -50,20 +50,20 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 5.0x | 20 | 4 | `cli/src/fno/_lazy_group.py:58` | `_module_is_now_on_disk` |
 | 4.8x | 24 | 5 | `cli/src/fno/agents/events.py:78` | `emit_with_context` |
 | 4.4x | 22 | 5 | `cli/src/fno/retro/cli.py:72` | `_resolve_pr_session_ids` |
-| 4.2x | 21 | 5 | `cli/src/fno/agents/providers/codex.py:266` | `_effective_yolo` |
+| 4.2x | 21 | 5 | `cli/src/fno/agents/harnesses/codex.py:266` | `_effective_yolo` |
 | 4.2x | 21 | 5 | `cli/src/fno/target_cli.py:824` | `check_review_gate` |
 | 4.0x | 24 | 6 | `cli/src/fno/worktree.py:393` | `archive` |
 | 3.83x | 23 | 6 | `cli/src/fno/projects/resolve.py:132` | `resolve_project_name` |
 | 3.8x | 19 | 5 | `cli/src/fno/provenance/spawn_think.py:677` | `_worker_agent_name` |
 | 3.75x | 15 | 4 | `cli/src/fno/claims/hostid.py:113` | `machine_id` |
 | 3.75x | 15 | 4 | `cli/src/fno/dispatch.py:349` | `_cutover_command` |
-| 3.56x | 32 | 9 | `cli/src/fno/agents/providers/codex.py:846` | `load_known_session_ids` |
+| 3.56x | 32 | 9 | `cli/src/fno/agents/harnesses/codex.py:846` | `load_known_session_ids` |
 | 3.5x | 14 | 4 | `cli/src/fno/agents/dispatch.py:5671` | `keystroke_lane` |
 | 3.5x | 14 | 4 | `cli/src/fno/graph/store.py:226` | `set_related` |
 | 3.25x | 13 | 4 | `cli/src/fno/agents/mux_spawn.py:106` | `_shell_integration` |
 | 3.25x | 13 | 4 | `cli/src/fno/target/orient.py:311` | `_peer_entry_identity` |
 | 3.23x | 71 | 22 | `cli/src/fno/agents/dispatch.py:2643` | `with_agent_lock_and_entry` |
-| 3.22x | 29 | 9 | `cli/src/fno/agents/providers/claude.py:1570` | `claude_logs_reachable` |
+| 3.22x | 29 | 9 | `cli/src/fno/agents/harnesses/claude.py:1570` | `claude_logs_reachable` |
 | 3.22x | 29 | 9 | `cli/src/fno/graph/cli.py:6447` | `_release_parented_children` |
 | 3.2x | 16 | 5 | `cli/src/fno/adapters/providers/failover.py:440` | `record_success` |
 | 3.2x | 16 | 5 | `cli/src/fno/recovery.py:427` | `_worktree_is_node_less` |
@@ -71,7 +71,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 3.0x | 12 | 4 | `cli/src/fno/paths.py:1034` | `config_file` |
 | 2.92x | 35 | 12 | `cli/src/fno/graph/ladder.py:192` | `plan_rung` |
 | 2.91x | 32 | 11 | `cli/src/fno/paths.py:918` | `inbox_root_for` |
-| 2.88x | 23 | 8 | `cli/src/fno/agents/providers/claude.py:1149` | `_alias_value` |
+| 2.88x | 23 | 8 | `cli/src/fno/agents/harnesses/claude.py:1149` | `_alias_value` |
 | 2.88x | 23 | 8 | `cli/src/fno/executor/_locked.py:107` | `_extract_value` |
 | 2.8x | 14 | 5 | `cli/src/fno/agents/dispatch.py:5414` | `_lineage_seed_prefix` |
 | 2.8x | 14 | 5 | `cli/src/fno/config/__init__.py:3917` | `agents_headless_yolo` |
@@ -104,7 +104,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.44x | 44 | 18 | `cli/src/fno/graph/cli.py:6491` | `_cascade_close_contained` |
 | 2.42x | 29 | 12 | `cli/src/fno/agents/rust_runtime.py:597` | `_scrub_account_auth_at_seam` |
 | 2.42x | 29 | 12 | `cli/src/fno/graph/_intake.py:487` | `_settings_candidate_paths` |
-| 2.4x | 12 | 5 | `cli/src/fno/agents/providers/claude.py:1514` | `claude_stop` |
+| 2.4x | 12 | 5 | `cli/src/fno/agents/harnesses/claude.py:1514` | `claude_stop` |
 | 2.4x | 12 | 5 | `cli/src/fno/agents/self_stamp.py:35` | `stamp_from` |
 | 2.38x | 19 | 8 | `cli/src/fno/graph/statuses.py:40` | `_rung_to_graph_status` |
 | 2.38x | 19 | 8 | `cli/src/fno/scoreboard/fold.py:188` | `read_graph_nodes` |
@@ -126,8 +126,8 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.22x | 20 | 9 | `cli/src/fno/executor/_surface.py:42` | `is_frontend_surface_path` |
 | 2.22x | 20 | 9 | `cli/src/fno/graph/types.py:305` | `status` |
 | 2.2x | 11 | 5 | `cli/src/fno/adapters/providers/runtime_state.py:161` | `_resolve_state_path` |
-| 2.2x | 11 | 5 | `cli/src/fno/agents/providers/claude.py:267` | `_resolved_request_model` |
-| 2.2x | 11 | 5 | `cli/src/fno/agents/providers/claude.py:1535` | `claude_rm` |
+| 2.2x | 11 | 5 | `cli/src/fno/agents/harnesses/claude.py:267` | `_resolved_request_model` |
+| 2.2x | 11 | 5 | `cli/src/fno/agents/harnesses/claude.py:1535` | `claude_rm` |
 | 2.2x | 11 | 5 | `cli/src/fno/agents/registry.py:763` | `_is_identity_token` |
 | 2.2x | 11 | 5 | `cli/src/fno/agents/rust_runtime.py:707` | `_is_provenance_bearing_spawn` |
 | 2.2x | 11 | 5 | `cli/src/fno/backlog/groom.py:154` | `_mechanical_legs` |
@@ -145,7 +145,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.0x | 12 | 6 | `cli/src/fno/agents/autonomous_route.py:180` | `_healthy_alternate_exists` |
 | 2.0x | 10 | 5 | `cli/src/fno/agents/context.py:80` | `caller_kind_from_env` |
 | 2.0x | 20 | 10 | `cli/src/fno/agents/events.py:44` | `emit` |
-| 2.0x | 8 | 4 | `cli/src/fno/agents/providers/codex.py:212` | `git_writable_config_args` |
+| 2.0x | 8 | 4 | `cli/src/fno/agents/harnesses/codex.py:212` | `git_writable_config_args` |
 | 2.0x | 8 | 4 | `cli/src/fno/agents/registry.py:655` | `_agent_lock_path` |
 | 2.0x | 10 | 5 | `cli/src/fno/agents/rust_runtime.py:428` | `_is_dispatch_account_bearing_spawn` |
 | 2.0x | 10 | 5 | `cli/src/fno/agents/rust_runtime.py:465` | `_is_route_bearing_spawn` |
@@ -185,7 +185,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.83x | 11 | 6 | `cli/src/fno/ledger_join.py:41` | `_entry_owns_pr` |
 | 1.83x | 11 | 6 | `cli/src/fno/retro/cli.py:530` | `drain_postmortems` |
 | 1.81x | 29 | 16 | `cli/src/fno/config/__init__.py:3525` | `_settings_yaml_locations` |
-| 1.8x | 9 | 5 | `cli/src/fno/agents/providers/_claude_session_registry.py:286` | `read_state_json` |
+| 1.8x | 9 | 5 | `cli/src/fno/agents/harnesses/_claude_session_registry.py:286` | `read_state_json` |
 | 1.8x | 9 | 5 | `cli/src/fno/executor/test_locked.py:96` | `test_rejected_alternative_prose_does_not_become_mixed` |
 | 1.8x | 9 | 5 | `cli/src/fno/mail/cli.py:1410` | `_recipient_is_attended` |
 | 1.8x | 9 | 5 | `cli/src/fno/paths.py:878` | `vault_root` |
@@ -303,10 +303,10 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.47x | 22 | 15 | `cli/src/fno/retro/dedup.py:105` | `anchor_verdict` |
 | 1.47x | 44 | 30 | `cli/src/fno/retro/harvest.py:327` | `addressed_ids_from_comments` |
 | 1.46x | 35 | 24 | `cli/src/fno/graph/render.py:74` | `_kanban_column` |
-| 1.45x | 16 | 11 | `cli/src/fno/agents/providers/claude.py:286` | `_emit_headless_receipt` |
+| 1.45x | 16 | 11 | `cli/src/fno/agents/harnesses/claude.py:286` | `_emit_headless_receipt` |
 | 1.45x | 55 | 38 | `cli/src/fno/target/orient.py:338` | `_required_bots` |
 | 1.44x | 13 | 9 | `cli/src/fno/agents/cli.py:463` | `_caller_row_by_session` |
-| 1.44x | 13 | 9 | `cli/src/fno/agents/providers/codex.py:573` | `_on_timeout` |
+| 1.44x | 13 | 9 | `cli/src/fno/agents/harnesses/codex.py:573` | `_on_timeout` |
 | 1.44x | 13 | 9 | `cli/src/fno/graph/_decompose.py:71` | `extract_contract_versions` |
 | 1.44x | 26 | 18 | `cli/src/fno/harness_identity.py:178` | `sync_harness_aliases` |
 | 1.43x | 10 | 7 | `cli/src/fno/agents/model_routing.py:756` | `route_settings_path_for` |
@@ -345,7 +345,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.38x | 11 | 8 | `cli/src/fno/config/__init__.py:3503` | `_ensure_migrated` |
 | 1.38x | 11 | 8 | `cli/src/fno/observer/isolation.py:430` | `default_real_state_paths` |
 | 1.38x | 11 | 8 | `cli/src/fno/retro/cli.py:178` | `_current_repo_slug` |
-| 1.36x | 34 | 25 | `cli/src/fno/agents/providers/codex.py:907` | `remove_session_index_entry` |
+| 1.36x | 34 | 25 | `cli/src/fno/agents/harnesses/codex.py:907` | `remove_session_index_entry` |
 | 1.36x | 19 | 14 | `cli/src/fno/graph/types.py:52` | `_derive_status` |
 | 1.36x | 15 | 11 | `cli/src/fno/inbox/settings.py:31` | `_load_inbox_config` |
 | 1.36x | 15 | 11 | `cli/src/fno/inbox/store.py:224` | `inbox_dir_for` |
@@ -358,7 +358,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.33x | 8 | 6 | `cli/src/fno/adapters/providers/managed.py:1562` | `reconcile_backoff_active` |
 | 1.33x | 8 | 6 | `cli/src/fno/adapters/providers/test_failover.py:888` | `test_record_success_swallows_oserror_from_runtime_state` |
 | 1.33x | 8 | 6 | `cli/src/fno/agents/dispatch.py:332` | `_current_inside_leg` |
-| 1.33x | 8 | 6 | `cli/src/fno/agents/providers/claude.py:750` | `_build_envelope` |
+| 1.33x | 8 | 6 | `cli/src/fno/agents/harnesses/claude.py:750` | `_build_envelope` |
 | 1.33x | 8 | 6 | `cli/src/fno/agents/read.py:387` | `_read_jsonl_tail` |
 | 1.33x | 24 | 18 | `cli/src/fno/agents/registry.py:1209` | `_updater` |
 | 1.33x | 8 | 6 | `cli/src/fno/config/__init__.py:432` | `_coerce_auto_run` |
@@ -384,7 +384,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.3x | 13 | 10 | `cli/src/fno/worktree.py:196` | `_run_setup_worktree_hook` |
 | 1.29x | 22 | 17 | `cli/src/fno/adapters/providers/runtime_state.py:712` | `is_in_cooldown` |
 | 1.29x | 9 | 7 | `cli/src/fno/agent/state.py:125` | `_detect_harness` |
-| 1.29x | 22 | 17 | `cli/src/fno/agents/providers/codex.py:416` | `_wait_with_grace` |
+| 1.29x | 22 | 17 | `cli/src/fno/agents/harnesses/codex.py:416` | `_wait_with_grace` |
 | 1.29x | 9 | 7 | `cli/src/fno/agents/rust_runtime.py:446` | `_is_resume_bearing_spawn` |
 | 1.29x | 9 | 7 | `cli/src/fno/harness_identity.py:234` | `resolve_harness_identity` |
 | 1.29x | 18 | 14 | `cli/src/fno/health_monitor.py:105` | `load_config` |
@@ -438,8 +438,8 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.21x | 17 | 14 | `cli/src/fno/agents/session_truth.py:60` | `classify_tail` |
 | 1.2x | 6 | 5 | `cli/src/fno/adapters/providers/managed.py:447` | `verify_slot` |
 | 1.2x | 6 | 5 | `cli/src/fno/adapters/providers/usage.py:418` | `_claude_window_label` |
-| 1.2x | 30 | 25 | `cli/src/fno/agents/providers/claude.py:179` | `_build_argv` |
-| 1.2x | 18 | 15 | `cli/src/fno/agents/providers/claude.py:767` | `send_to_session` |
+| 1.2x | 30 | 25 | `cli/src/fno/agents/harnesses/claude.py:179` | `_build_argv` |
+| 1.2x | 18 | 15 | `cli/src/fno/agents/harnesses/claude.py:767` | `send_to_session` |
 | 1.2x | 12 | 10 | `cli/src/fno/agents/test_harness_map.py:424` | `test_both_merge_posture_readers_default_to_deny` |
 | 1.2x | 12 | 10 | `cli/src/fno/approvals/store.py:788` | `_drain` |
 | 1.2x | 6 | 5 | `cli/src/fno/cost/__init__.py:263` | `_as_cost` |
@@ -458,7 +458,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.2x | 6 | 5 | `cli/src/fno/plan/criteria.py:141` | `_split_leading_code` |
 | 1.2x | 6 | 5 | `cli/src/fno/target/test_orient.py:36` | `test_node_line_shipped_without_merge_evidence` |
 | 1.2x | 6 | 5 | `cli/src/fno/wake/signal.py:46` | `drop_signal` |
-| 1.18x | 26 | 22 | `cli/src/fno/agents/providers/claude.py:840` | `wait_for_reply` |
+| 1.18x | 26 | 22 | `cli/src/fno/agents/harnesses/claude.py:840` | `wait_for_reply` |
 | 1.18x | 26 | 22 | `cli/src/fno/backlog/advance.py:1287` | `_ensure_lane_worktree` |
 | 1.18x | 13 | 11 | `cli/src/fno/config_io.py:30` | `_deep_merge` |
 | 1.18x | 13 | 11 | `cli/src/fno/paths.py:721` | `handoffs_dir` |
@@ -466,7 +466,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.17x | 7 | 6 | `cli/src/fno/adapters/providers/staging.py:44` | `_symlink_path` |
 | 1.17x | 7 | 6 | `cli/src/fno/adapters/test_hermes.py:112` | `test_spawn_worker_empty_string_session_var_still_in_session` |
 | 1.17x | 7 | 6 | `cli/src/fno/agents/discover.py:219` | `_codex_started_ms` |
-| 1.17x | 7 | 6 | `cli/src/fno/agents/providers/claude.py:140` | `parse_short_id` |
+| 1.17x | 7 | 6 | `cli/src/fno/agents/harnesses/claude.py:140` | `parse_short_id` |
 | 1.17x | 7 | 6 | `cli/src/fno/agents/session_truth.py:241` | `_claude_model` |
 | 1.17x | 7 | 6 | `cli/src/fno/claims/events.py:39` | `_emit` |
 | 1.17x | 7 | 6 | `cli/src/fno/config/__init__.py:1817` | `_coerce_enabled` |
@@ -569,7 +569,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.06x | 17 | 16 | `cli/src/fno/graph/collision.py:238` | `_load_thresholds` |
 | 1.06x | 38 | 36 | `cli/src/fno/worktree.py:286` | `create` |
 | 1.05x | 63 | 60 | `cli/src/fno/adapters/providers/managed.py:1430` | `register_slot_snapshot` |
-| 1.05x | 22 | 21 | `cli/src/fno/agents/providers/claude.py:1858` | `mcp_channel_reachable` |
+| 1.05x | 22 | 21 | `cli/src/fno/agents/harnesses/claude.py:1858` | `mcp_channel_reachable` |
 | 1.04x | 25 | 24 | `cli/src/fno/graph/cli.py:6301` | `_cascade_close_parents` |
 | 1.04x | 25 | 24 | `cli/src/fno/relay/roundtrip.py:737` | `submit_via_control_reply` |
 | 1.03x | 64 | 62 | `cli/src/fno/agents/dispatch.py:5692` | `_deliver_live` |

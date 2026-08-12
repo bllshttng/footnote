@@ -140,7 +140,7 @@ This is useful when running the same repo under Claude Code and hermes on altern
 
 ## Known limitations (v1)
 
-- Subagent dispatch on hermes uses `delegate_task` (see `docs/providers/provider-adapters.md`). Parallel children run via hermes `ThreadPoolExecutor`, default 3-concurrent. Configurable per-child model via `model_override`.
+- Subagent dispatch on hermes uses `delegate_task` (see `docs/harnesses/harness-adapters.md`). Parallel children run via hermes `ThreadPoolExecutor`, default 3-concurrent. Configurable per-child model via `model_override`.
 - Cache-metric features from Claude Code (`token-doctor`) are not available on hermes. See compatibility in [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md).
 - Claude Code's Stop-hook replacement here is the external wrapper loop, not an in-process hook. Signals are delivered via the sentinel file, not via process-return semantics.
 

@@ -46,13 +46,13 @@ dispatch.py
    ├─ reconcile_agents ─ no flock; per-entry update_registry; one-shot capability checks (claude-on-PATH, codex-session-index)
    └─ attach_agent   ─ no flock; claude_attach with inherited stdio
 
-providers/claude.py
+harnesses/claude.py
    ├─ claude_stop(short_id, timeout=30)         → (exit_code, stderr)
    ├─ claude_rm(short_id, timeout=30)           → (exit_code, stderr)
    ├─ claude_attach(short_id)                   → exit_code  (no capture, no timeout)
    └─ claude_logs_reachable(short_id, timeout=10) → bool
 
-providers/codex.py
+harnesses/codex.py
    ├─ default_session_index_path()              → ~/.codex/session_index.jsonl
    ├─ session_index_exists(path=None)           → bool
    └─ load_known_session_ids(path=None)         → set[str]   (UUID regex extraction)

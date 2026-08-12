@@ -1,6 +1,6 @@
-"""Unit tests for ``providers.codex.resume`` follow-up invocation.
+"""Unit tests for ``harnesses.codex.resume`` follow-up invocation.
 
-Shares the JSONL replay infrastructure with ``test_providers_codex_create``.
+Shares the JSONL replay infrastructure with ``test_harnesses_codex_create``.
 Resume differs from create in three ways:
 
 - argv: ``codex exec resume <session_id>`` instead of ``codex exec``
@@ -22,8 +22,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fno.agents.providers import codex as codex_mod
-from fno.agents.providers.codex import (
+from fno.agents.harnesses import codex as codex_mod
+from fno.agents.harnesses.codex import (
     CodexInvocationError,
     CodexResult,
 )

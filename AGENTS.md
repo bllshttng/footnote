@@ -62,7 +62,7 @@ An absence has two explanations, the real outcome and "the instrument never ran"
 Require a string only the real outcome produces, pinned to the thing measured rather than any line carrying the word.
 `until ! grep -q pending out` called CI settled when `gh` died on a TLS error, since an error carries no "pending"; `grep -q '"settled": true'` is one line apart and fails safe.
 
-- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; `git worktree list | head -20` truncated a present worktree into absence; an unanchored `rg --glob=!target` also hides `skills/target/`, so live callers survived every sweep of a rename; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
+- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; `git worktree list | head -20` truncated a present worktree into absence; an unanchored `rg --glob=!target` also hides `skills/target/`, so live callers survived every sweep of a rename; a bare `target` in a gate's exclude set hid 78 files from it; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
 - graduates-to: an assert helper refusing an absence-only success condition and failing a zero-hit probe with no positive control; it cannot catch an honest exit code answering a different question, which needs the verdict verb.
 - added: 2026-07-27
 

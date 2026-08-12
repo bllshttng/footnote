@@ -79,7 +79,7 @@ engine's source, load-bearing enough to state plainly:
 
 A bundled manifest only *fires* once its harness clears three rungs:
 
-1. it is in `READABLE_PROVIDERS` (`cli/.../providers/__init__.py`) so
+1. it is in `READABLE_PROVIDERS` (`cli/.../agents/harnesses/__init__.py`) so
    `load_registry` accepts its row;
 2. it occupies a mux pane (`build_pane_argv` has an arm + a `for_name` provider
    impl) so `scrape_targets` selects it;

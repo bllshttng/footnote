@@ -39,6 +39,14 @@ JSON
 
 export HOME="$TMP"
 export FNO_GRAPH_JSON_LOCK=/tmp/fno-smoke-done.lock
+# The carve-out gate resolves its ledger from the CANONICAL repo root, never
+# from HOME, so overriding HOME alone left this test reading the developer's
+# real .fno/carveouts.jsonl. Any unharvested deferred carve-out in the checkout
+# then made `fno done` refuse with exit 6 over work this sandbox never
+# declared. Green in CI throughout, because carveouts.jsonl is gitignored and
+# a fresh checkout has none: the test passed exactly where nobody runs it and
+# failed on every machine where somebody does.
+export FNO_REPO_ROOT="$TMP"
 
 # Closing with --pr now demands gh-resolved MERGED evidence, and CI has no
 # authenticated gh. Stub one that reports merged so the cases below keep

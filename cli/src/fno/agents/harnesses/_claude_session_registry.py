@@ -4,7 +4,7 @@ US2 (ab-8b90e793) reverse-engineered three external surfaces from the
 ``claude`` binary that have no documented schema. The provider adapter
 imports them through this thin wrapper so a future replacement (MCP
 channel server, daemon-backend wake) only needs to swap this module
-rather than touching ``providers.claude``:
+rather than touching ``harnesses.claude``:
 
 - ``~/.claude/sessions/<pid>.json`` — one entry per supervisor session.
   Function ``IE7`` in claude 2.1.143 owns this schema. The fields we

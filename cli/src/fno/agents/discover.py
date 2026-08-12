@@ -659,7 +659,7 @@ def _discover_from_roster(*, exclude_session_ids: Iterable[str] = ()) -> list[di
     process scan, so the roster is the ONLY source that surfaces it -- the exact
     handle that failed to resolve at send time. Lenient by construction (the
     reader returns ``[]`` on any roster read/parse failure)."""
-    from fno.agents.providers._claude_session_registry import roster_sessions
+    from fno.agents.harnesses._claude_session_registry import roster_sessions
 
     exclude = {s for s in (exclude_session_ids or ()) if s}
     return [r for r in roster_sessions() if r["session_id"] not in exclude]

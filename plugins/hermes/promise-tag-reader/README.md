@@ -24,7 +24,7 @@ Python 3.9+ standard library only. No external packages.
 
 ## Protocol reference
 
-See [`docs/providers/promise-sentinel.md`](../../../docs/providers/promise-sentinel.md) for the full protocol.
+See [`docs/harnesses/promise-sentinel.md`](../../../docs/harnesses/promise-sentinel.md) for the full protocol.
 
 ## Why this plugin is optional
 

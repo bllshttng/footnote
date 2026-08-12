@@ -70,7 +70,7 @@ def _seed_claude(name: str, *, status: str, short_id: str) -> AgentEntry:
 
 def _patch_codex_known(monkeypatch, ids: set[str]) -> None:
     """Stub codex's session index loader to return ``ids``."""
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     monkeypatch.setattr(codex_mod, "session_index_exists", lambda **_: True)
     monkeypatch.setattr(
         codex_mod, "load_known_session_ids", lambda **_: ids
@@ -257,7 +257,7 @@ def test_sigint_mid_loop_leaves_registry_untouched(
     # Inject a KeyboardInterrupt by patching `load_known_session_ids` to
     # raise after returning the empty set for the FIRST entry only. This
     # simulates Ctrl-C mid-loop.
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     calls = {"n": 0}
 
     def kbint_after_one(**kwargs):
@@ -312,7 +312,7 @@ def test_reconcile_handles_mixed_provider_registry(
     )
 
     # Claude probe says reachable.
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     monkeypatch.setattr(
         claude_mod, "claude_logs_reachable", lambda *args, **kwargs: True
     )

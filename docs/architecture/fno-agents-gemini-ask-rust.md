@@ -1,6 +1,6 @@
 # Rust client handles gemini `ask` + the unconditional flip
 
-The closing follow-up of the codex auto-routing work ([`fno-agents-ask-auto-route.md`](./fno-agents-ask-auto-route.md)). It ports Python's `cli/src/fno/agents/providers/gemini.py` to a Rust client module and then flips `ask` to auto-route **unconditionally** for every provider, removing the provider-conditional special case.
+The closing follow-up of the codex auto-routing work ([`fno-agents-ask-auto-route.md`](./fno-agents-ask-auto-route.md)). It ports Python's `cli/src/fno/agents/harnesses/gemini.py` to a Rust client module and then flips `ask` to auto-route **unconditionally** for every provider, removing the provider-conditional special case.
 
 ## What this completes
 
@@ -50,7 +50,7 @@ The one case that previously stayed on Python — an `ask` with no resolvable pr
 | Surface | What it pins |
 |---|---|
 | `crates/fno-agents/tests/gemini_ask_unit.rs` | argv builders, `inject_from_name`, `sandbox_flag`, single-blob `parse_response` + every schema-drift guard, exit-code map |
-| `crates/fno-agents/tests/gemini_ask_parity.rs` | cross-language byte parity: Python `providers/gemini.py` vs Rust `gemini_ask` against one shared fake gemini (create/resume/null-response/drift/non-zero/stderr-noise/inject) + the cross-language registry round-trip |
+| `crates/fno-agents/tests/gemini_ask_parity.rs` | cross-language byte parity: Python `harnesses/gemini.py` vs Rust `gemini_ask` against one shared fake gemini (create/resume/null-response/drift/non-zero/stderr-noise/inject) + the cross-language registry round-trip |
 | `crates/fno-agents/tests/gemini_ask_sigint.rs` | Ctrl-C forwards to the gemini pgroup → exit 130; SIG_IGN parent disposition preserved (shared `subprocess_ask` driver) |
 | `cli/tests/agents/test_rust_runtime.py` | empty `PYTHON_AGENT_VERBS`, `AUTO_ROUTE_VERBS == RUST_CLIENT_VERBS` identity, ask auto-routes for every provider / no-flag / no-binary fallback / `=python` force |
 | `cli/tests/agents/test_ask_e2e_dispatch.py` | CLI-level create + followup dispatch differential parametrized across codex AND gemini |

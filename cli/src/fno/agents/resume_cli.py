@@ -75,7 +75,7 @@ def _build_resume_argv(
         # which is global and must precede the subcommand.
         from pathlib import Path
 
-        from fno.agents.providers.codex import git_writable_config_args
+        from fno.agents.harnesses.codex import git_writable_config_args
 
         grant = git_writable_config_args(Path(cwd)) if cwd else []
         return ["codex", *grant, "resume", session_id]

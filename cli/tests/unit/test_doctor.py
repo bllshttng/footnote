@@ -75,6 +75,13 @@ def _stub_signals(
     monkeypatch.setattr(
         doctor, "_launch_agent_failures", lambda: {"applicable": True, "dead": []}
     )
+    # mux-server freshness probe shells out to `fno mux ls --json` and only
+    # short-circuits when no mux is running. A developer machine with a live mux
+    # (or a sibling bg session) trips the subprocess tripwire below for a reason
+    # unrelated to the verdict under test, so stub it like the other probes.
+    from fno import update
+
+    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
 
 
 # ---------------------------------------------------------------------------

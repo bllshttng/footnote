@@ -144,6 +144,7 @@ backlog relatedness build
 backlog relatedness get
 backlog release
 backlog remove
+backlog reopen
 backlog reprioritize
 backlog roadmap
 backlog schedule
@@ -161,6 +162,7 @@ backlog triage propose
 backlog triage rank
 backlog triage trend
 backlog triage validate
+backlog unarchive
 backlog unclaim
 backlog undefer
 backlog unqueue
@@ -173,6 +175,7 @@ bundle lint
 carveout add
 carveout list
 carveout resolve
+carveout update
 claim acquire
 claim force-release
 claim incarnation-fence
@@ -295,6 +298,7 @@ plugins deactivate
 plugins inspect
 plugins ls
 plugins verify
+posture apply
 pr base-check
 pr base-lineage-check
 pr evidence-check

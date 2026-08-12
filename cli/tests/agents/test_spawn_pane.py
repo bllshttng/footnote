@@ -1030,7 +1030,7 @@ def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) ->
     NOT. This is the enforcement the borrowed READABLE_PROVIDERS list lacked."""
     from fno.agents.dispatch import DispatchAskError
     from fno.agents.mux_spawn import PANE_HOSTABLE_PROVIDERS, build_pane_argv
-    from fno.agents.providers import READABLE_PROVIDERS
+    from fno.agents.harnesses import READABLE_PROVIDERS
 
     for provider in PANE_HOSTABLE_PROVIDERS:
         argv = build_pane_argv(provider, "", tmp_path, False, None)

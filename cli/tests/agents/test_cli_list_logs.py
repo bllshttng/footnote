@@ -1,8 +1,8 @@
 """CLI-level tests for `fno agents list` and `fno agents logs`.
 
 These tests exercise the Typer entry points, not the underlying
-read.py / providers.claude module. The latter have their own unit tests
-in test_read.py / test_providers_claude_read.py. Here we verify flag
+read.py / harnesses.claude module. The latter have their own unit tests
+in test_read.py / test_harnesses_claude_read.py. Here we verify flag
 wiring, exit codes, TTY behavior, and the AC3-ERR allowed-values list.
 """
 from __future__ import annotations
@@ -64,7 +64,7 @@ def _patch_claude_subprocess(monkeypatch):
     directly instead of leaning on this default; that keeps the assertions
     here focused on CLI plumbing rather than provider plumbing.
     """
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(timeout=3.0):  # noqa: ARG001
         return {}, []
@@ -256,7 +256,7 @@ def test_logs_claude_raw_passthrough(
     use_tmpdir(monkeypatch, tmp_path)
     write_registry([_claude(name="alpha")])
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(argv, **kwargs):  # noqa: ARG001
         assert argv[:2] == ["claude", "logs"]
@@ -281,7 +281,7 @@ def test_logs_claude_tail_n_slices_output(tmp_path, monkeypatch, runner):
     use_tmpdir(monkeypatch, tmp_path)
     write_registry([_claude(name="alpha")])
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(argv, **kwargs):  # noqa: ARG001
         return _fake_completed(
@@ -321,7 +321,7 @@ def test_logs_tail_zero_emits_nothing(
     use_tmpdir(monkeypatch, tmp_path)
     write_registry([_claude(name="alpha")])
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(argv, **kwargs):  # noqa: ARG001
         return _fake_completed(stdout="line1\nline2\n", returncode=0)
@@ -343,7 +343,7 @@ def test_logs_claude_propagates_non_zero_exit(tmp_path, monkeypatch, runner):
     use_tmpdir(monkeypatch, tmp_path)
     write_registry([_claude(name="alpha")])
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(argv, **kwargs):  # noqa: ARG001
         return _fake_completed(stdout="", stderr="claude: not found\n", returncode=17)
@@ -369,7 +369,7 @@ def test_logs_claude_with_json_flag_emits_warn_and_raw_passthrough(
     use_tmpdir(monkeypatch, tmp_path)
     write_registry([_claude(name="alpha")])
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(argv, **kwargs):  # noqa: ARG001
         return _fake_completed(stdout="claude raw output\n", returncode=0)

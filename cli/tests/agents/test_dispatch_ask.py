@@ -3,7 +3,7 @@
 Covers AC1-HP / AC1-ERR / AC1-UI / AC1-EDGE / AC1-FR from the design
 doc. Provider invocation is monkeypatched via the fake-claude script
 installed in test-isolated bin dirs OR via direct ``_subprocess_run``
-patching on ``providers.claude``.
+patching on ``harnesses.claude``.
 """
 from __future__ import annotations
 
@@ -821,7 +821,7 @@ def test_dispatch_ask_handles_ctrl_c(tmp_path: Path, monkeypatch) -> None:
     _install_fake(tmp_path, monkeypatch)
 
     from fno.agents.dispatch import _claude_create_path
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     def boom(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -950,7 +950,7 @@ def test_dispatch_ask_followup_happy_path(tmp_path: Path, monkeypatch) -> None:
 
     from fno import paths
     from fno.agents.dispatch import dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     captured: dict = {}
@@ -996,7 +996,7 @@ def test_dispatch_ask_followup_orphan_marks_status(tmp_path: Path, monkeypatch) 
     _seed_followup_target(tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     def fake_ask_followup(**kwargs):  # type: ignore[no-untyped-def]
@@ -1051,7 +1051,7 @@ def test_dispatch_ask_followup_poll_timeout(tmp_path: Path, monkeypatch) -> None
     _seed_followup_target(tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     def fake_ask_followup(**kwargs):  # type: ignore[no-untyped-def]
@@ -1086,7 +1086,7 @@ def test_dispatch_ask_followup_socket_error(tmp_path: Path, monkeypatch) -> None
     _seed_followup_target(tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     def fake_ask_followup(**kwargs):  # type: ignore[no-untyped-def]
@@ -1125,7 +1125,7 @@ def test_dispatch_ask_followup_preserves_lock_on_registry_write_failure(
     from fno import paths
     from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import _agent_lock_path
 
     def fake_ask_followup(**kwargs):  # type: ignore[no-untyped-def]
@@ -1176,7 +1176,7 @@ def test_dispatch_ask_followup_rejects_xml_unsafe_from_name(
     _seed_followup_target(tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     called = {"n": 0}
 
@@ -1215,7 +1215,7 @@ def test_dispatch_ask_followup_ctrl_c_during_poll_releases_lock(
 
     from fno import paths
     from fno.agents.dispatch import dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import _agent_lock_path, load_registry
 
     def boom(**kwargs):  # type: ignore[no-untyped-def]
@@ -1262,7 +1262,7 @@ def test_dispatch_ask_followup_default_from_name_is_fno(
     _seed_followup_target(tmp_path)
 
     from fno.agents.dispatch import dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict = {}
 

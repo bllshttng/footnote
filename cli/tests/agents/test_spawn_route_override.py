@@ -362,7 +362,7 @@ def test_bg_create_route_env_wins_over_role(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _setup_tmp_home(tmp_path, monkeypatch)
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     # A stale parent Anthropic credential must be cleared so the routed token wins.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic")
@@ -409,7 +409,7 @@ def test_bg_create_route_wins_over_account_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _setup_tmp_home(tmp_path, monkeypatch)
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic")
     seen: Dict[str, Any] = {}
@@ -513,7 +513,7 @@ def test_bg_create_routed_spawn_passes_settings_flag(
 ) -> None:
     _setup_tmp_home(tmp_path, monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     seen: Dict[str, Any] = {}
 
@@ -547,7 +547,7 @@ def test_composed_route_and_account_spawn_scrubs_inherited_auth(
     _setup_tmp_home(tmp_path, monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-primary-key")
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     seen: Dict[str, Any] = {}
 
@@ -576,7 +576,7 @@ def test_headless_create_routed_spawn_passes_settings_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     seen: Dict[str, Any] = {}
 
@@ -653,7 +653,7 @@ def test_bg_create_account_spawn_passes_settings_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _setup_tmp_home(tmp_path, monkeypatch)
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     seen: Dict[str, Any] = {}
 
@@ -679,7 +679,7 @@ def test_headless_create_account_spawn_passes_settings_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     seen: Dict[str, Any] = {}
 

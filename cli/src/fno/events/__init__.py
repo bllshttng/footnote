@@ -935,6 +935,37 @@ def backlog_done_forced(
     return _build("backlog_done_forced", source, data)
 
 
+def backlog_reopened(
+    *,
+    node_id: str,
+    reason: str,
+    forced: bool = False,
+    pr_number: int | None = None,
+    pr_state: str | None = None,
+    cascade_reopened: "list[str] | None" = None,
+    source: str = "backlog",
+) -> dict[str, Any]:
+    """Build a ``backlog_reopened`` event.
+
+    Emitted when ``fno backlog reopen`` clears a node's completion. The reason
+    is required rather than optional: closing a node is evidenced by a merged
+    PR, and reopening one is evidenced by nothing but the operator's judgment,
+    so the judgment is the record.
+
+    ``cascade_reopened`` carries the ancestor epics reopened alongside, which
+    are the ones ``_cascade_close_parents`` had auto-closed when this node
+    closed. Joined into a string because the envelope's data values are scalars.
+    """
+    data: dict[str, Any] = {"node_id": node_id, "reason": reason, "forced": forced}
+    if pr_number is not None:
+        data["pr_number"] = pr_number
+    if pr_state is not None:
+        data["pr_state"] = pr_state
+    if cascade_reopened:
+        data["cascade_reopened"] = ",".join(cascade_reopened)
+    return _build("backlog_reopened", source, data)
+
+
 SESSION_SATISFIED_SOURCES = frozenset(
     {"check_pr", "pr_merge", "ci_watcher", "fno_gate_manual", "delegated"}
 )

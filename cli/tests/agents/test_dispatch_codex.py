@@ -1,6 +1,6 @@
 """Dispatch-layer tests for codex routing (Wave 2.1).
 
-Verifies ``dispatch_ask`` routes to ``providers.codex`` correctly for both
+Verifies ``dispatch_ask`` routes to ``harnesses.codex`` correctly for both
 create and resume paths. Provider invocation is monkeypatched so the
 dispatch logic is exercised in isolation; real subprocess testing lives
 in ``test_codex_integration_smoke.py`` and ``test_codex_signal_handling.py``.
@@ -32,8 +32,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.providers import codex as codex_mod
-from fno.agents.providers.codex import (
+from fno.agents.harnesses import codex as codex_mod
+from fno.agents.harnesses.codex import (
     CodexInvocationError,
     CodexResult,
     CodexTimeoutError,
@@ -553,8 +553,8 @@ def test_yolo_on_claude_create_maps_to_bypass_permissions(workdir, capsys, monke
     """x-dfa4: --yolo for claude create now maps to bypassPermissions (was a
     no-op note). bg_create receives permission_mode=bypassPermissions and the
     misleading 'no effect' note is gone."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ProviderResult
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.base import ProviderResult
     seen: dict = {}
 
     def fake_bg_create(**kw):
@@ -586,7 +586,7 @@ def test_yolo_on_claude_create_maps_to_bypass_permissions(workdir, capsys, monke
 
 def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch):
     """AC3-ERR variant: claude follow-up with --yolo also emits the note."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     write_registry([
         AgentEntry(
@@ -637,7 +637,7 @@ def test_from_name_prepended_to_codex_prompt(workdir, fake_codex_create):
     call = fake_codex_create.call_args
     assert call.kwargs["from_name"] == "orchestrator-main"
     # The actual bracket prefix is applied by codex.create() (verified in
-    # test_providers_codex_create), but we assert dispatch passes the
+    # test_harnesses_codex_create), but we assert dispatch passes the
     # name through unchanged.
 
 

@@ -115,10 +115,28 @@ fno backlog rank <id> --clear          # rejoin the priority fallback
 | Resume it | `fno backlog undefer <id>` | returns to `ready`/`idea` |
 | Replace with a newer node | `fno backlog supersede <new> --replaces <old> --reason "..."` | auto-defers old; `status: superseded` |
 | Mark complete | `fno backlog done <id>` | closes only on a MERGED PR; sets `completed_at`, unblocks dependents |
+| Reopen it | `fno backlog reopen <id> --reason "..."` | clears `completed_at`; refuses when a referenced PR is MERGED |
 | Remove permanently | `fno backlog remove <id>` | hard delete (use for dupes / dead nodes) |
+| Sweep old terminal nodes | `fno backlog archive --apply` | moves them to `graph-archive.json`, still readable |
+| Bring one back | `fno backlog unarchive <id>` | returns it to the working graph |
 
 Blockers: `--blocked-by`, `--add-blocker`, `--remove-blocker` on `update`.
 A node with an open blocker derives to `status: blocked` automatically.
+
+**Every transition here has a correction, and that is enforced.**
+`cli/tests/unit/test_lifecycle_pairs.py` fails on a verb that changes a node's state or existence and ships without an inverse.
+It fails just as hard on an inverse that nothing a caller reads ever names.
+That second half is the one that bit us.
+`fno backlog remove` existed and worked for a long time while nothing mentioned it.
+An agent therefore ruled that no delete verb existed, and another project kept 23 nodes it believed un-file-able.
+
+Reopening is guarded rather than free.
+When a referenced PR is MERGED, `reopen` refuses.
+That is `done`'s gate inverted: the work is in main, and clearing the completion makes the graph assert that shipped work did not ship.
+The usual remedy is to file what remains as its own node.
+`--force --reason` records a deliberate reopen of shipped work.
+Ancestor epics the cascade auto-closed come back with the child.
+An epic closed on its own evidence is left alone and named, because reopening it discards a judgment the verb never made.
 
 ## Node-to-node edges
 

@@ -1,6 +1,6 @@
 """dispatch_spawn / cmd_spawn thread the routing role to the create path (x-d2fe).
 
-The provider boundary (bg_create) is covered by test_provider_role_routing.py;
+The provider boundary (bg_create) is covered by test_harness_role_routing.py;
 these guards pin the wiring above it so a future refactor cannot silently drop
 the ``role`` kwarg between the CLI flag and the claude create path.
 """
@@ -310,7 +310,7 @@ def test_direct_claude_adapter_refuses_managed_route_before_subprocess(
     _setup_tmp_home(tmp_path, monkeypatch)
 
     from fno.agents.model_routing import RouteCompositionError
-    from fno.agents.providers import claude
+    from fno.agents.harnesses import claude
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "makers")

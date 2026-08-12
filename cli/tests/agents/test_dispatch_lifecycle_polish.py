@@ -96,7 +96,7 @@ def test_stop_claude_flips_status_to_orphaned(tmp_path: Path, monkeypatch) -> No
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod,
@@ -134,7 +134,7 @@ def test_stop_claude_nonzero_exit_leaves_status_untouched(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod,
@@ -316,7 +316,7 @@ def test_concurrent_reconcile_and_ask_preserves_both_fields(
     apply_may_proceed = threading.Event()
 
     if provider == "codex":
-        from fno.agents.providers import codex as codex_mod
+        from fno.agents.harnesses import codex as codex_mod
 
         # Make the codex session index "ready" so the reconcile loop
         # reaches the per-entry reachability check.

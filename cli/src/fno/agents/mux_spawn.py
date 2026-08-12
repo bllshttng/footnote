@@ -867,7 +867,7 @@ def build_pane_argv(
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
         # cannot commit without the grant. Only the two bypass postures skip it.
-        from fno.agents.providers.codex import git_writable_args
+        from fno.agents.harnesses.codex import git_writable_args
 
         bounded = (permission_mode != "yolo") if permission_mode else not yolo
         if bounded:
@@ -1002,7 +1002,7 @@ def _mesh_env_wrapper(
         # Raise the harness Stop-hook block cap so fno's repeated-block loop is
         # not force-ended at the default 9 (x-1680). The helper honors an
         # operator-set value, so an explicit env wins over the fno default.
-        from fno.agents.providers.claude import claude_stop_hook_block_cap
+        from fno.agents.harnesses.claude import claude_stop_hook_block_cap
 
         pairs.append(f"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP={claude_stop_hook_block_cap()}")
     # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
@@ -2316,7 +2316,34 @@ def dispatch_spawn_pane(
                     f"session to {name} (succession). You no longer hold it.",
                     file=sys.stderr,
                 )
+            # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now
+            # exists in the registry. Emit to the daemon lifecycle log so this
+            # birth joins the daemon's death events. The registry row leaves
+            # short_id empty (mux is its one live transport ref) and carries
+            # pid=child_pid, and the daemon death reads that row, so the durable
+            # birth<->death key is name (always) and pid (the child pid) - not
+            # the mux pane_id, which no death event carries. short_id stays None
+            # to match the row the death reads, rather than naming an id
+            # (pane_id) the death will never repeat.
+            from fno.agents import events as _spawn_events
+
+            _spawn_events.emit_spawned(
+                name=name,
+                short_id=None,
+                pid=child_pid,
+                provider=provider,
+                spawned_by_session=spawned_by_session,
+                spawned_by_harness=spawned_by_harness,
+                spawned_by_cwd=spawned_by_cwd,
+            )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
+            # No row was written, so the orphan's later death would join no
+            # birth. Record the failed start in the daemon log (x-8cd5 Wave 6).
+            from fno.agents import events as _spawn_events
+
+            _spawn_events.emit_spawn_failed(
+                name=name, provider=provider, short_id=None, reason=f"registry-write: {exc}"
+            )
             reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
             if reaped:
                 raise DispatchAskError(

@@ -1,6 +1,6 @@
 """Coverage gap 3: fatal codex error propagation through dispatch.
 
-US4-codex's provider tests in ``test_providers_codex_create.py`` cover
+US4-codex's provider tests in ``test_harnesses_codex_create.py`` cover
 ``CodexInvocationError`` / ``NoSessionIdError`` at the provider layer.
 The dispatch layer is tested with happy-path mocks. This file pins the
 chain end-to-end: provider raises -> dispatch maps to the right
@@ -68,7 +68,7 @@ def test_business_role_routing_error_maps_to_stable_dispatch_refusal(
 
     from fno.agents.dispatch import DispatchAskError, _codex_create_path
     from fno.agents.model_routing import BusinessRoleRoutingProjectionError
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     def fake_create(**_kwargs):
         raise BusinessRoleRoutingProjectionError("invalid business routing")
@@ -109,7 +109,7 @@ def test_codex_invocation_error_maps_to_exit_1(
     _force_codex_on_path(monkeypatch, tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, _codex_create_path
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     from fno.agents.registry import load_registry
 
     def fake_create(**_kwargs):
@@ -159,7 +159,7 @@ def test_codex_invocation_error_propagates_nonzero_exit_code(
     _force_codex_on_path(monkeypatch, tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, _codex_create_path
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     # exit_code=12 is the structured "tee-open EACCES" provider code per
     # the US4-codex commentary; dispatch must propagate, not collapse to 1.
@@ -194,7 +194,7 @@ def test_no_session_id_error_maps_to_exit_11(
     _force_codex_on_path(monkeypatch, tmp_path)
 
     from fno.agents.dispatch import DispatchAskError, _codex_create_path
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     from fno.agents.registry import load_registry
 
     types_seen = {"turn.started", "turn.completed"}

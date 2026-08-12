@@ -2765,7 +2765,7 @@ fn follow_exit_code(status: std::process::ExitStatus) -> i32 {
 }
 
 /// Claude `logs` path: client-side subprocess passthrough with in-process tail
-/// slicing (mirrors `providers.claude.logs`).
+/// slicing (mirrors `harnesses.claude.logs`).
 fn run_logs_claude(entry: &Value, args: &LogsArgs) -> i32 {
     if args.json_out {
         eprintln!(

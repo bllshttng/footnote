@@ -49,7 +49,7 @@ echo "codex-jsonl-capture: running codex exec --json --cd /tmp 'echo hello'" >&2
 
 # Stream stdout AND stderr (codex merges some warnings into stderr) so the
 # fixture matches what the parser will see when we set stderr=subprocess.STDOUT
-# in providers/codex.py (Locked Decision 12).
+# in harnesses/codex.py (Locked Decision 12).
 codex exec --json --cd /tmp --skip-git-repo-check --sandbox workspace-write \
     'echo hello in one word' 2>&1 | tee "${FIXTURE_FILE}"
 

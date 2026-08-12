@@ -46,7 +46,7 @@ Returns `None` on any failure (missing registry, perm denied, corrupt JSON, agen
 
 ### Why ask stays in `PYTHON_AGENT_VERBS`
 
-The contract test `AUTO_ROUTE_VERBS == RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` is the routing-drift tripwire. If a future change removes `ask` from `PYTHON_AGENT_VERBS` before gemini is ported, gemini `ask` would silently route to the binary, which has no gemini-ask path. Keeping `ask` in `PYTHON_AGENT_VERBS` and handling routing via the explicit provider-conditional branch keeps the tripwire honest. The membership of `RUST_CLIENT_ASK_PROVIDERS` is itself pinned by a contract test that flags drift if gemini is added without porting `providers/gemini.py`.
+The contract test `AUTO_ROUTE_VERBS == RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` is the routing-drift tripwire. If a future change removes `ask` from `PYTHON_AGENT_VERBS` before gemini is ported, gemini `ask` routes silently to the binary, which has no gemini-ask path. Keeping `ask` in `PYTHON_AGENT_VERBS` and routing via the explicit provider-conditional branch keeps the tripwire honest. A second contract test pins the membership of `RUST_CLIENT_ASK_PROVIDERS`. If gemini is added without porting `harnesses/gemini.py`, that test flags the drift.
 
 ## Codex `ask` client-side port
 
@@ -59,7 +59,7 @@ The contract test `AUTO_ROUTE_VERBS == RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS` i
   - `turn.completed` → end-of-turn marker
 - **Resume** (`codex_resume`): `codex exec resume <session_id> --json ...`. Subprocess `cwd` is pinned to the registry-recorded cwd (codex sessions are cwd-bound). No `--sandbox` arg.
 
-Faithful to the Python error taxonomy in `providers/codex.py`:
+Faithful to the Python error taxonomy in `harnesses/codex.py`:
 
 | Condition | Exit code | Mapping |
 |---|---|---|
@@ -96,7 +96,7 @@ Reasons covered: `paths import failed`, `agents_registry_path() raised`, `regist
 | `cli/tests/agents/test_ask_e2e_dispatch.py` | CLI-level dispatch differential: Python `dispatch_ask` vs Rust binary subprocess against one shared fake codex; happy path + non-zero exit propagation |
 | `crates/fno-agents/tests/codex_ask_unit.rs` (B1) | Pure-function core: argv build, JSONL parse, error enum, exit-code map |
 | `crates/fno-agents/tests/codex_ask_dispatch.rs` (B2) | Subprocess driver + dispatch orchestrator against the fake codex |
-| `crates/fno-agents/tests/codex_ask_parity.rs` (B3) | Cross-language byte parity: Python `providers/codex.py` vs Rust `codex_ask` against the SAME fake codex |
+| `crates/fno-agents/tests/codex_ask_parity.rs` (B3) | Cross-language byte parity: Python `harnesses/codex.py` vs Rust `codex_ask` against the SAME fake codex |
 | `crates/fno-agents/tests/claude_ask_parity.rs` (parent) | Cross-language byte parity for claude |
 
 ## Scope boundary

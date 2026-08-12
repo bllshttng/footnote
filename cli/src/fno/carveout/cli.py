@@ -13,6 +13,7 @@ from typing import List
 import typer
 
 from fno.carveout.core import (
+    BACKFILL_KIND,
     DESCRIPTION_CAP,
     VALID_KINDS,
     CarveoutError,
@@ -33,7 +34,11 @@ carveout_app = typer.Typer(
 _PRIORITY_RE = re.compile(r"^p[0-3]$")
 
 
-@carveout_app.command("add")
+@carveout_app.command(
+    "add",
+    epilog="Paired verbs: `fno carveout update <id>` corrects one in place "
+    "(the id survives); `fno carveout resolve <id>` retires it.",
+)
 def add(
     description: str = typer.Argument(
         ...,
@@ -227,6 +232,146 @@ def list_carveouts(
             typer.echo(f"{cid} [{kind_val}] {first}{suffix}")
 
 
+@carveout_app.command(
+    "update",
+    epilog="Reverses nothing - it CORRECTS. To retire a row instead, "
+    "`fno carveout resolve <id> --reason \"...\"`.",
+)
+def update(
+    cv_id: str = typer.Argument(..., help="Carve-out id to edit (e.g. cv-ab12cd34)."),
+    description: str = typer.Option(
+        None,
+        "--description",
+        "-d",
+        help="Replacement text. Truncated past "
+        f"{DESCRIPTION_CAP} chars, like `add`.",
+    ),
+    kind: str = typer.Option(
+        None,
+        "--kind",
+        "-k",
+        help=f"Reclassify: {' | '.join(VALID_KINDS)}.",
+    ),
+    need: str = typer.Option(None, "--need", help="Replacement dependency text."),
+    priority: str = typer.Option(
+        None, "--priority", "-p", help="Replacement priority hint (p0-p3)."
+    ),
+    scope: str = typer.Option(None, "--scope", help="Replacement crown scope."),
+) -> None:
+    """Correct a carve-out in place, keeping its id.
+
+    Fixing the wording of a carve-out used to mean ``resolve`` then ``add``.
+    That changed the id, so every id already quoted in a PR body or a mail
+    became a dead pointer, and it was lossy: two writes, and a failure between
+    them left the ledger with neither the old row nor the new one. That happened
+    live, and the replacement id had to be chased through three messages.
+
+    Only the options you pass are replaced; the rest of the row is untouched.
+
+    Refuses rather than guessing:
+      - no field given (exit 2) - a no-op that prints a success line is exactly
+        the lie this verb exists to stop
+      - an id that is not on the ledger (exit 1) - never creates it, since that
+        would resurrect a row ``/pr merged`` already consumed, under a later
+        PR's number
+      - an empty ``--description`` (exit 2) - an empty carve-out is a lost one
+      - an unreadable or unwritable ledger (exit 1) - a failed edit must not
+        report as a clean no-op while the old wording sits on disk
+    """
+    from fno.carveout.core import (
+        CarveoutNotFound,
+        resolve_carveout_root,
+        update_carveout,
+    )
+
+    if all(v is None for v in (description, kind, need, priority, scope)):
+        typer.echo(
+            "carveout: nothing to update; pass at least one of --description / "
+            "--kind / --need / --priority / --scope",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if description is not None and not description.strip():
+        typer.echo("carveout: --description cannot be blank", err=True)
+        raise typer.Exit(2)
+
+    if kind is not None and kind not in VALID_KINDS:
+        typer.echo(
+            f"carveout: invalid --kind '{kind}' "
+            f"(expected one of: {', '.join(VALID_KINDS)})",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if priority is not None and not _PRIORITY_RE.match(priority):
+        typer.echo(
+            f"carveout: invalid --priority '{priority}' (expected p0, p1, p2 or p3)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    root = resolve_carveout_root()
+    # Read the old kind BEFORE the rewrite so the warning below can name what
+    # actually changed rather than asserting a transition that may not have
+    # happened.
+    old_kind = None
+    if kind is not None:
+        from fno.carveout.core import read_carveouts
+
+        try:
+            old_kind = next(
+                (
+                    str(r.get("kind"))
+                    for r in read_carveouts(root)
+                    if str(r.get("id")) == cv_id
+                ),
+                None,
+            )
+        except CarveoutError:
+            old_kind = None
+
+    try:
+        rec = update_carveout(
+            root,
+            cv_id,
+            description=description,
+            kind=kind,
+            need=need,
+            priority=priority,
+            scope=scope,
+        )
+    except CarveoutNotFound as exc:
+        typer.echo(f"carveout: {exc}", err=True)
+        raise typer.Exit(1)
+    except CarveoutError as exc:
+        typer.echo(f"carveout: failed to update {cv_id}: {exc}", err=True)
+        raise typer.Exit(1)
+
+    # A warning, not a refusal. Crossing the backfill boundary hands the row to
+    # a different consumer (/pr merged's backfill slot vs the generic retro
+    # harvest), which is worth saying out loud - but refusing a legitimate
+    # reclassification would be worse than permitting it.
+    if old_kind is not None and kind is not None and old_kind != kind:
+        crossed = BACKFILL_KIND in (old_kind, kind)
+        if crossed:
+            typer.echo(
+                f"carveout: {cv_id} moved {old_kind} -> {kind}; it now belongs to "
+                f"{'/fno:pr merged' if kind == BACKFILL_KIND else 'the retro-triage harvest'} "
+                f"instead",
+                err=True,
+            )
+
+    if rec.get("truncated"):
+        typer.echo(
+            f"carveout: description truncated at {DESCRIPTION_CAP} chars", err=True
+        )
+
+    # Same machine-first stdout contract as `add`: the id, which is the value
+    # this verb exists to preserve.
+    typer.echo(cv_id)
+
+
 @carveout_app.command("resolve")
 def resolve_carveouts(
     ids: List[str] = typer.Argument(
@@ -250,10 +395,20 @@ def resolve_carveouts(
 
     ``--reason`` exists for the row that should be retired WITHOUT filing
     anything: test residue, a duplicate of work already tracked elsewhere, a
-    carve-out overtaken by events. The backlog has no delete verb, so a junk
-    node is permanent while a reasoned resolve is a cheap, recorded correction.
-    Without the reason that same removal is indistinguishable from dropping the
-    work on the floor.
+    carve-out overtaken by events. Without the reason that same removal is
+    indistinguishable from dropping the work on the floor.
+
+    This docstring used to justify that flag by asserting the backlog had no
+    delete verb, so a junk node was permanent. That was FALSE: ``fno backlog
+    remove`` has always existed, and ``fno backlog reopen`` now reverses a
+    close. The claim was read by an agent, which repeated it to an operator as
+    the load-bearing reason for a ruling; another project kept 23 nodes it
+    believed un-file-able. Corrected here rather than deleted, because the
+    failure mode is worth naming: prose in a docstring is consulted as fact.
+
+    To CORRECT a carve-out rather than retire it, use ``fno carveout update``,
+    which preserves the id. Resolving and re-adding changes the id and loses
+    the content if the second step fails.
     """
     from fno.carveout.core import (
         consume_carveouts,

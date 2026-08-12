@@ -50,9 +50,9 @@ The [architecture/](architecture/) directory holds the design docs (one per subs
 - [distribution.md](distribution.md) - packaging and release
 - [deployment-guide.md](deployment-guide.md) - deployment notes
 
-## Providers and alternate runtimes
+## Harnesses and alternate runtimes
 
-- [providers/](providers/) - per-provider adapter notes (`gemini.md`, `codex.md`, `provider-adapters.md`)
+- [harnesses/](harnesses/) - per-harness adapter notes (`gemini.md`, `codex.md`, `harness-adapters.md`)
 - [SETUP-HERMES.md](SETUP-HERMES.md), [SETUP-OPENCLAW.md](SETUP-OPENCLAW.md) - alternate CLI runtimes
 
 ## Contributing

@@ -78,7 +78,7 @@ def _mk(**kw) -> AgentEntry:
 
 
 def test_is_revival_gate(monkeypatch) -> None:
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     # Dead supervisor: a --resume that matches the row's own uuid is a revival.
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
@@ -105,7 +105,7 @@ def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
     """AC1-HP: spawn --resume against the row's own exited name updates it in
     place - one row, fresh short_id, same uuid - instead of exiting 2."""
     from fno.agents.cli import agents_app
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
     _seed_row("rev-agent", "deadbeef", DEAD_UUID)
@@ -128,7 +128,7 @@ def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) ->
     """AC2-EDGE: a --resume uuid that is not the row's own is a collision, not a
     revival; the row is left untouched."""
     from fno.agents.cli import agents_app
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
     _seed_row("rev-agent", "deadbeef", DEAD_UUID)
@@ -148,7 +148,7 @@ def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) ->
 def test_spawn_same_name_no_resume_is_collision(workdir_claude, monkeypatch) -> None:
     """AC2-HP: a same-name spawn without --resume is the ordinary collision."""
     from fno.agents.cli import agents_app
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
     _seed_row("rev-agent", "deadbeef", DEAD_UUID)
@@ -170,7 +170,7 @@ def test_spawn_resume_refused_when_session_claim_held(
     import os as _os
 
     from fno.agents.cli import agents_app
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
@@ -218,7 +218,7 @@ def revive_ready(workdir_claude, monkeypatch, tmp_path):
     import subprocess
     import sys
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
     monkeypatch.setattr(claude_mod, "session_is_live", lambda sid: False)
@@ -237,8 +237,8 @@ def revive_ready(workdir_claude, monkeypatch, tmp_path):
 
 def _pin_supervisor(monkeypatch, pid: int | None) -> None:
     """Point ``locate_session`` at a supervisor with ``pid`` (None = sidecar miss)."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     def _locate(short_id: str):
         if pid is None:
@@ -316,8 +316,8 @@ def test_registry_failure_retries_the_pin_when_first_lookup_misses(
     """The sidecar race and a registry failure can coincide. The exit-12 path is
     the last chance to pin, so it retries - otherwise the orphan is 'guarded' by
     a claim pinned to this exiting process, which is no guard at all."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     supervisor_pid = revive_ready
     calls = {"n": 0}
@@ -350,7 +350,7 @@ def test_writer_claim_released_when_claude_never_ran(revive_ready, monkeypatch):
     """AC5-ERR: exit 127 means claude never executed, so no supervisor can exist
     and the claim must be freed - otherwise a missing binary would lock the
     session out of every later wake."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     _pin_supervisor(monkeypatch, revive_ready)
 
@@ -388,7 +388,7 @@ def test_writer_claim_kept_when_a_child_may_exist(
     fail-open double-writer window; keeping costs only a dead-pid claim that
     stale recovery reclaims.
     """
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     _pin_supervisor(monkeypatch, revive_ready)
 
@@ -412,7 +412,7 @@ def test_unknown_orphan_guard_survives_the_caller_dying(revive_ready, monkeypatc
     """The point of the TTL, proven the only way that counts: with the holder's
     pid dead, the claim must still refuse a competing writer. A pure PID-liveness
     claim would be STALE here and the next wake would reclaim it."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.claims import acquire_claim, claim_status
     from fno.claims.core import ClaimHeldByOther
     from fno.claims.io import global_claims_root
@@ -457,7 +457,7 @@ def test_claim_substrate_fault_fails_closed(revive_ready, monkeypatch):
     SessionWriterClaimError nor the OSError/RuntimeError wake_and_deliver
     catches. It must surface as exit 11 (writer-possibly-live) rather than
     propagate and abort `fno mail send` before its durable fallback runs."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.claims.io import ClaimCorrupted
 
     def _corrupt(**_kw):
@@ -472,7 +472,7 @@ def test_claim_substrate_fault_fails_closed(revive_ready, monkeypatch):
 def test_wake_and_deliver_degrades_on_claim_substrate_fault(revive_ready, monkeypatch):
     """The same fault, seen end to end: the wake reports a lane failure so the
     sender writes the durable fallback, instead of raising out of the command."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.claims.io import ClaimCorrupted
 
     def _corrupt(**_kw):
@@ -505,7 +505,7 @@ def test_wake_and_deliver_takes_no_outer_claim(revive_ready, monkeypatch):
     The outer/inner same-holder pair was the bug - the inner release dropped the
     outer claim, because same-holder re-acquire is idempotent, not refcounted."""
     calls: list[dict] = []
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     real_acquire = claude_mod.acquire_session_writer_claim
 

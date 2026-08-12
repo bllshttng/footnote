@@ -29,7 +29,7 @@ cli/src/fno/agents/
 ├── dispatch.py                  # + _gemini_create_path / _gemini_followup_path,
 │                                # + reconcile gemini branch, refactored stop/rm
 │                                # to use with_agent_lock_and_entry
-└── providers/
+└── harnesses/
     ├── base.py                  # + ReachabilityProbeError (lifted)
     ├── claude.py                # ClaudeReachabilityProbeError -> subclass alias
     ├── codex.py                 # SessionIndexReadError -> subclass alias
@@ -43,7 +43,7 @@ cli/tests/agents/
 ├── fixtures/gemini-json-sample.json     # committed real-gemini capture
 ├── fixtures/gemini-smoke-findings.md    # runtime-discovery resolution doc
 ├── fixtures/fake-gemini-hang.sh         # signal-handling test shim
-├── test_provider_base.py                # 19 lift + alias tests
+├── test_harness_base.py                # 19 lift + alias tests
 ├── test_with_agent_lock_and_entry.py    # 6 context-manager tests
 ├── test_reconcile_batched.py            # 6 batched-write tests
 ├── test_provider_gemini.py              # 26 provider unit tests
@@ -58,7 +58,7 @@ cli/tests/agents/
 
 ### 1. `ReachabilityProbeError` lift
 
-Previously, each provider defined its own tri-state probe error class (`ClaudeReachabilityProbeError` in `claude.py`, `SessionIndexReadError` in `codex.py`). Adding gemini would have meant a third class with the same shape. The lift moves the contract to `providers/base.py`:
+Previously, each provider defined its own tri-state probe error class (`ClaudeReachabilityProbeError` in `claude.py`, `SessionIndexReadError` in `codex.py`). On that trajectory, adding gemini meant a third class with the same shape. The lift moves the contract to `harnesses/base.py`:
 
 ```python
 class ReachabilityProbeError(RuntimeError):
@@ -109,12 +109,12 @@ Atomicity: SIGINT mid-loop or an OSError mid-write either commits ALL pending up
 
 ## The gemini provider
 
-`providers/gemini.py` is structurally a clone of `providers/codex.py` with three cleavages captured at runtime discovery:
+`harnesses/gemini.py` is structurally a clone of `harnesses/codex.py` with three cleavages captured at runtime discovery:
 
 ### Single-blob JSON parser
 
 ```python
-# providers/gemini.py
+# harnesses/gemini.py
 stdout_text = proc.stdout.read()
 session_id, reply = _parse_response(stdout_text)
 ```
@@ -176,7 +176,7 @@ The gemini integration was developed against gemini CLI 0.42.0 and the following
 
 Adding a fourth provider (e.g. `opencode`) requires zero `base.py` edits — the lifted `ReachabilityProbeError`, `with_agent_lock_and_entry`, and batched `reconcile_agents` already absorb a new provider's tri-state probe + lifecycle verbs. The `dispatch.py` routing extends by one elif clause.
 
-The deprecated alias removal is a separate follow-up. New code should `from fno.agents.providers.base import ReachabilityProbeError` rather than the legacy class names.
+The deprecated alias removal is a separate follow-up. New code imports `ReachabilityProbeError` from `fno.agents.harnesses.base` rather than using the legacy class names.
 
 ## See also
 

@@ -800,6 +800,190 @@ def _launch_agent_failures() -> dict[str, Any]:
     return {"applicable": True, "dead": dead}
 
 
+# --------------------------------------------------------------------------
+# Silent-switch legibility (x-8cd5 Wave 6). Fail-safe defaults compose to
+# inertness, and inertness is invisible because every component behaves as
+# designed: a disabled drain with missions queued looks identical to a clean
+# queue with nothing to do. The symmetric risk is a default-on/armed switch
+# silently taking an irreversible action (auto-merge). The rule, recorded in
+# both directions: any default-off switch that can silently produce inaction
+# owes a doctor line; any default-on switch that can silently take an
+# irreversible action owes one too. Advisory only, never changes the exit code.
+# --------------------------------------------------------------------------
+
+
+def _mission_active_count() -> int:
+    """Backlog epics carrying ``mission_active`` (the drain's input set).
+
+    Delegates to the canonical fail-safe reader so a torn graph reads as 0
+    rather than crashing the report. A hand-rolled json walk raised TypeError on
+    ``{"entries": null}`` because the null value iterated outside the try, which
+    broke this function's own ``never crashes`` promise."""
+    try:
+        from fno.active_backlog import _active_missions
+
+        return len(_active_missions())
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
+        return 0
+
+
+def _auto_merge_armed_manifests() -> int:
+    """Worktree manifests whose resolved ``auto_merge_approved`` is true.
+
+    Each is one run's standing merge authority; the count is the legibility
+    point (an armed manifest set against an operator who expects to review).
+    Scans BOTH worktree homes: the fno-managed base (``paths.worktrees_base()``)
+    and the harness-native ``<repo>/.claude/worktrees`` (the default policy's
+    location, which the fno base does not cover, so without it the count reads
+    0 on a default-config machine). Uses ``parse_target_state`` so a quoted
+    ``"true"`` coerces instead of string-matching to nothing. Fixed-depth globs
+    avoid descending into each worktree's own tree the way rglob would.
+    """
+    bases: list[Path] = []
+    try:
+        from fno import paths as _paths
+
+        bases.append(_paths.worktrees_base())
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
+        pass
+    try:
+        from fno import paths as _paths
+
+        repo = _paths.resolve_repo_root()
+        if repo:
+            bases.append(Path(repo) / ".claude" / "worktrees")
+    except Exception:  # noqa: BLE001 - resolve_repo_root may shell out to git
+        pass
+
+    try:
+        from fno.cost._register import parse_target_state
+    except Exception:
+        return 0
+
+    count = 0
+    seen: set[Path] = set()
+    for base in bases:
+        if not base.is_dir():
+            continue
+        # Two layouts live under these bases: <base>/<name>/.fno/target-state.md
+        # (harness-native) and <base>/<repo>/<name>/.fno/target-state.md
+        # (fno-managed). Fixed-depth globs skip each worktree's interior.
+        for pattern in ("*/.fno/target-state.md", "*/*/.fno/target-state.md"):
+            for mf in base.glob(pattern):
+                real = mf.resolve()
+                if real in seen:
+                    continue
+                seen.add(real)
+                try:
+                    if parse_target_state(str(mf)).get("auto_merge_approved") is True:
+                        count += 1
+                except (OSError, ValueError):
+                    continue
+    return count
+
+
+def _read_posture_stamp() -> Optional[dict[str, Any]]:
+    """Advisory provenance written by ``fno posture apply``; None if absent.
+
+    Doctor may DISPLAY this; config resolution must never read it, or the
+    applied posture becomes a resolve-time layer (the trap ``fno posture`` was
+    designed to avoid)."""
+    try:
+        from fno import paths as _paths
+
+        p = _paths.state_dir() / "posture.json"
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
+        return None
+
+
+def _silent_switch_report() -> dict[str, Any]:
+    """Both directions of the silent-switch rule.
+
+    Direction "inaction": a default-off switch silently producing nothing while
+    work waits (drain off + missions queued; think_spawn off). Direction
+    "irreversible": a default-on/armed switch that can merge a green PR with no
+    operator (auto_merge.enabled, dispatch.auto_merge, armed manifests). Each
+    finding names the switch, a count where one exists, and the exact command.
+    """
+    try:
+        from fno.config import load_settings
+
+        s = load_settings()
+    except Exception:  # noqa: BLE001 - a config that won't load is not doctor's alarm
+        s = None
+
+    def _leaf(block: Any, attr: str) -> Optional[bool]:
+        v = getattr(block, attr, None)
+        return bool(v) if isinstance(v, bool) else None
+
+    ab = _leaf(getattr(s, "active_backlog", None), "enabled")
+    ts = _leaf(getattr(s, "think_spawn", None), "enabled")
+    am = _leaf(getattr(s, "auto_merge", None), "enabled")
+    dam = _leaf(getattr(s, "dispatch", None), "auto_merge")
+
+    findings: list[dict[str, Any]] = []
+    missions = _mission_active_count()
+    # Direction 1: default-off -> silent inaction.
+    if ab is False and missions > 0:
+        findings.append(
+            {
+                "direction": "inaction",
+                "switch": "active_backlog.enabled",
+                "count": missions,
+                "count_label": "mission_active epic(s) queued",
+                "command": "fno config set active_backlog.enabled true",
+            }
+        )
+    if ts is False:
+        findings.append(
+            {
+                "direction": "inaction",
+                "switch": "think_spawn.enabled",
+                "command": "fno config set think_spawn.enabled true",
+            }
+        )
+    # Direction 2: armed -> silent irreversible action.
+    if am is True:
+        findings.append(
+            {
+                "direction": "irreversible",
+                "switch": "auto_merge.enabled",
+                "command": "fno config set auto_merge.enabled false",
+            }
+        )
+    if dam is True:
+        findings.append(
+            {
+                "direction": "irreversible",
+                "switch": "dispatch.auto_merge",
+                "command": "fno config set dispatch.auto_merge false",
+            }
+        )
+    # A manifest's per-run approval is inert while the kill-switch
+    # (auto_merge.enabled) is off: the sanctioned merge path checks that switch
+    # first, so a green PR cannot merge unattended no matter how many manifests
+    # carry auto_merge_approved. Counting them as an active irreversible risk in
+    # that state is a false alarm; the kill-switch-off inaction finding above
+    # already names that state. Only when the switch is ON do armed manifests
+    # become a live, silent irreversible action worth a doctor line.
+    armed = _auto_merge_armed_manifests()
+    if armed and am is True:
+        findings.append(
+            {
+                "direction": "irreversible",
+                "switch": "auto_merge_approved (worktree manifests)",
+                "count": armed,
+                "count_label": "manifest(s)",
+                "command": "fno config set auto_merge.enabled false",
+            }
+        )
+    return {"findings": findings, "posture": _read_posture_stamp()}
+
+
 def _bounded_command(argv: list[str]) -> Optional[tuple[int, str, str]]:
     try:
         proc = subprocess.Popen(
@@ -1011,7 +1195,28 @@ def _emit_human(
     out = (lambda m: typer.echo(m, err=True)) if err else typer.echo
     status = result["status"]
     if status == "fresh":
-        out("fno doctor: installed fno is up to date with source.")
+        # Naming WHICH source is load-bearing. The comparison is against
+        # `git rev-parse HEAD` of the RESOLVED source checkout, which is the
+        # canonical clone sitting on the default branch. Unmerged work in a
+        # feature worktree is invisible to it, so this verdict answers "am I
+        # behind the default branch" and never "does this binary carry the
+        # change I just wrote". Anyone editing fno itself reads the first as the
+        # second and then verifies their branch against a binary without it.
+        # The command named here must actually load the other checkout. `fno` is
+        # the Rust front door and forwards every non-mux verb to the ABSOLUTE
+        # installed fno-py (cli/pyproject.toml), so cd-ing into a worktree and
+        # typing `fno` runs the installed build again and the branch stays
+        # untested. Measured: one scoped call reported 196 inspected lines via
+        # `fno` inside the checkout against 0 via uv run. Advice that does not
+        # work is the same defect as a receipt that lies.
+        out(
+            "fno doctor: installed fno is up to date with source at "
+            f"{src or 'the resolved source checkout'} "
+            f"(rev {result.get('source_rev') or 'unknown'}). "
+            "Unmerged work in another branch or worktree is not included, and "
+            "`fno` forwards to this installed build from anywhere. To exercise "
+            "another checkout run: cd <checkout>/cli && uv run fno-py <verb>"
+        )
     elif status == "stale":
         # A missing-verb verdict can be stale with no resolved source (src is
         # None), so fall back to a readable label rather than printing "behind None".
@@ -1289,6 +1494,33 @@ def _emit_human(
             "(it is installed but failing); check its log under ~/.fno/ and re-run "
             "`fno update` if the entry point moved."
         )
+
+    # Silent-switch legibility (x-8cd5 Wave 6): the applied posture, then both
+    # directions of the rule. Advisory; never changes the exit code.
+    ss = result.get("silent_switches") or {}
+    stamp = ss.get("posture") or {}
+    if stamp.get("posture"):
+        out(
+            f"fno doctor: applied posture: {stamp.get('posture')} "
+            f"(applied {stamp.get('applied_at', '?')}, scope {stamp.get('scope', '?')})."
+        )
+    for f in ss.get("findings") or []:
+        sw = f.get("switch", "")
+        cmd = f.get("command", "")
+        count = f.get("count")
+        label = f.get("count_label", "")
+        if f.get("direction") == "inaction":
+            clause = f" but {count} {label} waiting" if count else " (idle)"
+            out(
+                f"fno doctor: {sw} is OFF{clause}; nothing is happening. "
+                f"Run `{cmd}` to enable."
+            )
+        else:  # irreversible
+            clause = f" ({count} {label})" if count else ""
+            out(
+                f"fno doctor: {sw} is ARMED{clause}; a green PR can merge "
+                f"unattended. Run `{cmd}` to disarm."
+            )
 
     if surf.get("codex_hooks_dual"):
         out(
@@ -2371,6 +2603,11 @@ def doctor_command(
     result["groom"] = _groom_health()
     result["post_merge_sync"] = _post_merge_sync_health()
     result["launch_agents"] = _launch_agent_failures()
+
+    # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
+    # silently producing inaction + default-on/armed switches silently merging.
+    # Never changes status/exit.
+    result["silent_switches"] = _silent_switch_report()
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

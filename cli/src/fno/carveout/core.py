@@ -140,6 +140,37 @@ def truncate_description(text: str, cap: int = DESCRIPTION_CAP) -> Tuple[str, bo
     return text[:cap] + marker, True
 
 
+def _rewrite_jsonl(path: Path, lines: "list[str]") -> None:
+    """Replace the ledger's contents atomically. Raises OSError on failure.
+
+    A plain ``write_text`` truncates in place, so a kill or an ENOSPC between
+    truncate and flush leaves the ledger empty or half-written - every carve-out
+    lost, not just the row being changed. Both rewriting callers hold the mkdir
+    mutex, which serializes writers but does nothing about a torn write.
+
+    Same mkstemp + ``os.replace`` shape ``graph.store._write_json`` uses, and
+    the temp file is created in the ledger's own directory so the replace is a
+    same-filesystem rename rather than a copy.
+    """
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(("\n".join(lines) + "\n") if lines else "")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _append_jsonl(path: Path, line: str, lock_timeout_seconds: int = 30) -> None:
     """Append one line under a mkdir mutex (mirrors events.append_event).
 
@@ -223,6 +254,127 @@ def add_carveout(
         raise CarveoutError(str(exc)) from exc
 
     return cv, unscoped
+
+
+class CarveoutNotFound(CarveoutError):
+    """Raised when the id to update is not on the ledger.
+
+    Its own type because the CLI must NOT fall back to creating the row. A
+    create-on-miss would resurrect a carve-out ``/pr merged`` already consumed,
+    under a later PR's number - the exact re-filing hazard ``consume_carveouts``
+    exists to prevent.
+    """
+
+
+def update_carveout(
+    root: Path,
+    cv_id: str,
+    *,
+    description: Optional[str] = None,
+    kind: Optional[str] = None,
+    need: Optional[str] = None,
+    priority: Optional[str] = None,
+    scope: Optional[str] = None,
+    cap: int = DESCRIPTION_CAP,
+) -> "dict[str, Any]":
+    """Edit one carve-out IN PLACE, preserving its identity. Returns the new record.
+
+    ``id``, ``ts`` and ``session_id`` are never touched. That is the whole point
+    of the verb: correcting a carve-out used to mean ``resolve`` then ``add``,
+    which minted a new id, so every id already quoted in a PR body or a mail
+    became a dead pointer. It was also LOSSY - the two steps are two writes, and
+    a failure between them left the ledger with neither row. This does one
+    locked rewrite, so the row either changes or does not.
+
+    Only the fields passed are replaced; ``None`` means "leave alone", which is
+    why an empty description has to be rejected at the CLI boundary rather than
+    here (it would be indistinguishable from an omitted one). A new description
+    is re-truncated and ``truncated`` recomputed, matching :func:`add_carveout`.
+
+    Unlike :func:`consume_carveouts`, this is NOT best-effort. That function can
+    return 0 for "already gone" and for "the ledger is unwritable" because both
+    leave the caller's invariant intact. Here they differ: an absent id means
+    the edit cannot apply, an unwritable ledger means the edit did not apply,
+    and reporting a failed write as a clean no-op would tell the operator their
+    correction landed when the old wording is still on disk. So it raises
+    :class:`CarveoutNotFound` for the first and :class:`CarveoutError` for the
+    second.
+
+    Preserves a malformed neighbouring line verbatim, the same way
+    ``consume_carveouts`` does: one bad row must not cost the others.
+    """
+    if kind is not None and kind not in VALID_KINDS:
+        raise CarveoutError(f"invalid kind {kind!r}; must be one of {VALID_KINDS}")
+
+    from fno.paths import project_log
+
+    path = project_log(CARVEOUTS_NAME, project_root=root)
+    if not path.exists():
+        raise CarveoutNotFound(f"no carve-out ledger at {path}")
+
+    lock_dir = path.parent / (path.name + ".lock.d")
+    deadline = _time.monotonic() + 30
+    while True:
+        try:
+            lock_dir.mkdir()
+            break
+        except FileExistsError:
+            if _time.monotonic() >= deadline:
+                raise CarveoutError(f"carveouts.jsonl lock timeout: {lock_dir}")
+            _time.sleep(0.05)
+        except OSError as exc:
+            raise CarveoutError(str(exc)) from exc
+    try:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CarveoutError(f"cannot read carve-out ledger {path}: {exc}") from exc
+
+        updated: "Optional[dict[str, Any]]" = None
+        kept: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rec = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                kept.append(stripped)  # keep malformed; don't lose data
+                continue
+            if not isinstance(rec, dict) or str(rec.get("id", "")) != cv_id:
+                kept.append(stripped)
+                continue
+            if description is not None:
+                rec["description"], rec["truncated"] = truncate_description(
+                    description, cap
+                )
+            for field, value in (
+                ("kind", kind),
+                ("need", need),
+                ("priority", priority),
+                ("scope", scope),
+            ):
+                if value is not None:
+                    rec[field] = value
+            updated = rec
+            kept.append(json.dumps(rec, separators=(",", ":")))
+
+        if updated is None:
+            raise CarveoutNotFound(
+                f"{cv_id} is not on the ledger (already resolved, or recorded "
+                f"under a different project root)"
+            )
+
+        try:
+            _rewrite_jsonl(path, kept)
+        except OSError as exc:
+            raise CarveoutError(f"cannot write carve-out ledger {path}: {exc}") from exc
+        return updated
+    finally:
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
 
 
 def read_carveouts(
@@ -322,9 +474,9 @@ def consume_carveouts(repo_root: Path, ids: "set[str] | list[str]") -> int:
                 removed += 1
                 continue
             kept.append(stripped)
-        path.write_text(
-            ("\n".join(kept) + "\n") if kept else "", encoding="utf-8"
-        )
+        # Atomic for the same reason the update path is: an in-place truncate
+        # that dies mid-write loses every carve-out, not just the consumed ones.
+        _rewrite_jsonl(path, kept)
         return removed
     except OSError:
         return 0

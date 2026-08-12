@@ -100,7 +100,7 @@ case "$DRIVER" in
     # Build argv as two branches to avoid bash 3.2's set -u empty-array
     # bug (same workaround as driver-hermes.sh / driver-openclaw.sh).
     # Hermes preferred path inside a session is the delegate_task tool;
-    # from shell we spawn a fresh hermes process per provider-adapters.md.
+    # from shell we spawn a fresh hermes process per harness-adapters.md.
     if [[ -n "$MODEL" ]]; then
       "$cli" -p "$PROMPT" --model "$MODEL"
     else
@@ -119,10 +119,10 @@ case "$DRIVER" in
     fi
     ;;
   gemini|codex)
-    # Existing adapter patterns live in docs/providers/provider-adapters.md.
+    # Existing adapter patterns live in docs/harnesses/harness-adapters.md.
     # This helper is not the recommended path for these drivers; they have
     # their own in-session spawn primitives.
-    echo "ERROR: driver '$DRIVER' uses an in-session spawn tool - see provider-adapters.md" >&2
+    echo "ERROR: driver '$DRIVER' uses an in-session spawn tool - see harness-adapters.md" >&2
     exit 2
     ;;
   *)

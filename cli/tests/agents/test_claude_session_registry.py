@@ -1,4 +1,4 @@
-"""Tests for fno.agents.providers._claude_session_registry.
+"""Tests for fno.agents.harnesses._claude_session_registry.
 
 US2 Task 2.2: helpers that read claude 2.1.143's session registry and
 jobs directory. All paths are derived from ``Path.home()`` so the tests
@@ -68,7 +68,7 @@ def _write_timeline_jsonl(home: Path, short_id: str, rows: list[dict]) -> Path:
 
 def test_locate_session_returns_locator_when_jobid_matches(tmp_path, monkeypatch):
     """jobId match + kind=bg + non-null socket -> SessionLocator returned."""
-    from fno.agents.providers._claude_session_registry import locate_session
+    from fno.agents.harnesses._claude_session_registry import locate_session
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_session_file(home, pid=12345, jobId="7c5dcf5d", kind="bg",
@@ -83,7 +83,7 @@ def test_locate_session_returns_locator_when_jobid_matches(tmp_path, monkeypatch
 
 def test_locate_session_returns_none_when_no_match(tmp_path, monkeypatch):
     """No session file with that jobId -> None (orphan)."""
-    from fno.agents.providers._claude_session_registry import locate_session
+    from fno.agents.harnesses._claude_session_registry import locate_session
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_session_file(home, pid=1, jobId="aaaaaaaa")
@@ -94,7 +94,7 @@ def test_locate_session_returns_none_when_no_match(tmp_path, monkeypatch):
 
 def test_locate_session_returns_none_when_socket_null(tmp_path, monkeypatch):
     """Match exists but messagingSocketPath=null (suspended) -> None."""
-    from fno.agents.providers._claude_session_registry import locate_session
+    from fno.agents.harnesses._claude_session_registry import locate_session
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_session_file(home, pid=99, jobId="abc12345",
@@ -105,7 +105,7 @@ def test_locate_session_returns_none_when_socket_null(tmp_path, monkeypatch):
 
 def test_locate_session_skips_non_bg_kind(tmp_path, monkeypatch):
     """Interactive session with matching jobId is skipped (kind != "bg")."""
-    from fno.agents.providers._claude_session_registry import locate_session
+    from fno.agents.harnesses._claude_session_registry import locate_session
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_session_file(home, pid=1, jobId="match01a", kind="interactive")
@@ -115,7 +115,7 @@ def test_locate_session_skips_non_bg_kind(tmp_path, monkeypatch):
 
 def test_locate_session_ignores_malformed_session_files(tmp_path, monkeypatch):
     """A corrupt JSON file in sessions/ is skipped, not raised."""
-    from fno.agents.providers._claude_session_registry import locate_session
+    from fno.agents.harnesses._claude_session_registry import locate_session
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     (home / ".claude" / "sessions" / "junk.json").write_text(
@@ -130,7 +130,7 @@ def test_locate_session_ignores_malformed_session_files(tmp_path, monkeypatch):
 
 def test_session_locator_carries_session_id_and_cwd(tmp_path, monkeypatch):
     """SessionLocator preserves sessionId and cwd from the session file."""
-    from fno.agents.providers._claude_session_registry import locate_session
+    from fno.agents.harnesses._claude_session_registry import locate_session
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_session_file(
@@ -150,7 +150,7 @@ def test_session_locator_carries_session_id_and_cwd(tmp_path, monkeypatch):
 
 def test_read_state_json_returns_parsed_snapshot(tmp_path, monkeypatch):
     """state.json parses into a StateSnapshot with the documented fields."""
-    from fno.agents.providers._claude_session_registry import read_state_json
+    from fno.agents.harnesses._claude_session_registry import read_state_json
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "abc12345"
@@ -173,7 +173,7 @@ def test_read_state_json_returns_parsed_snapshot(tmp_path, monkeypatch):
 
 def test_read_state_json_retries_once_on_json_decode_error(tmp_path, monkeypatch):
     """Atomic-rename window: read_state_json retries once on JSONDecodeError."""
-    from fno.agents.providers import _claude_session_registry as mod
+    from fno.agents.harnesses import _claude_session_registry as mod
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "race0001"
@@ -207,7 +207,7 @@ def test_read_state_json_retries_once_on_json_decode_error(tmp_path, monkeypatch
 
 def test_read_state_json_raises_after_second_failure(tmp_path, monkeypatch):
     """If retry also fails, the underlying JSONDecodeError surfaces."""
-    from fno.agents.providers import _claude_session_registry as mod
+    from fno.agents.harnesses import _claude_session_registry as mod
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "broken01"
@@ -222,7 +222,7 @@ def test_read_state_json_raises_after_second_failure(tmp_path, monkeypatch):
 
 def test_read_state_json_handles_missing_output_result(tmp_path, monkeypatch):
     """output.result may be absent (e.g., needs-input); snap.output_result is None."""
-    from fno.agents.providers._claude_session_registry import read_state_json
+    from fno.agents.harnesses._claude_session_registry import read_state_json
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "noresult"
@@ -243,7 +243,7 @@ def test_read_state_json_handles_missing_output_result(tmp_path, monkeypatch):
 
 def test_read_timeline_tail_returns_empty_when_offset_is_eof(tmp_path, monkeypatch):
     """If offset equals the current file size, tail is empty."""
-    from fno.agents.providers._claude_session_registry import read_timeline_tail
+    from fno.agents.harnesses._claude_session_registry import read_timeline_tail
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "empty001"
@@ -257,7 +257,7 @@ def test_read_timeline_tail_returns_empty_when_offset_is_eof(tmp_path, monkeypat
 
 def test_read_timeline_tail_concatenates_terminal_state_text(tmp_path, monkeypatch):
     """Only lines with state in {done, completed, failed, needs-input} contribute text."""
-    from fno.agents.providers._claude_session_registry import read_timeline_tail
+    from fno.agents.harnesses._claude_session_registry import read_timeline_tail
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "mixed001"
@@ -277,7 +277,7 @@ def test_read_timeline_tail_concatenates_terminal_state_text(tmp_path, monkeypat
 
 def test_read_timeline_tail_starts_at_offset(tmp_path, monkeypatch):
     """Tail reads only bytes >= offset; earlier rows are excluded."""
-    from fno.agents.providers._claude_session_registry import read_timeline_tail
+    from fno.agents.harnesses._claude_session_registry import read_timeline_tail
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "offset01"
@@ -300,7 +300,7 @@ def test_read_timeline_tail_starts_at_offset(tmp_path, monkeypatch):
 
 def test_read_timeline_tail_handles_missing_file(tmp_path, monkeypatch):
     """timeline.jsonl missing -> empty string (job hasn't emitted yet)."""
-    from fno.agents.providers._claude_session_registry import read_timeline_tail
+    from fno.agents.harnesses._claude_session_registry import read_timeline_tail
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "gone0001"
@@ -311,7 +311,7 @@ def test_read_timeline_tail_handles_missing_file(tmp_path, monkeypatch):
 
 def test_read_timeline_tail_skips_malformed_lines(tmp_path, monkeypatch):
     """Garbage JSONL lines are skipped, not raised."""
-    from fno.agents.providers._claude_session_registry import read_timeline_tail
+    from fno.agents.harnesses._claude_session_registry import read_timeline_tail
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "garbage1"
@@ -335,7 +335,7 @@ def test_read_timeline_tail_skips_malformed_lines(tmp_path, monkeypatch):
 
 def test_paths_resolved_via_path_home(tmp_path, monkeypatch):
     """All session/jobs paths must derive from Path.home() so HOME is the only knob."""
-    from fno.agents.providers._claude_session_registry import (
+    from fno.agents.harnesses._claude_session_registry import (
         _sessions_dir,
         _jobs_dir_for,
     )
@@ -355,7 +355,7 @@ def test_resolve_session_uuid_returns_uuid_for_idle_socket_null(tmp_path, monkey
     UUID. This is the whole point: locate_session SKIPS socket-null sessions,
     but an idle session is exactly the stream-json resume target, so the
     resolver must read sessionId regardless of socket state."""
-    from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     full = "019e7157-4236-7bb1-b274-ebbac6040ace"
@@ -369,7 +369,7 @@ def test_resolve_session_uuid_returns_uuid_for_idle_socket_null(tmp_path, monkey
 
 def test_resolve_session_uuid_returns_uuid_for_live_socket(tmp_path, monkeypatch):
     """A live (non-null socket) bg session resolves its UUID too."""
-    from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     full = "019e7157-4236-7bb1-b274-ebbac6040ace"
@@ -385,7 +385,7 @@ def test_resolve_session_uuid_prefers_live_socket_supervisor(tmp_path, monkeypat
     """After a supervisor auto-update respawn, the dead pid's file (socket-null)
     and the live pid's file can share a jobId. The resolver prefers the live
     supervisor's sessionId but still resolves if only the stale one remains."""
-    from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     stale = "00000000-0000-0000-0000-000000000000"
@@ -404,7 +404,7 @@ def test_resolve_session_uuid_prefers_live_socket_supervisor(tmp_path, monkeypat
 
 def test_resolve_session_uuid_returns_none_when_not_found(tmp_path, monkeypatch):
     """No session file with a matching jobId -> None (never ran / typo)."""
-    from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
     _claude_home_setup(tmp_path, monkeypatch)
     assert resolve_session_uuid("ffffffff") is None
@@ -413,7 +413,7 @@ def test_resolve_session_uuid_returns_none_when_not_found(tmp_path, monkeypatch)
 def test_resolve_session_uuid_ignores_non_bg_kind(tmp_path, monkeypatch):
     """An interactive (kind != bg) session with the matching jobId is ignored:
     the stream-json lane only resumes bg supervisor transcripts."""
-    from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_session_file(
@@ -425,7 +425,7 @@ def test_resolve_session_uuid_ignores_non_bg_kind(tmp_path, monkeypatch):
 
 def test_resolve_session_uuid_none_when_sessions_dir_absent(tmp_path, monkeypatch):
     """No ~/.claude/sessions dir (claude never ran) -> None, not a crash."""
-    from fno.agents.providers._claude_session_registry import resolve_session_uuid
+    from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
     monkeypatch.setenv("HOME", str(tmp_path))  # no .claude tree created
     assert resolve_session_uuid("7c5dcf5d") is None
@@ -447,7 +447,7 @@ def _write_roster(home: Path, workers: dict) -> Path:
 
 
 def test_roster_live_true_when_short_id_present(tmp_path, monkeypatch):
-    from fno.agents.providers._claude_session_registry import roster_live
+    from fno.agents.harnesses._claude_session_registry import roster_live
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_roster(home, {"w1": {"sessionId": _ROSTER_UUID, "pid": 5}})
@@ -455,7 +455,7 @@ def test_roster_live_true_when_short_id_present(tmp_path, monkeypatch):
 
 
 def test_roster_live_false_when_short_id_absent(tmp_path, monkeypatch):
-    from fno.agents.providers._claude_session_registry import roster_live
+    from fno.agents.harnesses._claude_session_registry import roster_live
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     _write_roster(home, {"w1": {"sessionId": "deadbeef-1111-2222-3333-444455556666"}})
@@ -463,7 +463,7 @@ def test_roster_live_false_when_short_id_absent(tmp_path, monkeypatch):
 
 
 def test_roster_live_false_when_roster_missing(tmp_path, monkeypatch):
-    from fno.agents.providers._claude_session_registry import roster_live
+    from fno.agents.harnesses._claude_session_registry import roster_live
 
     _claude_home_setup(tmp_path, monkeypatch)  # no roster.json written
     assert roster_live("abc12345") is False
@@ -471,7 +471,7 @@ def test_roster_live_false_when_roster_missing(tmp_path, monkeypatch):
 
 def test_roster_live_lenient_on_torn_roster(tmp_path, monkeypatch):
     """A torn/garbage roster degrades to False, never raises (procStart drift)."""
-    from fno.agents.providers._claude_session_registry import roster_live
+    from fno.agents.harnesses._claude_session_registry import roster_live
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     daemon = home / ".claude" / "daemon"
@@ -481,7 +481,7 @@ def test_roster_live_lenient_on_torn_roster(tmp_path, monkeypatch):
 
 
 def test_roster_live_honors_daemon_dir_env(tmp_path, monkeypatch):
-    from fno.agents.providers._claude_session_registry import roster_live
+    from fno.agents.harnesses._claude_session_registry import roster_live
 
     _claude_home_setup(tmp_path, monkeypatch)
     alt = tmp_path / "altdaemon"
@@ -500,7 +500,7 @@ def test_read_state_json_rejects_non_object_json(tmp_path, monkeypatch):
     (gemini review on PR #293)."""
     import json as _json
 
-    from fno.agents.providers._claude_session_registry import read_state_json
+    from fno.agents.harnesses._claude_session_registry import read_state_json
 
     home = _claude_home_setup(tmp_path, monkeypatch)
     jobs_dir = home / ".claude" / "jobs" / "abc12345"

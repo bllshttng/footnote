@@ -1,6 +1,6 @@
 """Real-subprocess AC-FR tests for the codex provider (Wave 2.2).
 
-Spawns providers.codex.create() / resume() against a controlled fake-codex
+Spawns harnesses.codex.create() / resume() against a controlled fake-codex
 shim that hangs forever. Verifies SIGINT and timeout signaling actually
 deliver and clean up — monkeypatched Popen cannot validate signal
 delivery (US3's lesson: mocked tests passed but the real-subprocess
@@ -30,7 +30,7 @@ FIXTURE_PATH = (
 @pytest.fixture
 def fake_codex_on_path(tmp_path, monkeypatch):
     """Install a ``codex`` symlink in tmp_path/bin pointing at the shim,
-    then prepend the dir to PATH so providers.codex picks it up.
+    then prepend the dir to PATH so harnesses.codex picks it up.
 
     Mode is selected via ``FAKE_CODEX_MODE`` env var (default 'create').
     Honored values: 'create', 'resume', 'complete-then-hang'. The
@@ -83,11 +83,11 @@ def test_create_timeout_sigterms_codex_and_raises_timeout_error(
     """AC2-FR analog: codex create wall-clock timeout → SIGTERM → exit 15.
 
     Uses a 1-second timeout against the fake shim that sleeps 60 seconds.
-    The watchdog inside providers/codex.py must SIGTERM the child and
+    The watchdog inside harnesses/codex.py must SIGTERM the child and
     raise CodexTimeoutError, which the dispatcher maps to exit 15.
     """
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.codex import CodexTimeoutError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexTimeoutError
 
     start = time.monotonic()
     with pytest.raises(CodexTimeoutError) as exc_info:
@@ -112,8 +112,8 @@ def test_create_timeout_sigterms_codex_and_raises_timeout_error(
 )
 def test_resume_timeout_sigterms_codex(tmp_path, fake_codex_on_path):
     """AC2-FR end-to-end: resume timeout SIGTERMs codex, raises CodexTimeoutError."""
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.codex import CodexTimeoutError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexTimeoutError
 
     start = time.monotonic()
     with pytest.raises(CodexTimeoutError) as exc_info:
@@ -142,14 +142,14 @@ def test_wait_with_grace_killpg_terminates_subshells_after_turn_completed(
     so subshells get reaped if codex emits turn.completed but never exits.
 
     The shim emits a full happy-path JSONL stream (thread.started,
-    agent_message, turn.completed) then sleeps forever. providers.codex
+    agent_message, turn.completed) then sleeps forever. harnesses.codex
     breaks the read loop on turn.completed and calls _wait_with_grace
     with a default 5s grace. Without process-group cleanup, the shim's
     sleep would orphan and the test would hang. With os.killpg, the
     function escalates SIGTERM->SIGKILL within ~12s.
     """
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.codex import CodexResult, CodexInvocationError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexResult, CodexInvocationError
 
     monkeypatch.setenv("FAKE_CODEX_MODE", "complete-then-hang")
     monkeypatch.setenv("FAKE_HANG_SECS", "60")
@@ -203,10 +203,10 @@ def test_create_sigint_mid_stream_propagates_and_releases_child(
 ):
     """AC1-FR: SIGINT during create propagates to codex, no zombie left behind.
 
-    Spawns a subprocess that calls providers.codex.create() against the
+    Spawns a subprocess that calls harnesses.codex.create() against the
     hanging shim, then SIGINTs the parent after a short delay. Asserts:
       - the parent exits non-zero (KeyboardInterrupt re-raises out of
-        providers.codex._run_codex)
+        harnesses.codex._run_codex)
       - the codex child process is no longer running
     """
     # Drive the test via a child Python invocation so SIGINT delivery
@@ -217,7 +217,7 @@ def test_create_sigint_mid_stream_propagates_and_releases_child(
         f"""
 import os, signal, sys
 from pathlib import Path
-from fno.agents.providers import codex as codex_mod
+from fno.agents.harnesses import codex as codex_mod
 
 try:
     codex_mod.create(

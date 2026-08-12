@@ -1,7 +1,7 @@
 //! Cross-language byte-parity harness (ab-cc926b4e, W4).
 //!
 //! Pins the Rust claude-ask port against the **real** Python implementation
-//! (`fno.agents.providers.claude`), not a reimplementation. For a table
+//! (`fno.agents.harnesses.claude`), not a reimplementation. For a table
 //! of inputs it runs the genuine Python `_build_envelope` / `parse_short_id`
 //! and asserts the Rust output is byte-identical. If `_build_envelope` ever
 //! changes in Python, this test catches the drift.
@@ -21,7 +21,7 @@ fn pythonpath() -> PathBuf {
 fn python_available() -> bool {
     let probe = Command::new("python3")
         .arg("-c")
-        .arg("import fno.agents.providers.claude")
+        .arg("import fno.agents.harnesses.claude")
         .env("PYTHONPATH", pythonpath())
         .output();
     matches!(probe, Ok(o) if o.status.success())
@@ -32,7 +32,7 @@ fn python_available() -> bool {
 fn py_envelope(message: &str, from_name: &str) -> Vec<u8> {
     let code = r#"
 import os, sys
-from fno.agents.providers.claude import _build_envelope
+from fno.agents.harnesses.claude import _build_envelope
 sys.stdout.buffer.write(_build_envelope(os.environ["MSG"], os.environ["FROM"]))
 "#;
     let out = Command::new("python3")
@@ -56,7 +56,7 @@ fn py_parse_short_id(stdout_text: &str) -> Result<String, ()> {
     use std::io::Write;
     let code = r#"
 import sys
-from fno.agents.providers.claude import parse_short_id, ProviderParseError
+from fno.agents.harnesses.claude import parse_short_id, ProviderParseError
 data = sys.stdin.read()
 try:
     sys.stdout.write("OK " + parse_short_id(data))
@@ -125,7 +125,7 @@ fn py_output_result(jobs_dir: &Path) -> String {
     let code = r#"
 import os, sys
 from pathlib import Path
-from fno.agents.providers._claude_session_registry import read_state_json
+from fno.agents.harnesses._claude_session_registry import read_state_json
 snap = read_state_json(Path(os.environ["JOBS"]))
 sys.stdout.write("NONE" if snap.output_result is None else "SOME:" + snap.output_result)
 "#;
@@ -149,7 +149,7 @@ fn py_timeline_tail(jobs_dir: &Path, offset: u64) -> String {
     let code = r#"
 import os, sys
 from pathlib import Path
-from fno.agents.providers._claude_session_registry import read_timeline_tail
+from fno.agents.harnesses._claude_session_registry import read_timeline_tail
 sys.stdout.write(read_timeline_tail(Path(os.environ["JOBS"]), int(os.environ["OFF"])))
 "#;
     let out = Command::new("python3")

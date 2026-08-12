@@ -66,7 +66,7 @@ _ENV_PRESENCE = "FNO_THINK_SPAWN_PRESENCE"
 # Otherwise read from config.think_spawn.attended (spawn|offer, default offer).
 _ENV_ATTENDED = "FNO_THINK_SPAWN_ATTENDED"
 # Explicit headless markers. A --bg worker may set FNO_BG, but the claude
-# spawn path (providers/claude.py) injects FNO_AGENT_SELF into EVERY spawned
+# spawn path (harnesses/claude.py) injects FNO_AGENT_SELF into EVERY spawned
 # worker and does NOT set FNO_BG - so a bg worker filing an idea before its
 # target-state manifest exists would otherwise misclassify as attended (codex
 # PR #9). FNO_AGENT_SELF is the reliable "I am a spawned agent, not an operator

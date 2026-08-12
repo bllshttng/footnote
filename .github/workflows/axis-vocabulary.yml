@@ -1,8 +1,10 @@
 name: axis-vocabulary
 
 # check-axis-vocabulary.sh enforces the four-axis vocabulary
-# (harness / provider / model / effort / account): no identifier, dict/JSON key,
-# or env var named for one axis may hold a literal from another. The definitions
+# (harness / provider / model / effort / account) in two independent scans: no
+# identifier, dict/JSON key, or env var named for one axis may hold a literal
+# from another, and no DIRECTORY named for one axis may hold another axis's
+# implementation. The definitions
 # live in docs/architecture/four-axis-vocabulary.md. This workflow runs on EVERY
 # push and pull request with no `paths:` filter on purpose: the guard scans
 # Python, Rust, shell, and markdown, so a path filter would itself be the
