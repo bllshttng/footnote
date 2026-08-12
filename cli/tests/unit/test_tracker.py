@@ -128,6 +128,19 @@ def test_sidecar_path_encodes_separators(monkeypatch, tmp_path):
     assert sidecar_path("owner/repo#123").parent == tmp_path / "sidecar"
 
 
+def test_sidecar_rejects_tracker_owned_field():
+    # The static partition gate checks declared field names. extra="forbid" is
+    # the runtime backstop: a tracker-owned field (title, state, priority) must
+    # fail at construction, not persist a forbidden second copy. A positive
+    # assertion that the rejection fires, not an absence.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Sidecar(id="ab-deadbeef", title="leaked tracker field")
+    with pytest.raises(ValidationError):
+        Sidecar(id="ab-deadbeef", priority="p1")
+
+
 # -- list_open (the enumeration `backlog next` ranks) --
 
 

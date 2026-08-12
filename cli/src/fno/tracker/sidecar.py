@@ -40,7 +40,11 @@ class Sidecar(BaseModel):
     brand-new item is just ``Sidecar(id=...)``.
     """
 
-    model_config = ConfigDict(extra="allow")
+    # extra="forbid" closes the runtime hole the static partition gate cannot
+    # see: a Sidecar constructed or loaded with a tracker-owned field (title,
+    # state, priority, ...) must fail loudly here, not persist a forbidden second
+    # copy while check-tracker-partition.sh stays green on declared names alone.
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     # The repository this work happens in. No tracker concept; multi-repo

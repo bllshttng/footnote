@@ -81,9 +81,12 @@ class GitHubIssuesTracker:
             # No repo scope configured: cannot enumerate. Callers fall back to
             # the default backend's list_open for dispatch selection.
             return []
+        # gh caps a single listing at 1000 rows. A repo with more than 1000
+        # open issues is not fully enumerated here, which ships degraded like
+        # parent and blocked_by rather than guess at pagination across forks.
         rc, out, err = self._gh(
             ["issue", "list", "-R", self._default_repo, "--state", "open",
-             "--json", "number,title,state", "--limit", "100"]
+             "--json", "number,title,state", "--limit", "1000"]
         )
         if rc != 0:
             raise TrackerError(
