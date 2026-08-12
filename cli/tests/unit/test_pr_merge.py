@@ -1619,6 +1619,35 @@ def _fid_plan_path(pr, *a, **k):
     return "/x/plan.md"
 
 
+def test_plan_path_for_pr_is_scoped_to_this_repo(monkeypatch):
+    """The ledger is global and PR numbers are per-repo, so a bare number can
+    match a foreign repo's row. _plan_path_for_pr scopes by the row's pr_url so
+    the merge gate never evaluates a foreign plan."""
+    import fno.scoreboard.fold as fold
+
+    rows = [
+        {"pr_number": 42, "pr_url": "https://github.com/other/repo/pull/42",
+         "plan_path": "/foreign/plan.md"},
+        {"pr_number": 42, "pr_url": "https://github.com/bllshttng/footnote/pull/42",
+         "plan_path": "/local/plan.md"},
+    ]
+    monkeypatch.setattr(fold, "load_ledger_rows", lambda *a, **k: rows)
+    # Without the repo scope the foreign row (first) would win.
+    assert _merge._plan_path_for_pr(42, repo="bllshttng/footnote") == "/local/plan.md"
+    assert _merge._plan_path_for_pr(42, repo="other/repo") == "/foreign/plan.md"
+
+
+def test_plan_path_for_pr_considers_a_row_with_no_pr_url(monkeypatch):
+    """A row missing pr_url is not silently dropped by the repo filter."""
+    import fno.scoreboard.fold as fold
+
+    monkeypatch.setattr(
+        fold, "load_ledger_rows",
+        lambda *a, **k: [{"pr_number": 42, "pr_url": None, "plan_path": "/p.md"}],
+    )
+    assert _merge._plan_path_for_pr(42, repo="bllshttng/footnote") == "/p.md"
+
+
 def test_fidelity_guard_blocks_an_uncovered_shortfall(enabled, monkeypatch, capsys, tmp_path):
     """AC5: an unjoined planned row with no covering carveout refuses the merge."""
     import fno.plan.fidelity as fid
