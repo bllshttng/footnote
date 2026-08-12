@@ -312,7 +312,10 @@ class LazyTypeGroup(typer.core.TyperGroup):
         # - a guard on one of two reachable paths.
         from fno.tombstones import refuse, tombstone_for
 
-        if tombstone_for(cmd_name) is not None:
+        # allow_suffix=False: the root knows its children are top-level, so a
+        # bare `fno inbox` must not match the deeper `backlog inbox` key and
+        # claim a removal that has nothing to do with the name typed.
+        if tombstone_for(cmd_name, allow_suffix=False) is not None:
             raise refuse(cmd_name)
         return None
 

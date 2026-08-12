@@ -66,6 +66,24 @@ def test_removed_inbox_spelling_names_its_replacement() -> None:
     assert "was removed" not in typo.output
 
 
+def test_a_deep_tombstone_does_not_claim_the_bare_top_level_name() -> None:
+    """`fno inbox` must not answer for `fno backlog inbox`.
+
+    The tombstone lookup matches on suffix so a subgroup that cannot see its
+    own path still teaches. At the ROOT the full path IS known, so suffix
+    matching there let the `backlog inbox` entry claim a bare `fno inbox` -
+    a different removal entirely (`fno mail`'s retired inbox namespace), and
+    a confidently wrong answer to a name nobody removed.
+    """
+    from fno.cli import app
+
+    res = runner.invoke(app, ["inbox", "unread"])
+    assert res.exit_code != 0
+    combined = res.stdout + (res.stderr or "")
+    assert "backlog capture" not in combined, combined
+    assert "No such command 'inbox'" in combined, combined
+
+
 def test_backlog_capture_hidden_but_invocable() -> None:
     """x-71b6 tiering: `capture` is hidden from the advertised backlog menu,
     but stays fully invocable."""

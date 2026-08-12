@@ -61,7 +61,7 @@ TOMBSTONES: dict[str, str] = {
 }
 
 
-def tombstone_for(path: str) -> tuple[str, str] | None:
+def tombstone_for(path: str, *, allow_suffix: bool = True) -> tuple[str, str] | None:
     """``(removed path, replacement)`` for the verb path ``path``.
 
     Matched on longest prefix first, so a removed GROUP needs one entry rather
@@ -80,6 +80,14 @@ def tombstone_for(path: str) -> tuple[str, str] | None:
     An ambiguous suffix (two removed verbs sharing a leaf name) resolves to
     None, so the caller falls back to the generic unknown-command error. A
     tombstone that names the wrong replacement is worse than none.
+
+    ``allow_suffix=False`` is for the ROOT group, and it is load-bearing. The
+    root knows its children are top-level, so a bare ``fno inbox`` must not
+    match the deeper ``backlog inbox`` key. It did, and it claimed a removal
+    that had nothing to do with the name typed: ``fno mail``'s own retired
+    ``inbox`` namespace is a different removal, and its test caught the
+    hijack. Suffix matching is for a subgroup that cannot see its own path,
+    never for the one place the full path is already known.
     """
     tokens = path.split()
     if not tokens:
@@ -88,6 +96,8 @@ def tombstone_for(path: str) -> tuple[str, str] | None:
         key = " ".join(tokens[:n])
         if key in TOMBSTONES:
             return key, TOMBSTONES[key]
+    if not allow_suffix:
+        return None
     suffix = tuple(tokens)
     hits = [k for k in TOMBSTONES if tuple(k.split())[-len(suffix):] == suffix]
     if len(hits) == 1:
