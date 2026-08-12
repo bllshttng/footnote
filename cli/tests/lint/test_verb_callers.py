@@ -63,3 +63,21 @@ def test_curriculum_end_to_end_reports_complement():
     assert "taught (curriculum): 90" in proc.stdout
     assert "complement (untaught): 277" in proc.stdout
     assert "cull candidates in complement" in proc.stdout
+
+
+def test_curriculum_with_self_check_runs_self_check():
+    """--self-check takes precedence over --curriculum.
+
+    Before the reorder, --curriculum returned early and --self-check was
+    dropped: the operator got a cull list and exit 0 with no diagnostics. Now
+    --self-check runs regardless of --curriculum, consistent with its
+    precedence over --summary, --zero, and the default table.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--curriculum",
+         str(REPO_ROOT / "scripts" / "ci" / "curriculum.txt"), "--self-check"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    # self-check diagnostics present; the cull-list header is not.
+    assert "controls:" in proc.stdout, proc.stdout
+    assert "cull candidates in complement" not in proc.stdout, proc.stdout

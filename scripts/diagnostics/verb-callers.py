@@ -286,8 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     leaves = set(leaves_list)
 
     # Corrected sweep applies both false-positive fixes. The uncorrected sweep
-    # runs later (only when its self-consistency invariant is needed); --curriculum
-    # returns off the corrected sweep alone and skips that second corpus walk.
+    # backs the monotonicity invariant below, which guards every output mode.
     counts_corr = sweep(root, leaves, binary_form=True, pipe_fan=True)
 
     failed = check_controls(counts_corr)
@@ -300,34 +299,12 @@ def main(argv: list[str] | None = None) -> int:
 
     zero_corr = [l for l in leaves_list if counts_corr.get(l, 0) == 0]
 
-    if args.curriculum:
-        # The complement (untaught leaves) intersected with the zero-caller set
-        # is the deletion-candidate list the curriculum forces. Reuses the same
-        # sweep, controls, and skills/target-safe walk as the rest of the tool;
-        # adds only the curriculum layer.
-        taught, unknown = load_curriculum(args.curriculum, leaves)
-        if unknown:
-            print("verb-callers: curriculum verbs not in baseline (typos or cut verbs):",
-                  file=sys.stderr)
-            for u in unknown:
-                print(f"  {u}", file=sys.stderr)
-            return 2
-        zero_set = set(zero_corr)
-        complement = [l for l in leaves_list if l not in taught]
-        cull = sorted(l for l in complement if l in zero_set)
-        print(f"baseline leaves: {len(leaves_list)}")
-        print(f"taught (curriculum): {len(taught)}")
-        print(f"complement (untaught): {len(complement)}")
-        print(f"cull candidates in complement (zero external callers): {len(cull)}")
-        print(f"complement kept (has external caller): {len(complement) - len(cull)}")
-        if cull:
-            print("cull candidates:")
-            for l in cull:
-                print(f"  {l}")
-        return 0
-
-    # Uncorrected sweep + the corrected-is-subset-of-uncorrected invariant guard
-    # the zero-list output. Not needed for --curriculum, which returned above.
+    # Monotonicity invariant: the two false-positive fixes can only ADD
+    # references, so the corrected zero set must be a subset of the uncorrected
+    # one. This guards every output mode, especially --curriculum, whose cull
+    # list is the deletion-decision path and the most consequential output here.
+    # A regression that invents false zero-callers fails loudly before any cull
+    # list is emitted, not after.
     counts_unc = sweep(root, leaves, binary_form=False, pipe_fan=False)
     zero_unc = {l for l in leaves_list if counts_unc.get(l, 0) == 0}
     not_subset = [l for l in zero_corr if l not in zero_unc]
@@ -338,8 +315,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {l}", file=sys.stderr)
         return 2
 
-    enrichment = load_enrichment(root) if not args.self_check else {}
-
+    # --self-check is an instrument-health mode that takes precedence over every
+    # output mode (--curriculum, --summary, --zero, default), matching the
+    # return-early ordering the other modes already share.
     if args.self_check:
         ok = not failed and not not_subset
         print("controls:", "PASS" if not failed else "FAIL",
@@ -374,6 +352,34 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             print(f"corpus coverage: SKIPPED ({e})")
         return 0 if ok else 1
+
+    if args.curriculum:
+        # The complement (untaught leaves) intersected with the zero-caller set
+        # is the deletion-candidate list the curriculum forces. Reuses the same
+        # sweep, controls, skills/target-safe walk, and monotonicity invariant
+        # as every other mode; adds only the curriculum layer.
+        taught, unknown = load_curriculum(args.curriculum, leaves)
+        if unknown:
+            print("verb-callers: curriculum verbs not in baseline (typos or cut verbs):",
+                  file=sys.stderr)
+            for u in unknown:
+                print(f"  {u}", file=sys.stderr)
+            return 2
+        zero_set = set(zero_corr)
+        complement = [l for l in leaves_list if l not in taught]
+        cull = sorted(l for l in complement if l in zero_set)
+        print(f"baseline leaves: {len(leaves_list)}")
+        print(f"taught (curriculum): {len(taught)}")
+        print(f"complement (untaught): {len(complement)}")
+        print(f"cull candidates in complement (zero external callers): {len(cull)}")
+        print(f"complement kept (has external caller): {len(complement) - len(cull)}")
+        if cull:
+            print("cull candidates:")
+            for l in cull:
+                print(f"  {l}")
+        return 0
+
+    enrichment = load_enrichment(root)
 
     if args.summary:
         print(f"control values: {', '.join(f'{k}={counts_corr.get(k,0)}' for k in CONTROLS)}")
