@@ -786,8 +786,9 @@ def mutate(
     arg_str = str(doc_path)
     if not _looks_like_path(arg_str):
         msg = (
-            f"No design doc found. Run `/think \"{arg_str}\"` first, then "
-            f"`/blueprint <resulting-doc-path>`. Or invoke `/target` for the full chain."
+            f"Blueprint owns the whole plan, but needs a save path. "
+            f"Resolve one with `fno plan path --slug \"<slug>\"` (add `--node <id>` "
+            f"for a node-seeded plan), then pass that path. Or pass a node id directly."
         )
         return 1, msg
 
@@ -795,8 +796,8 @@ def mutate(
     resolved = doc_path.expanduser().resolve() if not doc_path.is_absolute() else doc_path
     if not resolved.exists():
         msg = (
-            f"Design doc at {resolved} is missing or unreadable. "
-            f"Run `/think` first to create the design doc, then pass the resulting path."
+            f"No doc at {resolved}. Blueprint creates plans via `fno plan path`; "
+            f"pass a resolved path, or pass a node id and let the skill seed the doc."
         )
         return 1, msg
 

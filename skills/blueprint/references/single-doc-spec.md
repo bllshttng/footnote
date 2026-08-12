@@ -112,12 +112,10 @@ Example composing multiple modifiers:
 /blueprint quick greenfield rewrite internal/fno/plans/2026-05-18-foo.md
 ```
 
-## Redirect to /think
+## Blueprint owns the whole plan
 
-When `/blueprint` receives input that is not a path to an existing file (a feature description string, a nonexistent path, or an `ab-ID` with no `plan_path` set), it exits with code 1 and prints:
-
-```
-No design doc found. Run `/think "..."` first, then `/blueprint <resulting-doc-path>`. Or invoke `/target` for the full chain.
-```
-
-`/target` chains `/think` → `/blueprint` → `/do` automatically, so the redirect is only relevant when invoking `/blueprint` directly without a prior `/think` session.
+Blueprint takes any input and produces the plan.
+A feature description, a node id, or a cited-findings doc all work.
+The skill resolves a save path via `fno plan path`, seeds the body, and mutates.
+A prior `/think` run is optional research, never a prerequisite.
+`/target` chains blueprint into do and ship whether or not think ran.
