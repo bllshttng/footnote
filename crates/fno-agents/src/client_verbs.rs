@@ -20,8 +20,7 @@
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
 use crate::claude_ask::{
-    family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session,
-    ClaudeHome,
+    family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session, ClaudeHome,
 };
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
@@ -1876,9 +1875,7 @@ where
         // AC2: an id-less row is a definite "nothing to resume", never the
         // "liveness is inconclusive" that printed an unrunnable empty-id hint and
         // hid the real bug.
-        eprintln!(
-            "fno agents resume: {name} has no session id recorded; nothing to resume."
-        );
+        eprintln!("fno agents resume: {name} has no session id recorded; nothing to resume.");
         Err(13)
     } else {
         // has_uuid but neither attachable-live nor affirmatively dead: genuinely
@@ -4010,8 +4007,11 @@ mod tests {
         let home = cv_tmpdir();
         let ch = ClaudeHome::at(home.path());
         let route = home.path().join("route-settings-mux.json");
-        fs::write(&route, r#"{"env":{"ANTHROPIC_BASE_URL":"https://example.invalid"}}"#)
-            .unwrap();
+        fs::write(
+            &route,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://example.invalid"}}"#,
+        )
+        .unwrap();
         let entry = serde_json::json!({
             "name": "pane-worker", "provider": "claude",
             "claude_session_uuid": uuid,
@@ -4022,13 +4022,9 @@ mod tests {
         // truth_fn returns the lowered "stalled" that
         // family1_truth_state_for_resume produces for a working + unreachable +
         // pane-gone verdict (proven by the lowering unit test in claude_ask).
-        let (argv, claim) = claude_resume_argv_with_truth(
-            &ch,
-            &entry,
-            "pane-worker",
-            |_| Some("stalled".into()),
-        )
-        .expect("a gone pane worker relaunches rather than refusing");
+        let (argv, claim) =
+            claude_resume_argv_with_truth(&ch, &entry, "pane-worker", |_| Some("stalled".into()))
+                .expect("a gone pane worker relaunches rather than refusing");
         assert_eq!(claim.as_deref(), Some(uuid));
         assert_eq!(
             argv,
@@ -4053,7 +4049,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn mux_pane_run_argv_fences_the_resumed_command() {
         // x-b84f D3: the one-verb form of the manual `fno mux pane run` recovery.
         // The `--` fence keeps the inner `--resume <uuid>` (and any flag-shaped
@@ -4089,7 +4085,7 @@ mod tests {
         assert_eq!(pane.iter().position(|a| a == "--"), Some(7));
     }
 
-fn _git(repo: &Path, args: &[&str]) {
+    fn _git(repo: &Path, args: &[&str]) {
         let st = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)

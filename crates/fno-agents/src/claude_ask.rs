@@ -179,8 +179,12 @@ fn lower_state_with_verdict<'a>(state: &'a str, reachability: Option<&str>) -> &
 pub fn family1_truth_state_for_resume(handle: &str) -> Option<String> {
     let probe = family1_truth_probe(handle)?;
     Some(
-        lower_state_for_resume(&probe.state, probe.reachability.as_deref(), probe.basis.as_deref())
-            .to_string(),
+        lower_state_for_resume(
+            &probe.state,
+            probe.reachability.as_deref(),
+            probe.basis.as_deref(),
+        )
+        .to_string(),
     )
 }
 
