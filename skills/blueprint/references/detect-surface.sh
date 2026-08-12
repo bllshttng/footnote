@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# detect-surface.sh - structural surface-detection helper for /think.
+# detect-surface.sh - structural surface-detection helper for /blueprint.
 #
 # Reads design-doc text on stdin and emits one of:
 #   frontend-touching   one or more frontend signals matched, no backend signal

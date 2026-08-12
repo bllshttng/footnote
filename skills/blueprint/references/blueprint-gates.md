@@ -187,11 +187,12 @@ over its absence.
 
 ## Executor Lock Transcription (when a design doc supplies a Locked Decision)
 
-When `/think` runs against a frontend or mixed-surface design, it captures
-the executor decision as a Locked Decisions entry (see
-`skills/think/references/executor-routing-prompt.md`). `/blueprint` transcribes
-that lock into the plan's frontmatter so the operator's three-tier resolver
-honors it without a runtime surface-inference fallback.
+When a design doc carries a frontend or mixed surface, `/blueprint` runs the
+structural surface detector (`references/detect-surface.sh`) and captures the
+executor decision as a Locked Decisions entry (see
+`references/executor-routing-prompt.md`). `/blueprint` transcribes that lock
+into the plan's frontmatter so the operator's three-tier resolver honors it
+without a runtime surface-inference fallback.
 
 Transcription is purely mechanical: same Locked Decisions input yields the
 same frontmatter output. No LLM judgment in this step.

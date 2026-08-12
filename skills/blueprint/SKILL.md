@@ -162,9 +162,14 @@ fi
 
    If a design doc was supplied, run the **Executor Lock Transcription** gate
    ([references/blueprint-gates.md](references/blueprint-gates.md#executor-lock-transcription-when-a-design-doc-supplies-a-locked-decision)) before writing the plan body so the parser's output can be
-   inlined into the plan's frontmatter as `executor: <value>`. Empty parser
-   output leaves the frontmatter without an `executor:` field, falling through to
-   runtime surface inference.
+   inlined into the plan's frontmatter as `executor: <value>`. The gate runs
+   [references/detect-surface.sh](references/detect-surface.sh) over the design
+   text to classify the surface (frontend-touching, backend-only, mixed), then
+   applies the decision rules in
+   [references/executor-routing-prompt.md](references/executor-routing-prompt.md)
+   to pick the executor and write it as a Locked Decision. Empty parser output
+   leaves the frontmatter without an `executor:` field, falling through to
+   runtime surface inference (overridable via `FNO_EXECUTOR_OVERRIDE`).
 
    **Enrich the Execution Strategy before it becomes executable.**
    Run `mutate_doc.py` with `--draft`; it produces the deterministic wave/task skeleton while keeping a design-status document in `design`.

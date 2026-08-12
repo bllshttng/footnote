@@ -1,15 +1,15 @@
 # Executor Routing Prompt
 
-**Load when:** Step 6.5 of `/think` (after the UI state machine audit, before
-generating BDD acceptance criteria). The skill calls into this reference to
-detect surface mix, decide whether to prompt or auto-lock, and write the
-result to the design doc's `## Locked Decisions` section.
+**Load when:** `/blueprint` reaches the Executor Lock Transcription gate on a
+design doc that touches a frontend or mixed surface. Blueprint calls into this
+reference to detect surface mix, decide whether to prompt or auto-lock, and
+write the result to the design doc's `## Locked Decisions` section.
 
-The output of this step is a single Locked Decision entry that `/blueprint` will
-later transcribe into the implementation plan's `executor:` frontmatter
-(see `skills/blueprint/SKILL.md`, section "Executor Lock Transcription"). The
-section anchor is more stable than a step number because step ordering
-shifts with skill revisions; the section heading is the contract.
+The output of this step is a single Locked Decision entry that `/blueprint`
+transcribes into the implementation plan's `executor:` frontmatter (see
+`skills/blueprint/SKILL.md`, section "Executor Lock Transcription"). The
+section anchor is more stable than a step number because step ordering shifts
+with skill revisions; the section heading is the contract.
 
 ## Why this exists
 
