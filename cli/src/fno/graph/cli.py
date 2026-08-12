@@ -912,6 +912,22 @@ def _create_node_impl(
     sets and behavior from drifting - the divergence that used to force a second
     ``fno backlog update`` just to set parent/size/domain on a fresh idea.
     """
+    # On an external backend, item creation lives in the tracker (GitHub Issues,
+    # Linear, ...), not graph.json. Refuse rather than silently mutate graph.json's
+    # tracker-half into a phantom item the tracker does not know about. add, idea,
+    # and new all route through this body, so the guard covers the creation class.
+    from fno.tracker import active_backend_name
+
+    backend = active_backend_name()
+    if backend != "graph":
+        typer.echo(
+            f"fno backlog: creating work belongs to the {backend} tracker. "
+            f"Create the item there; footnote tracks it by its id "
+            f"(e.g. /fno:target owner/repo#N).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     from fno.graph._constants import PRIORITY_ORDER, mint_node_id
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (

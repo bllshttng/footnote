@@ -236,3 +236,33 @@ def test_github_tracker_satisfies_protocol():
 
     assert isinstance(GitHubIssuesTracker(), NodeTracker)
 
+
+# -- verb refusal on an external backend --
+
+
+def test_add_refuses_on_external_backend(monkeypatch):
+    # The guard fires before any graph read: creating work on an external
+    # backend belongs to the tracker, not graph.json. add/idea/new all route
+    # through _create_node_impl, so this covers the creation class.
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    result = CliRunner().invoke(app, ["backlog", "add", "phantom work"])
+    assert result.exit_code == 1
+    assert "github" in result.output
+    # The message must point the user at the tracker, not fail opaquely.
+    assert "tracker" in result.output.lower()
+
+
+def test_active_backend_name_default_and_override(monkeypatch):
+    from fno.tracker import active_backend_name
+
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    assert active_backend_name() == "graph"
+    assert active_backend_name("github") == "github"
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    assert active_backend_name() == "github"
+
+

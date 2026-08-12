@@ -20,13 +20,23 @@ from .github_backend import GitHubIssuesTracker
 from .types import NodeNotFound, NodeTracker, TrackerError, TrackerNode, TrackerState
 
 
+def active_backend_name(name: str | None = None) -> str:
+    """The selected backend tag (``graph`` by default). Pure; no side effects.
+
+    An explicit ``name`` wins (tests); otherwise ``FNO_TRACKER_BACKEND`` selects,
+    defaulting to ``"graph"``. Shared with :func:`get_tracker` so the verb-refusal
+    guard and backend construction cannot disagree on which backend is live.
+    """
+    return name or os.environ.get("FNO_TRACKER_BACKEND") or "graph"
+
+
 def get_tracker(name: str | None = None) -> NodeTracker:
     """Return the configured work-item tracker.
 
     ``name`` selects a backend explicitly (used by tests). Otherwise the
     ``FNO_TRACKER_BACKEND`` env var selects, defaulting to ``"graph"``.
     """
-    backend = name or os.environ.get("FNO_TRACKER_BACKEND") or "graph"
+    backend = active_backend_name(name)
     if backend == "graph":
         return GraphTracker()
     if backend == "github":
@@ -44,5 +54,6 @@ __all__ = [
     "TrackerError",
     "TrackerNode",
     "TrackerState",
+    "active_backend_name",
     "get_tracker",
 ]
