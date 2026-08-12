@@ -86,18 +86,6 @@ bundles:
       - source: skills/target/references/verification-patterns.md
         dest: references/verification-patterns.md
 
-  # Cluster router: /think. Mode bodies (references/think.md, references/what-if.md, references/panel.md) and
-  # their references are canonical in the folder. Shared references come from
-  # /target (iteration/verification) and /blueprint (the discovery protocol).
-  - skill: think
-    files:
-      - source: skills/target/references/iteration-loop.md
-        dest: references/iteration-loop.md
-      - source: skills/target/references/verification-patterns.md
-        dest: references/verification-patterns.md
-      - source: skills/blueprint/references/discovery-gate.md
-        dest: references/discovery-gate.md
-
   # Cluster router: /do. Mode bodies (references/flat.md, references/waves.md), orchestrator.py,
   # scripts/, and the wave-orchestration references are canonical in the folder.
   # Only the shared Multi-CLI tool mapping comes from /target.
