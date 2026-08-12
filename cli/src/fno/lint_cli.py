@@ -405,8 +405,11 @@ def style(
     A list-item sentence is 20 words or fewer, and every other sentence is 25
     or fewer. No semicolon. No "should", "would", "may", "might", or "could".
     No contractions. If a sentence carries "if" or "when", that word starts the
-    sentence. Code, paths, flags, and quoted output do not count. Exit 0 clean,
-    1 with violations, 2 on bad usage.
+    sentence. Code, paths, flags, and quoted output do not count.
+
+    Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
+    this gate. That second 2 fires when git counts added lines in a file and
+    this verb reads none, which is never something to annotate in the file.
     """
     from fno import style as style_mod
 

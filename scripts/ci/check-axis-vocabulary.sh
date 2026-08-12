@@ -102,6 +102,17 @@ if [[ $SELF_TEST -eq 1 ]]; then
 fi
 
 if [[ $WRITE_BASELINE -eq 1 ]]; then
+  # `--strict --write-baseline` silently WROTE. The parser refuses
+  # `--baseline --strict` as two modes, then this line overrode MODE with no
+  # conflict check, so asking for a read-only audit regenerated the baseline and
+  # printed a success line. Second destructive write in this file to hide behind
+  # a receipt, and the first one is fixed six lines of comment above.
+  if [[ -n "$MODE_SEEN" ]]; then
+    echo "check-axis-vocabulary: --write-baseline is a mode, not a modifier." >&2
+    echo "  It cannot be combined with --$MODE_SEEN, which asks for a read." >&2
+    echo "  This write REPLACES the baseline file." >&2
+    exit 2
+  fi
   MODE="write-baseline"
 fi
 
@@ -443,6 +454,18 @@ def _partition_stale_vs_unvisited(expected, collected, root: Path, whole_repo: b
     return stale, unvisited
 
 
+def _misdeclared_keys(declared):
+    """Map keys whose final path component names no axis at all.
+
+    Such a key can never be collected, because only axis-named directories enter
+    the collection, so the split above files it as "present on disk but never
+    visited" and the gate exits 2 telling the reader the traversal is broken.
+    The fix is the map entry. Two states behind one exit again, one level up
+    from the split that already distinguishes stale from unvisited.
+    """
+    return sorted(k for k in declared if not _stated_axis(k.rsplit("/", 1)[-1]))
+
+
 def scan(root: Path):
     findings = []
     observed_by_ext = {}
@@ -562,6 +585,7 @@ def _self_test():
             print(f"FAILED to catch planted {lang} violation", file=sys.stderr)
             failures += 1
     d = Path(tempfile.mkdtemp(prefix="axis-clean-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / "ok.py").write_text('provider = "anthropic"\n', encoding="utf-8")
     found, _, _, _ = scan(d)
     if found:
@@ -575,6 +599,7 @@ def _self_test():
     # Name scan. The planted directory is undeclared, which is the rule that
     # catches a NEW mis-named directory on the PR that adds it.
     d = Path(tempfile.mkdtemp(prefix="axis-name-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / "providers").mkdir()
     (d / "providers" / "x.py").write_text("x = 1\n", encoding="utf-8")
     _, _, dirs, _ = scan(d)
@@ -589,6 +614,7 @@ def _self_test():
     # map emptied by a bad edit fails here instead of passing on a fixture.
     declared_rel, declared_axis = next(iter(DECLARED_PATH_AXIS.items()))
     d = Path(tempfile.mkdtemp(prefix="axis-declared-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / declared_rel).mkdir(parents=True)
     (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
     _, _, dirs, _ = scan(d)
@@ -618,7 +644,7 @@ def _self_test():
     # root. Needs `git init`: without a repo above it, the scan root and the
     # repo root coincide and the bug cannot reproduce.
     d = Path(tempfile.mkdtemp(prefix="axis-subtree-"))
-    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / declared_rel).mkdir(parents=True)
     (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
     subtree = d / Path(declared_rel).parts[0]
@@ -645,12 +671,12 @@ def _self_test():
     # the answer was "0 axis-named directories" every time. Every specimen above
     # plants its subject BELOW the root, so none of them could see this.
     d = Path(tempfile.mkdtemp(prefix="axis-asroot-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     # `git init` so the temp tree is its OWN repo root. Left uninitialised, a
     # TMPDIR that happens to sit inside a git repo makes _repo_root_for return
     # that outer repo, every key gains a long prefix, and the specimen fails for
     # a reason unrelated to what it measures. The hazard is documented above and
     # these specimens re-introduced it.
-    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
     (d / "providers").mkdir()
     (d / "providers" / "x.py").write_text("x = 1\n", encoding="utf-8")
     _, _, dirs, _ = scan(d / "providers")
@@ -667,6 +693,7 @@ def _self_test():
 
     # NOT_AN_AXIS silences a name that merely contains an axis word.
     d = Path(tempfile.mkdtemp(prefix="axis-notaxis-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / "models").mkdir()
     (d / "models" / "x.py").write_text("x = 1\n", encoding="utf-8")
     _, _, dirs, _ = scan(d)
@@ -683,6 +710,7 @@ def _self_test():
     # found. Multi-level on purpose: the single-level trees above cannot reach a
     # second os.walk iteration, which is how a bug in the walk survived them.
     d = Path(tempfile.mkdtemp(prefix="axis-anchored-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / "skills" / "target" / "references").mkdir(parents=True)
     (d / "skills" / "target" / "references" / "v.py").write_text(
         'provider = "claude"\n', encoding="utf-8"
@@ -715,6 +743,7 @@ def _self_test():
     # is absent WITH the derivation and present without it, since a zero on its
     # own here has three explanations and this specimen only wants one.
     d = Path(tempfile.mkdtemp(prefix="axis-newcrate-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
     (d / "crates" / "foo" / "target").mkdir(parents=True)
     (d / "crates" / "foo" / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
     (d / "crates" / "foo" / "target" / "gen.py").write_text(
@@ -873,8 +902,15 @@ _whole_repo_scan = root_arg.resolve() == _repo_root_for(root_arg).resolve()
 # in the map (exit 1). A directory that exists on disk but the walk never visited
 # is an INSTRUMENT failure the author fixes in the traversal (exit 2). The far
 # more common cause is the first, and it was reported as the second.
+# Bad map keys are pulled out FIRST. A key whose last component names no axis
+# can never be collected, so leaving it in the split filed it under "on disk but
+# never visited" and sent the reader into os.walk over a typo in the map.
+_declared_misdeclared = _misdeclared_keys(DECLARED_PATH_AXIS)
 _declared_missing, _declared_unreached = _partition_stale_vs_unvisited(
-    sorted(DECLARED_PATH_AXIS), axis_dirs, root_arg, _whole_repo_scan
+    sorted(set(DECLARED_PATH_AXIS) - set(_declared_misdeclared)),
+    axis_dirs,
+    root_arg,
+    _whole_repo_scan,
 )
 
 name_violations = _name_findings(axis_dirs)
@@ -882,6 +918,11 @@ name_violations += [
     f"{rel}/: declared in DECLARED_PATH_AXIS but no such directory exists; "
     "remove the entry or restore the path"
     for rel in _declared_missing
+]
+name_violations += [
+    f"{rel}/: DECLARED_PATH_AXIS key names no axis in its final component, so "
+    "nothing can ever match it; fix the key or drop the entry"
+    for rel in _declared_misdeclared
 ]
 
 # Instrument failures, collected rather than raised, so the verdict below still
@@ -958,7 +999,18 @@ if name_violations:
         "implementation; see docs/architecture/four-axis-vocabulary.md",
         file=sys.stderr,
     )
-    sys.exit(1)
+    # Not in write-baseline mode. The header promises the two scans are
+    # independent and that the name scan never contributes a baseline line, and
+    # exiting here broke that: a PR adding an axis-named directory could not
+    # regenerate the CONTENT baseline until it had also fixed the declaration,
+    # so one scan gated the other's maintenance verb.
+    if mode != "write-baseline":
+        sys.exit(1)
+    print(
+        "check-axis-vocabulary: continuing to write the CONTENT baseline; the "
+        "name violations above still need fixing and are not baselined.",
+        file=sys.stderr,
+    )
 
 
 # An allowlist entry MUST carry a one-line justification: `allowlist: <path>:<line> <why>`.
@@ -973,20 +1025,34 @@ _LINE_IN_ENTRY = re.compile(r"^(.+?):\d+: ")
 
 
 def _allowlist_keys(path: Path):
-    """file:line keys allowlisted out of the violation set (correct ambiguous
-    sites, time-boxed compat windows), with a required justification per line."""
+    """Keys allowlisted out of the violation set (correct ambiguous sites,
+    time-boxed compat windows), with a required justification per line.
+
+    Keyed by FILE, not file:line, for the same reason the baseline comparison
+    drops the line: inserting a line anywhere above an allowlisted site
+    renumbers it, the entry silently stops suppressing, and the site reappears
+    as a new violation in a PR that touched nothing related. The baseline diff
+    learned that lesson (its docstring records main going red twice in four
+    hours), and this half kept the line pin, so the two disagreed about what
+    identifies a finding.
+
+    The entry still RECORDS a line, because a human chasing the justification
+    needs somewhere to look. It just does not match on one.
+    """
     keys = set()
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             m = _ALLOWLIST_RE.match(s)
             if m:
-                keys.add(f"{m.group(1)}:{m.group(2)}")
+                keys.add(m.group(1))
     return keys
 
 
 def _finding_key(f: str) -> str:
-    m = re.match(r"^(.+?:\d+):", f)
+    """The FILE a finding sits in. Paired with _allowlist_keys above, and the
+    pairing is the point: both sides must identify a finding the same way."""
+    m = re.match(r"^(.+?):\d+:", f)
     return m.group(1) if m else f
 
 
