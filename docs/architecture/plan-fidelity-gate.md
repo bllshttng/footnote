@@ -1,12 +1,12 @@
 # Plan fidelity gate and the scope denominator
 
-Node x-cbab. Operator finding 2026-08-11: "it keeps cutting out scope without me knowing until i check later."
+Operator finding 2026-08-11: "it keeps cutting out scope without me knowing until i check later."
 
 Two holes, and the second made the first unfixable. This doc is the contract for both fixes plus the carveout-severity and ratio-measurement work that shipped with them.
 
 ## The denominator: count is a declaration, never a detection
 
-Detection of multi-deliverable scope from node prose is impossible. Proven on three real specimens: one node enumerates with an ordinal run, one with a cardinal governing a plural, and the one that actually failed (x-0707) with a coordinated noun phrase carrying zero numerals. A regex tight enough to skip that node's measurement digits misses its ask; a regex loose enough to catch the ask fires on every measurement bullet. Keying a refusal on detection is keying it on a coin flip.
+Detection of multi-deliverable scope from node prose is impossible. Proven on three real specimens: one node enumerates with an ordinal run, one with a cardinal governing a plural, and the one that actually failed with a coordinated noun phrase carrying zero numerals. A regex tight enough to skip that node's measurement digits misses its ask; a regex loose enough to catch the ask fires on every measurement bullet. Keying a refusal on detection is keying it on a coin flip.
 
 So the gate never asks *how many* deliverables a node has. It asks whether a denominator exists at all:
 
@@ -19,13 +19,13 @@ Three structured field reads, zero prose. `payload_is_code` is `domain == "code"
 1. `/fno:blueprint quick "..."` writes a plan enumerating the tasks. `plan_path` fills. The denominator is the task count.
 2. `fno target init --deliverables N` stamps `deliverables: N` into the immutable manifest.
 
-Exit 2 is deliberately cheap. A run that stamps 1 and ships one of four leaves a falsifiable claim on the record, which is exactly what x-0707 lacked. A missing band and a never-planned band stop being indistinguishable.
+Exit 2 is deliberately cheap. A run that stamps 1 and ships one of four leaves a falsifiable claim on the record, which is exactly what that failed node lacked. A missing band and a never-planned band stop being indistinguishable.
 
 ### The enumerated_scope ratchet
 
 `enumerated_scope` (`cli/src/fno/target/denominator.py`) is a narrow, high-precision predicate over a node's title and details. It fires on an ordinal run (`(1)…(2)` or a numbered list), a cardinal 2-10 governing a plural noun within three tokens, or `both X and Y`. It gates nothing on its own. Its only power is to **withdraw exit 2** for an unambiguously enumerated node, forcing a real plan instead of a declared count.
 
-A non-fire asserts nothing. The pinned miss (x-0707's coordinated-noun-phrase ask) does not fire, and that is correct: `denominator_absent` is what protects that node, not this ratchet.
+A non-fire asserts nothing. The pinned miss (that failed node's coordinated-noun-phrase ask) does not fire, and that is correct: `denominator_absent` is what protects that node, not this ratchet.
 
 ## The fidelity gate: one join, two dispositions
 
