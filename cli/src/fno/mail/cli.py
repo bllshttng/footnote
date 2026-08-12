@@ -2921,7 +2921,7 @@ def cmd_bus_ack(
     Spelled out because the old one-liner read as if ``<name>`` came first and
     cost a reader two failed invocations before they resorted to ``--help``.
     """
-    from fno.bus.cursor import advance_cursor
+    from fno.bus.cursor import advance_cursor, scan_unread
     from fno.bus.log import iter_messages
 
     # The ack target must be a retained message addressed to `name`. Two failure
@@ -2931,7 +2931,8 @@ def cmd_bus_ack(
     #   - an id not in the log -> scan_unread can't find it -> re-surfaces ALL mail;
     #   - an id addressed to ANOTHER recipient but positioned after my unread ->
     #     advances me past my own earlier unread, hiding it.
-    target = next((m for m in iter_messages() if m.id == msg_id), None)
+    all_msgs = list(iter_messages())
+    target = next((m for m in all_msgs if m.id == msg_id), None)
     if target is None:
         print(
             f"unknown message id {msg_id!r}: not found in the retained bus log; "
@@ -2947,8 +2948,17 @@ def cmd_bus_ack(
         )
         raise typer.Exit(code=2)
 
+    # The advance consumes every message addressed to `name` up through msg_id.
+    # Emit a receipt for each so a manual ack does not leave them unread with no
+    # terminal event -- the same accounting gap drain-self closes. Captured
+    # before the advance (after it, scan_unread no longer returns them).
+    pos = {m.id: i for i, m in enumerate(all_msgs)}
+    acked = [m for m in scan_unread(name) if pos.get(m.id, -1) <= pos[msg_id]]
+
     if advance_cursor(name, msg_id):
         print(f"cursor for {name!r} advanced to {msg_id}")
+        for m in acked:
+            _emit_drain_marker(m.id, name, name, m.from_, "acked")
     else:
         # Forward-only: the id is at or before the current cursor (re-ack / older
         # message). Idempotent no-op, not an error - the cursor never rewinds.
@@ -3146,34 +3156,35 @@ def cmd_drain_self(
     # is the opposite of what the paragraph above promises.
     if msgs or job_msgs:
         sys.stdout.flush()
+        # Per-form receipt (W1.1): advance one address form, then emit that
+        # form's drained markers before the next advance. A later form's cursor
+        # failure cannot strand the markers for an already-acked form, because
+        # each marker rides its own form's commit. The marker is emitted at the
+        # ack point, never the print point: this function is inject-before-ack,
+        # so a crash between print and here re-surfaces the message, and a marker
+        # at print would claim delivery for one about to be delivered again.
+        # Best-effort and swallowed (AC9-ERR): the message is already acked, so
+        # an observability gap must never become a delivery failure. A skipped
+        # duplicate still advances and still gets a marker (reason distinguishes
+        # it) so the dedup is observable, never a silent swallow (W2).
         for _form, _last_id in last_by_form.items():
             advance_cursor(_form, _last_id)
-    if job_addr and job_msgs:
-        advance_cursor(job_addr, job_msgs[-1].id)
-
-    # ACK POINT receipt (W1.1). The cursor advances above are the commit; emit
-    # one agent_mail_drained per drained id HERE, never at the print point up
-    # top. This function is inject-before-ack, so a crash between print and this
-    # block re-surfaces the message; a marker written at print would claim
-    # delivery for a message about to be delivered again. Best-effort and
-    # swallowed on failure: the message is already printed and acked, so an
-    # observability gap must never become a delivery failure (AC9-ERR).
-    #
-    # W2: a skipped-duplicate still advances the cursor (above) and still gets a
-    # marker, with reason distinguishing it from a printed drain. Swallowing it
-    # silently would recreate the absence problem one layer down.
-    for m in to_print:
-        _emit_drain_marker(m.id, handle, form_by_id.get(m.id, handle), m.from_, "printed")
-    for m in skipped:
-        _emit_drain_marker(
-            m.id, handle, form_by_id.get(m.id, handle), m.from_, "skipped-duplicate"
-        )
-    for m in job_to_print:
-        _emit_drain_marker(m.id, job_addr or handle, job_addr or handle, m.from_, "printed")
-    for m in job_skipped:
-        _emit_drain_marker(
-            m.id, job_addr or handle, job_addr or handle, m.from_, "skipped-duplicate"
-        )
+            for m in to_print:
+                if form_by_id.get(m.id, handle) == _form:
+                    _emit_drain_marker(m.id, handle, _form, m.from_, "printed")
+            for m in skipped:
+                if form_by_id.get(m.id, handle) == _form:
+                    _emit_drain_marker(m.id, handle, _form, m.from_, "skipped-duplicate")
+        if job_addr and job_msgs:
+            advance_cursor(job_addr, job_msgs[-1].id)
+            for m in job_to_print:
+                _emit_drain_marker(
+                    m.id, job_addr or handle, job_addr or handle, m.from_, "printed"
+                )
+            for m in job_skipped:
+                _emit_drain_marker(
+                    m.id, job_addr or handle, job_addr or handle, m.from_, "skipped-duplicate"
+                )
 
 
 def _emit_drain_marker(

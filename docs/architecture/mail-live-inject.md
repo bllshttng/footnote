@@ -99,9 +99,11 @@ The verb confirms that the recipient transcript grew after the inject, i.e. the 
   That bounded DOUBLE delivery is now deduped at the drain (W2).
 - Live-first writes durable only after a failed live attempt.
   A kill during the live window used to lose the message.
-  Write-ahead durable (W3) closes that window.
+  Write-ahead (W3) closes that window for an asleep recipient.
+  A live recipient stays live-first to avoid a drain-time double delivery.
 
-Both tradeoffs are now closed.
+The double delivery is closed by drain-time dedup (W2).
+The crash window is closed for asleep recipients (W3).
 
 ## The relay variant
 

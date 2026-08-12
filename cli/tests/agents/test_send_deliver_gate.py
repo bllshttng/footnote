@@ -834,6 +834,7 @@ def test_real_relay_descendant_releases_captured_receipt_pipes(
     """A real double-forked relay cannot delay the hosted CLI-style receipt."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import bus_log_path
 
     write_registry(
         [
@@ -913,13 +914,7 @@ print(f"{result.msg_id} delivered ({result.delivery})")
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(result.stdout.splitlines()) == 1
     assert result.stdout.strip().endswith("delivered (hosted)")
-    # W3 write-ahead leaves a withdrawn placeholder + tombstone pair on the bus,
-    # so the log exists, but the recipient drains nothing: a hosted send queues
-    # no deliverable mail.
-    from fno.bus.cursor import scan_unread
-    from fno.harness_identity import canonical_handle
-
-    assert scan_unread(canonical_handle("aaaaaaaa-1111-7222-8333-4444abcd1234")) == []
+    assert not bus_log_path().exists()
     marker_deadline = time.monotonic() + 2.0
     while not relay_marker.exists() and time.monotonic() < marker_deadline:
         time.sleep(0.01)

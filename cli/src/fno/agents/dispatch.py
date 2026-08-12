@@ -6329,27 +6329,27 @@ def dispatch_send(
                     msg_id=msg_id,
                 )
 
-                # W3 write-ahead: persist the durable placeholder BEFORE the live
-                # attempt so a process kill during the up-to-20s live window
-                # leaves the message on the bus for the recipient's next drain,
-                # closing the crash window live-inject-first opened. Only when a
-                # durable recipient exists; a recipient with no harness session id
-                # cannot receive durable mail, so that path stays live-first (and
-                # the window with it -- it cannot be closed without a durable key).
-                # W2 makes this safe: write-ahead gives every send a durable copy,
-                # so the bounded double-delivery it would reintroduce is deduped at
-                # the drain, and a hosted send retracts the placeholder below.
-                if durable_recipient is not None:
-                    _write_durable()
-                delivery = "durable"
-                demotion_notice: Optional[str] = None
-
                 family1_state = _registered_family1_state(existing)
                 family1_live = family1_state in {"working", "watching", "your-move"}
                 # Unknown is hands-off, not dead. A registered peer still has a
                 # confirmable transport, so try it once and let delivery's ack
                 # decide; failure falls through to the durable bus.
                 family1_attemptable = family1_live or family1_state == "unknown"
+
+                # W3 write-ahead: a recipient we will not attempt live is asleep,
+                # so it cannot drain during a live window, and there is no live
+                # window to crash in. Write its durable placeholder BEFORE
+                # anything else so a sender crash before the recipient wakes does
+                # not lose the message. A recipient we WILL attempt live stays
+                # live-first: it can drain at its next SessionStart while the live
+                # turn is still in flight, before the id lands in its transcript,
+                # so W2 cannot skip a write-ahead placeholder there and the
+                # message would double-deliver.
+                if durable_recipient is not None and not family1_attemptable:
+                    _write_durable()
+                delivery = "durable"
+                demotion_notice: Optional[str] = None
+
                 if family1_attemptable and _deliver_live(
                     existing,
                     message,
@@ -6358,23 +6358,10 @@ def dispatch_send(
                     sender_entry=sender_entry,
                 ):
                     delivery = "hosted"
-                    if durable_recipient is not None:
-                        # Live confirmed: retract the placeholder so it neither
-                        # double-delivers nor surfaces as a false dead-letter. A
-                        # tombstone write failure only leaves the placeholder
-                        # lingering (W2 still dedups a repeat at the drain).
-                        try:
-                            from fno.inbox.store import retract_durable_message
-
-                            retract_durable_message(
-                                msg_id, from_name, durable_recipient, to_kind="session"
-                            )
-                        except (OSError, ValueError, RuntimeError):
-                            pass
-                elif durable_recipient is None:
-                    # No durable recipient and live missed: the legacy durable
-                    # write, which raises durable-address exit 12 when the session
-                    # id is genuinely missing.
+                elif durable_recipient is None or family1_attemptable:
+                    # Live-first fallback: an attemptable recipient whose live
+                    # attempt missed, or a recipient with no durable address
+                    # (which raises durable-address exit 12 inside _write_durable).
                     _write_durable()
 
                 if delivery == "durable" and family1_live:

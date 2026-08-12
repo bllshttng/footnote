@@ -225,69 +225,69 @@ def _register_claude_peer(name: str = "red") -> str:
     return canonical_handle(sid)
 
 
-def test_writeahead_writes_durable_before_live_attempt(runner, tmp_path, monkeypatch):
-    """AC8-HP (ordering): the durable placeholder exists on the bus BEFORE the
-    live attempt fires, so a kill during the live window cannot lose the
-    message. Proven by snapshotting the bus inside the _deliver_live seam."""
-    from fno.cli import app
-
-    use_tmpdir(monkeypatch, tmp_path)
-    _register_claude_peer("red")
-
-    bus_at_live: dict = {}
-
-    def _spy(*_a, **_k):
-        from fno.bus.log import iter_messages
-
-        bus_at_live["ids"] = [
-            m.id for m in iter_messages(warn=False) if m.kind != "withdraw"
-        ]
-        return False  # live does not confirm
-
-    monkeypatch.setattr("fno.agents.dispatch._deliver_live", _spy)
-    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
-    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
-
-    assert bus_at_live.get("ids"), (
-        "no durable record existed when the live attempt fired; a kill in the "
-        "live window would lose the message"
-    )
-
-
-def test_hosted_send_retracts_writeahead_placeholder(runner, tmp_path, monkeypatch):
-    """A hosted send writes the placeholder then retracts it, so no durable copy
-    lingers to double-deliver or surface as a false dead-letter. scan_unread
-    filters the withdrawn pair, so the recipient's drain sees nothing."""
+def test_writeahead_writes_durable_for_asleep_recipient(runner, tmp_path, monkeypatch):
+    """AC8-HP: a send to a recipient we will not attempt live (asleep) writes the
+    durable placeholder ahead. The recipient cannot drain during a live window
+    (there is none), and a sender crash before it wakes leaves the message on the
+    bus, drainable exactly once."""
     from fno.bus.cursor import scan_unread
     from fno.cli import app
 
     use_tmpdir(monkeypatch, tmp_path)
     recipient = _register_claude_peer("red")
+    # Asleep: not live and not unknown -> not attemptable -> the write-ahead path.
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state", lambda _e: "asleep"
+    )
+
+    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
+
+    unread = scan_unread(recipient)
+    assert unread, "the write-ahead placeholder did not land on the bus"
+    assert all(m.kind != "withdraw" for m in unread)
+
+
+def test_live_recipient_hosted_writes_no_durable(runner, tmp_path, monkeypatch):
+    """A recipient we will attempt live does NOT write-ahead: it can drain during
+    the live window, and a placeholder there would race the live inject. A hosted
+    send to it leaves the bus empty."""
+    from fno.bus.cursor import scan_unread
+    from fno.cli import app
+
+    use_tmpdir(monkeypatch, tmp_path)
+    recipient = _register_claude_peer("red")
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state", lambda _e: "working"
+    )
     monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: True)
 
     res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
-    assert "hosted" in res.output.lower() or "delivered" in res.output.lower()
 
     assert scan_unread(recipient) == [], (
-        "a hosted send left a durable copy the recipient's drain would surface"
+        "a hosted live send wrote a durable copy (write-ahead must not fire for a "
+        "recipient that can drain during the live window)"
     )
 
 
-def test_not_hosted_send_leaves_a_drainable_durable(runner, tmp_path, monkeypatch):
-    """When live does not confirm, the write-ahead placeholder IS the delivery:
-    it stays on the bus (no retraction) and is drainable exactly once."""
+def test_live_recipient_live_miss_writes_durable(runner, tmp_path, monkeypatch):
+    """An attemptable recipient whose live attempt misses falls back to the
+    durable write (live-first), drainable exactly once."""
     from fno.bus.cursor import scan_unread
     from fno.cli import app
 
     use_tmpdir(monkeypatch, tmp_path)
     recipient = _register_claude_peer("red")
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state", lambda _e: "working"
+    )
     monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: False)
 
     res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
 
     unread = scan_unread(recipient)
-    assert unread, "the write-ahead placeholder did not stay on the bus as the delivery"
+    assert unread, "the live-first durable fallback did not write"
     assert all(m.kind != "withdraw" for m in unread)
 

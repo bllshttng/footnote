@@ -290,3 +290,22 @@ def test_sweep_legacy_message_without_marker_still_escalates(tmp_path, monkeypat
     assert [f for f in findings if f.get("msg_id") == handle.thread_id], (
         "a legacy message with no marker and an unadvanced cursor stopped escalating"
     )
+
+
+def test_manual_ack_emits_drain_marker(tmp_path, monkeypatch):
+    """The manual `fno mail ack` path consumes mail by advancing the cursor; it
+    must emit agent_mail_drained too, or those messages leave unread with no
+    terminal event -- the same accounting gap drain-self closes."""
+    from fno.inbox.store import write_new_thread
+    from fno.mail import cli as mail_cli
+
+    use_tmpdir(monkeypatch, tmp_path)
+    handle = write_new_thread("cl-abcd1234", "alice", "send", "hi")
+    captured = _capture_events(monkeypatch)
+
+    mail_cli.cmd_bus_ack(msg_id=handle.thread_id, name="cl-abcd1234")
+
+    markers = [e for e in captured if e.get("kind") == "agent_mail_drained"]
+    assert markers, "a manual ack advanced the cursor without emitting a receipt"
+    assert markers[0]["msg_id"] == handle.thread_id
+    assert markers[0]["reason"] == "acked"
