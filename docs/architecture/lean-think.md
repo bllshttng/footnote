@@ -14,6 +14,10 @@ It investigates a question against primary sources (source code, specs, first-pa
 `/fno:blueprint` is the execution compiler.
 It turns an approved design into owned tasks, dependencies, verification commands, and graph relationships.
 
+The discovery receipt is shared infrastructure.
+`/think` uses it as the first step of research.
+`/blueprint` uses it to ground itself when no cited findings are supplied, so a fresh plan never rests on questions alone.
+
 Native Plan Mode can replace conversational intent capture or produce an already approved implementation plan.
 It does not replace deterministic project discovery when the plan makes claims about existing code, backlog duplication, pull requests, schema, or project pitfalls.
 The next bare `/fno:target` may capture an approved native plan, while Blueprint remains appropriate when Footnote graph decomposition and execution contracts are needed.
@@ -21,10 +25,21 @@ The next bare `/fno:target` may capture an approved native plan, while Blueprint
 ## Why this is Footnote-specific
 
 The workflow does not copy Superpowers.
-It independently keeps the useful separation between exploring a design and compiling an implementation plan, while grounding both in Footnote's graph, schema artifact, worktree ownership, failure-mode handoff, and durable node lifecycle.
+It independently keeps the useful separation between exploring a design and compiling an implementation plan, while grounding both in Footnote's graph, schema artifact, worktree ownership, discovery receipt, and durable node lifecycle.
 
 Visual aids are optional and evidence-driven.
 Footnote should add one when a state machine, graph, or spatial interface becomes easier to review visually, not operate a companion server as mandatory ceremony.
+
+## Why the reasoning lives in the model
+
+The old `/think` skill carried 98 KB of design-reasoning guidance.
+It is gone from the text on purpose, not by oversight.
+None of that text was run while designing this change, and the design held.
+The reasoning already lives in the model, so prose that reads well but changes no plan stays deleted.
+
+One part earned a place in `/blueprint`: the deterministic discovery receipt.
+It changes the plan a deterministic step can produce, because a plan grounded on duplicate candidates, schema status, and the active pitfalls differs from one guessed from questions alone.
+Everything else, the depth ladder and the four-label failure vocabulary included, carried a scale-to-risk escape hatch or changed nothing, so it stayed deleted.
 
 ## Truth boundary
 

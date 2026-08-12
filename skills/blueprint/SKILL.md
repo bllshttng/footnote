@@ -136,9 +136,10 @@ fi
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
    proceeds; it does not block.
-2b. **Discovery ownership** - A supplied design doc never re-runs discovery: `/think` owns that reasoning, and `/blueprint` compiles its artifact even when it has no exact `## Discovery` or `## Assumptions` heading.
-   Run discovery when creating a fresh plan from raw prose or a direct node-seeded path with no completed design artifact.
-   Load `references/discovery-gate.md` then; use 3 questions max with `quick` and 5 otherwise.
+2b. **Discovery grounding** - A supplied design doc carries cited findings, and `/blueprint` compiles it without re-running discovery.
+   When creating a fresh plan from raw prose or a node-seeded path with no cited findings, blueprint grounds itself first. Run `fno think inspect "<seed>" --json` for the receipt. It reports duplicate candidates, schema status, and the active pitfalls.
+   Then load `references/discovery-gate.md`. Ask at most 3 questions with `quick`, or 5 otherwise.
+   For a plan that needs deeper investigation than the receipt, run `/think` first. Think writes cited findings that blueprint then compiles.
 
 3. **Write** the plan.
 

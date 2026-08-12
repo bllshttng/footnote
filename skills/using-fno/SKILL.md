@@ -16,7 +16,7 @@ Invoke via `/fno:<verb>`. Front door:
 | Verb | Purpose |
 |------|---------|
 | `/fno:target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
-| `/fno:think` | Research cited findings to one file. Briefs: what-if, panel, class; prefix `bg`/`subagent` to run off-thread. |
+| `/fno:think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
 | `/fno:review` | Review a diff. Routes: `sigma` (six-agent panel, default), `peer` (cross-model). |
 | `/fno:pr` | PR lifecycle. Routes: `create` (Haiku worker), `check`, `merged`. |
 | `/fno:fix` | Repair. Routes: `fix` (default), `investigate`. |

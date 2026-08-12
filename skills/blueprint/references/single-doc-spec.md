@@ -4,7 +4,7 @@ Reference for the `/blueprint` mutation behavior introduced in PR1 (2026-05-18, 
 
 ## Design doc shape
 
-A design doc is the input `/blueprint` mutates. `/think` writes it from cited primary sources; `/blueprint` first-fills its frontmatter if absent, appends an Execution Strategy, and compiles its `## User Stories` into the task skeleton. The shape:
+A design doc is the input `/blueprint` mutates. `/think` writes it from cited primary sources. When the doc has no frontmatter, `/blueprint` first-fills it. `/blueprint` then appends an Execution Strategy and compiles `## User Stories` into the task skeleton. The shape:
 
 ```markdown
 ---

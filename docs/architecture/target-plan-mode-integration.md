@@ -62,9 +62,9 @@ types (HP/ERR/UI/EDGE/FR) synthesized **before** `/blueprint` runs. `/blueprint`
 no longer requires a `## Failure Modes` section (that refusal retired with the
 think-era contract) and first-fills frontmatter on a doc that has none, so a
 native plan needs neither Failure Modes nor hand-written frontmatter to pass
-through. Native Plan Mode replaces `/think`'s interactive *exploration*; the
+through. Native Plan Mode replaces `/think`'s interactive *exploration*. The
 adapter runs the deterministic *artifact generation* (the AC synthesis) against
-the approved plan. The synthesis is LLM-powered (it reads the plan's intent);
+the approved plan. The synthesis is LLM-powered (it reads the plan's intent).
 `check-sections` is the deterministic gate that bounds retries to 2 and names
 exactly what is missing so a retry re-synthesizes only the rejected section. A
 native plan that already contains a section is reused, never duplicated.

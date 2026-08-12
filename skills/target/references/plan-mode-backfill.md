@@ -84,7 +84,7 @@ is LLM-powered and orchestrated by the skill body.
 - `check-sections <doc>` — validates the structure blueprint compiles (the
   Acceptance Criteria section + its 5 BDD types) and prints exactly what is
   missing, so a retry re-synthesizes ONLY the rejected section. Bounded to 2
-  attempts (AC2-ERR); on persistent failure the partial doc path is surfaced
+  attempts (AC2-ERR). On persistent failure the partial doc path is surfaced
   and target does NOT enter the autonomous loop (AC1-ERR).
 - The skill body then invokes `/blueprint <doc>` to append Execution Strategy,
   File Ownership Map, kill_criteria and set `status: ready` (AC2-HP).

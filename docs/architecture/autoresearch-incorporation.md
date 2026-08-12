@@ -82,7 +82,7 @@ The implementation also fixes `scripts/validate-plan.sh` so scaffolding and POC 
 |------|------|
 | `skills/target/references/iteration-loop.md` | Shared iteration protocol |
 | `skills/target/references/verification-patterns.md` | Verification catalog and repo-specific checks |
-| `skills/think/SKILL.md` | Research skill; `what-if` is now an inline brief, not its own file |
+| `skills/think/SKILL.md` | Research skill. `what-if` is now an inline brief, not its own file |
 | `skills/fix/SKILL.md` | Atomic repair skill |
 | `skills/fix/references/investigate.md` | Scientific-method upgrade with `--fix` chain |
 | `scripts/validate-plan.sh` | Semantic stub-detection bugfix |
