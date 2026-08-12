@@ -94,8 +94,17 @@ def compute_plan_fidelity(
         # No planned rows in window: nothing to measure, nothing to refuse.
         return _passthrough(planned=0, delivered=0)
 
-    target = _plan_key(plan_path)
-    plan_rows = [r for r in pf["results"] if _plan_key(r.get("plan_path")) == target]
+    # Scope the join to this repo: the ledger is global, and _plan_key's tail
+    # alone can match a foreign project's same-tail plan. Reuse the SAME
+    # remote-slug derivation the ledger stamps row.project with
+    # (paths._slug_from_git_remote), not a checkout basename, so a worktree
+    # resolves to the repo's real project and not its worktree folder name.
+    project = _paths._slug_from_git_remote(Path(repo_root) if repo_root else None)
+    target = _plan_key(plan_path, project)
+    plan_rows = [
+        r for r in pf["results"]
+        if _plan_key(r.get("plan_path"), r.get("project")) == target
+    ]
     unjoined = [r for r in plan_rows if r.get("status") == "unjoined"]
     planned = len(plan_rows)
     delivered = planned - len(unjoined)

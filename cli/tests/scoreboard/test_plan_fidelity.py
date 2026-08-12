@@ -479,3 +479,40 @@ def test_fidelity_refusal_passes_when_there_is_no_shortfall():
 
     decision = fidelity_refusal(unjoined_rows=[], carveouts=[])
     assert decision["refused"] is False
+
+
+def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_path):
+    """The ledger is global and two projects can share a plan-path tail.
+    compute_plan_fidelity selects only this repo's rows via the same remote-slug
+    derivation the ledger stamps, so a foreign project's same-tail plan cannot
+    cover or pollute the gate decision."""
+    import fno.paths as paths
+    import fno.plan.fidelity as fid
+    import fno.scoreboard.fold as fold
+
+    plan = tmp_path / "feat" / "00-INDEX.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# plan\n")
+
+    fake_pf = {
+        "state": "ok",
+        "results": [
+            {"plan_path": "/a/feat/00-INDEX.md", "project": "footnote",
+             "status": "unjoined", "session_id": "s-local"},
+            {"plan_path": "/b/feat/00-INDEX.md", "project": "abilities",
+             "status": "unjoined", "session_id": "s-foreign"},
+        ],
+    }
+    # build_plan_fidelity is imported lazily inside compute_plan_fidelity, so
+    # patch it at its source module rather than on fid.
+    monkeypatch.setattr(fold, "build_plan_fidelity", lambda *a, **k: fake_pf)
+    monkeypatch.setattr(fid, "_load_graph_nodes", lambda: [])
+    monkeypatch.setattr(fid, "_read_covering_carveouts", lambda *a, **k: [])
+    monkeypatch.setattr(paths, "_slug_from_git_remote", lambda root=None: "footnote")
+
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+
+    # Only the footnote row is selected; the abilities row does not count.
+    assert decision["planned"] == 1
+    assert decision["refused"] is True
+    assert decision["unjoined"][0]["session_id"] == "s-local"
