@@ -15,16 +15,12 @@ Acceptance criteria (operator-locked):
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from fno.paths_testing import use_tmpdir
 from fno.agents import events as events_mod
 from fno.agents.registry import (
-    AgentEntry,
     load_registry,
 )
 
@@ -73,16 +69,17 @@ def workdir_claude(tmp_path, monkeypatch):
 
 @pytest.fixture
 def captured_emits(monkeypatch):
-    """Capture all events.emit calls; return the list of (kind, data) tuples."""
+    """Capture spawn births as (kind, data) tuples.
+
+    Births write the daemon envelope via emit_spawned (x-8cd5 Wave 6), not the
+    flat events.emit, so this intercepts the spawn seam the ACs assert on.
+    """
     calls: list[tuple[str, dict]] = []
 
-    original_emit = events_mod.emit
+    def _capture(**data):
+        calls.append(("agent_spawned", data))
 
-    def _capture(kind: str, *, path=None, **data):
-        calls.append((kind, data))
-        original_emit(kind, path=path, **data)
-
-    monkeypatch.setattr(events_mod, "emit", _capture)
+    monkeypatch.setattr(events_mod, "emit_spawned", _capture)
     return calls
 
 

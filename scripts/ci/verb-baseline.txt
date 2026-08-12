@@ -298,6 +298,7 @@ plugins deactivate
 plugins inspect
 plugins ls
 plugins verify
+posture apply
 pr base-check
 pr base-lineage-check
 pr evidence-check

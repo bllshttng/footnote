@@ -142,6 +142,113 @@ def emit_identity_resolution(owned: Any, *, path: Optional[Path] = None) -> None
 
 
 # ---------------------------------------------------------------------
+# Spawn-lifecycle births (x-8cd5 Wave 6): deaths already land in the daemon's
+# agent-lifecycle log (~/.fno/agents/events.jsonl) — agent_orphan_reaped,
+# agent_row_reaped, agent_stopped, agent_removed. A birth that lands anywhere
+# else splits the lineage tree across two files, so it is unreconstructible:
+# the daemon records every way an agent can END and nothing about how it began.
+# These helpers write the birth to the SAME log the daemon writes deaths to, so
+# a parent->child->death tree is joinable from one file.
+#
+# Co-writing the daemon's log from Python is safe: single-line JSONL appends
+# are atomic below PIPE_BUF, so concurrent writers (this process and the
+# daemon) interleave only at line boundaries. The daemon's advisory flock is
+# not held across writes, so not taking it here cannot deadlock or corrupt a
+# line.
+KIND_AGENT_SPAWNED = "agent_spawned"
+KIND_AGENT_SPAWN_FAILED = "agent_spawn_failed"
+
+
+def daemon_lifecycle_log() -> Path:
+    """The daemon's agent-lifecycle log: where births and deaths are joinable."""
+    return paths.agents_home_dir() / "events.jsonl"
+
+
+def _emit_daemon_envelope(
+    kind: str, data: dict[str, Any], *, source: str = "python"
+) -> None:
+    """Write one record in the daemon's unified envelope (x-2901) to the daemon
+    lifecycle log.
+
+    The Rust daemon nests the payload under ``data`` and stamps the kind as
+    ``type`` (crates/fno-agents/src/events.rs). A Python birth that shared the
+    file but used the flat ``{..., ts, kind}`` shape would not be joinable with
+    a daemon death by one reader: ``rec["data"]["name"]`` works on the death and
+    KeyErrors on the flat birth. Writing the same envelope from both sides is
+    what makes the lineage tree reconstructable from a single file.
+    Best-effort: OSError is swallowed (a failed log write must not break spawn).
+    """
+    record = {
+        "ts": _utc_now_iso(),
+        "type": kind,
+        "source": source,
+        "data": data,
+    }
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    try:
+        target = daemon_lifecycle_log()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError as exc:
+        print(f"fno agents: warning: daemon envelope {kind}: {exc}", file=sys.stderr)
+
+
+def emit_spawned(
+    *,
+    name: str,
+    short_id: Optional[str],
+    provider: str,
+    pid: Optional[int] = None,
+    spawned_by_session: Optional[str] = None,
+    spawned_by_harness: Optional[str] = None,
+    spawned_by_cwd: Optional[str] = None,
+) -> None:
+    """Record one agent birth in the daemon lifecycle log (envelope format).
+
+    Carries the parent edge the registry row already captures
+    (spawned_by_session/harness/cwd), plus the child ``pid`` where the caller
+    has it. The pane path in particular leaves the registry row's short_id
+    empty (mux is its one live transport ref) and keys the row on pid, so the
+    daemon death that reads that row carries pid, not the mux pane_id. A birth
+    that recorded the pane_id as short_id could not join that death; recording
+    pid (and leaving short_id empty to match the row) makes the birth join the
+    death on ``data.name`` and, for the pane path, on ``data.pid``.
+    Exactly one per successful create.
+    """
+    data: dict[str, object] = {
+        "name": name,
+        "short_id": short_id,
+        "provider": provider,
+        "spawned_by_session": spawned_by_session,
+        "spawned_by_harness": spawned_by_harness,
+        "spawned_by_cwd": spawned_by_cwd,
+    }
+    if pid is not None:
+        data["pid"] = pid
+    _emit_daemon_envelope(KIND_AGENT_SPAWNED, data)
+
+
+def emit_spawn_failed(
+    *,
+    name: str,
+    provider: Optional[str] = None,
+    short_id: Optional[str] = None,
+    reason: str = "",
+) -> None:
+    """Record a spawn attempt that did not produce a live row.
+
+    The birth's failure counterpart: a spawn that exits via an error path still
+    leaves a trace in the daemon log, so a name with a death but no birth is
+    distinguishable from a name whose only event is a failed start.
+    """
+    _emit_daemon_envelope(
+        KIND_AGENT_SPAWN_FAILED,
+        {"name": name, "provider": provider, "short_id": short_id, "reason": reason},
+    )
+
+
+# ---------------------------------------------------------------------
 # Phase 5 — MCP channel + streaming event kinds
 # ---------------------------------------------------------------------
 

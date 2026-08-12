@@ -959,6 +959,9 @@ def _codex_create_path(
     try:
         update_registry(lambda entries: entries + [new_entry])
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+        events.emit_spawn_failed(
+            name=name, provider=new_entry.harness, reason=f"registry-write: {exc}"
+        )
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -976,6 +979,18 @@ def _codex_create_path(
             exit_code=12,
         ) from exc
 
+    # Spawn birth (x-8cd5 Wave 6): the codex create path is the third spawn
+    # seam after _claude_create_path and mux_spawn, and was the one a death
+    # could dangle from. Emit to the daemon lifecycle log with the parent edge.
+    _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+    events.emit_spawned(
+        name=name,
+        short_id=session_id,
+        provider=new_entry.harness,
+        spawned_by_session=_cx_session,
+        spawned_by_harness=_cx_harness,
+        spawned_by_cwd=_cx_cwd,
+    )
     _emit_ev(
         "agent_ask_done",
         stage="dispatch",
@@ -1510,6 +1525,12 @@ def _claude_create_path(
                 file=sys.stderr,
             )
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+        # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
+        # but no registry row names it, so without this the orphan's later
+        # death would join no birth in the daemon log.
+        events.emit_spawn_failed(
+            name=name, provider=chosen, short_id=short_id, reason=f"registry-write: {exc}"
+        )
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -1570,10 +1591,10 @@ def _claude_create_path(
             file=sys.stderr,
         )
 
-    # Spawn event (Task 2.2, x-30f6): exactly one per successful create.
-    # Open schema — flattens onto the JSONL record alongside ts/kind.
-    events.emit(
-        "agent_spawned",
+    # Spawn birth (x-30f6, x-8cd5 Wave 6): exactly one per successful create,
+    # written to the daemon lifecycle log so it joins the death events the
+    # daemon emits there (agent_orphan_reaped / agent_row_reaped / etc.).
+    events.emit_spawned(
         name=name,
         short_id=short_id,
         provider=chosen,
@@ -5262,7 +5283,6 @@ def _mux_pane_send(
             return
         try:
             from fno.events import agent_raw_inject, append_event
-            from fno.paths import agents_home_dir
 
             # Write the CANONICAL {type, source, data} envelope to the SAME log
             # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That
@@ -5281,7 +5301,7 @@ def _mux_pane_send(
                     confirmed=confirmed,
                     source="daemon",
                 ),
-                agents_home_dir() / "events.jsonl",
+                events.daemon_lifecycle_log(),
                 lock_timeout_seconds=2,
             )
         except Exception:

@@ -172,6 +172,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Provider route lanes: ls / set / unset / env (GLM build lane).",
         {"hidden": True},
     ),
+    "posture": (
+        "fno.posture_cli:posture_app",
+        "Apply attended/autonomous stance as ordinary config keys (generator, not a layer).",
+        {"hidden": True},
+    ),
     "evals": (
         "fno.evals.cli:evals_app",
         "Golden-task efficacy evals (run / report / diff)",
