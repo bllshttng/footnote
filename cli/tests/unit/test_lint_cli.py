@@ -300,14 +300,88 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     assert unexplained == 0, "a pure rename is an explained zero, not a broken scan"
 
 
-def test_style_gate_still_fails_when_a_changed_file_explains_no_zero(
-    tmp_path: Path,
+def test_no_newline_marker_does_not_shift_added_line_numbers(tmp_path: Path) -> None:
+    """`\\ No newline at end of file` is a note, never a line of the file.
+
+    Counted as context it advances the position, so every added line after it
+    is numbered one too high. The marker lands MID-hunk when the old file had
+    no trailing newline and its last line is replaced, which is the shape that
+    makes a real line escape rather than merely inventing a phantom one.
+    """
+    from fno.lint_cli import _git_added_line_nums
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    doc = repo / "docs" / "m.md"
+    doc.write_text("Old last line.", encoding="utf-8")  # no trailing newline
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    doc.write_text("New first line.\nSecond added.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "replace the last line")
+
+    nums = _git_added_line_nums("docs/m.md", "base", repo)
+    assert nums == {1, 2}, (
+        "added lines must be numbered against the NEW file; counting the "
+        f"no-newline marker as context shifts them (got {sorted(nums)})"
+    )
+
+
+def test_a_deletion_only_edit_is_an_explained_zero(tmp_path: Path) -> None:
+    """A trimmed doc must not fail the gate.
+
+    This test previously asserted the OPPOSITE, and it was wrong on purpose
+    rather than by accident: it encoded the author's misreading that any
+    zero-inspected file is suspicious. Making a test fail proves it is
+    connected to the code. It never proves it asserts the right thing.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    trim = repo / "docs" / "trim.md"
+    trim.write_text("One line.\nTwo line.\n", encoding="utf-8")
+    (repo / "docs" / "normal.md").write_text("Alpha.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    trim.write_text("One line.\n", encoding="utf-8")
+    (repo / "docs" / "normal.md").write_text("Alpha.\nBeta.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "trim one, extend the other")
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        _v, inspected, changed, unexplained = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert changed == 2 and inspected == 1, "positive control: one line was added"
+    assert unexplained == 0, "a deletion-only edit authors nothing and is explained"
+
+
+def test_style_gate_still_fails_when_the_parser_loses_added_lines(
+    tmp_path: Path, monkeypatch
 ) -> None:
     """The absence guard must survive the fix that narrowed it.
 
-    Narrowing a guard is where guards die quietly, so this pins the case it
-    still has to catch: a changed file that is not a rename, not a deletion,
-    and not exception-marked, yet contributes no added lines.
+    Narrowing a guard is where guards die quietly. The case it still has to
+    catch is the only one that ever meant trouble: git counted added lines for
+    a path and this parser returned none, so the instrument failed.
     """
     import os
 
@@ -319,14 +393,18 @@ def test_style_gate_still_fails_when_a_changed_file_explains_no_zero(
     _git(repo, "config", "user.email", "t@t")
     _git(repo, "config", "user.name", "t")
     doc = repo / "docs" / "d.md"
-    doc.write_text("One line.\nTwo line.\n", encoding="utf-8")
+    doc.write_text("One line.\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
     _git(repo, "branch", "-f", "base")
-    # Deletion-only edit: the file changed, nothing was authored.
-    doc.write_text("One line.\n", encoding="utf-8")
+    # A genuine authored line, so git's own count for this path is non-zero.
+    doc.write_text("One line.\nTwo line.\n", encoding="utf-8")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "delete a line")
+    _git(repo, "commit", "-qm", "author a line")
+
+    # The parser loses the line git counted. That disagreement, and only that,
+    # is what the guard exists to catch.
+    monkeypatch.setattr("fno.lint_cli._git_added_line_nums", lambda *a, **k: set())
 
     cwd = os.getcwd()
     os.chdir(repo)
@@ -340,10 +418,12 @@ def test_style_gate_still_fails_when_a_changed_file_explains_no_zero(
         os.chdir(cwd)
 
     assert changed == 1 and inspected == 0
-    assert unexplained == 1, "a deletion-only change is exactly what the guard is for"
+    assert unexplained == 1, "git counted an added line and the parser found none"
 
 
-@pytest.mark.parametrize("marker", ["--name-only", "-U0", "--name-status"])
+@pytest.mark.parametrize(
+    "marker", ["--name-only", "-U0", "--name-status", "--numstat", "rev-parse"]
+)
 def test_a_failing_git_diff_is_not_reported_as_a_clean_tree(
     tmp_path: Path, monkeypatch, marker: str
 ) -> None:
@@ -455,22 +535,23 @@ def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> No
         _clear_repo_root_cache()
         os.chdir(cwd)
 
+    from fno.lint_cli import _pinned_diff_argv
+
     diffs = [c for c in seen if "diff" in c]
     assert diffs, "positive control: no git diff call was observed at all"
-    unpinned = [c for c in diffs if "diff.renameLimit=0" not in c]
-    assert not unpinned, f"git diff calls missing the rename-limit pin: {unpinned}"
-    # The limit pin alone is half the configuration, and asserting only it left
-    # the other half deletable. With `diff.renames=false` inherited from the
-    # caller, git splits every rename into a delete plus an add no matter how
-    # high the limit is, so the pin guards a pass that never runs. Each diff must
-    # also turn detection ON, by config or by the equivalent flag.
-    undetected = [
-        c
-        for c in diffs
-        if "diff.renames=true" not in c and "--find-renames" not in c
-    ]
-    assert not undetected, f"git diff calls with rename detection off: {undetected}"
-    # Path quoting off, or git C-quotes any non-ASCII path into a display string
-    # that fails is_file() and the file is skipped without a word.
-    unquoted = [c for c in diffs if "core.quotePath=false" not in c]
-    assert not unquoted, f"git diff calls that leave path quoting on: {unquoted}"
+    # Pin the MECHANISM, not the outcome. The previous version accepted either
+    # `diff.renames=true` or `--find-renames` at each site, which asserts that
+    # detection is on somehow and permits three sites to spell it three ways.
+    # It also false-flags a correct call using `-M`, git's own alias for
+    # `--find-renames`. Requiring the shared prefix means one thing decides how,
+    # and a fourth site cannot quietly invent a fourth spelling.
+    prefix = _pinned_diff_argv()
+    unowned = [c for c in diffs if c[: len(prefix)] != prefix]
+    assert not unowned, (
+        f"git diff calls not built by _pinned_diff_argv: {unowned}\n"
+        f"expected every call to start with {prefix}"
+    )
+    # And no site re-specifies detection by flag, which is how a second spelling
+    # gets back in beside the config pin.
+    by_flag = [c for c in diffs if "--find-renames" in c or "-M" in c]
+    assert not by_flag, f"rename detection respelled as a flag: {by_flag}"

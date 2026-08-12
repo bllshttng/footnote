@@ -1018,12 +1018,20 @@ def _emit_human(
         # behind the default branch" and never "does this binary carry the
         # change I just wrote". Anyone editing fno itself reads the first as the
         # second and then verifies their branch against a binary without it.
+        # The command named here must actually load the other checkout. `fno` is
+        # the Rust front door and forwards every non-mux verb to the ABSOLUTE
+        # installed fno-py (cli/pyproject.toml), so cd-ing into a worktree and
+        # typing `fno` runs the installed build again and the branch stays
+        # untested. Measured: one scoped call reported 196 inspected lines via
+        # `fno` inside the checkout against 0 via uv run. Advice that does not
+        # work is the same defect as a receipt that lies.
         out(
             "fno doctor: installed fno is up to date with source at "
             f"{src or 'the resolved source checkout'} "
             f"(rev {result.get('source_rev') or 'unknown'}). "
-            "Unmerged work in another branch or worktree is not included; "
-            "run fno from that checkout to exercise it."
+            "Unmerged work in another branch or worktree is not included, and "
+            "`fno` forwards to this installed build from anywhere. To exercise "
+            "another checkout run: cd <checkout>/cli && uv run fno-py <verb>"
         )
     elif status == "stale":
         # A missing-verb verdict can be stale with no resolved source (src is

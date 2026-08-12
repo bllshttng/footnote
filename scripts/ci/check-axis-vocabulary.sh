@@ -121,6 +121,27 @@ if [[ "${_relpath_total:-0}" -eq 0 ]]; then
   echo "  the probe is broken, not the file. Refusing to report it clean." >&2
   exit 2
 fi
+# Ownership guard for the stale-vs-unvisited split, the same shape as the one
+# below and for the same reason. A helper alone is a snapshot: neutering either
+# call site left --self-test green, because a specimen that CALLS the helper
+# proves the helper works and never that production uses it. These two lines are
+# the wiring, so their absence is the regression.
+for _sig in '_declared_missing, _declared_unreached = _partition_stale_vs_unvisited(' \
+            '_probe_stale, _probe_missed = _partition_stale_vs_unvisited('; do
+  # This guard's own literal is one of the matches, so a live call site makes
+  # two. Requiring one match let the guard satisfy itself, and it shipped
+  # decorative until a make-it-fail run caught it: neutering the call site left
+  # the check green because the string it looked for was sitting in the check.
+  _n=$(grep -cF "$_sig" "$SELF_PATH" || true)
+  if [[ "${_n:-0}" -lt 2 ]]; then
+    echo "check-axis-vocabulary: a caller stopped routing through the split owner:" >&2
+    echo "  missing: $_sig" >&2
+    echo "  Both callers must use _partition_stale_vs_unvisited. Hand-rolling" >&2
+    echo "  the two-way branch is how one copy silently swaps exit 1 and exit 2." >&2
+    exit 2
+  fi
+done
+
 _relpath_stray=$(grep -n 'os\.path\.relpath(' "$SELF_PATH" | grep -v 'repo-key-exempt' || true)
 if [[ -n "$_relpath_stray" ]]; then
   echo "check-axis-vocabulary: path key bypasses _repo_key:" >&2
@@ -338,6 +359,32 @@ def _repo_key(path, root: Path, repo_root: Path) -> str:
     if key.startswith(".."):
         key = os.path.relpath(path, root)  # repo-key-exempt: this IS the helper
     return key.replace(os.sep, "/")
+
+
+def _partition_stale_vs_unvisited(expected, collected, root: Path, whole_repo: bool):
+    """THE split between a stale constant and an instrument failure.
+
+    Two constants in this gate name paths the walk is expected to reach, and
+    each needs the same two-way answer. A name the walk missed while the
+    directory EXISTS is a broken traversal the author fixes in os.walk (exit 2).
+    A name whose directory is gone is a stale constant the author fixes in the
+    constant (exit 1). Collapsing those sent every reader to the wrong file.
+
+    Both callers had this inlined, byte-identical apart from variable names,
+    linked only by a comment reading "same split the declared map already got".
+    An independent reviewer named that as one concern owned by two copies, and
+    prose is not ownership: a third caller, or a copy that swaps which state
+    gets which exit, ships green. Returns (stale, unvisited).
+    """
+    stale, unvisited = [], []
+    if not whole_repo:
+        return stale, unvisited
+    repo_root = _repo_root_for(root)
+    for name in expected:
+        if name in collected:
+            continue
+        (unvisited if (repo_root / name).is_dir() else stale).append(name)
+    return stale, unvisited
 
 
 def scan(root: Path):
@@ -590,6 +637,30 @@ def _self_test():
         )
         failures += 1
 
+    # The stale-vs-unvisited split, which had NO specimen at all: both callers
+    # could be neutered and this suite stayed green. Asserts both directions,
+    # since a copy that swaps which state gets which exit is the failure an
+    # independent reviewer named as shipping green today.
+    d = Path(tempfile.mkdtemp(prefix="axis-split-"))
+    (d / "ondisk").mkdir()
+    stale, unvisited = _partition_stale_vs_unvisited(
+        ["ondisk", "gone"], set(), d, True
+    )
+    if stale == ["gone"] and unvisited == ["ondisk"]:
+        print("caught planted stale-vs-unvisited split ok")
+    else:
+        print(
+            f"FAILED split: stale={stale} (want ['gone']), "
+            f"unvisited={unvisited} (want ['ondisk'])",
+            file=sys.stderr,
+        )
+        failures += 1
+    # A name already collected is neither, and a subtree scan asserts nothing.
+    if _partition_stale_vs_unvisited(["ondisk"], {"ondisk"}, d, True) != ([], []) or \
+       _partition_stale_vs_unvisited(["gone"], set(), d, False) != ([], []):
+        print("FAILED split: collected or subtree case leaked a result", file=sys.stderr)
+        failures += 1
+
     # Mismatch branch: a directory whose NAME states one axis while the map
     # DECLARES another. Untested until now, so the whole `declared != stated`
     # arm could be deleted and this suite stayed green. Reuses the tree above,
@@ -671,15 +742,9 @@ _whole_repo_scan = root_arg.resolve() == _repo_root_for(root_arg).resolve()
 # in the map (exit 1). A directory that exists on disk but the walk never visited
 # is an INSTRUMENT failure the author fixes in the traversal (exit 2). The far
 # more common cause is the first, and it was reported as the second.
-_declared_missing, _declared_unreached = [], []
-if _whole_repo_scan:
-    for _rel in sorted(DECLARED_PATH_AXIS):
-        if _rel in axis_dirs:
-            continue
-        if (_repo_root_for(root_arg) / _rel).is_dir():
-            _declared_unreached.append(_rel)
-        else:
-            _declared_missing.append(_rel)
+_declared_missing, _declared_unreached = _partition_stale_vs_unvisited(
+    sorted(DECLARED_PATH_AXIS), axis_dirs, root_arg, _whole_repo_scan
+)
 
 name_violations = _name_findings(axis_dirs)
 name_violations += [
@@ -697,19 +762,13 @@ if _declared_unreached:
         "declared directories present on disk but never visited: "
         + ", ".join(_declared_unreached)
     )
-# Same split the declared map already got. A probe path that no longer exists is
+# The same split, through the same owner. A probe path that no longer exists is
 # a STALE CONSTANT the author fixes in REQUIRED_REACH, not a broken traversal,
 # and this repo renames directories routinely. Reporting it as an instrument
 # failure sends the reader into os.walk when the fix is three hundred lines away.
-_probe_stale, _probe_missed = [], []
-if _whole_repo_scan:
-    for _probe in REQUIRED_REACH:
-        if _probe in probes_reached:
-            continue
-        if (_repo_root_for(root_arg) / _probe).is_dir():
-            _probe_missed.append(_probe)
-        else:
-            _probe_stale.append(_probe)
+_probe_stale, _probe_missed = _partition_stale_vs_unvisited(
+    sorted(REQUIRED_REACH), probes_reached, root_arg, _whole_repo_scan
+)
 name_violations += [
     f"{probe}/: REQUIRED_REACH names a path that does not exist; update the "
     "probe to a live directory inside an excluded region"
@@ -844,6 +903,26 @@ else:
     )
 
 if mode == "write-baseline":
+    # A SUBTREE scan collects findings from that subtree alone, and this write
+    # REPLACES the whole file. Combining them silently deletes every finding
+    # outside the subtree while printing a success receipt. Measured twice by
+    # two independent reviewers: `--write-baseline crates` took the file from
+    # 847 entries to 176, and `--write-baseline cli` from 838 to 615, both
+    # exit 0. It was harmless before this branch only by accident, because the
+    # baseline path resolved under the subtree and the write failed loudly.
+    #
+    # The compare path above already narrows both sides to the subtree. This is
+    # the second site of that same concern, and narrowing only the first is
+    # what produced a destructive write with a success receipt.
+    if not _whole_repo_scan:
+        print(
+            "check-axis-vocabulary: --write-baseline needs a whole-repo scan.\n"
+            f"  Root {root_arg} is a subtree, and this write replaces the whole\n"
+            "  baseline, so it would delete every finding outside that subtree.\n"
+            "  Re-run without a ROOT argument.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     header = [
         "# Known four-axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).",
         "# Each entry is exact: file, line, the binding, the literal, and the axis collision.",
