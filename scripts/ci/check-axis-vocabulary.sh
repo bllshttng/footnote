@@ -921,8 +921,14 @@ def _self_test():
         d = Path(tempfile.mkdtemp(prefix="axis-allow-"))
         subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
         (d / "sub").mkdir()
+        # The two plants are the SAME binding, deliberately. The first version
+        # of this specimen used `provider="codex"` beside
+        # `legacy_provider="claude"`, so it could only ever catch a key coarse
+        # enough to merge two different bindings. It passed while one entry was
+        # still absorbing every COPY of one binding, which is the defect that
+        # actually survived. A specimen has to plant the thing it fears.
         (d / "sub" / "mod.py").write_text(
-            'provider = "codex"\nlegacy_provider = "claude"\n', encoding="utf-8"
+            'provider = "codex"\nx = 1\nprovider = "codex"\n', encoding="utf-8"
         )
         env = dict(os.environ)
         env.pop("AXIS_SELF_TEST", None)
@@ -966,17 +972,23 @@ def _self_test():
                 env=env,
             )
             out = drift.stdout + drift.stderr
-            # Both halves asserted positively: the un-allowlisted finding must
-            # still be reported, and the allowlisted one must not. Checking only
-            # the absence would pass on a scan that collapsed to nothing.
-            kept = _identity(found[1]) in out
-            suppressed = _identity(found[0]) not in out
-            if kept and suppressed:
-                print("allowlist suppresses one finding, not the file, ok")
+            # Two identical bindings, one entry, so EXACTLY ONE survives.
+            # Asserted as a count rather than as presence-and-absence, because
+            # the two plants now share an identity and a presence test cannot
+            # tell one survivor from two. Zero is the over-suppression this
+            # specimen exists for. Two means the entry stopped suppressing.
+            ident = _identity(found[0])
+            survivors = sum(
+                1
+                for ln in out.splitlines()
+                if "new or changed violation:" in ln and ident in ln
+            )
+            if survivors == 1:
+                print("allowlist spends one entry on one finding ok")
             else:
                 print(
-                    "FAILED allowlist specimen: "
-                    f"sibling finding reported={kept}, allowlisted suppressed={suppressed}",
+                    "FAILED allowlist specimen: one entry against two identical "
+                    f"bindings left {survivors} survivor(s), expected 1",
                     file=sys.stderr,
                 )
                 failures += 1
@@ -1248,23 +1260,41 @@ def _allowlist_keys(path: Path):
     Identity is the key the baseline diff already uses, and using it here is
     the whole point: a suppression must name one finding, survive renumbering,
     and cover nothing else.
+
+    Returned as a COUNT per identity, not a set, and spent one match per entry
+    below. Membership was the third wrong answer at this site in one sitting:
+    it survives renumbering and it still absorbs every COPY of the binding, so
+    a file holding `provider = "codex"` twice went to zero findings on one
+    entry. The baseline diff has counted identities from the start, for this
+    exact reason, and each of the three suppression keys shipped without it.
     """
-    keys = set()
+    keys: Counter = Counter()
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             m = _ALLOWLIST_RE.match(s)
             if m:
-                keys.add(_identity(m.group(1)))
+                keys[_identity(m.group(1))] += 1
     return keys
 
 
 # Suppress allowlisted sites before any reporting or baseline diff. An entry that
 # does not carry a finding and a justification cannot be parsed, so a bare
 # "smuggle it past review" line fails to suppress.
+#
+# One entry spends itself on one finding. Two identical bindings in a file need
+# two entries and two justifications, which is the same bar the baseline holds
+# a repeated violation to.
 allowlisted = _allowlist_keys(baseline_path)
-_matched_allowlist = {_identity(f) for f in findings} & allowlisted
-findings = [f for f in findings if _identity(f) not in allowlisted]
+_unspent = Counter(allowlisted)
+_kept = []
+for _f in findings:
+    _k = _identity(_f)
+    if _unspent[_k] > 0:
+        _unspent[_k] -= 1
+        continue
+    _kept.append(_f)
+findings = _kept
 
 # A suppression that matches nothing is a live trapdoor nobody is looking at:
 # the site it justified is gone, the entry stays, and the next binding that
@@ -1274,7 +1304,7 @@ findings = [f for f in findings if _identity(f) not in allowlisted]
 # Whole-repo scans only. A subtree legitimately contains no allowlisted site,
 # so firing there would red every `--baseline docs` run - the same scope rule
 # the content positive control below already carries.
-_stale_allowlist = sorted(allowlisted - _matched_allowlist)
+_stale_allowlist = sorted(k for k, n in _unspent.items() if n > 0)
 if _stale_allowlist and _whole_repo_scan:
     print(
         "check-axis-vocabulary: allowlist entries matching no current finding:",
@@ -1286,7 +1316,20 @@ if _stale_allowlist and _whole_repo_scan:
         "The site is gone; remove the entry in the PR that removed it.",
         file=sys.stderr,
     )
-    sys.exit(2)
+    # Not in write-baseline mode, for the reason the name scan carves itself
+    # out 130 lines above: a check must not gate the verb that fixes what it
+    # is complaining about. Removing the ambiguous site an entry justifies is
+    # exactly when an author regenerates, and this exited 2 before writing,
+    # with `--baseline-file` refused in write mode, so the only way out was to
+    # hand-edit the baseline. Second time on this branch that one scan gated
+    # another's maintenance verb, and I wrote both.
+    if mode != "write-baseline":
+        sys.exit(2)
+    print(
+        "check-axis-vocabulary: continuing to write the CONTENT baseline; the "
+        "stale entries above are preserved verbatim and still need removing.",
+        file=sys.stderr,
+    )
 
 # Positive control (AC3): the scan must reach real content in BOTH Python and
 # Rust, the two languages carrying the most axis-named bindings. A scan that

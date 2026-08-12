@@ -396,6 +396,42 @@ def test_a_files_scope_matching_nothing_refuses(tmp_path: Path) -> None:
     assert exc.value.exit_code == 2
 
 
+def test_a_scope_naming_a_path_the_branch_renamed_away_is_allowed(
+    tmp_path: Path,
+) -> None:
+    """The PRE-rename path is a legitimate scope for a rename diff.
+
+    The existence check that catches a cwd mis-resolution also refused a path
+    the branch itself moved, which is exactly the diff a rename PR asks about.
+    Measured on this branch: `--files docs/providers/codex.md` exited 2 over a
+    file this branch renamed. Absence in the working tree cannot decide it, so
+    the base decides: present there means deleted or renamed since.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo, _new, old = _repo_with_renamed_doc(tmp_path)
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        violations, inspected, changed, unexplained = _style_added_lines(
+            "base", [Path(old)]
+        )
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    # A pure rename authors nothing, so the honest answer is a clean zero
+    # rather than a refusal. The sibling test above still proves a path absent
+    # from BOTH sides refuses.
+    assert (violations, inspected, unexplained) == ([], 0, [])
+    assert changed >= 0
+
+
 def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
     """A renamed-and-edited doc must still be covered by the instrument guard.
 

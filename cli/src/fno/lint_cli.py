@@ -408,8 +408,10 @@ def style(
     sentence. Code, paths, flags, and quoted output do not count.
 
     Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
-    this gate. That second 2 fires when git counts added lines in a file and
-    this verb reads none, which is never something to annotate in the file.
+    this gate. That second 2 fires when git and this verb disagree about how
+    many lines a file added, in either direction, which is never something to
+    annotate in the file. Reading FEWER than git counted is the case that
+    matters and the case the first version of this guard missed.
     """
     from fno import style as style_mod
 
@@ -556,7 +558,7 @@ def _numstat_added(raw: str) -> "dict[str, int]":
     return added
 
 
-def _repo_scope(paths: list[Path], repo: Path) -> "list[str]":
+def _repo_scope(paths: list[Path], repo: Path, diff_base: str) -> "list[str]":
     """Repo-root-relative POSIX pathspecs for git, from caller-relative paths.
 
     Callers pass paths relative to THEIR cwd while every git call here runs from
@@ -586,15 +588,40 @@ def _repo_scope(paths: list[Path], repo: Path) -> "list[str]":
         # punished the normal answer: an existing file with no changes since the
         # base is correct, not an instrument failure, and per-file invocation is
         # the advertised use of this flag.
-        if not full.exists():
+        # A path absent from the WORKING TREE is still a legitimate scope when
+        # the branch deleted or renamed it, which is precisely the diff a
+        # rename PR asks about. `--files docs/providers/codex.md` exited 2 on
+        # this very branch, over a file this branch moved. So absence alone
+        # cannot decide it: ask whether the path existed at the BASE. Present
+        # at the base means deleted or renamed since, and the scope is real.
+        # Absent at the base too means the path never existed on either side,
+        # which is the mis-resolution above and still refuses.
+        if not full.exists() and not _existed_at_base(rel, diff_base, root):
             typer.echo(
-                f"style: --files path does not exist: {p} (resolved to {full}). "
+                f"style: --files path does not exist: {p} (resolved to {full}), "
+                f"and it is not in {diff_base} either. "
                 "Paths resolve against the current directory.",
                 err=True,
             )
             raise typer.Exit(2)
         out.append(rel)
     return out
+
+
+def _existed_at_base(rel: str, diff_base: str, repo: Path) -> bool:
+    """Did ``rel`` exist at ``diff_base``?
+
+    Deliberately NOT routed through _run_git: a false answer here is the whole
+    point of the call, and that helper turns a non-zero git into a hard exit.
+    Any failure reads as "not at the base", which keeps the refusal above
+    fail-closed - an unreadable base refuses the path rather than waving it
+    through.
+    """
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{diff_base}:{rel}"],
+        capture_output=True,
+    )
+    return probe.returncode == 0
 
 
 def _style_added_lines(
@@ -617,11 +644,19 @@ def _style_added_lines(
     from fno import style as style_mod
 
     repo = _repo_root()
-    scope = _repo_scope(paths, repo) if paths else ["docs", "skills", "agents"]
+    # Verified BEFORE scope resolution, because scope resolution now asks the
+    # base whether a missing path existed there. An unverified base answers
+    # "no" for every path, so a bad base would refuse a legitimate deleted-file
+    # scope while blaming the path instead of the base.
     _run_git(
         ["git", "rev-parse", "--verify", diff_base],
         repo,
         label=f"bad diff-base {diff_base!r}",
+    )
+    scope = (
+        _repo_scope(paths, repo, diff_base)
+        if paths
+        else ["docs", "skills", "agents"]
     )
     diff_files = _run_git(
         _pinned_diff_argv("--name-only", f"{diff_base}...HEAD", "--", *scope),
