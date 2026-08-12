@@ -73,22 +73,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Evaluate generic delivery evidence.",
         {"hidden": True},
     ),
-    "company": (
-        "fno.company.cli:company_app",
-        "Company campaign inspection and proposals.",
-        {"hidden": True},
-    ),
     "plugins": (
         "fno.plugins.cli:plugins_app",
         "Install, verify, activate, and inspect function packs.",
         {"hidden": True},
     ),
-    "log": (
-        "fno.log_cmd:app",
-        "Append a progress entry to the per-worktree agent-progress.jsonl",
-        {"hidden": True},
-    ),
-    "reality-check": ("fno.reality_check.cli:cli", "check external reality", {"hidden": True}),
     "mail": (
         "fno.mail.cli:mail_app",
         "Durable polled mailbox: send/unread/ack/reply/drain/status.",
@@ -100,7 +89,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "agents": ("fno.agents.cli:agents_app", "Cross-CLI agent dispatch (claude / codex / gemini)."),
-    "wake": ("fno.wake.cli:wake_app", "Wake-signal admin commands", {"hidden": True}),
     "plan": ("fno.plan:plan_app", "Plan frontmatter stamping (in-package)", {"hidden": True}),
     "pr": ("fno.pr:pr_app", "PR utilities (wraps scripts/lib/pr-*.sh)", {"hidden": True}),
     "stub-manifest": (

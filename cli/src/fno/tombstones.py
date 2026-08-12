@@ -29,6 +29,30 @@ import click
 import typer.core
 
 TOMBSTONES: dict[str, str] = {
+    # Four top-level groups whose every leaf scored zero in `verb-callers.py
+    # --dead`: no skill, doc, script, hook, or cli/src argv named any of them.
+    # Confirmed by a second whole-repo walk sharing no code with that tool.
+    # The implementation packages stay where live code imports them
+    # (`fno.company.contracts` and `fno.wake.signal` have many importers); what
+    # is gone is the invocable surface.
+    "company": (
+        "nothing - the company campaign verbs had no caller anywhere. "
+        "`fno.company.contracts` is still imported by the graph, plan, and "
+        "delivery code; only the CLI surface was removed"
+    ),
+    "log": (
+        "`fno event emit` - the per-worktree progress log had no reader and no "
+        "caller outside its own test"
+    ),
+    "reality-check": (
+        "nothing - the external-reality probes had no caller. The `gh` probe's "
+        "job is done by `fno pr status <n>`"
+    ),
+    "wake": (
+        "nothing - the wake-signal ADMIN verbs had no caller. Wake signals "
+        "themselves are still written and read by `fno.wake.signal`, which the "
+        "inbox drain and mail paths use"
+    ),
     "backlog inbox": (
         "`fno backlog capture` - the same command. `inbox` was a second "
         "registration of the identical Typer app, so every one of its nine "
@@ -77,7 +101,11 @@ def refuse(path: str) -> click.UsageError:
     if hit is None:  # pragma: no cover - callers check first
         return click.UsageError(f"No such command {path.split()[-1]!r}.")
     removed, replacement = hit
-    return click.UsageError(f"`fno {removed}` was removed. Use {replacement}.")
+    # A verb with a successor says "Use X"; one whose capability simply went
+    # away says so directly. "Use nothing - ..." is the kind of sentence that
+    # makes a reader think the tool is broken rather than the verb gone.
+    lead = "" if replacement.startswith("nothing") else "Use "
+    return click.UsageError(f"`fno {removed}` was removed. {lead}{replacement}.")
 
 
 class TombstoneGroup(typer.core.TyperGroup):

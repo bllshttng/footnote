@@ -306,6 +306,14 @@ class LazyTypeGroup(typer.core.TyperGroup):
             return cmd
         if cmd_name in self._lazy:
             return self._make_stub(cmd_name)
+        # A removed top-level verb refuses BY NAME. The root group is a
+        # different class from TombstoneGroup (it owns lazy loading), so the
+        # check has to live on both or removals are only taught one level down
+        # - a guard on one of two reachable paths.
+        from fno.tombstones import refuse, tombstone_for
+
+        if tombstone_for(cmd_name) is not None:
+            raise refuse(cmd_name)
         return None
 
     def _make_stub(self, name: str) -> _LazyStub:

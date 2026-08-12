@@ -178,10 +178,6 @@ claim release
 claim session-pid
 claim status
 codemap
-company join
-company propose
-company show
-company topology
 config accounts
 config active-backlog
 config doctor
@@ -216,10 +212,6 @@ lint spawn-paths
 lint stale-skill-refs
 lint style
 lint verb-ratchet
-log activity
-log milestone
-log user-note
-log warning
 loops ls
 loops pause-all
 loops resume-all
@@ -313,7 +305,6 @@ pr-watch refresh
 pr-watch status
 pr-watch tick
 pr-watch uninstall
-reality-check gh !--pr
 research
 restart
 resume receipt show
@@ -377,9 +368,6 @@ tokens
 update
 upgrade
 version
-wake clear
-wake drop
-wake list
 whoami
 worker blueprint
 worker external !--pr
