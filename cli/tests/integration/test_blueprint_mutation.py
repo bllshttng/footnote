@@ -488,33 +488,27 @@ class TestAC1ERRRewrite:
 
 
 # ---------------------------------------------------------------------------
-# AC1-EDGE: missing ## Failure Modes
+# AC1-EDGE: ## Failure Modes is optional. The refusal retired with the
+# think-era contract; a research doc without it blueprints fine.
 # ---------------------------------------------------------------------------
 
 
 class TestAC1EDGE:
-    def test_missing_failure_modes_exits_2(self, tmp_path):
-        """AC1-EDGE: missing ## Failure Modes -> exit 2."""
-        # Create a doc without ## Failure Modes
+    def test_missing_failure_modes_is_accepted(self, tmp_path):
+        """A doc without ## Failure Modes mutates successfully (exit 0)."""
         doc = tmp_path / "no_failure_modes.md"
         doc.write_text(
-            "---\nstatus: design\n---\n\n# Test\n\n## Overview\n\nSome overview.\n\n"
-            "## User Stories\n\n**US1:** Some story.\n",
+            "---\nstatus: design\ncreated: 2026-01-01\n---\n\n# Test\n\n## Overview\n\nSome overview.\n\n"
+            "## Architecture\n\nnew files\n\n## User Stories\n\n**US1:** Some story.\n",
             encoding="utf-8",
         )
-        result = _run_mutate(doc)
-        assert result.returncode == 2, \
-            f"Expected exit 2 for missing Failure Modes, got {result.returncode}\nstderr: {result.stderr}"
-
-    def test_missing_failure_modes_stderr_message(self, tmp_path):
-        """AC1-EDGE: stderr message mentions Failure Modes and /think."""
-        doc = tmp_path / "no_failure_modes.md"
-        doc.write_text(
-            "---\nstatus: design\n---\n\n# Test\n\n## Overview\n\nSome overview.\n",
-            encoding="utf-8",
+        result = _run_mutate(doc, "--mode", "greenfield", "--draft")
+        assert result.returncode == 0, (
+            f"Expected exit 0 (Failure Modes optional), got {result.returncode}\nstderr: {result.stderr}"
         )
-        result = _run_mutate(doc)
-        assert "Failure Modes" in result.stderr, f"Expected 'Failure Modes' in stderr: {result.stderr}"
+        assert "## Execution Strategy" in doc.read_text(encoding="utf-8"), (
+            "mutate should produce an Execution Strategy without Failure Modes"
+        )
 
 
 # ---------------------------------------------------------------------------

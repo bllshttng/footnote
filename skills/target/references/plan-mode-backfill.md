@@ -72,25 +72,26 @@ A same-session, in-TTL sidecar survives so `/target` can detect it.
 ## Backfill (skills/target/scripts/backfill-plan.sh + the /target skill body)
 
 Deterministic scaffolding lives in the script; the one genuinely new piece of
-reasoning (synthesizing `## Failure Modes` + `## Acceptance Criteria` from the
-native plan's intent) is LLM-powered and orchestrated by the skill body.
+reasoning (synthesizing `## Acceptance Criteria` from the native plan's intent)
+is LLM-powered and orchestrated by the skill body.
 
 - `skeleton <native-plan> <out-doc>` — wraps the native plan in a design-doc
   skeleton + inline frontmatter, body preserved VERBATIM (AC2-FR). If the
-  native plan already contains a `## Failure Modes` and/or `## Acceptance
-  Criteria` section, it is carried through and reused, never duplicated
-  (AC2-EDGE).
-- The skill body then synthesizes any missing `## Failure Modes`
-  (Boundaries/Errors/Invariants/Concurrency sub-labels) + the 5 BDD AC types
-  (AC-HP / AC-ERR / AC-UI / AC-EDGE / AC-FR) into the doc.
-- `check-sections <doc>` — validates the gate-required structure is present and
-  prints exactly what is missing, so a retry re-synthesizes ONLY the rejected
-  section. Bounded to 2 attempts (AC2-ERR); on persistent failure the partial
-  doc path is surfaced and target does NOT enter the autonomous loop (AC1-ERR).
+  native plan already contains a `## Acceptance Criteria` section, it is
+  carried through and reused, never duplicated (AC2-EDGE).
+- The skill body then synthesizes the 5 BDD AC types (AC-HP / AC-ERR / AC-UI /
+  AC-EDGE / AC-FR) into the doc.
+- `check-sections <doc>` — validates the structure blueprint compiles (the
+  Acceptance Criteria section + its 5 BDD types) and prints exactly what is
+  missing, so a retry re-synthesizes ONLY the rejected section. Bounded to 2
+  attempts (AC2-ERR); on persistent failure the partial doc path is surfaced
+  and target does NOT enter the autonomous loop (AC1-ERR).
 - The skill body then invokes `/blueprint <doc>` to append Execution Strategy,
   File Ownership Map, kill_criteria and set `status: ready` (AC2-HP).
 - `render-diff <native-plan> <enriched-doc>` — prints the ADDED sections
   distinctly from the original plan body for the confirm step (AC1-UI).
 
-`/blueprint` hard-refuses a doc without `## Failure Modes` (literal
-`grep -q '^## Failure Modes$'`), which is why synthesis MUST precede it.
+`/blueprint` compiles acceptance criteria, so AC synthesis precedes it.
+`/blueprint` no longer requires a `## Failure Modes` section (that refusal
+retired with the think-era contract) and first-fills frontmatter on a doc that
+has none, so a native plan needs neither to pass through.

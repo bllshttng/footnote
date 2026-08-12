@@ -17,8 +17,7 @@ Exit codes:
     0  success
     1  doc already in ready (or higher) status without --rewrite; or path is
        a feature description / nonexistent file (redirect to /think)
-    2  required section missing (## Failure Modes) or section ownership
-       violation
+    2  section ownership violation
     3  frontmatter status missing / invalid / unreadable
 """
 from __future__ import annotations
@@ -842,12 +841,6 @@ def mutate(
         return 1, (
             "doc already has a Blueprint execution draft; pass `rewrite` to regenerate it "
             "or `--finalize` after enrichment."
-        )
-
-    # --- Validate required sections ---
-    if not plan.has_section("Failure Modes"):
-        return 2, (
-            "design doc missing required ## Failure Modes section; run /think first."
         )
 
     # --- Detect mode ---

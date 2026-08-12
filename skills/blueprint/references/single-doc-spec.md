@@ -25,7 +25,6 @@ Enforced by `fno.plan._status.validate_transition(old, new)`. Backward transitio
 | Scenario | Exit code | Stderr |
 |----------|-----------|--------|
 | `/blueprint` on `status: ready` without `rewrite` | 1 | "doc already in `ready` status; pass `rewrite` to regenerate execution sections." |
-| `/blueprint` on doc missing `## Failure Modes` | 2 | "design doc missing required ## Failure Modes section; run /think first." |
 | `/blueprint` writes to section outside allowlist | 2 | "section ownership violation: '<section>' is not in BLUEPRINT_WRITE_ALLOWLIST" |
 
 ## Section ownership allowlist
