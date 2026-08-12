@@ -440,9 +440,10 @@ def style(
             if violations:
                 typer.echo(style_mod.format_violations(violations), err=True)
             typer.echo(
-                "style: git counted added lines in these file(s) that this gate "
-                "then read as having none, which is a parser failure in the gate "
-                "rather than something to annotate in the file:\n  "
+                "style: git and this gate disagree about how many lines these "
+                "file(s) added, so some added lines went unread. That is a "
+                "parser failure in the gate rather than something to annotate "
+                "in the file:\n  "
                 + "\n  ".join(unexplained),
                 err=True,
             )
@@ -606,11 +607,12 @@ def _style_added_lines(
     not open: a malformed base that inspects nothing is the absence the pitfalls
     corpus names, indistinguishable from "no violations found".
 
-    ``unexplained`` collects the PATHS of changed files where GIT counted added
-    lines and this parser found none. That is an instrument failure and nothing else. Counting
-    bare zeros instead swept in every legitimate zero: a pure rename, a
-    deletion-only trim, a mode change. Two of those were measured failing real
-    PRs, and the rename-resolution fix directly above is what creates the first.
+    ``unexplained`` collects the PATHS of changed files where GIT and this
+    parser disagree about the added-line count. That is an instrument failure
+    and nothing else. Counting bare zeros instead swept in every legitimate
+    zero: a pure rename, a deletion-only trim, a mode change. Two of those were
+    measured failing real PRs, and the rename-resolution fix directly above is
+    what creates the first.
     """
     from fno import style as style_mod
 
@@ -684,11 +686,24 @@ def _style_added_lines(
             # Mask the WHOLE file and check only the added lines, so an added
             # line inside an existing fenced block is masked as code and skipped.
             violations.extend(style_mod.check_lines(whole, nums))
-        elif added_by_path.get(rel, 0) > 0:
-            # git counted added lines for this path and the parser found none.
-            # That is the only shape here that means the INSTRUMENT failed, and
-            # it is the shape the guard was always meant to catch. Paths are
-            # collected rather than counted, since a count is not investigable.
+        if len(nums) != added_by_path.get(rel, 0):
+            # git and the parser disagree about how many lines this file added,
+            # which is the only shape here that means the INSTRUMENT failed.
+            #
+            # Compared as COUNTS, not as "did we get zero". The emptiness test
+            # this replaces caught only a TOTAL loss: one hunk header failing
+            # the `\+(\d+)` search leaves `nums` non-empty, so git's 40 against
+            # the parser's 31 passed, nine unread lines shipped unstyled, and
+            # the receipt said "inspected 31 added line(s)" with no hint that
+            # 40 was the right number. Same class as the absence the guard was
+            # written for, one step short of total. The exact number was on
+            # hand the whole time.
+            #
+            # Both sides agree on every real file measured (34 changed docs on
+            # this branch, four of them renamed, zero mismatches), so equality
+            # is not a stricter approximation of the truth - it IS the truth.
+            # Paths are collected rather than counted, since a count is not
+            # investigable.
             unexplained.append(rel)
     return violations, inspected, len(changed), unexplained
 

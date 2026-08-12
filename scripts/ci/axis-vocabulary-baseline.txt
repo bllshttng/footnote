@@ -2,8 +2,10 @@
 # Each entry is exact: file, line, the binding, the literal, and the axis collision.
 # A binding named for one axis (provider/harness/model) may not hold a literal from another.
 # Remove an entry only in the same PR that removes the violation. Convert a genuinely
-# correct ambiguous site (opencode/gemini) to an `allowlist:` line with a one-line
-# justification; see docs/architecture/four-axis-vocabulary.md.
+# correct ambiguous site (opencode/gemini) by copying its row below, appending
+# `| <one-line justification>`, and prefixing it with `allowlist: `. The entry
+# suppresses that one finding and nothing else, and the gate fails once it matches
+# nothing. See docs/architecture/four-axis-vocabulary.md.
 # Regenerate: bash scripts/ci/check-axis-vocabulary.sh --write-baseline
 
 cli/src/fno/agents/dispatch.py:1032: provider="codex" (provider-named binding holds a harness literal)
@@ -844,4 +846,4 @@ tests/test-target-state-recovery.sh:69: provider="codex" (provider-named binding
 tests/test_register_task.py:280: provider="claude" (provider-named binding holds a harness literal)
 tests/test_register_task.py:288: provider="claude" (provider-named binding holds a harness literal)
 
-allowlist: cli/tests/agents/test_harnesses_env_inject.py:181 tests the AC8 pre-cutover compat window; the legacy FNO_AGENT_PROVIDER name is the point of the fixture, not a conflation.
+allowlist: cli/tests/agents/test_harnesses_env_inject.py:181: FNO_AGENT_PROVIDER="codex" (provider-named binding holds a harness literal) | tests the AC8 pre-cutover compat window; the legacy FNO_AGENT_PROVIDER name is the point of the fixture, not a conflation.

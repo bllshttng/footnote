@@ -536,6 +536,56 @@ def test_style_gate_still_fails_when_the_parser_loses_added_lines(
     )
 
 
+def test_the_guard_catches_a_partial_parser_loss_not_only_a_total_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Losing SOME added lines is the same instrument failure as losing all.
+
+    The emptiness test this replaces caught only a total loss. One hunk header
+    failing the `\\+(\\d+)` search leaves the returned set non-empty, so the
+    file passed the guard, the unread lines shipped unstyled, and the receipt
+    reported the smaller number as though it were the whole job. Git's exact
+    count was already in hand.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    doc = repo / "docs" / "d.md"
+    doc.write_text("One line.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    doc.write_text("One line.\nTwo line.\nThree line.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "author two lines")
+
+    # Git counts two added lines; the parser returns one. Non-empty, and wrong.
+    monkeypatch.setattr("fno.lint_cli._git_added_line_nums", lambda *a, **k: {2})
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        _v, inspected, _changed, unexplained = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert inspected == 1, "the receipt reports what was actually read"
+    assert unexplained == ["docs/d.md"], (
+        "one line read out of two counted is an instrument failure, "
+        "and the old emptiness test called it clean"
+    )
+
+
 @pytest.mark.parametrize(
     "marker", ["--name-only", "-U0", "--name-status", "--numstat", "rev-parse"]
 )

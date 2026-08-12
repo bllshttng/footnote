@@ -92,7 +92,12 @@ ROOT="${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 BASELINE_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
 BASELINE_FILE="${BASELINE_FILE:-$BASELINE_ROOT/scripts/ci/axis-vocabulary-baseline.txt}"
 
-if [[ "$MODE" == "strict" && $BASELINE_FILE_SEEN -eq 1 ]]; then
+# Checked against MODE_SEEN, not MODE. MODE defaults to strict and --write-baseline
+# overrides it further down, so testing MODE let `--write-baseline --baseline-file
+# /tmp/x` through: the message said --baseline-file was valid only with --baseline
+# while the destructive regeneration quietly accepted a redirect to any path. The
+# read-only combination the guard WAS written for exited 2 the whole time.
+if [[ "$MODE_SEEN" != "baseline" && $BASELINE_FILE_SEEN -eq 1 ]]; then
   echo "check-axis-vocabulary: --baseline-file is valid only with --baseline" >&2
   exit 2
 fi
@@ -374,6 +379,36 @@ def _findings_for_line(rel: str, lineno: int, line: str):
         seen.add(key)
         out.append(f'{rel}:{lineno}: {name}="{literal}" ({desc})')
     return out
+
+
+# The `:<line>:` between an entry's path and its binding. Stripped to compare
+# entries by identity rather than by position; see _identity.
+_LINE_IN_ENTRY = re.compile(r"^(.+?):\d+: ")
+
+
+def _identity(entry: str) -> str:
+    """An entry's identity WITHOUT its line number.
+
+    The baseline still records `path:line:` because a human chasing a finding
+    needs somewhere to look. Comparing on it was the bug: an edit anywhere
+    ABOVE a baselined violation renumbers it, and a pure renumbering read as
+    one resolved entry plus one new violation. That turned main red twice in
+    four hours on days nobody touched the vocabulary at all - once from a
+    two-line config refactor, once from a merge that shifted 22 daemon.rs
+    entries at a stroke. The violation is the NAME-holds-the-wrong-AXIS
+    binding, not the row it happens to sit on, so identity drops the line.
+
+    Counted rather than set-compared by the baseline diff, so N identical
+    bindings in one file still require N baseline entries: adding a sixth
+    `legacy_provider="codex"` to a file that already has five is a new
+    violation and must fail.
+
+    Defined up here, well above all three callers, because the baseline diff,
+    the allowlist suppression and the self-test MUST identify a finding the
+    same way, and the first two have now disagreed about that twice in
+    opposite directions.
+    """
+    return _LINE_IN_ENTRY.sub(r"\1: ", entry, count=1)
 
 
 def _stated_axis(name: str):
@@ -868,6 +903,168 @@ def _self_test():
             )
             failures += 1
 
+    # An allowlist entry suppresses ONE finding, not its whole file. Both
+    # cheaper keys shipped: `path:line` renumbered, and the fix for that keyed
+    # by bare `path`, which absorbed every finding in the file - including ones
+    # that did not exist yet, and including them from the baseline write, since
+    # suppression runs first. It passed CI because the one allowlisted file
+    # holds exactly one finding, so the over-suppression had nothing to absorb.
+    # A guard whose defect the current data hides needs a specimen carrying its
+    # own second finding.
+    #
+    # End to end through the real entry point, on a SUBTREE root: a temp repo
+    # scanned whole exits at the name-scan positive control long before
+    # suppression runs, so a whole-repo specimen would test the control instead.
+    if not script:
+        pass  # already counted above
+    else:
+        d = Path(tempfile.mkdtemp(prefix="axis-allow-"))
+        subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+        (d / "sub").mkdir()
+        (d / "sub" / "mod.py").write_text(
+            'provider = "codex"\nlegacy_provider = "claude"\n', encoding="utf-8"
+        )
+        env = dict(os.environ)
+        env.pop("AXIS_SELF_TEST", None)
+        raw = subprocess.run(
+            ["bash", script, "--strict", str(d / "sub")],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        found = sorted(
+            ln.strip()
+            for ln in (raw.stdout + raw.stderr).splitlines()
+            if re.match(r"^\s+sub/mod\.py:\d+: ", ln)
+        )
+        if len(found) != 2:
+            # Positive control. Zero findings has three explanations and this
+            # specimen wants one, so it must never read as a pass.
+            print(
+                f"FAILED allowlist specimen: planted 2 findings, scan saw {len(found)}",
+                file=sys.stderr,
+            )
+            failures += 1
+        else:
+            bf = d / "bl.txt"
+            # Recorded at a line the finding is no longer on, which is what an
+            # edit above it produces. Suppression must survive that, and a
+            # line-pinned key does not - the entry stops matching, the site
+            # reappears, and an unrelated PR goes red. Writing the entry
+            # pre-shifted makes ONE run cover both wrong keys: an exact-line
+            # entry and a shifted one take the same path once the line is
+            # dropped, so the shifted case strictly dominates.
+            shifted = re.sub(r"^(.+?):(\d+): ", lambda m: f"{m.group(1)}:{int(m.group(2)) + 1000}: ", found[0])
+            bf.write_text(
+                "# specimen\n\n" + f"allowlist: {shifted} | specimen\n",
+                encoding="utf-8",
+            )
+            drift = subprocess.run(
+                ["bash", script, "--baseline", "--baseline-file", str(bf), str(d / "sub")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            out = drift.stdout + drift.stderr
+            # Both halves asserted positively: the un-allowlisted finding must
+            # still be reported, and the allowlisted one must not. Checking only
+            # the absence would pass on a scan that collapsed to nothing.
+            kept = _identity(found[1]) in out
+            suppressed = _identity(found[0]) not in out
+            if kept and suppressed:
+                print("allowlist suppresses one finding, not the file, ok")
+            else:
+                print(
+                    "FAILED allowlist specimen: "
+                    f"sibling finding reported={kept}, allowlisted suppressed={suppressed}",
+                    file=sys.stderr,
+                )
+                failures += 1
+
+    # A suppression matching nothing must fail rather than sit there. Run
+    # against the REAL repo root, which costs one extra full scan (~2s): the
+    # check is scoped to a whole-repo scan, and a whole-repo scan of a temp
+    # tree exits at the name-scan positive control before suppression ever
+    # runs, so a temp specimen would silently be testing that control instead.
+    # The stale entry is INJECTED rather than adapted from a live one, so the
+    # specimen keeps working on the day the baseline holds no allowlist at all.
+    if script:
+        real_root = subprocess.run(
+            ["git", "-C", str(Path(script).parent), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        real_baseline = Path(script).parent / "axis-vocabulary-baseline.txt"
+        if not real_root or not real_baseline.exists():
+            print(
+                "FAILED stale-allowlist specimen: no real repo root or baseline",
+                file=sys.stderr,
+            )
+            failures += 1
+        else:
+            ghost = 'nosuch/ghost.py:1: provider="codex" (provider-named binding holds a harness literal)'
+            bf = Path(tempfile.mkdtemp(prefix="axis-stale-")) / "bl.txt"
+            bf.write_text(
+                real_baseline.read_text(encoding="utf-8")
+                + f"allowlist: {ghost} | specimen\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            env.pop("AXIS_SELF_TEST", None)
+            run = subprocess.run(
+                ["bash", script, "--baseline", "--baseline-file", str(bf), real_root],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            out = run.stdout + run.stderr
+            if "matching no current finding" in out and "nosuch/ghost.py" in out:
+                print("stale allowlist entry fails the gate ok")
+            else:
+                print(
+                    f"FAILED stale-allowlist specimen: exit {run.returncode}, "
+                    "the injected entry was accepted",
+                    file=sys.stderr,
+                )
+                failures += 1
+
+    # The two mode refusals, which live in bash and had no cover at all: both
+    # were found by review rather than by a run. Exercised against a temp root
+    # so a regression cannot regenerate the real baseline while proving it can.
+    #
+    # Asserted as "refused at parse time", not as "no file appeared". A temp
+    # root exits at the name-scan positive control long before any write, so
+    # `not baseline.exists()` holds there whether the guard works or not - it
+    # would have been a third assertion that cannot fail, in a file that has
+    # now shipped two. The refusal message plus the ABSENCE of the scan receipt
+    # pins it: one positive marker for the refusal, one for having stopped
+    # before the scan, and the reverted guard fails both.
+    if script:
+        d = Path(tempfile.mkdtemp(prefix="axis-mode-"))
+        subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+        env = dict(os.environ)
+        env.pop("AXIS_SELF_TEST", None)
+        for args, marker in (
+            (["--strict", "--write-baseline"], "--write-baseline is a mode, not a modifier"),
+            (
+                ["--write-baseline", "--baseline-file", str(d / "redirect.txt")],
+                "--baseline-file is valid only with --baseline",
+            ),
+        ):
+            run = subprocess.run(
+                ["bash", script, *args, str(d)], capture_output=True, text=True, env=env
+            )
+            out = run.stdout + run.stderr
+            if marker in out and run.returncode == 2 and "positive control" not in out:
+                print(f"refused {' '.join(args[:2])} at parse time ok")
+            else:
+                print(
+                    f"FAILED mode refusal {args}: exit {run.returncode}, "
+                    f"refused={marker in out}, scanned={'positive control' in out}",
+                    file=sys.stderr,
+                )
+                failures += 1
+
     return 1 if failures else 0
 
 
@@ -1013,31 +1210,44 @@ if name_violations:
     )
 
 
-# An allowlist entry MUST carry a one-line justification: `allowlist: <path>:<line> <why>`.
-# This single regex is the authority for BOTH suppression (a bare line parses to no
-# key, so it cannot suppress) and baseline format validation (a bare line is
-# malformed -> exit 2). A bare `allowlist: file:line` with no justification therefore
-# fails in both modes - it can never silently absorb a finding.
-_ALLOWLIST_RE = re.compile(r"^allowlist:\s+(.+?):(\d+)\s+(\S.*)$")
-# The `:<line>:` between an entry's path and its binding. Stripped to compare
-# entries by identity rather than by position; see _identity below.
-_LINE_IN_ENTRY = re.compile(r"^(.+?):\d+: ")
+# An allowlist entry is the FINDING it suppresses, then `|`, then a one-line
+# justification: `allowlist: <path>:<line>: <binding> (<axis note>) | <why>`.
+# Copy the row out of the baseline above and append the reason.
+#
+# This single regex is the authority for BOTH suppression (an entry that does not
+# parse yields no key, so it cannot suppress) and baseline format validation (an
+# entry that does not parse is malformed -> exit 2). A bare `allowlist: file:line`
+# with no finding text and no justification therefore fails in both modes - it can
+# never silently absorb a finding.
+#
+# Group 1 is non-greedy, so the FIRST `|` separates the finding from the reason.
+# No axis finding contains one; a justification may.
+_ALLOWLIST_RE = re.compile(r"^allowlist:\s+(.+?:\d+:\s+.+?)\s+\|\s+(\S.*)$")
 
 
 def _allowlist_keys(path: Path):
-    """Keys allowlisted out of the violation set (correct ambiguous sites,
-    time-boxed compat windows), with a required justification per line.
+    """Identities allowlisted out of the violation set (correct ambiguous
+    sites, time-boxed compat windows), with a required justification per line.
 
-    Keyed by FILE, not file:line, for the same reason the baseline comparison
-    drops the line: inserting a line anywhere above an allowlisted site
-    renumbers it, the entry silently stops suppressing, and the site reappears
-    as a new violation in a PR that touched nothing related. The baseline diff
-    learned that lesson (its docstring records main going red twice in four
-    hours), and this half kept the line pin, so the two disagreed about what
-    identifies a finding.
+    Keyed by IDENTITY: the path plus the binding, minus the line. Both cheaper
+    keys were wrong in opposite directions and both shipped.
 
-    The entry still RECORDS a line, because a human chasing the justification
-    needs somewhere to look. It just does not match on one.
+    `path:line` renumbers. Inserting a line anywhere above an allowlisted site
+    makes the entry stop suppressing and the site reappear as a new violation
+    in a PR that touched nothing related - the same failure whose two red
+    mains are recorded in _identity above.
+
+    Bare `path` over-suppresses, which is what the renumbering fix traded to.
+    One entry then covered every axis violation in that file, present AND
+    future, and because suppression runs ahead of the baseline write the
+    absorbed findings never reached the baseline either. Concretely: the one
+    live entry justifies a single pre-cutover compat fixture, and under the
+    bare-path key a fresh `provider = "claude"` anywhere else in that same file
+    was invisible to --strict, --baseline and --write-baseline alike.
+
+    Identity is the key the baseline diff already uses, and using it here is
+    the whole point: a suppression must name one finding, survive renumbering,
+    and cover nothing else.
     """
     keys = set()
     if path.exists():
@@ -1045,22 +1255,38 @@ def _allowlist_keys(path: Path):
             s = line.strip()
             m = _ALLOWLIST_RE.match(s)
             if m:
-                keys.add(m.group(1))
+                keys.add(_identity(m.group(1)))
     return keys
 
 
-def _finding_key(f: str) -> str:
-    """The FILE a finding sits in. Paired with _allowlist_keys above, and the
-    pairing is the point: both sides must identify a finding the same way."""
-    m = re.match(r"^(.+?):\d+:", f)
-    return m.group(1) if m else f
-
-
-# Suppress allowlisted sites before any reporting or baseline diff. An allowlist
-# entry with no justification cannot be parsed (the regex requires text after the
-# file:line), so a bare "smuggle it past review" line fails to suppress.
+# Suppress allowlisted sites before any reporting or baseline diff. An entry that
+# does not carry a finding and a justification cannot be parsed, so a bare
+# "smuggle it past review" line fails to suppress.
 allowlisted = _allowlist_keys(baseline_path)
-findings = [f for f in findings if _finding_key(f) not in allowlisted]
+_matched_allowlist = {_identity(f) for f in findings} & allowlisted
+findings = [f for f in findings if _identity(f) not in allowlisted]
+
+# A suppression that matches nothing is a live trapdoor nobody is looking at:
+# the site it justified is gone, the entry stays, and the next binding that
+# lands on that identity is absorbed silently. The baseline half already fails
+# on a resolved entry for exactly this reason, and this half did not.
+#
+# Whole-repo scans only. A subtree legitimately contains no allowlisted site,
+# so firing there would red every `--baseline docs` run - the same scope rule
+# the content positive control below already carries.
+_stale_allowlist = sorted(allowlisted - _matched_allowlist)
+if _stale_allowlist and _whole_repo_scan:
+    print(
+        "check-axis-vocabulary: allowlist entries matching no current finding:",
+        file=sys.stderr,
+    )
+    for e in _stale_allowlist:
+        print(f"  {e}", file=sys.stderr)
+    print(
+        "The site is gone; remove the entry in the PR that removed it.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # Positive control (AC3): the scan must reach real content in BOTH Python and
 # Rust, the two languages carrying the most axis-named bindings. A scan that
@@ -1125,8 +1351,10 @@ if mode == "write-baseline":
         "# Each entry is exact: file, line, the binding, the literal, and the axis collision.",
         "# A binding named for one axis (provider/harness/model) may not hold a literal from another.",
         "# Remove an entry only in the same PR that removes the violation. Convert a genuinely",
-        "# correct ambiguous site (opencode/gemini) to an `allowlist:` line with a one-line",
-        "# justification; see docs/architecture/four-axis-vocabulary.md.",
+        "# correct ambiguous site (opencode/gemini) by copying its row below, appending",
+        "# `| <one-line justification>`, and prefixing it with `allowlist: `. The entry",
+        "# suppresses that one finding and nothing else, and the gate fails once it matches",
+        "# nothing. See docs/architecture/four-axis-vocabulary.md.",
         "# Regenerate: bash scripts/ci/check-axis-vocabulary.sh --write-baseline",
         "",
     ]
@@ -1170,8 +1398,8 @@ except (OSError, UnicodeError) as exc:
 
 # Split the checked-in baseline into violation entries and allowlist entries.
 # Allowlist lines are metadata (consumed by the suppression pass), not findings
-# to diff - but they ARE validated: each must carry a path, a line, and a
-# one-line justification (_ALLOWLIST_RE). A bare `allowlist: file:line` with no
+# to diff - but they ARE validated: each must carry the finding it suppresses and
+# a one-line justification (_ALLOWLIST_RE). A bare `allowlist: file:line` with no
 # justification is exactly how a finding would be smuggled past review, so a
 # missing justification or a malformed entry fails loudly here rather than
 # silently doing nothing.
@@ -1190,26 +1418,6 @@ if malformed or len(baseline) != len(set(baseline)) or len(allowlist_lines) != l
     sys.exit(2)
 
 current = list(findings)
-
-
-def _identity(entry: str) -> str:
-    """An entry's identity WITHOUT its line number.
-
-    The baseline still records `path:line:` because a human chasing a finding
-    needs somewhere to look. Comparing on it was the bug: an edit anywhere
-    ABOVE a baselined violation renumbers it, and a pure renumbering read as
-    one resolved entry plus one new violation. That turned main red twice in
-    four hours on days nobody touched the vocabulary at all - once from a
-    two-line config refactor, once from a merge that shifted 22 daemon.rs
-    entries at a stroke. The violation is the NAME-holds-the-wrong-AXIS
-    binding, not the row it happens to sit on, so identity drops the line.
-
-    Counted rather than set-compared, so N identical bindings in one file
-    still require N baseline entries: adding a sixth `legacy_provider="codex"`
-    to a file that already has five is a new violation and must fail.
-    """
-    return _LINE_IN_ENTRY.sub(r"\1: ", entry, count=1)
-
 
 # A SUBTREE scan produces findings only from that subtree, so diffing it against
 # the whole-repo baseline reports every violation outside the subtree as resolved.

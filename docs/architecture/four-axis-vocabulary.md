@@ -113,11 +113,19 @@ Each entry carries a one-line justification stating which two axes collide and w
 
 When a site legitimately binds an ambiguous value and must be excluded from the guard:
 
-1. Add one line to `scripts/ci/axis-vocabulary-baseline.txt` with the file, line, binding, literal, and the two axes involved.
-2. Append a `# justification: <one line>` stating which axes collide and why this binding is correct.
-3. Record a removal trigger if the entry is time-boxed (the only such entry today is the `FNO_AGENT_PROVIDER` read-side compatibility window, which expires when no in-flight worker can carry the old variable).
+1. Run `bash scripts/ci/check-axis-vocabulary.sh --write-baseline` and find the row the site produced in `scripts/ci/axis-vocabulary-baseline.txt`.
+2. Copy that row, prefix it with `allowlist: `, and append ` | <one line>` stating which axes collide and why this binding is correct.
+3. Delete the plain row you copied, so the site is held by the allowlist rather than by the ratchet.
+4. Record a removal trigger if the entry is time-boxed (the only such entry today is the `FNO_AGENT_PROVIDER` read-side compatibility window, which expires when no in-flight worker can carry the old variable).
+
+The entry carries the whole finding, not just its path, and that is what scopes it.
+Keying by path alone would suppress every axis violation in that file, including ones written later.
+Keying by `path:line` would stop suppressing the moment an edit above renumbers the site.
+The recorded line is for a human chasing the justification; the guard matches on the file and the binding.
 
 An allowlist entry with no justification fails the guard, because a justification-free entry is exactly how a real violation would be smuggled past a reviewer.
+An entry matching no current finding also fails, on a whole-repo scan.
+A suppression whose site is gone is a trapdoor left open for the next binding that lands on the same name.
 
 ## Recognized and unrecognized harness values
 
