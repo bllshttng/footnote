@@ -1589,6 +1589,8 @@ def _drained_msg_ids() -> set[str]:
                     rec = json.loads(line)
                 except (ValueError, TypeError):
                     continue
+                if not isinstance(rec, dict):
+                    continue
                 if rec.get("kind") == "agent_mail_drained":
                     mid = rec.get("msg_id")
                     if isinstance(mid, str) and mid:

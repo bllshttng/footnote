@@ -2953,7 +2953,7 @@ def cmd_bus_ack(
     # terminal event -- the same accounting gap drain-self closes. Captured
     # before the advance (after it, scan_unread no longer returns them).
     pos = {m.id: i for i, m in enumerate(all_msgs)}
-    acked = [m for m in scan_unread(name) if pos.get(m.id, -1) <= pos[msg_id]]
+    acked = [m for m in scan_unread(name) if m.id in pos and pos[m.id] <= pos[msg_id]]
 
     if advance_cursor(name, msg_id):
         print(f"cursor for {name!r} advanced to {msg_id}")
@@ -3350,9 +3350,17 @@ def cmd_notify_self() -> None:
     lines: list[str] = []
 
     unread = scan_unread(handle)
-    if unread:
-        lines.append(f"[fno mail] {len(unread)} message(s) for {handle}:")
-        for message in unread:
+    from fno.mail.reply_resolve import present_mail_ids
+
+    present = present_mail_ids()
+
+    def _dup(m: object) -> bool:
+        return present is not None and getattr(m, "id", "") in present
+
+    to_render = [m for m in unread if not _dup(m)]
+    if to_render:
+        lines.append(f"[fno mail] {len(to_render)} message(s) for {handle}:")
+        for message in to_render:
             lines.extend(
                 (
                     f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
@@ -3378,6 +3386,10 @@ def cmd_notify_self() -> None:
         )
 
     if not lines:
+        if unread:
+            advance_cursor(handle, unread[-1].id)
+            for m in unread:
+                _emit_drain_marker(m.id, handle, handle, m.from_, "skipped-duplicate")
         return
 
     try:
@@ -3402,6 +3414,9 @@ def cmd_notify_self() -> None:
 
     if unread:
         advance_cursor(handle, unread[-1].id)
+        for m in unread:
+            reason = "skipped-duplicate" if _dup(m) else "printed"
+            _emit_drain_marker(m.id, handle, handle, m.from_, reason)
 
 
 @mail_app.command("rebuild-render", hidden=True)

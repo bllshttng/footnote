@@ -309,3 +309,182 @@ def test_manual_ack_emits_drain_marker(tmp_path, monkeypatch):
     assert markers, "a manual ack advanced the cursor without emitting a receipt"
     assert markers[0]["msg_id"] == handle.thread_id
     assert markers[0]["reason"] == "acked"
+
+
+# ---------------------------------------------------------------------------
+# Class fix: cmd_notify_self is the third cursor-advancing mail path. It must
+# emit drain markers and dedup against the transcript, like drain-self and ack.
+# ---------------------------------------------------------------------------
+
+
+class _StubStdout:
+    """Captures cmd_notify_self's UserPromptSubmit JSON payload."""
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+
+    def write(self, s: str) -> int:
+        self.written.append(s)
+        return len(s)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _notify_setup(monkeypatch, msgs):
+    """Wire cmd_notify_self to see ``msgs`` for cl-abcd1234, stub sent-unclaimed
+    and config so the test exercises only the drain/dedup path."""
+    from types import SimpleNamespace
+
+    from fno import harness_identity
+    from fno.bus import cursor as cursor_mod
+    from fno.mail import cli as mail_cli
+
+    class _Ident:
+        harness = "claude"
+        session_id = "abcd1234"
+
+    monkeypatch.setattr(harness_identity, "resolve_harness_identity", lambda: _Ident())
+    monkeypatch.setattr(harness_identity, "canonical_handle", lambda sid: "cl-abcd1234")
+    monkeypatch.setattr(cursor_mod, "scan_unread", lambda h: msgs if h == "cl-abcd1234" else [])
+    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(inbox=SimpleNamespace(unclaimed_ttl=3600)),
+    )
+    return cursor_mod
+
+
+def test_notify_self_emits_markers_and_dedups(monkeypatch):
+    """AC1-class: the push path receipts each message, printing fresh mail and
+    skipping a duplicate whose id already landed in the transcript."""
+    from fno.mail import cli as mail_cli
+
+    dup = _Msg(id="n-dup", from_="alice", to="cl-abcd1234", kind="note",
+               ts="2026-08-11T00:00:00Z", body="dup body")
+    fresh = _Msg(id="n-fresh", from_="bob", to="cl-abcd1234", kind="note",
+                 ts="2026-08-11T00:00:00Z", body="fresh body")
+    cursor_mod = _notify_setup(monkeypatch, [dup, fresh])
+    monkeypatch.setattr("fno.mail.reply_resolve.present_mail_ids", lambda: {"n-dup"})
+    advances: list[tuple] = []
+    monkeypatch.setattr(
+        cursor_mod, "advance_cursor", lambda h, mid: advances.append((h, mid)) or True
+    )
+    captured = _capture_events(monkeypatch)
+    out = _StubStdout()
+
+    with monkeypatch.context() as patch:
+        patch.setattr("sys.stdout", out)
+        mail_cli.cmd_notify_self()
+
+    rendered = "".join(out.written)
+    assert "fresh body" in rendered, "a fresh message was not rendered"
+    assert "dup body" not in rendered, "a duplicate was rendered a second time"
+    assert advances, "the push path advanced no cursor"
+    by_id = {m["msg_id"]: m["reason"] for m in captured if m.get("kind") == "agent_mail_drained"}
+    assert by_id.get("n-dup") == "skipped-duplicate", "a duplicate was receipted as printed"
+    assert by_id.get("n-fresh") == "printed", "a fresh message was receipted as a duplicate"
+
+
+def test_notify_self_unreadable_transcript_prints_all(monkeypatch):
+    """AC5-class: an unreadable transcript (present is None) falls through to
+    printing every message. A read failure is not evidence of absence."""
+    from fno.mail import cli as mail_cli
+
+    msgs = [
+        _Msg(id=f"n-{i}", from_="alice", to="cl-abcd1234", kind="note",
+             ts="2026-08-11T00:00:00Z", body=f"body {i}")
+        for i in range(2)
+    ]
+    cursor_mod = _notify_setup(monkeypatch, msgs)
+    monkeypatch.setattr("fno.mail.reply_resolve.present_mail_ids", lambda: None)
+    monkeypatch.setattr(cursor_mod, "advance_cursor", lambda h, mid: True)
+    captured = _capture_events(monkeypatch)
+    out = _StubStdout()
+
+    with monkeypatch.context() as patch:
+        patch.setattr("sys.stdout", out)
+        mail_cli.cmd_notify_self()
+
+    rendered = "".join(out.written)
+    assert "body 0" in rendered and "body 1" in rendered, (
+        "a message was skipped when the transcript could not be read"
+    )
+    reasons = {m["reason"] for m in captured if m.get("kind") == "agent_mail_drained"}
+    assert reasons == {"printed"}, "an unreadable transcript receipted a message as a duplicate"
+
+
+def test_notify_self_all_dups_advance_and_mark_silently(monkeypatch):
+    """When every unread message is a duplicate, nothing is rendered but the
+    cursor still advances and each gets a skipped-duplicate receipt."""
+    from fno.mail import cli as mail_cli
+
+    dup = _Msg(id="n-all", from_="alice", to="cl-abcd1234", kind="note",
+               ts="2026-08-11T00:00:00Z", body="already seen")
+    cursor_mod = _notify_setup(monkeypatch, [dup])
+    monkeypatch.setattr("fno.mail.reply_resolve.present_mail_ids", lambda: {"n-all"})
+    advances: list[tuple] = []
+    monkeypatch.setattr(
+        cursor_mod, "advance_cursor", lambda h, mid: advances.append((h, mid)) or True
+    )
+    captured = _capture_events(monkeypatch)
+    out = _StubStdout()
+
+    with monkeypatch.context() as patch:
+        patch.setattr("sys.stdout", out)
+        mail_cli.cmd_notify_self()
+
+    assert not out.written, "a fully-duplicate mailbox rendered a payload"
+    assert advances, "a fully-duplicate mailbox advanced no cursor"
+    markers = [m for m in captured if m.get("kind") == "agent_mail_drained"]
+    assert markers and markers[0]["reason"] == "skipped-duplicate"
+
+
+def test_bus_ack_excludes_mail_arriving_after_snapshot(monkeypatch, tmp_path):
+    """cmd_bus_ack builds its position snapshot from iter_messages, then reads
+    scan_unread again. A message that lands between the two must NOT be receipted
+    (the m.id-in-pos guard), or mail the user never acked gets a terminal event."""
+    from fno.bus import cursor as cursor_mod
+    from fno.bus import log as bus_log
+    from fno.mail import cli as mail_cli
+
+    use_tmpdir(monkeypatch, tmp_path)
+    m_ack = _Msg(id="m-ack", from_="alice", to="fno", kind="note",
+                 ts="2026-08-11T00:00:00Z", body="ack me")
+    m_late = _Msg(id="m-late", from_="bob", to="fno", kind="note",
+                  ts="2026-08-11T00:01:00Z", body="arrived after the snapshot")
+    monkeypatch.setattr(bus_log, "iter_messages", lambda: [m_ack])
+    monkeypatch.setattr(cursor_mod, "scan_unread", lambda n: [m_ack, m_late])
+    monkeypatch.setattr(cursor_mod, "advance_cursor", lambda n, mid: True)
+    captured = _capture_events(monkeypatch)
+
+    mail_cli.cmd_bus_ack(msg_id="m-ack", name="fno")
+
+    by_id = {m["msg_id"]: m for m in captured if m.get("kind") == "agent_mail_drained"}
+    assert "m-ack" in by_id and by_id["m-ack"]["reason"] == "acked"
+    assert "m-late" not in by_id, (
+        "a message that arrived after the ack snapshot was receipted; the id-in-pos "
+        "guard must exclude it"
+    )
+
+
+def test_drained_msg_ids_skips_non_dict_json(tmp_path, monkeypatch):
+    """A valid-JSON non-object line carrying the marker substring must not crash
+    the sweep; it is skipped and real markers are still read."""
+    from fno.agents import events
+    from fno.doctor import _drained_msg_ids
+    from fno.paths import state_dir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    events.emit(
+        events.KIND_AGENT_MAIL_DRAINED, msg_id="m-real",
+        recipient="cl-abcd1234", address_form="cl-abcd1234", sender="alice",
+    )
+    with (state_dir() / "events.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write('["agent_mail_drained"]\n')
+
+    ids = _drained_msg_ids()
+    assert "m-real" in ids, "a non-dict line suppressed a real marker"
