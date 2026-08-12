@@ -798,6 +798,8 @@ struct View {
     /// inherits the emulator's own colors so every pre-theme render is
     /// byte-identical.
     theme: Theme,
+    /// (x-f75e) Which settings tab is in front (general toggles / theme picker).
+    settings_tab: SettingsTab,
     /// (x-a496) Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
@@ -1481,10 +1483,21 @@ enum AuxAction {
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
+    /// (x-f75e) Apply the named mux theme now: swap the in-memory theme, then
+    /// persist via `fno config set mux.theme`. The picker lists the shipped
+    /// names, so this carries one of them.
+    ApplyTheme(String),
     /// (x-1d91) Jump the sideline selector to this Backlog card and close the
     /// mini-kanban - the overlay is a scanning surface, so acting on a card
     /// hands you back to the row where its full menu lives.
     BacklogGoto(String),
+}
+
+/// (x-f75e) The settings modal's two tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Theme,
 }
 
 /// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
@@ -1648,6 +1661,7 @@ impl View {
             show_missions: true,
             show_backlog: true,
             theme: Theme::default_theme(),
+            settings_tab: SettingsTab::General,
             hover_pending: None,
             hover_row: None,
             hover_seam: None,
@@ -2357,28 +2371,50 @@ impl View {
         self.aux_esc.clear();
     }
 
-    /// Build the minimal settings modal (x-8ccf US5): 2 session-only toggles that
-    /// live-apply to this session. Persistence to config.toml is out of scope for
-    /// v1, so each row is honestly labeled "session only" rather than pretending
-    /// it persisted (the modal must never claim persistence it did not achieve).
+    /// Build the settings modal (x-8ccf US5, x-f75e theme picker): a `general`
+    /// tab of session-only toggles and a `theme` tab of the shipped palettes.
+    /// This is the first real consumer of `Chrome::tabs`. The toggles live-apply
+    /// to this session and are honestly labeled "session only" (persistence to
+    /// config.toml is out of scope for them); the theme picker persists via
+    /// `fno config set` on apply.
     fn build_settings_modal(&self) -> AuxPopup {
-        let toggle = |on: bool, label: &str| PopupRow::Entry {
-            glyph: if on { "☑".into() } else { "☐".into() },
-            label: label.into(),
-            hint: "session only".into(),
-        };
-        AuxPopup {
-            popup: Popup::new(
-                vec![
-                    PopupRow::Header("settings".into()),
-                    PopupRow::Rule,
-                    toggle(self.hover_focus, "focus follows mouse"),
-                    toggle(self.status_on, "status row"),
-                ],
-                Anchor::Center,
-            ),
-            actions: vec![AuxAction::ToggleHoverFocus, AuxAction::ToggleStatus],
+        let tab = self.settings_tab;
+        let mut rows = Vec::new();
+        let mut actions: Vec<AuxAction> = Vec::new();
+        match tab {
+            SettingsTab::General => {
+                let toggle = |on: bool, label: &str| PopupRow::Entry {
+                    glyph: if on { "☑".into() } else { "☐".into() },
+                    label: label.into(),
+                    hint: "session only".into(),
+                };
+                rows.push(toggle(self.hover_focus, "focus follows mouse"));
+                rows.push(toggle(self.status_on, "status row"));
+                actions.push(AuxAction::ToggleHoverFocus);
+                actions.push(AuxAction::ToggleStatus);
+            }
+            SettingsTab::Theme => {
+                // The four shipped palettes; the active one is marked. Enter on a
+                // name applies it (an explicit action, not a cursor-move preview).
+                for name in crate::theme::THEME_NAMES {
+                    let active = self.theme.name == name;
+                    rows.push(PopupRow::Entry {
+                        glyph: if active { "●".into() } else { "○".into() },
+                        label: name.into(),
+                        hint: if active { "active".into() } else { String::new() },
+                    });
+                    actions.push(AuxAction::ApplyTheme(name.into()));
+                }
+            }
         }
+        let popup = Popup::new(rows, Anchor::Center)
+            .title("settings")
+            .tabs(vec![
+                ("general".to_string(), tab == SettingsTab::General),
+                ("theme".to_string(), tab == SettingsTab::Theme),
+            ])
+            .footer("tab switches section · esc close");
+        AuxPopup { popup, actions }
     }
 
     /// Rebuild the settings modal after a toggle so its glyph reflects the new
@@ -10054,8 +10090,44 @@ async fn execute_aux_action(
                 .map_err(|e| format!("resize send failed: {e}"))?;
             view.reopen_settings_keeping_sel();
         }
+        AuxAction::ApplyTheme(name) => {
+            // Swap the in-memory theme first (immediate), then persist via the
+            // CLI - the mux never writes config itself, mirroring the rule that
+            // it never writes the graph. On a write failure the in-memory theme
+            // STAYS (applied this session) and the notice says so honestly,
+            // never claiming a persistence it did not achieve.
+            let (theme, warn) = Theme::from_name(&name);
+            view.theme = theme;
+            let notice = match spawn_set_theme(&name).await {
+                Ok(()) => match warn {
+                    None => format!("theme: {name}"),
+                    Some(w) => w.0,
+                },
+                Err(_) => format!("theme {name} applied this session; save failed"),
+            };
+            view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
     }
     Ok(DispatchFlow::Continue)
+}
+
+/// Run `fno config set mux.theme <name>`, bounded. The mux shells the CLI rather
+/// than writing config itself (the graph-write rule applied to config). Returns
+/// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
+/// in-memory theme either way and reports honestly.
+async fn spawn_set_theme(name: &str) -> Result<(), String> {
+    let fut = tokio::process::Command::new(crate::server::fno_bin())
+        .args(["config", "set", "mux.theme", name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match tokio::time::timeout(Duration::from_secs(3), fut).await {
+        Ok(Ok(out)) if out.status.success() => Ok(()),
+        Ok(_) => Err(format!("fno config set mux.theme {name} failed")),
+        Err(_) => Err("fno config set timed out".into()),
+    }
 }
 
 /// Run the aux popup's selected row (Enter/click), propagating a detach.
@@ -10135,6 +10207,24 @@ async fn aux_keys(
                     DispatchFlow::Detach
                 ) {
                     return Ok(StdinFlow::Detach);
+                }
+            }
+            // Tab switches the settings modal's section (general/theme). Other aux
+            // popups have no tab strip, so Tab dismisses as every unbound key does.
+            ModalKey::Byte(b'\t') => {
+                let has_tabs = view
+                    .aux
+                    .as_ref()
+                    .map(|m| !m.popup.chrome.tabs.is_empty())
+                    .unwrap_or(false);
+                if has_tabs {
+                    view.settings_tab = match view.settings_tab {
+                        SettingsTab::General => SettingsTab::Theme,
+                        SettingsTab::Theme => SettingsTab::General,
+                    };
+                    view.reopen_settings_keeping_sel();
+                } else {
+                    view.aux = None;
                 }
             }
             // Any other (unbound) key dismisses, per the shared popup contract.
@@ -17169,6 +17259,84 @@ mod tests {
         aux_execute_selected(&mut v, &mut buf).await.unwrap();
         assert_eq!(v.hover_focus, !before, "toggle flips session state");
         assert!(v.aux.is_some(), "settings stays open for another toggle");
+    }
+
+    #[test]
+    fn settings_theme_tab_lists_the_shipped_palettes() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Theme;
+        let modal = v.build_settings_modal();
+        // One ApplyTheme action per shipped theme, in display order.
+        let names: Vec<String> = modal
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                AuxAction::ApplyTheme(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        let want: Vec<String> = crate::theme::THEME_NAMES
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(names, want);
+        // The active theme (terminal by default) is marked with the filled dot.
+        assert!(
+            modal
+                .popup
+                .rows
+                .iter()
+                .any(|r| matches!(r, PopupRow::Entry { glyph, .. } if glyph == "●")),
+            "active theme is marked"
+        );
+        // The chrome carries the two section tabs (positive marker it framed).
+        assert_eq!(modal.popup.chrome.tabs.len(), 2);
+    }
+
+    #[test]
+    fn settings_general_tab_keeps_the_session_toggles() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::General;
+        let modal = v.build_settings_modal();
+        assert!(modal.actions.contains(&AuxAction::ToggleHoverFocus));
+        assert!(modal.actions.contains(&AuxAction::ToggleStatus));
+    }
+
+    #[test]
+    fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
+        // (x-f75e) Chrome is mandatory by construction: Popup.chrome is
+        // non-optional and draw_lines_overlay takes a &Chrome, so a new overlay
+        // cannot skip it - it is a compile error, not a review catch. This
+        // enumerates the family-A constructors reachable with light fixtures and
+        // asserts each renders a border (positive marker) at the level its
+        // anchor dictates (Centered -> Full, anchored -> Bare).
+        //
+        // The full set of fourteen: family A (7) = keys modal, row menu, card
+        // menu, section menu, sideline MENU, mini-kanban, settings; family B
+        // (7) = the seven draw_lines_overlay callers (catch-up, needs-me,
+        // move-pick, attach-place, connections, peek, navigator), verified by
+        // draw_lines_overlay_centers_within_viewport and the chrome::frame tests.
+        let assert_chrome = |p: &Popup, expected: chrome::Level| {
+            assert_eq!(p.chrome.level(), expected, "level matches the anchor");
+            let r = p.render((40, 100));
+            assert!(
+                r.lines
+                    .iter()
+                    .any(|l| l.text.starts_with('┌') || l.text.starts_with('└')),
+                "a border corner was drawn"
+            );
+        };
+        // Centered (Full): keys modal, sideline MENU, settings.
+        assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
+        assert_chrome(&build_sideline_menu(Anchor::Center).popup, chrome::Level::Full);
+        let v = two_pane_view();
+        assert_chrome(&v.build_settings_modal().popup, chrome::Level::Full);
+        // Anchored (Bare): the row context menu, opened next to the pointer.
+        let agent = tab_agent(None, None, false);
+        assert_chrome(
+            &build_row_menu(&agent, Anchor::At { row: 5, col: 5 }).popup,
+            chrome::Level::Bare,
+        );
     }
 
     #[tokio::test]
