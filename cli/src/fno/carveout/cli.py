@@ -15,6 +15,7 @@ import typer
 from fno.carveout.core import (
     DESCRIPTION_CAP,
     VALID_KINDS,
+    VALID_SEVERITIES,
     CarveoutError,
     add_carveout,
 )
@@ -66,6 +67,14 @@ def add(
         "structured match - the king orphan check reads this field rather than "
         "grepping the description free text.",
     ),
+    severity: str = typer.Option(
+        None,
+        "--severity",
+        help="How much this left-out item matters: critical|high|medium|low, "
+        "routed to priority p0..p3 at harvest. Defaults to p3 (today's behavior). "
+        "A carveout filed to satisfy the fidelity gate is stamped high by "
+        "provenance, not chosen here.",
+    ),
 ) -> None:
     """Record one deferred decision, out-of-scope bug, or data backfill for later triage."""
     if kind not in VALID_KINDS:
@@ -79,6 +88,14 @@ def add(
     if priority is not None and not _PRIORITY_RE.match(priority):
         typer.echo(
             f"carveout: invalid --priority '{priority}' (expected p0, p1, p2 or p3)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if severity is not None and severity not in VALID_SEVERITIES:
+        typer.echo(
+            f"carveout: invalid --severity '{severity}' "
+            f"(expected one of: {', '.join(VALID_SEVERITIES)})",
             err=True,
         )
         raise typer.Exit(2)
@@ -100,6 +117,7 @@ def add(
             need=need,
             priority=priority,
             scope=scope,
+            severity=severity,
             storage_root=storage_root,
         )
     except CarveoutError as exc:
