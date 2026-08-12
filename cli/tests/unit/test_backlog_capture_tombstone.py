@@ -1,16 +1,16 @@
-"""Alias parity + event dual-read for the `backlog inbox` -> `backlog capture`
-rename (ab-bf7cc0d8).
+"""The removed `backlog inbox` alias, and the legacy event vocabulary it left.
 
-Covers:
-  AC1b-HP  `fno backlog inbox X` is byte-identical to `fno backlog capture X`
-           (same Typer app registered under both names)
-  AC2-ERR  validation errors are identical through either spelling
-  AC3-UI   `fno backlog --help` lists `capture` and hides `inbox`; the alias
-           still renders its own help
-  AC4-EDGE a session mixing legacy inbox_add and new capture_add rows counts
-           both in capture-pass
-  AC6-FR   capture-pass counts the capture_add the same binary just emitted
-           (emit/reader coherence)
+`inbox` was a second registration of the `capture` Typer app: nine subcommands,
+byte-identical behaviour, and nine baseline lines the surface paid for twice.
+It is gone, and what remains here splits cleanly in two.
+
+  TOMBSTONE   reaching for the removed spelling must name its replacement, not
+              fail the way a typo fails.
+  DUAL-READ   the alias is gone but its EVENTS are not. Sessions recorded
+              `inbox_add` rows before the rename and those rows still have to
+              count, so the reader vocabulary outlives the verb. Deleting these
+              with the alias would have silently broken the capture-pass gate
+              for any session that predates it.
 """
 from __future__ import annotations
 
@@ -46,94 +46,29 @@ def _backlog_cli():
 
 
 # --------------------------------------------------------------------------
-# AC1b-HP: alias parity through the parent app
+# The tombstone, and help visibility
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("spelling", ["capture", "inbox"])
-def test_add_works_through_both_spellings(spelling: str) -> None:
-    res = runner.invoke(
-        _backlog_cli(),
-        [spelling, "add", "parity item", "--source", "PR#1", "--why", "w"],
-    )
-    assert res.exit_code == 0, res.output
-    payload = json.loads(res.stdout.splitlines()[-1])
-    assert payload["id"].startswith("fu-")
+def test_removed_inbox_spelling_names_its_replacement() -> None:
+    """The removed alias teaches; a genuine typo still gets the generic error.
 
+    Both halves are asserted. Without the second, a tombstone table that
+    swallowed EVERY unknown verb would pass the first and hide real typos
+    behind a confident wrong answer.
+    """
+    res = runner.invoke(_backlog_cli(), ["inbox", "list"])
+    assert res.exit_code != 0
+    assert "was removed" in res.output
+    assert "fno backlog capture" in res.output
 
-def test_alias_write_matches_canonical(tmp_path: Path) -> None:
-    """Both spellings share one write path: distinct titles append
-    identically-shaped blocks, and a same-(title, where) add through the ALIAS
-    dedups against the item the canonical spelling captured (Phase 3 pre-check
-    applies regardless of spelling)."""
-    cli = _backlog_cli()
-    from fno.paths import inbox_path
+    typo = runner.invoke(_backlog_cli(), ["inbocks", "list"])
+    assert typo.exit_code != 0
+    assert "was removed" not in typo.output
 
-    res_cap = runner.invoke(
-        cli, ["capture", "add", "same title", "--source", "PR#1", "--why", "w"]
-    )
-    assert res_cap.exit_code == 0, res_cap.output
-    cap_payload = json.loads(res_cap.stdout.splitlines()[-1])
-
-    # Alias add with a DIFFERENT title: appends a second, identically-shaped block.
-    res_alias = runner.invoke(
-        cli, ["inbox", "add", "other title", "--source", "PR#1", "--why", "w"]
-    )
-    assert res_alias.exit_code == 0, res_alias.output
-
-    def norm(t: str) -> str:
-        return re.sub(r"fu-[0-9a-f]{6}", "fu-XXXXXX", t)
-
-    text = inbox_path().read_text(encoding="utf-8")
-    blocks = [
-        ln for ln in norm(text).splitlines() if ln.startswith("- [ ] fu-XXXXXX")
-    ]
-    assert blocks == [
-        "- [ ] fu-XXXXXX - same title (p2)",
-        "- [ ] fu-XXXXXX - other title (p2)",
-    ]
-
-    # Alias add of the SAME (title, where): dedups against the canonical's item.
-    res_dup = runner.invoke(
-        cli, ["inbox", "add", "same title", "--source", "PR#2", "--why", "w"]
-    )
-    assert res_dup.exit_code == 0, res_dup.output
-    dup_payload = json.loads(res_dup.stdout.splitlines()[-1])
-    assert dup_payload["deduped"] is True
-    assert dup_payload["id"] == cap_payload["id"]
-
-
-def test_list_parity_between_spellings() -> None:
-    cli = _backlog_cli()
-    add = runner.invoke(
-        cli, ["capture", "add", "listed item", "--source", "PR#1", "--why", "w"]
-    )
-    assert add.exit_code == 0, add.output
-    res_cap = runner.invoke(cli, ["capture", "list", "--json"])
-    res_alias = runner.invoke(cli, ["inbox", "list", "--json"])
-    assert res_cap.exit_code == res_alias.exit_code == 0
-    assert res_cap.stdout == res_alias.stdout
-
-
-# --------------------------------------------------------------------------
-# AC2-ERR: validation parity
-# --------------------------------------------------------------------------
-
-def test_validation_error_parity() -> None:
-    cli = _backlog_cli()
-    args = ["add", "x", "--source", "[[feedback_x]]", "--why", "y"]
-    res_cap = runner.invoke(cli, ["capture", *args])
-    res_alias = runner.invoke(cli, ["inbox", *args])
-    assert res_cap.exit_code == res_alias.exit_code == 2
-    assert res_cap.output == res_alias.output
-
-
-# --------------------------------------------------------------------------
-# AC3-UI: help visibility
-# --------------------------------------------------------------------------
 
 def test_backlog_capture_hidden_but_invocable() -> None:
-    """x-71b6 tiering: `capture` (and its `inbox` alias) are hidden from the
-    advertised backlog menu, but `capture` stays fully invocable."""
+    """x-71b6 tiering: `capture` is hidden from the advertised backlog menu,
+    but stays fully invocable."""
     # capture is invocable (its own --help works) even though hidden.
     cap = runner.invoke(_backlog_cli(), ["capture", "--help"])
     assert cap.exit_code == 0, cap.output
@@ -149,13 +84,6 @@ def test_backlog_capture_hidden_but_invocable() -> None:
             if re.match(rf"^[\s|│]*{verb}\s", ln)
         ]
         assert listed == [], f"hidden {verb!r} leaked into help: {listed}"
-
-
-def test_alias_help_still_renders() -> None:
-    res = runner.invoke(_backlog_cli(), ["inbox", "--help"])
-    assert res.exit_code == 0
-    for verb in ("add", "list", "promote", "dismiss", "tidy"):
-        assert verb in res.output
 
 
 # --------------------------------------------------------------------------

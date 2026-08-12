@@ -23,11 +23,15 @@ from typing import List, Literal, Optional
 import typer
 
 from fno.harness_identity import resolve_harness_identity
+from fno.tombstones import TombstoneGroup
 
 cli = typer.Typer(
     name="graph",
     help="Feature graph management",
     no_args_is_help=True,
+    # Removed verbs under `backlog` refuse by name and say what replaced them,
+    # instead of failing with the same message a typo gets.
+    cls=TombstoneGroup,
     # The curated menu below is nouns; this line is the answer to "can I take
     # that back". It sits on the group help because that is the surface someone
     # deciding what is possible actually reads - a correction verb nobody can
@@ -46,12 +50,14 @@ cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
-# `fno mail` (cross-project messaging). `fno backlog inbox` is kept as a
-# hidden deprecated alias (same Typer app, byte-identical behavior).
+# `fno mail` (cross-project messaging).
+#
+# `inbox` was a SECOND registration of this same app, so all nine of its
+# subcommands were duplicates and the surface paid for them twice. It is gone;
+# `fno.tombstones` keeps the name reachable as a signpost.
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
 cli.add_typer(_capture_cli, name="capture", hidden=True)
-cli.add_typer(_capture_cli, name="inbox", hidden=True)
 
 # Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.

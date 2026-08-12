@@ -91,7 +91,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "add", "advance", "archive", "backfill-slugs", "bases", "batch",
         "briefs", "capture", "collisions", "cost", "decompose", "defer",
         "dispatch-lanes", "done", "epic", "exec-graph", "find", "get", "groom",
-        "idea", "inbox", "intake", "lane-fill", "lanes", "maintain", "new",
+        "idea", "intake", "lane-fill", "lanes", "maintain", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "rank", "ready", "reconcile", "reconcile-findings", "rehash",
         "relatedness", "release", "remove", "reopen", "reprioritize", "roadmap",
