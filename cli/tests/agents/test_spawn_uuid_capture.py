@@ -16,8 +16,8 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.providers import claude as claude_mod
-from fno.agents.providers.claude import resolve_session_uuid_at_spawn
+from fno.agents.harnesses import claude as claude_mod
+from fno.agents.harnesses.claude import resolve_session_uuid_at_spawn
 from fno.agents.registry import load_registry
 
 

@@ -8,7 +8,8 @@ The Rust client (`crates/fno-agents`) can handle the `ask` verb for **claude** a
 
 `ask` was the last `fno agents` verb still owned by Python (`PYTHON_AGENT_VERBS` in `cli/src/fno/agents/rust_runtime.py`). Codex and gemini agents are PTY-managed by the Rust daemon, but `claude` is a `claude --bg` shellout: `ClaudeProvider.as_pty()` is `None`. A daemon-routed claude `ask` hits "worker not reachable". `claude --bg` is self-supervised — it runs its own background daemon, a rendezvous Unix socket, and a transcript/state dir under `~/.claude/jobs/<short-id>/`. There is nothing for the fno daemon to PTY-manage.
 
-So the Rust **client** talks to claude's own session machinery directly, the same way Python's `providers/claude.py` + `providers/_claude_session_registry.py` + the `dispatch.py` ask path do.
+So the Rust **client** talks to claude's own session machinery directly.
+That is the same path Python takes through `harnesses/claude.py`, `harnesses/_claude_session_registry.py`, and `dispatch.py`.
 
 ## The path
 
@@ -18,7 +19,7 @@ So the Rust **client** talks to claude's own session machinery directly, the sam
 
 ## Byte-parity
 
-Byte-parity with Python on observable behavior (stdout, exit code, the BG8 envelope bytes, events.jsonl fields) is the contract. Two Python-specific encodings are hand-rolled to match: `json.dumps(ensure_ascii=True)` (non-ASCII → `\uXXXX`, fixed key order) for the envelope and event lines, and `html.escape(quote=True)` for `from_name`. `claude_ask_parity.rs` pins the byte-critical surfaces (envelope, `parse_short_id`, reply extraction) against the **real** `fno.agents.providers.claude` so Python-side drift is caught (skips when python3 is unavailable).
+Byte-parity with Python on observable behavior (stdout, exit code, the BG8 envelope bytes, events.jsonl fields) is the contract. Two Python-specific encodings are hand-rolled to match: `json.dumps(ensure_ascii=True)` (non-ASCII → `\uXXXX`, fixed key order) for the envelope and event lines, and `html.escape(quote=True)` for `from_name`. `claude_ask_parity.rs` pins the byte-critical surfaces (envelope, `parse_short_id`, reply extraction) against the **real** `fno.agents.harnesses.claude`, so Python-side drift is caught. When python3 is unavailable, it skips.
 
 ## Scope boundary
 

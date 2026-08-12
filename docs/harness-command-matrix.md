@@ -158,5 +158,5 @@ Only two spawn payloads render through this table: an **explicit `/verb` passthr
 ## See also
 
 - [provider-rotation.md](provider-rotation.md) - provider records, failover, and the switchboard settings schema.
-- [providers/provider-adapters.md](providers/provider-adapters.md) - how a provider adapter is put together.
+- [harnesses/harness-adapters.md](harnesses/harness-adapters.md) - how a harness adapter is put together.
 - `skills/using-fno/SKILL.md` - the two-surface orientation loaded each session.

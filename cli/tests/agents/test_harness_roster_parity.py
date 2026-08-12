@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents.providers import KNOWN_PROVIDERS, READABLE_PROVIDERS
+from fno.agents.harnesses import KNOWN_PROVIDERS, READABLE_PROVIDERS
 
 
 def _rust_provider_rs() -> Path:

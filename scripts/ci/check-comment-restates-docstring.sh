@@ -21,7 +21,7 @@
 # against the code on the next line, you have rebuilt the refused instrument.
 #
 # Safe where every density gate was not. The reference exemplar
-# cli/src/fno/agents/providers/base.py is the densest file in the repository
+# cli/src/fno/agents/harnesses/base.py is the densest file in the repository
 # (over half its lines are documentation) and must score ZERO findings; the
 # file-level density of base.py is exactly the property a percentage gate
 # misreads as bloat. A finding there means the instrument has drifted toward

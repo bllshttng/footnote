@@ -353,7 +353,7 @@ def _default_resolver(short_id: str) -> Optional[str]:
     the session entry is not rejected on a transient miss (blueprint Concurrency).
     """
     try:
-        from fno.agents.providers.claude import resolve_session_uuid_at_spawn
+        from fno.agents.harnesses.claude import resolve_session_uuid_at_spawn
 
         return resolve_session_uuid_at_spawn(short_id)
     except Exception:
@@ -637,7 +637,7 @@ def inject_spawn_defaults(
         return _resolved["v"]
 
     if cfg_provider and not has_provider:
-        from fno.agents.providers import READABLE_PROVIDERS
+        from fno.agents.harnesses import READABLE_PROVIDERS
 
         if cfg_provider not in READABLE_PROVIDERS:
             print(

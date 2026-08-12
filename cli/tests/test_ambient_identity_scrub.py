@@ -159,8 +159,8 @@ def test_bg_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None
     """AC5 (bg substrate): a `claude --bg` child sheds every ambient identity
     marker its parent carried. The operator's spawned-reviewer lane uses
     `--substrate bg`, so this is the seam a cross-model review crosses."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import bg_create
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import bg_create
 
     for index, marker in enumerate(ALL_MARKERS):
         monkeypatch.setenv(marker, f"bg-marker-{index:04d}")
@@ -181,7 +181,7 @@ def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -
     """AC5 (headless substrate): a one-shot `claude -p` sheds every ambient
     identity marker. The no-overlay path constructs an env only because a marker
     is present; identity is gone, the rest of the parent env survives."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     for index, marker in enumerate(ALL_MARKERS):
         monkeypatch.setenv(marker, f"hl-marker-{index:04d}")
@@ -202,7 +202,7 @@ def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypat
     """The no-overlay, no-marker path still omits the env kwarg (inherits parent
     byte-identical). Pins that the identity scrub did not force env construction
     on every headless spawn - only when there is something to scrub."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured = _capture_subprocess_env(monkeypatch, claude_mod)
     cwd = tmp_path / "wd"

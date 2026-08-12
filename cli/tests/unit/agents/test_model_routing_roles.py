@@ -733,8 +733,8 @@ def test_spawn_paths_share_the_guarded_routing_seams() -> None:
         "cli.py": "resolve_spawn_route",
         "dispatch.py": "resolve_spawn_route",
         "mux_spawn.py": "resolve_spawn_route",
-        "providers/claude.py": "resolve_spawn_route",
-        "providers/codex.py": "resolve_codex_route",
+        "harnesses/claude.py": "resolve_spawn_route",
+        "harnesses/codex.py": "resolve_codex_route",
     }
 
     for relative, positive_control in expected.items():

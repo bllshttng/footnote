@@ -79,7 +79,7 @@ Provider + dispatch surface:
 
 ```
 cli/src/fno/agents/
-├── providers/claude.py    # +MCPChannelSendError, +ask_followup_via_mcp,
+├── harnesses/claude.py    # +MCPChannelSendError, +ask_followup_via_mcp,
 │                          #  +mcp_channel_reachable (tri-state).
 ├── dispatch.py            # +route-selection in _followup helper
 │                          # +register_mcp_channel write verb

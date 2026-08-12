@@ -118,7 +118,7 @@ def list_agents(
     # TypeError / ImportError).
     live_map: dict[str, dict] = {}
     if any(e.harness == "claude" for e in filtered):
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         live_map, augment_warnings = claude_mod.claude_agents_json()
         warnings.extend(augment_warnings)
@@ -295,7 +295,7 @@ def read_logs(
     Behavior per provider:
 
     - **Claude** — shell out to ``claude logs <short_id>`` via
-      :func:`fno.agents.providers.claude.logs`. Raw passthrough
+      :func:`fno.agents.harnesses.claude.logs`. Raw passthrough
       to ``stdout``; exit code mirrors ``claude``'s.
     - **Codex / Gemini** — read the JSONL tee file at the entry's
       ``log_path``. If the file does not exist, emit a precise
@@ -345,7 +345,7 @@ def read_logs(
             # Missing short_id is a data-integrity error, not a
             # name-resolution miss; reserve exit 13 for the latter.
             return LogsResult(exit_code=1, warnings=warnings)
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         exit_code = claude_mod.logs(
             short_id=entry.short_id,
@@ -387,7 +387,7 @@ def read_logs(
 
     if follow:
         # Best-effort 500ms polling loop for codex/gemini. Claude logs
-        # delegate follow to providers.claude.logs which has its own
+        # delegate follow to harnesses.claude.logs which has its own
         # signal-safe implementation. OSError covers the open-time race
         # (log deleted/rotated between the tail read above and the
         # _follow_jsonl open below) — without it the operator sees a

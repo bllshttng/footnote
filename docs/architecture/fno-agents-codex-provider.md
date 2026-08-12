@@ -28,16 +28,16 @@ The `--yolo` flag is provider-agnostic in spec but a no-op for claude (`claude -
 cli/src/fno/agents/
 ├── cli.py                       ← --yolo flag wiring
 ├── dispatch.py                  ← codex create + resume routes
-└── providers/
+└── harnesses/
     └── codex.py                 ← create() + resume() + argv helpers
 cli/scripts/smoke/
 └── capture-codex-jsonl.sh       ← smoke capture for event-vocabulary pinning
 cli/tests/agents/
 ├── fixtures/codex-jsonl-sample.jsonl   ← committed real-codex capture
 ├── fixtures/fake-codex-hang.sh         ← signal-handling test shim
-├── test_providers_codex_argv.py        ← argv + AST-regression tests
-├── test_providers_codex_create.py      ← create unit tests
-├── test_providers_codex_resume.py      ← resume unit tests
+├── test_harnesses_codex_argv.py        ← argv + AST-regression tests
+├── test_harnesses_codex_create.py      ← create unit tests
+├── test_harnesses_codex_resume.py      ← resume unit tests
 ├── test_dispatch_codex.py              ← dispatch-layer tests
 ├── test_codex_signal_handling.py       ← real-subprocess SIGINT/timeout tests
 └── test_codex_integration_smoke.py     ← CODEX_SMOKE-gated live tests

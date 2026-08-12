@@ -69,7 +69,7 @@ Both the Python socket path (claude) and the Rust PTY injection path (codex/gemi
 </cross-session-message>
 ```
 
-The Python side (`cli/src/fno/agents/providers/claude.py`, `_build_envelope`) uses `html.escape(from_name, quote=True)` for attribute escaping and then wraps the result in a JSON `{"type":"user","message":{"role":"user","content":"<tag>"},"priority":"next"}` envelope for the socket protocol.
+The Python side (`cli/src/fno/agents/harnesses/claude.py`, `_build_envelope`) uses `html.escape(from_name, quote=True)` for attribute escaping and then wraps the result in a JSON `{"type":"user","message":{"role":"user","content":"<tag>"},"priority":"next"}` envelope for the socket protocol.
 
 The Rust side (`daemon.rs`, `inject_into_pty`) uses `xml_attr_escape(from_name)` for the same attribute and writes the container text directly into the bracketed-paste frame. `xml_attr_escape` escapes the same five characters as Python's `html.escape(quote=True)`, including single quotes as `&#x27;`, so the container is byte-identical across the socket and PTY transports. Keep the two escapers in lockstep if either side changes.
 

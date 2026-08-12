@@ -15,7 +15,7 @@ cli/src/fno/agents/
 ├── cli.py                  ← Typer wiring; adds the `logs` verb
 ├── format.py               ← pure JSON + table renderers
 ├── read.py                 ← list_agents + read_logs entry points
-└── providers/
+└── harnesses/
     └── claude.py           ← claude_agents_json + logs shellouts
 ```
 
@@ -45,7 +45,7 @@ list_agents(filters, json_out, tty)
    ├─ load_registry()                      ← read-only, no flock
    ├─ apply filters (cwd / provider / status)
    ├─ if any claude entry survives filtering:
-   │    └─ providers.claude.claude_agents_json()
+   │    └─ harnesses.claude.claude_agents_json()
    │         ├─ subprocess.run(timeout=3.0, capture)
    │         ├─ on every failure mode → ({}, [warning])
    │         └─ on success → {short_id: {live_status, ...}}
@@ -73,7 +73,7 @@ read_logs(name, tail, follow, json_out, stdout, stderr)
    ├─ load_registry(); find by name (exit 13 if not found)
    ├─ provider == "claude":
    │    ├─ short_id missing on entry → exit 1 (data drift, not name-miss)
-   │    └─ providers.claude.logs(short_id, tail, follow, stdout, stderr)
+   │    └─ harnesses.claude.logs(short_id, tail, follow, stdout, stderr)
    │         ├─ follow=False → subprocess.run capture, tail slice in-process
    │         └─ follow=True  → subprocess.Popen line-buffered passthrough,
    │                            SIGINT forwarded to child on KeyboardInterrupt
@@ -144,7 +144,7 @@ The JSON-when-non-TTY default aligns with the orchestrator-first audience: a pip
 The CLI's `AgentStatusFilter` Typer enum exposes the family-1 read verdicts `live`, `orphaned`, and `unknown`.
 It intentionally does not mirror `registry.KNOWN_STATUSES`: stored lifecycle metadata and rendered transcript liveness answer different questions.
 
-The `KNOWN_LIVE_STATUSES` allowlist in `providers/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift: `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
+The `KNOWN_LIVE_STATUSES` allowlist in `harnesses/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift. `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through, because we do not fail closed on an unknown enum from an external CLI. A forensic warning lands on stderr instead, so operators see the change rather than getting silently-stale table values.
 
 ## Known gaps
 
@@ -153,4 +153,7 @@ The `KNOWN_LIVE_STATUSES` allowlist in `providers/claude.py` catches the orthogo
 
 ## Test surface
 
-`list` + `logs` coverage lives in `cli/tests/agents/`: `test_format.py` (serialize_entry / render_json / render_table), `test_read.py` (list_agents filters, fallback paths, pure-read invariant), `test_providers_claude_read.py` (claude_agents_json failure modes and logs() streaming + SIGINT), `test_cli_list_logs.py` (CLI plumbing, exit codes, the `--json` Claude branch), and `test_follow_signal.py` (a real subprocess `python -m fno.cli` invocation with SIGINT delivery). The acceptance-criterion-to-test mapping lives in the design doc.
+`list` + `logs` coverage lives in `cli/tests/agents/`, across five files.
+`test_format.py` (serialize_entry / render_json / render_table), `test_read.py` (list_agents filters, fallback paths, pure-read invariant), and `test_harnesses_claude_read.py` (claude_agents_json failure modes and logs() streaming + SIGINT).
+Then `test_cli_list_logs.py` (CLI plumbing, exit codes, the `--json` Claude branch) and `test_follow_signal.py` (a real subprocess `python -m fno.cli` invocation with SIGINT delivery).
+The acceptance-criterion-to-test mapping lives in the design doc.

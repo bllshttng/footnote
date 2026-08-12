@@ -1442,7 +1442,7 @@ class SpawnDefaultsBlock(BaseModel):
     unpinned, which is the per-stage coordinate the stage table exists to carry.
 
     No value validation here: config stays a leaf module (x-7fdd, no import
-    from agents/providers at load time). Provider is checked against the known
+    from agents/harnesses at load time). Provider is checked against the known
     set at the spawn seam; effort against the per-provider surface.
     """
 

@@ -26,8 +26,8 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
-from fno.agents.providers import codex as codex_mod
-from fno.agents.providers.codex import (
+from fno.agents.harnesses import codex as codex_mod
+from fno.agents.harnesses.codex import (
     CodexInvocationError,
     CodexResult,
 )

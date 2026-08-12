@@ -1,6 +1,6 @@
 //! Wave B3: codex ask cross-language parity harness (ab-0429c6e1).
 //!
-//! Drives the SAME fake `codex` binary through BOTH Python (`providers/codex.py`
+//! Drives the SAME fake `codex` binary through BOTH Python (`harnesses/codex.py`
 //! `create`/`resume`) and the Rust `codex_ask` path, and asserts identical
 //! behavior: reply text, exit code, and key events.jsonl field presence.
 //!
@@ -35,7 +35,7 @@ fn pythonpath() -> PathBuf {
 fn python_available() -> bool {
     let probe = Command::new("python3")
         .arg("-c")
-        .arg("import fno.agents.providers.codex")
+        .arg("import fno.agents.harnesses.codex")
         .env("PYTHONPATH", pythonpath())
         .output();
     matches!(probe, Ok(o) if o.status.success())
@@ -83,7 +83,7 @@ exit "${FAKE_CODEX_EXIT:-0}"
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Drive the Python `providers.codex.create` or `.resume` and return `(exit_code, last_msg)`.
+/// Drive the Python `harnesses.codex.create` or `.resume` and return `(exit_code, last_msg)`.
 ///
 /// MUST hold the module-level `PATH_MUTEX` for the duration of the call.
 /// `cmd.env(...)` adds keys ON TOP of the inherited environment, so if a
@@ -116,7 +116,7 @@ fn py_codex(
 import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from pathlib import Path
-from fno.agents.providers import codex as c
+from fno.agents.harnesses import codex as c
 
 prompt = os.environ.get("PROMPT","")
 from_name = os.environ.get("FROM_NAME","fno")
@@ -295,7 +295,7 @@ fn rust_codex_resume(
 #[test]
 fn parity_create_happy_path() {
     if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.providers.codex not available");
+        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
         return;
     }
 
@@ -336,7 +336,7 @@ fn parity_create_happy_path() {
 #[test]
 fn parity_resume_happy_path() {
     if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.providers.codex not available");
+        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
         return;
     }
 
@@ -392,7 +392,7 @@ fn parity_resume_happy_path() {
 #[test]
 fn parity_no_jsonl_nonzero_exit() {
     if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.providers.codex not available");
+        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
         return;
     }
 
@@ -431,7 +431,7 @@ fn parity_no_jsonl_nonzero_exit() {
 #[test]
 fn parity_soft_error_promotion() {
     if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.providers.codex not available");
+        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
         return;
     }
 
@@ -476,14 +476,14 @@ fn parity_soft_error_promotion() {
 #[test]
 fn parity_inject_from_name() {
     if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.providers.codex not available");
+        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
         return;
     }
 
     let code = r#"
 import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
-from fno.agents.providers.codex import inject_from_name
+from fno.agents.harnesses.codex import inject_from_name
 prompt = os.environ.get("PROMPT","")
 from_name = os.environ.get("FROM_NAME","fno")
 sys.stdout.write(inject_from_name(prompt, from_name))

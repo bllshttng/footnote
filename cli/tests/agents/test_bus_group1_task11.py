@@ -65,8 +65,8 @@ def test_unknown_agent_name_exits_16(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
 
     # Monkeypatch provider modules to FAIL the test if invoked (they must NOT be called)
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     def _fail_create(*args, **kwargs):
         raise AssertionError("Provider create must NOT be invoked for unknown agent names")
@@ -125,8 +125,8 @@ def test_unknown_agent_name_no_provider_subprocess(tmp_path: Path, monkeypatch) 
     # Track invocations - any call means the test fails
     invocations: list[str] = []
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     def _record_claude(*args, **kwargs):
         invocations.append("claude.bg_create")
@@ -166,7 +166,7 @@ def test_unknown_agent_name_with_provider_still_exits_16(tmp_path: Path, monkeyp
     """AC1-ERR variant: unknown name + --harness codex -> still exit 16 (not create)."""
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     def _fail_create(*args, **kwargs):
         raise AssertionError("codex.create must NOT be called for unknown agent")

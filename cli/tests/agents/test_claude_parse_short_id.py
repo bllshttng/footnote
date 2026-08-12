@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from fno.agents.providers.claude import ProviderParseError, parse_short_id
+from fno.agents.harnesses.claude import ProviderParseError, parse_short_id
 
 
 def test_parse_short_id_plain():

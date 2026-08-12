@@ -87,7 +87,7 @@ def _isolate_spawn_uuid_capture(monkeypatch):
     the suite. Tests that exercise resolution override these per-test
     (monkeypatch order: the test-local setattr wins).
     """
-    from fno.agents.providers import claude
+    from fno.agents.harnesses import claude
 
     monkeypatch.setattr(claude, "_SPAWN_UUID_RETRY_BACKOFF_SEC", 0.0)
     monkeypatch.setattr(claude, "resolve_session_uuid", lambda short_id: None)
@@ -127,8 +127,8 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     import shutil
     from pathlib import Path
 
-    from fno.agents.providers import claude as _claude
-    from fno.agents.providers import codex as _codex
+    from fno.agents.harnesses import claude as _claude
+    from fno.agents.harnesses import codex as _codex
 
     # Use pytest's session basetemp (which honors a custom --basetemp) rather
     # than tempfile.gettempdir(), so the "is this a tmp-isolated fake?" check

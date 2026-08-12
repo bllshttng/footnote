@@ -127,7 +127,7 @@ def test_dispatch_send_happy_path_live_claude(
     _register_claude_peer()
 
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     # MCP probe: return False so we reach the control.sock inject path.
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
@@ -184,7 +184,7 @@ def test_cmd_send_happy_path_stdout_format(
     _register_claude_peer()
 
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
     # Live-inject succeeds -> hosted.
@@ -536,9 +536,9 @@ def test_dispatch_send_durable_queued_output(tmp_path: Path, monkeypatch) -> Non
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import ProviderSocketError
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import ProviderSocketError
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     # locate_session succeeds but send_to_session fails
     monkeypatch.setattr(
@@ -718,8 +718,8 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
         claude_mod, "locate_session",
@@ -796,7 +796,7 @@ def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) 
     _register_claude_peer()
 
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
 
@@ -927,8 +927,8 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
         claude_mod, "locate_session",
@@ -1229,8 +1229,8 @@ def test_dispatch_send_envelope_write_oserror_exit12(tmp_path: Path, monkeypatch
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
         claude_mod, "locate_session",
@@ -1441,8 +1441,8 @@ def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypa
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
         claude_mod, "locate_session",
@@ -1485,8 +1485,8 @@ def test_dispatch_send_events_carry_context_envelope(tmp_path: Path, monkeypatch
         monkeypatch.delenv(_var, raising=False)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
         claude_mod, "locate_session",
@@ -1816,9 +1816,9 @@ def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypa
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import ProviderSocketError
-    from fno.agents.providers._claude_session_registry import SessionLocator
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import ProviderSocketError
+    from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
         claude_mod, "locate_session",

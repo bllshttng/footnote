@@ -1,4 +1,4 @@
-"""fno.agents.providers.codex - codex exec adapter for US4.
+"""fno.agents.harnesses.codex - codex exec adapter for US4.
 
 Surface:
 
@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from fno.agents.providers.base import ReachabilityProbeError
+from fno.agents.harnesses.base import ReachabilityProbeError
 
 
 # Pinned from a real codex 0.130.0 capture (scripts/smoke/capture-codex-jsonl.sh).

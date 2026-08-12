@@ -7,7 +7,7 @@
 // Install by symlinking this directory into ~/.openclaw/plugins/ per
 // docs/SETUP-OPENCLAW.md.
 //
-// See docs/providers/promise-sentinel.md for the protocol.
+// See docs/harnesses/promise-sentinel.md for the protocol.
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";

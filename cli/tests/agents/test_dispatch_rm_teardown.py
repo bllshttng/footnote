@@ -22,8 +22,8 @@ import pytest
 
 from fno.agents import dispatch as dispatch_mod
 from fno.agents.dispatch import DispatchAskError, rm_agent
-from fno.agents.providers import codex as codex_mod
-from fno.agents.providers import opencode as opencode_mod
+from fno.agents.harnesses import codex as codex_mod
+from fno.agents.harnesses import opencode as opencode_mod
 from fno.agents.registry import AgentEntry, load_registry, update_registry
 
 KEEP_ID = "aaaaaaaa-1111-2222-3333-444444444444"

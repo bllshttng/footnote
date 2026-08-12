@@ -4,7 +4,7 @@
 //! agent: it runs its own background daemon, a rendezvous Unix socket, and a
 //! transcript/state dir under `~/.claude/jobs/<short-id>/`. The fno daemon
 //! cannot PTY-manage it, so the Rust **client** replicates Python's
-//! `providers/claude.py` + `providers/_claude_session_registry.py` +
+//! `harnesses/claude.py` + `harnesses/_claude_session_registry.py` +
 //! `dispatch.py` ask path directly, bypassing the daemon RPC.
 //!
 //! **Byte-parity is the contract.** Every observable (stdout reply, exit code,
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // ===========================================================================
-// Constants (verbatim from providers/claude.py + _claude_session_registry.py)
+// Constants (verbatim from harnesses/claude.py + _claude_session_registry.py)
 // ===========================================================================
 
 /// `_ARGV_OVERFLOW_THRESHOLD` — messages larger than this (in UTF-8 bytes) are
@@ -51,7 +51,7 @@ const SEND_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(10);
 
 /// Bounded best-effort window for resolving the full session UUID at spawn
-/// (mirrors `providers.claude._SPAWN_UUID_RETRY_*`). The happy path resolves on
+/// (mirrors `harnesses.claude._SPAWN_UUID_RETRY_*`). The happy path resolves on
 /// the first probe (claude writes `~/.claude/sessions/<pid>.json` before
 /// `claude --bg` returns the short-id); the retry only covers the rare write-lag
 /// window. `resolve_session_uuid_at_spawn` short-circuits when the sessions dir
@@ -2702,7 +2702,7 @@ fn create(
     // stream-json `--resume` target alongside the 8-hex short-id so the worker
     // is adoptable by the live `chat` lane. Runs after the receipt is captured;
     // a miss leaves the field None and never gates the launch. This is the Rust
-    // (default installed) path's parity with providers/claude.py's resolution.
+    // (default installed) path's parity with harnesses/claude.py's resolution.
     let session_uuid = resolve_session_uuid_at_spawn(claude_home, &short_id);
     let log_path = derive_log_path(home, name);
     let new_entry = RegistryEntry {

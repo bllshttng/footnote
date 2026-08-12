@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -148,13 +149,59 @@ def test_ac1fr_transient_recovery_is_observable_under_fno_debug(tmp_path, monkey
 
 # --- AC3-HP: concurrent writers + readers, zero false corruption ---
 
-def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch):
-    import fno.graph.store as gs
+# Readers run as separate PROCESSES, which is what production does and what
+# this test spent three commits failing to simulate with threads.
+#
+# With thread readers the GIL made the writer's two-write window as long as the
+# scheduler wanted. On a loaded CI runner three readers squeezed the writer
+# across both renames and held the window past load_graph's retry ceiling
+# (12 attempts x 23ms = ~253ms, against a ~4.8ms window in production), so the
+# test surfaced false corruption over a healthy graph. Three commits answered
+# that by widening a reader yield: 0.0002s, then 0.002s, then a fourth failure
+# on this branch. Every one of them compensated for the artifact rather than
+# removing it, and the second commit message already named the reason it could
+# not be removed that way - production readers are separate processes.
+#
+# They are separate processes here now. No yield, no tuning knob, and nothing
+# left to widen on the next loaded runner.
+_READER = r"""
+import json, sys, time
+from pathlib import Path
+from fno.graph.load import GraphCorruptionError, load_graph
+
+g, stop, out, ready = (Path(a) for a in sys.argv[1:5])
+# Announced only after the import that costs ~0.35s, and the writer blocks on
+# this file before its first mutation. Without the handshake a reader still
+# importing when STOP lands exits with loads == 0 and reddens the positive
+# control on a healthy graph - a startup race in the very test written to
+# remove a timing artifact, with the same shrinking margin on a loaded runner.
+ready.write_text("")
+false_corruption = missing_seed = loads = most = 0
+deadline = time.monotonic() + 120  # never outlive a dead parent
+while not stop.exists() and time.monotonic() < deadline:
+    try:
+        entries = load_graph(g)
+    except GraphCorruptionError:
+        false_corruption += 1
+        continue
+    loads += 1
+    most = max(most, len(entries))
+    if not any(e.get("id") == "x-keep" for e in entries):
+        missing_seed += 1
+out.write_text(json.dumps({
+    "false_corruption": false_corruption,
+    "missing_seed": missing_seed,
+    "loads": loads,
+    "most": most,
+}))
+"""
+
+
+def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path):
+    from fno.graph.store import locked_mutate_graph
 
     g = tmp_path / "graph.json"
     # Seed a present node the readers resolve throughout.
-    from fno.graph.store import locked_mutate_graph
-
     def _seed(entries):
         entries.append({"id": "x-keep", "title": "keep", "status": "ready",
                         "project": "fno", "domain": "code"})
@@ -162,44 +209,63 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch)
 
     locked_mutate_graph(g, _seed)
 
-    errors: list[Exception] = []
-    stop = threading.Event()
+    stop = tmp_path / "STOP"
+    readers = []
+    for n in range(3):
+        out = tmp_path / f"reader{n}.json"
+        ready = tmp_path / f"ready{n}"
+        readers.append((
+            subprocess.Popen(
+                [sys.executable, "-c", _READER, str(g), str(stop), str(out), str(ready)]
+            ),
+            out,
+            ready,
+        ))
+    try:
+        # Every reader is past its import before the writer starts. The writer
+        # loop takes a second or two and reader startup takes a fraction of
+        # one, so this only ever mattered on a loaded runner - which is exactly
+        # the machine this test keeps failing on.
+        deadline = time.monotonic() + 60
+        for proc, _out, ready in readers:
+            while not ready.exists() and time.monotonic() < deadline:
+                assert proc.poll() is None, "a reader exited before signalling ready"
+                time.sleep(0.01)
+            assert ready.exists(), "a reader never signalled ready"
 
-    def writer():
         for i in range(200):
             def _mut(entries, i=i):
                 entries.append({"id": f"x-w{i:04x}", "title": f"n{i}",
                                 "status": "ready", "project": "fno", "domain": "code"})
                 return entries
             locked_mutate_graph(g, _mut)
-        stop.set()
-
-    def reader():
-        while not stop.is_set():
+    finally:
+        stop.write_text("")
+        for proc, _out, _ready in readers:
+            # kill() rather than a bare wait(timeout=...): a TimeoutExpired
+            # raised from this finally block replaces the real failure with a
+            # cleanup error and leaves the readers orphaned.
             try:
-                entries = load_graph(g)
-                # false negative check: the seeded node is always present
-                assert any(e.get("id") == "x-keep" for e in entries)
-            except GraphCorruptionError as e:
-                errors.append(e)
-            # Yield the GIL so the 3 readers can't starve the single writer
-            # between its graph and sidecar writes (a threads-only artifact:
-            # production readers are separate processes). Without this, a
-            # loaded runner holds the two-write window open past load_graph's
-            # retry ceiling and surfaces false corruption. The yield is sized
-            # for a loaded CI runner, where 3 readers otherwise squeeze the
-            # writer across both renames on every one of its 200 mutations.
-            time.sleep(0.002)
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
 
-    threads = [threading.Thread(target=writer)] + [
-        threading.Thread(target=reader) for _ in range(3)
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    reports = []
+    for _proc, out, _ready in readers:
+        assert out.exists(), "a reader process died before reporting"
+        reports.append(json.loads(out.read_text()))
 
-    assert errors == [], f"{len(errors)} false corruption(s): {errors[:2]}"
+    # Positive controls first. Zero errors from a reader that crashed on import
+    # is the absence this whole gate exists to refuse, and it looks exactly
+    # like a clean run.
+    assert all(r["loads"] > 0 for r in reports), f"a reader never read: {reports}"
+    assert max(r["most"] for r in reports) > 1, (
+        f"no reader observed the writer's appends: {reports}"
+    )
+
+    bad = [r for r in reports if r["false_corruption"] or r["missing_seed"]]
+    assert not bad, f"false corruption or a lost seed: {bad}"
 
 
 def test_ac3hp_genuine_corruption_still_raises(tmp_path, monkeypatch):

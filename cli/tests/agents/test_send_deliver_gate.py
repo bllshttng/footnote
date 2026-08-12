@@ -407,7 +407,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
     ])
 
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
 
@@ -478,7 +478,7 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
         ),
     ])
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     send_calls: list = []
     monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: send_calls.append(1))
@@ -1646,7 +1646,7 @@ def test_deliver_live_claude_no_live_lane_queues_durable(
     ])
 
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
     monkeypatch.setattr(
@@ -1695,7 +1695,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     ])
 
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
     monkeypatch.setattr(

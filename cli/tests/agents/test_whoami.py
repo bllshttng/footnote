@@ -210,7 +210,7 @@ class TestWhoamiCLI:
         write_registry([_claude()])
         monkeypatch.setenv("FNO_AGENT_SELF", "spawn-x-301a-whoami")
         monkeypatch.setenv("FNO_AGENT_HARNESS", "claude")
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         monkeypatch.setattr(
             claude_mod, "claude_agents_json",

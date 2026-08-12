@@ -56,7 +56,7 @@ stays as the single idempotency floor).
 | 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | #573 |
 | 6 | Claude/Codex adapter worker spawns | `adapters/{claude_code,codex}.py` | DELETE; review caller migrated to canonical dispatch | #573 |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
-| 8 | Gemini provider adapter paths | `agents/dispatch.py` Gemini create/follow-up/reconcile paths, `agents/providers/gemini.py` | DELETE; Rust keeps its native provider path and harness-map refusal | #573 |
+| 8 | Gemini provider adapter paths | `agents/dispatch.py` Gemini create/follow-up/reconcile paths, `agents/harnesses/gemini.py` | DELETE; Rust keeps its native provider path and harness-map refusal | #573 |
 | 9 | Shell-form `claude -p` in the memory pass | `scripts/memory/post-merge-pass.sh:12` | RETIRE through canonical spawn (surfaced by the lint's shell-form scan) | OPEN |
 
 The Claude/Codex adapter row was closed after its live review caller migrated to canonical one-shot dispatch.

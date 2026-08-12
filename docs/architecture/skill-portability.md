@@ -68,7 +68,7 @@ The target loop detects the current AI coding client at runtime:
 | `run_shell_command` | Gemini CLI | Sequential fallback |
 | None of above | Generic | Sequential fallback |
 
-See `docs/providers/provider-adapters.md` for dispatch patterns.
+See `docs/harnesses/harness-adapters.md` for dispatch patterns.
 
 ## Skill Categories
 

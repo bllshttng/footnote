@@ -182,7 +182,7 @@ class TestReconcileMCPProbeSlot:
         )
 
         from fno.agents import dispatch
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         # Track which probe got called.
         probe_calls: dict[str, list] = {"mcp": [], "logs": []}
@@ -195,7 +195,7 @@ class TestReconcileMCPProbeSlot:
             probe_calls["logs"].append({"short_id": short_id, "timeout": timeout})
             return True
 
-        from fno.agents.providers import codex as codex_mod
+        from fno.agents.harnesses import codex as codex_mod
 
         monkeypatch.setattr(claude_mod, "mcp_channel_reachable", fake_mcp_probe)
         monkeypatch.setattr(claude_mod, "claude_logs_reachable", fake_logs_probe)
@@ -226,7 +226,7 @@ class TestReconcileMCPProbeSlot:
         _seed_claude_agent()
 
         from fno.agents import dispatch
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         probe_calls: dict[str, list] = {"mcp": [], "logs": []}
 
@@ -238,7 +238,7 @@ class TestReconcileMCPProbeSlot:
             probe_calls["logs"].append({"short_id": short_id})
             return True
 
-        from fno.agents.providers import codex as codex_mod
+        from fno.agents.harnesses import codex as codex_mod
 
         monkeypatch.setattr(claude_mod, "mcp_channel_reachable", fake_mcp_probe)
         monkeypatch.setattr(claude_mod, "claude_logs_reachable", fake_logs_probe)

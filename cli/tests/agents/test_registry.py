@@ -385,7 +385,7 @@ def test_dispatch_still_refuses_agy_provider() -> None:
     rejected early rather than crashing late with a missing adapter.
     """
     from fno.agents.dispatch import _check_known_provider
-    from fno.agents.providers import KNOWN_PROVIDERS, READABLE_PROVIDERS
+    from fno.agents.harnesses import KNOWN_PROVIDERS, READABLE_PROVIDERS
 
     assert "agy" in READABLE_PROVIDERS
     assert "agy" not in KNOWN_PROVIDERS
@@ -1211,7 +1211,7 @@ def test_harness_session_id_fields_covers_known_providers() -> None:
     Python dispatch that has no opencode codepath. The upper bound stays
     READABLE_PROVIDERS so a typo'd harness still fails.
     """
-    from fno.agents.providers import KNOWN_PROVIDERS, READABLE_PROVIDERS
+    from fno.agents.harnesses import KNOWN_PROVIDERS, READABLE_PROVIDERS
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
     assert set(KNOWN_PROVIDERS) <= set(HARNESS_SESSION_ID_FIELDS)

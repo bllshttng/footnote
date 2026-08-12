@@ -4,7 +4,7 @@
 *without* touching the daemon-wide active `~/.claude` slot. This module resolves
 an `--account` id to an env overlay merged into the child env at the same seam
 `route_env` already uses (mux_spawn `_mesh_env_wrapper` for pane,
-providers/claude.py `bg_create` for bg/headless).
+harnesses/claude.py `bg_create` for bg/headless).
 
 **The working mechanism is a per-account `CLAUDE_CONFIG_DIR`** (verified
 2026-07-15): a full second login in its own dir (e.g. `~/.claude-alt`, sharing

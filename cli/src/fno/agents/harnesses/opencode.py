@@ -1,4 +1,4 @@
-"""fno.agents.providers.opencode - what teardown can and cannot do.
+"""fno.agents.harnesses.opencode - what teardown can and cannot do.
 
 opencode is a pane-hosted provider (``READABLE_PROVIDERS``): fno never
 drives it through a Python ask adapter, so this module carries only what

@@ -867,7 +867,7 @@ def build_pane_argv(
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
         # cannot commit without the grant. Only the two bypass postures skip it.
-        from fno.agents.providers.codex import git_writable_args
+        from fno.agents.harnesses.codex import git_writable_args
 
         bounded = (permission_mode != "yolo") if permission_mode else not yolo
         if bounded:
@@ -1002,7 +1002,7 @@ def _mesh_env_wrapper(
         # Raise the harness Stop-hook block cap so fno's repeated-block loop is
         # not force-ended at the default 9 (x-1680). The helper honors an
         # operator-set value, so an explicit env wins over the fno default.
-        from fno.agents.providers.claude import claude_stop_hook_block_cap
+        from fno.agents.harnesses.claude import claude_stop_hook_block_cap
 
         pairs.append(f"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP={claude_stop_hook_block_cap()}")
     # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the

@@ -31,8 +31,8 @@ MENU_CAP_SUB_APP = 12
 SPAWN_SHAPE_ALLOWLIST = frozenset(
     {
         "cli/src/fno/agents/dispatch.py",
-        "cli/src/fno/agents/providers/claude.py",
-        "cli/src/fno/agents/providers/codex.py",
+        "cli/src/fno/agents/harnesses/claude.py",
+        "cli/src/fno/agents/harnesses/codex.py",
         # Canonical tool-less one-shot judgment seam; x-81ad consolidated the
         # former inbox/graph/review call-site shapes here.
         "cli/src/fno/llm.py",
@@ -206,10 +206,10 @@ def provider_stderr_merge(
     root = (
         providers_dir
         if providers_dir is not None
-        else _repo_root() / "cli" / "src" / "fno" / "agents" / "providers"
+        else _repo_root() / "cli" / "src" / "fno" / "agents" / "harnesses"
     )
     if not root.is_dir():
-        typer.echo(f"provider-stderr-merge: providers dir not found: {root}", err=True)
+        typer.echo(f"provider-stderr-merge: harness dir not found: {root}", err=True)
         raise typer.Exit(2)
 
     violations: list[str] = []
@@ -405,8 +405,13 @@ def style(
     A list-item sentence is 20 words or fewer, and every other sentence is 25
     or fewer. No semicolon. No "should", "would", "may", "might", or "could".
     No contractions. If a sentence carries "if" or "when", that word starts the
-    sentence. Code, paths, flags, and quoted output do not count. Exit 0 clean,
-    1 with violations, 2 on bad usage.
+    sentence. Code, paths, flags, and quoted output do not count.
+
+    Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
+    this gate. That second 2 fires when git and this verb disagree about how
+    many lines a file added, in either direction, which is never something to
+    annotate in the file. Reading FEWER than git counted is the case that
+    matters and the case the first version of this guard missed.
     """
     from fno import style as style_mod
 
@@ -418,17 +423,33 @@ def style(
         raise typer.Exit(2)
 
     if diff_base is not None:
-        violations, inspected, changed = _style_added_lines(diff_base, files)
+        violations, inspected, changed, unexplained = _style_added_lines(
+            diff_base, files
+        )
         typer.echo(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
-        if changed and inspected == 0:
+        if unexplained:
+            # Reported AFTER the violations below, never instead of them.
+            # Raising here discarded every real finding in the same run: a PR
+            # with one parser gap and three genuine violations showed only the
+            # gap, and the author had nothing to fix and nothing to look at.
+            #
+            # Exit 2, not 1. This is an instrument failure, which is what the
+            # message says and what the sibling gate in this same PR reserves
+            # exit 2 for. Exiting 1 filed it as a finding against the author.
+            # The paths are named, because "1 file(s)" is not investigable.
+            if violations:
+                typer.echo(style_mod.format_violations(violations), err=True)
             typer.echo(
-                "style: a gated tree changed but no added lines were inspected. "
-                "Add a style-exception marker if the change is deletion-only.",
+                "style: git and this gate disagree about how many lines these "
+                "file(s) added, so some added lines went unread. That is a "
+                "parser failure in the gate rather than something to annotate "
+                "in the file:\n  "
+                + "\n  ".join(unexplained),
                 err=True,
             )
-            raise typer.Exit(1)
+            raise typer.Exit(2)
     elif stdin:
         import sys
 
@@ -453,35 +474,230 @@ def style(
     raise typer.Exit(1)
 
 
+# One spell of every rename and quoting knob this module needs, and ONE form of
+# rename detection.
+#
+# Three call sites hand-pinned these in two different spellings, kept in step by
+# a comment reading "pinned identically to the pass below". That is the
+# snapshot-not-invariant signature: a test can pin that detection is ON at each
+# site, which is the outcome, and cannot pin that one thing decides HOW. It also
+# misfires, since `-M` is git's own alias for `--find-renames`, so an
+# outcome-shaped test flags a correct call as undetected.
+#
+# `diff.renames=true` because a caller inheriting `false` splits a rename into
+# separate D and A entries, so a moved doc bills as authored prose.
+# `diff.renameLimit=0` because past the limit git skips the exhaustive pass,
+# warns on stderr, and exits 0: measured at limit 1 on this branch, 9 of 21
+# renames found with a clean exit code. `core.quotePath=false` because git
+# C-quotes any non-ASCII path into a display string that fails is_file(), and
+# the file is skipped without a word.
+_DIFF_PINS = (
+    "-c", "diff.renames=true",
+    "-c", "diff.renameLimit=0",
+    "-c", "core.quotePath=false",
+)
+
+
+def _pinned_diff_argv(*tail: str) -> "list[str]":
+    """The ONLY way this module spells a rename-aware, quote-safe `git diff`.
+
+    Rename detection comes from `_DIFF_PINS` alone. No call site passes
+    `--find-renames` or `-M`, so there is one mechanism to reason about rather
+    than a per-site choice a reader has to diff by eye.
+    """
+    return ["git", *_DIFF_PINS, "diff", *tail]
+
+
+def _run_git(argv: "list[str]", repo: Path, *, label: str):
+    """Run git, and refuse to let a failure read as a clean result.
+
+    Every git call in this module answers with stdout alone, and empty stdout is
+    also the clean answer, so an unchecked return code turns any git error into
+    a green gate. Four sites hand-rolled this same guard and one of the four
+    had no test at all, which is the shape that lets a fifth call ship without
+    it. Routing every call through here is what makes the guard unforgettable
+    rather than remembered.
+    """
+    proc = subprocess.run(argv, cwd=str(repo), capture_output=True, text=True)
+    if proc.returncode != 0:
+        typer.echo(f"style: {label} failed: {proc.stderr.strip()}", err=True)
+        raise typer.Exit(2)
+    return proc
+
+
+def _numstat_added(raw: str) -> "dict[str, int]":
+    """Added-line count per NEW path, from `git diff --numstat -z`.
+
+    `-z` is the whole point. Without it git compresses a rename into the single
+    display form `docs/{a.md => b.md}`, so the new path is never a key. Keyed
+    that way the guard below could never fire for a renamed file, which is
+    exactly the class the rename resolution above makes eligible for a
+    zero-inspection result. A renamed-and-edited doc whose line numbers the
+    parser lost would have exited 0 reporting a clean tree.
+
+    With `-z` a rename emits `added\\tdeleted\\t` followed by the old and new
+    paths as separate NUL-terminated fields, so the new path is recoverable.
+    """
+    added: dict[str, int] = {}
+    fields = raw.split("\0")
+    i = 0
+    while i < len(fields):
+        parts = fields[i].split("\t")
+        if len(parts) < 3:
+            i += 1
+            continue
+        count, path = parts[0], parts[2]
+        if path == "":
+            # Rename: the old path is the next field, the new path the one after.
+            path = fields[i + 2] if i + 2 < len(fields) else ""
+            i += 3
+        else:
+            i += 1
+        if count.isdigit() and path:
+            added[path] = int(count)
+    return added
+
+
+def _repo_scope(paths: list[Path], repo: Path, diff_base: str) -> "list[str]":
+    """Repo-root-relative POSIX pathspecs for git, from caller-relative paths.
+
+    Callers pass paths relative to THEIR cwd while every git call here runs from
+    the repo root, so the two disagree the moment the caller is not standing at
+    the root. Measured: `--files ../docs` from `cli/` matched nothing and the
+    gate exited 0 over 27 changed files, while the same scope from the root
+    inspected 569 added lines. Absence read as success, one directory off.
+
+    A path outside the repository fails loud rather than silently matching
+    nothing, for the same reason.
+    """
+    root = repo.resolve()
+    out = []
+    for p in paths:
+        full = Path(p).resolve()
+        try:
+            rel = full.relative_to(root).as_posix()
+        except ValueError:
+            typer.echo(
+                f"style: --files path is outside the repository: {p}", err=True
+            )
+            raise typer.Exit(2)
+        # Existence is what separates a mis-resolved path from a real one. A
+        # caller standing in cli/ and passing `docs` resolves to cli/docs, which
+        # is inside the repo and does not exist, so it matched nothing and the
+        # gate exited 0 over a whole tree. Refusing on a ZERO MATCH instead
+        # punished the normal answer: an existing file with no changes since the
+        # base is correct, not an instrument failure, and per-file invocation is
+        # the advertised use of this flag.
+        # A path absent from the WORKING TREE is still a legitimate scope when
+        # the branch deleted or renamed it, which is precisely the diff a
+        # rename PR asks about. `--files docs/providers/codex.md` exited 2 on
+        # this very branch, over a file this branch moved. So absence alone
+        # cannot decide it: ask whether the path existed at the BASE. Present
+        # at the base means deleted or renamed since, and the scope is real.
+        # Absent at the base too means the path never existed on either side,
+        # which is the mis-resolution above and still refuses.
+        if not full.exists() and not _existed_at_base(rel, diff_base, root):
+            typer.echo(
+                f"style: --files path does not exist: {p} (resolved to {full}), "
+                f"and it is not in {diff_base} either. "
+                "Paths resolve against the current directory.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        out.append(rel)
+    return out
+
+
+def _existed_at_base(rel: str, diff_base: str, repo: Path) -> bool:
+    """Did ``rel`` exist at ``diff_base``?
+
+    Deliberately NOT routed through _run_git: a false answer here is the whole
+    point of the call, and that helper turns a non-zero git into a hard exit.
+    Any failure reads as "not at the base", which keeps the refusal above
+    fail-closed - an unreadable base refuses the path rather than waving it
+    through.
+    """
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{diff_base}:{rel}"],
+        capture_output=True,
+    )
+    return probe.returncode == 0
+
+
 def _style_added_lines(
     diff_base: str, paths: Optional[list[Path]]
-) -> "tuple[list, int, int]":
-    """Return (violations, added-line count, changed-file count) for markdown.
+) -> "tuple[list, int, int, list[str]]":
+    """Return (violations, added-line count, changed-file count, unexplained).
 
     Per file: a whole-file style-exception marker exempts it; otherwise only the
     ADDED lines since diff_base are checked. A bad diff-base fails loud (exit 2),
     not open: a malformed base that inspects nothing is the absence the pitfalls
     corpus names, indistinguishable from "no violations found".
+
+    ``unexplained`` collects the PATHS of changed files where GIT and this
+    parser disagree about the added-line count. That is an instrument failure
+    and nothing else. Counting bare zeros instead swept in every legitimate
+    zero: a pure rename, a deletion-only trim, a mode change. Two of those were
+    measured failing real PRs, and the rename-resolution fix directly above is
+    what creates the first.
     """
     from fno import style as style_mod
 
     repo = _repo_root()
-    scope = [str(p) for p in paths] if paths else ["docs", "skills", "agents"]
-    rev = subprocess.run(
+    # Verified BEFORE scope resolution, because scope resolution now asks the
+    # base whether a missing path existed there. An unverified base answers
+    # "no" for every path, so a bad base would refuse a legitimate deleted-file
+    # scope while blaming the path instead of the base.
+    _run_git(
         ["git", "rev-parse", "--verify", diff_base],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
+        repo,
+        label=f"bad diff-base {diff_base!r}",
     )
-    if rev.returncode != 0:
-        typer.echo(f"style: bad diff-base {diff_base!r}: {rev.stderr.strip()}", err=True)
+    scope = (
+        _repo_scope(paths, repo, diff_base)
+        if paths
+        else ["docs", "skills", "agents"]
+    )
+    diff_files = _run_git(
+        _pinned_diff_argv("--name-only", f"{diff_base}...HEAD", "--", *scope),
+        repo,
+        label=f"listing changed files ({diff_base}...HEAD)",
+    )
+    # Pre-rename paths, keyed by new path. Resolved from an UNSCOPED name-status
+    # pass because rename detection needs both sides visible, which a per-file
+    # pathspec denies it.
+    renames: dict[str, str] = {}
+    name_status = _run_git(
+        _pinned_diff_argv("--name-status", f"{diff_base}...HEAD"),
+        repo,
+        label=f"rename detection ({diff_base}...HEAD)",
+    )
+    # Backstop for the degradation the pin is meant to prevent, kept because a
+    # silent partial answer here mis-bills every moved doc as authored prose.
+    if "rename detection was skipped" in name_status.stderr:
+        typer.echo(
+            "style: git skipped rename detection despite the pinned limit "
+            f"({name_status.stderr.strip()}); refusing to bill moved files as "
+            "authored prose",
+            err=True,
+        )
         raise typer.Exit(2)
-    diff_files = subprocess.run(
-        ["git", "diff", "--name-only", f"{diff_base}...HEAD", "--", *scope],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
+    for line in name_status.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].startswith("R"):
+            renames[parts[2]] = parts[1]
+    # Added-line counts straight from git, which is what the absence guard below
+    # actually rests on. Asking "did we inspect zero" cannot tell a broken parser
+    # from a file that authored nothing, and a deletion-only edit authors
+    # nothing. Measured before this: one trimmed doc beside one normal doc failed
+    # the whole gate, demanding a style-exception marker in a file the author had
+    # only shortened. A mode-only change did the same.
+    numstat = _run_git(
+        _pinned_diff_argv("--numstat", "-z", f"{diff_base}...HEAD"),
+        repo,
+        label=f"counting changed lines ({diff_base}...HEAD)",
     )
+    added_by_path = _numstat_added(numstat.stdout)
     # Markdown only: the gate is "changed markdown", so a PR adding a shell or
     # Python file under skills/ is not style-checked as prose.
     changed = [
@@ -491,6 +707,7 @@ def _style_added_lines(
     ]
     violations = []
     inspected = 0
+    unexplained: list[str] = []
     for rel in changed:
         full = repo / rel
         if not full.is_file():
@@ -498,32 +715,88 @@ def _style_added_lines(
         whole = full.read_text(encoding="utf-8")
         if style_mod.has_exception(whole):
             continue
-        nums = _git_added_line_nums(rel, diff_base, repo)
+        nums = _git_added_line_nums(rel, diff_base, repo, renames.get(rel))
         inspected += len(nums)
         if nums:
             # Mask the WHOLE file and check only the added lines, so an added
             # line inside an existing fenced block is masked as code and skipped.
             violations.extend(style_mod.check_lines(whole, nums))
-    return violations, inspected, len(changed)
+        if len(nums) != added_by_path.get(rel, 0):
+            # git and the parser disagree about how many lines this file added,
+            # which is the only shape here that means the INSTRUMENT failed.
+            #
+            # Compared as COUNTS, not as "did we get zero". The emptiness test
+            # this replaces caught only a TOTAL loss: one hunk header failing
+            # the `\+(\d+)` search leaves `nums` non-empty, so git's 40 against
+            # the parser's 31 passed, nine unread lines shipped unstyled, and
+            # the receipt said "inspected 31 added line(s)" with no hint that
+            # 40 was the right number. Same class as the absence the guard was
+            # written for, one step short of total. The exact number was on
+            # hand the whole time.
+            #
+            # Both sides agree on every real file measured (34 changed docs on
+            # this branch, four of them renamed, zero mismatches), so equality
+            # is not a stricter approximation of the truth - it IS the truth.
+            # Paths are collected rather than counted, since a count is not
+            # investigable.
+            unexplained.append(rel)
+    return violations, inspected, len(changed), unexplained
 
 
-def _git_added_line_nums(rel: str, diff_base: str, repo: Path) -> "set[int]":
+def _git_added_line_nums(
+    rel: str, diff_base: str, repo: Path, old_rel: Optional[str] = None
+) -> "set[int]":
     """Return 1-based line numbers (in the new file) of added ('+') lines from
     ``git diff -U0 <base>...HEAD -- <rel>``. Position advances on context and
-    added lines, not on deleted lines, matching how the new file is laid out."""
-    proc = subprocess.run(
-        ["git", "diff", "-U0", f"{diff_base}...HEAD", "--", rel],
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
+    added lines, not on deleted lines, matching how the new file is laid out.
+
+    ``old_rel`` is the pre-rename path, and passing it is what keeps a MOVED
+    file from reading as an authored one. Restricting the pathspec to the new
+    path alone hides the rename source from git's detection, so the file comes
+    back as ``new file mode`` and every pre-existing line counts as added. A
+    pure ``git mv`` of a doc then bills its whole body to whoever moved it.
+    """
+    pathspec = [rel] if old_rel is None else [rel, old_rel]
+    proc = _run_git(
+        _pinned_diff_argv("-U0", f"{diff_base}...HEAD", "--", *pathspec),
+        repo,
+        label=f"reading added lines for {rel}",
     )
     nums: set[int] = set()
     pos = 0
+    in_hunk = False
     for line in proc.stdout.splitlines():
-        if line.startswith("@@"):
+        if line.startswith("diff --git"):
+            # Reset per FILE. The pathspec here carries two paths, so a diff
+            # that comes back as two separate entries rather than one paired
+            # rename would reach the second entry's `+++ b/<path>` with in_hunk
+            # still true from the previous file, count it as an added line, and
+            # style-check a line the author never wrote. Latent rather than
+            # live, and one line closes it.
+            in_hunk = False
+        elif line.startswith("@@"):
             match = re.search(r"\+(\d+)", line)
             pos = int(match.group(1)) if match else pos
-        elif line.startswith("+++") or line.startswith("---"):
+            in_hunk = True
+        elif not in_hunk:
+            # File headers live BEFORE the first hunk, so position is what
+            # separates them from content, not the `+++` / `---` prefix.
+            # Matching by prefix anywhere swallowed an added markdown line whose
+            # own text begins with `++`, and swallowed it WITHOUT advancing the
+            # position, so every later added line in that file was numbered one
+            # too low: a real violation shipped while a different line was
+            # checked in its place. Repo docs carry fenced diff snippets, so a
+            # literal `+++ b/file` as CONTENT is reachable, and this is the same
+            # off-by-one the no-newline branch below was added to fix.
+            continue
+        elif line.startswith("\\"):
+            # `\ No newline at end of file`. It is a NOTE about the adjacent
+            # line, never a line of the file, so counting it as context shifts
+            # every added line after it by one. Measured with the marker
+            # mid-hunk: added lines reported as [2, 3] where they are [1, 2],
+            # so line 1 was never checked and line 3 does not exist. The
+            # escaped line carried a semicolon, meaning a real violation ships
+            # while a nonexistent line gets style-checked in its place.
             continue
         elif line.startswith("+"):
             nums.add(pos)

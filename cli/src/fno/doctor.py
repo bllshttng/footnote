@@ -1011,7 +1011,28 @@ def _emit_human(
     out = (lambda m: typer.echo(m, err=True)) if err else typer.echo
     status = result["status"]
     if status == "fresh":
-        out("fno doctor: installed fno is up to date with source.")
+        # Naming WHICH source is load-bearing. The comparison is against
+        # `git rev-parse HEAD` of the RESOLVED source checkout, which is the
+        # canonical clone sitting on the default branch. Unmerged work in a
+        # feature worktree is invisible to it, so this verdict answers "am I
+        # behind the default branch" and never "does this binary carry the
+        # change I just wrote". Anyone editing fno itself reads the first as the
+        # second and then verifies their branch against a binary without it.
+        # The command named here must actually load the other checkout. `fno` is
+        # the Rust front door and forwards every non-mux verb to the ABSOLUTE
+        # installed fno-py (cli/pyproject.toml), so cd-ing into a worktree and
+        # typing `fno` runs the installed build again and the branch stays
+        # untested. Measured: one scoped call reported 196 inspected lines via
+        # `fno` inside the checkout against 0 via uv run. Advice that does not
+        # work is the same defect as a receipt that lies.
+        out(
+            "fno doctor: installed fno is up to date with source at "
+            f"{src or 'the resolved source checkout'} "
+            f"(rev {result.get('source_rev') or 'unknown'}). "
+            "Unmerged work in another branch or worktree is not included, and "
+            "`fno` forwards to this installed build from anywhere. To exercise "
+            "another checkout run: cd <checkout>/cli && uv run fno-py <verb>"
+        )
     elif status == "stale":
         # A missing-verb verdict can be stale with no resolved source (src is
         # None), so fall back to a readable label rather than printing "behind None".
