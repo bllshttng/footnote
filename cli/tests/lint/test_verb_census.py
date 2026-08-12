@@ -60,6 +60,20 @@ def test_classify_bucket(rel, expected):
     assert vc.classify_bucket(rel) == expected
 
 
+@pytest.mark.parametrize("parts,excluded", [
+    (("target", "debug", "fno"), True),               # workspace build output
+    (("crates", "fno", "target", "debug", "fno"), True),  # per-crate build output
+    (("skills", "target", "SKILL.md"), False),        # the target skill - a caller source
+    (("tests", "target", "fixture.txt"), False),      # target test fixtures
+    (("cli", "src", "fno", "target", "cli.py"), False),  # the fno.target command package
+    (("internal", "plans", "x.md"), True),            # vault symlink, root only
+    (("repo", ".git", "config"), True),              # a normal excluded dir still is
+])
+def test_should_exclude_target_is_build_only(parts, excluded):
+    # `target` is excluded only as Rust build output, never as a source segment.
+    assert vc.should_exclude(tuple(parts)) is excluded
+
+
 # --------------------------------------------------------------------------- #
 # Baseline / curriculum parsing
 # --------------------------------------------------------------------------- #
@@ -130,6 +144,23 @@ def test_single_token_requires_front_door():
     assert not pat.search("a nice readme about whoami usage")
     # front door is token-bounded: not a prefix of a longer word
     assert not pat.search("fnoteworthy whoami")
+
+
+def test_no_hyphenated_continuation_match():
+    """A leaf must not match a longer hyphenated leaf that extends it.
+
+    Without the trailing hyphen boundary, `backlog batch ship` would steal the
+    docs caller of `backlog batch ship-closeable`, and `agents loop` would steal
+    `agents loop-check`'s, flipping both toward KEEP. The shorter leaf matches
+    its own callers but not the longer leaf's.
+    """
+    assert vc.compile_pattern("backlog batch ship").search("fno backlog batch ship-closeable") is None
+    assert vc.compile_pattern("agents loop").search("fno-agents loop-check --json") is None
+    assert vc.compile_pattern("mail drain").search("fno mail drain-self") is None
+    # the longer leaf still matches its own invocation
+    assert vc.compile_pattern("backlog batch ship").search("fno backlog batch ship --yes")
+    # and the shorter leaf still matches a real bare caller
+    assert vc.compile_pattern("agents loop").search("crates: fno agents loop --driver target")
 
 
 # --------------------------------------------------------------------------- #

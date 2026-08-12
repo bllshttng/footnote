@@ -45,11 +45,32 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = REPO_ROOT / "scripts" / "ci" / "verb-baseline.txt"
 
 # Dirs that are not repo content, or that re-state the surface we measure.
+# NOTE: "target" is deliberately absent. As a path SEGMENT it collides with
+# real source trees - skills/target (a skill), tests/target (fixtures), and
+# cli/src/fno/target (the target command package) - and excluding it segment-
+# wide hides their callers, flipping live verbs toward the deletion list.
+# Rust build output is handled separately in should_exclude.
 EXCLUDE_DIRS = {
-    ".git", "target", "graphify-out", "node_modules", ".venv", "__pycache__",
+    ".git", "graphify-out", "node_modules", ".venv", "__pycache__",
     ".understand-anything", ".claude", ".fno", "internal", ".pytest_cache",
     ".mypy_cache", ".ruff_cache", "dist", "build",
 }
+
+
+def should_exclude(parts: tuple[str, ...]) -> bool:
+    """True if a repo-relative path's parts mark it non-content.
+
+    Rust build output (`target/` at the workspace root, or `crates/<c>/target/`)
+    is excluded by position, not by the bare segment, so the skills/target,
+    tests/target, and cli/src/fno/target source trees stay in the corpus.
+    """
+    if any(seg in EXCLUDE_DIRS for seg in parts):
+        return True
+    if parts[0] == "target":
+        return True
+    if len(parts) >= 3 and parts[0] == "crates" and parts[2] == "target":
+        return True
+    return False
 
 # A verb must not count the census's own data files as a caller. The baseline,
 # this script (its DEFAULT_CONTROLS literals), and the curriculum file (its
@@ -104,7 +125,7 @@ def iter_corpus(repo_root: Path) -> Iterable[tuple[str, str]]:
             rel = path.relative_to(repo_root).as_posix()
         except ValueError:
             continue
-        if any(seg in EXCLUDE_DIRS for seg in Path(rel).parts):
+        if should_exclude(Path(rel).parts):
             continue
         if rel in SELF_EXCLUDE:
             continue
@@ -159,14 +180,20 @@ def compile_pattern(verb: str) -> re.Pattern[str]:
     """
     tokens = verb.split()
     escaped = [re.escape(t) for t in tokens]
+    # Trailing boundary rejects a following word char OR hyphen, so a leaf that
+    # prefixes a longer hyphenated leaf does not steal its callers: `backlog
+    # batch ship` does not match `backlog batch ship-closeable`, and `agents
+    # loop` does not match `agents loop-check`. The leading lookbehind still
+    # permits a preceding hyphen so the `fno-agents` Rust front door matches.
+    tail = r"(?![\w-])"
     if len(escaped) == 1:
         # fno, fno-py, fno-agents, ... then separators then the token.
         # `fno(?:-[a-z]+)?` does not match `fnoteworthy` (no separator follows
         # `fno`), so a longer word sharing the prefix is not a false front door.
-        body = rf"(?<!\w)fno(?:-[a-z]+)?{SEP}{escaped[0]}(?!\w)"
+        body = rf"(?<!\w)fno(?:-[a-z]+)?{SEP}{escaped[0]}{tail}"
     else:
         joined = SEP.join(escaped)
-        body = rf"(?<!\w){joined}(?!\w)"
+        body = rf"(?<!\w){joined}{tail}"
     return re.compile(body)
 
 
@@ -299,20 +326,28 @@ def verdict_summary(records: list[dict]) -> dict[str, int]:
 
 def print_summary(records: list[dict], taught: set[str] | None) -> None:
     total = len(records)
-    counts = verdict_summary(records)
-    cut = counts.get("CUT-1", 0) + counts.get("CUT-2", 0) + counts.get("CUT-3", 0)
-    keep = counts.get("KEEP-INTERNAL-skill", 0) + counts.get("KEEP-INTERNAL-machinery", 0)
-    doc_gap = counts.get("KEEP-DOC-GAP", 0)
     print(f"baseline leaves:    {total}")
+    # The deletion-census measurement is over the complement (untaught), so
+    # when a curriculum is bound the verdict breakdown filters to it; without a
+    # curriculum the breakdown covers the whole baseline.
     if taught is not None:
         complement = total - len(taught)
         print(f"taught (curriculum): {len(taught)}")
         print(f"complement:         {complement}")
-    print(f"CUT candidates:     {cut}  (CUT-1={counts.get('CUT-1', 0)}, "
+        scope = [r for r in records if not r["taught"]]
+        scope_label = "complement"
+    else:
+        scope = records
+        scope_label = "baseline"
+    counts = verdict_summary(scope)
+    cut = counts.get("CUT-1", 0) + counts.get("CUT-2", 0) + counts.get("CUT-3", 0)
+    keep = counts.get("KEEP-INTERNAL-skill", 0) + counts.get("KEEP-INTERNAL-machinery", 0)
+    doc_gap = counts.get("KEEP-DOC-GAP", 0)
+    print(f"CUT candidates ({scope_label}): {cut}  (CUT-1={counts.get('CUT-1', 0)}, "
           f"CUT-2={counts.get('CUT-2', 0)}, CUT-3={counts.get('CUT-3', 0)})")
-    print(f"KEEP-INTERNAL:      {keep}  (skill={counts.get('KEEP-INTERNAL-skill', 0)}, "
+    print(f"KEEP-INTERNAL ({scope_label}):  {keep}  (skill={counts.get('KEEP-INTERNAL-skill', 0)}, "
           f"machinery={counts.get('KEEP-INTERNAL-machinery', 0)})")
-    print(f"KEEP-DOC-GAP:       {doc_gap}")
+    print(f"KEEP-DOC-GAP ({scope_label}):   {doc_gap}")
 
 
 # --------------------------------------------------------------------------- #
