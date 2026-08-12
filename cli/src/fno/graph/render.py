@@ -234,6 +234,12 @@ def _kanban_card(
             note = (extra.get("note") or "").strip()
             body_lines.append(f"  {label}{' - ' + note if note else ''}")
 
+    # artifact_url: the user-supplied design/doc link (fno done --link). Shown
+    # on the board so the field has a purpose-built reader, not just a writer.
+    artifact_url = (entry.get("artifact_url") or "").strip()
+    if artifact_url:
+        body_lines.append(f"  artifact: {artifact_url}")
+
     if body_lines:
         return header + "\n" + "\n".join(body_lines)
     return header
