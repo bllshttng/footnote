@@ -1,0 +1,119 @@
+# Verbs the tutorial curriculum teaches.
+# One CLI leaf per line, exactly as it appears in scripts/ci/verb-baseline.txt.
+# Consumed by scripts/ci/verb-census.py --curriculum to compute the complement
+# (the deletion-candidate set the verb-cut decision consumes).
+#
+# Slash commands (/fno:think, /fno:blueprint, ...) are deliberately absent:
+# they are skill invocations, not CLI leaves, and are not in the baseline.
+#
+# Spine (L1-L9): install to merged PR.
+# L1 install and prove it
+version
+doctor
+setup wizard
+config doctor
+update
+restart
+# L2 your first shipped PR
+whoami
+status
+target start
+target status
+# L3 how "done" is decided
+pr status
+agents loop-check
+state show
+# L4 design before code (skill-led; one CLI verb)
+think dispatch
+# L5 turn a design into a plan (skill-led; three CLI verbs)
+plan path
+plan brief
+plan stamp
+# L6 execute a plan (skill-led; two CLI verbs)
+state set
+state init
+# L7 review before you ship (skill-led; one CLI verb)
+review
+# L8 the PR lifecycle (skill-led; four CLI verbs)
+pr merge
+pr rebase
+pr verify
+pr ritual
+# L9 when it breaks (skill-led; five CLI verbs)
+test
+config get
+config set
+config unset
+config schema
+# Track B, the backlog (L10-L11)
+# L10 capture and shape work
+backlog idea
+backlog get
+backlog update
+backlog find
+backlog next
+backlog ready
+backlog done
+backlog defer
+backlog undefer
+backlog supersede
+backlog view
+backlog status
+# L11 keep the board honest
+backlog groom
+backlog reconcile
+backlog maintain
+backlog rank
+backlog roadmap
+backlog triage health
+backlog advance
+backlog intake
+# Track C, the mesh (L12-L14)
+# L12 worktrees
+worktree ensure
+worktree status
+worktree cleanup
+worktree archive
+worktree policy
+claim status
+claim list
+# L13 spawn a peer agent
+agents spawn
+agents list
+agents peek
+agents attach
+agents ask
+agents stop
+agents rm
+agents top
+agents watch
+agents resume
+agents logs
+agents status
+agents whoami
+# L14 make agents talk
+mail send
+mail reply
+mail unread
+mail ack
+mail list
+mail view
+mail status
+mail drain
+# Track D, a different product (L15)
+# L15 mux, optional
+mux attach
+mux ls
+mux server
+mux pane send
+mux pane read
+mux shell-init
+# Cross-cutting (L16)
+# L16 cost, providers, and what you left out
+config accounts
+cost
+tokens
+route ls
+route set
+carveout add
+carveout list
