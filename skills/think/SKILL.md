@@ -2,6 +2,10 @@
 name: think
 description: "Investigate a question against primary sources - repo source code, specs, first-party APIs - and write cited findings to one Markdown file. Use when: 'research this', 'think through this', 'how does this break' (what-if), 'several lenses on this' (panel), 'what owns this' (class). Prefix `bg` or `subagent` to run it off the main thread."
 argument-hint: "[bg|subagent] [what-if|panel|class] <question | node-id>"
+requires:
+  binaries:
+    - "fno >= 0.1"
+    - "git >= 2.0"
 ---
 
 # Think
@@ -11,6 +15,8 @@ Research, not planning. `/fno:blueprint` owns the plan and its approval.
 Read the argument left to right: an optional substrate token, an optional brief token, then the question (node id, slug, or free text).
 
 **Substrate.** `bg` hands the question to a background worker (`fno think dispatch <node>`) and returns its receipt immediately. `subagent` runs the process below in a subagent. Neither token: run it here, inline.
+
+**Codex posture.** When `$CODEX_THREAD_ID` is nonblank, before routing, Print exactly once: `codex posture: think researches inline by default; the bg token dispatches a background worker, subagent a subagent.`
 
 **Brief.** The question put to the sources. The process never varies; only this row does.
 

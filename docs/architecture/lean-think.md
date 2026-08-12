@@ -1,6 +1,6 @@
 # Lean Think and Native Planning
 
-Footnote separates factual discovery, design judgment, and execution compilation.
+Footnote separates factual discovery, research, and execution compilation.
 This keeps strong project grounding without forcing every request through the same amount of ritual.
 
 ## The three layers
@@ -8,8 +8,8 @@ This keeps strong project grounding without forcing every request through the sa
 `fno think inspect` is the deterministic discovery layer.
 It reads repository, backlog, PR, database-artifact, and project-lesson evidence and emits typed source status without mutating code or state.
 
-`/fno:think` is the optional design-judgment layer.
-It consumes the receipt, resolves meaningful uncertainty, compares alternatives, and produces a typed design whose depth is light, standard, or deep.
+`/fno:think` is the research layer.
+It investigates a question against primary sources (source code, specs, first-party APIs) and writes cited findings to one Markdown file. The question varies by brief - what is true (think), how it breaks (what-if), several lenses (panel), what owns a concern (class) - but the three-step process (ground, investigate, write) is fixed.
 
 `/fno:blueprint` is the execution compiler.
 It turns an approved design into owned tasks, dependencies, verification commands, and graph relationships.
