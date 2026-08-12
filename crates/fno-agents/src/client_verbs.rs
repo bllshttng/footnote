@@ -19,7 +19,10 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
-use crate::claude_ask::{family1_truth_state, liveness_probe, locate_session, ClaudeHome};
+use crate::claude_ask::{
+    family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session,
+    ClaudeHome,
+};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde::Serialize;
@@ -1769,7 +1772,7 @@ fn claude_resume_argv(
     entry: &Value,
     name: &str,
 ) -> Result<(Vec<String>, Option<String>), i32> {
-    claude_resume_argv_with_truth(claude_home, entry, name, family1_truth_state)
+    claude_resume_argv_with_truth(claude_home, entry, name, family1_truth_state_for_resume)
 }
 
 fn claude_resume_argv_with_truth<F>(
@@ -1787,15 +1790,20 @@ where
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
+    let has_uuid = is_uuid_shaped(uuid);
 
     let socket_live = !short_id.is_empty()
         && locate_session(claude_home, short_id)
             .map(|loc| liveness_probe(&loc.messaging_socket_path))
             .unwrap_or(false);
-    // An empty uuid is a row that never recorded one, not a session to probe:
-    // `fno agents truth "" --json` can only answer not-found, and that answer is
-    // now filtered, so the spawn is pure cost with no reachable signal.
-    let truth_state = if socket_live || short_id.is_empty() || uuid.is_empty() {
+    // Probe on the canonical uuid whenever one is recorded. This used to also
+    // short-circuit on an empty short_id, so a pane worker (no short_id by
+    // design: _validate_single_live_ref enforces mux XOR worker XOR bg) never
+    // probed and reported "liveness is inconclusive" for a session whose uuid
+    // was resolvable - the x-b84f bug. The attach arm below gates on a present
+    // short_id, so dropping the short_id term lets a mux row probe without ever
+    // issuing a bare `claude attach ""`.
+    let truth_state = if socket_live || uuid.is_empty() {
         None
     } else {
         truth_fn(uuid)
@@ -1807,13 +1815,13 @@ where
         );
     let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
-    if live {
+    if live && !short_id.is_empty() {
         eprintln!("fno agents resume: {name} is live - attaching");
         Ok((
             vec!["claude".into(), "attach".into(), short_id.into()],
             None,
         ))
-    } else if dead && is_uuid_shaped(uuid) {
+    } else if dead && has_uuid {
         // x-ae2d: this arm RELAUNCHES (the live arm above only attaches), so it
         // is the one door on this verb that can lose a route. A row that records
         // one gets it re-applied through `--settings`, the same mechanism the
@@ -1863,15 +1871,22 @@ where
         argv.push("--resume".into());
         argv.push(uuid.into());
         Ok((argv, Some(uuid.to_string())))
-    } else if dead {
+    } else if !has_uuid {
+        // No resumable uuid and no live socket to attach through: name the cause.
+        // AC2: an id-less row is a definite "nothing to resume", never the
+        // "liveness is inconclusive" that printed an unrunnable empty-id hint and
+        // hid the real bug.
         eprintln!(
-            "fno agents resume: {} has no claude session recorded; nothing to resume.",
-            py_repr_str(name)
+            "fno agents resume: {name} has no session id recorded; nothing to resume."
         );
         Err(13)
     } else {
+        // has_uuid but neither attachable-live nor affirmatively dead: genuinely
+        // inconclusive (a live fork holding the pane, or a silent-unreachable
+        // worker that may still be alive). Name the uuid the operator can probe,
+        // not the empty short_id the old hint interpolated.
         eprintln!(
-            "fno agents resume: {name} liveness is inconclusive; refusing to open a second writer. Run 'fno agents truth {short_id}'."
+            "fno agents resume: {name} liveness is inconclusive; refusing to open a second writer. Run 'fno agents truth {uuid}'."
         );
         Err(13)
     }
@@ -3895,6 +3910,64 @@ mod tests {
                 vec!["claude".into(), "attach".into(), "7c5dcf5d".into()],
                 None
             )
+        );
+    }
+
+    #[test]
+    fn claude_resume_argv_mux_row_relaunches_on_a_gone_verdict() {
+        // x-b84f: a pane worker carries a canonical uuid but NO short_id (empty
+        // by design: _validate_single_live_ref enforces mux XOR worker XOR bg, so
+        // a mux row never gets the transport key). The loader backfill mirrors
+        // harness_session_id -> claude_session_uuid, so the uuid IS resolvable.
+        // What stood between it and the relaunch arm is the empty short_id, which
+        // short-circuited the truth probe to None and printed "liveness is
+        // inconclusive" for a session the operator can see is gone. A pane-gone
+        // worker is affirmatively dead, so resume relaunches it (--resume <uuid>
+        // plus the recorded route) instead of refusing. AC1, AC3.
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let route = home.path().join("route-settings-mux.json");
+        fs::write(&route, r#"{"env":{"ANTHROPIC_BASE_URL":"https://example.invalid"}}"#)
+            .unwrap();
+        let entry = serde_json::json!({
+            "name": "pane-worker", "provider": "claude",
+            "claude_session_uuid": uuid,
+            "route_settings_path": route.to_str().unwrap(),
+            // short_id deliberately absent: this is the mux-row shape.
+        });
+
+        // truth_fn returns the lowered "stalled" that
+        // family1_truth_state_for_resume produces for a working + unreachable +
+        // pane-gone verdict (proven by the lowering unit test in claude_ask).
+        let (argv, claim) = claude_resume_argv_with_truth(
+            &ch,
+            &entry,
+            "pane-worker",
+            |_| Some("stalled".into()),
+        )
+        .expect("a gone pane worker relaunches rather than refusing");
+        assert_eq!(claim.as_deref(), Some(uuid));
+        assert_eq!(
+            argv,
+            vec![
+                "claude".to_string(),
+                "--settings".into(),
+                route.to_str().unwrap().into(),
+                "--resume".into(),
+                uuid.into(),
+            ]
+        );
+
+        // AC2: a row with no session id in any field must refuse, and the return
+        // is Err(13) regardless of message - but it must not be reachable via the
+        // dead arm (no uuid to relaunch).
+        let entry_idless = serde_json::json!({
+            "name": "idless", "provider": "claude",
+        });
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry_idless, "idless", |_| Some("done".into())),
+            Err(13)
         );
     }
 

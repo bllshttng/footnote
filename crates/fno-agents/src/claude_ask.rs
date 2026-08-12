@@ -163,6 +163,46 @@ fn lower_state_with_verdict<'a>(state: &'a str, reachability: Option<&str>) -> &
     state
 }
 
+/// Variant of [`family1_truth_state`] for the resume smart verb. The shared
+/// lowering renders a gone process as `"unreachable"` (matches no arm, so resume
+/// refuses it as inconclusive - the safe answer for the mail path). Resume wants
+/// the opposite for a worker the verdict confirms is DEAD: relaunch it. So an
+/// `unreachable` verdict whose `basis` is the process being gone (`pane-gone` /
+/// `process-gone`) lowers to `"stalled"` and resume's `done | stalled` relaunch
+/// arm fires. A `silent` / `no-evidence` unreachable stays `"unreachable"`
+/// (inconclusive): the process may still be alive, and relaunching would open a
+/// second writer on one transcript.
+///
+/// Separate from [`family1_truth_state`] because routing a gone worker to
+/// relaunch is a resume-specific call; the mail path's orphan-reason reader
+/// (`family1_orphan_reason`) shares the probe but must not change with it.
+pub fn family1_truth_state_for_resume(handle: &str) -> Option<String> {
+    let probe = family1_truth_probe(handle)?;
+    Some(
+        lower_state_for_resume(&probe.state, probe.reachability.as_deref(), probe.basis.as_deref())
+            .to_string(),
+    )
+}
+
+/// [`lower_state_with_verdict`] plus one rule: a live-seeming state the verdict
+/// falsified with evidence the PROCESS is gone (not merely silent) is dead, so
+/// resume relaunches it. Falls through to the shared lowering for every other
+/// case, so reachable-working stays live and a pre-verdict probe build is
+/// unchanged.
+fn lower_state_for_resume<'a>(
+    state: &'a str,
+    reachability: Option<&str>,
+    basis: Option<&str>,
+) -> &'a str {
+    if reachability == Some("unreachable")
+        && matches!(basis, Some("pane-gone") | Some("process-gone"))
+        && matches!(state, "working" | "watching" | "your-move")
+    {
+        return "stalled";
+    }
+    lower_state_with_verdict(state, reachability)
+}
+
 /// Diagnostic for a failed family-1 truth probe. truth writes its refusal
 /// JSON ({state,reason}) to stdout on a non-zero exit, so the reason is read
 /// off stdout, falling back to stderr only when stdout is not the expected JSON.
@@ -2854,6 +2894,43 @@ mod tests {
         assert_eq!(lower_state_with_verdict("working", None), "working");
         assert_eq!(
             lower_state_with_verdict("working", Some("reachable")),
+            "working"
+        );
+    }
+
+    #[test]
+    fn resume_lowering_treats_a_gone_process_as_dead() {
+        // x-b84f: the resume variant lowers a live-seeming state the verdict
+        // falsified with PROCESS-gone evidence to "stalled", so the relaunch arm
+        // fires for a pane-gone worker instead of the inconclusive refusal.
+        assert_eq!(
+            lower_state_for_resume("working", Some("unreachable"), Some("pane-gone")),
+            "stalled"
+        );
+        assert_eq!(
+            lower_state_for_resume("working", Some("unreachable"), Some("process-gone")),
+            "stalled"
+        );
+        // A silent / no-evidence unreachable is NOT affirmatively dead: the
+        // process may still be alive, so it stays "unreachable" (resume's
+        // inconclusive refusal, never a relaunch that would double-write).
+        assert_eq!(
+            lower_state_for_resume("working", Some("unreachable"), Some("silent")),
+            "unreachable"
+        );
+        assert_eq!(
+            lower_state_for_resume("working", Some("unreachable"), None),
+            "unreachable"
+        );
+        // Monotone: a terminal state is never rewritten, and the shared lowering
+        // still owns the reachable / no-verdict cases unchanged.
+        assert_eq!(
+            lower_state_for_resume("done", Some("unreachable"), Some("pane-gone")),
+            "done"
+        );
+        assert_eq!(lower_state_for_resume("working", None, None), "working");
+        assert_eq!(
+            lower_state_for_resume("working", Some("reachable"), Some("transcript")),
             "working"
         );
     }
