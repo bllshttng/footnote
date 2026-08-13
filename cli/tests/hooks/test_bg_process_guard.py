@@ -107,6 +107,15 @@ DENIED = [
     # A `case` arm's `)` opens the body, so command position restarts there.
     # Left mid-segment, the body sat behind the `case` head and was never read.
     "case $x in a) yes > /dev/null;; esac",
+    # An escape AFTER `done` is outside the loop and can never run. These two
+    # are specimen 1 exactly, and they are the canonical way to write a
+    # detached keepalive: the mirror image of the precondition hole below.
+    "while true; do sleep 60; done; exit 0",
+    "while true; do sleep 60; done & exit",
+    "until false; do sleep 60; done; break",
+    # An empty middle expression is what makes a C-style `for` endless.
+    "for ((i=0;;)); do sleep 1; done",
+    "for (( ; ; )); do sleep 1; done",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -167,6 +176,15 @@ ALLOWED = [
     "wc -l < report.txt",
     "cat < report.txt",
     "case $x in a) echo hi;; esac",
+    # A C-style `for` with a real condition counts and stops. A shape test that
+    # reads only the parentheses calls this one endless too.
+    "for ((i=0;i<10;i++)); do sleep 1; done",
+    # None of these has a shell loop in it. Matched on the raw command text,
+    # `for ((;;))` denied every one, and the third blocked writing a commit
+    # message about this guard in the repo that ships it.
+    'echo "for ((;;))"',
+    "rg 'for ((;;))' hooks/",
+    "git commit -m 'guard: refuse for ((;;)) loops'",
 ]
 
 

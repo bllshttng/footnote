@@ -164,6 +164,27 @@ def test_a_probe_that_never_reparents_withholds_the_verdict(monkeypatch, table) 
     assert result.findings == []
 
 
+def test_a_broken_reaper_still_cleans_up_our_own_probes(monkeypatch, table) -> None:
+    """The withheld verdict must not leak the two probes it planted.
+
+    Returning early skipped the kill block, so both probes ran their full
+    lifetime on exactly the host where reparenting is already misbehaving: the
+    one path in this module that leaks the thing the module hunts. It also left
+    `control` empty, so the report named no arm status at all.
+    """
+    killed: list[int] = []
+    monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: 9001)
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: None)
+    monkeypatch.setattr(orphans, "_kill", _recording_kill(killed))
+
+    result = orphans.scan()
+    assert result.broken
+    assert killed == [9001, 9001], "both probes must be signalled"
+    assert set(result.control) == {"NAME", "CWD", "kill"}
+    assert result.control["NAME"] is False
+    assert result.control["CWD"] is False
+
+
 def test_an_out_of_enum_skip_probe_refuses(monkeypatch, table) -> None:
     """A falsifier that cannot fail is worse than no falsifier.
 

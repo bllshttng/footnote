@@ -466,9 +466,16 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
             # No probe settled, so there is no reaper to compare against and
             # every ppid test below would be meaningless. Say so instead of
             # counting against a guess.
+            #
+            # Fall THROUGH rather than return. The kill block below is what
+            # cleans up our own two probes, so returning here left them running
+            # for their full lifetime on exactly the host where reparenting is
+            # already misbehaving: the one path in this module that leaks the
+            # thing the module hunts. Both arms stay False, so the verdict is
+            # still withheld, and `control` now names which arms failed instead
+            # of reporting nothing at all.
             result.broken_reason = "no probe reparented, so the reaper is unknown"
-            return result
-        for info in _iter_processes(reaper):
+        for info in _iter_processes(reaper) if reaper is not None else ():
             result.total += 1
             if info.get("ppid") != reaper:
                 continue

@@ -30,7 +30,9 @@ A PreToolUse hook on Bash, wired on both the claude and codex lanes. It denies a
 
 Refused shapes: `yes`, `while true`, `while :`, `until false`, `for ((;;))`, `sleep infinity`. Also `stress` and `stress-ng` with no `-t`, `dd` from an endless device with no `count=`, and a checksum reading one.
 
-These make it legal: `timeout` or `gtimeout` as the command, `count=` on `dd`, `-t <seconds>` on `stress`, and `ulimit -t` in an earlier command. So does piping INTO a reader that exits, as in `yes | head -c 1M`. Each is read in command position, so an argument spelling `timeout` is not a bound, and neither is a trailing comment mentioning one. `head` bounds only the stage that feeds it, so `head -c 1M f | yes` is still refused. A `break`, `exit`, or `return` in COMMAND position after the loop header also clears it. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Two things discriminate, and neither is the word. Command position: `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes. Position relative to the header: an escape leaves the loop it is inside, never one it precedes, so `cd /tmp || exit 1; while true; do sleep 60; done &` is still refused.
+These make it legal: `timeout` or `gtimeout` as the command, `count=` on `dd`, `-t <seconds>` on `stress`, and `ulimit -t` in an earlier command. So does piping INTO a reader that exits, as in `yes | head -c 1M`. Each is read in command position, so an argument spelling `timeout` is not a bound, and neither is a trailing comment mentioning one. `head` bounds only the stage that feeds it, so `head -c 1M f | yes` is still refused. A `break`, `exit`, or `return` in COMMAND position after the loop header also clears it. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Three things discriminate, and none of them is the word. Command position: `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes. Position after the header: an escape leaves the loop it is inside, never one it precedes, so `cd /tmp || exit 1; while true; do sleep 60; done &` is still refused. Position before the `done`: `while true; do sleep 60; done; exit 0` never reaches its own `exit`, and it is the canonical way to write a detached keepalive.
+
+`for ((...))` is read the same way. Bash takes three `;`-separated expressions and the MIDDLE one is the condition. An empty condition is what never ends, so `for ((i=0;;))` is refused and `for ((i=0;i<10;i++))` counts to ten and passes. The header is rebuilt from tokens in command position. Matched on the raw command text instead, the guard denied `echo "for ((;;))"`, `rg 'for ((;;))' hooks/`, and a commit message naming the shape. The third one blocked writing about this guard in the repo that ships it.
 
 Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
@@ -40,7 +42,7 @@ It is parse-only and imports nothing outside the standard library, `psutil` incl
 
 It does not reach every harness. opencode and agy have no PreToolUse lane here. A test fixture that spawns a subprocess never passes through the Bash tool at all. Those are the sweep's.
 
-It reads one level into `bash -c` and no further. A payload handed to `eval`, or detached by `screen -dmS` or `tmux new -d`, is never parsed. So `eval 'yes > /dev/null'` passes, and so does a command substitution. That is the fail-open direction on purpose. A guard that guesses at nested quoting refuses real work, and the sweep backstops what the guard misses. Adding `eval` to the recursion is the one cheap extension left.
+It reads one level into `bash -c` and no further. A payload handed to `eval`, or detached by `screen -dmS` or `tmux new -d`, is never parsed. So `eval 'yes > /dev/null'` passes, and so does a command substitution. A shell FUNCTION body is invisible the same way: `myloop() { while true; do sleep 1; done; }; myloop &` passes, while the bare-brace `{ while true; ...; } &` is refused. That is the fail-open direction on purpose. A guard that guesses at nested quoting refuses real work, and the sweep backstops what the guard misses. Adding `eval` to the recursion is the one cheap extension left.
 
 ## The sweep: `fno agents orphans`
 
@@ -60,6 +62,8 @@ FNO_ORPHANS_SKIP_PROBE=cwd  fno agents orphans; echo "exit=$?"
 ```
 
 Read that exit code directly. Never through a `| tail`. A tail reports its own status, and that has hidden a failing gate here before.
+
+Read the printed line too, not only the code. A deployed `fno` older than this verb answers `No such command 'orphans'` and exits 2, which is the same code a failing arm uses. All three commands above then look like the falsifier working. The healthy run is what separates them: it exits 0 on a current binary and 2 on a stale one. `fno doctor` names the staleness, and `fno doctor --fix` updates it.
 
 **What the live control does not prove**, stated so nobody reads it as covering more than it does. Three arms stay unproven: the uid test, the census exclusion, and the reap age gate. The probe is ours, is not a census row, and is seconds old. Unit tests cover those three against a fabricated process table in `cli/tests/agents/test_orphans.py`.
 

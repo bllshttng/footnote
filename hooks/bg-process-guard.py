@@ -354,6 +354,45 @@ def _payload_of(head, argv):
     return None
 
 
+def _infinite_arith_for(tokens):
+    """True when a C-style `for ((...))` header can never end.
+
+    Bash reads three `;`-separated arithmetic expressions and the MIDDLE one is
+    the condition. An empty condition is what never ends: `for ((i=0;i<10;i++))`
+    counts to ten and stops, `for ((i=0;;))` does not. A shape test that reads
+    only `((;;))` calls the first one infinite too.
+
+    Read from the token walk, in command position, never from the raw text. A
+    text match denied `echo "for ((;;))"`, `rg 'for ((;;))' hooks/`, and a
+    commit message naming the shape. None of those has a shell loop in it, and
+    the third blocked writing about this guard in the repo that ships it. That
+    is the same defect this file already refused for `break`, reached from the
+    other side.
+
+    The header is rebuilt by joining tokens rather than read per segment.
+    `((;;));` is all punctuation, so the lexer emits it as one operator token
+    and `_segments` drops it as a separator; by the time there are segments the
+    condition is gone.
+    """
+    for i, tok in enumerate(tokens):
+        if tok != "for" or (i and not _is_separator(tokens[i - 1])):
+            continue
+        header = []
+        for nxt in tokens[i + 1:]:
+            if nxt == "do":
+                break
+            header.append(nxt)
+        joined = "".join(header)
+        start = joined.find("((")
+        end = joined.find("))", start + 2)
+        if start == -1 or end == -1:
+            continue  # `for f in *`, or a header this walk cannot read
+        parts = joined[start + 2:end].split(";")
+        if len(parts) == 3 and not parts[1].strip():
+            return True
+    return False
+
+
 def _find_unbounded(text, inherited_bound=False, depth=0):
     """First (reason, segment_text) that can never end and is unbounded.
 
@@ -364,7 +403,8 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     if depth > 2:
         return None
     text = _strip_heredocs(text)
-    all_segments = _segments(_tokens(text))
+    all_tokens = _tokens(text)
+    all_segments = _segments(all_tokens)
     # A loop header runs forever only if nothing inside leaves the loop.
     # `while true; do sleep 5; gh pr view && break; done` is the standard poll
     # and it ends; refusing it blocked an ordinary shape at the Bash boundary.
@@ -377,12 +417,17 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     # command, `cd /tmp || exit 1; while true; do sleep 60; done &` cleared its
     # own loop from a line that had already run, and that is an ordinary way to
     # write the keepalive this guard exists to refuse.
-    # ponytail: one escape clears every loop after the first header, so a
-    # `break` in a NESTED loop reads as one for the outer, and in
-    # `while true; do break; done; while true; do sleep 1; done` it clears the
-    # second loop too. Telling those apart needs loop-scope tracking, and this
-    # walk has already been rewritten three times; the sweep covers what the
-    # guard misses. Fail-open, in the same direction as the rest of this file.
+    # The scan also STOPS at the loop's `done`. An escape can only leave a loop
+    # it sits inside, and `done` is where that loop ends: `while true; do sleep
+    # 60; done; exit 0` and `while true; do sleep 60; done & exit` are both
+    # specimen 1 exactly, and the `exit` can never run. Read to the end of the
+    # command, both cleared themselves, which is the mirror image of the
+    # precondition hole and the canonical way to write a detached keepalive.
+    # ponytail: one escape clears every loop between that header and that
+    # `done`, so a `break` in a NESTED loop reads as one for the outer too.
+    # Telling those apart needs loop-scope tracking, and this walk has already
+    # been rewritten four times; the sweep covers what the guard misses.
+    # Fail-open, in the same direction as the rest of this file.
     heads = [
         [_head_of(part)[0] for part in _pipe_parts(segment)]
         for segment in all_segments
@@ -391,15 +436,17 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
         (i for i, hs in enumerate(heads) if {"while", "until", "for"} & set(hs)),
         None,
     )
-    escapes = first_loop is not None and any(
-        head in _ESCAPES for hs in heads[first_loop + 1:] for head in hs
-    )
-    # `for ((;;))` cannot be found per segment: `((;;))` is all punctuation, so
-    # the lexer emits it as one operator token and _is_separator splits there,
-    # leaving a `for` segment with empty argv. Matched on the raw text instead,
-    # and only when the whole command carries no bound at all, so
+    escapes = False
+    if first_loop is not None:
+        for hs in heads[first_loop + 1:]:
+            if "done" in hs:
+                break
+            if any(head in _ESCAPES for head in hs):
+                escapes = True
+                break
+    # Denied only when the whole command carries no bound at all, so
     # `for ((;;)); do timeout 5 x; done` still passes.
-    if re.search(r"for\s*\(\(\s*;\s*;\s*\)\)", text) and not escapes and not any(
+    if _infinite_arith_for(all_tokens) and not escapes and not any(
         _has_bound(seg) for seg in all_segments
     ):
         return "`for ((;;))` is an unbounded loop header.", text.strip()
