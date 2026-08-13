@@ -44,6 +44,9 @@ DENIED = [
     "dd if=/dev/zero of=/dev/null",
     "cat /dev/urandom > /dev/null",
     "setsid yes > /dev/null &",
+    # A leading assignment is a prefix, not the command.
+    "FOO=1 yes > /dev/null &",
+    "env FOO=1 yes > /dev/null &",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and

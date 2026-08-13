@@ -90,6 +90,11 @@ def _head_of(segment):
             # Only meaningful directly after a transparent wrapper (`exec -a`).
             i += 2
             continue
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tok):
+            # A leading assignment is a prefix, not the command: `FOO=1 yes` and
+            # `env FOO=1 yes` both still run `yes`.
+            i += 1
+            continue
         return base, segment[i + 1:]
     return None, []
 
