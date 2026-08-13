@@ -6591,7 +6591,11 @@ fn evaluate_plan_fidelity(plan_path: Option<&str>, fno_bin: &OsStr, cwd: &Path) 
         Ok(o) => o,
         Err(_) => return FidelityGate::Absent,
     };
-    let v: Value = match serde_json::from_slice(&out.stdout) {
+    classify_plan_fidelity(&out.stdout)
+}
+
+fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
+    let v: Value = match serde_json::from_slice(stdout) {
         Ok(v) => v,
         Err(_) => return FidelityGate::Absent,
     };
@@ -7578,27 +7582,13 @@ mod tests {
 
     // ── plan fidelity stop gate (x-cbab) ──────────────────────────────────────
     //
-    // Hermetic: a stub `fno` script emits canned JSON, so the gate is exercised
-    // without the real CLI. Mirrors the merge-gate half (tested in Python); the
-    // two readers are independent by design.
-
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn _write_fno_stub(body: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let stub = dir.path().join("fno");
-        fs::write(&stub, format!("#!/bin/sh\necho '{}'", body)).unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-        (dir, stub)
-    }
+    // Hermetic: classify canned JSON without spawning, and exercise missing
+    // process handling separately. Mirrors the merge-gate half (tested in
+    // Python); the two readers are independent by design.
 
     #[test]
     fn plan_fidelity_gate_blocks_an_uncovered_shortfall() {
-        let (_dir, stub) =
-            _write_fno_stub(r#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#);
-        let cwd = std::env::temp_dir();
-        match evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd) {
+        match classify_plan_fidelity(br#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#) {
             FidelityGate::Refused { reason } => assert!(reason.contains("unjoined")),
             other => panic!("expected Refused, got {:?}", other),
         }
@@ -7606,24 +7596,22 @@ mod tests {
 
     #[test]
     fn plan_fidelity_gate_passes_when_not_refused() {
-        let (_dir, stub) = _write_fno_stub(r#"{"refused": false}"#);
-        let cwd = std::env::temp_dir();
         assert!(matches!(
-            evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd),
+            classify_plan_fidelity(br#"{"refused": false}"#),
             FidelityGate::Pass
         ));
     }
 
     #[test]
     fn plan_fidelity_gate_absent_without_a_plan() {
-        let (_dir, stub) = _write_fno_stub(r#"{"refused": true}"#);
         let cwd = std::env::temp_dir();
+        let missing = Path::new("/definitely/missing/fno");
         assert!(matches!(
-            evaluate_plan_fidelity(None, stub.as_os_str(), &cwd),
+            evaluate_plan_fidelity(None, missing.as_os_str(), &cwd),
             FidelityGate::Absent
         ));
         assert!(matches!(
-            evaluate_plan_fidelity(Some(""), stub.as_os_str(), &cwd),
+            evaluate_plan_fidelity(Some(""), missing.as_os_str(), &cwd),
             FidelityGate::Absent
         ));
     }
@@ -7633,10 +7621,17 @@ mod tests {
         // A stale fno without the verb prints an error, not JSON. The stop gate
         // must not block on that - the merge gate is the backstop, and fail-open
         // here is what keeps a stale install from wedging every run.
-        let (_dir, stub) = _write_fno_stub("No such command: fidelity");
         let cwd = std::env::temp_dir();
         assert!(matches!(
-            evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd),
+            evaluate_plan_fidelity(
+                Some("/x/plan.md"),
+                Path::new("/definitely/missing/fno").as_os_str(),
+                &cwd
+            ),
+            FidelityGate::Absent
+        ));
+        assert!(matches!(
+            classify_plan_fidelity(b"No such command: fidelity"),
             FidelityGate::Absent
         ));
     }
