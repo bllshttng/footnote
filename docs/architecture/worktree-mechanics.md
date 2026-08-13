@@ -52,7 +52,8 @@ bash scripts/setup/archive-worktree.sh <name|path>   # checks: clean tree, no un
 ```
 
 Flags: `--force`, `--yes` (skip kill prompt), `--delete-branch`.
-Or `git worktree remove <path>`; NEVER `rm -rf`, which leaves dangling refs.
+Or use `git worktree remove <path>`.
+NEVER `rm -rf` a worktree, which leaves dangling refs.
 
 Post-merge pruning is automated.
 `/fno:pr merged` archives the PR's worktree, and `fno worktree cleanup --merged --apply` sweeps landed ones.
@@ -64,7 +65,7 @@ It emits `verdict=ok|canonical-protected` plus a nested-worktree advisory, and a
 
 - **SessionStart heads-up** (`hooks/session-start.sh`): a non-blocking note when the session is on the canonical protected branch.
 - **Implementation-entry refusal** (`/target`, `/do`, `/fix`): on `canonical-protected` these refuse before the first write. The escape is `TARGET_LOCATION_OK=main-acknowledged`.
-- **Config-driven relocation** (`hooks/worktree-setup.sh`): refuses outright on `policy = "never"`. Otherwise it relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>` when the knob is set, and leaves harness-native when it is unset. `scripts/setup/worktree-create-hook.sh` is the user-global wiring for non-footnote repos and does the same, reading its base from config.
+- **Config-driven relocation** (`hooks/worktree-setup.sh`): refuses outright on `policy = "never"`. With `worktrees_base` set, it relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>`. With the knob unset, it leaves the placement harness-native. `scripts/setup/worktree-create-hook.sh` is the user-global wiring for non-footnote repos and does the same, reading its base from config.
 
 Wire exactly one `WorktreeCreate` hook per repo.
 The plugin hook and a user-global one merge across settings levels and race each other.
