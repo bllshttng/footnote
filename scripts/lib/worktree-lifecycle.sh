@@ -17,8 +17,19 @@ if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-reapable.sh" ]]; then
 else
     WT_REAPABLE_LINE=""
     wt_reapable() {
-        WT_REAPABLE_LINE="reapable=no reason=probe-failed detail=helper-missing"
-        [[ -z "$(git -C "${1:-}" status --porcelain 2>/dev/null)" ]]
+        # The receipt has to match the answer, or the reason printed below lies:
+        # the old shape stamped "probe-failed" even on the path that returned 0.
+        # A git that ERRORS also blocks here; an empty porcelain from a failed
+        # command is not a clean tree.
+        local out rc=0 reason=dirty
+        out="$(git -C "${1:-}" status --porcelain 2>/dev/null)" || rc=$?
+        if [[ "$rc" -eq 0 && -z "$out" ]]; then
+            WT_REAPABLE_LINE="reapable=yes reason=clean recoverable_deletions=0"
+            return 0
+        fi
+        [[ "$rc" -ne 0 ]] && reason=probe-failed
+        WT_REAPABLE_LINE="reapable=no reason=${reason} detail=helper-missing"
+        return 1
     }
 fi
 
@@ -255,7 +266,11 @@ case "${1:-status}" in
                 #    receipt names the recoverable-deletion count so a
                 #    systematic cause is visible instead of the word "dirty".
                 if ! wt_reapable "$wt"; then
-                    printf '%-18s %-34s %s\n' "kept (dirty)" "$branch" "$wt"; N_DIRTY=$((N_DIRTY + 1)); continue
+                    # Print the reason, or the promise above is empty: "dirty"
+                    # alone cannot tell an untracked scratch file from a probe
+                    # that never answered.
+                    reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                    printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
                 # 2. merged into origin/main? Detached HEAD (deleted branch) is always kept.
                 if [[ "$branch" == "HEAD" || -z "$head" ]]; then

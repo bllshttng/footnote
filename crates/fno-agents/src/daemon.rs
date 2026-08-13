@@ -387,20 +387,6 @@ pub struct GcSummary {
     pub kept_dirty: Vec<(String, String)>,
 }
 
-/// Can this worktree-owning row's `cwd` be removed without destroying work?
-/// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
-/// -> the caller fails closed and keeps the row.
-///
-/// Routes through `fno worktree reapable`, the same answer the `--merged` sweep
-/// and `archive-worktree.sh` use, so three call sites cannot drift apart (an
-/// equivalence test pins that they agree). The old rule here was "is
-/// `git status --porcelain` empty", which blocked on a tracked file merely
-/// MISSING from disk - content HEAD still holds, so removal loses nothing.
-///
-/// Permission needs BOTH a clean exit and the literal `reapable=yes` marker. A
-/// stale `fno` predating the verb exits non-zero with no receipt, which is
-/// indistinguishable from any other non-answer, so every unknown degrades to
-/// `None` and the row is kept. That is exactly the prior behaviour.
 /// Distinct canonical repo roots the registry knows about, deduplicated.
 ///
 /// A linked worktree is not its own repo, so its rows fold into the checkout
@@ -553,6 +539,20 @@ fn is_linked_worktree(cwd: &str) -> bool {
     std::path::Path::new(cwd).join(".git").is_file()
 }
 
+/// Can this worktree-owning row's `cwd` be removed without destroying work?
+/// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
+/// -> the caller fails closed and keeps the row.
+///
+/// Routes through `fno worktree reapable`, the same answer the `--merged` sweep
+/// and `archive-worktree.sh` use, so three call sites cannot drift apart (an
+/// equivalence test pins that they agree). The old rule here was "is
+/// `git status --porcelain` empty", which blocked on a tracked file merely
+/// MISSING from disk - content HEAD still holds, so removal loses nothing.
+///
+/// Permission needs BOTH a clean exit and the literal `reapable=yes` marker. A
+/// stale `fno` predating the verb exits non-zero with no receipt, which is
+/// indistinguishable from any other non-answer, so every unknown degrades to
+/// `None` and the row is kept. That is exactly the prior behaviour.
 fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     let out = std::process::Command::new("fno")
         .current_dir(cwd)

@@ -195,8 +195,11 @@ def test_helper_fails_closed_when_the_verb_cannot_answer(tmp_path: Path) -> None
         f'if wt_reapable "{repo}"; then echo YES; else echo NO; fi\n'
         f'echo "$WT_REAPABLE_LINE"\n'
     )
+    # STRIP `fno` FOR REAL. The docstring above always claimed a PATH without
+    # it; leaving the real PATH in place let the developer's installed CLI
+    # answer, so this asserted nothing once the helper grew its fallback.
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                       cwd=str(REPO_ROOT))
+                       cwd=str(REPO_ROOT), env={"PATH": "/usr/bin:/bin"})
 
     assert "NO" in r.stdout
     assert "probe-failed" in r.stdout

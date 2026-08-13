@@ -1101,8 +1101,9 @@ fn squad_store_check() -> Check {
     };
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
     // ONE argument set with the prune that actually runs. This counter used to
-    // hardcode `include_named: false` and pass an empty `live_cwds`, so the
-    // number the operator read could disagree with what a prune would do.
+    // pass an empty `live_cwds` and no clock, so the number the operator read
+    // could disagree with what a bare `prune` would do. `include_named: false`
+    // stays hardcoded on purpose: it is what a bare `prune` uses.
     let live_cwds = live_pane_cwds();
     let now = crate::squad_store::now_epoch_secs();
     let orphan = loaded

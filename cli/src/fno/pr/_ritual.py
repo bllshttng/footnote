@@ -261,6 +261,9 @@ class Ritual:
     # only works on the constructed path is the decorative kind. False is the
     # honest default: no number was supplied.
     pr_supplied: bool = False
+    # Same class-level-default reason: `_bare()`-style tests skip __init__, and
+    # a cache that only exists on the constructed path is the decorative kind.
+    _merge_state: Optional[tuple] = None
 
     def __init__(self, pr: Optional[int], autonomous: bool, cwd: Path,
                  runner: Callable = _run) -> None:
@@ -442,6 +445,10 @@ class Ritual:
     def _merged_state(self) -> tuple[Optional[str], Optional[str]]:
         """(state, headRefName) from ONE gh call, or (None, None) if unreadable.
 
+        Memoized: two legs ask, and one PR view per ritual is enough. The state
+        can only travel toward MERGED during a run, so a cached OPEN refuses
+        more, never less.
+
         `state` is the whole point. This call already existed and read only the
         branch, so an OPEN PR resolved a branch, found its worktree, and handed
         it to the archive script - whose own checks (clean, pushed, no live
@@ -453,6 +460,11 @@ class Ritual:
         path the merge is an ARGUMENT, so the guard belongs here at the leg,
         where a removal actually happens, not at resolve.
         """
+        if self._merge_state is None:
+            self._merge_state = self._merged_state_read()
+        return self._merge_state
+
+    def _merged_state_read(self) -> tuple[Optional[str], Optional[str]]:
         try:
             meta = self._gh(["pr", "view", str(self.ctx.pr),
                              "--json", "state,headRefName"])

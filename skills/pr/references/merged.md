@@ -71,14 +71,17 @@ step=retro status=ok detail=...
 step=advance status=ok detail=exit=0 (3 progress lines)
 step=skill-diff status=ok detail=...
 step=sync-canonical status=skipped detail=not configured
-step=archive status=ok detail=archived
+step=archive status=deferred detail=sweep-will-reap
 step=judgment status=ok detail=deferred-to-skill (attended); deferred=2 files=14 lines=320 parking_lot=set bar=above
 step=reap-rows status=ok detail=no lingering rows
 ```
 
 **Read the receipts.** Each `status=failed` names a real failure (exit code +
 tail line); the verb exits non-zero so a partial run is never readable as
-success. A re-run is resume-safe: completed legs no-op, failed legs retry, no
+success. Four statuses exist and `deferred` is the one that is easy to misread:
+`ok` done, `skipped` nothing was owed, `failed` it broke, `deferred` the work is
+still owed and a later sweep does it. The archive leg defers whenever the ritual
+runs from inside the worktree it would remove, which is the usual case. A re-run is resume-safe: completed legs no-op, failed legs retry, no
 leg double-applies (reconcile/retro/advance/sync/skill-diff each dedup on their
 own markers and claims).
 

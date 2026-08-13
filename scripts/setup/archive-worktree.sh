@@ -430,7 +430,19 @@ REMOVE_FLAGS=""
 # remove, and the whole predicate change was inert on exactly the 17 worktrees
 # it targets. Pass git's force only after OUR check said yes on its own terms:
 # the unpushed-commit and live-session guards above have already run.
-[[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]] && REMOVE_FLAGS="--force"
+# RE-READ AT REMOVAL TIME. The verdict above was taken before the process sweep
+# SIGTERM/SIGKILLed anything rooted here and before salvage ran; an editor or
+# agent killed mid-write can leave a modified tracked file behind. Git's refusal
+# is the last line of defence, so only wave it aside on a verdict that is still
+# true right now (the same rule the liveness re-check follows).
+if [[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]]; then
+  if wt_reapable "$TARGET"; then
+    REMOVE_FLAGS="--force"
+  else
+    echo "archive-worktree: $WT_REAPABLE_LINE at removal time; keeping $TARGET" >&2
+    exit 2
+  fi
+fi
 if ! git worktree remove $REMOVE_FLAGS "$TARGET"; then
   echo "archive-worktree: git worktree remove failed" >&2
   exit 4

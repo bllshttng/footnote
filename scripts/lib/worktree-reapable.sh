@@ -26,6 +26,15 @@
 # Set by wt_reapable to the verb's receipt line (or a synthesised one).
 WT_REAPABLE_LINE=""
 
+# One attempt's reading: 0 a real yes, 1 a real no, 2 no answer at all.
+# Split out so the interpreter and the installed CLI are read by one rule.
+_wt_reapable_verdict() {
+    local rc="$1" out="$2"
+    [[ "$rc" -eq 0 && "$out" == *"reapable=yes"* ]] && return 0
+    [[ "$rc" -eq 1 && "$out" == reapable=no* ]] && return 1
+    return 2
+}
+
 wt_reapable() {
     local target="${1:-}"
     WT_REAPABLE_LINE=""
@@ -50,26 +59,30 @@ wt_reapable() {
         source "${root}/scripts/lib/fno-python.sh" && fno_python_init "$root"
     fi
 
-    local out rc=0
+    local out="" rc=0 verdict=2
     if [[ -n "${FNO_PYTHON:-}" && -d "${root}/cli/src" ]]; then
         out="$(PYTHONPATH="${root}/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
             "$FNO_PYTHON" -m fno.cli worktree reapable "$target" 2>/dev/null)" || rc=$?
-    elif command -v fno >/dev/null 2>&1; then
-        out="$(fno worktree reapable "$target" 2>/dev/null)" || rc=$?
-    else
-        WT_REAPABLE_LINE="reapable=no reason=probe-failed detail=no-fno-cli"
-        return 1
+        verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
     fi
 
-    # Exit 1 with a receipt is a real "blocked"; report it verbatim.
-    if [[ "$rc" -eq 1 && "$out" == reapable=no* ]]; then
-        WT_REAPABLE_LINE="$out"
-        return 1
+    # FALL THROUGH, DO NOT STOP AT THE FIRST SILENCE. `fno_python_init` always
+    # exports something (a bare `python3` when no venv resolves), so inside a
+    # checkout the interpreter arm always runs - and a `python3` without fno's
+    # deps dies on import and answers nothing. Treating that as final would call
+    # every worktree unreapable on a fresh clone, which bricks `--merged` and
+    # makes archive-worktree.sh exit 2 on every target. The installed CLI gets
+    # the second look; only then do we fail closed.
+    if [[ "$verdict" -eq 2 ]] && command -v fno >/dev/null 2>&1; then
+        rc=0
+        out="$(fno worktree reapable "$target" 2>/dev/null)" || rc=$?
+        verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
     fi
-    # Permission needs the positive marker AND a clean exit.
-    if [[ "$rc" -eq 0 && "$out" == *"reapable=yes"* ]]; then
+
+    # 0 permission (positive marker AND clean exit), 1 a receipt that says no.
+    if [[ "$verdict" -le 1 ]]; then
         WT_REAPABLE_LINE="$out"
-        return 0
+        return "$verdict"
     fi
     WT_REAPABLE_LINE="reapable=no reason=probe-failed detail=verb-unavailable(rc=$rc)"
     return 1
