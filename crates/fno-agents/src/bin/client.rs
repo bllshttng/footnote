@@ -19,6 +19,48 @@ use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
+const ALL_CLIENT_ACTIONS: &[&str] = &[
+    "--emit-schema",
+    "adopt",
+    "ask",
+    "attach",
+    "claim",
+    "codex-loaded-threads",
+    "detect",
+    "digest",
+    "drive",
+    "drive-authority",
+    "finalize",
+    "grid",
+    "help",
+    "host",
+    "kill-check",
+    "list",
+    "logs",
+    "loop",
+    "loop-check",
+    "mail-inject",
+    "needs",
+    "ping",
+    "probe-run",
+    "promote",
+    "reap",
+    "reconcile",
+    "report",
+    "restart",
+    "resume",
+    "review-start",
+    "rm",
+    "spawn",
+    "status",
+    "stop",
+    "subscribe",
+    "trace",
+    "verify-evidence",
+    "version",
+    "wait",
+];
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1814,7 +1856,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "agent.rm"
         }
         "reconcile" => "agent.reconcile",
-        other => return Err(format!("unknown verb: {other}")),
+        other => {
+            return Err(format!(
+                "unknown verb: {other} (expected {})",
+                ALL_CLIENT_ACTIONS.join("|")
+            ))
+        }
     };
 
     Ok((method.to_string(), Value::Object(params)))

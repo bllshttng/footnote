@@ -42,6 +42,8 @@ class VerbRatchetError(Exception):
 
 
 BASELINE_REL = Path("scripts") / "ci" / "verb-baseline.txt"
+COLLAPSE_MAP_REL = Path("scripts") / "ci" / "verb-collapse-map.tsv"
+COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 
 # The Rust front's leaf tree is READ FROM ITS DISPATCHERS, not listed here.
 #
@@ -68,6 +70,7 @@ RUST_SOURCES = (
     Path("crates") / "fno" / "src" / "main.rs",
     Path("crates") / "fno" / "src" / "mux_cli.rs",
 )
+FNO_AGENTS_SOURCE = Path("crates") / "fno-agents" / "src" / "bin" / "client.rs"
 
 # A match arm (``"ls" =>``, ``Some("pipe") =>``, ``Some("get") | None =>``).
 _ARM_RE = re.compile(r'(?:Some\(\s*)?"([a-z][a-z0-9-]*)"\s*(?:\)\s*)?(?:\||=>)')
@@ -93,9 +96,7 @@ _FAMILY_RE = re.compile(r"fno mux (\w+):")
 # family has exactly one verb and the pipe form would read oddly. Both are read
 # rather than normalised, because normalising means editing Rust and rebuilding
 # the front, and a probe run against a stale binary is its own silent lie.
-_ALTERNATION_RE = re.compile(
-    r"\((?:expected\s+)?([a-z][a-z0-9-]*(?:\s*\|\s*[a-z][a-z0-9-]*)*)\)"
-)
+_ALTERNATION_RE = re.compile(r"\((?:expected\s+)?([a-z][a-z0-9-]*(?:\s*\|\s*[a-z][a-z0-9-]*)*)\)")
 
 
 def _repo_root() -> Path:
@@ -148,6 +149,8 @@ def _iter_group_leaves(group, ctx, prefix: str, depth: int = 0):
     if depth > 8:  # ponytail: safety cap; fno groups never nest this deep
         yield prefix, None
         return
+    if getattr(group, "_fno_collapsed_dispatcher", False):
+        yield prefix, group
     for name in group.list_commands(ctx):
         sub = group.get_command(ctx, name)
         if sub is None:
@@ -236,7 +239,23 @@ def iter_python_leaves():
 
     _assert_python_source_matches_repo()
 
+    from fno._lazy_group import collapse_click_group
     from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as _root_app
+
+    collapsed_groups = {
+        name
+        for name, entry in LAZY_SUBCOMMANDS.items()
+        if len(entry) == 3 and "collapse_keep" in entry[2]
+    }
+    mapped_actions = {
+        action
+        for line in (_repo_root() / COLLAPSE_MAP_REL).read_text().splitlines()[1:]
+        if line.strip()
+        for action in [line.split("\t", 1)[0]]
+        if action.split()[0] in collapsed_groups
+    }
+    live_actions: set[str] = set()
+    live_action_flags: set[str] = set()
 
     # Eager inline commands (help, cost, review) are seeded on the main app, not
     # LAZY_SUBCOMMANDS, so resolve each from the root Click tree rather than emit
@@ -249,6 +268,7 @@ def iter_python_leaves():
     seen_groups: set[str] = set()
     for name, entry in LAZY_SUBCOMMANDS.items():
         import_path = entry[0]
+        options = entry[2] if len(entry) == 3 else {}
         module_path, _, attr = import_path.rpartition(":")
         try:
             module = importlib.import_module(module_path)
@@ -272,6 +292,15 @@ def iter_python_leaves():
                 continue
             seen_groups.add(import_path)
             cmd = typer.main.get_command(obj)
+            collapse_keep = options.get("collapse_keep")
+            if collapse_keep is not None:
+                uncollapsed_ctx = click.Context(cmd, info_name=name)
+                for path, sub in _iter_group_leaves(cmd, uncollapsed_ctx, name):
+                    live_actions.add(path)
+                    live_action_flags.update(
+                        f"{path} {flag}" for flag in _hidden_option_tokens(sub)
+                    )
+                cmd = collapse_click_group(cmd, keep=set(collapse_keep))
             if hasattr(cmd, "list_commands"):
                 ctx = click.Context(cmd, info_name=name)
                 yielded = False
@@ -292,6 +321,27 @@ def iter_python_leaves():
             sub = typer.Typer(add_completion=False)
             sub.command(name=name)(obj)
             yield name, typer.main.get_command(sub)
+
+    if live_actions != mapped_actions:
+        raise VerbRatchetError(
+            "verb-ratchet: collapsed action inventory drifted from "
+            "scripts/ci/verb-collapse-map.tsv; "
+            f"code-only={sorted(live_actions - mapped_actions)}, "
+            f"map-only={sorted(mapped_actions - live_actions)}. Allocate every new "
+            "action in the map before regenerating the registered-leaf baseline."
+        )
+    mapped_action_flags = {
+        line.strip()
+        for line in (_repo_root() / COLLAPSE_FLAGS_REL).read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if live_action_flags != mapped_action_flags:
+        raise VerbRatchetError(
+            "verb-ratchet: collapsed action hidden-option inventory drifted from "
+            "scripts/ci/verb-collapse-flags.txt; "
+            f"code-only={sorted(live_action_flags - mapped_action_flags)}, "
+            f"file-only={sorted(mapped_action_flags - live_action_flags)}"
+        )
 
 
 def enumerate_python_leaves() -> list[str]:
@@ -323,6 +373,75 @@ def _strip_line_comments(text: str) -> list[str]:
     proposes verbs that no arm dispatches.
     """
     return [line.split("//")[0] for line in text.splitlines()]
+
+
+def _braced_region(text: str, marker: str) -> str:
+    """Return the balanced braced region beginning at ``marker``."""
+    start = text.find(marker)
+    opening = text.find("{", start)
+    if start < 0 or opening < 0:
+        raise VerbRatchetError(
+            f"verb-ratchet: could not find fno-agents dispatch marker {marker!r}"
+        )
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening : index + 1]
+    raise VerbRatchetError(f"verb-ratchet: unbalanced fno-agents dispatch marker {marker!r}")
+
+
+def scan_fno_agents_source(repo_root: Optional[Path] = None) -> set[str]:
+    """Action tokens read from the fno-agents dispatch control flow."""
+    root = repo_root or _repo_root()
+    text = "\n".join(_strip_line_comments((root / FNO_AGENTS_SOURCE).read_text(encoding="utf-8")))
+    run = _braced_region(text, "async fn run(args:")
+    actions = set(re.findall(r'\bif verb == "([a-z][a-z0-9-]*)"', run))
+    for alternatives in re.findall(r"matches!\(\s*verb\s*,([^)]*)\)", run):
+        actions.update(re.findall(r'"([a-z][a-z0-9-]*)"', alternatives))
+
+    retired = _braced_region(text, "fn retired_verb_pointer(verb:")
+    actions.update(_ARM_RE.findall(retired))
+    request = _braced_region(text, "let method = match verb")
+    request_lines = _strip_line_comments(request)
+    actions.update(_arms_at_top_level(request_lines, 0, len(request_lines)))
+
+    actions.update({"help", "version", "--emit-schema"})
+    if not {"claim", "detect"} <= actions:
+        raise VerbRatchetError(
+            "verb-ratchet: fno-agents source scan missed hidden `claim` or `detect`; "
+            "a silent exemption is the defect this scan exists to prevent"
+        )
+    return actions
+
+
+def probe_fno_agents_actions(binary: Path) -> set[str]:
+    """Action tokens from the live binary's named unknown-verb refusal."""
+    result = _run_front(binary, ["__fno_verb_probe__"])
+    output = (result.stdout or "") + (result.stderr or "")
+    marker = "__fno_verb_probe__"
+    if marker not in output:
+        raise VerbRatchetError("verb-ratchet: fno-agents did not refuse the positive probe by name")
+    match = re.search(r"\(expected ([^)]+)\)", output[output.index(marker) :])
+    if match is None:
+        raise VerbRatchetError(
+            "verb-ratchet: fno-agents refusal did not report its expected actions"
+        )
+    return {value.strip() for value in match.group(1).split("|") if value.strip()}
+
+
+def _locate_fno_agents_front() -> Optional[Path]:
+    override = os.environ.get("FNO_AGENTS_FRONT", "").strip()
+    if override:
+        return Path(override)
+    worktree = _repo_root() / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+    if worktree.is_file() and os.access(worktree, os.X_OK):
+        return worktree
+    found = shutil.which("fno-agents")
+    return Path(found) if found else None
 
 
 def _enclosing_block_start(lines: list[str], idx: int) -> int:
@@ -420,17 +539,16 @@ def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[s
     tops: set[str] = set()
     for m in re.finditer(
         r'Some\("([a-z][a-z0-9-]*)"((?:\s*\|\s*"[a-z][a-z0-9-]*")*)\)',
-        main_text[start:end if end > start else len(main_text)],
+        main_text[start : end if end > start else len(main_text)],
     ):
         tops.add(m.group(1))
         tops.update(re.findall(r'"([a-z][a-z0-9-]*)"', m.group(2) or ""))
     tops.discard("mux")
 
     # Non-mux top-level verbs (`version`), same dispatcher, outer level.
-    outer = {
-        m.group(1)
-        for m in re.finditer(r'Some\(Some\("([a-z][a-z0-9-]*)"\)\)', main_text)
-    } - {"mux"}
+    outer = {m.group(1) for m in re.finditer(r'Some\(Some\("([a-z][a-z0-9-]*)"\)\)', main_text)} - {
+        "mux"
+    }
 
     families: dict[str, set[str]] = {}
     for i, line in enumerate(mux_lines):
@@ -490,11 +608,9 @@ def probe_rust_families(binary: Path, families) -> dict[str, set[str]]:
             )
         # Search only AFTER the probe token: the alternation belongs to the
         # refusal, and a parenthesised word elsewhere in the output is not it.
-        tail = out[out.index("__fno_verb_probe__"):]
+        tail = out[out.index("__fno_verb_probe__") :]
         alts = _ALTERNATION_RE.search(tail)
-        probed[fam] = (
-            {a.strip() for a in alts.group(1).split("|") if a.strip()} if alts else set()
-        )
+        probed[fam] = {a.strip() for a in alts.group(1).split("|") if a.strip()} if alts else set()
     return probed
 
 
@@ -609,14 +725,28 @@ def enumerate_rust_leaves() -> list[str]:
                 f"rather than adding the verb to a list."
             )
 
-    # `tops` already carries FULL leaf paths, so nothing is prefixed here. It
-    # used to be bare names fused from two levels, and everything not a family
-    # got a `mux ` prefix with `version` rescued by name. A second non-mux
-    # top-level arm would have landed in the baseline as a bogus `mux X` plus a
-    # missing bare one - latent, but the whole point of this module is that a
-    # new arm must not be silently mis-recorded.
-    leaves = {f"mux {fam} {verb}" for fam, verbs in families.items() for verb in verbs}
-    leaves |= {t for t in tops if t.split()[-1] not in families}
+    agents_binary = _locate_fno_agents_front()
+    if agents_binary is None:
+        raise VerbRatchetError(
+            "verb-ratchet: fno-agents is not reachable; the client dispatcher "
+            "cannot be independently checked"
+        )
+    agents_source = scan_fno_agents_source()
+    agents_live = probe_fno_agents_actions(agents_binary)
+    if agents_source != agents_live:
+        raise VerbRatchetError(
+            "verb-ratchet: fno-agents source and binary action surfaces disagree; "
+            f"source-only={sorted(agents_source - agents_live)}, "
+            f"binary-only={sorted(agents_live - agents_source)}. Rebuild and set "
+            "FNO_AGENTS_FRONT if the installed binary is stale."
+        )
+
+    # Mux already dispatches its action tokens as arguments in decide_role and
+    # the family parsers. Keep the independent source/binary cross-check above
+    # over every action, but register that whole argument-dispatch surface as
+    # one leaf. Non-mux Rust commands such as `version` remain separate leaves.
+    leaves = {"mux", "fno-agents"}
+    leaves |= {top for top in tops if not top.startswith("mux ")}
     return sorted(leaves)
 
 
@@ -749,7 +879,9 @@ def check() -> CheckReport:
         parts.append("    commit this file in the PR,")
         parts.append("    and add a PR-body line:  verb-exception: <rationale>")
     if added_flags:
-        parts.append("  Added hidden options (in the code, not the baseline): " + ", ".join(added_flags))
+        parts.append(
+            "  Added hidden options (in the code, not the baseline): " + ", ".join(added_flags)
+        )
         parts.append("    A hidden option cannot be added silently. Regenerate with")
         parts.append("    `uv run --project cli fno-py lint verb-ratchet --update`,")
         parts.append("    commit this file in the PR,")
@@ -761,7 +893,9 @@ def check() -> CheckReport:
             "--update` and commit the baseline."
         )
     if removed_flags:
-        parts.append("  Removed hidden options (in the baseline, not the code): " + ", ".join(removed_flags))
+        parts.append(
+            "  Removed hidden options (in the baseline, not the code): " + ", ".join(removed_flags)
+        )
         parts.append(
             "    Regenerate with `uv run --project cli fno-py lint verb-ratchet "
             "--update` and commit the baseline."
