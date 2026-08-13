@@ -307,9 +307,13 @@ Two consequences are recorded rather than gated.
 `self_attested_count` on the coverage event says how many of `reviewed_count` are the author attesting its own diff.
 It is recorded rather than gated because self-review is the DEFAULT path, and refusing it wedges every single-session PR.
 The `model` field records what the environment CLAIMED.
-The producer now refuses to record a claim it can prove false.
+The producer refuses to record a claim it can prove false.
 A non-`claude*` model name with no non-Anthropic base URL cannot be the model that answered.
-A claim that is merely unverified still records as given, because nothing available to a shell can check it.
+A refused claim stores the literal `unobserved`, never an empty string.
+So a claim that was made and declined never reads the same as a field nobody set.
+A claim that is merely unverified still records as given, because nothing in a shell can check it.
+That refusal landed separately.
+`tests/hooks/test_attest_model.sh` drives the hook and the emitter over one env matrix, so the two predicates cannot drift.
 
 ## Attestation origin: whose process rendered the verdict
 

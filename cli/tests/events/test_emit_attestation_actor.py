@@ -106,55 +106,6 @@ def test_attestation_model_is_empty_not_guessed_when_unrouted(tmp_path: Path) ->
     assert data["provider"] == ""
 
 
-def test_attestation_refuses_to_record_a_known_false_model_claim(tmp_path: Path) -> None:
-    """x-62a1: a model claim the environment can prove false is not recorded.
-
-    ANTHROPIC_MODEL naming a non-Anthropic model with no non-Anthropic base URL
-    cannot be the model that answered - the request falls back to the primary
-    Anthropic model. This produced a real wrong provenance record on
-    2026-08-12, where a worker's attestations said glm-5.2 for a session running
-    claude-opus-5. Empty is already defined as "not observable, never proof of
-    the primary model", so degrading to it is honest; recording the env value
-    writes a line that reads as fact and is not.
-    """
-    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
-    env = {
-        k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"
-    }
-    env["FNO"] = "fno-py"
-    env["ANTHROPIC_MODEL"] = "glm-5.2[1m]"
-    r = subprocess.run(
-        ["bash", str(_SCRIPT), "code-review", "pass"],
-        cwd=repo, env=env, capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    data = _last_event(repo)["data"]
-    assert data["model"] == ""
-    # And the drift is SAID, not silently swallowed: a routing bug that this
-    # hid would otherwise be invisible at exactly the moment it mattered.
-    assert "glm-5.2[1m]" in r.stderr
-    assert "unobserved" in r.stderr
-
-
-def test_attestation_records_a_claim_it_cannot_disprove(tmp_path: Path) -> None:
-    """The check closes the KNOWN-FALSE case only, never the merely unverified.
-
-    An Anthropic model name is coherent with any base, so it records as given.
-    Nothing available to a shell can verify which model actually answered, and
-    pretending otherwise would be the same overclaim one layer down.
-    """
-    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"}
-    env["FNO"] = "fno-py"
-    env["ANTHROPIC_MODEL"] = "claude-opus-5"
-    r = subprocess.run(
-        ["bash", str(_SCRIPT), "code-review", "pass"],
-        cwd=repo, env=env, capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    assert _last_event(repo)["data"]["model"] == "claude-opus-5"
-
-
 def test_attestation_attester_session_from_env_marker(tmp_path: Path) -> None:
     """CLAUDE_CODE_SESSION_ID set -> attester_session_id carries it, and it is
     NOT the manifest session_id. session_id is the worktree run id (grepped from
