@@ -7925,7 +7925,10 @@ mod tests {
             &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
         );
         let line = coverage_receipt_line(&rep);
-        assert!(line.contains("no review carries a reviewed commit"), "{line}");
+        assert!(
+            line.contains("no review carries a reviewed commit"),
+            "{line}"
+        );
         assert!(line.contains("upgrade gh"), "{line}");
 
         // The ordinary stale case keeps the re-read instruction and must NOT
