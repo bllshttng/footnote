@@ -486,6 +486,10 @@ enum CoreMsg {
         name: Option<String>,
         reply: ControlReply,
     },
+    PaneFocus {
+        pane: u64,
+        reply: ControlReply,
+    },
     TabJoin {
         src_tab: TabSel,
         anchor_pane: u64,
@@ -2782,6 +2786,73 @@ impl Core {
                     tabs: vec![self.tab_layout(&sq.tabs[ti])],
                 }])
             }
+        }
+    }
+
+    /// Point every attached (non-passive) viewer at `pane`, wherever it lives:
+    /// the [`ControlVerb::PaneFocus`] handler, and the inverse of every other
+    /// `Pane*` verb (those act ON a pane for an agent; this moves the OPERATOR).
+    ///
+    /// The actual focus is [`Command::FocusPane`] through [`Core::command`] - the
+    /// one trunk the `-> Focus` menu entry and the navigator already end at. That
+    /// is deliberate reuse, not laziness: `FocusPane` resolves the leaf
+    /// session-wide and `set_view`s the client onto its (squad, tab), so
+    /// cross-squad and cross-tab goto come for free, and so does clearing a Done
+    /// pane's unseen bit via `mark_seen_if_done`. A bespoke handler here would
+    /// silently drop that side effect, which is exactly when it should fire: an
+    /// agent pointing the operator at a finished pane.
+    ///
+    /// `clients_moved` counts clients whose view IS the resolved (squad, tab)
+    /// afterwards, not clients the loop visited. Accepting a command is not
+    /// evidence anything moved on screen, and a receipt that conflates the two
+    /// is the `queued (durable)`-read-as-delivered class of lie.
+    fn pane_focus(&mut self, pane: u64) -> ServerMsg {
+        let Some((sid, ti)) = self.session.find_pane(pane) else {
+            return ServerMsg::Err {
+                code: err_code::DEAD_PANE,
+                msg: format!("no such pane: {pane}"),
+            };
+        };
+        let sq = self.session.squad(sid).expect("find_pane live");
+        let (tab_id, squad_name) = (sq.tabs[ti].id, sq.name.clone());
+        // A passive (observer) client is read-only at the server and has no
+        // viewport to move, so it is not a candidate and never inflates the
+        // count. No candidates at all is a REFUSAL, not a zero-moved success:
+        // "nobody is watching" is a different problem from "your pane is gone",
+        // and an absent client reported as a pass is the absence-versus-
+        // instrument-failure trap.
+        let targets: Vec<u64> = self
+            .clients
+            .iter()
+            .filter(|c| !c.passive)
+            .map(|c| c.id)
+            .collect();
+        if targets.is_empty() {
+            return ServerMsg::Err {
+                code: err_code::NO_CLIENT,
+                msg: "no attached client to move".into(),
+            };
+        }
+        let mut clients_moved = 0usize;
+        for cid in targets {
+            self.command(cid, Command::FocusPane(pane));
+            // Re-read the view rather than trusting the dispatch: a client that
+            // disconnected between the snapshot above and this dispatch is gone
+            // from `clients` and simply does not count.
+            if self
+                .clients
+                .iter()
+                .any(|c| c.id == cid && c.view == (sid, tab_id))
+            {
+                clients_moved += 1;
+            }
+        }
+        ServerMsg::PaneFocused {
+            pane,
+            squad_id: sid,
+            squad_name,
+            tab_id,
+            clients_moved,
         }
     }
 
@@ -8227,6 +8298,11 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::PaneFocus { pane, reply } => {
+                let msg = self.pane_focus(pane);
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
             CoreMsg::TabJoin {
                 src_tab,
                 anchor_pane,
@@ -9396,6 +9472,14 @@ async fn handle_control(
                 .send(CoreMsg::PaneBreak {
                     pane,
                     name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::PaneFocus { pane } => {
+            core_tx
+                .send(CoreMsg::PaneFocus {
+                    pane,
                     reply: reply_tx,
                 })
                 .await
@@ -16893,6 +16977,130 @@ mod tests {
         assert_eq!(bounded_scroll_target(0, 3, 24), 3);
         // ...and a true no-op fold stays put.
         assert_eq!(bounded_scroll_target(10, 10, 24), 10);
+    }
+
+    /// Graft a second squad hosting one fresh pane onto a `seen_test_core`, so a
+    /// `pane focus` test has somewhere to travel TO. Returns the new pane id and
+    /// its tab id.
+    fn add_second_squad(core: &mut Core) -> (u64, TabId) {
+        let p3 = core.spawn_pane(24, 40, "/tmp/other").expect("pane 3");
+        core.session.add_squad(
+            2,
+            vec!["/tmp/other".into()],
+            Some("other".into()),
+            Tab {
+                name: None,
+                id: 3,
+                root: Node::Leaf(p3),
+                focus: p3,
+            },
+        );
+        (p3, 3)
+    }
+
+    #[test]
+    fn pane_focus_moves_the_viewer_across_squads_and_reports_where() {
+        // AC1-HP: the verb is a goto, not a nudge. A client viewing squad 1 ends
+        // up on squad 2's tab with the named pane focused, and the receipt names
+        // the RESOLVED location rather than echoing the request.
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        let (p3, t3) = add_second_squad(&mut core);
+        let view_before = core.clients.iter().find(|c| c.id == client_id).unwrap().view;
+        assert_eq!(view_before.0, 1, "precondition: viewing squad 1");
+
+        let reply = core.pane_focus(p3);
+        match reply {
+            ServerMsg::PaneFocused {
+                pane,
+                squad_id,
+                squad_name,
+                tab_id,
+                clients_moved,
+            } => {
+                assert_eq!((pane, squad_id, tab_id), (p3, 2, t3));
+                assert_eq!(squad_name.as_deref(), Some("other"));
+                // The count is the anti-lie field: it must reflect a client that
+                // actually ended up looking at the pane.
+                assert_eq!(clients_moved, 1);
+            }
+            other => panic!("expected PaneFocused, got {other:?}"),
+        }
+        let c = core.clients.iter().find(|c| c.id == client_id).unwrap();
+        assert_eq!(c.view, (2, t3), "the viewer really moved");
+        assert_eq!(
+            core.session.squad(2).unwrap().tabs[0].focus,
+            p3,
+            "and the pane is focused, not merely on screen"
+        );
+    }
+
+    #[test]
+    fn pane_focus_refuses_a_dead_pane_fail_closed() {
+        // AC1-EDGE: an id no live pane owns is DEAD_PANE with the same `no such
+        // pane` wording `Command::FocusPane` already refuses with, and the
+        // viewer does not move a millimetre on the way to the refusal.
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        let before = core.clients.iter().find(|c| c.id == client_id).unwrap().view;
+        match core.pane_focus(999_999) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::DEAD_PANE);
+                assert!(msg.contains("no such pane"), "wording: {msg}");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+        assert_eq!(
+            core.clients.iter().find(|c| c.id == client_id).unwrap().view,
+            before,
+            "a refusal moves nobody"
+        );
+    }
+
+    #[test]
+    fn pane_focus_refuses_when_only_passive_observers_are_attached() {
+        // AC1-ERR: no non-passive client is a REFUSAL with its OWN code, never a
+        // silent pass and never DEAD_PANE. A passive observer is read-only at the
+        // server with no viewport to move, so it must not satisfy the check -
+        // otherwise the verb reports success for a pane nobody can see.
+        let (mut core, client_id, p1, _p2, _rx) = seen_test_core();
+        core.clients.retain(|c| c.id != client_id);
+        let (tx, _rx2) = mpsc::channel::<ServerMsg>(32);
+        core.attach(
+            77,
+            0, // rows == cols == 0 is what makes a client passive
+            0,
+            "/tmp/seen".into(),
+            "/tmp/seen".into(),
+            tx,
+            Arc::default(),
+            Arc::new(Notify::new()),
+        );
+        assert!(core.is_passive(77), "precondition: the observer is passive");
+        match core.pane_focus(p1) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(
+                    code,
+                    err_code::NO_CLIENT,
+                    "distinct from DEAD_PANE: 'nobody is watching' is not 'your \
+                     pane is gone'"
+                );
+                assert!(msg.contains("no attached client"), "wording: {msg}");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_focus_clears_a_done_panes_unseen_bit_through_the_shared_trunk() {
+        // The invariant that makes reuse load-bearing rather than tidy: routing
+        // through `Command::FocusPane` gets `mark_seen_if_done` for free, and an
+        // agent pointing the operator at a finished pane is exactly when the seen
+        // bit should clear. A bespoke handler would silently drop it, so this
+        // asserts the side effect on the CLI path, not just the TUI one.
+        let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![agent_in("test", p1, Some(AgentBadge::Done), false)];
+        assert!(!core.seen.contains(&p1), "precondition: unseen");
+        core.pane_focus(p1);
+        assert!(core.seen.contains(&p1));
     }
 
     #[test]

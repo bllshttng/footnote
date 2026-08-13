@@ -7923,6 +7923,7 @@ async fn attach_and_run(
                 | ServerMsg::LayoutTree { .. }
                 | ServerMsg::PaneLocation { .. }
                 | ServerMsg::TabSpawned { .. }
+                | ServerMsg::PaneFocused { .. }
                 | ServerMsg::LayoutApplied { .. }
                 | ServerMsg::LayoutGrafted { .. },
             ) => {}
@@ -8213,6 +8214,7 @@ async fn attach_and_run(
                     | ServerMsg::LayoutTree { .. }
                     | ServerMsg::PaneLocation { .. }
                     | ServerMsg::TabSpawned { .. }
+                    | ServerMsg::PaneFocused { .. }
                     | ServerMsg::LayoutApplied { .. }
                     | ServerMsg::LayoutGrafted { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {

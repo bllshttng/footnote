@@ -245,7 +245,12 @@ fn default_true() -> bool {
 /// and the CLIENT opens it, because the client is the process sitting at the
 /// human's desk. A new variant, not an additive field, so a v44 client cannot
 /// decode it; the handshake is what stops the skew.
-pub const PROTO_VERSION: u32 = 45;
+///
+/// v46 (x-3e17, pane focus): `ControlVerb::PaneFocus` + `ServerMsg::PaneFocused`
+/// - the CLI door onto the focus trunk the TUI already owns. New variants, not
+/// additive fields, so a v45 server cannot deserialize a `PaneFocus`; the
+/// handshake is what stops the skew.
+pub const PROTO_VERSION: u32 = 46;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -649,6 +654,18 @@ pub enum ControlVerb {
     /// Break a pane into its OWN new tab in the same squad, keeping its PTY alive
     /// -> [`ServerMsg::TabSpawned`] (the created tab's id).
     PaneBreak { pane: u64, name: Option<String> },
+    /// Point every attached (non-passive) viewer AT `pane`, wherever it lives ->
+    /// [`ServerMsg::PaneFocused`]. The inverse of every other `Pane*` verb: those
+    /// act ON a pane for an agent, this moves the OPERATOR to one.
+    ///
+    /// Routes to the same [`Command::FocusPane`] trunk the right-click `-> Focus`
+    /// entry and the navigator end at, so cross-squad / cross-tab resolution and
+    /// the Done-pane seen-bit clear come for free rather than being reimplemented.
+    ///
+    /// Two DISTINCT refusals ([`err_code::DEAD_PANE`] / [`err_code::NO_CLIENT`]):
+    /// "your pane is gone" and "nobody is watching" are different problems, and a
+    /// third ("your mux is not running") is the CLI's own connect failure.
+    PaneFocus { pane: u64 },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
     /// front ([`err_code::BAD_REQUEST`]).
@@ -1644,6 +1661,21 @@ pub enum ServerMsg {
     },
     /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created tab.
     TabSpawned { tab_id: TabId },
+    /// Answer to [`ControlVerb::PaneFocus`]: where the pane was found, and how
+    /// many viewers actually ended up looking at it.
+    ///
+    /// `clients_moved` is load-bearing, not decoration. Accepting the command
+    /// proves a command was accepted, never that anything moved on screen - a
+    /// bare `Ok` here would be the same class of lie as reading `queued
+    /// (durable)` as delivery. It counts clients whose view IS the resolved
+    /// (squad, tab) after the dispatch, not clients the loop iterated over.
+    PaneFocused {
+        pane: u64,
+        squad_id: u64,
+        squad_name: Option<String>,
+        tab_id: TabId,
+        clients_moved: usize,
+    },
     /// (v42, x-c4d4) Answer to [`ControlVerb::LayoutApply`]: one [`SlotResult`]
     /// per requested slot, in slot order, so a script captures the created pane
     /// ids from the receipt (never predicts them). A top-level `Err` (arity /
@@ -1811,6 +1843,11 @@ pub mod err_code {
     pub const TEMPLATE_UNFITTABLE: u32 = 11;
     /// (v42, x-c4d4) `LayoutApply`: an unknown template name. Pre-mutation, atomic.
     pub const TEMPLATE_UNKNOWN: u32 = 12;
+    /// `PaneFocus`: the pane exists but no non-passive client is attached, so
+    /// there is no viewer to move. DISTINCT from [`DEAD_PANE`] on purpose: "your
+    /// pane is gone" and "nobody is watching" are different problems, and
+    /// collapsing them leaves the operator unable to tell which one they have.
+    pub const NO_CLIENT: u32 = 13;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -2589,8 +2626,8 @@ mod tests {
         // serde default. The anchored-layout node (x-6928) bumped 43 -> 44;
         // what we assert here is (a) the canonical version and (b) the new
         // variants survive the codec losslessly, exactly the discipline every
-        // prior new-verb bump followed. x-a2d0 (clickable links) bumped 44 -> 45.
-        assert_eq!(PROTO_VERSION, 45);
+        // prior new-verb bump followed. (The version literal is pinned once, in
+        // the crown-fields test; asserting it again here caught nothing.)
         for msg in [
             ClientMsg::Command(Command::BreakPane { pane: 7 }),
             ClientMsg::Command(Command::JoinTab {
@@ -2636,9 +2673,15 @@ mod tests {
         // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
         // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
-        // clickable links (x-a2d0) bumped it 44 -> 45. The two additive crown
-        // fields stay skew-tolerant both ways regardless of the version number.
-        assert_eq!(PROTO_VERSION, 45);
+        // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
+        // 46. The two additive crown fields stay skew-tolerant both ways
+        // regardless of the version number.
+        //
+        // This is the ONE canonical pin, as this test's name says. Two sibling
+        // roundtrip tests used to re-assert the same literal, which caught
+        // nothing a single pin does not and turned every bump into a three-file
+        // edit; they now assert only their own wire shapes.
+        assert_eq!(PROTO_VERSION, 46);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
@@ -2668,8 +2711,8 @@ mod tests {
         // `fallback`; a v44 reader decodes it as NewTab (the shipped default),
         // never a failure - the skew window the handshake holds. An exact
         // placement sets Refuse, and the receipt carries it losslessly.
-        // (x-a2d0 later bumped 44 -> 45; these v44 shapes are unaffected.)
-        assert_eq!(PROTO_VERSION, 45);
+        // (Later bumps do not touch these v44 shapes; the version itself is
+        // pinned once, in the crown-fields test.)
         let v43 = r#"{"target":"CurrentRoute"}"#;
         let legacy: PanePlacement = serde_json::from_str(v43).unwrap();
         assert_eq!(legacy.fallback, PlacementFallback::NewTab);
@@ -3471,6 +3514,9 @@ mod tests {
             ControlVerb::PaneWhere {
                 fno_id: "abcd1234".into(),
             },
+            // (x-3e17, v46) A new externally-tagged variant, so a v45 server
+            // cannot decode it at all - the handshake is what stops the skew.
+            ControlVerb::PaneFocus { pane: 31 },
             ControlVerb::LayoutGet {
                 scope: LayoutScope::Tab {
                     squad: PaneTarget::SquadId(1),
@@ -3521,6 +3567,19 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&loc).unwrap();
         assert_eq!(loc, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
+
+        // (x-3e17, v46) The focus receipt, including the field that keeps it
+        // honest: `clients_moved` must survive the wire, since the CLI's whole
+        // receipt is "how many viewers actually ended up there".
+        let focused = ServerMsg::PaneFocused {
+            pane: 31,
+            squad_id: 2,
+            squad_name: Some("other".into()),
+            tab_id: 3,
+            clients_moved: 2,
+        };
+        let bytes = serde_json::to_vec(&focused).unwrap();
+        assert_eq!(focused, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
     }
 
     #[test]
