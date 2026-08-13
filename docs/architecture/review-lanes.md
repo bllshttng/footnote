@@ -345,9 +345,13 @@ fno agents spawn --name <name>-review "/code-review <size> for PR <n> against ma
 ```
 
 Two rules ride with the lane, each derived from a code fact.
-`--cwd` MUST be the author's worktree: `fno event emit` writes cwd-relative through `append_event`, and `local_latest_passes` reads only the project log, so a reviewer anywhere else emits an attestation its own loop-check never sees.
+`--cwd` MUST be the author's worktree.
+`fno event emit` writes cwd-relative through `append_event`, and `local_latest_passes` reads only the project log.
+A reviewer anywhere else emits an attestation its own loop-check never sees.
 NO `--fix`: the reviewer shares the worktree, so a fixing reviewer moves HEAD and can silently invalidate the author's own attestation.
-One writer per worktree while a review is in flight; the author applies findings and re-attests, and the reviewer's attestation is then stale by design, which is the freshness rule working, not a bug.
+Keep one writer per worktree while a review is in flight.
+The author applies findings and re-attests, and the reviewer's attestation is then stale by design.
+That is the freshness rule working, not a bug.
 A `--fix` that touches only documentation now carries rather than invalidates.
 That is exactly why the freshness rule is not the reason for this constraint. The tree-corruption specimens are.
 

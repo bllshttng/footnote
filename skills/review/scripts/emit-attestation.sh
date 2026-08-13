@@ -28,7 +28,13 @@
 set -euo pipefail
 
 usage() {
-  sed -n '13,16p' "$0" | sed 's/^# \{0,1\}//'
+  # Anchored on the `# Usage:` marker, never on line numbers. A `sed -n
+  # '13,16p'` prints whatever happens to sit at those lines, so it silently
+  # printed the wrong paragraph the moment the header above it grew - which is
+  # exactly what happened here, and the only reason it was caught is that a
+  # test asserted the literal "Usage:". Print from the marker to the end of
+  # that comment block instead, so the block can move freely.
+  sed -n '/^# Usage:/,/^[^#]/p' "$0" | sed '/^[^#]/d; s/^# \{0,1\}//'
 }
 
 # A flag-shaped first argument is NEVER a reviewer name. Without this, `--help`
