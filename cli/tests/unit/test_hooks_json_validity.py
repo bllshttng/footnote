@@ -432,3 +432,38 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
         f"is set (real Codex sets no CLAUDE_PLUGIN_ROOT); got rc={wrong['rc']}"
     )
 
+
+
+def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> None:
+    """The unbounded-generator refusal must fire on BOTH Bash lanes.
+
+    A concurrent branch rewriting either manifest can drop this registration
+    and still merge clean, so the assertion names both commands rather than
+    counting hooks. Order matters too: git-protection.py runs first, so a
+    refusal it already owns is never re-decided here.
+    """
+    guard = "hooks/bg-process-guard.py"
+    assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
+
+    for path, root_var, matcher in (
+        (HOOKS_JSON, "CLAUDE_PLUGIN_ROOT", "Bash"),
+        (CODEX_HOOKS_JSON, "PLUGIN_ROOT", "^Bash$"),
+    ):
+        registrations = [
+            registration
+            for registration in json.loads(path.read_text(encoding="utf-8"))[
+                "hooks"
+            ]["PreToolUse"]
+            if registration.get("matcher") == matcher
+        ]
+        assert len(registrations) == 1, (
+            f"{path.name} must carry exactly one PreToolUse {matcher!r} "
+            f"registration, found {len(registrations)}"
+        )
+        commands = [
+            hook.get("command") for hook in registrations[0].get("hooks", [])
+        ]
+        assert commands == [
+            f"python3 ${{{root_var}}}/hooks/git-protection.py",
+            f"python3 ${{{root_var}}}/{guard}",
+        ], f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"

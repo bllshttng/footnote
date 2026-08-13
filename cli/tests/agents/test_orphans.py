@@ -349,3 +349,25 @@ def test_filter_new_speaks_for_an_unseen_pid(monkeypatch, table, tmp_path: Path)
     table.append(_proc(81, name="grep", cwd="/repo"))
     result = _scan_with_working_control(monkeypatch, table)
     assert orphans.filter_new(result, seen) is True
+
+
+def test_session_start_appends_outstanding_then_orphan_sweep() -> None:
+    """Both blocks survive, in order, when another branch rewrites the hook.
+
+    A concurrent rewrite of session-start.sh merges clean while dropping or
+    reordering either block, so this names both appends and their order
+    instead of counting sections. The sweep speaks after outstanding because
+    an unharvested carve-out outranks a stale process.
+    """
+    body = (
+        Path(__file__).resolve().parents[3] / "hooks" / "session-start.sh"
+    ).read_text(encoding="utf-8")
+
+    for call in ('append_section "$outstanding_content"',
+                 'append_section "$orphan_content"'):
+        assert body.count(call) == 1, f"session-start.sh lost {call!r}"
+
+    assert body.index('append_section "$outstanding_content"') < body.index(
+        'append_section "$orphan_content"'
+    ), "outstanding must be appended before the orphan sweep"
+    assert "fno agents orphans --reap --quiet-unless-new" in body

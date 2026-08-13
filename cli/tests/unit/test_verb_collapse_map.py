@@ -48,7 +48,20 @@ def test_map_covers_current_surface_once():
     rows = _rows()
     mapped = [row["current-leaf"] for row in rows]
     assert len(mapped) == len(set(mapped))
-    assert len(mapped) == 323
+    # Adding a CLI action means allocating its row in verb-collapse-map.tsv
+    # BEFORE scripts/ci/verb-baseline.txt can regenerate, then bumping this
+    # count. Nothing else states that order, and the regeneration refuses
+    # without the row.
+    #
+    # This number is a two-writer collision waiting to happen: main and a
+    # feature branch each bump it to the same value from the same base, so the
+    # texts conflict while both are individually right. Resolve by COUNTING the
+    # merged rows, never by taking either side. `worktree reapable` and
+    # `agents orphans` both landed at 323 and the truth is 324.
+    assert len(mapped) == 324, (
+        f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
+        "new CLI action is deliberately allocated a row"
+    )
 
 
 def test_map_matches_the_uncollapsed_click_action_inventory():
