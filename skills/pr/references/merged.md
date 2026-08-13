@@ -76,15 +76,7 @@ step=judgment status=ok detail=deferred-to-skill (attended); deferred=2 files=14
 step=reap-rows status=ok detail=no lingering rows
 ```
 
-**Read the receipts.** Each `status=failed` names a real failure (exit code +
-tail line); the verb exits non-zero so a partial run is never readable as
-success. Four statuses exist and `deferred` is the one that is easy to misread:
-`ok` done, `skipped` nothing was owed, `failed` it broke, `deferred` the work is
-still owed and a later sweep does it. The archive leg defers whenever the ritual
-runs from inside the worktree it targets for removal, which is the usual case.
-A re-run is resume-safe: completed legs no-op, failed legs retry, no
-leg double-applies (reconcile/retro/advance/sync/skill-diff each dedup on their
-own markers and claims).
+**Read the receipts.** Each `status=failed` names a real failure, with an exit code and a tail line. The verb exits non-zero, so a partial run is never readable as success. Four statuses exist, and `deferred` is the one that is easy to misread. `ok` means done, `skipped` means nothing was owed, and `failed` means it broke. `deferred` means the work is still owed and a later sweep does it. The archive leg defers whenever the ritual runs from inside the worktree it targets for removal, which is the usual case. A re-run is resume-safe: completed legs no-op, failed legs retry, no leg double-applies (reconcile/retro/advance/sync/skill-diff each dedup on their own markers and claims).
 
 The verb absorbed four prior ritual bugs (each verified by a test in
 `cli/tests/`): **x-c4ff** (only real verbs are called - `skill-diff reconcile`,
