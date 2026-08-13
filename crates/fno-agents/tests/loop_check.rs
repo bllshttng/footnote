@@ -93,7 +93,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -102,7 +102,16 @@ exit 1
         let git = make_script(
             dir.path(),
             "git",
-            r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+            r#"case "$*" in
+  # A test env has no real repo, so the freshness identity must be
+  # UNCOMPUTABLE. Without this the stub answers `git diff --raw` with the
+  # same one line at every sha, which compares equal to itself and
+  # fabricates a carry out of nothing - the absence-matched-against-
+  # absence shape the predicate exists to refuse. Scoped to --raw so
+  # `git diff --name-only` (classify_payload) behaves exactly as before.
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
         );
         MockBins { _dir: dir, gh, git }
     }
@@ -121,7 +130,16 @@ exit 1"#,
         let git = make_script(
             dir.path(),
             "git",
-            r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+            r#"case "$*" in
+  # A test env has no real repo, so the freshness identity must be
+  # UNCOMPUTABLE. Without this the stub answers `git diff --raw` with the
+  # same one line at every sha, which compares equal to itself and
+  # fabricates a carry out of nothing - the absence-matched-against-
+  # absence shape the predicate exists to refuse. Scoped to --raw so
+  # `git diff --name-only` (classify_payload) behaves exactly as before.
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
         );
         MockBins { _dir: dir, gh, git }
     }
@@ -159,7 +177,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"codex[bot]"},"state":"APPROVED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"codex[bot]"},"state":"APPROVED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -1402,7 +1420,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"APPROVED","submittedAt":"2026-06-05T02:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"APPROVED","submittedAt":"2026-06-05T02:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -1539,7 +1557,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -1677,7 +1695,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -2148,7 +2166,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -2321,7 +2339,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T00:50:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T00:50:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -2330,7 +2348,16 @@ exit 1
     let git1 = make_script(
         dir1.path(),
         "git",
-        r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+        r#"case "$*" in
+  # A test env has no real repo, so the freshness identity must be
+  # UNCOMPUTABLE. Without this the stub answers `git diff --raw` with the
+  # same one line at every sha, which compares equal to itself and
+  # fabricates a carry out of nothing - the absence-matched-against-
+  # absence shape the predicate exists to refuse. Scoped to --raw so
+  # `git diff --name-only` (classify_payload) behaves exactly as before.
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
     );
 
     let args1 = [
@@ -2419,7 +2446,7 @@ if echo "$*" | grep -q "commits"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}}],"comments":[]}}'
+  echo '{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}}}],"comments":[]}}'
   exit 0
 fi
 exit 1
@@ -3220,7 +3247,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 1
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -3450,7 +3477,7 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}],"comments":[]}'
+  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
 exit 1
@@ -3571,7 +3598,7 @@ if echo "$*" | grep -q "commits"; then
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  echo '{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z"}}],"comments":[]}}'
+  echo '{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}}}],"comments":[]}}'
   exit 0
 fi
 exit 1
@@ -4625,7 +4652,16 @@ exit 1
     let git = make_script(
         dir.path(),
         "git",
-        r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+        r#"case "$*" in
+  # A test env has no real repo, so the freshness identity must be
+  # UNCOMPUTABLE. Without this the stub answers `git diff --raw` with the
+  # same one line at every sha, which compares equal to itself and
+  # fabricates a carry out of nothing - the absence-matched-against-
+  # absence shape the predicate exists to refuse. Scoped to --raw so
+  # `git diff --name-only` (classify_payload) behaves exactly as before.
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
     );
     MockBins { _dir: dir, gh, git }
 }
@@ -4919,13 +4955,35 @@ fn nudge_awaiting_defers_the_backstop() {
 
 use fno_agents::loopcheck::{
     classify_coverage, coverage_receipt_line, AttestationOrigin, Coverage, CoverageProducer,
-    CoverageReport, CoverageVerdict,
+    CoverageReport, CoverageVerdict, Freshness,
 };
 
 const COV_HEAD: &str = "abc1234567890abcdef1234567890abcdef1234";
 
+/// A review object as `gh pr view --json reviews` returns one, including the
+/// `commit.oid` the review was submitted against. That field is not decoration:
+/// coverage reads it to decide whether the verdict still describes HEAD, and a
+/// fixture without it exercises the absent-commit path rather than the one the
+/// test means to (x-5b99). Defaults to COV_HEAD, so a bot review is fresh
+/// unless a test says otherwise.
 fn gh_review(author: &str, state: &str) -> serde_json::Value {
-    serde_json::json!({"author": {"login": author}, "state": state, "submittedAt": "2026-08-05T10:00:00Z"})
+    gh_review_at(author, state, COV_HEAD)
+}
+
+fn gh_review_at(author: &str, state: &str, oid: &str) -> serde_json::Value {
+    serde_json::json!({"author": {"login": author}, "state": state,
+                       "submittedAt": "2026-08-05T10:00:00Z", "commit": {"oid": oid}})
+}
+
+/// The bare sha equality the freshness predicate replaced, as a resolver. The
+/// pre-x-5b99 coverage tests below run against it unchanged: with no carry ever
+/// granted, the new code must reproduce the old verdicts exactly.
+fn at_head(sha: &str) -> Freshness {
+    if !sha.is_empty() && sha == COV_HEAD {
+        Freshness::Fresh
+    } else {
+        Freshness::Stale
+    }
 }
 
 fn gh_comment(author: &str, body: &str) -> serde_json::Value {
@@ -4964,10 +5022,10 @@ fn coverage_classify_quota_refusal_is_zero_coverage_refused() {
         &[],
         &comments,
         "",
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
         None,
+        &at_head,
     );
     assert_eq!(rep.coverage, Coverage::Covered(0));
     let bot = rep
@@ -4987,10 +5045,10 @@ fn coverage_classify_real_review_counts() {
         &reviews,
         &[],
         "",
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
         None,
+        &at_head,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
 }
@@ -4999,7 +5057,7 @@ fn coverage_classify_real_review_counts() {
 /// error and not vacuous success.
 #[test]
 fn coverage_classify_zero_configured_is_covered_zero() {
-    let rep = classify_coverage(&[], &[], "", COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&[], &[], "", &[], true, None, &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5010,10 +5068,10 @@ fn coverage_classify_github_read_failure_is_unknown_without_local() {
         &[],
         &[],
         "",
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         false,
         None,
+        &at_head,
     );
     assert_eq!(rep.coverage, Coverage::Unknown);
     assert_eq!(rep.coverage_count(), None);
@@ -5029,10 +5087,10 @@ fn coverage_classify_local_pass_survives_github_outage() {
         &[],
         &[],
         &events,
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         false,
         None,
+        &at_head,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let local = rep
@@ -5057,10 +5115,10 @@ fn coverage_classify_bot_refused_plus_local_is_covered() {
         &[],
         &comments,
         &events,
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
         None,
+        &at_head,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     assert_eq!(
@@ -5085,10 +5143,10 @@ fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
         &[],
         &comments,
         "",
-        COV_HEAD,
         &["gemini-code-assist".to_string()],
         true,
         None,
+        &at_head,
     );
     let g = rep
         .verdicts
@@ -5104,7 +5162,7 @@ fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
 #[test]
 fn coverage_classify_human_approval_excluded() {
     let reviews = vec![gh_review("jason", "APPROVED")];
-    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&reviews, &[], "", &[], true, None, &at_head);
     let human = rep.verdicts.iter().find(|v| v.name == "jason").unwrap();
     assert!(human.human_approval);
     assert_eq!(human.verdict, CoverageVerdict::Reviewed);
@@ -5120,7 +5178,7 @@ fn coverage_classify_duplicate_login_one_verdict() {
         "chatgpt-codex-connector".to_string(),
         "chatgpt-codex-connector".to_string(),
     ];
-    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &logins, true, None);
+    let rep = classify_coverage(&reviews, &[], "", &logins, true, None, &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(1));
     assert_eq!(
         rep.verdicts
@@ -5139,7 +5197,7 @@ fn coverage_classify_local_fail_then_pass_latest_wins() {
         attestation_line("code-review", COV_HEAD, "fail"),
         attestation_line("code-review", COV_HEAD, "pass"),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(1));
 }
 
@@ -5151,7 +5209,7 @@ fn coverage_classify_local_pass_then_fail_revokes() {
         attestation_line("code-review", COV_HEAD, "pass"),
         attestation_line("code-review", COV_HEAD, "fail"),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5160,7 +5218,7 @@ fn coverage_classify_local_pass_then_fail_revokes() {
 fn coverage_classify_stale_head_does_not_count() {
     let old_head = "0000000000000000000000000000000000000000";
     let events = attestation_line("code-review", old_head, "pass");
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5177,7 +5235,7 @@ fn coverage_classify_local_pass_unconfigured_name_counts() {
     // the same display name as the github_app bot - the producer axis field is
     // what keeps them distinct, and an unconfigured name still counts.
     let events = attestation_line("codex", COV_HEAD, "pass");
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let local = rep
         .verdicts
@@ -5248,7 +5306,16 @@ exit 1
     let git = make_script(
         dir.path(),
         "git",
-        r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+        r#"case "$*" in
+  # A test env has no real repo, so the freshness identity must be
+  # UNCOMPUTABLE. Without this the stub answers `git diff --raw` with the
+  # same one line at every sha, which compares equal to itself and
+  # fabricates a carry out of nothing - the absence-matched-against-
+  # absence shape the predicate exists to refuse. Scoped to --raw so
+  # `git diff --name-only` (classify_payload) behaves exactly as before.
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
     );
 
     // A local /code-review pass attested at the current HEAD.
@@ -5378,14 +5445,17 @@ fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
 
 #[test]
 fn coverage_receipt_covered_names_reviewers() {
+    // gh_review, not a hand-rolled object: a review with no `commit.oid`
+    // exercises the absent-commit path (fail closed) rather than the reviewed
+    // one this test is about.
     let rep = classify_coverage(
-        &[serde_json::json!({"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED"})],
+        &[gh_review("chatgpt-codex-connector", "COMMENTED")],
         &[],
         "",
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
         None,
+        &at_head,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.starts_with("review coverage: 1 reviewed ("), "{line}");
@@ -5402,13 +5472,13 @@ fn coverage_receipt_zero_names_refused_and_absent() {
         &[],
         &comments,
         "",
-        COV_HEAD,
         &[
             "chatgpt-codex-connector".to_string(),
             "gemini-code-assist".to_string(),
         ],
         true,
         None,
+        &at_head,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("0 reviewed"), "{line}");
@@ -5450,10 +5520,10 @@ fn coverage_receipt_zero_prescribes_the_verb_when_the_only_reviewer_refused() {
         &[],
         &comments,
         "",
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
         None,
+        &at_head,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("1 refused"), "{line}");
@@ -5501,7 +5571,7 @@ const OTHER: &str = "reviewer-session-bbbb";
 #[test]
 fn coverage_origin_self_attested_does_not_change_count() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let local = rep
         .verdicts
         .iter()
@@ -5518,7 +5588,7 @@ fn coverage_origin_self_attested_does_not_change_count() {
 #[test]
 fn coverage_origin_other_session_is_not_independent_count_unchanged() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", OTHER);
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let local = rep
         .verdicts
         .iter()
@@ -5535,7 +5605,7 @@ fn coverage_origin_other_session_is_not_independent_count_unchanged() {
 fn coverage_origin_unknown_when_attester_empty_count_unchanged() {
     // attestation_line omits attester_session_id entirely, modeling the backlog.
     let events = attestation_line("code-review", COV_HEAD, "pass");
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let local = rep
         .verdicts
         .iter()
@@ -5555,7 +5625,7 @@ fn coverage_origin_author_unknown_is_unknown_fail_open() {
         "{}\n",
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR)
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
     let local = rep
         .verdicts
         .iter()
@@ -5582,7 +5652,7 @@ fn coverage_two_sessions_same_reviewer_join_not_replace() {
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
         attestation_line_attested("code-review", COV_HEAD, "pass", OTHER),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5622,7 +5692,7 @@ fn coverage_same_session_same_reviewer_dedups_to_one() {
         attestation_line_attested("code-review", COV_HEAD, "fail", AUTHOR),
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5647,7 +5717,7 @@ fn coverage_legacy_no_attester_byte_identical_to_name_key() {
         // a distinct reviewer with no attester: its own entry
         attestation_line("codex", COV_HEAD, "pass"),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5674,7 +5744,7 @@ fn coverage_peer_fail_does_not_revoke_author_pass() {
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
         attestation_line_attested("code-review", COV_HEAD, "fail", OTHER),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5693,7 +5763,7 @@ fn coverage_peer_fail_does_not_revoke_author_pass() {
 #[test]
 fn coverage_receipt_names_origin_buckets() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("self 1"), "{line}");
     assert!(line.contains("other 0"), "{line}");
@@ -5712,10 +5782,10 @@ fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
         &reviews,
         &[],
         &events,
-        COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
         Some(AUTHOR),
+        &at_head,
     );
     assert_eq!(rep.coverage, Coverage::Covered(2));
     let line = coverage_receipt_line(&rep);
@@ -5736,7 +5806,7 @@ fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
 #[test]
 fn coverage_receipt_states_the_tally_is_not_a_subtraction() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], false, Some(AUTHOR));
+    let rep = classify_coverage(&[], &[], &events, &[], false, Some(AUTHOR), &at_head);
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let line = coverage_receipt_line(&rep);
 
