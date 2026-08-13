@@ -898,6 +898,30 @@ def _build_backlog_node(
     }
 
 
+def _refuse_create_on_external_backend() -> None:
+    """Refuse node-creation verbs on a non-default backend.
+
+    On an external backend, item creation lives in the tracker (GitHub Issues,
+    Linear, ...); minting an ab- entry in graph.json would create a phantom item
+    the tracker has no record of. Called from EVERY creation entry point
+    (_create_node_impl for add/idea, plus cmd_new, cmd_decompose, cmd_intake, and
+    cmd_tree) so the guard is not decorative. A guard on only some reachable
+    paths is the pitfall this exists to prevent; the parametrized test exercises
+    each path so a future creation verb that bypasses it fails loudly.
+    """
+    from fno.tracker import active_backend_name
+
+    backend = active_backend_name()
+    if backend != "graph":
+        typer.echo(
+            f"fno backlog: creating work belongs to the {backend} tracker. "
+            f"Create the item there; footnote tracks it by its id "
+            f"(e.g. /fno:target owner/repo#N).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -925,6 +949,7 @@ def _create_node_impl(
     sets and behavior from drifting - the divergence that used to force a second
     ``fno backlog update`` just to set parent/size/domain on a fresh idea.
     """
+    _refuse_create_on_external_backend()
     from fno.graph._constants import PRIORITY_ORDER, mint_node_id
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
@@ -1384,6 +1409,7 @@ def cmd_decompose(
     lands in one locked graph mutation, so a bad spec leaves the graph exactly
     as it was (AC1-FR).
     """
+    _refuse_create_on_external_backend()
     import sys as _sys
     from fno.graph._constants import mint_node_id
     from fno.graph.store import locked_mutate_graph, read_graph, GraphUnreadableError
@@ -2672,6 +2698,7 @@ def cmd_intake(
     ),
 ) -> None:
     """Pull in an existing plan file as a backlog node."""
+    _refuse_create_on_external_backend()
     _intake_impl(
         plan_paths=plan_paths,
         from_list=from_list,
@@ -10381,6 +10408,7 @@ def cmd_new(
     --unscoped to opt out (e.g. for cross-project ideas with no clear home).
     --project always overrides the auto-detected name when both are present.
     """
+    _refuse_create_on_external_backend()
     from fno.graph._constants import PRIORITY_ORDER, mint_node_id
     from fno.graph.fuzzy import suggest_domain
     from fno.graph.store import read_graph, locked_mutate_graph

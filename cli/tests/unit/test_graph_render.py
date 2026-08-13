@@ -51,6 +51,24 @@ def test_column_ready_p0_goes_now():
     assert _kanban_column(e) == "Now"
 
 
+def test_kanban_card_renders_artifact_url():
+    """artifact_url has a purpose-built reader on the board card.
+
+    The field had a writer (fno done --link) and no rendered reader. This pins
+    the URL is consumed by the card render (a positive marker at a named
+    consumer), not merely that the write landed.
+    """
+    e = _entry(
+        "ab-art",
+        status="done",
+        completed_at="2026-01-01T00:00:00Z",
+        artifact_url="https://figma.com/file/x",
+    )
+    card = _kanban_card(e, {e["id"]: e})
+    assert "https://figma.com/file/x" in card
+    assert "artifact:" in card
+
+
 def test_column_ready_p1_goes_now():
     """p1 (next-up) is today-or-tomorrow-ish - Now column."""
     e = _entry("ab-11111113", status="ready", priority="p1")
