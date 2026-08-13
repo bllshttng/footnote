@@ -129,6 +129,7 @@ def collapse_click_group(group: click.Group, *, keep: set[str]) -> click.Group:
     group.shell_complete = MethodType(shell_complete, group)  # type: ignore[method-assign]
     group._fno_collapsed_dispatcher = True  # type: ignore[attr-defined]
     group._fno_collapsed_keep = frozenset(keep)  # type: ignore[attr-defined]
+    group._fno_collapsed_original_list_commands = original_list_commands  # type: ignore[attr-defined]
     group._fno_collapsed_original_get_command = original_get_command  # type: ignore[attr-defined]
     return group
 

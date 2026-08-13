@@ -565,8 +565,10 @@ def _render_group_full_menu(path: list[str]) -> Optional[str]:
         return None  # a leaf command, not a group
 
     rows: dict[str, str] = {}
-    for name in cmd.list_commands(cur):
-        sub = cmd.get_command(cur, name)
+    list_all = getattr(cmd, "_fno_collapsed_original_list_commands", cmd.list_commands)
+    get_all = getattr(cmd, "_fno_collapsed_original_get_command", cmd.get_command)
+    for name in list_all(cur):
+        sub = get_all(cur, name)
         if sub is None:
             continue
         rows[name] = sub.get_short_help_str() if hasattr(sub, "get_short_help_str") else ""
