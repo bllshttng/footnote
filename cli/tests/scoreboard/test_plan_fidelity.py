@@ -380,3 +380,139 @@ def test_probe_evidence_skips_a_corrupt_event_without_crashing():
     )
     joined = [r for r in pf["results"] if r["status"] == "joined"][0]
     assert joined["probes"] == {"declared": 2, "passed": 2}
+
+
+# --- AC4-CORE: one join, two dispositions (x-cbab) ---------------------------
+#
+# The unmeasurable knob is the inversion, never a second join. 'unjoined' (the
+# default) is byte-identical to today's telemetry; 'refuse' adds a gate key that
+# marks unjoined planned rows as a would-be refusal. The carveout waiver that can
+# overturn would_refuse is tested via fno.plan.fidelity.fidelity_refusal.
+
+_ORPHAN_ROWS = [
+    {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+     "phases_completed": ["think", "plan"], "plan_path": "/x/orphan.md",
+     "session_id": "plan-sess", "cost_usd": 2.0},
+]
+
+
+def test_unmeasurable_unjoined_is_byte_identical_to_the_default():
+    """The telemetry disposition never sees a gate key, so the scoreboard output
+    is unchanged. Default == explicit 'unjoined'."""
+    default = _fidelity(_ORPHAN_ROWS)
+    explicit = build_plan_fidelity(
+        _ORPHAN_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: PLAN_DOC, read_summary=lambda r: "",
+        read_diff=lambda pr: None, unmeasurable="unjoined",
+    )
+    assert default == explicit
+    assert "gate" not in default, "telemetry must not carry the gate key"
+
+
+def test_refuse_disposition_marks_unjoined_as_a_would_be_refusal():
+    """The same join, but an unjoined planned row is a refusal rather than n/a."""
+    pf = build_plan_fidelity(
+        _ORPHAN_ROWS, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: PLAN_DOC, read_summary=lambda r: "",
+        read_diff=lambda pr: None, unmeasurable="refuse",
+    )
+    gate = pf["gate"]
+    assert gate["would_refuse"] is True
+    assert gate["unjoined_count"] == 1
+    assert gate["planned"] == 1 and gate["delivered"] == 0
+    # the join itself is unchanged: the unjoined row is still reported.
+    assert pf["results"][0]["status"] == "unjoined"
+
+
+def test_refuse_disposition_passes_when_every_planned_row_joined():
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+         "phases_completed": ["think", "plan"], "plan_path": "/x/plan-a.md",
+         "session_id": "s1", "cost_usd": 2.0},
+        {"completed": "2026-07-03T11:00:00", "termination_reason": "DonePRGreen",
+         "phases_completed": ["do", "ship"], "plan_path": "/x/plan-a.md",
+         "graph_node_id": "x-1", "pr_number": 42, "session_id": "s2", "cost_usd": 6.0},
+    ]
+    pf = build_plan_fidelity(
+        rows, [], since_days=28, now=NOW,
+        read_plan_doc=lambda p: PLAN_DOC, read_summary=lambda r: "",
+        read_diff=lambda pr: [], unmeasurable="refuse",
+    )
+    assert pf["gate"]["would_refuse"] is False
+    assert pf["gate"]["unjoined_count"] == 0
+
+
+def test_unknown_unmeasurable_raises_rather_than_silently_defaulting():
+    import pytest
+
+    with pytest.raises(ValueError, match="unmeasurable"):
+        build_plan_fidelity(
+            _ORPHAN_ROWS, [], since_days=28, now=NOW,
+            read_plan_doc=lambda p: PLAN_DOC, read_summary=lambda r: "",
+            read_diff=lambda pr: None, unmeasurable="bogus",
+        )
+
+
+def test_fidelity_refusal_refuses_an_uncovered_shortfall():
+    """AC5 heart: a planned-minus-delivered row with no covering carveout refuses."""
+    from fno.plan.fidelity import fidelity_refusal
+
+    unjoined = [{"session_id": "s1", "plan_path": "/x/p.md"}]
+    decision = fidelity_refusal(unjoined_rows=unjoined, carveouts=[])
+    assert decision["refused"] is True
+    assert decision["shortfall"] == 1
+    assert decision["covered"] is False
+    assert "not a carveout" in decision["reason"]
+
+
+def test_fidelity_refusal_passes_when_carveouts_cover_the_shortfall():
+    from fno.plan.fidelity import fidelity_refusal
+
+    unjoined = [{"session_id": "s1", "plan_path": "/x/p.md"}]
+    decision = fidelity_refusal(unjoined_rows=unjoined, carveouts=[{"id": "c1"}])
+    assert decision["refused"] is False
+    assert decision["covered"] is True
+
+
+def test_fidelity_refusal_passes_when_there_is_no_shortfall():
+    from fno.plan.fidelity import fidelity_refusal
+
+    decision = fidelity_refusal(unjoined_rows=[], carveouts=[])
+    assert decision["refused"] is False
+
+
+def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_path):
+    """The ledger is global and two projects can share a plan-path tail.
+    compute_plan_fidelity selects only this repo's rows via the same remote-slug
+    derivation the ledger stamps, so a foreign project's same-tail plan cannot
+    cover or pollute the gate decision."""
+    import fno.paths as paths
+    import fno.plan.fidelity as fid
+    import fno.scoreboard.fold as fold
+
+    plan = tmp_path / "feat" / "00-INDEX.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# plan\n")
+
+    fake_pf = {
+        "state": "ok",
+        "results": [
+            {"plan_path": "/a/feat/00-INDEX.md", "project": "footnote",
+             "status": "unjoined", "session_id": "s-local"},
+            {"plan_path": "/b/feat/00-INDEX.md", "project": "abilities",
+             "status": "unjoined", "session_id": "s-foreign"},
+        ],
+    }
+    # build_plan_fidelity is imported lazily inside compute_plan_fidelity, so
+    # patch it at its source module rather than on fid.
+    monkeypatch.setattr(fold, "build_plan_fidelity", lambda *a, **k: fake_pf)
+    monkeypatch.setattr(fid, "_load_graph_nodes", lambda: [])
+    monkeypatch.setattr(fid, "_read_covering_carveouts", lambda *a, **k: [])
+    monkeypatch.setattr(paths, "_slug_from_git_remote", lambda root=None: "footnote")
+
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+
+    # Only the footnote row is selected; the abilities row does not count.
+    assert decision["planned"] == 1
+    assert decision["refused"] is True
+    assert decision["unjoined"][0]["session_id"] == "s-local"
