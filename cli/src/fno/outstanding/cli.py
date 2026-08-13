@@ -7,7 +7,6 @@ predictable (0 ok / 1 read or write failure).
 from __future__ import annotations
 
 import json
-import os
 import secrets
 from pathlib import Path
 from typing import List
@@ -43,14 +42,25 @@ def _session_id() -> "str | None":
 
 
 def _unattended() -> bool:
-    """True for a spawned/bg worker.
+    """True for a spawned/bg worker, via the canonical presence resolver.
 
     The hook fires in every session, so the discriminator has to be
     attendedness rather than question ownership: the OPERATOR owns none of
     these questions (workers asked them), so gating the render on ownership
-    would show the one person who can answer exactly nothing.
+    shows the one person who can answer exactly nothing.
+
+    Delegates to ``classify_presence`` rather than re-reading the env here. A
+    local `FNO_AGENT_SELF or FNO_BG` check is a second implementation of one
+    operation, and it diverged in two directions: `FNO_BG=0` read as a worker
+    (it is truthy as a string), and a headless run whose owned manifest says
+    `attended: false` read as attended and got the operator's whole queue.
     """
-    return bool(os.environ.get("FNO_AGENT_SELF") or os.environ.get("FNO_BG"))
+    from fno.provenance.spawn_think import classify_presence
+
+    try:
+        return classify_presence() == "away"
+    except Exception:  # noqa: BLE001 - a read verb never fails on presence
+        return False
 
 
 @outstanding_app.callback(invoke_without_command=True)

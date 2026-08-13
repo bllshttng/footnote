@@ -23,8 +23,12 @@ from typing import Any, Optional
 # skipped, which is the failure this verb exists to fix.
 RENDER_CAP = 3
 
+EVENTS_NAME = "events.jsonl"
 QUESTION_EVENT = "operator_question"
 QUESTION_CLOSED_EVENT = "operator_question_closed"
+# Both question types share this prefix, so a raw line without it cannot be
+# one of ours. See the substring prefilter in read_open_questions.
+QUESTION_MARKER = "operator_question"
 
 
 class OutstandingError(Exception):
@@ -79,8 +83,16 @@ class Outstanding:
 
 
 def events_path(root: Path) -> Path:
-    """The events journal beside the carve-out ledger under the same root."""
-    return Path(root) / ".fno" / "events.jsonl"
+    """The events journal beside the carve-out ledger under the same root.
+
+    Routes through ``project_log``, the single accessor for ``.fno/<name>``,
+    rather than hand-building the path: that keeps the ``.resolve()`` (so a
+    symlinked root yields one path string, not two) and keeps this reader on
+    the same placement rule as every other writer.
+    """
+    from fno.paths import project_log
+
+    return project_log(EVENTS_NAME, project_root=Path(root))
 
 
 def read_open_questions(root: Path) -> "list[Question]":
@@ -103,6 +115,16 @@ def read_open_questions(root: Path) -> "list[Question]":
     for line in lines:
         stripped = line.strip()
         if not stripped:
+            continue
+        # Substring prefilter before json.loads. This journal is shared,
+        # append-only and never rotated, so nearly every line belongs to some
+        # other event type; parsing all of them cost ~0.9s against the hook's
+        # 3s bound, and the bound firing does not surface an error - the block
+        # just vanishes and the operator reads "nothing outstanding". That is
+        # the absence-as-success failure this whole verb exists to prevent, so
+        # the read must not get slower as the journal grows. Full history is
+        # preserved: questions never expire, so a tail read is not an option.
+        if QUESTION_MARKER not in stripped:
             continue
         try:
             rec = json.loads(stripped)

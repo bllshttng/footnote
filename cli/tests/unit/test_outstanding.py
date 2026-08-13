@@ -13,6 +13,7 @@ is the pair that closes that gap for the silent-on-zero case.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,11 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
     monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
     monkeypatch.delenv("FNO_BG", raising=False)
+    # Presence resolves through classify_presence, whose documented default is
+    # "away" when no human signal is present - correct for a cron/script, and
+    # what a bare pytest process looks like. Declare the attended case here so
+    # each test states the presence it is exercising instead of inheriting it.
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
     # resolve_repo_root is @cache'd and is warmed with the REAL worktree root
     # before this fixture runs. Without the clear, session resolution reads the
     # live target-state.md instead of this sandbox, and the ownership tests
@@ -98,10 +104,24 @@ def test_carveout_leg_names_the_verb_that_clears_it(root: Path):
 
 
 def test_carveout_leg_reports_the_age_of_the_oldest_row(root: Path):
-    _write_carveouts(root, [_carveout("cv-old", "oos-bug", ts="2026-01-01T00:00:00Z")])
+    """Pins the DATE, not the word "oldest".
+
+    The label is emitted for any row carrying a ts, so an `or "oldest" in ...`
+    disjunct stays green even if the date slice regressed. Assert the thing
+    measured, which is this file's own stated rule.
+    """
+    _write_carveouts(
+        root,
+        [
+            _carveout("cv-old", "oos-bug", ts="2026-01-01T00:00:00Z"),
+            _carveout("cv-new", "oos-bug", ts="2026-08-01T00:00:00Z"),
+        ],
+    )
     result = runner.invoke(outstanding_app, [])
     assert result.exit_code == 0
-    assert "2026-01-01" in result.output or "oldest" in result.output.lower()
+    assert "oldest 2026-01-01" in result.output
+    # The newer row's date must NOT be the one reported as oldest.
+    assert "oldest 2026-08-01" not in result.output
 
 
 # --- 2.2 an unreadable ledger is a stated failure ----------------------------
@@ -166,6 +186,33 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     assert len(closed) == 1
     assert closed[0]["data"]["answer"] == "the codex lane"
     assert closed[0]["data"]["question_id"] == qid
+
+
+def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
+    """The shared journal is append-only and never rotated.
+
+    Parsing every line put the hook's 3s bound in reach, and that bound firing
+    does not surface an error - the block just vanishes and the operator reads
+    "nothing outstanding". Asserts the positive outcome (the question is still
+    found among 20k unrelated rows) plus a wall-clock ceiling.
+    """
+    qid = runner.invoke(outstanding_app, ["ask", "buried under noise?"]).stdout.strip().splitlines()[-1]
+    events = root / ".fno" / "events.jsonl"
+    noise = json.dumps(
+        {"ts": "2026-08-01T00:00:00Z", "type": "phase_transition", "source": "target",
+         "data": {"phase": "do", "nonce": "x" * 32, "session_id": "s", "gate_bearing": False}}
+    )
+    with events.open("a", encoding="utf-8") as fh:
+        for _ in range(20_000):
+            fh.write(noise + "\n")
+
+    started = time.monotonic()
+    result = runner.invoke(outstanding_app, ["--json"])
+    elapsed = time.monotonic() - started
+
+    assert result.exit_code == 0, result.output
+    assert [q["id"] for q in json.loads(result.stdout)["questions"]] == [qid]
+    assert elapsed < 1.5, f"read took {elapsed:.2f}s over 20k unrelated rows"
 
 
 def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
@@ -237,6 +284,7 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
 
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-quiet")
     monkeypatch.setenv("FNO_AGENT_SELF", "worker-quiet")
+    monkeypatch.delenv("FNO_THINK_SPAWN_PRESENCE", raising=False)
     out = runner.invoke(outstanding_app, []).stdout
     # The count still renders: a worker is told the queue exists.
     assert "6 open question" in out
@@ -260,6 +308,7 @@ def test_an_attended_session_does_see_other_sessions_questions(
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-operator")
     monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
     monkeypatch.delenv("FNO_BG", raising=False)
+    monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
     out = runner.invoke(outstanding_app, []).stdout
     assert "6 open question" in out
     # Capped: a growing pile reads as a number, not as a wall.
