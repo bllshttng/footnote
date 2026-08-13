@@ -56,12 +56,20 @@ def _session_id_for(entry: Any) -> Optional[str]:
     ``harness`` (x-8dfc) with ``provider`` fallback. Uses ``getattr`` (not the
     property) so it still works on the test fakes, which carry the underlying
     id fields but not the property.
+
+    A claude pane row carries no transport ``short_id`` (empty by design), so
+    it falls back to the canonical ``harness_session_id`` - mirroring
+    ``AgentEntry.session_id`` - rather than reporting "no session id" for a row
+    that has one (x-b84f).
     """
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
     key = getattr(entry, "harness", None)
     field_name = HARNESS_SESSION_ID_FIELDS.get(key) if key else None
-    return getattr(entry, field_name, None) if field_name else None
+    transport = getattr(entry, field_name, None) if field_name else None
+    if transport:
+        return transport
+    return getattr(entry, "harness_session_id", None)
 
 
 def _build_resume_argv(
@@ -177,6 +185,21 @@ def resume_logic(
             stderr=(
                 f"fno agents resume: agent {name!r} has no recorded cwd. "
                 f"Run `fno agents rm {name}` to clean up.\n"
+            ),
+        )
+
+    # A claude pane row carries no attach short_id (empty by design). The
+    # default Rust runtime relaunches it with --resume plus the recorded route;
+    # this Python fallback does not restore the route, so it refuses rather than
+    # resume on the default (wrong) account. The id still resolved above
+    # (_session_id_for fell back to harness_session_id) for the parity contract.
+    if harness == "claude" and not (getattr(entry, "short_id", "") or ""):
+        return ResumeResult(
+            exit_code=13,
+            stderr=(
+                f"fno agents resume: agent {name!r} is a claude pane row with "
+                f"no attach short_id; its recorded route is restored by the "
+                f"smart resume path. Unset FNO_AGENTS_RUNTIME=python to use it.\n"
             ),
         )
 
