@@ -134,6 +134,37 @@ Append the submit key to the text (`--text $'...\r'`), or send it separately.
 Above the size where a TUI stops echoing the text and renders it as a pasted block (codex shows `[Pasted Content N chars]`), a trailing `\r` does **not** submit; a second send of `$'\t'` queues it.
 Read the pane back with `fno mux pane read <id> --lines N` to confirm, rather than trusting the exit code.
 
+## Pointing the operator at a pane
+
+Every other `mux pane` verb lets an agent act ON a pane.
+`fno mux pane focus <pane>` is the one that moves the OPERATOR to one, so "it is in pane 31" becomes something their screen acts on.
+
+```
+$ fno mux pane focus 31
+31 squad=2 (billing) tab=7 clients_moved=1
+```
+
+It resolves the pane session-wide.
+A pane in another workspace or another tab needs no extra navigation.
+Focusing a finished pane also clears its unseen marker, exactly as clicking it does.
+
+Read `clients_moved`, not the exit code.
+A zero-exit reply proves only that the command was accepted, never that anything moved on screen.
+The count is how many attached viewers actually ended up looking at the pane.
+
+Three refusals stay distinct, because "your pane is gone", "nobody is watching", and "your mux is not running" are different problems:
+
+| Outcome | Exit | Message |
+|---|---|---|
+| No live pane with that id | 1 | `no such pane: <id>` |
+| Running, but no non-passive client attached | 19 | `no attached client to move` |
+| No reachable mux session | 1 | `cannot reach session <name>` |
+
+There is deliberately no URL scheme for this.
+`link.rs` `OPENABLE_SCHEMES` guards untrusted pane-sourced bytes.
+Widening it to carry a deep link is a separate risk decision with its own blast radius.
+The verb reaches the same destination with none of that exposure.
+
 ## Why the asymmetries exist
 
 - **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.

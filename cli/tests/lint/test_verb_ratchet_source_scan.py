@@ -114,6 +114,42 @@ def test_missing_dispatch_refuses_rather_than_returning_empty(rust_tree: Path) -
         scan_rust_source(rust_tree)
 
 
+def test_catch_all_arm_shape_does_not_change_the_answer(rust_tree: Path) -> None:
+    """Both spellings of the catch-all arm must scan to the same verbs.
+
+    Rust lets a catch-all be a braced block or a single expression, and rustfmt
+    keeps whichever it is handed - so the shape tracks whether the refusal
+    message happens to fit on one line, not anything about the dispatch. Hoisting
+    a verb list into a const is enough to flip it.
+
+    The scan used to walk up a FIXED two levels from the refusal (arm, then
+    match), which only holds for the braced form. On the brace-less one it
+    walked past the match into the enclosing fn, found no arms at that level and
+    reported zero verbs for the family. That fails closed, but it names the
+    verbs it cannot see rather than the shape, so the message points away from
+    the cause. Asserting equality across the two shapes is what pins it: a scan
+    that can only read one of them cannot pass this.
+    """
+    path = _mux(rust_tree)
+    src = path.read_text()
+    flat = '        other => return Err(format!("unknown pane verb: {other} ({PANE_VERBS})")),'
+    assert flat in src, "the pane catch-all moved; re-anchor this test"
+    _tops, before = scan_rust_source(rust_tree)
+
+    braced = (
+        '        other => {\n'
+        '            return Err(format!("unknown pane verb: {other} ({PANE_VERBS})"));\n'
+        '        }'
+    )
+    path.write_text(src.replace(flat, braced))
+    _tops, after = scan_rust_source(rust_tree)
+
+    assert after["pane"] == before["pane"]
+    # Guard the guard: a scan that returned {} for both shapes would satisfy the
+    # equality above while seeing nothing at all.
+    assert "focus" in after["pane"] and len(after["pane"]) > 5
+
+
 def test_removed_mux_verbs_carry_a_tombstone() -> None:
     """A removed Rust verb names its replacement instead of a bare banner."""
     real_root = Path(__file__).resolve().parents[3]

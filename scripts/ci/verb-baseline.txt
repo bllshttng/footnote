@@ -217,6 +217,7 @@ mux layout graft
 mux ls
 mux pane break
 mux pane claim
+mux pane focus
 mux pane kill
 mux pane ls
 mux pane read

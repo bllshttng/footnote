@@ -880,7 +880,7 @@ struct View {
     /// selector `m` overlay is open. A digit sends [`Command::MoveTab`] for a tab
     /// source or [`Command::MovePane`] (cross-squad) for a pane source; the id
     /// is re-validated against the current catalog before it goes on the wire.
-    move_pick: Option<(MoveSrc, Vec<u64>)>,
+    move_pick: Option<MovePick>,
     /// Pending target and geometry for selector `p` placement.
     attach_place: Option<AttachPlace>,
     /// (x-96e8) The squad the selector cursor is tracking across a `J`/`K`
@@ -1003,12 +1003,67 @@ enum RenameTarget {
     Squad(u64),
 }
 
+/// The move-tab / move-pane destination picker's state (x-96e8, cursored by
+/// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
+/// cursor or the escape carry an arrow key needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MovePick {
+    src: MoveSrc,
+    /// Every candidate destination, uncapped (see `View::move_dst_squads`).
+    squads: Vec<u64>,
+    /// Index into `squads` of the highlighted destination.
+    cursor: usize,
+    /// Escape-sequence carry across reads, so an arrow split at a read boundary
+    /// neither closes the picker nor leaks its tail into the pane.
+    esc: Vec<u8>,
+}
+
+impl MovePick {
+    /// The selected destination squad id, or `None` for an empty list.
+    ///
+    /// Test-only: the commit path consumes the picker and indexes `squads`
+    /// directly, so this exists to let a test read the selection without
+    /// reproducing that arithmetic. Unconditional, it is dead code in the
+    /// shipped build.
+    #[cfg(test)]
+    fn target(&self) -> Option<u64> {
+        self.squads.get(self.cursor).copied()
+    }
+
+    /// A freshly opened picker: cursor at the top, no escape carry.
+    fn new(src: MoveSrc, squads: Vec<u64>) -> Self {
+        Self {
+            src,
+            squads,
+            cursor: 0,
+            esc: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttachPlace {
     id: String,
-    target: u64,
+    /// Index into `squads` of the highlighted destination. A CURSOR, not a
+    /// squad id: the picker now moves like every other overlay, and an index
+    /// cannot name a workspace that is not in the list the operator is reading.
+    /// Staleness is still checked at commit, because the layout can change
+    /// under an open picker.
+    cursor: usize,
+    /// Every non-mission workspace, uncapped. It used to be `.take(9)`, which
+    /// silently dropped the 10th onward - at 14 squads five simply did not
+    /// exist as far as the operator could tell.
     squads: Vec<u64>,
     esc: Vec<u8>,
+}
+
+impl AttachPlace {
+    /// The selected destination squad id, or `None` when the list is empty.
+    /// The one place `cursor` is turned back into an id, so no caller can
+    /// index `squads` out of step with the drawn highlight.
+    fn target(&self) -> Option<u64> {
+        self.squads.get(self.cursor).copied()
+    }
 }
 
 /// Client-local in-scrollback search state (v12, x-e780).
@@ -2069,8 +2124,9 @@ impl View {
     }
 
     /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
-    /// candidate destination squads (source excluded, capped at 9) in the order
-    /// a digit selects them. Same overlay-clearing discipline as the others.
+    /// candidate destination squads (source excluded). Same overlay-clearing
+    /// discipline as the others. The cursor starts at the top; the list is no
+    /// longer capped at the digit range, so rows past nine are cursor-only.
     fn open_move_pick(&mut self, src: MoveSrc, squads: Vec<u64>) {
         self.selector = None;
         self.answers = None;
@@ -2083,10 +2139,19 @@ impl View {
         self.recruit_esc.clear();
         self.attach_place = None;
         self.clear_peek();
-        self.move_pick = Some((src, squads));
+        self.move_pick = Some(MovePick::new(src, squads));
     }
 
-    fn open_attach_place(&mut self, id: String, target: u64, squads: Vec<u64>) {
+    /// Open the attach-placement picker on `squads` (non-empty; the caller
+    /// reports its own no-workspace notice), starting on `owner`'s workspace if
+    /// that is still a candidate, else the active one, else the first.
+    ///
+    /// The default is resolved HERE, not at the two call sites, for the same
+    /// reason they share `attach_dst_squads`: the click door (`apply_hit`) and
+    /// the keyboard door (`p`/Enter) each carried an identical copy of this
+    /// resolution, which is the N-reachable-paths trap the list extraction was
+    /// already fixing. One door's worth of logic, two doors.
+    fn open_attach_place(&mut self, id: String, owner: Option<u64>, squads: Vec<u64>) {
         self.selector = None;
         self.answers = None;
         self.search = None;
@@ -2098,9 +2163,14 @@ impl View {
         self.recruit_esc.clear();
         self.move_pick = None;
         self.clear_peek();
+        let active = self.layout.active_squad;
+        let cursor = owner
+            .and_then(|sid| squads.iter().position(|s| *s == sid))
+            .or_else(|| squads.iter().position(|s| *s == active))
+            .unwrap_or(0);
         self.attach_place = Some(AttachPlace {
             id,
-            target,
+            cursor,
             squads,
             esc: Vec::new(),
         });
@@ -2142,18 +2212,21 @@ impl View {
     }
 
     /// Keep the selected modal row inside the scrolled viewport after an arrow
-    /// move (the block is one line per row, so the row index IS the line index).
+    /// move, by delegating to the ONE implementation.
+    ///
+    /// This used to hand-roll the scroll arithmetic with `rows.len().min(trows)`,
+    /// the pre-chrome viewport formula. `Popup::viewport_h` now subtracts
+    /// `chrome.rows_overhead()`, so the copy drifted the moment overlays gained
+    /// a frame: on a 24-row terminal it believed it had 24 body rows when it had
+    /// 22, and arrowing far enough parked the highlighted row permanently below
+    /// the fold while Enter still executed it. That is the invisible-Enter-target
+    /// case `follow_sel` exists to prevent, reached through the copy that did not
+    /// get the fix. `clamp_sel_to_view` never drifted because it already routed
+    /// through `viewport_h`.
     fn follow_modal_selection(&mut self) {
         let trows = self.term.0.max(1) as usize;
         if let Some(m) = self.keys_modal.as_mut() {
-            let vis_h = m.popup.rows.len().min(trows);
-            if let Some((ri, _)) = m.popup.selected() {
-                if ri < m.popup.scroll {
-                    m.popup.scroll = ri;
-                } else if ri >= m.popup.scroll + vis_h {
-                    m.popup.scroll = ri + 1 - vis_h;
-                }
-            }
+            m.popup.follow_sel(trows);
         }
     }
 
@@ -2245,16 +2318,41 @@ impl View {
     }
 
     /// The candidate destination squads for a Move-to-workspace gesture on a row
-    /// owned by `own`: every other non-mission workspace, capped at the picker's
-    /// 9-digit range. Shared by the menu entry's construction and its dispatch so
-    /// the two cannot drift on what counts as a destination.
+    /// owned by `own`: every other non-mission workspace. Shared by the menu
+    /// entry's construction, its dispatch, and the tab-move picker so the three
+    /// cannot drift on what counts as a destination.
+    ///
+    /// It used to `.take(9)`, the digit range. At 14 workspaces that dropped
+    /// five with no notice, and a list that silently omits its tail is worse
+    /// than one that admits it: the operator cannot tell a missing workspace
+    /// from a gone one. The digit accelerator is still nine wide; the LIST is
+    /// not, and the pickers carry a cursor to reach the rest.
     fn move_dst_squads(&self, own: Option<u64>) -> Vec<u64> {
         self.layout
             .squads
             .iter()
             .map(|s| s.id)
             .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
-            .take(9)
+            .collect()
+    }
+
+    /// The candidate destination workspaces for an attach placement: every
+    /// non-mission workspace. A synthetic mission squad is a render-time
+    /// grouping header, not a real squad `place_spawned_pane` can route into,
+    /// so it is excluded here rather than at each call site.
+    ///
+    /// Both entry paths into the placement picker (the click path through
+    /// `apply_hit` and the keyboard path through `p`/Enter) built this list
+    /// independently and identically. Two constructions of one list is the
+    /// N-reachable-paths trap in miniature: the mission-squad exclusion had
+    /// already been fixed twice, and the `.take(9)` cap had to be removed
+    /// twice. Now there is one.
+    fn attach_dst_squads(&self) -> Vec<u64> {
+        self.layout
+            .squads
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !is_mission_squad(*id))
             .collect()
     }
 
@@ -4691,6 +4789,7 @@ impl View {
                 &chrome,
                 lines,
                 &self.theme,
+                None,
             );
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
@@ -4739,11 +4838,16 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                // +1 for the header line. This queue is cursored (`n`/`N`) and
+                // unbounded, so it needs the same follow the pickers do: on a
+                // short terminal the selected row would otherwise sit below the
+                // fold while still being the row Enter acts on.
+                Some(sel + 1),
             );
-        } else if let Some((src, squads)) = &self.move_pick {
+        } else if let Some(picker) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
-            let lines = self.move_pick_lines(src, squads);
+            let lines = self.move_pick_lines(picker);
             let chrome = chrome::Chrome::new("move to", Anchor::Center).footer("esc cancel");
             draw_lines_overlay(
                 &mut cells,
@@ -4754,6 +4858,9 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                // +1 for the header line: an uncapped list must not park its
+                // cursor behind the fold (same reason as the attach picker).
+                Some(picker.cursor + 1),
             );
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
@@ -4767,6 +4874,11 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                // +1 for the header line: keep the CURSOR row on screen. Without
+                // this an uncapped list on a short terminal would put the 10th
+                // workspace behind the fold while still selecting it, which is
+                // the same unreachability the .take(9) caused.
+                Some(picker.cursor + 1),
             );
         } else if let Some(conn) = &self.connections {
             // x-84d7 Connections modal: accounts + combos lists. Drawn from the
@@ -4782,6 +4894,7 @@ impl View {
                 &chrome,
                 &conn.render(),
                 &self.theme,
+                None,
             );
         } else if let Some(peek) = &self.peek {
             // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
@@ -4809,6 +4922,7 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                None,
             );
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line. Rows
@@ -4827,6 +4941,11 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                // The navigator is the uncapped selector this whole change
+                // points operators at, so its cursor must stay on screen too:
+                // a session with more rows than the viewport would otherwise
+                // drive the selection below the fold. +1 for the query line.
+                Some(nav.cursor + 1),
             );
         }
 
@@ -5216,29 +5335,13 @@ impl View {
     /// selects it. A candidate that vanished from the catalog since open still
     /// renders (labelled) - the digit is re-validated on press, and the server
     /// refuses a stale id regardless.
-    fn move_pick_lines(&self, src: &MoveSrc, squads: &[u64]) -> Vec<String> {
+    fn move_pick_lines(&self, picker: &MovePick) -> Vec<String> {
         const W: usize = 40;
-        let verb = match src {
+        let verb = match picker.src {
             MoveSrc::Tab(_) => "move tab to:",
             MoveSrc::Pane(_) => "move pane to:",
         };
-        let mut lines = vec![pad_to(&format!(" {verb} · digit selects · esc cancel"), W)];
-        for (i, &sid) in squads.iter().enumerate() {
-            let name = self
-                .layout
-                .squads
-                .iter()
-                .find(|s| s.id == sid)
-                .map(|s| s.name.as_str())
-                .unwrap_or("(gone)");
-            lines.push(pad_to(&format!(" {} {name}", i + 1), W));
-        }
-        lines
-    }
-
-    fn attach_place_lines(&self, picker: &AttachPlace) -> Vec<String> {
-        const W: usize = 54;
-        let mut lines = vec![pad_to(" attach placement · digit selects workspace", W)];
+        let mut lines = vec![pad_to(&format!(" {verb}"), W)];
         for (i, &sid) in picker.squads.iter().enumerate() {
             let name = self
                 .layout
@@ -5247,11 +5350,58 @@ impl View {
                 .find(|s| s.id == sid)
                 .map(|s| s.name.as_str())
                 .unwrap_or("(gone)");
-            let marker = if sid == picker.target { '›' } else { ' ' };
-            lines.push(pad_to(&format!(" {marker} {} {name}", i + 1), W));
+            let marker = if i == picker.cursor { '›' } else { ' ' };
+            // Only the first nine are digit-addressable; the rest get a blank
+            // gutter, so the drawn numbering never promises a key that does
+            // not exist.
+            let ord = if i < 9 {
+                (i + 1).to_string()
+            } else {
+                " ".into()
+            };
+            lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
         }
-        lines.push(pad_to(" h/← left · j/↓ down · k/↑ up · l/→ right", W));
-        lines.push(pad_to(" enter/space here · t new tab · esc/q cancel", W));
+        lines.push(pad_to(" hjkl/arrows move · enter move here", W));
+        lines.push(pad_to(" 1-9 move to first nine · esc/q cancel", W));
+        lines
+    }
+
+    /// Build the attach-placement picker lines: a header, one row per candidate
+    /// workspace, then a footer where each axis names its OWN keys.
+    ///
+    /// Rows past the ninth carry no number, because no digit reaches them. The
+    /// drawn numbering therefore never lies about what a digit will do, which is
+    /// the property that lets the list be uncapped and the digit accelerator
+    /// stay nine-wide without the two contradicting each other.
+    fn attach_place_lines(&self, picker: &AttachPlace) -> Vec<String> {
+        const W: usize = 54;
+        let mut lines = vec![pad_to(" attach placement", W)];
+        for (i, &sid) in picker.squads.iter().enumerate() {
+            let name = self
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.name.as_str())
+                .unwrap_or("(gone)");
+            let marker = if i == picker.cursor { '›' } else { ' ' };
+            // Only the first nine are digit-addressable; the rest get a blank
+            // gutter rather than a number no key produces.
+            let ord = if i < 9 {
+                (i + 1).to_string()
+            } else {
+                " ".into()
+            };
+            lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
+        }
+        lines.push(pad_to(" hjkl/arrows move · 1-9 jump to first nine", W));
+        // enter/space/t are ONE action listed once. They send byte-identical
+        // messages (split: None -> `place_spawned_pane` new_tab), so advertising
+        // "attach to ›" and "t new tab" as two entries described a distinction
+        // the code does not make - the same overselling this node exists to fix,
+        // one layer up in the footer.
+        lines.push(pad_to(" enter/space/t new tab in › · HJKL split", W));
+        lines.push(pad_to(" . attach here (current view) · esc/q cancel", W));
         lines
     }
 
@@ -7116,6 +7266,7 @@ fn draw_lines_overlay<S: AsRef<str>>(
     chrome: &chrome::Chrome,
     lines: &[S],
     theme: &Theme,
+    follow: Option<usize>,
 ) {
     let (base_r, base_c) = content_origin;
     let (content_rows, content_cols) = content_dims;
@@ -7136,22 +7287,36 @@ fn draw_lines_overlay<S: AsRef<str>>(
     let overhead = chrome.rows_overhead();
     let body_budget = content_rows.saturating_sub(overhead);
     let total = lines.len();
-    let (take, scroll) = if total > body_budget {
+    let (start, take, scroll) = if total > body_budget {
         // Covers body_budget == 0 (a viewport shorter than the chrome
         // overhead): windows to zero body rows instead of painting the whole
         // body plus its border past the content viewport.
+        //
+        // `follow` is the body index that MUST stay visible - a cursor. Without
+        // it the window is top-pinned, which is right for a static body and
+        // wrong for one the operator drives: the tenth row of a fourteen-row
+        // picker on a short terminal would be selectable and invisible, which is
+        // the same "you cannot reach it" defect as truncating the list. The
+        // window scrolls by the minimum needed to contain the cursor, so it only
+        // moves at the edges. `pos` then reports where the window really is,
+        // making the scrollbar thumb truthful rather than always parked at 0.
+        let start = match follow.filter(|_| body_budget > 0) {
+            Some(f) => f.saturating_sub(body_budget - 1).min(total - body_budget),
+            None => 0,
+        };
         (
+            start,
             body_budget,
             Some(chrome::Scroll {
-                pos: 0,
+                pos: start,
                 total,
                 visible: body_budget,
             }),
         )
     } else {
-        (total, None)
+        (0, total, None)
     };
-    let body: Vec<chrome::BodyLine> = lines[..take]
+    let body: Vec<chrome::BodyLine> = lines[start..start + take]
         .iter()
         .map(|l| chrome::BodyLine::from_str(l.as_ref()))
         .collect();
@@ -7923,6 +8088,7 @@ async fn attach_and_run(
                 | ServerMsg::LayoutTree { .. }
                 | ServerMsg::PaneLocation { .. }
                 | ServerMsg::TabSpawned { .. }
+                | ServerMsg::PaneFocused { .. }
                 | ServerMsg::LayoutApplied { .. }
                 | ServerMsg::LayoutGrafted { .. },
             ) => {}
@@ -8193,7 +8359,6 @@ async fn attach_and_run(
                     // which then overwrote the real reason with a generic one.
                     view.settle_backlog_pending_on_notice();
                     view.set_notice(text);
-                    let _ = raw_out(b"\x07");
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -8213,6 +8378,7 @@ async fn attach_and_run(
                     | ServerMsg::LayoutTree { .. }
                     | ServerMsg::PaneLocation { .. }
                     | ServerMsg::TabSpawned { .. }
+                    | ServerMsg::PaneFocused { .. }
                     | ServerMsg::LayoutApplied { .. }
                     | ServerMsg::LayoutGrafted { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {
@@ -9383,26 +9549,11 @@ async fn apply_hit(
             // exclude it here so a mission-grouped row's placement falls back
             // to a real target (the row's cwd match, else active, else first)
             // instead of leaking the virtual id into the picker.
-            let squads: Vec<u64> = view
-                .layout
-                .squads
-                .iter()
-                .map(|s| s.id)
-                .filter(|id| !is_mission_squad(*id))
-                .take(9)
-                .collect();
+            let squads: Vec<u64> = view.attach_dst_squads();
             if squads.is_empty() {
                 view.set_notice("no workspace to attach into".into());
             } else {
-                let target = squad
-                    .filter(|sid| squads.contains(sid))
-                    .or_else(|| {
-                        squads
-                            .contains(&view.layout.active_squad)
-                            .then_some(view.layout.active_squad)
-                    })
-                    .unwrap_or(squads[0]);
-                view.open_attach_place(id, target, squads);
+                view.open_attach_place(id, squad, squads);
             }
         }
     }
@@ -9493,6 +9644,11 @@ enum ModalKey {
     PageDown,
 }
 
+/// The ceiling on a partially-read escape sequence, shared by all four folds.
+/// A real CSI is far shorter, so this only ever fires on a pathological stream,
+/// and it is what stops one from growing the carry without limit.
+const MAX_ESC_CARRY: usize = 16;
+
 /// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
 /// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
 /// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
@@ -9548,9 +9704,30 @@ fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
                     continue;
                 }
                 _ => {
-                    // Unknown escape tail: swallow it whole (never leak).
+                    // Inside a CSI (`ESC [ ...`): consume the WHOLE sequence.
+                    // "swallow it whole (never leak)" used to be a comment
+                    // rather than a behaviour here: this arm dropped ONE byte
+                    // and let the rest of the sequence fall through as plain
+                    // keys, so Ctrl-Up (`ESC [ 1 ; 5 A`) leaked `;`, `5`, `A`.
+                    // Same defect the selector fold had, same fix.
+                    if b == 0x1b {
+                        // ESC aborts an in-progress sequence and starts a fresh
+                        // one, so a cancel is never eaten as a parameter.
+                        esc.clear();
+                        esc.push(0x1b);
+                        continue;
+                    }
+                    if (0x40..=0x7e).contains(&b) || esc.len() >= MAX_ESC_CARRY {
+                        esc.clear();
+                        continue;
+                    }
+                    if (0x20..=0x3f).contains(&b) {
+                        esc.push(b);
+                        continue;
+                    }
+                    // A C0 control mid-sequence is malformed: abandon the
+                    // sequence and reprocess the byte below rather than losing it.
                     esc.clear();
-                    continue;
                 }
             }
         }
@@ -10408,15 +10585,66 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
                 esc.push(b);
                 continue;
             }
-            if esc.as_slice() == [0x1b, b'['] {
-                match b {
-                    b'A' => keys.push(b'k'),
-                    b'B' => keys.push(b'j'),
-                    b'C' => keys.push(b'l'),
-                    b'D' => keys.push(b'h'),
-                    _ => {} // unknown sequence: swallowed whole
+            if esc.first() == Some(&0x1b) && esc.get(1) == Some(&b'[') {
+                // Inside a CSI sequence. Consume until its FINAL byte (0x40-0x7E)
+                // rather than dropping one byte and letting the tail out.
+                //
+                // "swallowed whole" used to be a comment, not a behaviour: a
+                // modified arrow like Ctrl-Up (`ESC [ 1 ; 5 A`) had its `1`
+                // swallowed and then leaked `;`, `5` and `A` as plain keys. That
+                // was survivable while these overlays closed on any key they did
+                // not recognise. Once a picker gained a cursor it was not: the
+                // leaked `5` reads as a digit, which in the move picker COMMITS,
+                // and the leaked `A`/`H` reads as an uppercase split key, which
+                // in the attach picker commits too. A function key (`ESC [ 1 5 ~`)
+                // leaks a digit the same way.
+                //
+                // Five overlays share this fold, so fixing it here fixes every
+                // door at once instead of guarding the two that were probed.
+                if (0x40..=0x7e).contains(&b) {
+                    // A BARE `ESC [ X` is a plain arrow. A parameterised one is a
+                    // modified arrow (ctrl/shift/alt) and means something this
+                    // layer has no mapping for, so it is dropped entirely rather
+                    // than aliased onto the unmodified key.
+                    if esc.len() == 2 {
+                        match b {
+                            b'A' => keys.push(b'k'),
+                            b'B' => keys.push(b'j'),
+                            b'C' => keys.push(b'l'),
+                            b'D' => keys.push(b'h'),
+                            _ => {} // unknown final byte: swallowed whole
+                        }
+                    }
+                    esc.clear();
+                    continue;
                 }
+                if (0x20..=0x3f).contains(&b) && esc.len() < MAX_ESC_CARRY {
+                    // A real parameter or intermediate byte (ECMA-48): keep
+                    // accumulating, up to the shared ceiling.
+                    esc.push(b);
+                    continue;
+                }
+                if esc.len() >= MAX_ESC_CARRY {
+                    // A pathological run of parameter bytes: drop the sequence
+                    // rather than growing the carry without limit.
+                    esc.clear();
+                    continue;
+                }
+                // Anything else is malformed: a C0 control landed mid-sequence.
+                // Treating it as a parameter would strand the parser and eat the
+                // operator's escape hatch - a truncated `ESC [` in the carry (an
+                // Alt-`[` press emits exactly that) would swallow the Esc meant
+                // to cancel the picker, and then swallow the following `q` too,
+                // because `q` is in the final-byte range. Abandon the sequence
+                // and let the byte be handled as if it arrived fresh, so a
+                // cancel always reaches the overlay. This also bounds the carry:
+                // it can only ever hold parameter bytes.
                 esc.clear();
+                if b == 0x1b {
+                    esc.push(0x1b);
+                } else {
+                    keys.push(b);
+                }
                 continue;
             }
             // Pending [ESC] + a non-'[' byte: that ESC was a bare Esc press.
@@ -10929,25 +11157,10 @@ async fn selector_keys(
                 // this one and `place_spawned_pane` cannot route it. Same reason
                 // the two no-op cases stay distinct: "no workspace" and "not
                 // attachable" are different problems to report.
-                let squads: Vec<u64> = view
-                    .layout
-                    .squads
-                    .iter()
-                    .map(|s| s.id)
-                    .filter(|id| !is_mission_squad(*id))
-                    .take(9)
-                    .collect();
+                let squads: Vec<u64> = view.attach_dst_squads();
                 match picked {
                     Some((id, owner)) if !squads.is_empty() => {
-                        let target = owner
-                            .filter(|sid| squads.contains(sid))
-                            .or_else(|| {
-                                squads
-                                    .contains(&view.layout.active_squad)
-                                    .then_some(view.layout.active_squad)
-                            })
-                            .unwrap_or(squads[0]);
-                        view.open_attach_place(id, target, squads);
+                        view.open_attach_place(id, owner, squads)
                     }
                     Some(_) => view.set_notice("no workspace to attach into".into()),
                     None => view.set_notice("placement requires an attachable agent".into()),
@@ -11124,19 +11337,12 @@ async fn selector_keys(
                 .and_then(|squad| {
                     let sq = view.layout.squads.iter().find(|s| s.id == squad)?;
                     let tid = sq.tabs.get(sq.active_tab).or_else(|| sq.tabs.first())?.id;
-                    let dsts: Vec<u64> = view
-                        .layout
-                        .squads
-                        .iter()
-                        // Exclude the source AND mission sentinels: a mission id
-                        // resolves to no server-side squad, so MoveTab into one is
-                        // refused. The other destination sites (Move-to-workspace,
-                        // the `p` attach picker) already guard this; the tab picker
-                        // was the holdout.
-                        .filter(|s| s.id != squad && !is_mission_squad(s.id))
-                        .map(|s| s.id)
-                        .take(9)
-                        .collect();
+                    // Exclude the source AND mission sentinels: a mission id
+                    // resolves to no server-side squad, so MoveTab into one is
+                    // refused. That rule now lives in `move_dst_squads`, which
+                    // the Move-to-workspace menu entry already uses - this site
+                    // was a fourth hand-rolled copy of the same list.
+                    let dsts: Vec<u64> = view.move_dst_squads(Some(squad));
                     (!dsts.is_empty()).then_some((tid, dsts))
                 });
                 match picked {
@@ -11154,23 +11360,93 @@ async fn selector_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Move-tab picker keys (x-96e8): a digit `1..=9` selects the numbered
-/// destination squad and sends [`Command::MoveTab`]; the captured id is
-/// re-validated against the CURRENT catalog first (stale -> BEL + close, the
-/// server refuses a stale id regardless). Esc/q cancels; any other key closes
-/// without acting. `take()` clears the picker either way, so a stale overlay
-/// can never resurrect a second move.
+/// Move-tab / move-pane picker keys (x-96e8; cursored by x-3e17).
+///
+/// Two axes reach the same destination. A digit `1..=9` commits the numbered
+/// squad in one keystroke, exactly as it always has - that is why digits still
+/// COMMIT here while in the attach picker they only select. The attach picker
+/// needs a second axis (the split direction) and so cannot commit on a digit;
+/// this picker has no second axis, so a one-key move is the whole gesture and
+/// there is nothing to gain by making it two.
+///
+/// The cursor is what reaches PAST nine, now that the list is uncapped: hjkl
+/// and the arrows move it, Enter/Space commits it. Which means the picker is no
+/// longer single-shot - it must survive a keypress that is neither. An unmapped
+/// key is now ignored rather than closing the overlay, because "j closed my
+/// picker" is exactly the surprise the cursor exists to remove.
+///
+/// The captured id is re-validated against the CURRENT catalog before sending
+/// (stale -> BEL + close; the server refuses a stale id regardless).
 async fn move_pick_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    let Some((src, squads)) = view.move_pick.take() else {
-        return Ok(StdinFlow::Continue);
+    let keys = {
+        let Some(picker) = view.move_pick.as_mut() else {
+            return Ok(StdinFlow::Continue);
+        };
+        let mut esc = std::mem::take(&mut picker.esc);
+        let keys = fold_selector_keys(&mut esc, bytes);
+        picker.esc = esc;
+        keys
     };
-    match bytes.first() {
-        Some(&b) if (b'1'..=b'9').contains(&b) => {
-            let idx = (b - b'1') as usize;
+
+    for key in keys {
+        // Cursor motion first: it is the only branch that leaves the picker open
+        // and unchanged otherwise.
+        let step = match key {
+            b'k' | b'h' => Some(-1isize),
+            b'j' | b'l' => Some(1isize),
+            _ => None,
+        };
+        if let Some(delta) = step {
+            if let Some(picker) = view.move_pick.as_mut() {
+                let len = picker.squads.len();
+                if len > 0 {
+                    let cur = picker.cursor.min(len - 1) as isize;
+                    picker.cursor = (cur + delta).clamp(0, len as isize - 1) as usize;
+                }
+            }
+            continue;
+        }
+        // A digit picks by ordinal, Enter/Space picks whatever the cursor is on.
+        // Everything else either cancels or is ignored.
+        let idx = match key {
+            // A digit past the END OF THE LIST names a row that was never
+            // there, so it is a BEL that leaves the picker open - the same
+            // answer the attach picker gives. Only an in-range digit is a
+            // commit attempt; closing on an out-of-range one would be the
+            // "j closed my picker" surprise the cursor exists to remove.
+            b'1'..=b'9' => {
+                let idx = (key - b'1') as usize;
+                let in_range = view
+                    .move_pick
+                    .as_ref()
+                    .is_some_and(|p| idx < p.squads.len());
+                if !in_range {
+                    let _ = raw_out(b"\x07");
+                    continue;
+                }
+                idx
+            }
+            b'\r' | b'\n' | b' ' => match view.move_pick.as_ref() {
+                Some(p) => p.cursor,
+                None => return Ok(StdinFlow::Continue),
+            },
+            0x1b | b'q' => {
+                view.move_pick = None;
+                return Ok(StdinFlow::Continue);
+            }
+            _ => continue,
+        };
+        // Committing consumes the picker, so a stale overlay can never
+        // resurrect a second move.
+        let Some(picker) = view.move_pick.take() else {
+            return Ok(StdinFlow::Continue);
+        };
+        let (src, squads) = (picker.src, picker.squads);
+        {
             match squads.get(idx) {
                 // The captured id must still name a live squad; the server
                 // refuses a stale id regardless, but pre-validating saves a
@@ -11231,9 +11507,7 @@ async fn move_pick_keys(
                 }
             }
         }
-        // Esc/q cancel silently; any other key just closes (the picker is
-        // single-shot, cleared by take() above).
-        _ => {}
+        return Ok(StdinFlow::Continue);
     }
     Ok(StdinFlow::Continue)
 }
@@ -11255,32 +11529,83 @@ async fn attach_place_keys(
 
     for key in keys {
         if (b'1'..=b'9').contains(&key) {
+            // The digit accelerator now JUMPS THE CURSOR rather than setting a
+            // separate selection, so the two axes cannot disagree about what is
+            // selected. Out of range (fewer than N workspaces) is a BEL, not a
+            // silent no-op: the operator asked for a row that is not there.
             let idx = (key - b'1') as usize;
-            let target = view
-                .attach_place
-                .as_ref()
-                .and_then(|picker| picker.squads.get(idx))
-                .copied();
-            match target.filter(|sid| view.layout.squads.iter().any(|s| s.id == *sid)) {
-                Some(target) => view.attach_place.as_mut().unwrap().target = target,
-                None => {
-                    view.set_notice("workspace is no longer available".into());
+            match view.attach_place.as_mut() {
+                Some(picker) if idx < picker.squads.len() => picker.cursor = idx,
+                _ => {
+                    // Out of range DROPS THE REST OF THE READ, it does not just
+                    // beep and carry on. Terminal input arrives in batches, so a
+                    // fast `9L` on a three-workspace layout would otherwise BEL
+                    // and then commit an immediate right-split into whatever the
+                    // cursor was already on - a placement the operator never
+                    // chose, from keys they typed believing row 9 existed. The
+                    // remaining bytes were composed against a model that just
+                    // proved wrong, so none of them may commit.
+                    let _ = raw_out(b"\x07");
+                    view.set_notice("no workspace at that number".into());
                     return Ok(StdinFlow::Continue);
                 }
             }
             continue;
         }
 
-        // (x-fbb1) Enter/Space = attach here: repoint the focused pane; the server picks
-        // swap-viewer vs take-over-idle-shell. "Here" is the stronger primary CTA, so it owns
-        // the confirm keys; `t` alone is the secondary new-tab. Route-anchored, so here ignores
-        // the digit-selected workspace (CurrentRoute + here, never a split).
+        // Lowercase h/j/k/l MOVE the cursor. They used to commit the attach with
+        // a split direction, which made a wrong guess a finalized placement
+        // rather than a mis-set toggle - and because `fold_selector_keys`
+        // rewrites the arrows to these same bytes irreversibly, pressing Down to
+        // scan the list attached the agent. Cursor motion is what the arrows
+        // already mean in every sibling overlay, so that is what they mean here.
+        //
+        // Split direction moves to UPPERCASE, which is not a new convention but
+        // the mux's existing one: keys.rs binds lowercase hjkl to focus movement
+        // and uppercase HJKL to resize. Lowercase navigates, uppercase acts on
+        // geometry. This picker was the one overlay that broke that rule.
+        let step = match key {
+            b'k' | b'h' => Some(-1isize),
+            b'j' | b'l' => Some(1isize),
+            _ => None,
+        };
+        if let Some(delta) = step {
+            if let Some(picker) = view.attach_place.as_mut() {
+                let len = picker.squads.len();
+                if len > 0 {
+                    // Clamped, no wrap - same discipline as the navigator cursor.
+                    let cur = picker.cursor.min(len - 1) as isize;
+                    picker.cursor = (cur + delta).clamp(0, len as isize - 1) as usize;
+                }
+            }
+            continue;
+        }
+
+        // Every commit key here acts on the CURSOR, except `.`, which never does.
+        // No key's meaning depends on whether the cursor has moved.
+        //
+        // Enter/Space used to be "attach here" (x-fbb1), which ignored the
+        // cursor and routed to CurrentRoute. That ruling was correct while the
+        // picker had no cursor to contradict it. Adding one removed its premise:
+        // the overlay drew a marker on ws10 and Enter attached somewhere else,
+        // with no notice, in exactly the case the cursor was added for. That is
+        // this node's own defect - a visible selection ignored by the obvious
+        // key - recreated one layer up.
+        //
+        // So Enter commits the cursor, always, and `here` keeps its distinct
+        // swap-viewer semantics under its own binding. Two different actions,
+        // two keys, no hidden mode: one key meaning either thing depending on
+        // cursor history would be the same class of trap.
         let (split, here) = match key {
-            b'h' => (Some(Some(Dir::Left)), false),
-            b'j' => (Some(Some(Dir::Down)), false),
-            b'k' => (Some(Some(Dir::Up)), false),
-            b'l' => (Some(Some(Dir::Right)), false),
-            b'\r' | b'\n' | b' ' => (Some(None), true),
+            b'H' => (Some(Some(Dir::Left)), false),
+            b'J' => (Some(Some(Dir::Down)), false),
+            b'K' => (Some(Some(Dir::Up)), false),
+            b'L' => (Some(Some(Dir::Right)), false),
+            b'\r' | b'\n' | b' ' => (Some(None), false),
+            // `.` = attach HERE: repoint the focused pane, and let the server
+            // pick swap-viewer vs take-over-idle-shell. Route-anchored, so it
+            // ignores the cursor by design rather than by accident.
+            b'.' => (Some(None), true),
             b't' => (Some(None), false),
             0x1b | b'q' => {
                 view.attach_place = None;
@@ -11297,9 +11622,13 @@ async fn attach_place_keys(
             view.set_notice("agent is no longer attachable".into());
             return Ok(StdinFlow::Continue);
         }
-        // Here is route-anchored - it never touches the digit-selected
+        // Here is route-anchored - it never touches the cursor-selected
         // workspace, so a vanished target must not block it (only split/new-tab).
-        if !here && !view.layout.squads.iter().any(|s| s.id == picker.target) {
+        // The staleness check still runs at commit, because the layout can shift
+        // under an open picker; the cursor only guarantees the index is in range
+        // of the list as drawn, not that the squad still exists.
+        let dst = picker.target();
+        if !here && !dst.is_some_and(|sid| view.layout.squads.iter().any(|s| s.id == sid)) {
             view.set_notice("workspace is no longer available".into());
             return Ok(StdinFlow::Continue);
         }
@@ -11308,10 +11637,9 @@ async fn attach_place_keys(
             &ClientMsg::Command(Command::AttachAgent {
                 id: picker.id,
                 placement: PanePlacement {
-                    target: if here {
-                        PaneTarget::CurrentRoute
-                    } else {
-                        PaneTarget::SquadId(picker.target)
+                    target: match dst.filter(|_| !here) {
+                        Some(sid) => PaneTarget::SquadId(sid),
+                        None => PaneTarget::CurrentRoute,
                     },
                     split,
                     here,
@@ -11448,15 +11776,23 @@ fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
                     esc.push(0x1b);
                 } else if (0x40..=0x7e).contains(&b) {
                     // CSI complete. Surface the three motion finals; swallow the
-                    // rest (whole sequence consumed either way - no leak).
-                    match b {
-                        b'A' => keys.push(NavKey::Up),
-                        b'B' => keys.push(NavKey::Down),
-                        b'Z' => keys.push(NavKey::ShiftTab),
-                        _ => {}
+                    // rest. Only a BARE `ESC [ X` counts: a parameterised
+                    // sequence is a MODIFIED key (Ctrl-Up is `ESC [ 1 ; 5 A`),
+                    // and aliasing it onto the unmodified one silently
+                    // reinterprets a chord the operator meant as something else.
+                    // This fold serves prefix+f, the navigator this change
+                    // promotes to the primary route, so it is the last place
+                    // that should guess.
+                    if esc.len() == 2 {
+                        match b {
+                            b'A' => keys.push(NavKey::Up),
+                            b'B' => keys.push(NavKey::Down),
+                            b'Z' => keys.push(NavKey::ShiftTab),
+                            _ => {}
+                        }
                     }
                     esc.clear();
-                } else if esc.len() >= 16 {
+                } else if esc.len() >= MAX_ESC_CARRY {
                     esc.clear();
                 } else {
                     esc.push(b);
@@ -12426,14 +12762,19 @@ mod tests {
         apply_hit(&mut view, hit, &mut buf).await.unwrap();
         let picker = view.attach_place.expect("picker opened");
         assert_ne!(
-            picker.target, mid,
+            picker.target(),
+            Some(mid),
             "target must not be the virtual mission id"
         );
         assert!(
             !picker.squads.contains(&mid),
             "the mission id must not be offered as a placement choice"
         );
-        assert_eq!(picker.target, 1, "falls back to the active real squad");
+        assert_eq!(
+            picker.target(),
+            Some(1),
+            "falls back to the active real squad"
+        );
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
@@ -13324,6 +13665,7 @@ mod tests {
             &chrome,
             &lines,
             &Theme::default_theme(),
+            None,
         );
 
         // The framed block (top + 2 body + bottom = 4 rows) centers in the
@@ -13368,6 +13710,7 @@ mod tests {
             &chrome,
             &lines,
             &Theme::default_theme(),
+            None,
         );
         let painted = |c: char| cells.iter().any(|cell| cell.c == c);
         // Positive markers: the windowed-in rows are painted.
@@ -13403,6 +13746,7 @@ mod tests {
             &chrome,
             &lines,
             &Theme::default_theme(),
+            None,
         );
         let painted = |c: char| cells.iter().any(|cell| cell.c == c);
         // No body content reaches the buffer: the body budget was zero.
@@ -16291,8 +16635,16 @@ mod tests {
         assert!(text.contains("panes"), "section header");
         assert!(text.contains("detach"), "the d binding's action");
         assert!(
-            text.contains("find: goto pane/agent"),
-            "the f binding's action"
+            text.contains("find: goto squad/tab/pane/agent"),
+            "the f binding's action names every row class nav_rows emits"
+        );
+        // The digit row must state its ceiling AND the way past it. Asserting
+        // both halves is what stops a later trim from restoring a bare
+        // `select tab`, which is the label that made `f` look like the lesser
+        // tool in the first place.
+        assert!(
+            text.contains("first 9") && text.contains("f goes past"),
+            "the 1-9 row states its ceiling and names the uncapped way past it"
         );
     }
 
@@ -18552,6 +18904,194 @@ mod tests {
     }
 
     #[test]
+    fn client_selector_fold_swallows_a_whole_parameterised_csi() {
+        // "swallowed whole" was a comment, not a behaviour: only the first byte
+        // after `ESC [` was dropped, so a modified arrow leaked its tail as
+        // plain keys. Harmless while every overlay closed on an unrecognised
+        // key; destructive once a picker gained a cursor, because the leaked
+        // bytes include DIGITS (which commit in the move picker) and UPPERCASE
+        // LETTERS (which commit a split in the attach picker).
+        for (name, seq) in [
+            ("ctrl-up", &b"\x1b[1;5A"[..]),
+            ("ctrl-left", &b"\x1b[1;5D"[..]),
+            ("shift-home", &b"\x1b[1;5H"[..]),
+            ("f5", &b"\x1b[15~"[..]),
+            ("page-up", &b"\x1b[5~"[..]),
+            ("mouse-ish", &b"\x1b[<35;80;24M"[..]),
+        ] {
+            let mut esc = Vec::new();
+            assert_eq!(
+                fold_selector_keys(&mut esc, seq),
+                Vec::<u8>::new(),
+                "{name} must leak nothing"
+            );
+            assert!(esc.is_empty(), "{name} leaves no carry");
+        }
+
+        // A parameterised arrow is NOT aliased onto the plain one: it means
+        // something this layer has no mapping for, so it is dropped rather than
+        // silently acted on as an unmodified press.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5B"), Vec::<u8>::new());
+
+        // Still split-safe: a parameterised sequence broken across reads leaks
+        // nothing either, and a real key after it still arrives.
+        let mut esc = Vec::new();
+        let mut keys = Vec::new();
+        for chunk in [&b"\x1b[1"[..], &b";5"[..], &b"A"[..], &b"j"[..]] {
+            keys.extend(fold_selector_keys(&mut esc, chunk));
+        }
+        assert_eq!(keys, b"j".to_vec(), "only the real keypress survives");
+        assert!(esc.is_empty());
+    }
+
+    #[test]
+    fn every_escape_fold_swallows_an_unrecognised_sequence_whole() {
+        // PARITY over all four folds, deliberately not four separate tests.
+        // The leak-whole-sequence guarantee was only ever asserted against
+        // `fold_search_input`, and the two folds nobody tested were the two that
+        // leaked: `fold_selector_keys` and `fold_modal_keys` each dropped ONE
+        // byte after `ESC [` and let the tail out as plain keys.
+        //
+        // That was survivable while every overlay closed on a key it did not
+        // recognise. Giving the pickers cursors is what weaponised it, because
+        // the leaked bytes are exactly the ones that now commit: a digit commits
+        // a MoveTab, and `ESC [ 1 ; 5 H` ends in the `H` that commits an attach
+        // split. A capability upgrade turned a dormant defect destructive.
+        //
+        // Written as one sweep so a FIFTH fold added later inherits the
+        // guarantee instead of inheriting nothing.
+        let sequences: &[(&str, &[u8])] = &[
+            ("ctrl-up", b"\x1b[1;5A"),
+            ("ctrl-down", b"\x1b[1;5B"),
+            ("ctrl-home", b"\x1b[1;5H"),
+            ("shift-tab-ish", b"\x1b[1;2Z"),
+            ("f5", b"\x1b[15~"),
+            ("f12", b"\x1b[24~"),
+            ("sgr-mouse", b"\x1b[<35;80;24M"),
+            ("unknown-final", b"\x1b[?1049h"),
+        ];
+        // Each fold reduced to "how many keys did this leak", so one loop covers
+        // four different return types.
+        type Fold = (&'static str, fn(&mut Vec<u8>, &[u8]) -> usize);
+        let folds: &[Fold] = &[
+            ("fold_modal_keys", |e, b| fold_modal_keys(e, b).len()),
+            ("fold_selector_keys", |e, b| fold_selector_keys(e, b).len()),
+            ("fold_search_input", |e, b| fold_search_input(e, b).len()),
+            ("fold_nav_input", |e, b| fold_nav_input(e, b).len()),
+        ];
+        for (fold_name, fold) in folds {
+            for (seq_name, seq) in sequences {
+                // Whole sequence in one read.
+                let mut esc = Vec::new();
+                assert_eq!(fold(&mut esc, seq), 0, "{fold_name} leaked on {seq_name}");
+                assert!(esc.is_empty(), "{fold_name} left carry after {seq_name}");
+
+                // ...and split at every boundary, since a real terminal read can
+                // cut anywhere and a fold that only works on whole chunks is not
+                // actually safe.
+                for cut in 1..seq.len() {
+                    let mut esc = Vec::new();
+                    let leaked = fold(&mut esc, &seq[..cut]) + fold(&mut esc, &seq[cut..]);
+                    assert_eq!(leaked, 0, "{fold_name} leaked on {seq_name} split at {cut}");
+                    assert!(
+                        esc.is_empty(),
+                        "{fold_name} left carry after split {seq_name} at {cut}"
+                    );
+                }
+            }
+            // A pathological parameter run is dropped rather than growing the
+            // carry without limit.
+            let mut esc = Vec::new();
+            let flood: Vec<u8> = b"\x1b["
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(b'1').take(500))
+                .collect();
+            fold(&mut esc, &flood);
+            assert!(
+                esc.len() <= MAX_ESC_CARRY,
+                "{fold_name} carry grew to {} on a parameter flood",
+                esc.len()
+            );
+        }
+    }
+
+    #[test]
+    fn client_selector_fold_abandons_a_malformed_csi_and_frees_the_cancel() {
+        // A CSI carry must never swallow the operator's escape hatch. Alt-`[`
+        // emits exactly `ESC [`, which leaves a truncated sequence in the carry.
+        // Treating every non-final byte as a parameter would then absorb the Esc
+        // meant to cancel, and absorb the following `q` too (it is in the
+        // final-byte range) - the cancel eaten twice. ECMA-48 parameter and
+        // intermediate bytes are 0x20-0x3f, so a C0 control is malformed and
+        // ends the sequence instead.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b["), Vec::<u8>::new());
+        assert_eq!(esc, vec![0x1b, b'['], "the truncated CSI is pending");
+        // Esc abandons it and starts a fresh bare-Esc, which resolves on the
+        // next byte exactly as a normal bare Esc does.
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b"), Vec::<u8>::new());
+        assert_eq!(
+            esc,
+            vec![0x1b],
+            "the stale CSI is gone, a bare Esc is armed"
+        );
+        assert_eq!(
+            fold_selector_keys(&mut esc, b"q"),
+            vec![0x1b],
+            "the cancel reaches the overlay instead of being eaten"
+        );
+
+        // A non-Esc control mid-sequence is delivered rather than swallowed.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5"), Vec::<u8>::new());
+        assert_eq!(
+            fold_selector_keys(&mut esc, b"\r"),
+            b"\r".to_vec(),
+            "Enter mid-sequence is not lost"
+        );
+        assert!(esc.is_empty(), "and the carry is released");
+    }
+
+    #[tokio::test]
+    async fn move_picker_ignores_a_modified_arrow_instead_of_moving_a_tab() {
+        // The regression probe, at the door rather than the fold: Ctrl-Up used
+        // to leak `;`, `5`, `A`, and the `5` COMMITTED a MoveTab into whatever
+        // squad happened to be fifth. Before the cursor landed those bytes only
+        // closed the picker, so this was a change from harmless to destructive.
+        for seq in [&b"\x1b[1;5A"[..], &b"\x1b[15~"[..]] {
+            let mut v = two_pane_view();
+            widen_to_squads(&mut v, 14);
+            v.selector = Some(0);
+            selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+            let mut buf: Vec<u8> = Vec::new();
+            move_pick_keys(&mut v, seq, &mut buf).await.unwrap();
+            assert!(buf.is_empty(), "{seq:?} must send no MoveTab");
+            assert!(v.move_pick.is_some(), "{seq:?} leaves the picker open");
+            assert_eq!(v.move_pick.as_ref().unwrap().cursor, 0, "and unmoved");
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_picker_ignores_a_modified_arrow_instead_of_attaching() {
+        // Same leak, other door. `ESC [ 1 ; 5 H` ends in the letter `H`, which
+        // this PR made a commit key, so the tail committed an attach splitting
+        // left - the exact defect class this PR exists to remove, reached
+        // through a key nobody thinks of as a split.
+        for seq in [&b"\x1b[1;5H"[..], &b"\x1b[1;5A"[..]] {
+            let mut v = unified_rows_view();
+            widen_to_squads(&mut v, 14);
+            open_attach_by_click(&mut v).await;
+            let mut buf: Vec<u8> = Vec::new();
+            attach_place_keys(&mut v, seq, &mut buf).await.unwrap();
+            assert!(buf.is_empty(), "{seq:?} must send no AttachAgent");
+            let picker = v.attach_place.as_ref().expect("picker stays open");
+            assert_eq!(picker.cursor, 0, "{seq:?} moves nothing");
+        }
+    }
+
+    #[test]
     fn client_selector_rows_reanchor_on_catalog_shrink() {
         let mut view = two_pane_view();
         view.selector = Some(3);
@@ -19588,9 +20128,10 @@ mod tests {
             "a not-yet-spawned watch-only peek attach opens the placement picker"
         );
         assert!(buf2.is_empty(), "nothing sent until a direction is chosen");
-        // Choose a right split -> AttachAgent with split Right.
+        // Choose a right split -> AttachAgent with split Right. Uppercase: the
+        // lowercase twins are cursor motion now.
         let mut buf2b: Vec<u8> = Vec::new();
-        attach_place_keys(&mut v, b"l", &mut buf2b).await.unwrap();
+        attach_place_keys(&mut v, b"L", &mut buf2b).await.unwrap();
         let mut cur = std::io::Cursor::new(buf2b);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
@@ -20042,9 +20583,11 @@ mod tests {
         assert!(buf.is_empty(), "nothing sent until a direction is chosen");
         assert!(v.attach_place.is_some(), "Enter opens the placement picker");
         assert_eq!(v.selector, None, "the picker replaces the selector");
-        // Choosing a direction sends the AttachAgent with that split.
+        // Choosing a direction sends the AttachAgent with that split. Uppercase:
+        // lowercase now moves the cursor (arrows fold to the same bytes, so a
+        // scan of the list must never commit).
         let mut buf2: Vec<u8> = Vec::new();
-        attach_place_keys(&mut v, b"j", &mut buf2).await.unwrap();
+        attach_place_keys(&mut v, b"J", &mut buf2).await.unwrap();
         let mut cur = std::io::Cursor::new(buf2);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
@@ -20063,10 +20606,24 @@ mod tests {
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         let picker = v.attach_place.as_ref().expect("placement picker opens");
         assert_eq!(picker.id, "c19cd2c3");
-        assert_eq!(picker.target, 1);
+        assert_eq!(picker.target(), Some(1));
         assert_eq!(picker.squads, vec![1, 2]);
+        // The footer must let each axis name its OWN keys, and must say which
+        // key acts on the `›` marker. The old footer listed the split
+        // directions as if they were list navigation, which is the mislabel
+        // half of the reported defect.
         let overlay = v.attach_place_lines(picker).join("\n");
-        for label in ["left", "right", "up", "down", "new tab", "cancel"] {
+        for label in [
+            "hjkl/arrows move",
+            "1-9 jump",
+            // One entry, not two: enter/space/t send byte-identical messages, so
+            // a footer listing "attach to ›" and "t new tab" separately promised
+            // a placement choice that does not exist.
+            "enter/space/t new tab in ›",
+            "HJKL split",
+            "attach here",
+            "cancel",
+        ] {
             assert!(overlay.contains(label), "missing {label}: {overlay}");
         }
         assert!(buf.is_empty());
@@ -20075,11 +20632,14 @@ mod tests {
 
     #[tokio::test]
     async fn attach_placement_selects_target_and_direction() {
+        // The digit jumps the cursor; UPPERCASE commits with a split direction.
+        // Lowercase `h` here would now only move the cursor (see
+        // attach_placement_arrows_move_the_cursor_without_attaching).
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, b"2h", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"2H", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
         let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
         assert_eq!(
@@ -20099,16 +20659,344 @@ mod tests {
         assert!(v.attach_place.is_none());
     }
 
+    /// Replace a view's layout with `n` real workspaces (ids 1..=n), so a picker
+    /// opened over it has to cope with more destinations than there are digits.
+    /// 14 is the operator's real number, and the number at which five used to
+    /// vanish.
+    fn widen_to_squads(v: &mut View, n: u64) {
+        v.layout.squads = (1..=n).map(|i| meta(i, &format!("ws{i}"), 1, 0)).collect();
+    }
+
+    /// The `display_rows()` index of the attachable bg-claude agent row. Read
+    /// rather than hardcoded, because widening the workspace list shifts every
+    /// row index below it.
+    fn attachable_agent_row(v: &View) -> usize {
+        v.display_rows()
+            .iter()
+            .position(|r| {
+                matches!(r, DisplayRow::Agent(a)
+                    if a.pane_id.is_none() && !a.exited && a.attach_id.is_some())
+            })
+            .expect("an attachable agent row")
+    }
+
+    /// Open the attach picker through the CLICK door (`apply_hit`), which does
+    /// not depend on a sideline row index.
+    async fn open_attach_by_click(v: &mut View) {
+        apply_hit(
+            v,
+            ChromeHit::OpenAttachPlace {
+                id: "c19cd2c3".into(),
+                squad: None,
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn attach_placement_invalid_target_digit_drops_the_input_batch() {
+    async fn attach_picker_reaches_past_the_ninth_workspace() {
+        // AC3-HP: with 14 workspaces, the 10th and the 14th are REACHABLE. Under
+        // `.take(9)` they were not in the list at all, so no key could get to
+        // them and nothing told the operator they existed.
+        let mut v = unified_rows_view();
+        widen_to_squads(&mut v, 14);
+        open_attach_by_click(&mut v).await;
+        let mut buf = Vec::new();
+        assert_eq!(
+            v.attach_place.as_ref().unwrap().squads.len(),
+            14,
+            "every workspace is a candidate, not the first nine"
+        );
+
+        // Walk to the 10th (index 9): past the digit range by construction.
+        attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
+            .await
+            .unwrap();
+        assert!(buf.is_empty(), "walking the list attaches nothing");
+        assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
+
+        // ...and on to the 14th, where the clamp stops it.
+        attach_place_keys(&mut v, b"jjjjjjjj", &mut buf)
+            .await
+            .unwrap();
+        let picker = v.attach_place.as_ref().unwrap();
+        assert_eq!(picker.target(), Some(14), "the last workspace is reachable");
+        assert_eq!(picker.cursor, 13, "clamped at the end, no wrap");
+
+        // Committing there really targets the 14th, not a nine-capped stand-in.
+        attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+                assert_eq!(placement.target, PaneTarget::SquadId(14));
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_picker_rows_past_nine_carry_no_digit() {
+        // The drawn numbering must never lie about what a digit will do: nine
+        // digits exist, so exactly nine rows are numbered and the rest are not.
+        let mut v = unified_rows_view();
+        widen_to_squads(&mut v, 14);
+        open_attach_by_click(&mut v).await;
+        let picker = v.attach_place.as_ref().unwrap();
+        let lines = v.attach_place_lines(picker);
+        assert!(lines[9].contains("9 ws9"), "the ninth row is numbered");
+        assert!(
+            !lines[10].contains("10 ws10"),
+            "the tenth carries no ordinal: {:?}",
+            lines[10]
+        );
+        assert!(lines[10].contains("ws10"), "but it IS listed");
+    }
+
+    #[tokio::test]
+    async fn both_attach_picker_entry_paths_build_the_same_candidate_list() {
+        // The click path (apply_hit) and the keyboard path (p/Enter) used to
+        // build this list independently, which is how they drifted before. One
+        // helper now feeds both; this pins that they cannot drift again by
+        // asserting the two paths agree on the SAME layout.
+        // Two views built identically: unified_rows_view() is deterministic, so
+        // the only difference between them is which door gets opened.
+        let widen = |v: &mut View| {
+            widen_to_squads(v, 14);
+            v.layout.squads.push(mission_meta(5, "epic  0/4"));
+        };
+        let mut click = unified_rows_view();
+        widen(&mut click);
+        let mut keyboard = unified_rows_view();
+        widen(&mut keyboard);
+
+        open_attach_by_click(&mut click).await;
+
+        keyboard.selector = Some(attachable_agent_row(&keyboard));
+        selector_keys(&mut keyboard, b"p", &mut Vec::new())
+            .await
+            .unwrap();
+
+        let a = click.attach_place.as_ref().expect("click opens the picker");
+        let b = keyboard
+            .attach_place
+            .as_ref()
+            .expect("keyboard opens the picker");
+        assert_eq!(a.squads, b.squads, "one list, two doors");
+        assert_eq!(a.squads.len(), 14, "and it is the uncapped one");
+        assert!(
+            !a.squads.iter().any(|&id| is_mission_squad(id)),
+            "with the mission sentinel excluded on both"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_picker_reaches_past_the_ninth_workspace() {
+        // The same ceiling in the OTHER overlay. Pinning it only where the
+        // operator happened to hit it would leave the class half-fixed - which
+        // is the whole reason wave 3b exists.
+        let mut v = two_pane_view();
+        widen_to_squads(&mut v, 14);
+        v.selector = Some(0); // squad 1
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"m", &mut buf).await.unwrap();
+        let picker = v.move_pick.as_ref().expect("picker opens");
+        assert_eq!(
+            picker.squads.len(),
+            13,
+            "every workspace but the source is a destination"
+        );
+
+        // Destinations are 2..=14; index 12 is the 14th workspace.
+        move_pick_keys(&mut v, b"jjjjjjjjjjjj", &mut buf)
+            .await
+            .unwrap();
+        assert!(buf.is_empty(), "walking the list moves nothing");
+        let picker = v.move_pick.as_ref().expect("the picker stays open");
+        assert_eq!(picker.target(), Some(14), "the last workspace is reachable");
+
+        // Enter commits the cursor, so the destination past nine is not just
+        // visible but selectable.
+        move_pick_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::MoveTab { squad, .. }) => assert_eq!(squad, 14),
+            other => panic!("expected MoveTab, got {other:?}"),
+        }
+        assert!(v.move_pick.is_none(), "committing closes the picker");
+    }
+
+    #[tokio::test]
+    async fn move_picker_ignores_an_unmapped_key_instead_of_closing() {
+        // It used to close on ANY key that was not a digit. That was safe while
+        // it was single-shot and digit-only; with a cursor it would mean the
+        // picker vanished under the operator mid-scan.
+        let mut v = two_pane_view();
+        widen_to_squads(&mut v, 14);
+        v.selector = Some(0);
+        selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        assert!(
+            v.move_pick.is_some(),
+            "an unmapped key is ignored, not fatal"
+        );
+        // `q` still closes instantly. A bare Esc lands on the FOLLOWING keypress
+        // instead, which is fold_selector_keys' documented behaviour and the
+        // price of supporting arrows at all: a lone ESC is indistinguishable
+        // from the head of `ESC [ A` until the next byte arrives. Every other
+        // folded overlay behaves the same way.
+        move_pick_keys(&mut v, b"q", &mut buf).await.unwrap();
+        assert!(v.move_pick.is_none(), "q cancels");
+    }
+
+    #[tokio::test]
+    async fn move_picker_out_of_range_digit_bels_and_keeps_the_picker() {
+        // The same answer the attach picker gives: a digit past the END of the
+        // list names a row that was never drawn, so it BELs and the picker
+        // stays open. Closing on it would be the "my picker vanished" surprise
+        // the cursor was added to remove, and it fired on the one keypress an
+        // operator makes while learning how wide the list is.
+        let mut v = two_pane_view();
+        v.selector = Some(0); // squad 1; two_pane_view has squad 2 as the only dst
+        selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        assert_eq!(v.move_pick.as_ref().unwrap().squads.len(), 1);
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"5", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "an out-of-range digit sends nothing");
+        assert!(
+            v.move_pick.is_some(),
+            "and leaves the picker open to try again"
+        );
+        assert_eq!(v.move_pick.as_ref().unwrap().cursor, 0, "cursor unmoved");
+    }
+
+    #[tokio::test]
+    async fn attach_placement_keys_do_not_depend_on_cursor_history() {
+        // The hard constraint behind superseding x-fbb1: a key must mean the
+        // same thing whether or not the cursor has moved. The tempting cheap
+        // fix was "Enter means here on the starting row, and commits the cursor
+        // once moved", which is a hidden mode - the exact class this node
+        // closes. Enter on an UNMOVED cursor must still commit that cursor,
+        // never silently fall back to the route.
+        let mut v = unified_rows_view();
+        widen_to_squads(&mut v, 14);
+        open_attach_by_click(&mut v).await;
+        let start = v.attach_place.as_ref().unwrap().target().unwrap();
+        let mut buf = Vec::new();
+        attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+                assert_eq!(
+                    placement.target,
+                    PaneTarget::SquadId(start),
+                    "Enter commits the cursor even when it has never moved"
+                );
+                assert!(!placement.here, "and is not secretly the route");
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+
+        // And the cursor's ROUTE to a row does not change what commits: digit
+        // and arrows landing on the same index must produce the same command.
+        let by_digit = {
+            let mut v = unified_rows_view();
+            widen_to_squads(&mut v, 14);
+            open_attach_by_click(&mut v).await;
+            let mut buf = Vec::new();
+            attach_place_keys(&mut v, b"4\r", &mut buf).await.unwrap();
+            buf
+        };
+        let by_arrows = {
+            let mut v = unified_rows_view();
+            widen_to_squads(&mut v, 14);
+            open_attach_by_click(&mut v).await;
+            let mut buf = Vec::new();
+            attach_place_keys(&mut v, b"jjj\r", &mut buf).await.unwrap();
+            buf
+        };
+        assert_eq!(
+            by_digit, by_arrows,
+            "how the cursor got there cannot matter"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
+        // A digit past the end of the list is a BEL, not a selection, and the
+        // notice says the row is not there rather than claiming the workspace is
+        // "no longer available" - it never was. The cursor stays put and the
+        // picker stays open, so the operator can just press the right key next.
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, b"9h", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"9", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "an out-of-range digit sends nothing");
+        let picker = v.attach_place.as_ref().expect("picker stays open");
+        assert_eq!(picker.cursor, 0, "and moves the cursor nowhere");
+    }
+
+    #[tokio::test]
+    async fn attach_placement_out_of_range_digit_drops_the_rest_of_the_batch() {
+        // The BEL alone is not enough. Terminal reads arrive in batches, so the
+        // keys typed AFTER a bad digit are already in the same buffer - and they
+        // were composed believing row 9 existed. `L` would commit a right split
+        // into whatever the cursor happened to be on, a placement the operator
+        // never chose, with only a beep between intent and commit. So the bad
+        // digit abandons the whole read: nothing is sent, the cursor is untouched
+        // and the picker stays open on screen the operator can now actually read.
+        let mut v = unified_rows_view();
+        v.selector = Some(8); // bg-claude
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"9L", &mut buf).await.unwrap();
+        assert!(
+            buf.is_empty(),
+            "the trailing commit key must not reach the socket"
+        );
+        let picker = v.attach_place.as_ref().expect("picker stays open");
+        assert_eq!(picker.cursor, 0, "and the cursor never moved");
+        assert!(
+            v.notice.is_some(),
+            "the operator is told why nothing happened"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_placement_arrows_move_the_cursor_without_attaching() {
+        // AC3-FR, the exact reported defect: `j` (and therefore Down, which
+        // fold_selector_keys rewrites to `j`) used to return
+        // Some(Some(Dir::Down)) and attach IMMEDIATELY. Scanning the list with
+        // the arrow keys finalized a placement the operator never chose. This is
+        // the test that had to fail before the fix.
+        for key in [b"j".as_slice(), b"\x1b[B".as_slice()] {
+            let mut v = unified_rows_view();
+            v.selector = Some(8); // bg-claude
+            let mut buf = Vec::new();
+            selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+            assert_eq!(v.attach_place.as_ref().unwrap().cursor, 0);
+            attach_place_keys(&mut v, key, &mut buf).await.unwrap();
+            assert!(buf.is_empty(), "key {key:?} must send no AttachAgent");
+            let picker = v.attach_place.as_ref().expect("picker stays open");
+            assert_eq!(picker.cursor, 1, "key {key:?} moves the cursor");
+            assert_eq!(picker.target(), Some(2));
+        }
+        // ...and back up, clamped at the top rather than wrapping.
+        let mut v = unified_rows_view();
+        v.selector = Some(8);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"kk", &mut buf).await.unwrap();
         assert!(buf.is_empty());
-        assert_eq!(v.attach_place.as_ref().unwrap().target, 1);
-        assert!(v.notice.is_some());
+        assert_eq!(
+            v.attach_place.as_ref().unwrap().cursor,
+            0,
+            "clamped, no wrap"
+        );
     }
 
     #[tokio::test]
@@ -20147,14 +21035,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_placement_enter_and_space_send_here() {
-        // (x-fbb1) Enter and Space are the primary CTA: attach here (route-anchored, no split),
-        // NOT a new tab. `t` alone is the new tab.
+    async fn attach_placement_enter_commits_the_cursor_and_dot_attaches_here() {
+        // SUPERSEDES x-fbb1's Enter-is-here ruling, which was correct while the
+        // picker had no cursor to contradict it. Adding a cursor removed its
+        // premise: the overlay drew a marker on one workspace and Enter
+        // attached to another, which is this node's own defect one layer up.
+        //
+        // The rule is now that no key's meaning depends on cursor history.
+        // Enter/Space ALWAYS commit the cursor; `.` NEVER does.
         for key in [b"\r".as_slice(), b" ".as_slice()] {
             let mut v = unified_rows_view();
-            v.selector = Some(8); // bg-claude
+            widen_to_squads(&mut v, 14);
+            open_attach_by_click(&mut v).await;
             let mut buf = Vec::new();
-            selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+            // Drive the cursor somewhere the digits cannot reach, which is the
+            // case the cursor exists for and the case the old Enter broke.
+            attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
+                .await
+                .unwrap();
+            assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
             attach_place_keys(&mut v, key, &mut buf).await.unwrap();
             let mut cur = std::io::Cursor::new(buf);
             let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
@@ -20165,15 +21064,33 @@ mod tests {
                     placement: PanePlacement {
                         tab: None,
                         at: None,
-                        target: PaneTarget::CurrentRoute,
+                        target: PaneTarget::SquadId(10),
                         split: None,
-                        here: true,
+                        here: false,
                         fallback: PlacementFallback::NewTab,
                     },
                 }),
-                "key {key:?} sends here"
+                "key {key:?} must attach to the marked workspace"
             );
             assert!(v.attach_place.is_none());
+        }
+
+        // `.` keeps the here semantics under its own binding, and ignores the
+        // cursor BY DESIGN rather than by accident - including after the cursor
+        // has moved, so its meaning is history-independent too.
+        let mut v = unified_rows_view();
+        widen_to_squads(&mut v, 14);
+        open_attach_by_click(&mut v).await;
+        let mut buf = Vec::new();
+        attach_place_keys(&mut v, b"jjj", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b".", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+                assert_eq!(placement.target, PaneTarget::CurrentRoute);
+                assert!(placement.here, "`.` is route-anchored");
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
         }
     }
 
@@ -20183,9 +21100,11 @@ mod tests {
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        v.attach_place.as_mut().unwrap().target = 2;
+        // Park the cursor on squad 2, then delete it out from under the open
+        // picker: the cursor guarantees an in-range index, never a live squad.
+        v.attach_place.as_mut().unwrap().cursor = 1;
         v.layout.squads.retain(|s| s.id != 2);
-        attach_place_keys(&mut v, b"l", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
         assert!(buf.is_empty());
         assert!(v.notice.is_some());
         assert!(v.attach_place.is_none());
@@ -22927,7 +23846,7 @@ mod tests {
         assert!(buf.is_empty(), "opening the picker sends nothing");
         assert_eq!(
             v.move_pick,
-            Some((MoveSrc::Tab(1), vec![2])),
+            Some(MovePick::new(MoveSrc::Tab(1), vec![2])),
             "picker captures the squad's active tab id and the non-source squads"
         );
 
@@ -22959,7 +23878,10 @@ mod tests {
         v.layout.squads.push(mission_meta(5, "epic  0/4"));
         v.selector = Some(0); // squad 1
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
-        let (_, dsts) = v.move_pick.expect("picker opens with squad 2 available");
+        let dsts = v
+            .move_pick
+            .expect("picker opens with squad 2 available")
+            .squads;
         assert!(
             !dsts.iter().any(|&id| is_mission_squad(id)),
             "no mission sentinel in the destinations"
@@ -22972,7 +23894,7 @@ mod tests {
         // A digit sends MoveTab for the numbered squad; a captured id that
         // vanished is refused locally (no wire message).
         let mut v = two_pane_view();
-        v.move_pick = Some((MoveSrc::Tab(7), vec![2])); // move tab 7 to squad 2 (digit 1)
+        v.move_pick = Some(MovePick::new(MoveSrc::Tab(7), vec![2])); // move tab 7 to squad 2 (digit 1)
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -22985,7 +23907,7 @@ mod tests {
 
         // A stale captured id (not in the current catalog) sends nothing.
         let mut v = two_pane_view();
-        v.move_pick = Some((MoveSrc::Tab(7), vec![999]));
+        v.move_pick = Some(MovePick::new(MoveSrc::Tab(7), vec![999]));
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert!(
@@ -23063,7 +23985,7 @@ mod tests {
             id: 200,
             label: "dst".into(),
         });
-        v.move_pick = Some((MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
+        v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert_eq!(
@@ -23079,7 +24001,7 @@ mod tests {
 
         // Destination with no leaf pane: anchor is None -> a notice, no command.
         let mut v = two_pane_view(); // squad 2's tabs carry no PaneMeta here
-        v.move_pick = Some((MoveSrc::Pane(10), vec![2]));
+        v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2]));
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "no anchor -> nothing on the wire");

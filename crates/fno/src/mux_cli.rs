@@ -25,8 +25,8 @@
 //! - `shell-init`: `{shell, snippet}` (the raw snippet without `--json`).
 //! - `doctor`: `{ok: bool, checks: [{check, verdict: ok|warn|fail|n/a, detail,
 //!   remedy}]}`.
-//! - `pane ls|read|run|send|wait|kill|claim|release`: the per-reply shapes in
-//!   [`render_reply`].
+//! - `pane ls|read|run|send|wait|kill|claim|release|split|break|focus`: the
+//!   per-reply shapes in [`render_reply`].
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -1456,6 +1456,7 @@ pub const EXIT_TARGET_NOT_IDLE: i32 = 15; // block pipe: receiving agent not idl
 pub const EXIT_NOT_FOUND: i32 = 16; // where: the fno_id is not in the registry (x-d865)
 pub const EXIT_NOT_PANE_HOSTED: i32 = 17; // where: in registry but hosts no live pane (x-d865)
 pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not be read (x-d865)
+pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x-3e17)
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1528,6 +1529,12 @@ enum PaneCmd {
     Break {
         pane: u64,
         name: Option<String>,
+    },
+    /// (x-3e17) `pane focus <pane>`: move the OPERATOR's view to a pane, rather
+    /// than acting on the pane for an agent. Every other `pane` verb is the
+    /// latter; this is the one that points a human at something.
+    Focus {
+        pane: u64,
     },
     Run {
         cwd: Option<String>,
@@ -1632,11 +1639,18 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// Parse the tokens after `mux pane` into a [`ParsedPane`]. Pure, so the whole
 /// grammar (verbs, flags, the exit-code-bearing outcomes) is unit-testable
 /// without a socket.
+/// The `pane` verbs, named ONCE. Two messages quote this list - the
+/// missing-verb one and the unknown-verb one - and they had already drifted:
+/// `split` and `break` shipped without reaching the first, so an operator who
+/// typed a bare `fno mux pane` to discover the surface was told verbs that
+/// exist do not.
+const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
+
 fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
-        .ok_or_else(|| "pane needs a verb: ls|read|run|send|wait|kill|claim|release".to_string())?;
+        .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
 
     // `run` is special: leading options/directives, then the command argv
     // verbatim (its own flags are NOT ours to parse), optionally after `--`.
@@ -1829,6 +1843,9 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             pane: pane_arg("break")?,
             name: name.filter(|n| !n.trim().is_empty()),
         },
+        "focus" => PaneCmd::Focus {
+            pane: pane_arg("focus")?,
+        },
         "send" => {
             let pane = pane_arg("send")?;
             let source = match (text, stdin) {
@@ -1862,11 +1879,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         "release" => PaneCmd::Release {
             pane: pane_arg("release")?,
         },
-        other => {
-            return Err(format!(
-                "unknown pane verb: {other} (ls|read|run|send|wait|kill|claim|release|split|break)"
-            ))
-        }
+        other => return Err(format!("unknown pane verb: {other} ({PANE_VERBS})")),
     };
     Ok(ParsedPane { session, json, cmd })
 }
@@ -2533,6 +2546,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             CONTROL_TIMEOUT,
         ),
         PaneCmd::Break { pane, name } => (ControlVerb::PaneBreak { pane, name }, CONTROL_TIMEOUT),
+        PaneCmd::Focus { pane } => (ControlVerb::PaneFocus { pane }, CONTROL_TIMEOUT),
         PaneCmd::Read { pane, lines, block } => (
             ControlVerb::PaneRead { pane, lines, block },
             CONTROL_TIMEOUT,
@@ -2731,6 +2745,36 @@ fn render_reply(
             }
             EXIT_OK
         }
+        ServerMsg::PaneFocused {
+            pane,
+            squad_id,
+            squad_name,
+            tab_id,
+            clients_moved,
+        } => {
+            // The receipt names the RESOLVED location and how many viewers
+            // actually ended up there. `clients_moved` is printed even when it
+            // is the obvious 1, because the number is the whole point: a bare
+            // "ok" would prove only that the command was accepted.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pane_id": pane,
+                        "squad_id": squad_id,
+                        "squad_name": squad_name,
+                        "tab_id": tab_id,
+                        "clients_moved": clients_moved,
+                    })
+                );
+            } else {
+                let sq = squad_name.as_deref().unwrap_or("-");
+                println!(
+                    "{pane} squad={squad_id} ({sq}) tab={tab_id} clients_moved={clients_moved}"
+                );
+            }
+            EXIT_OK
+        }
         ServerMsg::TabSpawned { tab_id } => {
             // pane break receipt: EXACTLY the machine-readable new tab id.
             if json {
@@ -2905,6 +2949,11 @@ fn render_reply(
                 EXIT_NOT_PANE_HOSTED
             } else if code == err_code::REGISTRY_UNAVAILABLE {
                 EXIT_REGISTRY_UNAVAILABLE
+            } else if code == err_code::NO_CLIENT {
+                // (x-3e17) `pane focus` with nobody watching. Distinct from the
+                // dead-pane EXIT_ERROR so a caller can tell "your pane is gone"
+                // from "your mux is running but unattended" and re-notify later.
+                EXIT_NO_CLIENT
             } else {
                 EXIT_ERROR
             }
@@ -3736,6 +3785,13 @@ mod tests {
                 name: Some("solo".into()),
             }
         );
+        // (x-3e17) `pane focus <pane>` takes the pane and nothing else; a missing
+        // id is usage, never a focus of pane 0.
+        assert_eq!(
+            parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
+            PaneCmd::Focus { pane: 31 }
+        );
+        assert!(parse_pane_args(&os(&["focus"])).is_err());
         assert_eq!(
             parse_pane_args(&os(&["ls", "--fno-id", "abc123"]))
                 .unwrap()
