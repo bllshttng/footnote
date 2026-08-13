@@ -15,6 +15,15 @@ cli = typer.Typer(name="event", help="emit and audit events", no_args_is_help=Tr
 # reason from bloating an events.jsonl line while still landing the event.
 _PROTOCOL_DATA_STR_CAP = 500
 
+# Event types a reader in ANOTHER checkout must be able to see, so they are
+# mirrored into the global log as well as the project one.
+#
+# Small on purpose. Membership is earned by having a cross-checkout reader:
+# `review_attestation` gates `fno pr merge`, which runs from canonical while the
+# reviewer runs in a worktree. `review_coverage` needs no entry here because
+# loopcheck.rs emits it to both logs itself.
+GLOBAL_MIRROR_TYPES = frozenset({"review_attestation"})
+
 
 @cli.callback()
 def _event_callback(
@@ -380,6 +389,32 @@ def emit(
     except Exception as exc:
         typer.echo(f"error: failed to append event: {exc}", err=True)
         raise typer.Exit(code=1)
+
+    # CROSS-CHECKOUT TYPES ALSO REACH THE GLOBAL LOG.
+    #
+    # The project log is written wherever the emitter happens to run, which for
+    # a review is a worktree. `fno pr merge` runs from canonical and reads
+    # canonical, so a worktree-local attestation is a satisfied gate that reads
+    # as an unsatisfiable one - silently, with a refusal naming a count and not
+    # a location. loopcheck.rs already fixed exactly this for `review_coverage`
+    # by emitting to both logs; `review_attestation` goes through this path
+    # instead and kept the defect. The global log is the one file every
+    # checkout of a repo stands in.
+    #
+    # Best-effort: the durable project append above already succeeded, so a
+    # failure here must not fail the emit and lose that record.
+    if type_ in GLOBAL_MIRROR_TYPES:
+        try:
+            from fno.paths import state_dir
+
+            global_events = state_dir() / "events.jsonl"
+            if global_events.resolve() != Path(resolved_events).resolve():
+                append_event(event, events_path=global_events)
+        except Exception as exc:  # noqa: BLE001 - never lose the project append
+            typer.echo(
+                f"warning: {type_} not mirrored to the global log: {exc}",
+                err=True,
+            )
 
     # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
     # lineage exists. Fired AFTER the durable append so the events.jsonl record

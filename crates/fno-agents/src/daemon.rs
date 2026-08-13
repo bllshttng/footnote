@@ -385,6 +385,12 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
 pub struct GcSummary {
     pub reaped: Vec<String>,
     pub kept_dirty: Vec<(String, String)>,
+    /// Rows removed on absolute age alone, with nothing to corroborate.
+    ///
+    /// Kept SEPARATE from `reaped` on purpose. A backstop folded into one total
+    /// becomes the main path silently, and the corroboration gate it bypasses
+    /// turns into decoration. Reported at every pass, including zero.
+    pub reaped_backstop: Vec<String>,
 }
 
 /// Distinct canonical repo roots the registry knows about, deduplicated.
@@ -756,6 +762,9 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     // `created_at` is the spawn-stamped identity discriminant: a replacement
     // session carries a fresh one.
     let mut to_reap: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    // Rows in `to_reap` that got there on age alone, keyed by registry name.
+    let mut backstop_ids: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     let mut to_stamp: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     let mut to_clear: std::collections::BTreeMap<String, String> =
@@ -825,6 +834,10 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
                 to_reap.insert(e.name.clone(), e.created_at.clone());
+            }
+            crate::gc::GcAction::ReapBackstop => {
+                to_reap.insert(e.name.clone(), e.created_at.clone());
+                backstop_ids.insert(e.name.clone(), id.clone());
             }
             crate::gc::GcAction::StampExit => {
                 to_stamp.insert(e.name.clone(), e.created_at.clone());
@@ -945,11 +958,19 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
                             ("termination_event", Value::Bool(termination_event)),
                         ]),
                     );
-                    summary.reaped.push(if e.short_id.is_empty() {
+                    let reaped_id = if e.short_id.is_empty() {
                         e.name.clone()
                     } else {
                         e.short_id.clone()
-                    });
+                    };
+                    // A backstop removal is counted ONLY in its own list, never
+                    // in both. Two totals that overlap cannot be compared, and
+                    // comparing them is the point.
+                    if backstop_ids.contains_key(&e.name) {
+                        summary.reaped_backstop.push(reaped_id);
+                    } else {
+                        summary.reaped.push(reaped_id);
+                    }
                 }
             }
         }

@@ -12,12 +12,31 @@
 
 use crate::AgentStatus;
 
+/// How many grace windows a row with nothing to corroborate is kept before the
+/// absolute-age backstop removes it. Large on purpose: the backstop is the
+/// escape hatch for rows a data defect made unjudgeable, not a second normal
+/// path out of the registry.
+pub const BACKSTOP_GRACE_MULTIPLE: i64 = 168;
+
 /// What the GC sweep should do with one registry row this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcAction {
     /// Remove the row now: terminal/dead, strictly past the grace window, and
     /// (for a worktree-owning row) the worktree is clean.
     Reap,
+    /// Remove the row on absolute age alone, with NO corroborating signal.
+    ///
+    /// The corroboration gate below is fail-closed on purpose, and unbounded
+    /// growth is its honest cost: a row carrying an identity but neither a pid
+    /// nor a transcript offers nothing to corroborate with, so it is kept
+    /// forever. This is the pressure valve, never the answer - the fix is
+    /// upstream, refusing to write a row that cannot be judged by its own
+    /// evidence.
+    ///
+    /// It is a SEPARATE variant so the sweep can report it separately. Folded
+    /// into `Reap`, it silently becomes the main path and turns the
+    /// corroboration into decoration.
+    ReapBackstop,
     /// First tick we observe this row dead: stamp `exited_at` to start the grace
     /// clock. The row stays visible for the whole grace window after this.
     StampExit,
@@ -149,6 +168,13 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
                 || row.transcript_fresh == Some(false)
                 || !row.liveness_surface;
             if !independently_gone {
+                // ABSOLUTE-AGE BACKSTOP. At this horizon, no signal for that
+                // long is itself a signal. Deliberately many multiples of the
+                // grace window, so it can never overtake corroboration as the
+                // ordinary route out of the registry.
+                if now.saturating_sub(exited) > grace_secs.saturating_mul(BACKSTOP_GRACE_MULTIPLE) {
+                    return GcAction::ReapBackstop;
+                }
                 return GcAction::Keep;
             }
             if !row.owns_worktree {
@@ -455,6 +481,63 @@ mod tests {
     fn permanent_dead_is_terminal() {
         let row = GcRow {
             status: AgentStatus::PermanentDead,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- The absolute-age backstop -----------------------------------------
+    //
+    // A row with an identity but no pid and no transcript offers nothing to
+    // corroborate with, so the fail-closed gate keeps it forever and the
+    // registry grows without bound. These three pin the valve: it opens only at
+    // the far horizon, it is a DISTINCT verdict so the sweep can report it
+    // apart from corroborated reaps, and it never front-runs corroboration.
+
+    /// Uncorroborated: identity recorded, pid unknown, transcript unknown.
+    fn uncorroborated(exited_at: i64) -> GcRow {
+        GcRow {
+            pid_confirmed_dead: false,
+            liveness_surface: true,
+            transcript_fresh: None,
+            exited_at: Some(exited_at),
+            ..reapable()
+        }
+    }
+
+    #[test]
+    fn uncorroborated_row_is_kept_before_the_backstop_horizon() {
+        // Just past grace, nowhere near the horizon. This is the case the
+        // corroboration gate exists for, and the backstop must not shorten it.
+        assert_eq!(
+            gc_action(&uncorroborated(NOW - GRACE - 1), NOW, GRACE),
+            GcAction::Keep
+        );
+        // One second short of the horizon: still kept. Without this, an
+        // off-by-a-window backstop would pass the test below unnoticed.
+        let edge = NOW - GRACE * BACKSTOP_GRACE_MULTIPLE;
+        assert_eq!(gc_action(&uncorroborated(edge), NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn uncorroborated_row_past_the_horizon_reaps_as_backstop() {
+        let past = NOW - GRACE * BACKSTOP_GRACE_MULTIPLE - 1;
+        // NOT `Reap`. A backstop folded into the corroborated verdict becomes
+        // the main path silently and turns the gate into decoration.
+        assert_eq!(
+            gc_action(&uncorroborated(past), NOW, GRACE),
+            GcAction::ReapBackstop
+        );
+    }
+
+    #[test]
+    fn a_corroborated_row_never_reports_as_backstop() {
+        // Same far-past age, but with a positive signal. The ordinary verdict
+        // must win, or the two counts stop meaning what they say.
+        let past = NOW - GRACE * BACKSTOP_GRACE_MULTIPLE - 1;
+        let row = GcRow {
+            transcript_fresh: Some(false),
+            exited_at: Some(past),
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
