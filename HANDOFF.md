@@ -28,6 +28,19 @@ Steps 1 to 3 of the original plan are DONE. What remains is the rewrite, and one
    **This one touches an enforced control.** `scripts/diagnostics/verb-callers.py:150` pins `"pr evidence-required": 1` as one of the four controls that exist because the instrument was falsified. Update the control to the new verb path IN THE SAME EDIT, and confirm it still finds the `skills/pr/SKILL.md` caller inside `$(...)` afterwards. A control that stops finding its caller emits no candidate list at all, which is the designed behaviour, so a mistake here is loud rather than silent.
 2. **THE REWRITE.** `backlog` 73 -> about 15, `agents` 40 -> about 12, `mail` 16 -> about 6. That is roughly 96 leaves and it is the whole remaining distance to under 100. Every naming skill, doc, and hook gets rewritten with it.
 
+### Folding the top level comes AFTER the cuts (operator decision, 2026-08-12)
+
+Folding a top-level group under another moves a NAME; it does not cut a leaf.
+`fno codemap` becoming `fno backlog codemap` is still one leaf.
+Measured at 321 leaves across 58 top-level names: 25 of those names hold exactly one verb (so folding them gains nothing), 19 hold 2-4, and 14 hold 237 of the 321.
+
+There are no free leaves left up there.
+Ten top-level names collide by name with a nested leaf (`done`/`backlog done`, `whoami`/`agents whoami`, `restart`/`agents restart`, `status`/`agents status`, and six more), which is the shape that made `backlog inbox` worth nine free leaves.
+Every one of the ten resolves to a DIFFERENT callback, so none is a duplicate registration.
+That check is `iter_python_leaves()` compared on `cmd.callback.__wrapped__`; re-run it after the rewrite, because the rewrite is what could create a true alias.
+
+So fold the top level for coherence, sequenced AFTER the rewrite.
+
 ### The rest of step 4 is not a deletion, and this is measured
 
 The relay brief said steps 1 to 4 delete without touching a caller.

@@ -204,3 +204,42 @@ def test_attestation_attester_session_reads_opencode_marker(tmp_path: Path) -> N
     )
     assert r.returncode == 0, r.stderr
     assert _last_event(repo)["data"]["attester_session_id"] == "opencode-session-cccc"
+
+
+def test_a_flag_shaped_reviewer_emits_nothing(tmp_path: Path) -> None:
+    """`--help` must not write gate evidence.
+
+    `$1` was taken as the reviewer name with no validation, so
+    `emit-attestation.sh --help` emitted a real `verdict=pass`
+    review_attestation against the current HEAD: ASKING THE SCRIPT HOW TO RUN
+    IT stamped the merge gate. Any typo'd or stray flag did the same. No
+    reviewer name in any registry begins with `-`, so the whole shape is
+    refused rather than the one spelling.
+    """
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
+    env = {**os.environ, "FNO": "fno-py"}
+
+    helped = subprocess.run(
+        ["bash", str(_SCRIPT), "--help"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert helped.returncode == 0
+    assert "Usage:" in helped.stdout
+
+    flagged = subprocess.run(
+        ["bash", str(_SCRIPT), "--bogus"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert flagged.returncode == 2
+    assert "not a reviewer name" in flagged.stderr
+
+    # The positive control: neither run wrote a journal, and a REAL reviewer
+    # name still does. Without this half, a script that refused everything
+    # would pass the two assertions above.
+    assert not (repo / ".fno" / "events.jsonl").exists()
+    ok = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert _last_event(repo)["data"]["reviewer"] == "code-review"

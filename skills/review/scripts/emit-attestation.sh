@@ -16,6 +16,29 @@
 #   [verdict]   pass (default) | fail
 set -euo pipefail
 
+usage() {
+  sed -n '13,16p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# A flag-shaped first argument is NEVER a reviewer name. Without this, `--help`
+# was accepted as one and emitted a real `verdict=pass` attestation against the
+# current HEAD: asking this script how to run it wrote evidence onto the merge
+# gate. Any typo'd or stray flag did the same. There is no reviewer name in any
+# registry that begins with `-`, so refusing the whole shape costs nothing and
+# closes the class rather than the one spelling.
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -*)
+    echo "emit-attestation: '$1' is a flag, not a reviewer name; no event emitted" >&2
+    echo >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
 reviewer="${1:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
 verdict="${2:-pass}"
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
