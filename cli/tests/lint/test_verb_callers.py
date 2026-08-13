@@ -49,7 +49,7 @@ def test_load_curriculum_empty_file(tmp_path):
 
 
 def test_curriculum_end_to_end_reports_complement():
-    """The real curriculum computes a 277-verb complement with cull candidates.
+    """The real curriculum computes a 283-verb complement with cull candidates.
 
     Slow (runs the corpus sweep); verifies the feature integrates with the
     canonical sweep + controls and that the checked-in curriculum is valid.
@@ -61,7 +61,7 @@ def test_curriculum_end_to_end_reports_complement():
     )
     assert proc.returncode == 0, proc.stderr
     assert "taught (curriculum): 90" in proc.stdout
-    assert "complement (untaught): 277" in proc.stdout
+    assert "complement (untaught): 283" in proc.stdout
     assert "cull candidates in complement" in proc.stdout
 
 
