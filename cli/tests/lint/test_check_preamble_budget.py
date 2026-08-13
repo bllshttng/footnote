@@ -249,26 +249,53 @@ def test_two_positional_roots_are_rejected(tmp_path: Path) -> None:
     assert "expected at most one repo root" in result.stderr
 
 
-def test_workflow_filter_covers_discovery_rule() -> None:
-    """AC9-EDGE: no measured path can change without making the job reachable."""
+def _covered_by(path: str, filters: list[str]) -> bool:
+    """True when a GitHub paths filter would make `path` fire the job."""
+    for entry in filters:
+        if entry == path:
+            return True
+        if entry.endswith("/**") and path.startswith(entry[:-2]):
+            return True
+    return False
+
+
+def test_workflow_filter_covers_every_measured_path() -> None:
+    """AC9-EDGE: no measured path can change without making the job reachable.
+
+    Coverage, not literal membership: `skills/**` subsumes the individual
+    `skills/using-fno/SKILL.md` entry it replaced, and it has to, because the
+    gate now measures every `skills/*/SKILL.md` description. A filter that named
+    only using-fno would leave the descriptions ceiling unreachable from CI.
+    """
     raw = WORKFLOW.read_text(encoding="utf-8")
     workflow = yaml.safe_load(raw)
     triggers = workflow[True]
     push_paths = triggers["push"]["paths"]
     pull_request_paths = triggers["pull_request"]["paths"]
-    required = {
+    measured = [
         "AGENTS.md",
         "CLAUDE.md",
-        ".claude/rules/**",
+        ".claude/rules/worktrees.md",
         "skills/using-fno/SKILL.md",
+        "skills/mail/SKILL.md",
+        "skills/target/SKILL.md",
         "scripts/ci/check-preamble-budget.sh",
         ".github/workflows/preamble-budget.yml",
-    }
+    ]
 
-    assert required <= set(push_paths)
+    uncovered = [p for p in measured if not _covered_by(p, push_paths)]
+    assert not uncovered, f"paths the workflow would not fire on: {uncovered}"
     assert push_paths == pull_request_paths
     assert "&preamble_budget_paths" in raw
     assert "*preamble_budget_paths" in raw
+
+
+def test_workflow_filter_would_miss_an_unlisted_path() -> None:
+    """Negative control: the coverage helper can actually return False."""
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    push_paths = workflow[True]["push"]["paths"]
+
+    assert not _covered_by("cli/src/fno/doctor.py", push_paths)
 
 
 def test_doctor_report_is_silent_when_gate_is_absent(tmp_path: Path) -> None:
@@ -454,3 +481,227 @@ def test_doctor_resolves_the_worktree_from_a_subdirectory() -> None:
     assert line is not None
     assert line.startswith("preamble: ")
     assert f" / {CEILING_BYTES} B (" in line
+
+
+# --- The second budget: always-loaded skill descriptions ---------------------
+
+
+def _gate_constant(name: str) -> int:
+    match = re.search(rf"^{name}=(\d+)", GATE.read_text(), re.MULTILINE)
+    assert match is not None, f"{name} assignment not found in {GATE}"
+    return int(match.group(1))
+
+
+def _add_skill(
+    repo_root: Path, name: str, description: str, *, model_invoked: bool = True
+) -> None:
+    skill = repo_root / "skills" / name / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["---", f"name: {name}", f'description: "{description}"']
+    if not model_invoked:
+        lines.append("disable-model-invocation: true")
+    lines += ["---", "", "body", ""]
+    skill.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _measured_tree(
+    tmp_path: Path, *, descriptions: dict[str, str] | None = None
+) -> Path:
+    """A fixture repo the gate can measure, with real skill frontmatter."""
+    _write_fixed_roots(tmp_path, agents_bytes=500)
+    for name, description in (descriptions or {"alpha": "a" * 100}).items():
+        _add_skill(tmp_path, name, description)
+    return tmp_path
+
+
+def _run_at(
+    repo_root: Path, *, force_band: bool = False
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    if force_band:
+        env["PREAMBLE_BAND_FORCE"] = "1"
+    return subprocess.run(
+        ["bash", str(GATE), str(repo_root)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
+def test_descriptions_are_measured_and_reported() -> None:
+    """The gate measured ~85% of the always-loaded text before this budget."""
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "descriptions (always-loaded skill pointers):" in result.stdout
+    assert "always loaded, both budgets:" in result.stdout
+
+
+def test_descriptions_total_matches_an_independent_reader() -> None:
+    """Cross-check the gate's regex reader against a yaml-based one.
+
+    Two readers that disagree mean one of them is wrong, and the budget is only
+    worth having if the number under it is the real number.
+    """
+    expected = 0
+    for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
+        text = skill.read_text(encoding="utf-8")
+        match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        if not match:
+            continue
+        front = yaml.safe_load(match.group(1)) or {}
+        if front.get("disable-model-invocation"):
+            continue
+        description = front.get("description")
+        if not description:
+            continue
+        expected += len(str(description).encode("utf-8"))
+
+    payload = json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+
+    assert payload["descriptions"]["total_bytes"] == expected
+    assert payload["always_loaded_bytes"] == (
+        payload["total_bytes"] + payload["descriptions"]["total_bytes"]
+    )
+
+
+def test_user_invoked_skill_costs_nothing(tmp_path: Path) -> None:
+    """disable-model-invocation strips the pointer, so it leaves the budget."""
+    repo = _measured_tree(tmp_path, descriptions={"counted": "c" * 50})
+    _add_skill(repo, "hidden", "h" * 500, model_invoked=False)
+
+    payload = json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json", str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+
+    assert payload["descriptions"]["count"] == 1
+    assert payload["descriptions"]["total_bytes"] == 50
+
+
+def test_description_growth_past_the_ceiling_fails(tmp_path: Path) -> None:
+    """A fatter pointer is a real per-turn cost and has to be paid for."""
+    ceiling = _gate_constant("DESCRIPTIONS_CEILING_BYTES")
+    repo = _measured_tree(tmp_path, descriptions={"padding": "x" * (ceiling + 1)})
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "skill descriptions are" in result.stderr
+    assert "over the" in result.stderr
+
+
+def test_unbanked_description_cut_fails_and_names_the_value(tmp_path: Path) -> None:
+    """The band is two-sided here too: a cut is banked or it is not a cut."""
+    band = _gate_constant("DESCRIPTIONS_BAND_BYTES")
+    ceiling = _gate_constant("DESCRIPTIONS_CEILING_BYTES")
+    tiny = ceiling - band - 100
+    repo = _measured_tree(tmp_path, descriptions={"small": "s" * tiny})
+
+    result = _run_at(repo, force_band=True)
+
+    assert result.returncode == 1
+    assert f"DESCRIPTIONS_CEILING_BYTES={tiny + band}" in result.stderr
+
+
+def test_broken_reader_cannot_pass_as_zero(tmp_path: Path) -> None:
+    """A zero must never read as 'the skills are free'.
+
+    The grep cross-check exists because the reader and the budget would
+    otherwise fail the same way: a parser that stops matching returns 0 bytes,
+    indistinguishable from a repo that genuinely has no model-invoked skills.
+    """
+    repo = _measured_tree(tmp_path)
+    broken = repo / "skills" / "broken" / "SKILL.md"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    # A description line grep can see, with no frontmatter fence for the reader.
+    broken.write_text("description: visible to grep only\n", encoding="utf-8")
+    (repo / "skills" / "alpha" / "SKILL.md").unlink()
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "the frontmatter reader broke" in result.stderr
+
+
+def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
+    """A consumer checkout that vendors the rules without the skills is normal."""
+    _write_fixed_roots(tmp_path, agents_bytes=500)
+
+    result = _run_at(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "descriptions (always-loaded skill pointers):" not in result.stdout
+
+
+def test_multiline_description_is_refused_not_undercounted(tmp_path: Path) -> None:
+    """A folded scalar would measure as its marker, a silent undercount."""
+    repo = _measured_tree(tmp_path)
+    folded = repo / "skills" / "folded" / "SKILL.md"
+    folded.parent.mkdir(parents=True, exist_ok=True)
+    folded.write_text(
+        "---\nname: folded\ndescription: >\n  folded across lines\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "multi-line description scalar" in result.stderr
+
+
+# --- The two-sided file ceiling ----------------------------------------------
+
+
+def test_live_repo_sits_inside_the_band() -> None:
+    """The ceiling tracks the floor: this is what a banked cut looks like."""
+    band = _gate_constant("RATCHET_NUDGE_BYTES")
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    spare = int(re.search(r"tok at 4 B/tok\), (\d+) to spare", result.stdout).group(1))
+    assert spare <= band, f"{spare} B spare exceeds the {band} B band"
+
+
+def test_unbanked_file_cut_fails_and_names_the_value(tmp_path: Path) -> None:
+    """This path used to print an advisory and exit 0, so no cut was banked."""
+    band = _gate_constant("RATCHET_NUDGE_BYTES")
+    # Park the descriptions budget inside its own band, or it fails first and
+    # this test reads the wrong gate's message.
+    in_band = _gate_constant("DESCRIPTIONS_CEILING_BYTES") - 100
+    repo = _measured_tree(tmp_path, descriptions={"alpha": "a" * in_band})
+
+    result = _run_at(repo, force_band=True)
+
+    assert result.returncode == 1
+    assert "more than the" in result.stderr
+    total = int(re.search(r"check-preamble-budget: (\d+) /", result.stderr).group(1))
+    assert f"CEILING_BYTES={total + band}" in result.stderr
+
+
+def test_band_is_scoped_to_the_gates_own_repo(tmp_path: Path) -> None:
+    """A fixture root is not what the constants budget, so the band stays off."""
+    repo = _measured_tree(tmp_path)
+
+    result = _run_at(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "more than the" not in result.stderr
+

@@ -43,6 +43,13 @@ CEILING_BYTES=37400
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom. Ordinary edits move far less than this and pass.
 RATCHET_NUDGE_BYTES=2000
+
+# Second budget: the `description` of every model-invoked skill. Measured 6750 B
+# across 22 skills when this was added, against Matt Pocock's 3114 B across 15.
+# Two-sided from the start on the same reasoning as the file ceiling above; a
+# one-sided ceiling is the thing that only ever ratchets up.
+DESCRIPTIONS_CEILING_BYTES=7400
+DESCRIPTIONS_BAND_BYTES=750
 QUIET=0
 JSON_MODE=0
 REPO_ROOT="."
@@ -109,6 +116,20 @@ fi
   exit 1
 }
 
+# The two-sided band asks whether THIS repo's ceiling still tracks THIS repo's
+# content, so it applies only when the gate measures its own tree. A fixture
+# root passed as an argument is not what the constants budget, and holding it
+# to them would make every small fixture look like an unbanked cut. The
+# over-ceiling half still applies to every root, fixtures included.
+# PREAMBLE_BAND_FORCE=1 applies the band to any root. It exists so the two
+# failure paths below are reachable from a fixture: a gate branch no test can
+# enter is the decorative-guard shape this file is here to refuse.
+SCRIPT_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+MEASURED_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+BAND_APPLIES=0
+[[ "$MEASURED_ROOT" == "$SCRIPT_REPO_ROOT" ]] && BAND_APPLIES=1
+[[ "${PREAMBLE_BAND_FORCE:-}" == "1" ]] && BAND_APPLIES=1
+
 FILES=(
   "$REPO_ROOT/AGENTS.md"
   "$REPO_ROOT/CLAUDE.md"
@@ -160,6 +181,78 @@ APPROX_TOKENS=$((TOTAL_BYTES / 4))
 SPARE_BYTES=$((CEILING_BYTES - TOTAL_BYTES))
 APPROX_TOKEN_K=$(awk -v bytes="$TOTAL_BYTES" 'BEGIN { printf "%.1f", bytes / 4000 }')
 
+# Model-invoked skill descriptions are always-loaded too: the harness holds every
+# one in context on every turn so it can decide what to fire. They sit outside
+# FILES, so before this block the gate measured ~85% of the always-loaded text
+# and reported it as the whole. Budgeted separately because they are a different
+# surface with a different cure - a description is a context pointer, tuned by
+# sharpening its wording, not by trading bytes against AGENTS.md.
+DESC_RECORDS="$(python3 - "$REPO_ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+rows = []
+for path in sorted(root.glob("skills/*/SKILL.md")):
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        continue
+    block = m.group(1)
+    if re.search(r"^disable-model-invocation:\s*true\s*$", block, re.M):
+        continue
+    d = re.search(r"^description:[ \t]*(.*)$", block, re.M)
+    if not d:
+        continue
+    raw = d.group(1).strip()
+    # Fail loudly on a folded/literal scalar rather than measuring the marker
+    # and under-counting: a silent zero here would read as "no description".
+    if raw in ("|", ">") or raw.startswith(("|", ">")):
+        sys.stderr.write(
+            f"check-preamble-budget: {path} uses a multi-line description scalar, "
+            "which this reader does not measure. Put it on one line.\n"
+        )
+        raise SystemExit(2)
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1]
+        raw = raw.replace('\\"', '"') if d.group(1).strip()[0] == '"' else raw
+    rows.append((len(raw.encode("utf-8")), path.parent.name))
+for size, name in sorted(rows, reverse=True):
+    print(f"{size}\t{name}")
+PY
+)" || exit 1
+
+DESC_TOTAL=0
+DESC_COUNT=0
+while IFS=$'\t' read -r bytes name; do
+  [[ -z "$name" ]] && continue
+  DESC_TOTAL=$((DESC_TOTAL + bytes))
+  DESC_COUNT=$((DESC_COUNT + 1))
+done <<< "$DESC_RECORDS"
+DESC_SPARE=$((DESCRIPTIONS_CEILING_BYTES - DESC_TOTAL))
+ALWAYS_LOADED_BYTES=$((TOTAL_BYTES + DESC_TOTAL))
+
+# Independent cross-check on the reader, by grep rather than by frontmatter
+# parsing, so the two instruments cannot fail the same way. A file carrying a
+# description line while opting into model invocation MUST be counted above.
+# Without this, a broken reader returns 0 and the gate reads that absence as
+# "the skills are free" - which is the failure this whole budget exists to stop.
+EXPECT_DESC=0
+shopt -s nullglob
+for skill in "$REPO_ROOT"/skills/*/SKILL.md; do
+  grep -qE '^description:' "$skill" || continue
+  grep -qE '^disable-model-invocation:[[:space:]]*true' "$skill" && continue
+  EXPECT_DESC=$((EXPECT_DESC + 1))
+done
+shopt -u nullglob
+
+if (( EXPECT_DESC > 0 && DESC_COUNT == 0 )); then
+  echo "check-preamble-budget: grep sees ${EXPECT_DESC} model-invoked descriptions but the reader parsed 0." >&2
+  echo "  A zero here means the frontmatter reader broke, not that the skills are free." >&2
+  exit 1
+fi
+
 if (( JSON_MODE )); then
   printf '%s' "$MANIFEST_RECORDS" | python3 -c '
 import json
@@ -180,15 +273,28 @@ for raw in sys.stdin:
         "estimated_tokens": (size + 3) // 4,
         "content_hash": content_hash,
     })
+descriptions = []
+for raw in sys.argv[5].splitlines():
+    if not raw.strip():
+        continue
+    size, name = raw.split("\t", 1)
+    descriptions.append({"skill": name, "bytes": int(size)})
 print(json.dumps({
     "total_bytes": total,
     "estimated_tokens": (total + 3) // 4,
     "ceiling_bytes": ceiling,
     "sources": sources,
+    "descriptions": {
+        "total_bytes": int(sys.argv[3]),
+        "ceiling_bytes": int(sys.argv[4]),
+        "count": len(descriptions),
+        "skills": descriptions,
+    },
+    "always_loaded_bytes": total + int(sys.argv[3]),
 }, separators=(",", ":")))
-' "$TOTAL_BYTES" "$CEILING_BYTES"
+' "$TOTAL_BYTES" "$CEILING_BYTES" "$DESC_TOTAL" "$DESCRIPTIONS_CEILING_BYTES" "$DESC_RECORDS"
 elif (( QUIET )); then
-  echo "preamble: ${TOTAL_BYTES} / ${CEILING_BYTES} B (~${APPROX_TOKEN_K}K tok/turn)"
+  echo "preamble: ${TOTAL_BYTES} / ${CEILING_BYTES} B (~${APPROX_TOKEN_K}K tok/turn); descriptions: ${DESC_TOTAL} / ${DESCRIPTIONS_CEILING_BYTES} B"
 else
   if (( SPARE_BYTES >= 0 )); then
     echo "check-preamble-budget: ${TOTAL_BYTES} / ${CEILING_BYTES} bytes (~${APPROX_TOKENS} tok at 4 B/tok), ${SPARE_BYTES} to spare"
@@ -202,6 +308,16 @@ else
     [[ "$relative" == "skills/using-fno/SKILL.md" ]] && marker="  [shipped to every consumer]"
     printf '  %8d  %s%s\n' "$bytes" "$relative" "$marker"
   done < <(printf '%s' "$RECORDS" | LC_ALL=C sort -rn -k1,1)
+
+  if (( DESC_COUNT > 0 )); then
+    echo
+    echo "  descriptions (always-loaded skill pointers): ${DESC_TOTAL} / ${DESCRIPTIONS_CEILING_BYTES} bytes across ${DESC_COUNT} model-invoked skills, ${DESC_SPARE} to spare"
+    while IFS=$'\t' read -r bytes name; do
+      [[ -z "$name" ]] && continue
+      printf '  %8d  %s\n' "$bytes" "$name"
+    done <<< "$DESC_RECORDS"
+    echo "  always loaded, both budgets: ${ALWAYS_LOADED_BYTES} bytes (~$((ALWAYS_LOADED_BYTES / 4)) tok/turn)"
+  fi
 
   if (( INJECTIONS > 1 )); then
     echo
@@ -217,13 +333,44 @@ else
   fi
 fi
 
+DESC_FAILED=0
+if (( DESC_COUNT == 0 )); then
+  # No model-invoked skills in this tree (fixture repos, or a consumer that
+  # vendors the rules without the skills). Nothing to budget. The reader-broke
+  # case is already refused above, so this branch cannot hide a failure.
+  :
+elif (( DESC_TOTAL > DESCRIPTIONS_CEILING_BYTES )); then
+  DESC_FAILED=1
+  if (( ! QUIET && ! JSON_MODE )); then
+    {
+      echo "check-preamble-budget: skill descriptions are ${DESC_TOTAL} bytes, $((DESC_TOTAL - DESCRIPTIONS_CEILING_BYTES)) over the ${DESCRIPTIONS_CEILING_BYTES}-byte ceiling."
+      echo "  A description is a context pointer held in every session's context."
+      echo "  Fix: sharpen the wording (front-load the leading word, one trigger per"
+      echo "  branch, cut identity the skill body already carries), or set"
+      echo "  DESCRIPTIONS_CEILING_BYTES in this script with the reason in the PR body."
+    } >&2
+  fi
+elif (( BAND_APPLIES && DESC_SPARE > DESCRIPTIONS_BAND_BYTES )); then
+  DESC_FAILED=1
+  if (( ! QUIET && ! JSON_MODE )); then
+    {
+      echo "check-preamble-budget: skill descriptions are ${DESC_TOTAL} bytes, leaving ${DESC_SPARE} spare, more than the ${DESCRIPTIONS_BAND_BYTES}-byte band."
+      echo "  Fix: set DESCRIPTIONS_CEILING_BYTES=$((DESC_TOTAL + DESCRIPTIONS_BAND_BYTES)) in this script, in this PR."
+    } >&2
+  fi
+fi
+
+if (( DESC_FAILED )); then
+  exit 1
+fi
+
 if (( TOTAL_BYTES <= CEILING_BYTES )); then
   # Two-sided: under the ceiling by more than the band is also a failure. This
   # used to print an advisory and exit 0, which meant no cut was ever banked -
   # CEILING_BYTES was raised five times and lowered never, so each cut silently
   # became room for the next growth. The message names the value to write so
   # the fix is a paste, not arithmetic.
-  if (( SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
+  if (( BAND_APPLIES && SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
     SUGGESTED=$((TOTAL_BYTES + RATCHET_NUDGE_BYTES))
     if (( ! QUIET && ! JSON_MODE )); then
       {
