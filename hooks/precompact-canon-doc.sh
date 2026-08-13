@@ -223,6 +223,16 @@ DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows
 SB1="$(_session_block 1 "$DEFAULT_MERGE")"
 SB2="$(_session_block 2 "$DEFAULT_DECISIONS")"
 
+# A doc the session wrote by hand carries none of the markers above, so the
+# preserve helper reads nothing from it and the write below would truncate it
+# whole - erasing a brief written at full context. Keep everything that sits
+# above the hook's own title line. Re-fires re-read the same span, so the body
+# is preserved once, not appended again.
+PRIOR=""
+if [[ -f "$DOC_PATH" ]]; then
+  PRIOR="$(awk '/^# Canon doc: session /{exit} {print}' "$DOC_PATH" 2>/dev/null)"
+fi
+
 # ---------------------------------------------------------------------------
 # Assemble the doc. Auto block fully regenerated; the two session blocks are
 # preserved-or-defaulted. Ensure the parent dir exists (handoffs_dir may resolve
@@ -231,6 +241,9 @@ SB2="$(_session_block 2 "$DEFAULT_DECISIONS")"
 # ---------------------------------------------------------------------------
 mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
 {
+  if [[ -n "$(printf '%s' "$PRIOR" | tr -d '[:space:]')" ]]; then
+    printf '%s\n\n' "$PRIOR"
+  fi
   echo "# Canon doc: session ${SHORT}"
   echo ""
   echo "Session id (authoritative): \`${SID}\`  |  refreshed ${ISO} by precompact-canon-doc.sh."

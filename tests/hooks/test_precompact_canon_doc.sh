@@ -105,6 +105,40 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. A session-authored doc carrying none of the hook's markers is preserved.
+# The preserve helper above only reads content between `fno:session` markers,
+# so a doc the session wrote by hand - the shape a manual `/compact <path>`
+# supplies - was truncated whole. Content above the hook's own title line is
+# kept verbatim, and stays kept across the re-fire that follows.
+# ---------------------------------------------------------------------------
+HAND="$TMP/hand-written.md"
+cat > "$HAND" <<'MD'
+---
+created: 2026-08-13T13:39
+---
+# Session brief
+
+SENTINEL_HAND_9 the ordering constraint and why it is the hard part.
+MD
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HAND\"}" >/dev/null 2>&1
+if grep -q "SENTINEL_HAND_9" "$HAND" && grep -q "created: 2026-08-13T13:39" "$HAND"; then
+  pass "hand-written doc preserved when the hook enriches it"
+else
+  fail "hand-written doc clobbered by the hook"
+fi
+if grep -q "<!-- fno:auto -->" "$HAND"; then
+  pass "auto block added below the hand-written body"
+else
+  fail "auto block not added to hand-written doc"
+fi
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$HAND\"}" >/dev/null 2>&1
+if [[ "$(grep -c "SENTINEL_HAND_9" "$HAND")" == "1" ]]; then
+  pass "hand-written body survives the re-fire exactly once"
+else
+  fail "hand-written body lost or duplicated on re-fire"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. PR section omitted when gh is absent (degrade, never a failed hook).
 # ---------------------------------------------------------------------------
 rm -f "$DOC"
