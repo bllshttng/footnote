@@ -263,6 +263,20 @@ if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then
     mail_content=$(bash "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" 2>/dev/null || echo "")
 fi
 
+# 7. outstanding — unharvested carve-outs and open operator questions. This is
+#    the delivery leg: both stores were already readable and neither was ever
+#    put where the operator looks. Deliberately a call plus a guard; every
+#    decision (what counts, ordering, the render cap) lives in the verb, since
+#    hooks/ is inside the control-plane LOC manifest and cli/ is not. Silent
+#    when nothing is outstanding, which is the correct steady state.
+outstanding_content=""
+_wt_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
+if command -v fno >/dev/null 2>&1 && [[ -f "$_wt_lib" ]]; then
+    # shellcheck source=../scripts/lib/with-timeout.sh
+    source "$_wt_lib"
+    outstanding_content=$(with_timeout 3 fno outstanding 2>/dev/null || true)
+fi
+
 # ── Combine context ───────────────────────────────────────────────────
 # Newline-separate non-empty blocks so the agent sees each preamble as
 # its own section rather than one wall of text.
@@ -282,6 +296,7 @@ append_section "$whoami_content"
 append_section "$hygiene_content"
 append_section "$nudge_content"
 append_section "$mail_content"
+append_section "$outstanding_content"
 
 # Self-heal a defunct target manifest (x-4af4) before anything reads it, so a
 # dead target-state.md can no longer auto-lock an attended /think. Advisory.
