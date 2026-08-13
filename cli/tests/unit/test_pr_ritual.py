@@ -23,7 +23,7 @@ class FakeRunner:
 
     def __init__(self, *, diff_files=0, additions=0, deletions=0,
                  deferred=None, reconcile_closed=None, claim_rc=0,
-                 spawn_rc=0, agent_rows=None, branch="feat/x"):
+                 spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED"):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
@@ -32,6 +32,10 @@ class FakeRunner:
         self._spawn_rc = spawn_rc
         self._rows = agent_rows or []
         self._branch = branch
+        # The ritual's premise is a MERGED PR, so that is the default here.
+        # The removal legs now READ this rather than assuming it; see
+        # test_pr_ritual_merge_guard.py for the refusal cases.
+        self._state = state
 
     def __call__(self, argv, *, cwd=None, timeout=None):
         self.calls.append(list(argv))
@@ -40,8 +44,8 @@ class FakeRunner:
             if "list" in argv:
                 return Result(0, '[{"number":7,"mergedAt":"2026-07-23T00:00:00Z"}]', "")
             if "view" in argv:
-                return Result(0, '{"headRefName":"%s","changedFiles":%d,"additions":%d,"deletions":%d}'
-                              % (self._branch, self._diff[0], self._diff[1], self._diff[2]), "")
+                return Result(0, '{"state":"%s","headRefName":"%s","changedFiles":%d,"additions":%d,"deletions":%d}'
+                              % (self._state, self._branch, self._diff[0], self._diff[1], self._diff[2]), "")
             return Result(0, "{}", "")
         # fno-py <sub> ...
         sub = argv[1] if len(argv) > 1 else ""
@@ -567,8 +571,11 @@ def test_archive_defers_when_run_inside_worktree(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
     r.leg_archive()
     out = capsys.readouterr().out
-    assert "step=archive status=skipped" in out
-    assert "cleanup --merged --apply" in out
+    # `deferred`, not `skipped`. The old emit attached a command to a skipped
+    # status; it read as "nothing to do" and nobody ever ran the command, which
+    # is why the freshest merged worktrees were the ones left on disk.
+    assert "step=archive status=deferred" in out
+    assert "sweep-will-reap" in out
 
 
 def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
