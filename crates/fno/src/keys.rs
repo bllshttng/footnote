@@ -812,6 +812,26 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     rows
 }
 
+/// The display glyph for `action_id` resolved from the LIVE keymap (the shipped
+/// defaults plus any `config.mux.keys` rebinds), so a menu hint advertises the
+/// chord the dispatcher actually runs - never a literal that a rebind has
+/// silently moved. `None` when no binding carries that action id; the caller
+/// renders no hint.
+pub fn key_for(action_id: &str) -> Option<String> {
+    disp_for(action_id, &key_bindings())
+}
+
+/// `key_for` over a supplied table. Split out so a test can assert a rebind
+/// moves the glyph without touching the process-global keymap (`install` is
+/// first-call-wins), the same reason the prefix_hint rebind test resolves
+/// locally rather than installing.
+fn disp_for(action_id: &str, bindings: &[KeyBinding]) -> Option<String> {
+    bindings
+        .iter()
+        .find(|kb| kb.action == action_id)
+        .map(|kb| kb.disp.clone())
+}
+
 /// The one-line teaser shown while a prefix is pending, built from the LIVE
 /// bindings.
 ///
@@ -1321,6 +1341,33 @@ mod tests {
                 .map(|kb| kb.disp.as_str()),
             Some("Q"),
             "the table moved, so the hint built from it moves too"
+        );
+    }
+
+    #[test]
+    fn key_for_resolves_the_live_glyph_and_moves_on_a_rebind() {
+        // Default table: detach answers on `d`; an unknown action has no hint.
+        assert_eq!(disp_for("detach", &default_bindings()).as_deref(), Some("d"));
+        assert_eq!(disp_for("no-such-action", &default_bindings()), None);
+        // `key_for` reads the live (global) table; an unknown action is None
+        // under any installed keymap.
+        assert_eq!(key_for("no-such-action"), None);
+        // A rebind moves the resolved glyph a menu hint would show. Resolved
+        // locally, not via `install` (process-global, first-call-wins), mirroring
+        // the prefix_hint rebind test above.
+        let (map, warn) = resolve_keymap(None, &[("detach".into(), "Q".into())]);
+        assert!(warn.is_empty(), "Q is free: {warn:?}");
+        let mut rows = default_bindings();
+        for (action, byte) in &map.rebinds {
+            if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
+                kb.key = *byte;
+                kb.disp = key_disp(*byte);
+            }
+        }
+        assert_eq!(
+            disp_for("detach", &rows).as_deref(),
+            Some("Q"),
+            "the rebind moved the glyph a menu hint resolves"
         );
     }
 
