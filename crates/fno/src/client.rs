@@ -9642,6 +9642,11 @@ enum ModalKey {
 /// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
 /// special-cased by the caller for instant close) becomes `Esc`; every other
 /// printable byte is `Byte`, resolved by the caller through the chord table.
+/// The ceiling on a partially-read escape sequence, shared by all four folds.
+/// A real CSI is far shorter, so this only ever fires on a pathological stream,
+/// and it is what stops one from growing the carry without limit.
+const MAX_ESC_CARRY: usize = 16;
+
 fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
     let mut out = Vec::new();
     for &b in bytes {
@@ -9692,9 +9697,30 @@ fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
                     continue;
                 }
                 _ => {
-                    // Unknown escape tail: swallow it whole (never leak).
+                    // Inside a CSI (`ESC [ ...`): consume the WHOLE sequence.
+                    // "swallow it whole (never leak)" used to be a comment
+                    // rather than a behaviour here: this arm dropped ONE byte
+                    // and let the rest of the sequence fall through as plain
+                    // keys, so Ctrl-Up (`ESC [ 1 ; 5 A`) leaked `;`, `5`, `A`.
+                    // Same defect the selector fold had, same fix.
+                    if b == 0x1b {
+                        // ESC aborts an in-progress sequence and starts a fresh
+                        // one, so a cancel is never eaten as a parameter.
+                        esc.clear();
+                        esc.push(0x1b);
+                        continue;
+                    }
+                    if (0x40..=0x7e).contains(&b) || esc.len() >= MAX_ESC_CARRY {
+                        esc.clear();
+                        continue;
+                    }
+                    if (0x20..=0x3f).contains(&b) {
+                        esc.push(b);
+                        continue;
+                    }
+                    // A C0 control mid-sequence is malformed: abandon the
+                    // sequence and reprocess the byte below rather than losing it.
                     esc.clear();
-                    continue;
                 }
             }
         }
@@ -10585,10 +10611,16 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
                     esc.clear();
                     continue;
                 }
-                if (0x20..=0x3f).contains(&b) {
+                if (0x20..=0x3f).contains(&b) && esc.len() < MAX_ESC_CARRY {
                     // A real parameter or intermediate byte (ECMA-48): keep
-                    // accumulating.
+                    // accumulating, up to the shared ceiling.
                     esc.push(b);
+                    continue;
+                }
+                if esc.len() >= MAX_ESC_CARRY {
+                    // A pathological run of parameter bytes: drop the sequence
+                    // rather than growing the carry without limit.
+                    esc.clear();
                     continue;
                 }
                 // Anything else is malformed: a C0 control landed mid-sequence.
@@ -11712,15 +11744,23 @@ fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
                     esc.push(0x1b);
                 } else if (0x40..=0x7e).contains(&b) {
                     // CSI complete. Surface the three motion finals; swallow the
-                    // rest (whole sequence consumed either way - no leak).
-                    match b {
-                        b'A' => keys.push(NavKey::Up),
-                        b'B' => keys.push(NavKey::Down),
-                        b'Z' => keys.push(NavKey::ShiftTab),
-                        _ => {}
+                    // rest. Only a BARE `ESC [ X` counts: a parameterised
+                    // sequence is a MODIFIED key (Ctrl-Up is `ESC [ 1 ; 5 A`),
+                    // and aliasing it onto the unmodified one silently
+                    // reinterprets a chord the operator meant as something else.
+                    // This fold serves prefix+f, the navigator this change
+                    // promotes to the primary route, so it is the last place
+                    // that should guess.
+                    if esc.len() == 2 {
+                        match b {
+                            b'A' => keys.push(NavKey::Up),
+                            b'B' => keys.push(NavKey::Down),
+                            b'Z' => keys.push(NavKey::ShiftTab),
+                            _ => {}
+                        }
                     }
                     esc.clear();
-                } else if esc.len() >= 16 {
+                } else if esc.len() >= MAX_ESC_CARRY {
                     esc.clear();
                 } else {
                     esc.push(b);
@@ -18871,6 +18911,78 @@ mod tests {
         }
         assert_eq!(keys, b"j".to_vec(), "only the real keypress survives");
         assert!(esc.is_empty());
+    }
+
+    #[test]
+    fn every_escape_fold_swallows_an_unrecognised_sequence_whole() {
+        // PARITY over all four folds, deliberately not four separate tests.
+        // The leak-whole-sequence guarantee was only ever asserted against
+        // `fold_search_input`, and the two folds nobody tested were the two that
+        // leaked: `fold_selector_keys` and `fold_modal_keys` each dropped ONE
+        // byte after `ESC [` and let the tail out as plain keys.
+        //
+        // That was survivable while every overlay closed on a key it did not
+        // recognise. Giving the pickers cursors is what weaponised it, because
+        // the leaked bytes are exactly the ones that now commit: a digit commits
+        // a MoveTab, and `ESC [ 1 ; 5 H` ends in the `H` that commits an attach
+        // split. A capability upgrade turned a dormant defect destructive.
+        //
+        // Written as one sweep so a FIFTH fold added later inherits the
+        // guarantee instead of inheriting nothing.
+        let sequences: &[(&str, &[u8])] = &[
+            ("ctrl-up", b"\x1b[1;5A"),
+            ("ctrl-down", b"\x1b[1;5B"),
+            ("ctrl-home", b"\x1b[1;5H"),
+            ("shift-tab-ish", b"\x1b[1;2Z"),
+            ("f5", b"\x1b[15~"),
+            ("f12", b"\x1b[24~"),
+            ("sgr-mouse", b"\x1b[<35;80;24M"),
+            ("unknown-final", b"\x1b[?1049h"),
+        ];
+        // Each fold reduced to "how many keys did this leak", so one loop covers
+        // four different return types.
+        type Fold = (&'static str, fn(&mut Vec<u8>, &[u8]) -> usize);
+        let folds: &[Fold] = &[
+            ("fold_modal_keys", |e, b| fold_modal_keys(e, b).len()),
+            ("fold_selector_keys", |e, b| fold_selector_keys(e, b).len()),
+            ("fold_search_input", |e, b| fold_search_input(e, b).len()),
+            ("fold_nav_input", |e, b| fold_nav_input(e, b).len()),
+        ];
+        for (fold_name, fold) in folds {
+            for (seq_name, seq) in sequences {
+                // Whole sequence in one read.
+                let mut esc = Vec::new();
+                assert_eq!(fold(&mut esc, seq), 0, "{fold_name} leaked on {seq_name}");
+                assert!(esc.is_empty(), "{fold_name} left carry after {seq_name}");
+
+                // ...and split at every boundary, since a real terminal read can
+                // cut anywhere and a fold that only works on whole chunks is not
+                // actually safe.
+                for cut in 1..seq.len() {
+                    let mut esc = Vec::new();
+                    let leaked = fold(&mut esc, &seq[..cut]) + fold(&mut esc, &seq[cut..]);
+                    assert_eq!(leaked, 0, "{fold_name} leaked on {seq_name} split at {cut}");
+                    assert!(
+                        esc.is_empty(),
+                        "{fold_name} left carry after split {seq_name} at {cut}"
+                    );
+                }
+            }
+            // A pathological parameter run is dropped rather than growing the
+            // carry without limit.
+            let mut esc = Vec::new();
+            let flood: Vec<u8> = b"\x1b["
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(b'1').take(500))
+                .collect();
+            fold(&mut esc, &flood);
+            assert!(
+                esc.len() <= MAX_ESC_CARRY,
+                "{fold_name} carry grew to {} on a parameter flood",
+                esc.len()
+            );
+        }
     }
 
     #[test]
