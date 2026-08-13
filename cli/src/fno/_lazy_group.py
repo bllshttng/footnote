@@ -363,6 +363,11 @@ class LazyTypeGroup(typer.core.TyperGroup):
             # (Codex P2 finding on PR #269).
             if "Did you mean" in (exc.message or ""):
                 raise
+            # A tombstone refusal already names the replacement. Appending a
+            # fuzzy "Did you mean 'loops'?" to it offers a second, wrong answer
+            # next to the right one.
+            if "was removed" in (exc.message or ""):
+                raise
             if self.suggest_commands:
                 # Only the lazy keys are missing from the parent's
                 # suggestion pool, so restrict the candidate list to those.

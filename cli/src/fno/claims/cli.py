@@ -179,15 +179,26 @@ def acquire(
     ``lane-acquire`` verb whose name was its own flag.
     """
     if lane is not None:
-        if key is not None or max_lanes is None:
+        if key is not None or max_lanes is None or holder:
             typer.echo(
-                "validation error: --lane takes no KEY and requires --max-lanes "
-                "(a lane slot is acquired by lane id, not by claim key)",
+                "validation error: --lane takes no KEY and no --holder, and "
+                "requires --max-lanes (a lane slot is acquired by lane id, not "
+                "by claim key)",
                 err=True,
             )
             raise typer.Exit(code=2)
         _acquire_lane(lane=lane, max_lanes=max_lanes, ttl=ttl, json_output=json_output)
         return
+    # --max-lanes is meaningless without --lane, and silently ignoring it is how
+    # someone migrating off `lane-acquire` gets an ordinary claim with the cap
+    # not enforced and nothing on stderr to say so.
+    if max_lanes is not None:
+        typer.echo(
+            "validation error: --max-lanes is the lane-slot cap and requires "
+            "--lane <id>",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if key is None:
         typer.echo("validation error: KEY is required (or use --lane <id>)", err=True)
         raise typer.Exit(code=2)
@@ -297,11 +308,16 @@ def release(
     the default releases a claim we hold, ``--lane <id>`` releases a lane slot,
     and ``--force`` drops a claim regardless of owner.
     """
+    # A flag that belongs to another mode is REFUSED, never ignored. Silently
+    # dropping `--stamp-do` on the force path (or `--reason` on the plain one)
+    # loses exactly the provenance the flag was passed to record, and the caller
+    # gets exit 0 saying it worked.
     if lane is not None:
-        if key is not None or force:
+        if key is not None or force or holder or strict or stamp_do or rollback_do or reason:
             typer.echo(
-                "validation error: --lane takes no KEY and is not combinable "
-                "with --force (a lane slot has no administrative override)",
+                "validation error: --lane takes only the lane id (no KEY, and "
+                "none of --force/--holder/--strict/--reason/--stamp-do/"
+                "--rollback-do): a lane slot has no owner and no do window",
                 err=True,
             )
             raise typer.Exit(code=2)
@@ -310,7 +326,22 @@ def release(
     if key is None:
         typer.echo("validation error: KEY is required (or use --lane <id>)", err=True)
         raise typer.Exit(code=2)
+    if reason and not force:
+        typer.echo(
+            "validation error: --reason records the --force override and has no "
+            "effect on an ordinary release",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if force:
+        if strict or stamp_do or rollback_do:
+            typer.echo(
+                "validation error: --force is the administrative drop and takes "
+                "none of --strict/--stamp-do/--rollback-do (there is no owner to "
+                "check and no do window to stamp)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
         if holder:
             typer.echo(
                 "validation error: --force drops the claim regardless of owner, "

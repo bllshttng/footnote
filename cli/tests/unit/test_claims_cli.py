@@ -245,6 +245,25 @@ def test_force_release_rejects_a_holder(cwd_tmp):
     assert result.exit_code == 2
 
 
+def test_a_flag_from_another_mode_is_refused_not_ignored(cwd_tmp):
+    """Each collapsed mode refuses the flags that belong to a sibling mode.
+
+    Silently ignoring them is the failure the collapse can introduce: exit 0
+    saying it worked while the lane cap was never applied, the override reason
+    never recorded, or the do row never stamped.
+    """
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    for argv in (
+        ["acquire", "k", "--holder", "h", "--max-lanes", "3"],  # cap without a lane
+        ["acquire", "--lane", "L", "--max-lanes", "3", "--holder", "h"],
+        ["release", "k", "--holder", "h", "--reason", "why"],  # reason without --force
+        ["release", "k", "--force", "--reason", "why", "--stamp-do"],
+        ["release", "--lane", "L", "--strict"],
+    ):
+        result = runner.invoke(cli, argv)
+        assert result.exit_code == 2, f"{argv} was accepted: {result.output}"
+
+
 def test_refresh_pid_liveness_is_noop(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h"])  # PID-liveness
     result = runner.invoke(cli, ["refresh", "k", "--holder", "h"])

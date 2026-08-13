@@ -21,9 +21,9 @@ Six letters, reserved across the entire CLI:
 |-------|------|------|---------------|
 | `-J` | `--json` | bool | the runaway most-common flag (~40 commands) |
 | `-A` | `--all` | bool | backlog next/ready/status/pick/queued, triage, megawalk |
-| `-F` | `--force` | bool | backlog decompose/remove, providers add/remove, agents rm, update |
-| `-N` | `--dry-run` | bool | backlog intake/reconcile, runtime reap, worktree cleanup, update |
-| `-R` | `--reason` | value | backlog defer/queue/supersede, claim acquire/force-release, inbox passes |
+| `-F` | `--force` | bool | backlog decompose/remove, providers add/remove, agents rm, claim release, update |
+| `-N` | `--dry-run` | bool | backlog intake/reconcile, worktree cleanup, update |
+| `-R` | `--reason` | value | backlog defer/queue/supersede, claim acquire/release, capture passes |
 | `-Y` | `--yolo` | bool | danger-mode bypass (agents ask `--yolo`) |
 
 Phase 1 applies these six to every Typer command that already declares the matching long flag. The addition is purely a second string in the existing declaration (`typer.Option(False, "--json", "-J", ...)`); long-flag behavior is byte-identical.
@@ -77,9 +77,9 @@ Because the Rust parser is verb-agnostic, its aliases apply to every verb that u
 
 The flag enumeration found spelling drift that blocked unambiguous short assignment: `--session` vs `--session-id` and `--pr` vs `--pr-number`, each pair meaning the same thing on different commands. Phase 3 makes `--session-id` and `--pr-number` canonical everywhere and demotes the old spellings to **hidden deprecated aliases**.
 
-The mechanics live in `cli/src/fno/_flag_aliases.py`. Typer/Click cannot hide one name of a multi-name option, so each alias is a SEPARATE `typer.Option(..., hidden=True)` parameter folded into the canonical value at the top of the command body by `merge_deprecated_alias`: legacy-only use works but warns on stderr (never stdout, so JSON consumers are safe); passing both spellings is refused as a usage error (exit 2) even when the values agree. Two formerly-required options (`backlog cost --session-id`, `reality-check gh --pr-number`) became `Optional` + an explicit missing-option check, because the hidden alias forces a `None` default.
+The mechanics live in `cli/src/fno/_flag_aliases.py`. Typer/Click cannot hide one name of a multi-name option, so each alias is a SEPARATE `typer.Option(..., hidden=True)` parameter folded into the canonical value at the top of the command body by `merge_deprecated_alias`: legacy-only use works but warns on stderr (never stdout, so JSON consumers are safe); passing both spellings is refused as a usage error (exit 2) even when the values agree. Two formerly-required options (`backlog cost --session-id`, and `reality-check gh --pr-number` before that sub-app was removed as dead) became `Optional` + an explicit missing-option check, because the hidden alias forces a `None` default.
 
-Touched sites: `loop`, `review`, `gate check`, `backlog cost`, `retro run` (both concepts; its `--session-id` is repeatable), `worker review`, `worker external`, `reality-check gh`. `done` already accepted both spellings on one option and only needed a canonical-first reorder (`--pr-number, --pr, -p`). Internal callers were migrated too - notably the exit-42 dispatch payload's machine-generated `resume_command` (`handoff/dispatch.py`), which would otherwise have made the loop trigger its own deprecation warning on every reasoning-phase continuation.
+Touched sites: `loop`, `review`, `gate check`, `backlog cost`, `retro run` (both concepts; its `--session-id` is repeatable), `worker review`, `worker external`, and `reality-check gh` (since removed with its sub-app). `done` already accepted both spellings on one option and only needed a canonical-first reorder (`--pr-number, --pr, -p`). Internal callers were migrated too - notably the exit-42 dispatch payload's machine-generated `resume_command` (`handoff/dispatch.py`), which would otherwise have made the loop trigger its own deprecation warning on every reasoning-phase continuation.
 
 Two subtleties worth knowing:
 
@@ -102,7 +102,7 @@ Two subtleties worth knowing:
 - **Phase 2 map:** every command in the table above declares its design-table shorts (`PHASE2_LOWERCASE_MAP`).
 - **Phase 3 spellings:** every drift site declares its canonical long visibly and its legacy alias `hidden=True` (`TWO_SPELLING_SITES`); `--session`/`--pr` never appear as a VISIBLE primary long anywhere outside `TWO_SPELLING_EXEMPTIONS`; `done` lists `--pr-number` before `--pr`.
 
-The AST scan proves declarations but structurally cannot catch a Click registration failure: every touched sub-app is lazily loaded, so a malformed declaration only raises at first dispatch. `cli/tests/test_short_flag_dispatch.py` closes that hole at runtime - a `--help` registration smoke per Phase 2 surface through the real root app, plus short-vs-long parity proofs for `backlog find` (read-only graph) and `providers add` (previously had no CLI test at all). Phase 3 adds `cli/tests/test_two_spelling_dispatch.py` (alias-vs-canonical equivalence on `reality-check gh`, stderr-warning and both-passed-refusal proofs, help-hiding probes) and `cli/tests/test_help_shorthands.py` (legend content + bare-help pointer).
+The AST scan proves declarations but structurally cannot catch a Click registration failure: every touched sub-app is lazily loaded, so a malformed declaration only raises at first dispatch. `cli/tests/test_short_flag_dispatch.py` closes that hole at runtime - a `--help` registration smoke per Phase 2 surface through the real root app, plus short-vs-long parity proofs for `backlog find` (read-only graph) and `providers add` (previously had no CLI test at all). Phase 3 adds `cli/tests/test_two_spelling_dispatch.py` (registration smoke + help-hiding probes; its alias-vs-canonical equivalence, stderr-warning, and both-passed-refusal proofs moved to `cli/tests/unit/test_flag_aliases.py` when the `reality-check gh` command they drove was removed) and `cli/tests/test_help_shorthands.py` (legend content + bare-help pointer).
 
 The Rust path is pinned separately: `ask_accepts_phone_short_flags` (in `client.rs`) asserts the short form builds the byte-identical request the long form does, and `test_codex_ask_short_flags_match_long_through_rust_binary` (in `cli/tests/agents/test_ask_e2e_dispatch.py`) drives the compiled binary with `-p`/`-c`/`-t` and asserts identical stdout and exit to the long form.
 

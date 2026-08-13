@@ -87,11 +87,11 @@ These operate on the registry / daemon, not on a harness CLI, so they work for e
 
 ## Verbs: MCP channel sidecar (claude only)
 
-| Verb | What it does |
-|------|---|
-| `register-channel` / `unregister-channel` | Register/unregister a Claude Code session as an agent channel. |
-| `push-channel` | Push a message to a registered channel. |
+There are no CLI verbs here any more.
+`register-channel`, `unregister-channel`, and `push-channel` were removed: nothing shelled them, and `fno agents <verb>` now refuses each by name with a pointer (see `cli/src/fno/tombstones.py`).
 
+The `channel.*` daemon RPCs they fronted are live and untouched.
+The path in use is `fno.mcp.sidecar`, which speaks its own socket protocol (`register_channel` / `unregister_channel` ops) rather than going through the CLI.
 The channel reaches only sessions launched with the channel wired; it is a claude-only transport this release.
 
 ## Verbs: loop and harness plumbing
