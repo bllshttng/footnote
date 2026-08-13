@@ -151,9 +151,11 @@ fn retired_squad_spelling_is_removed() {
 
     let (ok, _stdout, stderr) = s.run_family("squad", &["prune", "--json"], false);
     assert!(!ok, "the retired spelling must not succeed: {stderr}");
+    // The tombstone names the replacement directly, which is the point of it;
+    // the old assertion looked for the generic usage banner this replaced.
     assert!(
-        stderr.contains("fno mux workspace prune"),
-        "usage must name the surviving spelling: {stderr}"
+        stderr.contains("removed") && stderr.contains("fno mux workspace"),
+        "the refusal must name the surviving spelling: {stderr}"
     );
     assert_eq!(s.store(), before, "a usage exit must not touch the store");
 
