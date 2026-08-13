@@ -82,13 +82,14 @@ Two things make reading forward safe, and neither is optional.
 Above our version, a row this fno cannot represent is skipped rather than fatal.
 That covers an unknown `status` or `host_mode` value, a missing now-required field, and an unknown key.
 Tolerating added keys alone was not enough.
-Widening an enum is one of the likelier reasons to bump a schema, and a row-level refusal took the whole shared read down by a different door.
+Widening an enum is one of the likelier reasons to bump a schema.
+A row-level refusal then took the whole shared read down by a different door.
 Skipped rows are announced with their indices.
 
 `load_registry` still raises `RegistryVersionError` for genuine damage, at any version:
 
 1. Malformed JSON, a non-object top level, or a `schema_version` that is missing or not a positive integer. Reading forward covers a version gap, never a torn file.
-2. A row with no valid identity token (`provider`/`harness`), which catches typos like `"calude"` that round-trip silently. Identity is a shape check rather than an enumeration, so one alien harness never bricks the shared read, and dispatch capability is gated at the spawn/ask seam.
+2. A row with no valid identity token (`provider`/`harness`), which catches typos like `"calude"` that round-trip silently. Identity is a shape check rather than an enumeration, so one alien harness never bricks the shared read. Dispatch capability is gated at the spawn/ask seam instead.
 3. At or below the in-process version, a row with unknown or missing fields, or an unknown `status` or `host_mode`. There it means a writer bug rather than a version gap, so it stays loud.
 
 All diagnostics use the same exception class so callers can handle "alien shape" uniformly.
