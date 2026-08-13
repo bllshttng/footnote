@@ -1,7 +1,7 @@
 # Claude Code temp files
 .claude/*.local.md
 .claude/audit-progress.txt
-.claude/plans/
+.claude/plans
 .claude/scheduled_tasks.lock
 .claude/scheduled_tasks.json
 .claude/worktrees/
