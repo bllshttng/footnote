@@ -247,6 +247,52 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
 }
 
+# T1 actions are parsed by the group dispatcher and keep their existing typing.
+# These selected actions remain registered leaves as deliberate readability
+# slack; the checked-in allocation and its reference costs live in
+# scripts/ci/verb-collapse-map.tsv.
+COLLAPSE_KEEP: dict[str, set[str]] = {
+    "agents": {"ask", "list", "logs", "loop", "loop-check", "needs", "resume", "rm", "spawn"},
+    "annotate": {"list"},
+    "approvals": set(),
+    "backlog": {"advance", "done", "get", "next", "queued", "reconcile", "update"},
+    "bundle": set(),
+    "carveout": set(),
+    "claim": {"release"},
+    "config": {"accounts", "get", "set"},
+    "dispatch": set(),
+    "evals": set(),
+    "event": {"emit"},
+    "loops": {"resume-all"},
+    "mail": {"send"},
+    "observer": set(),
+    "paths": set(),
+    "plan": set(),
+    "plugins": set(),
+    "pr": {"merge"},
+    "pr-watch": set(),
+    "resume": set(),
+    "retro": set(),
+    "roles": set(),
+    "route": set(),
+    "runtime": set(),
+    "setup": set(),
+    "skill-diff": set(),
+    "state": set(),
+    "stub-manifest": set(),
+    "target": {"init"},
+    "think": set(),
+    "worker": set(),
+    "worktree": set(),
+}
+
+for _group_name, _keep in COLLAPSE_KEEP.items():
+    _entry = LAZY_SUBCOMMANDS[_group_name]
+    _import_path, _short_help = _entry[:2]
+    _options = dict(_entry[2]) if len(_entry) == 3 else {}
+    _options["collapse_keep"] = sorted(_keep)
+    LAZY_SUBCOMMANDS[_group_name] = (_import_path, _short_help, _options)
+
 
 # ---------------------------------------------------------------------------
 # Helpers that defer their own imports until needed

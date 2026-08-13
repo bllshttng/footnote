@@ -147,9 +147,9 @@ INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "target init": 20, "backlog update
 #   scripts/lib/eval-sweep-throttle.sh   status="$("$fno_cmd" loops status
 # is the third shape: the binary lives in a VARIABLE, resolved at runtime.
 SUBSTITUTION_CONTROLS = {
-    "target resolve-owned-identity": 1,
-    "pr evidence-required": 1,
-    "loops status": 1,
+    "target": 1,
+    "pr": 1,
+    "loops": 1,
 }
 
 # The FOURTH shape: a Rust argv ARRAY. `Command::new(fno_bin()).args(["claim",
@@ -182,14 +182,15 @@ FOREIGN_BINARIES = {
 # baselined leaf at a real call site:
 #   agents needs           the fno-agents prefix case (array is ["needs"])
 #   notify                 single-token leaf
-#   plan fidelity          two-token leaf
-#   pr base-lineage-check  hyphenated leaf, and proof that `pr` traffic is
-#                          separable from the `gh pr view` arrays next to it
+#   plan                   collapsed dispatcher credited from `plan fidelity`
+#   pr                     collapsed dispatcher credited from the hyphenated
+#                          `pr base-lineage-check` action, separately from the
+#                          `gh pr view` arrays next to it
 RUST_ARGV_CONTROLS = {
     "agents needs": 1,
     "notify": 1,
-    "plan fidelity": 1,
-    "pr base-lineage-check": 1,
+    "plan": 1,
+    "pr": 1,
 }
 
 # A Rust integration-test reference must prove the test sweep ran, never keep a
