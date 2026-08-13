@@ -16291,8 +16291,16 @@ mod tests {
         assert!(text.contains("panes"), "section header");
         assert!(text.contains("detach"), "the d binding's action");
         assert!(
-            text.contains("find: goto pane/agent"),
-            "the f binding's action"
+            text.contains("find: goto squad/tab/pane/agent"),
+            "the f binding's action names every row class nav_rows emits"
+        );
+        // The digit row must state its ceiling AND the way past it. Asserting
+        // both halves is what stops a later trim from restoring a bare
+        // `select tab`, which is the label that made `f` look like the lesser
+        // tool in the first place.
+        assert!(
+            text.contains("first 9") && text.contains("f goes past"),
+            "the 1-9 row states its ceiling and names the uncapped way past it"
         );
     }
 

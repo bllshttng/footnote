@@ -10,7 +10,7 @@
 //! `%`/`"` split H/V · `h j k l` + arrows focus · `H J K L` + Ctrl-arrows
 //! resize · Shift-arrows move the pane · `x` close pane · `c` new tab ·
 //! `n`/`p` cycle tabs · `1`-`9`
-//! select tab · `&` close tab · `w` panel selector · `b` toggle sideline ·
+//! select tab · `&` close tab · `w` sideline row selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
 //! block (x-38c4) · `,` rename tab (x-c150) · prefix-prefix = one literal
@@ -740,9 +740,25 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         b(b'r', "rerun-block", BlockRerun, Navigation, "rerun block"),
         b(b'/', "search", SearchOpen, Navigation, "search scrollback"),
-        b(b'f', "find", OpenNav, Navigation, "find: goto pane/agent"),
+        // The label names every row class `nav_rows()` actually emits. The old
+        // `goto pane/agent` undersold the one selector in the mux with no
+        // nine-item ceiling, so the capped digit chords read as the way to
+        // reach a squad or a tab and this read as a lesser tool.
+        b(
+            b'f',
+            "find",
+            OpenNav,
+            Navigation,
+            "find: goto squad/tab/pane/agent",
+        ),
         // global
-        b(b'w', "selector", OpenSelector, Global, "panel selector"),
+        b(
+            b'w',
+            "selector",
+            OpenSelector,
+            Global,
+            "sideline row selector",
+        ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
         b(
             b'b',
@@ -867,9 +883,12 @@ pub fn prefix_hint() -> String {
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
     vec![
+        // The digit range is nine by construction (one byte, nine of them), so
+        // the row states its own ceiling and names the uncapped way past it
+        // rather than leaving a 14-tab operator to discover `f` by accident.
         (
             "1-9".into(),
-            "select tab".into(),
+            "select tab (first 9; f goes past)".into(),
             KeySection::WorkspacesTabs,
         ),
         (
