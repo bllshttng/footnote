@@ -1961,8 +1961,15 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        let coverage =
-            classify_coverage(&[], &[], &events_text, &[], false, author_session, &freshness);
+        let coverage = classify_coverage(
+            &[],
+            &[],
+            &events_text,
+            &[],
+            false,
+            author_session,
+            &freshness,
+        );
         (
             "none".to_string(),
             reviewers_ok,
@@ -3178,7 +3185,6 @@ fn compute_review_info(
             }
         }
     }
-
 
     let mut missing_bots: Vec<String> = required_bots
         .iter()
@@ -7557,11 +7563,7 @@ mod tests {
 
     // ── review freshness: the one predicate (x-5b99 / x-62a1) ───────────────
 
-    fn facts(
-        reviewed: Option<&str>,
-        head: Option<&str>,
-        tree: Option<&[&str]>,
-    ) -> FreshnessFacts {
+    fn facts(reviewed: Option<&str>, head: Option<&str>, tree: Option<&[&str]>) -> FreshnessFacts {
         FreshnessFacts {
             reviewed_identity: reviewed.map(str::to_string),
             head_identity: head.map(str::to_string),
@@ -7585,7 +7587,11 @@ mod tests {
             review_freshness(
                 "3f64bc31",
                 "83d2b4ce",
-                &facts(Some("ident-a"), Some("ident-a"), Some(&["crates/fno/src/lib.rs"]))
+                &facts(
+                    Some("ident-a"),
+                    Some("ident-a"),
+                    Some(&["crates/fno/src/lib.rs"])
+                )
             ),
             Freshness::CarriedBaseSync
         );
@@ -7608,7 +7614,11 @@ mod tests {
             review_freshness(
                 "e2976abc",
                 "1ef60959",
-                &facts(Some("i"), Some("i"), Some(&["docs/architecture/x.md", "README.md"]))
+                &facts(
+                    Some("i"),
+                    Some("i"),
+                    Some(&["docs/architecture/x.md", "README.md"])
+                )
             ),
             Freshness::CarriedDocsOnly
         );
@@ -7619,7 +7629,11 @@ mod tests {
         // 20 of the 22 measured transitions are this: genuine code change, and
         // no rule that refuses to guess can absorb them.
         assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i-old"), Some("i-new"), Some(&["a.rs"]))),
+            review_freshness(
+                "aaa",
+                "bbb",
+                &facts(Some("i-old"), Some("i-new"), Some(&["a.rs"]))
+            ),
             Freshness::Stale
         );
     }
@@ -7890,9 +7904,11 @@ mod tests {
         std::fs::write(&p, attestation_line("code-review", "oldhead", "pass")).unwrap();
         let reviewers = vec!["code-review".to_string()];
 
-        let carried =
-            unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::CarriedBaseSync).0;
-        assert!(carried.is_empty(), "a carried attestation must satisfy the gate");
+        let carried = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::CarriedBaseSync).0;
+        assert!(
+            carried.is_empty(),
+            "a carried attestation must satisfy the gate"
+        );
 
         let stale = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::Stale).0;
         assert_eq!(stale.len(), 1);
@@ -9286,7 +9302,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let (out, malformed) = unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h"));
+        let (out, malformed) =
+            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h"));
         assert_eq!(out.len(), 1, "a corrupt line never satisfies the gate");
         assert_eq!(malformed, 1, "and it is counted, not silently dropped");
 
