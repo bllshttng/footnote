@@ -29,10 +29,27 @@ import re
 import shlex
 import sys
 
-# Tokens that end one command and start the next. `|` is deliberately absent:
-# `yes | head -c 1M` is ONE pipeline and the `head` bounds it, so splitting
-# there would hide the bound from the generator that it bounds.
-SEGMENT_SEPARATORS = {";", "&&", "||", "&", "\n", "|&"}
+# Characters shlex may accumulate into a single operator token.
+PUNCT_CHARS = set("();<>|&\n")
+# The ones that actually END a command. `|` is deliberately absent: `yes | head
+# -c 1M` is ONE pipeline and the `head` bounds it, so splitting there would hide
+# the bound from the generator it bounds.
+CONTROL_CHARS = set(";&\n")
+
+
+def _is_separator(tok):
+    """True when this token ends one command and starts the next.
+
+    Membership in a fixed set is not enough. shlex accumulates ADJACENT
+    punctuation into one token, so `x=$(echo 1); yes > /dev/null` yields `');'`
+    - which matched no entry in the old set, left the whole line as a single
+    segment, and let every generator after a command substitution through. A
+    systematic sweep of 1512 unbounded commands found 84 misses and all 84 were
+    that one shape.
+    """
+    if not tok or any(ch not in PUNCT_CHARS for ch in tok):
+        return False
+    return bool(CONTROL_CHARS & set(tok)) or "||" in tok
 
 # Wrappers that are transparent to command position: `nohup yes` still runs
 # `yes` first. Without these the generator sits at index 1 and reads as an
@@ -82,7 +99,7 @@ def _segments(tokens):
     their segment; only control operators split."""
     out, current = [], []
     for tok in tokens:
-        if tok in SEGMENT_SEPARATORS:
+        if _is_separator(tok):
             out.append(current)
             current = []
         else:

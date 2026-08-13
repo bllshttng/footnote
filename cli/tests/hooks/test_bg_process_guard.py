@@ -104,6 +104,83 @@ def test_allows_bounded_and_ordinary_commands(command: str) -> None:
     assert guard.decide(command) is None, f"should have allowed: {command}"
 
 
+# ─── combinatorial sweep ────────────────────────────────────────────────────
+#
+# Two review rounds found two separate holes in the same command-position walk,
+# and a systematic sweep then found a third that neither reviewer reached. A
+# hand-written case list only covers shapes someone thought of, so this crosses
+# every wrapper with every prefix with every generator instead. It is the check
+# that makes hole number four fail CI rather than wait for a reviewer.
+
+_WRAPS = [
+    "{cmd}", "{cmd} &", "( {cmd} )", "( {cmd} & )", "{{ {cmd}; }}",
+    'bash -c "{cmd}"', "bash -c '{cmd}'", 'sh -c "{cmd}"',
+    "cd /tmp && {cmd}", "cd /tmp; {cmd}", "true || {cmd}",
+    "echo hi\n{cmd}", "echo hi\n{cmd} &",
+    "for i in 1 2; do {cmd}; done", "if true; then {cmd}; fi",
+    "while read l; do {cmd}; done", "until false; do {cmd}; done",
+    # Command substitution. shlex merges adjacent punctuation into ONE token,
+    # so this produced `');'`, which matched no separator by equality and left
+    # the whole line as a single segment. 84 of 1512 cases walked through here.
+    "x=$(echo 1); {cmd}",
+]
+
+_PREFIXES = [
+    "", "nohup ", "setsid ", "env ", "env FOO=1 ", "FOO=1 ", "sudo ",
+    "sudo -u me ", "nice -n 5 ", "time ", "command ", "exec ",
+    "exec -a fno-load-x ", "stdbuf -o0 ",
+]
+
+_GENERATORS = [
+    "yes > /dev/null", "yes", "sleep infinity", "dd if=/dev/zero of=/dev/null",
+    "stress -c 8", "cat /dev/urandom > /dev/null",
+]
+
+_LEGAL = [
+    "timeout 300 yes > /dev/null", "gtimeout 60 stress -c 8",
+    "yes | head -c 1M", "dd if=/dev/zero of=/dev/null count=10",
+    "stress -c 8 -t 60", 'timeout 5 bash -c "yes > /dev/null"',
+    "echo yes", "npm test", "cargo build", 'git commit -m "yes it works"',
+    "rg yes .", "grep -rn yes .", "gh pr checks --watch", "ls -la",
+    "fno agents orphans --reap",
+]
+
+
+@pytest.mark.parametrize("wrap", _WRAPS)
+def test_no_wrapper_hides_an_unbounded_generator(wrap: str) -> None:
+    missed = [
+        wrap.format(cmd=prefix + gen)
+        for prefix in _PREFIXES
+        for gen in _GENERATORS
+        if guard.decide(wrap.format(cmd=prefix + gen)) is None
+    ]
+    assert not missed, f"{len(missed)} unbounded commands allowed, e.g. {missed[0]!r}"
+
+
+#: The legal-direction wrappers. `until false; do ... ; done` is deliberately
+#: absent: that header never ends whatever its body, so refusing it is the
+#: right answer and not a false positive.
+_LEGAL_WRAPS = [w for w in _WRAPS if not w.startswith("until false")]
+
+
+@pytest.mark.parametrize("wrap", _LEGAL_WRAPS)
+def test_no_wrapper_turns_a_legal_command_into_a_refusal(wrap: str) -> None:
+    refused = [
+        wrap.format(cmd=cmd)
+        for cmd in _LEGAL
+        if guard.decide(wrap.format(cmd=cmd)) is not None
+    ]
+    assert not refused, f"{len(refused)} legal commands refused, e.g. {refused[0]!r}"
+
+
+def test_an_unbounded_loop_header_is_refused_whatever_its_body() -> None:
+    """The body cannot rescue the header. `until false; do timeout 300 yes;
+    done` runs forever even though every command inside it ends."""
+    assert guard.decide("until false; do timeout 300 yes; done") is not None
+    assert guard.decide("until false; do echo hi; done") is not None
+    assert guard.decide("while true; do sleep 1; done") is not None
+
+
 def test_refusal_carries_the_replacement_verbatim() -> None:
     """The refusal string IS the naming layer. Prevention layer 4 ships here
     and nowhere else, so a reason without the bounded+named form is a silent
