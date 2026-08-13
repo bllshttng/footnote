@@ -237,6 +237,7 @@ def list_carveouts(
     # own. --all restores the global read for the consumers that need it.
     unscoped_reason = None
     include_unscoped = False
+    scoped_to = None
     if pr_number is None and not sessions and not all_sessions:
         from fno.carveout.core import resolve_session_id
         from fno.paths import resolve_repo_root
@@ -244,6 +245,7 @@ def list_carveouts(
         current = resolve_session_id(resolve_repo_root())
         if current:
             sessions = [current]
+            scoped_to = current
             # Ownerless rows ride along: `add` mints them whenever no session
             # resolves, and dropping them here would hide them from every
             # session forever (13 of 39 rows on this repo's ledger).
@@ -293,6 +295,18 @@ def list_carveouts(
         typer.echo(
             f"carveout: {unscoped_reason}; listing all {len(rows)} row(s) "
             f"across every session. Pass --all to ask for this explicitly.",
+            err=True,
+        )
+    elif scoped_to:
+        # ALWAYS banner a scoped read, including (especially) when it is empty.
+        # A scoped default that prints nothing at all is indistinguishable from
+        # a clear ledger, which is the same absence-as-success trap the
+        # no-session branch above exists to close. Naming the total is what
+        # makes "0 of 39" readable as scoping rather than as emptiness.
+        total = len(read_carveouts(resolve_carveout_root(), kind=kind))
+        typer.echo(
+            f"carveout: scoped to session {scoped_to}; showing {len(rows)} of "
+            f"{total} row(s). Pass --all for every session.",
             err=True,
         )
 

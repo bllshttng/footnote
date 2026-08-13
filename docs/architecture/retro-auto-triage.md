@@ -102,7 +102,9 @@ The kind with a gate cleared, and the kind without one did not.
 `fno outstanding` is the missing half of this trade.
 It is a read-only fold over the ledger's size, its kind split, and the age of its oldest row.
 It names `fno retro sweep-carveouts` as the thing that clears them.
-`hooks/session-start.sh` renders it where the operator already reads.
+`hooks/outstanding-session-start.sh` renders it where the operator already reads.
+That is its own hook, registered in `hooks/hooks.json`, because `hooks/session-start.sh` is the codex and gemini wrapper and Claude registers each session-start hook individually.
+A block living only in the wrapper reaches every harness except the operator's own.
 The harvest stays manual and the reasoning above is unchanged.
 What changes is that a human is now told it is waiting.
 

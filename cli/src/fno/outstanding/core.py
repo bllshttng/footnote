@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 # Rows rendered before the footer takes over. A growing pile should read as a
 # number, not as a wall - a block that scrolls the operator's screen gets
@@ -97,6 +97,19 @@ def events_path(root: Path) -> Path:
     return project_log(EVENTS_NAME, project_root=Path(root))
 
 
+def _iter_question_lines(fh: "Iterable[str]") -> "Iterator[str]":
+    """Yield only the lines that can possibly be a question event.
+
+    The substring test runs per line as it is read, so neither the whole file
+    nor the whole filtered set is ever held beyond what the fold needs. Both
+    question types share ``QUESTION_MARKER``, so a line without it cannot be
+    one of ours and skipping it changes no outcome.
+    """
+    for line in fh:
+        if QUESTION_MARKER in line:
+            yield line
+
+
 def read_open_questions(root: Path) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
@@ -107,13 +120,19 @@ def read_open_questions(root: Path) -> "list[Question]":
     path = events_path(root)
     if not path.exists():
         return []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise OutstandingError(f"cannot read events journal {path}: {exc}") from exc
 
     asked: "dict[str, Question]" = {}
     closed: "set[str]" = set()
+    try:
+        # STREAM, never read_text().splitlines(). This journal is shared and
+        # never rotated, so materializing it holds the whole file in memory
+        # before the prefilter below skips anything - the read itself becomes
+        # the cost the prefilter was added to remove.
+        with path.open(encoding="utf-8") as fh:
+            lines = list(_iter_question_lines(fh))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OutstandingError(f"cannot read events journal {path}: {exc}") from exc
+
     for line in lines:
         stripped = line.strip()
         if not stripped:
