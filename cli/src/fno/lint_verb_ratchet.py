@@ -82,6 +82,10 @@ _EQ_RE = re.compile(
 
 # The catch-all arm that ends a verb dispatch, and the family it belongs to.
 _UNKNOWN_VERB_RE = re.compile(r"unknown (?:(\w+) )?verb")
+
+# The `match <expr> {` that a verb dispatch opens, used to find the owning match
+# from inside one of its arms without counting brace depth.
+_MATCH_OPEN_RE = re.compile(r"\bmatch\b[^{}]*\{\s*$")
 _FAMILY_RE = re.compile(r"fno mux (\w+):")
 
 # The alternation the front prints alongside that refusal. Two shapes in the
@@ -335,6 +339,36 @@ def _enclosing_block_start(lines: list[str], idx: int) -> int:
     return 0
 
 
+def _enclosing_match_start(lines: list[str], idx: int) -> int:
+    """Index of the ``match ... {`` owning the arm that contains ``idx``.
+
+    Walks OUTWARD block by block instead of assuming a fixed nesting depth.
+    Rust spells a catch-all arm two ways, and rustfmt keeps whichever it is
+    given::
+
+        other => { return Err(format!("unknown pane verb: ...")); }   # 2 deep
+        other => return Err(format!("unknown pane verb: ...")),       # 1 deep
+
+    Counting levels therefore makes the scan depend on whether the message
+    happened to fit on one line. It did not, until a verb list was hoisted into
+    a const and rustfmt collapsed the arm; the scan then walked past the match
+    into the enclosing fn, found no arms at that level, and reported ZERO verbs
+    for a family with eleven. It fails closed, but it blames the verbs it cannot
+    see rather than the shape it cannot parse, which is a long way from the
+    cause. Searching for the match itself has no depth assumption to break.
+    """
+    i = idx
+    while True:
+        start = _enclosing_block_start(lines, i)
+        if _MATCH_OPEN_RE.search(lines[start]):
+            return start
+        if start <= 0:
+            return 0
+        # Strictly decreasing (the next search starts above this block's opener),
+        # so this terminates at 0 even on a file with no match at all.
+        i = start - 1
+
+
 def _arms_at_top_level(lines: list[str], lo: int, hi: int) -> set[str]:
     """Verb literals dispatched directly by the match opening at ``lo``.
 
@@ -412,8 +446,7 @@ def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[s
             fam = fm.group(1)
         if not fam:
             continue
-        arm_block = _enclosing_block_start(mux_lines, i)
-        match_block = _enclosing_block_start(mux_lines, arm_block - 1) if arm_block else 0
+        match_block = _enclosing_match_start(mux_lines, i)
         verbs = _arms_at_top_level(mux_lines, match_block, i)
         fn_start = _enclosing_fn_start(mux_lines, i)
         verbs |= set(_EQ_RE.findall("\n".join(mux_lines[fn_start:i])))
