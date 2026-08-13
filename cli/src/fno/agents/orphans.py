@@ -612,7 +612,12 @@ def filter_new(result: ScanResult, seen_path: Path) -> bool:
         return True
     keys = {_seen_key(f) for f in result.findings}
     try:
-        seen = set(seen_path.read_text(encoding="utf-8").split())
+        # Split on LINES, never on whitespace. The file is newline-joined and a
+        # key carries argv[0], which on macOS is routinely `Foo Helper`. Split
+        # on whitespace that key never matched itself again, so a long-lived
+        # third-party process read as new at every session start forever - the
+        # reprint loop `--quiet-unless-new` exists to stop.
+        seen = set(seen_path.read_text(encoding="utf-8").splitlines())
     except Exception:  # noqa: BLE001 -- no memory means report it all
         seen = set()
     try:

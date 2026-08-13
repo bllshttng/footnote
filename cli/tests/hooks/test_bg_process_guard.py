@@ -184,6 +184,10 @@ _PREFIXES = [
     "", "nohup ", "setsid ", "env ", "env FOO=1 ", "FOO=1 ", "sudo ",
     "sudo -u me ", "nice -n 5 ", "time ", "command ", "exec ",
     "exec -a fno-load-x ", "stdbuf -o0 ",
+    # Boolean flags on a wrapper that ALSO has value flags. Read from one shared
+    # value-flag set, `-n` and `-p` swallowed the generator behind them and the
+    # command resolved to whatever came next.
+    "sudo -n ", "command -p ",
 ]
 
 _GENERATORS = [
@@ -251,6 +255,36 @@ def test_an_unbounded_loop_header_is_refused_whatever_its_body() -> None:
     assert guard.decide("until false; do timeout 300 yes; done") is not None
     assert guard.decide("until false; do echo hi; done") is not None
     assert guard.decide("while true; do sleep 1; done") is not None
+
+
+def test_an_escape_before_the_loop_does_not_clear_it() -> None:
+    """An escape leaves the loop it is INSIDE, never one it precedes.
+
+    Read over the whole command, an ordinary precondition cleared the loop that
+    followed it, and `cd /tmp || exit 1; while true; do sleep 60; done &` is a
+    very ordinary way to write the keepalive this guard exists to refuse.
+    """
+    assert guard.decide("cd /tmp || exit 1; while true; do sleep 60; done &")
+    assert guard.decide("[ -f x ] || exit 1\nwhile true; do sleep 1; done")
+    # The escape that IS inside the loop still clears it.
+    assert guard.decide("while true; do sleep 5; gh pr view && break; done") is None
+
+
+def test_a_bundled_shell_flag_still_opens_the_payload() -> None:
+    """`bash -lc '...'` is the same call as `bash -c '...'`; an exact `-c`
+    match walked past every bundled spelling."""
+    assert guard.decide("bash -lc 'yes > /dev/null'")
+    assert guard.decide("sh -ec 'while true; do sleep 1; done'")
+    assert guard.decide("timeout 5 bash -lc 'yes > /dev/null'") is None
+
+
+def test_a_redirect_target_is_not_a_bound() -> None:
+    """A filename is not a command. `yes 2> /tmp/gtimeout` claimed a bound it
+    never runs, and naming an output file is a bypass anyone reaches by
+    accident."""
+    assert guard.decide("yes 2> /tmp/gtimeout")
+    assert guard.decide("yes > /tmp/timeout")
+    assert guard.decide("timeout 300 yes > /dev/null") is None
 
 
 def test_refusal_carries_the_replacement_verbatim() -> None:

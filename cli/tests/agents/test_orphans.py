@@ -350,6 +350,22 @@ def test_seen_key_ignores_age(monkeypatch, table, tmp_path: Path) -> None:
     assert orphans.filter_new(result, seen) is False
 
 
+def test_a_name_with_a_space_still_goes_quiet(monkeypatch, table, tmp_path: Path) -> None:
+    """The seen-file is newline-joined, so it must be read by LINES.
+
+    Read by whitespace, a key carrying an argv[0] like `Chrome Helper` broke
+    into three tokens and never matched itself again, so exactly the long-lived
+    third-party process `--quiet-unless-new` exists to silence reprinted at
+    every session start forever. macOS argv[0] with a space is routine.
+    """
+    seen = tmp_path / ".orphan-sweep-seen"
+    table.append(_proc(93, name="Chrome Helper", cwd="/repo", create=time.time() - 900))
+    result = _scan_with_working_control(monkeypatch, table)
+    assert [f.name for f in result.findings] == ["Chrome Helper"]
+    assert orphans.filter_new(result, seen) is True
+    assert orphans.filter_new(result, seen) is False
+
+
 def test_a_concurrent_sweeps_probe_is_not_an_orphan(monkeypatch, table) -> None:
     """Two sweeps inside one 30s probe lifetime is likely, because worktrees of
     one repo share the hourly stamp. Neither may report the other's control."""

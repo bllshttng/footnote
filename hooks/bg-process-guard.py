@@ -74,8 +74,19 @@ TRANSPARENT = {
 }
 
 #: Flags that swallow the next token, so skipping the flag alone still leaves a
-#: value where the command should be (`sudo -u me yes`).
-VALUE_FLAGS = {"-a", "-u", "-g", "-C", "-S", "-n", "-c", "-p", "-U"}
+#: value where the command should be (`sudo -u me yes`). Read PER WRAPPER: one
+#: shared set is wrong in both directions, because `-n` takes a value for `nice`
+#: and takes none for `sudo`. Shared, `sudo -n yes > /dev/null` skipped the
+#: generator and resolved the command to whatever followed it.
+VALUE_FLAGS = {
+    "nice": {"-n"},
+    "ionice": {"-c", "-n", "-p"},
+    "sudo": {"-u", "-g", "-C", "-U", "-p", "-D", "-R", "-T", "-h"},
+    "env": {"-u", "-S"},
+    "exec": {"-a"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "taskpolicy": {"-c"},
+}
 
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 
@@ -184,11 +195,13 @@ def _head_of(segment):
     """
     i = 0
     saw_wrapper = False
+    wrapper = ""
     while i < len(segment):
         tok = segment[i]
         base = tok.rsplit("/", 1)[-1]
         if base in TRANSPARENT:
             saw_wrapper = True
+            wrapper = base
             i += 1
             continue
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tok):
@@ -206,7 +219,8 @@ def _head_of(segment):
             # A wrapper's own options, not the command. Skipping only a fixed
             # trio left `sudo -u me yes` resolving to a command called `-u`,
             # which defeated the `sudo` and `env` entries above.
-            i += 2 if (tok in VALUE_FLAGS and i + 1 < len(segment)) else 1
+            takes_value = tok in VALUE_FLAGS.get(wrapper, ())
+            i += 2 if (takes_value and i + 1 < len(segment)) else 1
             continue
         return base, segment[i + 1:]
     return None, []
@@ -220,6 +234,11 @@ def _has_bound(segment):
     in the same line.
     """
     for i, tok in enumerate(segment):
+        # A redirect TARGET is a filename, not a command. Read as one,
+        # `yes 2> /tmp/gtimeout` carried a bound it never runs, and naming an
+        # output file is a bypass anyone can reach by accident.
+        if i and (">" in segment[i - 1] or "<" in segment[i - 1]):
+            continue
         base = tok.rsplit("/", 1)[-1]
         if base in {"timeout", "gtimeout"}:
             return True
@@ -253,11 +272,15 @@ def _generator_reason(head, argv):
 
 
 def _payload_of(head, argv):
-    """The script text a shell was handed with -c, or None."""
-    if head in SHELLS and "-c" in argv:
-        idx = argv.index("-c")
-        if idx + 1 < len(argv):
-            return argv[idx + 1]
+    """The script text a shell was handed with -c, or None.
+
+    Short options bundle: `bash -lc '...'` and `sh -ec '...'` are the same call
+    as `-c`, and an exact `-c` match walked past both.
+    """
+    if head in SHELLS:
+        for idx, tok in enumerate(argv):
+            if re.fullmatch(r"-[A-Za-z]*c", tok) and idx + 1 < len(argv):
+                return argv[idx + 1]
     return None
 
 
@@ -271,18 +294,35 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     if depth > 2:
         return None
     text = _strip_heredocs(text)
+    all_segments = _segments(_tokens(text))
     # A loop header runs forever only if nothing inside leaves the loop.
     # `while true; do sleep 5; gh pr view && break; done` is the standard poll
     # and it ends; refusing it blocked an ordinary shape at the Bash boundary.
     # Read in COMMAND POSITION, through the same walk the rest of this function
     # uses. A text match here read `echo break` and `rg break src` as escapes,
     # which is a hole with no shell in it at all.
-    # ponytail: a `break` in a NESTED loop still reads as one for the outer.
-    # That is the fail-open direction this guard takes everywhere else.
-    escapes = any(
-        _head_of(part)[0] in _ESCAPES
-        for segment in _segments(_tokens(text))
-        for part in _pipe_parts(segment)
+    #
+    # Only AFTER the first loop header counts. An escape can leave a loop it is
+    # inside; one in a precondition that runs first cannot. Read over the whole
+    # command, `cd /tmp || exit 1; while true; do sleep 60; done &` cleared its
+    # own loop from a line that had already run, and that is an ordinary way to
+    # write the keepalive this guard exists to refuse.
+    # ponytail: one escape clears every loop after the first header, so a
+    # `break` in a NESTED loop reads as one for the outer, and in
+    # `while true; do break; done; while true; do sleep 1; done` it clears the
+    # second loop too. Telling those apart needs loop-scope tracking, and this
+    # walk has already been rewritten three times; the sweep covers what the
+    # guard misses. Fail-open, in the same direction as the rest of this file.
+    heads = [
+        [_head_of(part)[0] for part in _pipe_parts(segment)]
+        for segment in all_segments
+    ]
+    first_loop = next(
+        (i for i, hs in enumerate(heads) if {"while", "until", "for"} & set(hs)),
+        None,
+    )
+    escapes = first_loop is not None and any(
+        head in _ESCAPES for hs in heads[first_loop + 1:] for head in hs
     )
     # `for ((;;))` cannot be found per segment: `((;;))` is all punctuation, so
     # the lexer emits it as one operator token and _is_separator splits there,
@@ -290,10 +330,10 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     # and only when the whole command carries no bound at all, so
     # `for ((;;)); do timeout 5 x; done` still passes.
     if re.search(r"for\s*\(\(\s*;\s*;\s*\)\)", text) and not escapes and not any(
-        _has_bound(seg) for seg in _segments(_tokens(text))
+        _has_bound(seg) for seg in all_segments
     ):
         return "`for ((;;))` is an unbounded loop header.", text.strip()
-    for segment in _segments(_tokens(text)):
+    for segment in all_segments:
         seg_bound = inherited_bound or _has_bound(segment)
         parts = _pipe_parts(segment)
         for idx, part in enumerate(parts):

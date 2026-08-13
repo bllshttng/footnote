@@ -30,7 +30,7 @@ A PreToolUse hook on Bash, wired on both the claude and codex lanes. It denies a
 
 Refused shapes: `yes`, `while true`, `while :`, `until false`, `for ((;;))`, `sleep infinity`. Also `stress` and `stress-ng` with no `-t`, `dd` from an endless device with no `count=`, and a checksum reading one.
 
-Any of these makes it legal: `timeout`, `gtimeout`, `head` in the pipeline, `count=`, `ulimit -t`, `-t <seconds>`. A `break`, `exit`, or `return` in COMMAND position also clears a loop header. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Command position is the discriminator, not the word. `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes.
+Any of these makes it legal: `timeout`, `gtimeout`, `head` in the pipeline, `count=`, `ulimit -t`, `-t <seconds>`. A `break`, `exit`, or `return` in COMMAND position after the loop header also clears it. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Two things discriminate, and neither is the word. Command position: `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes. Position relative to the header: an escape leaves the loop it is inside, never one it precedes, so `cd /tmp || exit 1; while true; do sleep 60; done &` is still refused.
 
 Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
