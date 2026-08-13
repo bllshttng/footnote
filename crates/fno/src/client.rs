@@ -10583,9 +10583,28 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
                         }
                     }
                     esc.clear();
-                } else {
-                    // A parameter or intermediate byte: keep accumulating.
+                    continue;
+                }
+                if (0x20..=0x3f).contains(&b) {
+                    // A real parameter or intermediate byte (ECMA-48): keep
+                    // accumulating.
                     esc.push(b);
+                    continue;
+                }
+                // Anything else is malformed: a C0 control landed mid-sequence.
+                // Treating it as a parameter would strand the parser and eat the
+                // operator's escape hatch - a truncated `ESC [` in the carry (an
+                // Alt-`[` press emits exactly that) would swallow the Esc meant
+                // to cancel the picker, and then swallow the following `q` too,
+                // because `q` is in the final-byte range. Abandon the sequence
+                // and let the byte be handled as if it arrived fresh, so a
+                // cancel always reaches the overlay. This also bounds the carry:
+                // it can only ever hold parameter bytes.
+                esc.clear();
+                if b == 0x1b {
+                    esc.push(0x1b);
+                } else {
+                    keys.push(b);
                 }
                 continue;
             }
@@ -18852,6 +18871,43 @@ mod tests {
         }
         assert_eq!(keys, b"j".to_vec(), "only the real keypress survives");
         assert!(esc.is_empty());
+    }
+
+    #[test]
+    fn client_selector_fold_abandons_a_malformed_csi_and_frees_the_cancel() {
+        // A CSI carry must never swallow the operator's escape hatch. Alt-`[`
+        // emits exactly `ESC [`, which leaves a truncated sequence in the carry.
+        // Treating every non-final byte as a parameter would then absorb the Esc
+        // meant to cancel, and absorb the following `q` too (it is in the
+        // final-byte range) - the cancel eaten twice. ECMA-48 parameter and
+        // intermediate bytes are 0x20-0x3f, so a C0 control is malformed and
+        // ends the sequence instead.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b["), Vec::<u8>::new());
+        assert_eq!(esc, vec![0x1b, b'['], "the truncated CSI is pending");
+        // Esc abandons it and starts a fresh bare-Esc, which resolves on the
+        // next byte exactly as a normal bare Esc does.
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b"), Vec::<u8>::new());
+        assert_eq!(
+            esc,
+            vec![0x1b],
+            "the stale CSI is gone, a bare Esc is armed"
+        );
+        assert_eq!(
+            fold_selector_keys(&mut esc, b"q"),
+            vec![0x1b],
+            "the cancel reaches the overlay instead of being eaten"
+        );
+
+        // A non-Esc control mid-sequence is delivered rather than swallowed.
+        let mut esc = Vec::new();
+        assert_eq!(fold_selector_keys(&mut esc, b"\x1b[1;5"), Vec::<u8>::new());
+        assert_eq!(
+            fold_selector_keys(&mut esc, b"\r"),
+            b"\r".to_vec(),
+            "Enter mid-sequence is not lost"
+        );
+        assert!(esc.is_empty(), "and the carry is released");
     }
 
     #[tokio::test]

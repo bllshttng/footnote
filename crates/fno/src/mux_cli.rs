@@ -1639,11 +1639,18 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// Parse the tokens after `mux pane` into a [`ParsedPane`]. Pure, so the whole
 /// grammar (verbs, flags, the exit-code-bearing outcomes) is unit-testable
 /// without a socket.
+/// The `pane` verbs, named ONCE. Two messages quote this list - the
+/// missing-verb one and the unknown-verb one - and they had already drifted:
+/// `split` and `break` shipped without reaching the first, so an operator who
+/// typed a bare `fno mux pane` to discover the surface was told verbs that
+/// exist do not.
+const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
+
 fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
-        .ok_or_else(|| "pane needs a verb: ls|read|run|send|wait|kill|claim|release".to_string())?;
+        .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
 
     // `run` is special: leading options/directives, then the command argv
     // verbatim (its own flags are NOT ours to parse), optionally after `--`.
@@ -1872,11 +1879,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         "release" => PaneCmd::Release {
             pane: pane_arg("release")?,
         },
-        other => {
-            return Err(format!(
-                "unknown pane verb: {other} (ls|read|run|send|wait|kill|claim|release|split|break|focus)"
-            ))
-        }
+        other => return Err(format!("unknown pane verb: {other} ({PANE_VERBS})")),
     };
     Ok(ParsedPane { session, json, cmd })
 }
