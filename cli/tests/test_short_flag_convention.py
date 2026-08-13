@@ -132,7 +132,6 @@ TWO_SPELLING_SITES: dict[tuple[str, str], list[tuple[str, str]]] = {
     ("graph/cli.py", "cmd_cost"): [("--session-id", "--session")],
     ("worker/cli.py", "review"): [("--session-id", "--session")],
     ("worker/cli.py", "external"): [("--pr-number", "--pr")],
-    ("reality_check/cli.py", "gh"): [("--pr-number", "--pr")],
     ("retro/cli.py", "run"): [
         ("--session-id", "--session"),
         ("--pr-number", "--pr"),

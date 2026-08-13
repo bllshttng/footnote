@@ -25,8 +25,12 @@ fi
 
 passed=0
 failed=0
-declare -a FAILURES
-declare -a LEAKS
+# Initialized, not merely declared. Under `set -u` a declared-but-unassigned
+# array is UNSET, so `${#LEAKS[@]}` below aborted the report on any run
+# where nothing leaked - which is every healthy run, so the leak check was
+# dead exactly when it was supposed to say "clean".
+declare -a FAILURES=()
+declare -a LEAKS=()
 
 # Entry count of the developer's REAL graph, read-only. A smoke test that
 # forgets to redirect HOME writes here, and the suite stays green: the pytest

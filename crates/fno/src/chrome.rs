@@ -463,7 +463,19 @@ fn scroll_cell(row_idx: usize, s: Scroll) -> (char, Role) {
     }
     let thumb_h = ((s.visible as u64).pow(2) / s.total.max(1) as u64) as usize;
     let thumb_h = thumb_h.max(1);
-    let thumb_start = (s.pos as u64 * s.visible as u64 / s.total.max(1) as u64) as usize;
+    // Both the height and the start floor, so the proportional formula alone
+    // stops SHORT of the bottom at maximum scroll: the last track cell stays
+    // `░` and reports more content below when the operator is already at the
+    // end. Pin the thumb to the bottom there instead, and clamp elsewhere so it
+    // can never overhang. This only became reachable when `pos` started
+    // reporting the real window position - it was hardcoded 0 before, which
+    // parked the thumb at the top and hid the case entirely.
+    let last_row = s.visible.saturating_sub(thumb_h);
+    let thumb_start = if s.pos + s.visible >= s.total {
+        last_row
+    } else {
+        ((s.pos as u64 * s.visible as u64 / s.total.max(1) as u64) as usize).min(last_row)
+    };
     if row_idx >= thumb_start && row_idx < thumb_start + thumb_h {
         ('█', Role::ScrollThumb)
     } else {
@@ -477,6 +489,46 @@ mod tests {
 
     fn bl(s: &str) -> BodyLine {
         BodyLine::from_str(s)
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_the_bottom_at_maximum_scroll() {
+        // A track cell below the thumb means "there is more". At the end of the
+        // list that is a lie, and it was unreachable only because `pos` used to
+        // be hardcoded 0.
+        let s = Scroll {
+            pos: 1,
+            total: 11,
+            visible: 10,
+        };
+        let cells: Vec<char> = (0..s.visible).map(|r| scroll_cell(r, s).0).collect();
+        assert_eq!(
+            cells.last(),
+            Some(&'█'),
+            "at max scroll the thumb must touch the bottom: {cells:?}"
+        );
+        // ...and at the top it still starts at the top.
+        let top = Scroll { pos: 0, ..s };
+        assert_eq!(scroll_cell(0, top).0, '█');
+        assert_eq!(
+            scroll_cell(s.visible - 1, top).0,
+            '░',
+            "at the top the track below still says there is more"
+        );
+        // The thumb never overhangs the track, at any position.
+        for total in [11usize, 14, 30, 100] {
+            for pos in 0..=(total - 10) {
+                let sc = Scroll {
+                    pos,
+                    total,
+                    visible: 10,
+                };
+                let painted = (0..sc.visible)
+                    .filter(|r| scroll_cell(*r, sc).0 == '█')
+                    .count();
+                assert!(painted > 0, "thumb vanished at pos={pos} total={total}");
+            }
+        }
     }
 
     #[test]

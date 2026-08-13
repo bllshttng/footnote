@@ -8,16 +8,27 @@ from __future__ import annotations
 
 import click
 import typer
-from typer.testing import CliRunner
+import typer.main
+# click's runner: `fno lint` is a plain-function registry entry that the live
+# CLI resolves to a bare TyperCommand, which typer.testing.CliRunner rejects.
+from click.testing import CliRunner
 
 import fno.lint_cli as L
+
+
+def _lint_command():
+    """`fno lint` in the shape the live CLI resolves it to (see _lazy_group)."""
+    sub = typer.Typer(add_completion=False)
+    sub.command(name="lint")(L.lint)
+    return typer.main.get_command(sub)
+
 
 runner = CliRunner()
 
 
 def test_menu_caps_passes_on_the_shipped_registry():
     """The real curated menu is within caps (top-level <= 10)."""
-    result = runner.invoke(L.app, ["menu-caps"])
+    result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 0, result.output
     assert "menu-caps: ok" in result.output
 
@@ -32,7 +43,7 @@ def test_menu_caps_fails_naming_offender_and_both_remedies(monkeypatch):
     # Lower the cap below the shipped advertised set - the same branch a real
     # 11th advertised verb would hit.
     monkeypatch.setattr(L, "MENU_CAP_TOP_LEVEL", advertised - 1)
-    result = runner.invoke(L.app, ["menu-caps"])
+    result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 1, result.output
     out = result.output
     # Names a concrete offending verb (the one over the cap).
@@ -46,7 +57,7 @@ def test_menu_caps_passes_once_remedy_applied(monkeypatch):
     """AC5-FR: raising the cap constant (remedy 2) clears the failure."""
     # Set the cap comfortably above the shipped set: the ratchet passes again.
     monkeypatch.setattr(L, "MENU_CAP_TOP_LEVEL", 50)
-    result = runner.invoke(L.app, ["menu-caps"])
+    result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 0, result.output
 
 

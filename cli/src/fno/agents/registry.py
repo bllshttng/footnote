@@ -358,9 +358,17 @@ class AgentEntry:
         """The harness-specific resume-target id.
 
         Resolves to whichever stored field the resume path consumes:
-        ``short_id`` (``claude attach``), ``codex_session_id``
-        (``codex resume <uuid>``), or ``gemini_session_id``. ``None`` for
-        unknown harnesses or when the id was never captured.
+        ``short_id`` (``claude attach``) for a claude row that carries one,
+        otherwise the canonical ``harness_session_id`` (``claude --resume``,
+        ``codex resume <uuid>``). ``None`` only when the row carries neither a
+        transport key nor a ``harness_session_id``.
+
+        claude is the one harness whose transport key (``short_id``, the 8-hex
+        jobId ``claude attach`` takes) is distinct from its canonical id: a
+        pane/mux row carries a ``harness_session_id`` but no ``short_id`` by
+        design (``_validate_single_live_ref`` enforces mux XOR worker XOR bg).
+        Falling back to ``harness_session_id`` keeps such a row resumable
+        instead of reporting "no session id" for a row that has one (x-b84f).
 
         The harness -> field mapping comes from the module-level
         :data:`HARNESS_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
@@ -371,7 +379,12 @@ class AgentEntry:
         field_name = HARNESS_SESSION_ID_FIELDS.get(self.harness)
         # `short_id` is a str defaulting to "" (never None); normalize the
         # empty transport key to None so callers keep their `is None` checks.
-        return (getattr(self, field_name) or None) if field_name else None
+        transport = (getattr(self, field_name) or None) if field_name else None
+        if transport:
+            return transport
+        # No transport key (a claude pane row): the canonical id is the
+        # resume-target id.
+        return self.harness_session_id or None
 
     @property
     def crown_label(self) -> Optional[str]:

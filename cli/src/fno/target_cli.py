@@ -33,12 +33,14 @@ import typer
 
 from fno._subprocess_util import propagate_returncode
 from fno.paths import resolve_plugin_script
+from fno.tombstones import tombstone_group_cls
 
 
 target_app = typer.Typer(
     name="target",
     help="Target session bootstrap (records input/plan_path + owner_cwd binding).",
     add_completion=False,
+    cls=tombstone_group_cls("target"),
 )
 
 _INIT_RELPATH = "hooks/helpers/init-target-state.sh"
@@ -989,62 +991,6 @@ def check_contained() -> None:
         if exc.exit_code != 2:
             raise
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
-
-
-@target_app.command("resume-bind", hidden=True)
-def resume_bind_cmd(
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit one JSON result line for the harness adapter."
-    ),
-    heartbeat: bool = typer.Option(
-        False,
-        "--heartbeat",
-        help="Heartbeat mode: refresh the lease, or rebind if the prior pid is dead.",
-    ),
-    harness: Optional[str] = typer.Option(
-        None, "--harness", help="Override ambient harness (transport/testing)."
-    ),
-    harness_session_id: Optional[str] = typer.Option(
-        None, "--harness-session-id", help="Override ambient session id (transport/testing)."
-    ),
-) -> None:
-    """Native target resume: rebind the node claim to the resumed durable pid (x-2ccd).
-
-    Reads the immutable manifest in the cwd, proves the ambient harness identity
-    matches it, and atomically rebinds the node claim's dead prior PID to this
-    durable process. Fail-closed: a foreign, live-concurrent, off-host, or
-    mismatched owner refuses with a named reason and changes nothing. A plain
-    session with no manifest is a silent no-op. The SessionStart/heartbeat
-    adapters call this and parse the ``--json`` line; policy lives in the
-    primitive, not the shell.
-    """
-    from fno.target.resume_bind import resume_bind
-
-    result = resume_bind(
-        Path.cwd(),
-        heartbeat=heartbeat,
-        harness=harness,
-        harness_session_id=harness_session_id,
-    )
-    if json_out:
-        typer.echo(json.dumps(result))
-        return
-    res = result.get("result")
-    if res == "noop":
-        return  # silent: a plain session with no target manifest
-    if res in ("rebound", "idempotent"):
-        typer.echo(
-            f"target resume: {res} {result.get('node')} "
-            f"run={result.get('fno_id')} pid={result.get('pid')}"
-        )
-        return
-    typer.echo(
-        f"target resume: refused ({result.get('node', '?')}): {result.get('reason')}",
-        err=True,
-    )
-    if result.get("advice"):
-        typer.echo(f"  {result['advice']}", err=True)
-    raise typer.Exit(code=1)
 
 
 @target_app.command("denominator-ratio", hidden=True)
@@ -2594,7 +2540,7 @@ def _reacquire_node_claim(
             f"fno target start: cannot re-acquire {key}: "
             f"{type(exc).__name__}: {exc}. The claim state is unreadable or "
             f"corrupt; refusing to risk a duplicate claim. Clear it "
-            f"(fno claim force-release {key}) and retry.",
+            f"(fno claim release {key} --force -R <why>) and retry.",
             err=True,
         )
         raise typer.Exit(code=1)

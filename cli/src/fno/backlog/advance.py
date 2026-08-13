@@ -385,7 +385,7 @@ def _live_lane_domains(*, claims_root: Optional[Path] = None) -> set[str]:
     the exact collision domain-lane parallelism exists to prevent). Each lane
     records its ``domain`` in slot metadata at acquire time, so peer-lane domains
     are readable here without a per-node lookup. A slot with no recorded domain
-    (e.g. one taken via the bare ``fno claim lane-acquire`` CLI) collapses to the
+    (e.g. one taken via a bare ``fno claim acquire --lane`` CLI) collapses to the
     ``_DOMAIN_UNSET`` bucket - conservatively blocking co-schedule with an
     unknown-domain lane rather than guessing it is safe.
     """

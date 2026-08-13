@@ -177,7 +177,6 @@ LAYERS = (
             "fno.company.topology",
             "fno.company.execution",
             "fno.company.join",
-            "fno.company.cli",
         ),
     ),
     (4, "plugins", ("fno.plugins",)),

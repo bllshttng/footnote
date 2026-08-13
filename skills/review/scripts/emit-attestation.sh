@@ -16,6 +16,29 @@
 #   [verdict]   pass (default) | fail
 set -euo pipefail
 
+usage() {
+  sed -n '13,16p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# A flag-shaped first argument is NEVER a reviewer name. Without this, `--help`
+# was accepted as one and emitted a real `verdict=pass` attestation against the
+# current HEAD: asking this script how to run it wrote evidence onto the merge
+# gate. Any typo'd or stray flag did the same. There is no reviewer name in any
+# registry that begins with `-`, so refusing the whole shape costs nothing and
+# closes the class rather than the one spelling.
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -*)
+    echo "emit-attestation: '$1' is a flag, not a reviewer name; no event emitted" >&2
+    echo >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
 reviewer="${1:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
 verdict="${2:-pass}"
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
@@ -48,9 +71,12 @@ fi
 # inside an already-routed process. Reading the env is the only signal available
 # at emit; it reports what the environment CLAIMED, never proof of the model
 # that answered, so both stay empty rather than defaulting to a guess a later
-# reader would mistake for evidence. Empty means NOT OBSERVABLE, not "primary":
-# resolve_codex_route carries a codex worker's route in `-c model=...` config
-# args with only the API key in env, so a routed codex verdict reads empty here.
+# reader would mistake for evidence. Empty means NO CLAIM WAS MADE, not
+# "primary": resolve_codex_route carries a codex worker's route in `-c model=...`
+# config args with only the API key in env, so a routed codex verdict reads empty
+# here. A claim that WAS made and then refused reads `unobserved` instead, so the
+# two never collapse into one value - see the drift block below. The receipt line
+# at the end prints the stored value verbatim for the same reason.
 model="${ANTHROPIC_MODEL:-}"
 provider=""
 if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
@@ -58,6 +84,35 @@ if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
   provider="${provider%%/*}"              # host only, no path
   provider="${provider##*@}"              # drop userinfo: a key in the URL must not land in the log
 fi
+
+# A foreign model name over an Anthropic base is the routing-drift case: the
+# request falls back to the primary Anthropic model, so ANTHROPIC_MODEL names a
+# model that did NOT answer. hooks/attest-model.sh already warns at SessionStart.
+# Warning there and stamping the value here anyway would put a known-false claim
+# in the one record the reviewers gate reads.
+#
+# It records the literal `unobserved` rather than blanking the field. Empty here
+# means the env carried no claim at all, so reusing it would leave one value with
+# two explanations - nothing was set, versus something was set and refused - and
+# a reader could not tell a declined claim from an unset field. That is the same
+# assert-a-positive-marker trap this script exists to keep out of the record, one
+# level down. The refusal is a finding, so it is written as one.
+#
+# Host match is exact-or-subdomain so notanthropic.com stays foreign. This
+# predicate is duplicated from the hook because a skill script may not source
+# outside its own directory; tests/hooks/test_attest_model.sh drives both over
+# one env matrix and fails when they disagree.
+drift_host="${ANTHROPIC_BASE_URL:-}"
+drift_host="${drift_host#*://}"; drift_host="${drift_host%%/*}"
+drift_host="${drift_host##*@}"; drift_host="${drift_host%%:*}"
+case "$model" in
+  ""|claude*) ;;
+  *)
+    if [[ -z "$drift_host" || "$drift_host" == "anthropic.com" || "$drift_host" == *.anthropic.com ]]; then
+      model="unobserved"
+    fi
+    ;;
+esac
 
 # Record the harness session of the EMITTING PROCESS. This is the only field
 # that can tell an author-attested review from an independent one: session_id
@@ -94,4 +149,4 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unobserved} provider=${provider:-unobserved}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2

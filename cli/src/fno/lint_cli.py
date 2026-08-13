@@ -11,7 +11,31 @@ import click
 import typer
 
 
-app = typer.Typer(help="Repository lint checks", no_args_is_help=True)
+
+# Eight subcommands became one verb taking the check NAME as an argument, so
+# `fno lint verb-ratchet` still reads and types exactly the same while costing
+# one leaf instead of eight. Six of the eight only ever ran in CI, where a
+# distinct leaf per check bought nothing a dict key does not.
+#
+# The per-check options survive as options on the one verb, dispatched by
+# signature rather than by name: a check is called with only the parameters it
+# declares, so `--update` reaches `verb-ratchet` and nothing else.
+#
+# A check's option must still be DECLARED on `lint` below, and forgetting one is
+# silent here and loud four jobs later in CI - `--surface` was missed on the
+# first pass and only `check-markdown-style` said so.
+# `test_every_check_parameter_is_declared_on_the_dispatcher` closes that gap by
+# comparing the two sets directly.
+CHECKS: dict[str, str] = {
+    "spawn-paths": "spawn_paths",
+    "flock-pattern": "flock_pattern",
+    "provider-stderr-merge": "provider_stderr_merge",
+    "shellout-drift": "shellout_drift",
+    "menu-caps": "menu_caps",
+    "verb-ratchet": "verb_ratchet",
+    "style": "style",
+    "stale-skill-refs": "stale_skill_refs",
+}
 
 
 # x-71b6 In-N-Out menu ratchet: the advertised command surface stays small.
@@ -84,7 +108,6 @@ def _spawn_shape_violations(repo_root: Path) -> list[str]:
     return violations
 
 
-@app.command("spawn-paths")
 def spawn_paths() -> None:
     """Reject new single-line hand-assembled Claude/Codex session argv shapes.
 
@@ -133,14 +156,7 @@ def _repo_root() -> Path:
     return resolve_repo_root()
 
 
-@app.command("flock-pattern")
-def flock_pattern(
-    dispatch_path: Optional[Path] = typer.Option(
-        None,
-        "--dispatch-path",
-        help="Override dispatch.py path for tests or targeted linting.",
-    ),
-) -> None:
+def flock_pattern(dispatch_path: Optional[Path] = None) -> None:
     """Forbid open-coded agent flock + registry re-read patterns."""
     from fno.paths import resolve_repo_root
 
@@ -194,14 +210,7 @@ def _has_stdout_merge_justification(source_lines: list[str], line_no: int) -> bo
     )
 
 
-@app.command("provider-stderr-merge")
-def provider_stderr_merge(
-    providers_dir: Optional[Path] = typer.Option(
-        None,
-        "--providers-dir",
-        help="Override provider directory for tests or targeted linting.",
-    ),
-) -> None:
+def provider_stderr_merge(providers_dir: Optional[Path] = None) -> None:
     """Require justification for provider stderr/stdout pipe merging."""
     root = (
         providers_dir
@@ -239,14 +248,7 @@ def provider_stderr_merge(
     typer.echo("provider-stderr-merge: ok")
 
 
-@app.command("shellout-drift")
-def shellout_drift(
-    no_degrade: bool = typer.Option(
-        False,
-        "--no-degrade",
-        help="Skip the degrade proof (static scan only). Tests/diagnostics; CI runs the full check.",
-    ),
-) -> None:
+def shellout_drift(no_degrade: bool = False) -> None:
     """Forbid repo-root shell-outs without a proven clone-only degrade path (US4).
 
     Scans cli/src/fno/ for verbs that bash-exec a resolve_repo_root()/
@@ -263,7 +265,6 @@ def shellout_drift(
     raise typer.Exit(report.exit_code)
 
 
-@app.command("menu-caps")
 def menu_caps() -> None:
     """Enforce the In-N-Out menu caps (x-71b6): <=10 advertised top-level verbs,
     <=12 advertised verbs per sub-app. New verbs default to hidden; promoting one
@@ -333,14 +334,7 @@ def menu_caps() -> None:
     typer.echo(f"menu-caps: ok (top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})")
 
 
-@app.command("verb-ratchet")
-def verb_ratchet(
-    update: bool = typer.Option(
-        False,
-        "--update",
-        help="Regenerate scripts/ci/verb-baseline.txt from the live surface.",
-    ),
-) -> None:
+def verb_ratchet(update: bool = False) -> None:
     """Ratchet the REAL verb count.
 
     ``menu-caps`` caps what ``fno --help`` ADVERTISES; this caps what EXISTS.
@@ -376,7 +370,6 @@ def verb_ratchet(
 _STYLE_SURFACES = ("mail", "pr-body", "markdown")
 
 
-@app.command("style", hidden=True)
 def style(
     surface: str = typer.Option(
         "mail",
@@ -808,7 +801,6 @@ def _git_added_line_nums(
     return nums
 
 
-@app.command("stale-skill-refs")
 def stale_skill_refs() -> None:
     """Audit for stale references to cut, demoted, or merged skills.
 
@@ -831,3 +823,64 @@ def stale_skill_refs() -> None:
         typer.echo(f"failed to run audit script: {exc}", err=True)
         raise typer.Exit(code=2)
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def lint(
+    check: str = typer.Argument(
+        ...,
+        metavar="CHECK",
+        help="Which check to run: " + " | ".join(CHECKS),
+    ),
+    update: bool = typer.Option(
+        False, "--update", help="verb-ratchet: regenerate scripts/ci/verb-baseline.txt."
+    ),
+    no_degrade: bool = typer.Option(
+        False, "--no-degrade", help="shellout-drift: fail instead of degrading."
+    ),
+    dispatch_path: Optional[Path] = typer.Option(
+        None, "--dispatch-path", help="flock-pattern: scan this file instead of the default."
+    ),
+    providers_dir: Optional[Path] = typer.Option(
+        None, "--providers-dir", help="provider-stderr-merge: scan this dir instead of the default."
+    ),
+    surface: str = typer.Option(
+        "mail", "--surface",
+        help="style: where the text is read - mail, pr-body, or markdown.",
+    ),
+    stdin: bool = typer.Option(False, "--stdin", help="style: read the body from standard input."),
+    files: Optional[list[Path]] = typer.Option(
+        None, "--files",
+        help="style: files to check whole; with --diff-base, scopes the added-lines scan.",
+    ),
+    diff_base: Optional[str] = typer.Option(
+        None, "--diff-base",
+        help="style: check ADDED lines only since this ref (e.g. origin/main).",
+    ),
+) -> None:
+    """Run a repository lint check by name.
+
+    Refuses an unknown name by listing the real ones, rather than the bare
+    "No such command" eight separate subcommands used to produce.
+    """
+    import inspect
+
+    fn_name = CHECKS.get(check)
+    if fn_name is None:
+        typer.echo(
+            f"fno lint: unknown check {check!r}. Known: {', '.join(sorted(CHECKS))}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    fn = globals()[fn_name]
+    supplied = {
+        "update": update,
+        "no_degrade": no_degrade,
+        "dispatch_path": dispatch_path,
+        "providers_dir": providers_dir,
+        "surface": surface,
+        "stdin": stdin,
+        "files": files,
+        "diff_base": diff_base,
+    }
+    accepted = set(inspect.signature(fn).parameters)
+    fn(**{k: v for k, v in supplied.items() if k in accepted})

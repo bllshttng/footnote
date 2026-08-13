@@ -79,9 +79,12 @@ RUST_CLIENT_VERBS = frozenset(
         # `drive` and `grid` (the WebSocket drive surface + the TUI compositor)
         # were retired at G4 (x-f54c) when the mux became the agent-PTY
         # substrate; the binary intercepts them with a mux pointer.
-        "register-channel",
-        "unregister-channel",
-        "push-channel",
+        #
+        # The three `*-channel` verbs are gone from the ROUTABLE set for the same
+        # reason: nothing shelled them. The `channel.*` daemon RPCs they wrapped
+        # are live and untouched (protocol.rs, daemon.rs) - what went away is the
+        # CLI surface in front of them, still reachable as `fno-agents <verb>`
+        # for daemon debugging.
         # Python-only verbs ported to the Rust client (full thin-wrapper rewire).
         # These dispatch client-side in client.rs before build_request (no daemon
         # RPC, except `logs --follow` which upgrades to the agent.logs WS stream).
@@ -268,9 +271,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "status": "Report daemon liveness and per-agent state.",
     "restart": "Restart a stale daemon (pick up a new build; PTY workers survive).",
     "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output.",
-    "register-channel": "Register a Claude Code session as an agent channel.",
-    "unregister-channel": "Unregister an agent channel by id.",
-    "push-channel": "Push a message to a registered agent channel.",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
@@ -941,6 +941,15 @@ def make_agents_group_cls() -> type:
                 )
             if name in RETIRED_VERB_POINTERS:
                 return _make_retired_command(name, RETIRED_VERB_POINTERS[name])
+            # A removed agents verb refuses BY NAME rather than as a typo. This
+            # group cannot use `cls=tombstone_group_cls("agents")` -- it already
+            # needs its own class for the Rust routing -- so the same lookup is
+            # done here, on the same `get_command` seam TombstoneGroup hooks.
+            from fno.tombstones import refuse, tombstone_for
+
+            full = f"agents {name}"
+            if tombstone_for(full) is not None:
+                raise refuse(full)
             return None
 
         # Click's make_context signature carries precise Context types we do not

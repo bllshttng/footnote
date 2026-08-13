@@ -17,6 +17,7 @@ from fno.annotate.core import (
     list_findings,
     resolve_finding,
 )
+from fno.tombstones import tombstone_group_cls
 
 # Three commands from the start (single-command sub-app collapse gotcha: a
 # 1-command Typer flattens the verb away).
@@ -28,6 +29,7 @@ annotate_app = typer.Typer(
         "until resolved) AND a best-effort live-inject to the claim-holding "
         "session. add | list | resolve."
     ),
+    cls=tombstone_group_cls("annotate"),
 )
 
 

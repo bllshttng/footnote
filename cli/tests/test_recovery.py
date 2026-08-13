@@ -1246,7 +1246,7 @@ class TestMissionComplete:
 
 class TestRedispatch:
     """x-370f residual 1: failover respawn frees the dead session's claim via
-    ``fno claim force-release`` before spawning, skips an already-done node, and
+    ``fno claim release --force`` before spawning, skips an already-done node, and
     bails to the nudge (False) when the claim cannot be freed."""
 
     def _cand(self):
@@ -1270,7 +1270,11 @@ class TestRedispatch:
             calls.append(cmd)
             if cmd[:3] == ["fno-py", "agents", "stop"]:
                 return SimpleNamespace(returncode=stop_rc)
-            if cmd[:3] == ["fno-py", "claim", "force-release"]:
+            # Token containment, not a 3-slice: `claim force-release` became
+            # `claim release --force`, and a prefix compare against a 4-token
+            # marker is never true - it made this stub return the default 0 and
+            # the force_release_rc=1 case silently pass a spawn it should block.
+            if all(tok in cmd for tok in ("claim", "release", "--force")):
                 return SimpleNamespace(returncode=force_release_rc)
             if cmd[:3] == ["fno-py", "agents", "spawn"]:
                 return SimpleNamespace(returncode=spawn_rc)
@@ -1281,15 +1285,26 @@ class TestRedispatch:
 
     @staticmethod
     def _index_of(calls, marker):
-        return next((i for i, c in enumerate(calls) if c[:3] == marker), None)
+        """Index of the first call matching every token in ``marker``.
+
+        Was a `c[:3]` prefix compare. `claim force-release` and `claim
+        lane-release` collapsed into `claim release --force` / `--lane`, so a
+        three-token prefix now matches BOTH and the two assertions below would
+        silently pass on the wrong call. Matching on the full token set keeps
+        each assertion pinned to the call it names.
+        """
+        return next(
+            (i for i, c in enumerate(calls) if all(tok in c for tok in marker)),
+            None,
+        )
 
     def test_force_release_before_spawn_happy_path(self, monkeypatch):
-        # AC1-HP: stop → force-release node:<id> → canonical claude bg spawn.
+        # AC1-HP: stop -> release --force node:<id> -> canonical claude bg spawn.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
 
-        fr = self._index_of(calls, ["fno-py", "claim", "force-release"])
+        fr = self._index_of(calls, ["fno-py", "claim", "release", "--force"])
         spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
         assert fr is not None and spawn is not None
         assert fr < spawn                      # claim freed strictly before spawn
@@ -1307,7 +1322,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, stop_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        assert self._index_of(calls, ["fno-py", "claim", "force-release"]) is None
+        assert self._index_of(calls, ["fno-py", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
 
     def test_force_release_failure_skips_spawn(self, monkeypatch):
@@ -1336,7 +1351,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._redispatch(self._cand()) is False
-        lr = self._index_of(calls, ["fno-py", "claim", "lane-release"])
+        lr = self._index_of(calls, ["fno-py", "claim", "release", "--lane"])
         assert lr is not None
         assert "x-370f" in calls[lr]
 
@@ -1346,7 +1361,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand()) is True
-        assert self._index_of(calls, ["fno-py", "claim", "lane-release"]) is None
+        assert self._index_of(calls, ["fno-py", "claim", "release", "--lane"]) is None
 
     def test_unresolvable_node_returns_false(self, monkeypatch):
         # No node id in the worktree manifest → nothing to re-dispatch.
@@ -1364,7 +1379,7 @@ class TestRedispatch:
         assert recovery._redispatch(
             self._cand(), pre_spawn=lambda: calls.append(["MATERIALIZE"]) or True) is True
         stop = self._index_of(calls, ["fno-py", "agents", "stop"])
-        fr = self._index_of(calls, ["fno-py", "claim", "force-release"])
+        fr = self._index_of(calls, ["fno-py", "claim", "release", "--force"])
         mat = next((i for i, c in enumerate(calls) if c == ["MATERIALIZE"]), None)
         spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
         assert None not in (stop, fr, mat, spawn)
@@ -1378,7 +1393,7 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch)
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
-        assert self._index_of(calls, ["fno-py", "claim", "lane-release"]) is not None
+        assert self._index_of(calls, ["fno-py", "claim", "release", "--lane"]) is not None
 
 
 class TestReviveBgThread:

@@ -57,7 +57,7 @@ def test_ttl_parser_invalid_raises():
 def test_help_lists_all_verbs():
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for verb in ("acquire", "release", "refresh", "status", "list", "force-release"):
+    for verb in ("acquire", "release", "refresh", "status", "list"):
         assert verb in result.output
 
 
@@ -222,15 +222,46 @@ def test_list_with_prefix(cwd_tmp):
 
 def test_force_release_succeeds(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h"])
-    result = runner.invoke(cli, ["force-release", "k", "--reason", "operator override"])
+    result = runner.invoke(cli, ["release", "k", "--force", "--reason", "operator override"])
     assert result.exit_code == 0
 
 
 def test_force_release_empty_reason_exits_2(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h"])
-    # Typer's BadParameter on empty value goes through option parsing; pass empty string explicitly
-    result = runner.invoke(cli, ["force-release", "k", "--reason", ""])
+    result = runner.invoke(cli, ["release", "k", "--force", "--reason", ""])
     assert result.exit_code == 2
+
+
+def test_force_release_rejects_a_holder(cwd_tmp):
+    """--force drops the claim regardless of owner, so --holder is meaningless.
+
+    Accepting both silently would read as "release it if I hold it, else force",
+    which is two different operations behind one invocation.
+    """
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    result = runner.invoke(
+        cli, ["release", "k", "--force", "--reason", "why", "--holder", "h"]
+    )
+    assert result.exit_code == 2
+
+
+def test_a_flag_from_another_mode_is_refused_not_ignored(cwd_tmp):
+    """Each collapsed mode refuses the flags that belong to a sibling mode.
+
+    Silently ignoring them is the failure the collapse can introduce: exit 0
+    saying it worked while the lane cap was never applied, the override reason
+    never recorded, or the do row never stamped.
+    """
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    for argv in (
+        ["acquire", "k", "--holder", "h", "--max-lanes", "3"],  # cap without a lane
+        ["acquire", "--lane", "L", "--max-lanes", "3", "--holder", "h"],
+        ["release", "k", "--holder", "h", "--reason", "why"],  # reason without --force
+        ["release", "k", "--force", "--reason", "why", "--stamp-do"],
+        ["release", "--lane", "L", "--strict"],
+    ):
+        result = runner.invoke(cli, argv)
+        assert result.exit_code == 2, f"{argv} was accepted: {result.output}"
 
 
 def test_refresh_pid_liveness_is_noop(cwd_tmp):

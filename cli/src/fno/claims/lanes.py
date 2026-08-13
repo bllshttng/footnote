@@ -109,7 +109,7 @@ def acquire_lane_slot(
     # A lane slot is ALWAYS TTL-anchored, never PID-liveness. An explicit None
     # (e.g. CLI `--ttl ""`) must NOT fall through to acquire_claim's default,
     # which would pin the slot to the transient acquiring process - a one-shot
-    # `fno claim lane-acquire` exits immediately, the PID dies, the slot goes
+    # `fno claim acquire --lane` exits immediately, the PID dies, the slot goes
     # instantly stale, and the cap stops being enforced. Coerce to the lane
     # default instead.
     if ttl_ms is None:

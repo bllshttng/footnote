@@ -51,6 +51,34 @@ On the happy route they never coincide, and expecting them to match is not a def
 
 The defect signal is the absence of any claude session at all.
 
+## Resume reads the canonical id
+
+`harness_session_id` is the canonical session id every supervision surface keys on.
+`short_id` is claude's transport key alone.
+It is the 8-hex jobId `claude attach` takes.
+A mux row carries a `harness_session_id` but no `short_id` by design.
+`_validate_single_live_ref` enforces mux XOR worker XOR bg.
+A row never holds both a pane ref and a worker transport key.
+Resume that read `short_id` alone saw "no session id" on every pane worker and refused, never reaching the relaunch arm.
+
+Both runtimes resolve one id before reading.
+Python's `load_registry` folds the legacy per-provider keys into `harness_session_id` and drops them on read.
+The Rust loader mirrors `harness_session_id` back into `claude_session_uuid`.
+That lets the raw-Value helpers, which still read the legacy key, resolve it.
+Any new reader of a raw registry row must run that backfill before reading either field.
+Skipping it re-creates the gap on a row shape the loader already healed.
+
+Resume probes liveness on the canonical uuid, not the transport short_id.
+A pane worker has no short_id to gate on.
+Gating on it short-circuited the truth probe to "inconclusive" for a session the operator can see is gone.
+A truth verdict the falsifier confirms is process-gone (`pane-gone`, `process-gone`) routes to relaunch.
+A `silent` or `no-evidence` unreachable stays inconclusive.
+The process can still be alive, and relaunching opens a second writer on one transcript.
+A recorded route that cannot be read refuses rather than relaunching on the default account.
+A row that records no route refuses for the same reason.
+That silent fallback is what produced a session that looked alive and ate every turn.
+A mux row relaunches on its recorded session via `fno mux pane run`, the one-verb form of the manual recovery.
+
 ## Reading a suspect pane
 
 Counters, not prose.

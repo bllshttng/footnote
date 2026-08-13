@@ -167,7 +167,7 @@ Seven event types route through the existing `events.jsonl` validator
 | `claim_released` | Holder unlinked the file |
 | `claim_refreshed` | TTL extended |
 | `claim_stale_reclaimed` | New holder took over a dead/expired claim |
-| `claim_force_overridden` | Operator override via `fno claim force-release` |
+| `claim_force_overridden` | Operator override via `fno claim release --force` |
 | `claim_idempotent_reacquired` | Same holder re-acquired (resume) |
 | `claim_clock_skew_rejected` | Refresh would set expires_at in the past |
 
@@ -248,7 +248,7 @@ operator killed `/target` with SIGKILL and an orphan child remains),
 force-release with an audit trail:
 
 ```bash
-fno claim force-release node:ab-stuck --reason "operator intervention; SIGKILLed target 2026-05-19"
+fno claim release node:ab-stuck --force --reason "operator intervention; SIGKILLed target 2026-05-19"
 ```
 
 The archived claim survives in `.fno/claims/.expired/`.

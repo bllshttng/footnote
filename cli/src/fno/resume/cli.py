@@ -22,7 +22,6 @@ import typer
 
 from .receipt import (
     MalformedReceiptError,
-    RECEIPT_VERSION,
     RevalidationResult,
     build_receipt,
     load_receipt,
@@ -30,6 +29,7 @@ from .receipt import (
     revalidate,
     write_receipt,
 )
+from fno.tombstones import tombstone_group_cls
 
 cli = typer.Typer(
     name="resume",
@@ -45,6 +45,7 @@ receipt_app = typer.Typer(
     name="receipt",
     help="Write / validate / show a durable resume receipt",
     no_args_is_help=True,
+    cls=tombstone_group_cls("resume receipt"),
 )
 cli.add_typer(receipt_app, name="receipt")
 
@@ -324,7 +325,3 @@ def show_cmd(
     typer.echo(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
 
 
-@receipt_app.command("version")
-def version_cmd() -> None:
-    """Print the supported receipt schema version."""
-    typer.echo(str(RECEIPT_VERSION))

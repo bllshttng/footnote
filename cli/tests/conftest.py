@@ -185,46 +185,6 @@ def _real_graph_leak_tripwire():
         )
 
 
-# ---------------------------------------------------------------------------
-# skip_when_implemented marker (#26)
-# ---------------------------------------------------------------------------
-# Loud-failure marker for reality_check stubs. The stubs return
-# {"ok": False, "error": {"kind": "not-implemented", "domain": ...}}. When
-# a real implementation lands, the not-implemented sentinel goes away.
-# Tests decorated with @pytest.mark.skip_when_implemented(domain) then fail
-# at setup, forcing the dev to remove or rewrite them.
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "skip_when_implemented(domain): fail if reality_check.<domain> stub "
-        "has been implemented (returns kind != 'not-implemented').",
-    )
-
-
-def pytest_runtest_setup(item: pytest.Item) -> None:
-    marker = item.get_closest_marker("skip_when_implemented")
-    if marker is None:
-        return
-    if not marker.args:
-        raise pytest.UsageError(
-            "skip_when_implemented requires a domain argument: "
-            "use @pytest.mark.skip_when_implemented('notion')"
-        )
-    domain = marker.args[0]
-    module_name = f"fno.reality_check.{domain}"
-    fn_name = f"check_{domain}"
-    module = __import__(module_name, fromlist=[fn_name])
-    check_fn = getattr(module, fn_name)
-    result = check_fn()
-    if result.get("error", {}).get("kind") != "not-implemented":
-        pytest.fail(
-            f"{item.name} should be removed; check_{domain} now implemented "
-            f"(returned: {result!r})"
-        )
-
-
 @pytest.fixture(autouse=True)
 def _clear_settings_cache() -> None:
     """Clear the load_settings() lru_cache before every test.

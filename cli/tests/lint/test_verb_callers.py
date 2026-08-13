@@ -8,6 +8,7 @@ skills/target-safe walk are exercised by the tool's own --self-check.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,10 +50,17 @@ def test_load_curriculum_empty_file(tmp_path):
 
 
 def test_curriculum_end_to_end_reports_complement():
-    """The real curriculum computes a 283-verb complement with cull candidates.
+    """The real curriculum partitions the live surface, with cull candidates.
 
     Slow (runs the corpus sweep); verifies the feature integrates with the
     canonical sweep + controls and that the checked-in curriculum is valid.
+
+    Asserts the PARTITION (taught + untaught == the baseline, every count
+    positive), not a snapshot of the numbers. It used to pin `complement
+    (untaught): 277`, which made a verb cut - the thing this tool exists to
+    support - fail a test that had nothing to say about the cut. A partition
+    that stops adding up is a real defect; a complement that shrank is the
+    tool working.
     """
     proc = subprocess.run(
         [sys.executable, str(SCRIPT),
@@ -60,8 +68,17 @@ def test_curriculum_end_to_end_reports_complement():
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "taught (curriculum): 90" in proc.stdout
-    assert "complement (untaught): 283" in proc.stdout
+
+    def _n(label: str) -> int:
+        m = re.search(rf"^{re.escape(label)}: (\d+)$", proc.stdout, re.M)
+        assert m, f"missing {label!r} line in:\n{proc.stdout}"
+        return int(m.group(1))
+
+    leaves = _n("baseline leaves")
+    taught = _n("taught (curriculum)")
+    untaught = _n("complement (untaught)")
+    assert leaves > 0 and taught > 0 and untaught > 0
+    assert taught + untaught == leaves, "curriculum must partition the live surface"
     assert "cull candidates in complement" in proc.stdout
 
 

@@ -185,27 +185,6 @@ def test_ready_rows_lead_with_slug(tmp_graph):
 # -- backfill-slugs ----------------------------------------------------------
 
 
-def test_backfill_slugs_assigns_and_is_idempotent(tmp_graph):
-    # AC5-EDGE: legacy nodes (no slug) get one; re-running changes nothing.
-    _seed(tmp_graph, [
-        {"id": "ab-aaaaaaaa", "title": "First thing", "status": "ready",
-         "domain": "code", "project": "p"},
-        {"id": "ab-bbbbbbbb", "title": "Second thing", "status": "ready",
-         "domain": "code", "project": "p"},
-    ])
-    result = runner.invoke(app, ["backlog", "backfill-slugs"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["slugs_assigned"] == 2
-    by_id = {e["id"]: e for e in _read(tmp_graph)}
-    assert by_id["ab-aaaaaaaa"]["slug"] == "first-thing"
-    assert by_id["ab-bbbbbbbb"]["slug"] == "second-thing"
-
-    # Re-run is a no-op.
-    result2 = runner.invoke(app, ["backlog", "backfill-slugs"])
-    assert result2.exit_code == 0, result2.output
-    assert json.loads(result2.stdout)["slugs_assigned"] == 0
-
-
 # -- update --details --------------------------------------------------------
 
 

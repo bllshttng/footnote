@@ -482,7 +482,7 @@ def compare_and_rebind(
             )
         except ClaimCorrupted:
             raise RebindRefused(
-                "claim corrupted; cannot verify ownership (use `fno claim force-release`)",
+                "claim corrupted; cannot verify ownership (use `fno claim release --force`)",
                 state="corrupted",
             )
 

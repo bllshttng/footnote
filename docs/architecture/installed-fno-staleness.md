@@ -7,11 +7,15 @@ on its own: `fno update` reinstalls the Python wheel, and nothing auto-refreshes
 the Rust bins. So any verb added to the repo after the last install is invisible
 to the deployed CLI, and there was previously no way to detect the skew.
 
-The concrete failure this closes: a change added the `fno backlog inbox` command
-group and made the `deferrals_captured` gate depend on an `inbox_add` /
-`inbox_empty_pass` event. An `fno` installed before that change has no `inbox`
-subcommand, so `fno backlog inbox empty-pass` fails with `No such command 'inbox'`,
-the event never lands, and the gate is unsatisfiable through the documented path.
+The concrete failure this closes: a change added a capture command group and
+made the `deferrals_captured` gate depend on an event that group emits. An `fno`
+installed before that change has no such subcommand, so the documented
+invocation fails with `No such command`, the event never lands, and the gate is
+unsatisfiable through the documented path.
+
+That group was reachable as both `fno backlog capture` and `fno backlog inbox` at the time.
+The duplicate `inbox` spelling has since been removed, and the surviving spelling is `capture`.
+The staleness failure is unchanged by that: it is about a deployed binary predating a verb, not about which name the verb has.
 
 ## `fno doctor` (detection)
 

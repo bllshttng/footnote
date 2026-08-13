@@ -21,6 +21,24 @@ use std::path::PathBuf;
 
 use fno::{bootstrap, mux_cli, proto};
 
+/// Verbs removed from the mux front, and what replaced each one.
+///
+/// A removed verb that lands on the bare usage banner makes the caller re-read
+/// the docs to discover a rename they could have been told about in one line,
+/// and a hook that hits it fails with no idea why. A tombstone is cheaper than
+/// a broken caller, so removal means moving the name here, not deleting it.
+const MUX_TOMBSTONES: &[(&str, &str)] = &[(
+    "squad",
+    "`fno mux workspace <verb>` - `squad` was an unadvertised alias and is gone",
+)];
+
+fn mux_tombstone(verb: &str) -> Option<&'static str> {
+    MUX_TOMBSTONES
+        .iter()
+        .find(|(name, _)| *name == verb)
+        .map(|(_, replacement)| *replacement)
+}
+
 /// What this invocation is, decided purely from args + TTY-ness. Session
 /// resolution (flag > env > default) happens in `main`, not here, so the
 /// decision table stays pure.
@@ -67,6 +85,8 @@ enum Role {
     /// read-only web bridge (x-6a14). Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
     MuxWeb(fno::web::WebArgs),
+    /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
+    MuxRemoved(String),
     /// `version [--json]`: report the mux binary's own baked-in build rev so
     /// `fno update` can detect a present-but-stale front door. The bool is
     /// `--json`. Additive: `fno version` had no Python command (it errored), so
@@ -183,10 +203,10 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Some("tab") if args.len() > 2 => Role::MuxTab(args[2..].to_vec()),
             Some("layout") if args.len() > 2 => Role::MuxLayout(args[2..].to_vec()),
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
-            // (x-a572) `mux workspace prune ...`: a bare verb is usage. `squad`
-            // is the retired spelling, accepted but unadvertised (see
-            // `mux_cli::workspace`).
-            Some("workspace" | "squad") if args.len() > 2 => Role::MuxWorkspace(args[2..].to_vec()),
+            // `mux workspace prune ...`: a bare verb is usage. The retired
+            // `squad` spelling was an unadvertised alias of this arm; it was
+            // named by nothing but its own test and is gone.
+            Some("workspace") if args.len() > 2 => Role::MuxWorkspace(args[2..].to_vec()),
             // ls / doctor take no positional, an optional `--json` (US6).
             Some("ls") => match split_json(&args[2..]) {
                 Some((pos, json)) if pos.is_empty() => Role::MuxLs(json),
@@ -224,6 +244,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 },
                 None => Role::MuxUsage,
             },
+            // A removed verb is refused BY NAME, before the catch-all turns it
+            // into an anonymous usage banner.
+            Some(v) if mux_tombstone(v).is_some() => Role::MuxRemoved(v.to_string()),
             _ => Role::MuxUsage,
         },
         // `version [--json]`: the mux self-report gate surface. Takes no
@@ -261,9 +284,19 @@ fn main() {
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
-                 | fno mux pane ls|read|run|send|wait|kill|claim|release ... \
-                 | fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json] [--force] \
+                 | fno mux pane ls|read|run|send|wait|kill|claim|release|split|break ... \
+                 | fno mux block pipe|annotate ... \
+                 | fno mux tab ls|create|rename|join ... \
+                 | fno mux layout get|apply|graft ... \
+                 | fno mux where <fno_id> \
                  | fno mux workspace prune [--dry-run] [--include-named] [--json]"
+            );
+            std::process::exit(2);
+        }
+        Role::MuxRemoved(verb) => {
+            eprintln!(
+                "fno mux {verb}: removed. Use {}.",
+                mux_tombstone(&verb).unwrap_or("`fno mux` for the current surface")
             );
             std::process::exit(2);
         }
