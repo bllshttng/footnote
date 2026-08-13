@@ -61,7 +61,7 @@ Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
 
 **Mail is user-shaped.** `fno mail send` injects as user-shaped text, so it is the fallback when a worker's Skill-tool self-invocation is refused: `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply does not). No live king -> advisory self-review (`docs/architecture/review-lanes.md`). A probe over mail tests only the user-triggered path, never autonomous action.
 
-**Fix what you find; carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own atomic commit, even when unrelated. SIZE is the only justification for filing instead: `fno carveout add --kind deferred|oos-bug "<what + why>"` - harvested at merge, cleared only by `fno retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
+**Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 
 **Discovery:** `fno help` for the catalog, `fno help <verb>` for call shapes.
 

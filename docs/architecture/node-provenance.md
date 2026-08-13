@@ -6,7 +6,7 @@ This feature records that backward edge at the moment of creation, so a node or 
 
 ## The load-bearing principle: capture is ambient, never volunteered
 
-Any provenance design whose correctness depends on the model remembering to pass an arg is already broken. The direct evidence in this repo is `.fno/carveouts.jsonl`. It first failed in the obvious direction, staying empty while the structured `fno carveout add` verb went unused and carve-outs landed as prose. Adoption fixed that and exposed the same defect underneath: measured 2026-08-12, 13 of 39 rows carry no `session_id` at all, so a third of the ledger cannot be traced back to the session that filed it. Capture that hinges on a verb being called at the right moment does not happen reliably, and neither does a field that hinges on a caller passing it.
+Any provenance design whose correctness depends on the model remembering to pass an arg is already broken. The direct evidence in this repo is `.fno/carveouts.jsonl`. It first failed in the obvious direction, staying empty while the structured `fno carveout add` verb went unused. Adoption fixed that and exposed the same defect underneath. Measured 2026-08-12, 13 of 39 rows carry no `session_id`. A third of the ledger cannot be traced back to the session that filed it. Capture that hinges on a verb being called at the right moment is unreliable. So is a field that hinges on a caller passing it.
 
 So provenance is stamped from the environment at the moment of node birth and worker spawn, inside the originating session. That session is the only place the full context exists; everything later is reconstruction. No caller passes anything.
 
