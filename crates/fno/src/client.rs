@@ -1223,6 +1223,7 @@ fn build_keys_modal() -> KeysModal {
                     // rebinds. The config contract promises this modal lists
                     // them.
                     hint: kb.action.to_string(),
+                    enabled: true,
                 },
                 Some(kb.event.clone()),
             );
@@ -1236,6 +1237,7 @@ fn build_keys_modal() -> KeysModal {
                     glyph: disp.clone(),
                     label: label.clone(),
                     hint: String::new(),
+                    enabled: true,
                 },
                 None,
             );
@@ -1390,6 +1392,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
         hint: String::new(),
+        enabled: true,
     };
     let cell = |glyph: &str, label: &str| GridCell {
         glyph: glyph.into(),
@@ -1504,11 +1507,13 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
             glyph: "▲".into(),
             label: "Float to top".into(),
             hint: float_hint.into(),
+            enabled: true,
         },
         PopupRow::Entry {
             glyph: "⏸".into(),
             label: "Defer".into(),
             hint: String::new(),
+            enabled: true,
         },
     ];
     RowMenu {
@@ -1565,6 +1570,7 @@ fn build_section_menu(
             glyph: glyph.into(),
             label: label.into(),
             hint: String::new(),
+            enabled: true,
         };
         rows.push(entry("✎", "Rename"));
         actions.push(MenuAction::Rename);
@@ -1581,6 +1587,7 @@ fn build_section_menu(
             glyph: "✕".into(),
             label: format!("Clear dead ({dead})"),
             hint: String::new(),
+            enabled: true,
         });
         actions.push(MenuAction::ClearDead);
     }
@@ -1664,6 +1671,7 @@ fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Ancho
                 } else {
                     c.priority.clone()
                 },
+                enabled: true,
             });
             actions.push(AuxAction::BacklogGoto(c.id.clone()));
             shown += 1;
@@ -1699,6 +1707,7 @@ fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
         glyph: glyph.into(),
         label: label.into(),
         hint: String::new(),
+        enabled: true,
     };
     AuxPopup {
         popup: Popup::new(
@@ -2463,6 +2472,7 @@ impl View {
                             glyph: "↪".into(),
                             label: "Move to workspace".into(),
                             hint: String::new(),
+                            enabled: true,
                         });
                         menu.actions.push(MenuAction::MoveToWorkspace);
                     }
@@ -2566,6 +2576,7 @@ impl View {
                     glyph: if on { "☑".into() } else { "☐".into() },
                     label: label.into(),
                     hint: "session only".into(),
+                    enabled: true,
                 };
                 rows.push(toggle(self.hover_focus, "focus follows mouse"));
                 rows.push(toggle(self.status_on, "status row"));
@@ -2585,6 +2596,7 @@ impl View {
                         } else {
                             String::new()
                         },
+                        enabled: true,
                     });
                     actions.push(AuxAction::ApplyTheme(name.into()));
                 }

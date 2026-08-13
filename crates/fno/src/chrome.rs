@@ -144,6 +144,9 @@ pub struct Scroll {
 pub struct BodyLine {
     pub text: String,
     pub header: bool,
+    /// A greyed, inert row (a disabled `PopupRow::Entry`): every cell takes
+    /// [`Role::BodyDim`] regardless of selection, so it reads as inert.
+    pub disabled: bool,
     /// `(offset, len)` within `text` that is the selected cut-out.
     pub sel_span: Option<(usize, usize)>,
     /// `(target, offset, len)` hit spans within `text`, offsets relative to the
@@ -446,7 +449,9 @@ fn body_row(
     for j in 0..body_w {
         let (ch, role) = match chars.get(j) {
             Some(&c) => {
-                let role = if line.header {
+                let role = if line.disabled {
+                    Role::BodyDim
+                } else if line.header {
                     Role::BodyHead
                 } else if in_sel(j) {
                     Role::BodySel
@@ -455,7 +460,7 @@ fn body_row(
                 };
                 (c, role)
             }
-            None => (' ', Role::Body),
+            None => (' ', if line.disabled { Role::BodyDim } else { Role::Body }),
         };
         text.push(ch);
         roles.push(role);

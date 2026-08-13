@@ -49,6 +49,11 @@ pub enum PopupRow {
         glyph: String,
         label: String,
         hint: String,
+        /// `false` for a greyed, inert entry (LD7: state-blocked is greyed with
+        /// the reason carried as `hint`; config-off is absent, never greyed).
+        /// `cells()` returns 0, so arrows skip it, Enter cannot fire, and a click
+        /// is swallowed rather than dismissed.
+        enabled: bool,
     },
     /// A selectable full-width entry (e.g. "New Tab" spanning the block top).
     FullWidth(String),
@@ -61,6 +66,12 @@ impl PopupRow {
     fn cells(&self) -> usize {
         match self {
             PopupRow::Grid(cells) => cells.len(),
+            // A disabled Entry is inert: 0 cells means targets() never lists it,
+            // nav() skips it, selected() cannot land on it, and render() emits no
+            // hit span so a click resolves to no target (then swallowed by
+            // Rendered::contains rather than dismissing the menu). All three
+            // reachable paths, not one.
+            PopupRow::Entry { enabled: false, .. } => 0,
             PopupRow::Entry { .. } | PopupRow::FullWidth(_) => 1,
             PopupRow::Header(_) | PopupRow::Rule => 0,
         }
@@ -298,7 +309,7 @@ impl Popup {
             .map(|r| match r {
                 PopupRow::Header(s) | PopupRow::FullWidth(s) => s.chars().count() + 2,
                 PopupRow::Rule => 0,
-                PopupRow::Entry { glyph, label, hint } => {
+                PopupRow::Entry { glyph, label, hint, .. } => {
                     // glyph + space + label + gap + hint
                     glyph.chars().count() + 1 + label.chars().count() + 2 + hint.chars().count() + 2
                 }
@@ -337,7 +348,7 @@ impl Popup {
                         roles: vec![],
                     }
                 }
-                PopupRow::Entry { glyph, label, hint } => {
+                PopupRow::Entry { glyph, label, hint, enabled } => {
                     // The right column is EXACT; the left one ellipsizes. Padding
                     // the whole row and letting `pad` clip from the right ate the
                     // hint on a narrow modal, and in the key modal the hint is the
@@ -353,13 +364,23 @@ impl Popup {
                         let room = width.saturating_sub(hint_w + 2);
                         pad(&format!("{} {hint} ", pad(&left, room)), width)
                     };
-                    let ti = target_idx;
-                    target_idx += 1;
+                    let disabled = !*enabled;
+                    // A disabled entry contributes no target and no hit span, so
+                    // nav()/selected() (which read targets()) and the click router
+                    // (which reads hits) both pass over it. Its row still renders,
+                    // greyed via BodyDim, carrying the reason as the hint.
+                    let hits = if disabled {
+                        Vec::new()
+                    } else {
+                        let ti = target_idx;
+                        target_idx += 1;
+                        vec![(ti, 0, width)]
+                    };
                     RenderedLine {
                         text,
                         header: false,
-                        sel_span: (sel == Some((ri, 0))).then_some((0, width)),
-                        hits: vec![(ti, 0, width)],
+                        sel_span: (!disabled && sel == Some((ri, 0))).then_some((0, width)),
+                        hits,
                         roles: vec![],
                     }
                 }
@@ -407,11 +428,23 @@ impl Popup {
         // the left border and adds the chrome rows + scrollbar column.
         let body: Vec<BodyLine> = windowed
             .iter()
-            .map(|l| BodyLine {
-                text: l.text.clone(),
-                header: l.header,
-                sel_span: l.sel_span,
-                hits: l.hits.clone(),
+            .enumerate()
+            .map(|(i, l)| {
+                // A disabled Entry greys its whole row. Re-derive from the source
+                // row so the chrome styles it without RenderedLine carrying a flag:
+                // `lines` is 1:1 with `self.rows`, so windowed[i] is
+                // self.rows[scroll + i].
+                let disabled = matches!(
+                    self.rows.get(scroll + i),
+                    Some(PopupRow::Entry { enabled: false, .. })
+                );
+                BodyLine {
+                    text: l.text.clone(),
+                    header: l.header,
+                    disabled,
+                    sel_span: l.sel_span,
+                    hits: l.hits.clone(),
+                }
             })
             .collect();
         let framed = chrome::frame(&body, &self.chrome, width, scroll_state);
@@ -525,6 +558,15 @@ mod tests {
             glyph: g.into(),
             label: l.into(),
             hint: h.into(),
+            enabled: true,
+        }
+    }
+    fn disabled(g: &str, l: &str, reason: &str) -> PopupRow {
+        PopupRow::Entry {
+            glyph: g.into(),
+            label: l.into(),
+            hint: reason.into(),
+            enabled: false,
         }
     }
     fn grid(labels: &[&str]) -> PopupRow {
@@ -587,6 +629,64 @@ mod tests {
         );
         // Two selectable targets, at rows 1 and 3.
         assert_eq!(p.targets(), vec![(1, 0), (3, 0)]);
+    }
+
+    #[test]
+    fn targets_skip_disabled_entries() {
+        let p = Popup::new(
+            vec![
+                entry("a", "one", ""),
+                disabled("d", "dimmed", "no plan"),
+                entry("b", "two", ""),
+            ],
+            Anchor::Center,
+        );
+        // The disabled row contributes no target; the two selectable ones are
+        // rows 0 and 2, never row 1.
+        assert_eq!(p.targets(), vec![(0, 0), (2, 0)]);
+        let mut p = p;
+        assert_eq!(p.selected(), Some((0, 0)));
+        p.nav(NavDir::Down);
+        assert_eq!(p.selected(), Some((2, 0)), "arrow skips the disabled row");
+    }
+
+    #[test]
+    fn disabled_entry_is_inert_to_click_and_keeps_menu_open() {
+        // A disabled entry renders a line (greyed) carrying the reason as its
+        // hint, but emits no hit span: a click on its cells resolves to no
+        // target, and because the cells are still inside the block
+        // (Rendered::contains) the router swallows the click rather than
+        // dismissing. The two preconditions for "click leaves the menu open".
+        let p = Popup::new(
+            vec![entry("a", "one", ""), disabled("d", "dimmed", "no plan")],
+            Anchor::Center,
+        );
+        let r = p.render((24, 80));
+        // Full chrome: [0]=top border, [1]=body "one", [2]=body "dimmed",
+        // [3]=bottom border.
+        let disabled_line = &r.lines[2];
+        assert!(disabled_line.text.contains("no plan"), "reason renders");
+        assert!(
+            disabled_line.hits.is_empty(),
+            "disabled row has no hit target"
+        );
+        assert!(
+            disabled_line.roles.iter().any(|&role| role == Role::BodyDim),
+            "disabled row greys via BodyDim"
+        );
+        // Every non-border cell on the disabled row is BodyDim: it carries no
+        // normal (Body) or selected (BodySel) cell a selectable row would.
+        assert!(
+            disabled_line
+                .roles
+                .iter()
+                .all(|&role| matches!(role, Role::BodyDim | Role::Border)),
+            "disabled row has no selectable body cells"
+        );
+        // The cells are still inside the block, so the router reads an in-block
+        // miss (swallow), not an off-block click (dismiss).
+        let (r0, c0) = r.origin;
+        assert!(r.contains((r0 + 2) as u16, c0 as u16));
     }
 
     #[test]
