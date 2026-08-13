@@ -442,9 +442,11 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     // makes it indistinguishable from a complete one, and a routing decision
     // taken on one leaves no trace. Fixing only Python would have left this
     // path, the daemon, and mux still failing closed on the same file.
+    let mut read_forward = false;
     match obj.get("schema_version").and_then(Value::as_u64) {
         Some(v) if ACCEPTED_SCHEMA_VERSIONS.contains(&v) => {}
         Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
+            read_forward = true;
             eprintln!(
                 "fno agents: registry at {} is schema_version={v}, ahead of the \
                  schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
@@ -465,8 +467,47 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
         Some(Value::Array(rows)) => rows,
         Some(_) => return Err("registry 'agents' field is not a list".to_string()),
     };
-    for (i, row) in rows.iter().enumerate() {
-        let row = row
+    // Under read-forward a row-level refusal skips THAT ROW rather than the whole
+    // registry. Tolerating an added key was only half the fix: widening the
+    // `status` enum or dropping a field that is required today would still have
+    // failed every reader on the machine, which is the brick this path was just
+    // changed to prevent. At or below our own schema each of these stays fatal,
+    // where it means a writer bug rather than a version gap.
+    let mut skipped: Vec<usize> = Vec::new();
+    let mut kept: Vec<Value> = Vec::with_capacity(rows.len());
+    for (i, row_value) in rows.iter().enumerate() {
+        match validate_registry_row(i, row_value) {
+            Ok(()) => kept.push(row_value.clone()),
+            Err(e) if read_forward => {
+                skipped.push(i);
+                let _ = e;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if !skipped.is_empty() {
+        eprintln!(
+            "fno agents: registry at {}: skipped row(s) {skipped:?} this fno cannot \
+             represent at this schema_version. Those agents are invisible to this \
+             process until it is upgraded.",
+            registry_path.display()
+        );
+    }
+    let mut out = kept;
+    for row in &mut out {
+        if let Some(obj) = row.as_object_mut() {
+            backfill_row_aliases(obj);
+        }
+    }
+    Ok(out)
+}
+
+/// One registry row's shape checks, split out of [`load_registry_entries`] so a
+/// newer-schema read can skip a single unrepresentable row instead of refusing
+/// the shared file. Returns the same messages the inline checks used to return.
+fn validate_registry_row(i: usize, row_value: &Value) -> Result<(), String> {
+    {
+        let row = row_value
             .as_object()
             .ok_or_else(|| format!("registry row {i} is not a JSON object"))?;
         // Identity is one axis (x-8dfc): tolerate ANY well-shaped identity
@@ -507,13 +548,7 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
             }
         }
     }
-    let mut out = rows.clone();
-    for row in &mut out {
-        if let Some(obj) = row.as_object_mut() {
-            backfill_row_aliases(obj);
-        }
-    }
-    Ok(out)
+    Ok(())
 }
 
 /// Reconcile one row's identity aliases so every verb body reads the same

@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Current registry schema version.
 ///
@@ -922,7 +923,53 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     if buf.trim().is_empty() {
         return Ok(Registry::default());
     }
-    let mut reg: Registry = serde_json::from_str(&buf)?;
+    let mut reg: Registry = match serde_json::from_str(&buf) {
+        Ok(reg) => reg,
+        Err(typed_err) => {
+            // A newer writer can widen a field's VALUES, not only add keys, and
+            // `AgentStatus` has no catch-all variant -- so one row carrying a
+            // status this binary has never heard of failed the WHOLE file at
+            // serde and took the daemon's registry reads down with it. Tolerating
+            // added keys alone left that door open.
+            //
+            // Retry per row, keeping the ones this binary can represent, but ONLY
+            // when the store says it is newer than us. At or below our own schema
+            // an unparseable row is a writer bug and stays fatal.
+            let probe: serde_json::Value = serde_json::from_str(&buf)?;
+            let on_disk = probe
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if on_disk <= REGISTRY_SCHEMA_VERSION as u64 {
+                return Err(typed_err.into());
+            }
+            let rows = probe
+                .get("agents")
+                .or_else(|| probe.get("entries"))
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut entries = Vec::with_capacity(rows.len());
+            let mut skipped: Vec<usize> = Vec::new();
+            for (i, row) in rows.into_iter().enumerate() {
+                match serde_json::from_value::<RegistryEntry>(row) {
+                    Ok(entry) => entries.push(entry),
+                    Err(_) => skipped.push(i),
+                }
+            }
+            if !skipped.is_empty() {
+                eprintln!(
+                    "fno agents: registry: skipped row(s) {skipped:?} this fno cannot \
+                     represent at schema_version={on_disk}. Those agents are invisible \
+                     to this process until it is upgraded."
+                );
+            }
+            Registry {
+                schema_version: on_disk as u32,
+                entries,
+            }
+        }
+    };
     // Harness identity back-fill (x-ec59): canonical fields resolve from the
     // legacy per-provider fields on every load, so a legacy row read by Rust and
     // a canonical row written by Rust both round-trip. Applied here (the single
@@ -963,13 +1010,23 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
         });
     }
     if reg.schema_version > REGISTRY_SCHEMA_VERSION {
-        eprintln!(
-            "fno agents: registry is schema_version={}, ahead of the \
-             schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
-             Reading the fields it knows and ignoring the rest; writes are \
-             refused until this fno is upgraded. Rows may be incomplete.",
-            reg.schema_version
-        );
+        // Announce once per observed version, not once per read. The rule this
+        // implements ("a degraded read must leave a trace") is right for a
+        // one-shot CLI and wrong for the daemon, which reads this file on a
+        // 5-second idle loop and on most request handlers: an operator sitting
+        // in a mixed-version state for ten minutes would get 120 copies. A new
+        // version still announces, so an upgrade or a further bump is never
+        // swallowed by the latch.
+        static LAST_ANNOUNCED: AtomicU32 = AtomicU32::new(0);
+        if LAST_ANNOUNCED.swap(reg.schema_version, Ordering::Relaxed) != reg.schema_version {
+            eprintln!(
+                "fno agents: registry is schema_version={}, ahead of the \
+                 schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
+                 Reading the fields it knows and ignoring the rest; writes are \
+                 refused until this fno is upgraded. Rows may be incomplete.",
+                reg.schema_version
+            );
+        }
     }
     Ok(reg)
 }
@@ -2162,6 +2219,51 @@ mod tests {
             load_registry(&path).is_ok(),
             "v1 must still read (back-compat)"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_newer_row_with_an_unknown_status_skips_that_row_only() {
+        // Added KEYS were only half the problem. AgentStatus has no catch-all
+        // variant, so one row carrying a status this binary never heard of used
+        // to fail the WHOLE file at serde and take the daemon's reads with it.
+        let dir = tmpdir("newer-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":14,"agents":[
+                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
+                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let reg = load_registry(&path).expect("one unrepresentable row must not brick the read");
+
+        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["readable"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_same_unknown_status_stays_fatal_at_our_own_schema() {
+        // At or below our schema an unknown value is a writer bug, not a gap.
+        let dir = tmpdir("current-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":13,"agents":[
+                {"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert!(load_registry(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

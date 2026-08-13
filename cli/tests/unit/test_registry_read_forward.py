@@ -112,6 +112,70 @@ def test_a_current_schema_read_stays_quiet(tmp_path: Path, capsys) -> None:
 
 
 # --------------------------------------------------------------------------
+# Read forward covers added VALUES, not only added keys
+# --------------------------------------------------------------------------
+#
+# Tolerating a new key was only half the problem. Widening an existing enum is
+# one of the likelier reasons a writer bumps the schema at all (v2 added
+# `status`, v4 added `host_mode`), and a row-level refusal took the whole shared
+# read down with it -- the exact fleet-wide brick this module now exists to
+# prevent, reached by a different door.
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "hibernating"),   # a status enum widened by a newer writer
+        ("host_mode", "embedded"),   # a host_mode enum widened by a newer writer
+    ],
+)
+def test_an_unknown_enum_value_skips_its_row_not_the_registry(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    path = tmp_path / "registry.json"
+    bad = {**_row("future-worker"), field: value}
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [bad, _row("readable-worker")])
+
+    entries = reg.load_registry(path)
+
+    assert [e.name for e in entries] == ["readable-worker"], (
+        "one row this fno cannot represent must not hide every other agent"
+    )
+
+
+def test_a_row_missing_a_now_required_field_skips_its_row(tmp_path: Path) -> None:
+    """A newer writer may drop a field that is required today."""
+    path = tmp_path / "registry.json"
+    without_name = {k: v for k, v in _row().items() if k != "name"}
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [without_name, _row("readable-worker")])
+
+    assert [e.name for e in reg.load_registry(path)] == ["readable-worker"]
+
+
+def test_a_skipped_row_is_announced_with_its_index(tmp_path: Path, capsys) -> None:
+    """An invisible agent must never be silently invisible."""
+    path = tmp_path / "registry.json"
+    bad = {**_row("future-worker"), "status": "hibernating"}
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [bad])
+
+    reg.load_registry(path)
+
+    err = capsys.readouterr().err
+    assert "skipped row" in err
+    assert "[0]" in err
+
+
+def test_the_same_row_stays_fatal_at_our_own_schema(tmp_path: Path) -> None:
+    """At or below our schema an unknown value is a writer bug, not a version gap."""
+    path = tmp_path / "registry.json"
+    bad = {**_row(), "status": "hibernating"}
+    _write_raw(path, reg.SCHEMA_VERSION, [bad])
+
+    with pytest.raises(reg.RegistryVersionError):
+        reg.load_registry(path)
+
+
+# --------------------------------------------------------------------------
 # Write closed
 # --------------------------------------------------------------------------
 
