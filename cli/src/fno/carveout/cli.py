@@ -176,6 +176,7 @@ def list_carveouts(
     all_sessions: bool = typer.Option(
         False,
         "--all",
+        "-A",
         help="Read the WHOLE ledger instead of just this session's rows. Needed "
         "by any consumer that folds across sessions (the king orphan check "
         "does; it filters by .scope over every row).",
