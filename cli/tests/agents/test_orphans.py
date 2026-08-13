@@ -201,6 +201,19 @@ def test_missing_cwd_probe_withholds_the_verdict(monkeypatch, table) -> None:
     assert "orphans:" not in orphans.render(result)
 
 
+def test_a_dead_kill_path_withholds_the_verdict(monkeypatch, table) -> None:
+    """`_kill` swallows every exception. Reading the kill control off "a probe
+    was spawned" asserts an easier thing than a real kill does, so a broken
+    kill path reported healthy while `--reap` no-opped and still printed
+    `reaped: N`."""
+    monkeypatch.setattr(orphans, "_kill", lambda pid: None)
+    monkeypatch.setattr(orphans, "_pid_alive", lambda pid: True)
+    result = _scan_with_working_control(monkeypatch, table)
+    assert result.broken
+    assert "kill" in (result.broken_reason or "")
+    assert "orphans:" not in orphans.render(result)
+
+
 def test_a_broken_scan_reaps_nothing(monkeypatch, table) -> None:
     table.append(_proc(61, name="sleep", argv0="fno-load-x1", age=3600))
     killed: list[int] = []

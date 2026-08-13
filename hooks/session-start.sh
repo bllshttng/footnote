@@ -290,7 +290,14 @@ fi
 orphan_content=""
 orphan_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
 if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
-    orphan_stamp=".fno/.orphan-sweep-stamp"
+    # Anchored to the canonical checkout, exactly like the sweep's own
+    # seen-file. A per-worktree stamp beside a shared seen-file silences the
+    # wrong session: worktree A records a finding, and worktree B's sweep an
+    # hour later treats it as already reported and says nothing about an
+    # orphan sitting in B.
+    orphan_root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    orphan_root=${orphan_root:+$(dirname "$orphan_root")}
+    orphan_stamp="${orphan_root:-.}/.fno/.orphan-sweep-stamp"
     orphan_now=$(date +%s 2>/dev/null || echo 0)
     orphan_then=$(stat -c %Y "$orphan_stamp" 2>/dev/null || stat -f %m "$orphan_stamp" 2>/dev/null || echo 0)
     orphan_then=${orphan_then//[!0-9]/}
@@ -299,8 +306,18 @@ if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
         # shellcheck source=scripts/lib/with-timeout.sh
         source "$orphan_lib" 2>/dev/null || true
         if declare -F with_timeout >/dev/null 2>&1; then
-            orphan_raw="$(with_timeout 20 fno agents orphans --reap --quiet-unless-new 2>/dev/null || true)"
-            [[ -n "$orphan_raw" ]] && orphan_content="## Orphan processes"$'\n'"$orphan_raw"
+            orphan_rc=0
+            orphan_raw="$(with_timeout 20 fno agents orphans --reap --quiet-unless-new 2>/dev/null)" || orphan_rc=$?
+            if [[ -n "$orphan_raw" ]]; then
+                orphan_content="## Orphan processes"$'\n'"$orphan_raw"
+            elif (( orphan_rc == 124 )); then
+                # The stamp is written BEFORE the run so a wedged sweep cannot
+                # re-fire every session. That means a fired bound would
+                # otherwise lose the whole report, reap included, for a full
+                # window and say nothing. Silence here is the failure the sweep
+                # exists to make impossible, so name it.
+                orphan_content="## Orphan processes"$'\n'"the sweep hit its 20s bound and was killed. Any reap it started is unrecorded. Run \`fno agents orphans\` by hand."
+            fi
         fi
     fi
 fi

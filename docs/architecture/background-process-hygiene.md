@@ -42,11 +42,11 @@ It does not reach every harness. opencode and agy have no PreToolUse lane here. 
 
 Enumerates with `psutil`, never `ps ... | awk`. That pipeline returned `count=0` twice during the investigation. The harness truncated 1189 lines, and the pipeline counted the summary line. Redirect to a file and read the file, or use objects.
 
-**Attribution has exactly two arms.** NAME: argv[0] starts with `fno-` and differs from the executable. That means someone relabelled the process on purpose. CWD: the working directory is under a repo root or a `.claude/worktrees/` path. A process must also be at PPID 1, owned by this uid, and absent from the live worker census.
+**Attribution has exactly two arms.** NAME: argv[0] starts with `fno-` and differs from the executable. That means someone relabelled the process on purpose. CWD: the working directory is under a known worktree of this repo. Roots come from `git worktree list`, not only from the canonical checkout. An externally based worktree carries no literal `.claude/worktrees/` in its path, so a path test alone reported a clean machine on those projects. A process must also be at PPID 1, owned by this uid, and absent from the live worker census.
 
 **There is no CPU floor.** CPU is printed on every finding and gates none of them. One specimen burned no CPU at all.
 
-**It plants its own orphans before it counts anything.** A count of zero has two explanations. A clean machine looks exactly like a dead instrument. So each arm gets a probe that cannot satisfy the other arm. The NAME probe is renamed and parked outside any repo. The CWD probe keeps its own name inside it. Either one missing prints `verdict withheld (scan-broken)` and exits 2 with no orphan count at all. Break an arm on purpose to watch it work:
+**It plants its own orphans before it counts anything.** A count of zero has two explanations. A clean machine looks exactly like a dead instrument. So each arm gets a probe that cannot satisfy the other arm. The NAME probe is renamed and parked outside any repo. The CWD probe keeps its own name inside it. The kill path is a third arm, and it is measured after the kill, never before. `_kill` swallows every exception, so reading it off "a probe was spawned" asserts an easier thing than a real kill does. Any missing arm prints `verdict withheld (scan-broken)` and exits 2 with no orphan count at all. Break an arm on purpose to watch it work:
 
 ```bash
 FNO_ORPHANS_SKIP_PROBE=name fno agents orphans; echo "exit=$?"

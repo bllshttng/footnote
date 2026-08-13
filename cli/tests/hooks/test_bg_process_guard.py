@@ -47,6 +47,18 @@ DENIED = [
     # A leading assignment is a prefix, not the command.
     "FOO=1 yes > /dev/null &",
     "env FOO=1 yes > /dev/null &",
+    # Multi-line. shlex in posix mode eats newlines as whitespace, which
+    # flattened a whole command into one segment and hid every line after the
+    # first. Multi-line Bash calls are routine here, so this WAS most of the
+    # guard's real surface.
+    "cd foo\nyes > /dev/null",
+    "echo hi\nyes > /dev/null &",
+    "npm test\nyes > /dev/null &\necho done",
+    # Inside a loop or conditional body. `;` splits correctly, but the segment
+    # then starts with the keyword and the walk stopped there.
+    "for i in 1 2; do yes >/dev/null; done",
+    "if [ -f x ]; then yes > /dev/null; fi",
+    "while read l; do yes > /dev/null; done < f",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -71,6 +83,14 @@ ALLOWED = [
     "_eval_sweep_run_stages \"$2\" \"$3\" \"$4\"' _ a b c d >/dev/null 2>&1 &",
     "gh pr checks --watch",
     "cargo test",
+    # A newline inside a quoted string is part of that string, not a command
+    # separator. This is why the newline is handled in the lexer and not by a
+    # string replace before it.
+    'git commit -m "fix\nyes it works"',
+    'echo "line1\nline2 yes"',
+    "npm test\necho done",
+    "printf x\ntimeout 5 yes",
+    "for i in 1 2; do timeout 5 yes; done",
 ]
 
 

@@ -40,6 +40,10 @@ SEGMENT_SEPARATORS = {";", "&&", "||", "&", "\n", "|&"}
 TRANSPARENT = {
     "nohup", "setsid", "exec", "time", "env", "command", "builtin",
     "nice", "ionice", "taskpolicy", "stdbuf", "caffeinate", "sudo",
+    # Shell keywords that open a body. `;` splits `do yes` into its own
+    # segment, and without these the walk stops at the keyword and reads the
+    # generator as an argument: `for i in 1 2; do yes; done` was allowed.
+    "do", "then", "else", "elif", "{", "!",
 }
 
 # `exec -a NAME` renames the process; the NAME is not the command. Skipping the
@@ -53,8 +57,19 @@ REPLACEMENT = "timeout 300 bash -c 'exec -a fno-load-<node-or-session> yes > /de
 
 def _tokens(text):
     """Shell tokens with operators kept as their own tokens. Raises ValueError
-    on unbalanced quotes, which the caller turns into an allow."""
-    lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+    on unbalanced quotes, which the caller turns into an allow.
+
+    A newline is made punctuation and removed from whitespace, so it emits as
+    its own token and ends a command the way `;` does. In stock posix mode
+    shlex swallows newlines as whitespace, which flattened a whole multi-line
+    command into ONE segment: `cd foo\\nyes > /dev/null` read as a command
+    called `cd` and the generator on line 2 was never seen. Multi-line Bash
+    calls are routine from this harness, so that hole covered most real uses of
+    the guard. Doing it inside the lexer rather than by a string replace keeps a
+    newline INSIDE a quoted string part of that string.
+    """
+    lex = shlex.shlex(text, posix=True, punctuation_chars="();<>|&\n")
+    lex.whitespace = " \t\r"
     lex.whitespace_split = True
     return list(lex)
 

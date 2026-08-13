@@ -173,6 +173,23 @@ def _repo_roots() -> list[str]:
             roots.append(str(Path(common).parent))
     except Exception:  # noqa: BLE001 -- outside a repo is not an error here
         pass
+    # Externally-based worktrees are NOT under the canonical root and carry no
+    # literal `.claude/worktrees/` in their path. `config.paths.worktrees_base`
+    # puts them at <base>/<repo>/<name>, and the harness fallback at
+    # ~/.fno/worktrees/... On such a project an orphan sitting in its own
+    # worktree matched neither arm, and the sweep reported a clean machine.
+    try:
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in listing.stdout.splitlines():
+            if line.startswith("worktree "):
+                path = line.split(" ", 1)[1].strip()
+                if path and path not in roots:
+                    roots.append(path)
+    except Exception:  # noqa: BLE001 -- a listing failure narrows scope, never widens
+        pass
     return roots
 
 
@@ -263,6 +280,14 @@ def _await_orphaned(pid: Optional[int], timeout_s: float = 3.0) -> bool:
     return False
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _kill(pid: int) -> None:
     """SIGTERM, then SIGKILL if it is still there. Shared by the reap and by
     probe cleanup, so every run exercises the kill path that `--reap` uses."""
@@ -295,7 +320,16 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     result = ScanResult()
     roots = _repo_roots()
     repo_root = roots[0] if roots else os.getcwd()
-    scratch = tempfile.mkdtemp(prefix="fno-orphan-probe-")
+    # One fixed, empty directory rather than a fresh mkdtemp per run. A unique
+    # temp dir has to be removed, and a sweep killed at the SessionStart time
+    # bound never reaches its own cleanup, so it would leak one directory an
+    # hour. A SIGKILL cannot be handled in-process at all, so the fix is to
+    # have nothing to clean up.
+    scratch = Path(tempfile.gettempdir()) / "fno-orphan-probe"
+    try:
+        scratch.mkdir(exist_ok=True)
+    except Exception:  # noqa: BLE001 -- fall back to a dir that surely exists
+        scratch = Path(tempfile.gettempdir())
     nonce = uuid.uuid4().hex[:4]
 
     # NAME probe: renamed, and parked OUTSIDE any repo so the CWD arm cannot
@@ -303,7 +337,7 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     # match first and prove nothing about names.
     name_pid = (
         None if skip_probe == "name"
-        else _spawn_probe(f"{FNO_PREFIX}orphan-probe-{nonce}", scratch)
+        else _spawn_probe(f"{FNO_PREFIX}orphan-probe-{nonce}", str(scratch))
     )
     # CWD probe: its own ordinary name, in the repo. Only the CWD arm can claim
     # it.
@@ -361,20 +395,31 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     except Exception as exc:  # noqa: BLE001
         result.broken_reason = f"enumeration failed: {exc}"
 
+    # The kill control is measured AFTER the kill, never before it. Setting it
+    # from "a probe was spawned" asserts an easier thing than the real kill
+    # does, which is the exact lie this module exists to refuse: `_kill`
+    # swallows every exception, so a broken kill path would report healthy
+    # while `--reap` silently no-opped and still printed `reaped: N`.
+    killed_ok = True
+    for pid in (name_pid, cwd_pid):
+        if pid is None:
+            continue
+        _kill(pid)
+        killed_ok = killed_ok and not _pid_alive(pid)
+
     result.control = {
         "NAME": found_name_probe,
         "CWD": found_cwd_probe,
-        "kill": name_pid is not None or cwd_pid is not None,
+        "kill": killed_ok and (name_pid is not None or cwd_pid is not None),
     }
-
-    for pid in (name_pid, cwd_pid):
-        if pid is not None:
-            _kill(pid)
-    shutil.rmtree(scratch, ignore_errors=True)
 
     if result.broken_reason is None:
         missing = [
-            arm for arm, ok in (("NAME", found_name_probe), ("CWD", found_cwd_probe))
+            arm for arm, ok in (
+                ("NAME", found_name_probe),
+                ("CWD", found_cwd_probe),
+                ("kill", result.control["kill"]),
+            )
             if not ok
         ]
         if missing:
