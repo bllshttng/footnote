@@ -21,7 +21,11 @@ import json
 from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
-from fno.pr._reviews import read_optional_review_state, read_review_coverage
+from fno.pr._reviews import (
+    _UNKNOWN_COVERAGE,
+    read_optional_review_state,
+    read_review_coverage,
+)
 
 # Rollup states that count as a pass (jq parity with _verify._PASS_STATES).
 _PASS_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -199,13 +203,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     try:
         coverage = read_review_coverage(int(pr), cwd)
     except Exception:
-        coverage = {
-            "coverage": "unknown",
-            "reviewed_count": None,
-            "self_attested_count": None,
-            "head_sha": None,
-            "stale_verdicts": [],
-        }
+        # The producer's own sentinel, not a copy of it: a second literal here
+        # is a shape that drifts the moment a key is added on one side only.
+        coverage = dict(_UNKNOWN_COVERAGE)
 
     sys.stdout.write(
         json.dumps(
@@ -233,6 +233,17 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # cost a session tonight, and it is invisible from this number alone - which
     # is exactly why the instruction belongs in the output that prints the number
     # rather than in a PR body nobody re-reads.
+    if isinstance(unresolved, int) and unresolved > 0:
+        sys.stderr.write(
+            f"note: {unresolved} optional review finding(s) unresolved, so ready "
+            "stays false. A REPLY DOES NOT RESOLVE A THREAD. Fix each one, or "
+            "answer it in-thread, then resolve the thread explicitly: the "
+            '"Resolve conversation" button, or `gh api graphql -f query='
+            "'mutation($t: ID!){resolveReviewThread(input:{threadId: $t})"
+            "{thread{isResolved}}}' -F t=<threadId>` (thread ids come from "
+            "`reviewThreads` on the pullRequest).\n"
+        )
+
     # Coverage used to print a word and a number with no way to check either.
     # "covered, reviewed_count 2" rendered identically whether the reviewers had
     # read this commit or one from twelve hours and two commits ago, and the
@@ -256,17 +267,6 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             f"note: {v.get('name')} ({v.get('producer')}) reviewed "
             f"{str(v.get('reviewed_sha') or 'an unknown commit')[:8]}, whose code no longer "
             "matches HEAD - that verdict does not count. Ask it to re-read.\n"
-        )
-
-    if isinstance(unresolved, int) and unresolved > 0:
-        sys.stderr.write(
-            f"note: {unresolved} optional review finding(s) unresolved, so ready "
-            "stays false. A REPLY DOES NOT RESOLVE A THREAD. Fix each one, or "
-            "answer it in-thread, then resolve the thread explicitly: the "
-            '"Resolve conversation" button, or `gh api graphql -f query='
-            "'mutation($t: ID!){resolveReviewThread(input:{threadId: $t})"
-            "{thread{isResolved}}}' -F t=<threadId>` (thread ids come from "
-            "`reviewThreads` on the pullRequest).\n"
         )
     return code
 

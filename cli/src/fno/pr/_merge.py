@@ -255,8 +255,18 @@ def _coverage_refused_reason(
         # a gate that was already green somewhere else (x-f43c).
         where = f" (searched: {', '.join(sources)})" if sources else ""
         return f"no review_coverage event for this PR{where}"
-    if cov.get("coverage") != "covered":
-        return f"coverage {cov.get('coverage')}"
+    cov_word = str(cov.get("coverage"))
+    # `uncovered` (x-5b99) is a real known zero - the exact case that used to
+    # serialize as `covered` with `reviewed_count: 0`. It has to reach the
+    # naming branches below: short-circuiting on it here would send every
+    # zero-coverage refusal - the most common one there is - back to the bare
+    # word this function exists to replace. Only `unknown` (and anything a
+    # future producer invents) stops here.
+    if cov_word not in ("covered", "uncovered"):
+        return f"coverage {cov_word}"
+    # Say the word once when it is not the legacy `covered`, then let the
+    # actionable half of the message stand unchanged.
+    prefix = f"coverage {cov_word}: " if cov_word != "covered" else ""
     ev_head = cov.get("head_sha")
     if head and ev_head and head != ev_head:
         return (
@@ -277,13 +287,32 @@ def _coverage_refused_reason(
         for v in verdicts
         if isinstance(v, dict) and v.get("verdict") == "absent" and v.get("name")
     ]
-    if absent:
+    # A reviewer that read an OLDER commit is not absent and not refused, and
+    # "run the review verb at HEAD" is the wrong instruction for it: the move is
+    # a re-read by that reviewer. Naming it is the whole reason a stale verdict
+    # is recorded rather than dropped.
+    stale = [
+        str(v.get("name") or "")
+        for v in verdicts
+        if isinstance(v, dict) and v.get("verdict") == "stale" and v.get("name")
+    ]
+    if absent or stale:
+        waits = []
+        if absent:
+            waits.append(f"waiting on {', '.join(absent)}")
+        if stale:
+            waits.append(
+                f"{', '.join(stale)} reviewed an older commit and must re-read"
+            )
         return (
-            "0 reviewed (no head-pinned pass attestation; waiting on "
-            f"{', '.join(absent)} - if a reviewer there is uninstalled or no "
+            prefix + "0 reviewed (no head-pinned pass attestation; "
+            f"{'; '.join(waits)} - if a reviewer there is uninstalled or no "
             "longer configured, check config.review)"
         )
-    return "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD)"
+    return (
+        prefix
+        + "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD)"
+    )
 
 
 def _safe_int(val, default=0):

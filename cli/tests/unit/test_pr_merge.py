@@ -1433,6 +1433,49 @@ def test_genuine_zero_names_an_absent_reviewer_and_its_consequence():
     assert "chatgpt-codex-connector" not in reason
 
 
+def test_uncovered_still_names_the_cause_and_the_next_move():
+    """x-5b99 renamed a zero count from `covered` to `uncovered`, which sent the
+    most common refusal there is down the early-return that prints only the
+    word. Every test above pins the rich message against the LEGACY shape, so
+    nothing caught it. The word is now a prefix, not a replacement."""
+    cov = {
+        "coverage": "uncovered",
+        "reviewed_count": 0,
+        "head_sha": "abc",
+        "verdicts": [
+            {"producer": "github_app", "name": "gemini-code-assist", "verdict": "absent"}
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov)
+    assert "uncovered" in reason
+    assert "waiting on gemini-code-assist" in reason
+    assert "check config.review" in reason
+
+
+def test_a_stale_reviewer_is_named_and_asked_to_re_read():
+    """A reviewer that read an older commit is neither absent nor refused, and
+    "run the review verb at HEAD" is the one instruction that does not get it to
+    look again. Four zeros and a wrong next step is the absence-shaped lie the
+    stale verdict exists to delete."""
+    cov = {
+        "coverage": "uncovered",
+        "reviewed_count": 0,
+        "head_sha": "abc",
+        "verdicts": [
+            {
+                "producer": "github_app",
+                "name": "chatgpt-codex-connector",
+                "verdict": "stale",
+                "reviewed_sha": "8e557ccd",
+                "freshness": "stale",
+            }
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov)
+    assert "chatgpt-codex-connector reviewed an older commit" in reason
+    assert "review verb" not in reason
+
+
 def test_malformed_verdicts_do_not_raise():
     """Every other event-log read in this file is defensive; a truncated or
     hand-edited log must still produce a blocked receipt, not a traceback."""

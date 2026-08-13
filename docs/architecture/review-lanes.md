@@ -264,6 +264,13 @@ That is code under any classifier that does not parse Python, and an AST depende
 A documentation-only PR never carries an attestation either.
 With no code in the diff there is no identity to match, which is the fail-closed direction.
 
+**`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.**
+In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose.
+So a skill rewritten after a review carries the earlier verdict forward as fresh coverage.
+This is deliberate for now, because it matches the existing payload classifier.
+A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap.
+Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
+
 ### Named, not closed: the derivation-latency window
 
 A valid attestation can exist while the gate cannot see it, and this PR does not close that.

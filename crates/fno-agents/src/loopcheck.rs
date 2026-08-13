@@ -1415,9 +1415,17 @@ impl<'a> FreshnessResolver<'a> {
         Self {
             git_bin,
             cwd,
+            // `gh pr view` returns a BARE branch name, and a branch name may
+            // itself contain a slash (`release/2.0`), so "has a slash" does not
+            // mean "already remote-qualified" - it only means the caller may
+            // have passed one of ours. Test the `origin/` prefix instead: a
+            // bare `release/2.0` resolves to a local ref that a fresh worktree
+            // usually does not have, and the identity then fails to compute for
+            // every commit, silently taking the carry away on exactly the
+            // long-lived release branches that rebase most.
             base_ref: if base.is_empty() {
                 "origin/main".to_string()
-            } else if base.contains('/') {
+            } else if base.starts_with("origin/") {
                 base.to_string()
             } else {
                 format!("origin/{base}")
@@ -3860,6 +3868,31 @@ fn coverage_event_data(
     data
 }
 
+/// Whether every `github_app` verdict went stale WITHOUT naming a commit.
+///
+/// One bot with an empty `commit.oid` is a payload quirk. EVERY bot with an
+/// empty one, and none reviewed, is the signature of a `gh` too old to return
+/// the field - which makes freshness unresolvable for the whole axis, forever,
+/// so a required bot never clears and the loop has no reachable exit. Failing
+/// closed is right; reporting it as "reviewed an older commit" is not, because
+/// the fix is a gh upgrade rather than a re-read.
+///
+/// Requires at least one stale verdict, so a PR with no bot reviews at all
+/// (every verdict `Absent`) never matches: an absence of reviewers is a
+/// different fact from an absence of commits on the reviews that exist.
+fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
+    let github: Vec<&ReviewerVerdict> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::GithubApp)
+        .collect();
+    let staleness: Vec<&&ReviewerVerdict> = github
+        .iter()
+        .filter(|v| v.verdict == CoverageVerdict::Stale)
+        .collect();
+    !staleness.is_empty() && staleness.iter().all(|v| v.reviewed_sha.is_empty())
+}
+
 /// One-line coverage summary for the terminal message and receipts (x-0eaf
 /// task 3.1). Printed from the coverage value at print time, never from a
 /// remembered gate verdict (receipts have lied before).
@@ -3926,6 +3959,18 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .map(|v| v.name.as_str())
                 .collect();
+            // Stale reviewers are NAMED too. Without this the receipt for the
+            // x-5b99 specimen reads "0 reviewed, 0 refused, 0 errored, 0
+            // absent" - four zeros describing a PR a bot really did review, at
+            // an older commit. That is the absence-shaped lie the Stale variant
+            // exists to delete, and dropping it from the one line a human reads
+            // puts it straight back.
+            let stale: Vec<&str> = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Stale)
+                .map(|v| v.name.as_str())
+                .collect();
             // Never prescribe the local verb while anyone is absent, and never
             // suppress the next action entirely either. Both were tried here and
             // both were wrong: the offer walks a worker into self-attesting past
@@ -3937,19 +3982,44 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
             // The escape is that this line cannot know required-ness and should
             // not try. Name who is outstanding and point at the one move that is
             // safe whichever they are: check whether they are still configured.
-            let next = if absent.is_empty() {
-                "run the review verb at HEAD".to_string()
-            } else {
+            let next = if !absent.is_empty() {
                 format!(
                     "waiting on {} - if a reviewer there is uninstalled or no longer configured, check config.review",
                     absent.join(", ")
                 )
+            } else if !stale.is_empty() && blind_to_reviewed_commits(rep) {
+                // EVERY github_app verdict is stale AND none carries a commit at
+                // all. That is not "the bots read an older commit", it is "we
+                // cannot see which commit any bot read", and the two need
+                // opposite responses. `gh pr view --json reviews` supplies
+                // `commit.oid`; a gh too old to return it makes every bot review
+                // stale forever, so a required bot never clears and the loop
+                // blocks with no reachable exit. Failing closed is correct, but
+                // a closed gate that reports the wrong cause is the same
+                // absence-shaped lie this whole change deletes - so say which
+                // absence it is.
+                format!(
+                    "no review carries a reviewed commit ({}) - `gh pr view --json reviews` must return `commit.oid`; upgrade gh, then ask for a re-read",
+                    stale.join(", ")
+                )
+            } else if !stale.is_empty() {
+                // A re-read by the reviewer that already responded, not a local
+                // self-attest: "run the review verb" would walk a worker past a
+                // reviewer that may be REQUIRED and has simply gone stale.
+                format!(
+                    "{} reviewed an older commit whose code no longer matches HEAD - ask for a re-read",
+                    stale.join(", ")
+                )
+            } else {
+                "run the review verb at HEAD".to_string()
             };
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - {}.",
+                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} stale ({}), {} absent. No head-pinned pass attestation for this head - {}.",
                 refused.len(),
                 refused.join(", "),
                 errored,
+                stale.len(),
+                stale.join(", "),
                 absent.len(),
                 next
             )
@@ -7721,6 +7791,13 @@ mod tests {
             FreshnessResolver::new("git", &cwd, "origin/release", "abc").base_ref,
             "origin/release"
         );
+        // A slash in the name is not remote-qualification: `release/2.0` is a
+        // bare branch and must still be qualified, or the identity resolves
+        // against a local ref the worktree may not have.
+        assert_eq!(
+            FreshnessResolver::new("git", &cwd, "release/2.0", "abc").base_ref,
+            "origin/release/2.0"
+        );
         assert_eq!(
             FreshnessResolver::new("git", &cwd, "", "abc").base_ref,
             "origin/main"
@@ -7805,6 +7882,66 @@ mod tests {
         );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
         assert_eq!(rep.coverage, Coverage::Covered(0));
+    }
+
+    #[test]
+    fn coverage_receipt_names_a_stale_reviewer_instead_of_four_zeros() {
+        // The receipt for the x-5b99 specimen used to read "0 reviewed, 0
+        // refused, 0 errored, 0 absent" - four zeros over a PR codex really did
+        // review, at an older commit - and then prescribed the local verb,
+        // which is the one move that does NOT get the bot to re-read.
+        let rep = classify_coverage(
+            &pr826_reviews(),
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::Stale,
+        );
+        let line = coverage_receipt_line(&rep);
+        assert!(line.contains("1 stale (chatgpt-codex-connector)"), "{line}");
+        assert!(line.contains("ask for a re-read"), "{line}");
+        assert!(!line.contains("run the review verb"), "{line}");
+    }
+
+    #[test]
+    fn coverage_receipt_separates_an_old_commit_from_no_commit_at_all() {
+        // Both shapes are "stale", and they need OPPOSITE responses. A bot that
+        // read an older commit needs a re-read. A whole axis with no commit on
+        // any review needs a gh upgrade, because `commit.oid` is where
+        // freshness comes from and without it every bot review is stale
+        // forever - a required bot never clears and the loop has no exit.
+        let no_commit = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED"
+        })];
+        let rep = classify_coverage(
+            &no_commit,
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+        );
+        let line = coverage_receipt_line(&rep);
+        assert!(line.contains("no review carries a reviewed commit"), "{line}");
+        assert!(line.contains("upgrade gh"), "{line}");
+
+        // The ordinary stale case keeps the re-read instruction and must NOT
+        // mention gh: the payload named a commit, it is simply an older one.
+        let old_commit = classify_coverage(
+            &pr826_reviews(),
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::Stale,
+        );
+        let line = coverage_receipt_line(&old_commit);
+        assert!(line.contains("ask for a re-read"), "{line}");
+        assert!(!line.contains("upgrade gh"), "{line}");
     }
 
     fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
