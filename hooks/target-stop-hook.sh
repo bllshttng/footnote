@@ -94,12 +94,15 @@ SESSION_ID=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null \
 # Append an event to both project + global logs WITHOUT jq (this runs on the
 # jq-missing give-up path too). Fields are hook-internal and safe to interpolate.
 emit_event_both() {
-    local etype="$1" data="$2" ts line
+    local etype="$1" data="$2" ts line global_events
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
     line="{\"ts\":\"${ts}\",\"type\":\"${etype}\",\"source\":\"hook\",\"data\":${data}}"
-    mkdir -p "${REPO_ROOT}/.fno" "${HOME}/.fno" 2>/dev/null || true
+    # Honors an overridden config.state_dir when a caller has sourced the shell
+    # stub; falls back to the default so the jq-missing give-up path still logs.
+    global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
+    mkdir -p "${REPO_ROOT}/.fno" "$(dirname "$global_events")" 2>/dev/null || true
     echo "$line" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
-    echo "$line" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
+    echo "$line" >> "$global_events" 2>/dev/null || true
 }
 
 # Checker unavailable for an ACTIVE session: bounded-block, then loud give-up.
