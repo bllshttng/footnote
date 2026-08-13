@@ -34,6 +34,10 @@ from typing import Any, Optional, Tuple
 # the generic retro harvest (ab-4a1a4fea).
 BACKFILL_KIND = "backfill"
 VALID_KINDS: Tuple[str, ...] = ("deferred", "oos-bug", BACKFILL_KIND)
+# Severity is orthogonal to kind: how much a left-out item matters. Routed to
+# priority p0..p3 by retro.classify.severity_to_priority. None keeps today's p3
+# default, so existing records and hand-filed carveouts parse unchanged.
+VALID_SEVERITIES: Tuple[str, ...] = ("critical", "high", "medium", "low")
 
 # Max description length retained on disk. Oversized descriptions are TRUNCATED
 # (never rejected) so capture is never lost; the marker records the original
@@ -96,6 +100,11 @@ class Carveout:
     # silence it. Optional + last so existing records and retro-triage parse
     # unchanged (a missing key reads as None).
     scope: Optional[str] = None
+    # Severity stamped by provenance, not chosen by the filer: a carveout filed to
+    # satisfy the fidelity gate is by construction "a planned deliverable is
+    # unbuilt" and lands high/p1; hand-filed carveouts default to None (p3).
+    # Optional + defaulted so existing JSONL records parse unchanged.
+    severity: Optional[str] = None
 
 
 def _utc_now_iso() -> str:
@@ -206,6 +215,7 @@ def add_carveout(
     need: Optional[str] = None,
     priority: Optional[str] = None,
     scope: Optional[str] = None,
+    severity: Optional[str] = None,
     cap: int = DESCRIPTION_CAP,
     storage_root: Optional[Path] = None,
 ) -> Tuple[Carveout, bool]:
@@ -215,6 +225,12 @@ def add_carveout(
     still written, with ``session_id: null``). Raises ``CarveoutError`` for an
     invalid kind (closing the programmatic bypass of the CLI's own check) or if
     the ledger cannot be written.
+
+    ``severity`` is stamped by provenance, not chosen freely: a carveout filed to
+    satisfy the fidelity gate is by construction "a planned deliverable is
+    unbuilt" and the gate stamps it high (p1). Hand-filed carveouts pass
+    ``--severity`` or default to None (p3). Either way it routes through
+    ``retro.classify.severity_to_priority`` at harvest.
 
     The session id is always resolved from ``repo_root`` (the live worktree's
     ``target-state.md``). The ledger is written under ``storage_root`` when
@@ -227,6 +243,10 @@ def add_carveout(
     if kind not in VALID_KINDS:
         raise CarveoutError(
             f"invalid kind {kind!r}; must be one of {VALID_KINDS}"
+        )
+    if severity is not None and severity not in VALID_SEVERITIES:
+        raise CarveoutError(
+            f"invalid severity {severity!r}; must be one of {VALID_SEVERITIES}"
         )
     session_id = resolve_session_id(repo_root)
     unscoped = session_id is None
@@ -242,6 +262,7 @@ def add_carveout(
         description=desc,
         truncated=truncated,
         scope=scope,
+        severity=severity,
     )
 
     from fno.paths import project_log

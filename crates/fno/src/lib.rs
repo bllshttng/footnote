@@ -11,6 +11,7 @@
 pub mod agents_view;
 pub mod backlog_view;
 pub mod bootstrap;
+pub mod chrome;
 pub mod client;
 pub mod clipboard;
 pub mod connections_view;
@@ -29,6 +30,7 @@ pub mod server;
 pub mod squad;
 pub mod squad_store;
 pub mod templates;
+pub mod theme;
 pub mod tree;
 pub mod version;
 pub mod view_store;

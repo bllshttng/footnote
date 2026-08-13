@@ -283,6 +283,7 @@ paths shell-stub
 paths verify
 phase
 plan brief
+plan fidelity
 plan folder-audit
 plan graduate
 plan migrate-keys
@@ -369,6 +370,7 @@ stub-manifest write
 target blast-check
 target check-contained
 target check-review-gate
+target denominator-ratio
 target init !--provider
 target resolve-model !--provider
 target resolve-owned-identity

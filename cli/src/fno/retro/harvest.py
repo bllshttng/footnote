@@ -128,6 +128,7 @@ def harvest_carveouts(
                 source_pr=source_pr,
                 source_id=str(rec.get("id", f"carveout:{lineno}")),
                 priority=rec.get("priority"),
+                severity=rec.get("severity"),
                 title_hint=rec.get("need"),
                 subkind=rec.get("kind"),
             )

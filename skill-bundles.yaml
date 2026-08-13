@@ -36,6 +36,8 @@ bundles:
     files:
       - source: scripts/lib/parse-claims-arg.sh
         dest: scripts/lib/parse-claims-arg.sh
+      - source: scripts/lib/node-id.sh
+        dest: scripts/lib/node-id.sh
       - source: scripts/validate-plan.sh
         dest: scripts/validate-plan.sh
       - source: scripts/check-product-md.sh
@@ -71,6 +73,10 @@ bundles:
       # resolve ab-XXXX backlog node IDs to plan_path.
       - source: scripts/lib/graph-resolve.sh
         dest: scripts/lib/graph-resolve.sh
+      # node-id.sh: sourced by graph-resolve.sh as a bundled sibling; the
+      # shared fno-vs-external-vs-none classifier.
+      - source: scripts/lib/node-id.sh
+        dest: scripts/lib/node-id.sh
       # auto-merge.md and worktree.md are canonical in target/references/
       # (owned by target: "new target -> new worktree"; auto-merge is a
       # target ship concern). They are not bundled from elsewhere. Consumers

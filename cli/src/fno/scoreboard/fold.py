@@ -1999,12 +1999,26 @@ def build_plan_fidelity(
     trace_events: list[dict] | None = None,
     comparison_contract: dict | None = None,
     event_coverage: dict | None = None,
+    unmeasurable: str = "unjoined",
 ) -> dict:
     """Join each `planned` row (W1) to its delivery and score plan fidelity.
 
     A planned row with no joinable delivery is `unjoined`, never scored 0% -
     an unimplemented plan is unmeasurable, not a bad plan (the fold's
-    coverage-honesty rule)."""
+    coverage-honesty rule).
+
+    ``unmeasurable`` is the one disposition knob, never a second join:
+    ``"unjoined"`` (default, telemetry) reports the shortfall as ``status:
+    unjoined``; ``"refuse"`` (gate) adds a top-level ``gate`` key marking those
+    rows as a would-be refusal. The join is identical in both modes, so the
+    scoreboard and the gate cannot drift into two definitions of "planned".
+    The carveout waiver that can overturn ``gate.would_refuse`` lives in the
+    gate layer (``fno.plan.fidelity``), not here - the fold never reads carveouts.
+    """
+    if unmeasurable not in ("unjoined", "refuse"):
+        raise ValueError(
+            f"unmeasurable must be 'unjoined' or 'refuse', got {unmeasurable!r}"
+        )
     read_plan_doc = read_plan_doc or _default_read_plan_doc
     read_summary = read_summary or _default_read_summary
     read_diff = read_diff or _default_read_diff
@@ -2083,8 +2097,9 @@ def build_plan_fidelity(
         })
 
     planned_total = len(results)
+    unjoined_rows = [r for r in results if r.get("status") == "unjoined"]
     declared_contract = comparison_contract or _comparison_contract_from_events(trace_events)
-    return {
+    out = {
         "state": "ok",
         "since_days": since_days,
         "results": results,
@@ -2096,6 +2111,25 @@ def build_plan_fidelity(
             observation_complete=event_coverage.get("complete") is True,
         ),
     }
+    # The gate disposition: the same join, but an unjoined planned row is a
+    # refusal rather than n/a. Telemetry (unmeasurable='unjoined', the default)
+    # never sees this key, so its output stays byte-identical on the existing
+    # scoreboard fixtures. The carveout waiver that can overturn would_refuse is
+    # the gate layer's job (one implementation, shared by both readers); the fold
+    # only reports the shortfall, it does not read carveouts.
+    if unmeasurable == "refuse":
+        out["gate"] = {
+            "disposition": "refuse",
+            "planned": planned_total,
+            "delivered": planned_total - len(unjoined_rows),
+            "unjoined_count": len(unjoined_rows),
+            "unjoined": [
+                {"session_id": r.get("session_id"), "plan_path": r.get("plan_path")}
+                for r in unjoined_rows
+            ],
+            "would_refuse": len(unjoined_rows) > 0,
+        }
+    return out
 
 
 if __name__ == "__main__":
