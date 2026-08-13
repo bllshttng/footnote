@@ -41,7 +41,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno whoami\|status` | Self-introspection; run when confused after compaction. |
 | `fno mail send\|reply\|unread\|ack` | Cross-project messaging over the jsonl bus; live-inject-first, durable fallback. |
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
-| `fno carveout add` | Capture left-out work for retro-triage at merge. |
+| `fno carveout add` | Last resort for work too big for this PR. Fix what you find instead; harvested at merge. |
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno mail reply --to X "..."`: it threads the reply and resolves the sender itself, whether the message arrived live or was drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 
@@ -60,7 +60,7 @@ Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
 
 **Mail is user-shaped.** `fno mail send` injects as user-shaped text, so it is the fallback when a worker's Skill-tool self-invocation is refused: `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply does not). No live king -> advisory self-review (`docs/architecture/review-lanes.md`). A probe over mail tests only the user-triggered path, never autonomous action.
 
-**Fold in small fixes; capture the rest.** A small pre-existing bug found mid-task gets fixed in the current PR as its own atomic commit (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Not-small, or decided-but-deferred: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested into backlog nodes at merge. Applies in every pipeline.
+**Fix what you find. A carve-out is a last resort, and SIZE is the only justification.** A problem you spot mid-task gets FIXED in this PR as its own atomic commit - that is the default disposition, and it holds even when the fix has nothing to do with your task (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Carve out only when the work is genuinely too big to land here without derailing the PR: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested at merge, and clearable only by `fno retro sweep-carveouts --apply`, which nobody runs unprompted. Prefer a backlog node for anything you would want to see on the board. Applies in every pipeline.
 
 **Discovery:** `fno help` for the catalog, `fno help <verb>` for call shapes.
 
