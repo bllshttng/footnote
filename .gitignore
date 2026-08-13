@@ -63,7 +63,13 @@ __pycache__/
 .codex/*
 !.codex/agents/
 !.codex/agents/*.toml
-.gemini/
+# No trailing slash: setup-worktree.sh link_dir's this one into a SYMLINK, and a
+# `foo/` rule matches directories only, so the slash form left every linked
+# worktree dirty and preflight refusing (same defect as the .claude/* links
+# below). .agents/.codex/.codex-plugin keep their glob form on purpose: each
+# holds tracked files, so link_dir hits its non-empty-real-dir refusal and they
+# are never symlinks - and .codex-plugin must stay shippable besides.
+.gemini
 
 # Private/local scripts and docs (environment-specific, not for distribution)
 **/local/

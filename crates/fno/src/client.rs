@@ -5395,10 +5395,12 @@ impl View {
             lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
         }
         lines.push(pad_to(" hjkl/arrows move · 1-9 jump to first nine", W));
-        lines.push(pad_to(
-            " enter/space attach to › · t new tab · HJKL split",
-            W,
-        ));
+        // enter/space/t are ONE action listed once. They send byte-identical
+        // messages (split: None -> `place_spawned_pane` new_tab), so advertising
+        // "attach to ›" and "t new tab" as two entries described a distinction
+        // the code does not make - the same overselling this node exists to fix,
+        // one layer up in the footer.
+        lines.push(pad_to(" enter/space/t new tab in › · HJKL split", W));
         lines.push(pad_to(" . attach here (current view) · esc/q cancel", W));
         lines
     }
@@ -8357,7 +8359,6 @@ async fn attach_and_run(
                     // which then overwrote the real reason with a generic one.
                     view.settle_backlog_pending_on_notice();
                     view.set_notice(text);
-                    let _ = raw_out(b"\x07");
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -9643,16 +9644,16 @@ enum ModalKey {
     PageDown,
 }
 
-/// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
-/// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
-/// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
-/// special-cased by the caller for instant close) becomes `Esc`; every other
-/// printable byte is `Byte`, resolved by the caller through the chord table.
 /// The ceiling on a partially-read escape sequence, shared by all four folds.
 /// A real CSI is far shorter, so this only ever fires on a pathological stream,
 /// and it is what stops one from growing the carry without limit.
 const MAX_ESC_CARRY: usize = 16;
 
+/// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
+/// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
+/// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
+/// special-cased by the caller for instant close) becomes `Esc`; every other
+/// printable byte is `Byte`, resolved by the caller through the chord table.
 fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
     let mut out = Vec::new();
     for &b in bytes {
@@ -11536,7 +11537,17 @@ async fn attach_place_keys(
             match view.attach_place.as_mut() {
                 Some(picker) if idx < picker.squads.len() => picker.cursor = idx,
                 _ => {
+                    // Out of range DROPS THE REST OF THE READ, it does not just
+                    // beep and carry on. Terminal input arrives in batches, so a
+                    // fast `9L` on a three-workspace layout would otherwise BEL
+                    // and then commit an immediate right-split into whatever the
+                    // cursor was already on - a placement the operator never
+                    // chose, from keys they typed believing row 9 existed. The
+                    // remaining bytes were composed against a model that just
+                    // proved wrong, so none of them may commit.
                     let _ = raw_out(b"\x07");
+                    view.set_notice("no workspace at that number".into());
+                    return Ok(StdinFlow::Continue);
                 }
             }
             continue;
@@ -20605,8 +20616,10 @@ mod tests {
         for label in [
             "hjkl/arrows move",
             "1-9 jump",
-            "attach to ›",
-            "new tab",
+            // One entry, not two: enter/space/t send byte-identical messages, so
+            // a footer listing "attach to ›" and "t new tab" separately promised
+            // a placement choice that does not exist.
+            "enter/space/t new tab in ›",
             "HJKL split",
             "attach here",
             "cancel",
@@ -20913,10 +20926,10 @@ mod tests {
 
     #[tokio::test]
     async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
-        // A digit past the end of the list is a BEL, not a selection and not a
-        // notice claiming the workspace is "no longer available" - it was never
-        // there. The cursor stays put and the picker stays open, so the operator
-        // can just press the right key next.
+        // A digit past the end of the list is a BEL, not a selection, and the
+        // notice says the row is not there rather than claiming the workspace is
+        // "no longer available" - it never was. The cursor stays put and the
+        // picker stays open, so the operator can just press the right key next.
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
@@ -20925,6 +20938,26 @@ mod tests {
         assert!(buf.is_empty(), "an out-of-range digit sends nothing");
         let picker = v.attach_place.as_ref().expect("picker stays open");
         assert_eq!(picker.cursor, 0, "and moves the cursor nowhere");
+    }
+
+    #[tokio::test]
+    async fn attach_placement_out_of_range_digit_drops_the_rest_of_the_batch() {
+        // The BEL alone is not enough. Terminal reads arrive in batches, so the
+        // keys typed AFTER a bad digit are already in the same buffer - and they
+        // were composed believing row 9 existed. `L` would commit a right split
+        // into whatever the cursor happened to be on, a placement the operator
+        // never chose, with only a beep between intent and commit. So the bad
+        // digit abandons the whole read: nothing is sent, the cursor is untouched
+        // and the picker stays open on screen the operator can now actually read.
+        let mut v = unified_rows_view();
+        v.selector = Some(8); // bg-claude
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"9L", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "the trailing commit key must not reach the socket");
+        let picker = v.attach_place.as_ref().expect("picker stays open");
+        assert_eq!(picker.cursor, 0, "and the cursor never moved");
+        assert!(v.notice.is_some(), "the operator is told why nothing happened");
     }
 
     #[tokio::test]
