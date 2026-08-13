@@ -191,7 +191,7 @@ event_types:
     consumers: [scripts/ci/preflight.sh, fno pr, fno worker ship, fno-agents verify-evidence]
 
   - name: review_attestation
-    description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
+    description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, verdict == pass, and `review_freshness(head_sha, current HEAD)` is not Stale (x-5b99/x-62a1). That last clause used to be a bare `head_sha == current HEAD`, which made addressing a review destroy the proof the review happened - a mandatory pre-merge rebase cost a full re-review even though it changed no code. Freshness is now decided from the PR's own code-diff identity, so a pass carries across a rebase or a documentation-only advance and dies on any real code change. Head-pinning is still mandatory and the fail-closed direction is unchanged: an absent head_sha, an unresolvable commit, or any git failure is Stale. An unused-import removal is a `.py` change and still costs a re-review; no classifier here parses Python. NOTE what this event does and does not prove: the review verb emits nothing itself, and this event is written by a script that records the reviewer name and verdict it was PASSED. It proves a commit was pinned, never that a review happened."
     sources: [target, subagent, hook, test]
     data:
       required: [reviewer, head_sha, verdict, session_id]
@@ -201,7 +201,7 @@ event_types:
           description: "The reviewer name matching a config.review.reviewers entry (sigma | code-review | declare; a leading '/' is stripped by both parsers)."
         head_sha:
           type: string
-          description: "The git HEAD sha the reviewer reviewed. loop-check head-pins on this: it must equal the current HEAD or the attestation does not satisfy the gate."
+          description: "The git HEAD sha the reviewer reviewed. loop-check head-pins on this: it satisfies the gate only while `review_freshness` rates it Fresh or Carried against the current HEAD (x-5b99). Emit it AFTER the reviewed commit is the tip - an attestation emitted before committing pins a commit the reviewer's findings are not about."
         verdict:
           type: string
           enum: [pass, fail]
@@ -217,7 +217,7 @@ event_types:
           description: "The harness session of the process that emitted the attestation - the attesting ACTOR. Read from the live process env on the marker precedence CODEX_THREAD_ID > CLAUDE_CODE_SESSION_ID > CODEX_SESSION_ID > GEMINI_SESSION_ID (the same one init resolves). Unlike session_id it varies with who emitted, so it is the field the authorship join keys on: equal to the authoring session's manifest harness_session_id means self-attested. Empty when no marker is set (unobserved, never guessed, never fallen back to the manifest - a fallback restores the tautology session_id carries). Every pre-landed attestation has this empty."
         model:
           type: string
-          description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
+          description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. The producer now REFUSES to record a claim it can prove false: a non-`claude*` model name with an empty or anthropic.com base URL cannot be the model that answered (the request silently falls back to the primary Anthropic model), so that case records empty rather than a value a reader would take as fact. A live specimen produced exactly that wrong record on 2026-08-12. The residue is a claim that is merely unverified rather than known-false, and no environment-side check closes that one. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
         provider:
           type: string
           description: "The endpoint host the attesting session was pointed at (host only, derived from ANTHROPIC_BASE_URL at emit; scheme, path, and any userinfo are stripped so no key material lands here). Empty means not observable from the environment - the default Anthropic endpoint, or a lane that does not route via env. Same best-effort caveat as model."
@@ -234,11 +234,14 @@ event_types:
           description: "The PR number the gate evaluated."
         coverage:
           type: string
-          enum: [covered, unknown]
-          description: "`covered` carries a count in reviewed_count; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt)."
+          enum: [covered, uncovered, unknown]
+          description: "`covered` (count > 0) carries a count in reviewed_count; `uncovered` is a real, known zero; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt). `uncovered` was added in x-5b99: a zero count previously serialized as the string `covered`, so `coverage: covered` and `reviewed_count: 0` co-occurred on three PRs in flight and the reassuring WORD sat beside the honest NUMBER. Additive for every reader, all of which already test `covered AND count > 0`, so a historical `covered` event with a zero count keeps reading as not-covered."
         reviewed_count:
           type: integer
-          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). Present only when coverage == covered."
+          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). A verdict counts only while its freshness is not `stale`. Present whenever coverage is covered or uncovered (omitted only on unknown)."
+        self_attested_count:
+          type: integer
+          description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."
         verdicts:
           type: array
           description: "One entry per reviewer over one producer axis. Producer is named by axis so the chatgpt-codex-connector App and the local codex CLI are distinct."
@@ -252,7 +255,15 @@ event_types:
                 type: string
               verdict:
                 type: string
-                enum: [reviewed, refused, errored, absent]
+                enum: [reviewed, stale, refused, errored, absent]
+                description: "`stale` (x-5b99) means the reviewer RESPONDED, but against a commit whose code no longer describes HEAD. It is recorded rather than dropped so the trail shows what happened, it is excluded from reviewed_count, and it is deliberately distinct from `absent`: a reviewer that read an older commit needs a nudge to re-read, while one that never responded needs waiting for."
+              reviewed_sha:
+                type: string
+                description: "The commit this reviewer actually read: a github_app review object's `.commit.oid`, or a local attestation's own head_sha. Omitted when unknowable, which the freshness predicate treats as stale (fail closed). Its ABSENCE was the x-5b99 defect: head_sha below is stamped at EVAL time, so a bot verdict rendered hours and commits earlier serialized as coverage for a commit its author never saw."
+              freshness:
+                type: string
+                enum: [fresh, carried_base_sync, carried_docs_only, stale]
+                description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
               human_approval:
                 type: boolean
               attestation_origin:
@@ -261,7 +272,7 @@ event_types:
                 description: "Authorship of a local_attestation review, computed from attester_session_id vs the authoring session's harness_session_id. self_attested = emitted by the authoring session; other_session = emitted by a different session (NOT 'independent' - a self-handoff successor or a second agent in a shared worktree is a different session and still not independent); unknown = attester empty/absent or the author session is unknown (the entire pre-landed backlog). Meaningful only on local_attestation verdicts; github_app/human approvals omit it. Recorded, never gating: reviewed_count does not read this field, so a self_attested verdict counts toward coverage exactly like any other and a green PR whose only attestation is self_attested is covered and may merge. Whether that should stay true is a later gate decision, not this field."
         head_sha:
           type: string
-          description: "The HEAD the coverage was computed against (coverage is a snapshot)."
+          description: "The HEAD the coverage was computed against (coverage is a snapshot). This is the EVAL head, not the head any reviewer read - that is per-verdict `reviewed_sha`. Conflating the two is x-5b99: the merge gate compared this field against the current head and correctly refused a stale eval, but a FRESH eval carrying a stale bot verdict walked straight through it."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/pr/_reviews.py `_repo_identity_from_remote_url`. The two must agree."

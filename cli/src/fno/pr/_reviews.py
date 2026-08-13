@@ -83,7 +83,13 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
 
 
 # x-0eaf: coverage read degrades to this on any failure (additive, fail-open).
-_UNKNOWN_COVERAGE = {"coverage": "unknown", "reviewed_count": None}
+_UNKNOWN_COVERAGE = {
+    "coverage": "unknown",
+    "reviewed_count": None,
+    "self_attested_count": None,
+    "head_sha": None,
+    "stale_verdicts": [],
+}
 
 
 def _repo_root(cwd: Optional[str] = None) -> Path:
@@ -340,12 +346,40 @@ def _is_covered(data: Optional[dict]) -> bool:
         return False
 
 
+def _stale_verdicts(data: dict) -> list[dict]:
+    """Reviewers that responded against a commit that no longer describes HEAD.
+
+    Each entry is ``{name, producer, reviewed_sha, freshness}``. Present only on
+    events from a loop-check that computes per-verdict freshness (x-5b99);
+    older events carry no ``freshness`` key and yield an empty list, which reads
+    the same as "nothing stale" and keeps this additive.
+    """
+    verdicts = data.get("verdicts")
+    if not isinstance(verdicts, list):
+        return []
+    return [
+        {
+            "name": v.get("name"),
+            "producer": v.get("producer"),
+            "reviewed_sha": v.get("reviewed_sha"),
+            "freshness": v.get("freshness"),
+        }
+        for v in verdicts
+        if isinstance(v, dict) and v.get("freshness") == "stale"
+    ]
+
+
 def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
     """The latest ``review_coverage`` verdict for a PR (loop-check emits it every
     gate eval). Additive and fail-open: any failure degrades to the unknown
     sentinel. Python consumes the event rather than recomputing (Ownership: Rust
     computes, Python reads), so a human and the loop see one number for the same
     PR.
+
+    Carries ``head_sha`` and ``stale_verdicts`` (x-5b99) so a reader can see
+    WHICH commit was covered and by whom. Without them a stale verdict and a
+    fresh one rendered identically, and the operator was left merging by hand
+    because a green word could not be checked against anything.
     """
     try:
         latest = latest_review_coverage(pr_number, cwd)
@@ -356,6 +390,9 @@ def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
     return {
         "coverage": latest.get("coverage", "unknown"),
         "reviewed_count": latest.get("reviewed_count"),
+        "self_attested_count": latest.get("self_attested_count"),
+        "head_sha": latest.get("head_sha"),
+        "stale_verdicts": _stale_verdicts(latest),
     }
 
 
