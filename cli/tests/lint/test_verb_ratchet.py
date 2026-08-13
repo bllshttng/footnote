@@ -23,13 +23,13 @@ _FNO_FRONT = shutil.which("fno")
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(_FNO_FRONT is None, reason="Rust front `fno` not on PATH")
 def test_rust_surface_includes_mux_and_version():
+    if "FNO_AGENTS_FRONT" not in vr.os.environ:
+        pytest.skip("built fno-agents front not selected")
     rust = vr.enumerate_rust_leaves()
     assert "version" in rust
-    assert "mux pane ls" in rust
-    assert "mux attach" in rust
-    # the hidden verbs the usage string omits are still present (constant-only)
-    assert "mux tab ls" in rust
-    assert "mux layout get" in rust
+    assert "mux" in rust
+    assert "fno-agents" in rust
+    assert not any(leaf.startswith("mux ") for leaf in rust)
 
 
 def test_python_surface_recurses_to_real_leaves():
@@ -395,8 +395,9 @@ def test_enumeration_refuses_when_imported_package_is_not_this_checkout(monkeypa
 def test_enumeration_passes_when_package_is_this_checkout():
     """The ordinary in-repo run is unaffected (this test process IS the source)."""
     leaves = vr.enumerate_python_leaves()
+    assert "pr" in leaves
     assert "pr merge" in leaves
-    assert "pr base-lineage-check" in leaves
+    assert "pr base-lineage-check" not in leaves
 
 
 def test_guard_covers_check_not_only_update(monkeypatch, tmp_path):

@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from fno.lint_verb_ratchet import RUST_SOURCES, VerbRatchetError, scan_rust_source
+from fno.lint_verb_ratchet import (
+    FNO_AGENTS_SOURCE,
+    RUST_SOURCES,
+    VerbRatchetError,
+    scan_fno_agents_source,
+    scan_rust_source,
+)
 
 
 @pytest.fixture
@@ -30,6 +36,9 @@ def rust_tree(tmp_path: Path) -> Path:
         dst = tmp_path / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(real_root / rel, dst)
+    dst = tmp_path / FNO_AGENTS_SOURCE
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(real_root / FNO_AGENTS_SOURCE, dst)
     return tmp_path
 
 
@@ -156,3 +165,15 @@ def test_removed_mux_verbs_carry_a_tombstone() -> None:
     main_rs = (real_root / RUST_SOURCES[0]).read_text()
     assert "MUX_TOMBSTONES" in main_rs
     assert '"squad",' in main_rs, "the removed squad alias must keep its tombstone"
+
+
+def test_added_fno_agents_dispatch_is_seen(rust_tree: Path) -> None:
+    path = rust_tree / FNO_AGENTS_SOURCE
+    source = path.read_text()
+    anchor = '    if verb == "ping" {'
+    assert anchor in source
+    path.write_text(source.replace(anchor, '    if verb == "zzthrowaway" {\n    }\n' + anchor))
+
+    actions = scan_fno_agents_source(rust_tree)
+
+    assert "zzthrowaway" in actions
