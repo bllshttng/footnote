@@ -212,11 +212,25 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
     # `only` excludes: an added line sitting under unchanged prose must still
     # see that prose, or the added-lines gate reads it as paragraph-initial.
     prev_continuable = False
+    # A table written without leading pipes. Tracked HERE and not in `_mask`,
+    # because the rows need an exemption from rule 6 and from nothing else.
+    # Blanking them in the mask bought that exemption by dropping them out of
+    # rules 1 to 5 as well, which let a long sentence carrying a pipe sit under
+    # a table and pass everything. Scoped this way the worst case is one missed
+    # wrap, never a missed semicolon or modal.
+    in_table = False
     for index, (raw_line, masked_line) in enumerate(zip(raw_lines, masked_lines), 1):
         blank = not masked_line.strip()
         is_list = bool(_LIST_MARKER_RE.match(raw_line))
+        if blank or "|" not in raw_line:
+            in_table = False
+        table_row = _starts_table_run(raw_line, raw_lines, index)
+        if table_row:
+            in_table = True
         own_line = (
-            bool(_HEADING_RE.match(raw_line))
+            table_row
+            or (in_table and "|" in raw_line and not blank)
+            or bool(_HEADING_RE.match(raw_line))
             or bool(_OWN_LINE_BREAK_RE.match(raw_line))
             or bool(_HTML_BLOCK_RE.match(raw_line))
             or bool(_REF_DEF_RE.match(raw_line))
@@ -371,20 +385,10 @@ def _mask(text: str) -> str:
     fence_char = ""
     in_comment = False
     in_frontmatter = False
-    in_table = False
     lines = text.split("\n")
     for index, raw_line in enumerate(lines):
         lead = raw_line.lstrip()
 
-        # A table run ends at the first line that is not one of its rows, and
-        # that verdict is reached HERE, before any branch below can `continue`
-        # past it. Resetting further down covered only the fall-through path,
-        # so a fence, an indented block, or a comment opening straight after a
-        # table carried the flag onward and blanked the next prose line that
-        # happened to contain a pipe. That is a rule-evasion hole rather than a
-        # cosmetic miss: the line escaped all six rules, not just rule 6.
-        if in_table and not (lead and "|" in raw_line):
-            in_table = False
 
         # Frontmatter: a leading `--- ... ---` block. Blank it line-for-line so
         # the masked text keeps the same line count as the raw text.
@@ -426,25 +430,15 @@ def _mask(text: str) -> str:
                 continue
             # A same-line comment falls through: _mask_inline strips just the
             # span, so prose trailing the comment is still checked.
-        # A table row. GFM allows a row with no leading pipe, and a body row is
-        # then `a | b`, which is also an ordinary sentence carrying a pipe.
-        # POSITION tells them apart, never shape: a pipeless row is one that
-        # touches a delimiter row, the header above it or a body row below.
-        # Matching on shape alone would let any sentence with a pipe escape all
-        # six rules.
-        #
-        # The header needs a one-line lookahead because the delimiter row that
-        # proves it is a table has not been read yet. Without it the header was
-        # checked as prose while every body row was exempt, which is a rule
-        # applied to one row of a table and not the rest.
-        if in_table and lead and "|" in raw_line:
-            out.append("")
-            continue
-        if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead) or _opens_table(
-            raw_line, lines, index
-        ):
-            if _DELIMITER_ROW_RE.match(lead) or _opens_table(raw_line, lines, index):
-                in_table = True
+        # A leading-pipe table row is unambiguous, so it is removed outright as
+        # it always has been. A PIPELESS row is deliberately NOT handled here.
+        # Blanking removes a line from all six rules, and the only thing a
+        # pipeless row ever needed was an exemption from rule 6. Two earlier
+        # attempts blanked it and each opened a rule-evasion hole, because a
+        # pipeless row is shaped exactly like a sentence carrying a pipe. That
+        # exemption now lives in `_run`, scoped to rule 6, so such a line is
+        # still checked for length, semicolons, modals, and contractions.
+        if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead):
             out.append("")
             continue
         if _LOG_RE.match(lead):
@@ -454,18 +448,28 @@ def _mask(text: str) -> str:
     return "\n".join(out)
 
 
-def _opens_table(raw_line: str, lines: "list[str]", index: int) -> bool:
-    """True when this line is the HEADER of a table written without pipes.
+def _starts_table_run(raw_line: str, lines: "list[str]", index: int) -> bool:
+    """True when this 1-based line opens a table run, in either spelling.
 
-    Proven by the next line, because a header is indistinguishable from prose
-    until the delimiter row under it is read. The current line must carry a pipe
-    of its own, so a paragraph sitting above a setext underline is untouched:
-    the delimiter pattern needs pipes, and `---` alone never matches it.
+    Two openers count: a delimiter row, and the HEADER directly above one. The
+    header needs a lookahead, because it is indistinguishable from prose until
+    the delimiter row beneath it is read, and without it the header was charged
+    while every body row was exempt.
+
+    A paragraph above a setext underline is untouched, since a delimiter row
+    needs pipes and a bare dash run never matches one.
     """
+    lead = raw_line.lstrip()
+    if _DELIMITER_ROW_RE.match(lead) or (
+        lead.startswith("|") and _DELIMITER_ROW_RE.match(lead.strip("| \t"))
+    ):
+        return True
     if "|" not in raw_line:
         return False
-    nxt = lines[index + 1].lstrip() if index + 1 < len(lines) else ""
-    return bool(_DELIMITER_ROW_RE.match(nxt))
+    nxt = lines[index].lstrip() if index < len(lines) else ""
+    return bool(_DELIMITER_ROW_RE.match(nxt)) or (
+        nxt.startswith("|") and bool(_DELIMITER_ROW_RE.match(nxt.strip("| \t")))
+    )
 
 
 def _mask_inline(line: str) -> str:

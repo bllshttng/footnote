@@ -418,10 +418,21 @@ def read_logs(
                 return LogsResult(exit_code=1)
     except KeyboardInterrupt:
         if not follow:
-            # A one-shot dump has no clean-exit contract. Swallowing here made a
-            # truncated tail exit 0 and read as a complete one, so a caller
-            # could not tell the two apart. Only the follow loop is a session
-            # the user ends on purpose.
+            # Branch on the ARGUMENT, not on whether the loop was entered.
+            #
+            # Keying this on loop entry was tried and reverted. It reopens the
+            # race this guard exists to close: the tail write is the readiness
+            # marker a follower waits on, so a SIGINT arriving between that
+            # write and the loop would exit 130 again, which is the exact
+            # intermittent failure the guard was written for. It also
+            # contradicts AC2-FR, whose contract is that `--follow` interrupted
+            # exits clean, full stop. For a stream the operator stopped on
+            # purpose the tail is a preamble, so a short preamble is not a
+            # truncated deliverable.
+            #
+            # A one-shot dump is the opposite case and keeps the strict rule: it
+            # has no clean-exit contract, and swallowing there made a truncated
+            # tail exit 0 and read as a complete one.
             #
             # SystemExit(130) rather than a bare re-raise: `cmd_logs` traps no
             # KeyboardInterrupt, so re-raising printed a Python traceback for an

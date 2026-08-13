@@ -62,6 +62,10 @@ A bare prose line under a list item is a lazy continuation, so rule 6 fires ther
 
 The field-line escape exists because mail carries receipts and the worker return grammar. `RESULT: SUCCESS` over `TASK: 2.1` is two fields, never one wrapped sentence, and rule 6 refused that grammar outright. The key is one word with no space, so a colon partway through a sentence exempts nothing.
 
+A table row written WITH leading pipes is removed entirely, so it costs zero words and no rule reads it. A row written without them is waived from rule 6 alone, and rules 1 to 5 still read it.
+
+That difference is deliberate. A leading pipe is the author saying "this is a table", and a row without one is shaped exactly like a sentence carrying a pipe. Waiving every rule on that shape let a long sentence carrying a semicolon sit under a table and pass the whole gate. The narrow waiver is the safe one, and adding leading pipes is how to ask for the full exemption.
+
 ## Rule 6 accepts one blind spot on purpose
 
 Rule 6 reads a pair of lines, and the changed-markdown gate reads added lines only. A break is charged to the CONTINUING line, never to the line above it.

@@ -218,12 +218,31 @@ def test_a_pipeless_table_is_not_charged():
     assert 6 not in rule_set(body)
 
 
-def test_a_pipeless_table_header_is_not_charged():
+def test_a_pipeless_table_header_is_not_charged_rule_6():
     # The header is proven a table row by the delimiter row BELOW it, so it
-    # needs a lookahead. Without one it was checked as prose while every body
-    # row was exempt, which applies the rules to one row of a table.
-    body = "Intro paragraph.\n\nflag | what it does when unset\n--- | ---\nx | y\n"
-    assert rule_set(body) == set()
+    # needs a lookahead. Without one it was charged rule 6 while every body row
+    # was waived, which applies one rule to one row of a table and not the rest.
+    body = "Intro paragraph.\n\nflag | what it does\n--- | ---\nx | y\n"
+    assert 6 not in rule_set(body)
+
+
+def test_prose_after_a_pipeless_table_keeps_every_other_rule():
+    # The hole that survived two fixes. A pipeless row is shaped like a sentence
+    # carrying a pipe, so blanking it in the mask waived ALL six rules. The
+    # waiver is rule 6 only now, and the proof is that the sentence reports the
+    # same rules under a table as it does standing alone.
+    bad = (
+        "You should use a | b here and it is a very long sentence with lots and "
+        "lots and lots of extra words beyond the cap; really."
+    )
+    assert rule_set("a | b\n--- | ---\n1 | 2\n" + bad + "\n") == rule_set(bad + "\n")
+    assert {1, 2, 3} <= rule_set(bad + "\n")
+
+
+def test_a_mixed_pipe_table_body_row_is_not_charged_rule_6():
+    # A delimiter row written WITH pipes above body rows written without them is
+    # valid GFM: leading pipes are per-row optional.
+    assert 6 not in rule_set("| a | b |\n| --- | --- |\n1 | 2\n3 | 4\n")
 
 
 def test_table_state_does_not_leak_past_a_fence():

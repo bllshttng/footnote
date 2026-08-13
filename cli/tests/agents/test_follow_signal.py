@@ -142,6 +142,37 @@ def test_interrupt_on_a_one_shot_dump_is_not_swallowed(tmp_path, monkeypatch):
     assert excinfo.value.code == 130
 
 
+def test_follow_interrupted_before_the_loop_still_exits_clean(tmp_path, monkeypatch):
+    """AC2-FR is keyed on the ARGUMENT, and that is deliberate.
+
+    Keying it on loop entry was tried and reverted. The tail write is the
+    readiness marker a follower waits on, so an interrupt between that write and
+    the loop would exit 130 again, which is the intermittent failure this guard
+    was written to remove. For a stream the operator stopped on purpose the tail
+    is a preamble, so a short preamble is not a truncated deliverable.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    log_file = tmp_path / "follow.jsonl"
+    log_file.write_text('{"line": 1}\n', encoding="utf-8")
+    write_registry([_codex(log_path=str(log_file))])
+
+    from fno.agents import read as read_mod
+
+    def _boom(path, tail=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(read_mod, "_read_jsonl_tail", _boom)
+
+    result = read_mod.read_logs(
+        name="follow-target",
+        tail=None,
+        follow=True,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    assert result.exit_code == 0
+
+
 def test_follow_jsonl_detects_window_spanning_truncate(tmp_path):
     """Truncate-then-refill within a single poll window must surface, not emit garbage.
 
