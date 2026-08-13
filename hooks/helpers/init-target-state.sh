@@ -555,11 +555,12 @@ if [[ -f "$STATE_FILE" ]]; then
   if [[ -z "$_STALE_REASON" && -z "$_STALE_CLAIM_KEY" \
         && -n "$_STALE_SESSION_ID" && -f "$STATE_DIR/events.jsonl" \
         && -x "$(command -v python3 2>/dev/null || true)" ]]; then
-    if python3 - "$STATE_DIR/events.jsonl" "$_STALE_SESSION_ID" <<'PYEOF'
+    if python3 - "$STATE_DIR/events.jsonl" "$_STALE_SESSION_ID" "$STATE_DIR/.target-cancelled" <<'PYEOF'
 import json
 import sys
+from pathlib import Path
 
-path, session_id = sys.argv[1:]
+path, session_id, cancel_path = sys.argv[1:]
 try:
     lines = open(path, encoding="utf-8", errors="replace")
 except OSError:
@@ -575,17 +576,22 @@ with lines:
             event.get("type") == "session_finalized"
             and isinstance(data, dict)
             and data.get("session_id") == session_id
-            and data.get("termination_reason")
-            in {
-                "DonePRGreen",
-                "DoneAdvisory", "DoneDelivery",
-                "DoneBatched",
-                "DoneAwaitingMerge",
-                "DoneUnreviewed",
-                "DoneAwaitingReview",
-                "DonePlanned",
-                "NoWork",
-            }
+            and (
+                data.get("termination_reason") in {
+                    "DonePRGreen",
+                    "DoneAdvisory", "DoneDelivery",
+                    "DoneBatched",
+                    "DoneAwaitingMerge",
+                    "DoneUnreviewed",
+                    "DoneAwaitingReview",
+                    "DonePlanned",
+                    "NoWork",
+                }
+                or (
+                    data.get("termination_reason") == "Interrupted"
+                    and Path(cancel_path).is_file()
+                )
+            )
         ):
             raise SystemExit(0)
 raise SystemExit(1)
