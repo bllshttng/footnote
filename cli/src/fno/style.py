@@ -1,6 +1,6 @@
 """Style checker for agent-authored text.
 
-Five rules, checked at the tool boundary. ``docs/style-rules.md`` is the
+Six rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
 state, no network. Every caller (``fno mail send``, the PR-body CI gate, the
 changed-markdown CI gate) routes through :func:`check`.
@@ -23,6 +23,7 @@ RULE_NAMES = {
     3: "modal",
     4: "contraction",
     5: "condition",
+    6: "wrap",
 }
 
 LIST_ITEM_CAP = 20
@@ -72,6 +73,15 @@ _ABBREVIATIONS = ("e.g.", "i.e.", "vs.", "etc.")
 # so a doc that describes the escape is not exempted by the description.
 _LINE_EXCEPTION_RE = re.compile(r"^\s*style-exception:\s*(.+?)\s*$", re.MULTILINE)
 _COMMENT_EXCEPTION_RE = re.compile(r"<!--\s*style-exception:\s*(.+?)\s*-->")
+
+# Rule 6. A paragraph is one physical line, so the only legal newline is one
+# that starts the next block. A heading and a thematic break own their line
+# outright, so the line after either one is always legal. A list item and a
+# blockquote start a block AND accept a lazy continuation, so a bare prose line
+# under either is a break inside a paragraph.
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+_THEMATIC_BREAK_RE = re.compile(r"^\s{0,3}([-*_])[ \t]*(\1[ \t]*){2,}$")
+_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>")
 
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _LOG_RE = re.compile(
@@ -125,10 +135,11 @@ def has_exception(text: str) -> str | None:
 def check(text: str, *, surface: str = "mail") -> list[Violation]:
     """Return every violation found in ``text``.
 
-    ``surface`` is carried for forward compatibility (a future rule may scope by
-    surface); the five rules apply identically everywhere today. The text is
-    masked whole, then split into sentences per line, so a sentence and a line
-    are the same unit (the repo's one-sentence-per-line convention).
+    ``surface`` is carried for forward compatibility (a future rule can scope by
+    surface); the six rules apply identically everywhere today. The text is
+    masked whole, then each line is split into its sentences: a paragraph is one
+    physical line and carries as many sentences as it needs, and rule 6 is what
+    holds that shape.
     """
     del surface  # reserved; no rule scopes by surface yet
     return _run(text, None)
@@ -152,12 +163,30 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
     sentence_index = 0
     raw_lines = text.split("\n")
     masked_lines = masked.split("\n")
+    # Rule 6 is the one rule that reads a pair of lines rather than a sentence,
+    # so its state lives here. It advances on EVERY line, including a line
+    # `only` excludes: an added line sitting under unchanged prose must still
+    # see that prose, or the added-lines gate reads it as paragraph-initial.
+    prev_continuable = False
     for index, (raw_line, masked_line) in enumerate(zip(raw_lines, masked_lines), 1):
-        if not masked_line.strip():
-            continue
-        if only is not None and index not in only:
-            continue
+        blank = not masked_line.strip()
         is_list = bool(_LIST_MARKER_RE.match(raw_line))
+        is_heading = bool(_HEADING_RE.match(raw_line))
+        is_break = bool(_THEMATIC_BREAK_RE.match(raw_line))
+        starts_block = is_list or is_heading or is_break or bool(_BLOCKQUOTE_RE.match(raw_line))
+        checked = only is None or index in only
+        if not blank and not starts_block and prev_continuable and checked:
+            violations.append(
+                Violation(
+                    6, index - 1, masked_line.strip(),
+                    f"line {index} continues the paragraph above. "
+                    "A paragraph is one physical line. "
+                    "Join the two lines, or put a blank line between them.",
+                )
+            )
+        prev_continuable = not blank and not is_heading and not is_break
+        if blank or not checked:
+            continue
         work = _LIST_MARKER_RE.sub("", masked_line, count=1) if is_list else masked_line
         for sentence in _split_sentences(work):
             violations.extend(_check_sentence(sentence, sentence_index, is_list))
@@ -168,9 +197,12 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
 def format_violations(violations: list[Violation]) -> str:
     """Render violations as a self-teaching, rule-compliant refusal message.
 
-    The message itself passes the five rules: every banned word it names is
+    The message itself passes the six rules: every banned word it names is
     double-quoted, and the masking pass replaces quoted spans with one token
     before any rule runs, so a gate that violates its own rule never ships.
+    Rule 6 is why the lines are joined by a BLANK line rather than a newline.
+    Each line here is its own paragraph, so single newlines would make the
+    refusal an example of the break it refuses.
     """
     if not violations:
         return ""
@@ -179,7 +211,7 @@ def format_violations(violations: list[Violation]) -> str:
         name = RULE_NAMES.get(violation.rule, "?")
         lines.append(f"rule {violation.rule} ({name}): {violation.detail}")
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def _split_sentences(line: str) -> list[str]:

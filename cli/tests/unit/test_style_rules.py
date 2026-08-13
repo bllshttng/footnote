@@ -1,9 +1,14 @@
-"""Tests for the five-rule style checker (``cli/src/fno/style.py``).
+"""Tests for the six-rule style checker (``cli/src/fno/style.py``).
 
 Each rule is covered positive and negative, plus the two deliberate sharp
 edges: rule 4 must not flag the possessive "agent's", and rule 5 must skip the
 hyphenated compounds "if-branch" and "when-clause". Every masking construct is
 exercised, since "code does not count" is the load-bearing exemption.
+
+Rule 6 gets the widest negative coverage of the six. It is the only rule that
+reads a PAIR of lines, so every block that legally owns a newline (blank line,
+list marker, heading, table row, fence, frontmatter, thematic break) needs its
+own case. A false positive there refuses correct markdown.
 """
 from __future__ import annotations
 
@@ -124,6 +129,70 @@ def test_hyphenated_compounds_skip():
     assert 5 not in rule_set("a when-clause gates the run.")
 
 
+# --- Rule 6: a paragraph is one physical line --------------------------------
+
+def test_newline_inside_a_paragraph_fails():
+    assert 6 in rule_set("the gate refuses a break\ninside this paragraph.")
+
+
+def test_one_line_paragraph_passes():
+    assert 6 not in rule_set("the gate refuses a break inside this paragraph.")
+
+
+def test_many_sentences_on_one_line_pass():
+    assert not rule_set("first sentence here. second sentence here. third one here.")
+
+
+def test_blank_line_starts_the_next_paragraph():
+    assert 6 not in rule_set("first paragraph here.\n\nsecond paragraph here.")
+
+
+def test_list_items_are_legal_breaks():
+    assert 6 not in rule_set("- first item here.\n- second item here.\n- third item here.")
+
+
+def test_lazy_list_continuation_fails():
+    # A bare prose line under a list item is a break inside that item.
+    assert 6 in rule_set("- the item starts here\nand runs onto this line.")
+
+
+def test_prose_after_a_heading_passes():
+    assert 6 not in rule_set("# The heading\nthe paragraph under it.")
+
+
+def test_prose_after_a_table_passes():
+    body = "intro line here.\n| a | b |\n|---|---|\nclosing line here."
+    assert 6 not in rule_set(body)
+
+
+def test_prose_after_a_fence_passes():
+    assert 6 not in rule_set("intro here.\n```\ncode()\n```\nclosing here.")
+
+
+def test_prose_after_frontmatter_passes():
+    assert 6 not in rule_set("---\nkey: value\n---\nthe body line.")
+
+
+def test_prose_after_a_thematic_break_passes():
+    assert 6 not in rule_set("first paragraph.\n---\nsecond paragraph.")
+
+
+def test_blockquote_lines_are_legal_breaks():
+    assert 6 not in rule_set("> quoted line one.\n> quoted line two.")
+
+
+def test_check_lines_sees_the_unchanged_line_above():
+    # The added line continues prose that the diff never touched, so rule 6
+    # must still fire. State advances on every line, not only checked ones.
+    text = "an unchanged paragraph line\nthis added line continues it.\n"
+    assert 6 in {v.rule for v in style.check_lines(text, {2})}
+
+
+def test_check_lines_first_added_line_after_a_blank_passes():
+    text = "unchanged paragraph.\n\nthis added line starts its own.\n"
+    assert 6 not in {v.rule for v in style.check_lines(text, {3})}
+
+
 # --- Masking: code does not count --------------------------------------------
 
 def test_inline_code_span_is_one_word():
@@ -234,6 +303,14 @@ def test_the_refusal_message_passes_its_own_rules():
     # style-checked; every banned word it names is quoted, so masking exempts it.
     text = "you should don't; run if x."
     msg = style.format_violations(style.check(text))
+    assert style.check(msg) == [], msg
+
+
+def test_the_refusal_message_survives_a_rule_6_violation():
+    # Rule 6 is the one rule whose refusal is multi-line by nature, so it is the
+    # one most able to break the self-consistency invariant above.
+    msg = style.format_violations(style.check("a paragraph broken\nacross two lines."))
+    assert "rule 6" in msg
     assert style.check(msg) == [], msg
 
 
