@@ -67,12 +67,16 @@ REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 emit_event() {
     # Append to both project + global logs (no jq; safe interpolation). Same
     # shape target-stop-hook's emit_event_both uses.
-    local etype="$1" data="$2" ts line
+    local etype="$1" data="$2" ts line global_events
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
     line="{\"ts\":\"${ts}\",\"type\":\"${etype}\",\"source\":\"hook\",\"data\":${data}}"
-    mkdir -p "${REPO_ROOT}/.fno" "${HOME}/.fno" 2>/dev/null || true
+    # Resolved at CALL time, not definition time: this function fires before the
+    # shell stub is sourced (step 5) as well as after, so it reads whatever the
+    # stub set and otherwise falls back to the default state dir.
+    global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
+    mkdir -p "${REPO_ROOT}/.fno" "$(dirname "$global_events")" 2>/dev/null || true
     echo "$line" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
-    echo "$line" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
+    echo "$line" >> "$global_events" 2>/dev/null || true
 }
 
 # ── 1. Read stdin: transcript_path + session_id from the Stop payload ─────────
@@ -226,8 +230,27 @@ fi
 # from a cwd with no .fno) gets a fresh namespace and re-nudges within the same
 # band, defeating the once-per-band anti-nag. Worst case a worktree worker's
 # latch vanishes when the worktree archives. Global + transcript-keyed closes it.
-LATCH_DIR="${HOME}/.fno"
+#
+# They live in a `latches/` SUBDIR of that state dir, not its top level. Four
+# files per session per band at the root buried it: 395 of 527 entries, with no
+# deleter, six days after this hook landed. The location resolves through the
+# same door as every other path (`fno paths shell-stub`), so an overridden
+# `config.state_dir` moves the latches with it; hardcoding a new
+# `$HOME/.fno/latches` would repeat the bug one directory down.
+_stub="$(with_timeout 3 fno paths shell-stub 2>/dev/null || true)"
+[ -n "$_stub" ] && [ -f "$_stub" ] && . "$_stub" 2>/dev/null
+LATCH_DIR="${LATCHES_DIR:-${STATE_DIR:-$HOME/.fno}/latches}"
 mkdir -p "$LATCH_DIR" 2>/dev/null || true
+
+# The writer owns the lifetime. A latch is keyed to a session id, so once that
+# session ends nothing will ever read it again. Two days, not one: a long
+# session must not have its own latch swept mid-flight.
+find "$LATCH_DIR" -maxdepth 1 -type f -mtime +2 -delete 2>/dev/null || true
+# Legacy sweep: latches written to the state-dir TOP LEVEL before they moved
+# into latches/. Nothing writes that pattern there any more, so a match is by
+# definition pre-migration and needs no age bound. Delete this line after 0.4.0.
+find "${STATE_DIR:-$HOME/.fno}" -maxdepth 1 -type f -name '.context-nudge-*' -delete 2>/dev/null || true
+
 CTX_LATCH="${LATCH_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
 ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
 FLUSH_LATCH="${LATCH_DIR}/.context-nudge-flush-latch-${TBASE}-${BAND}"
