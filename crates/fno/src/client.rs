@@ -2212,18 +2212,21 @@ impl View {
     }
 
     /// Keep the selected modal row inside the scrolled viewport after an arrow
-    /// move (the block is one line per row, so the row index IS the line index).
+    /// move, by delegating to the ONE implementation.
+    ///
+    /// This used to hand-roll the scroll arithmetic with `rows.len().min(trows)`,
+    /// the pre-chrome viewport formula. `Popup::viewport_h` now subtracts
+    /// `chrome.rows_overhead()`, so the copy drifted the moment overlays gained
+    /// a frame: on a 24-row terminal it believed it had 24 body rows when it had
+    /// 22, and arrowing far enough parked the highlighted row permanently below
+    /// the fold while Enter still executed it. That is the invisible-Enter-target
+    /// case `follow_sel` exists to prevent, reached through the copy that did not
+    /// get the fix. `clamp_sel_to_view` never drifted because it already routed
+    /// through `viewport_h`.
     fn follow_modal_selection(&mut self) {
         let trows = self.term.0.max(1) as usize;
         if let Some(m) = self.keys_modal.as_mut() {
-            let vis_h = m.popup.rows.len().min(trows);
-            if let Some((ri, _)) = m.popup.selected() {
-                if ri < m.popup.scroll {
-                    m.popup.scroll = ri;
-                } else if ri >= m.popup.scroll + vis_h {
-                    m.popup.scroll = ri + 1 - vis_h;
-                }
-            }
+            m.popup.follow_sel(trows);
         }
     }
 
