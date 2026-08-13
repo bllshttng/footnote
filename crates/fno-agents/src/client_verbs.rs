@@ -4639,7 +4639,7 @@ mod tests {
             status: crate::AgentStatus::Idle,
             is_live: false,
             pid_confirmed_dead: false,
-            is_ask: false,
+            owns_worktree: true,
             exited_at: None,
             worktree_clean: None,
         };

@@ -401,6 +401,24 @@ pub struct GcSummary {
 /// stale `fno` predating the verb exits non-zero with no receipt, which is
 /// indistinguishable from any other non-answer, so every unknown degrades to
 /// `None` and the row is kept. That is exactly the prior behaviour.
+/// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
+/// plain directory?
+///
+/// A linked worktree's `.git` is a FILE containing a `gitdir:` pointer; the
+/// canonical checkout's `.git` is a directory. That difference is the whole
+/// test, it needs no subprocess, and it is what separates a row that owns
+/// something removable from one that merely ran somewhere.
+///
+/// Fails closed in the useful direction: a path we cannot read is "owns
+/// nothing", so its row is judged on terminal status and grace alone rather
+/// than pinned forever by a cleanliness answer that could never arrive.
+fn is_linked_worktree(cwd: &str) -> bool {
+    if cwd.is_empty() {
+        return false;
+    }
+    std::path::Path::new(cwd).join(".git").is_file()
+}
+
 fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     let out = std::process::Command::new("fno")
         .current_dir(cwd)
@@ -618,7 +636,10 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             .pid
             .map(|p| !pid_is_ours(p, e.pid_start_time))
             .unwrap_or(false);
-        let is_ask = e.is_one_shot_ask();
+        // A one-shot ask owns nothing; neither does a row sitting in the
+        // canonical checkout or in a plain directory. Only a LINKED worktree is
+        // removable, and only there does cleanliness decide anything.
+        let owns_worktree = !e.is_one_shot_ask() && is_linked_worktree(&e.cwd);
         let exited_at = e
             .exited_at
             .as_deref()
@@ -631,7 +652,7 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         let terminal_or_dead = matches!(e.status, AgentStatus::Exited | AgentStatus::PermanentDead)
             || pid_confirmed_dead;
         let past_grace = matches!(exited_at, Some(t) if now.saturating_sub(t) > grace_secs);
-        let needs_probe = !is_live && terminal_or_dead && past_grace && !is_ask;
+        let needs_probe = !is_live && terminal_or_dead && past_grace && owns_worktree;
         let worktree_clean = if needs_probe {
             worktree_clean_probe(&e.cwd)
         } else {
@@ -642,7 +663,7 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             status: e.status,
             is_live,
             pid_confirmed_dead,
-            is_ask,
+            owns_worktree,
             exited_at,
             worktree_clean,
         };
@@ -5065,6 +5086,40 @@ mod tests {
                 .and_then(Value::as_str),
             Some("ask-old")
         );
+    }
+
+    #[test]
+    fn linked_worktree_detection_separates_owners_from_passers_through() {
+        // The whole ownership test is `.git` being a FILE (a `gitdir:` pointer)
+        // rather than a directory. Getting it backwards would either pin every
+        // row again or reap rows that DO own a dirty worktree.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let base = dir.path();
+
+        let canonical = base.join("canonical");
+        std::fs::create_dir_all(canonical.join(".git")).unwrap();
+        assert!(
+            !is_linked_worktree(canonical.to_str().unwrap()),
+            "a .git DIRECTORY is the canonical checkout; the row owns nothing removable"
+        );
+
+        let linked = base.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: /somewhere/.git/worktrees/x\n").unwrap();
+        assert!(
+            is_linked_worktree(linked.to_str().unwrap()),
+            "a .git FILE is a linked worktree; cleanliness decides its row"
+        );
+
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!is_linked_worktree(plain.to_str().unwrap()));
+
+        // Unreadable and empty both fail closed toward "owns nothing", so the row
+        // is judged on terminal status and grace instead of waiting forever on a
+        // cleanliness answer that can never arrive.
+        assert!(!is_linked_worktree(""));
+        assert!(!is_linked_worktree("/nonexistent/path/that/cannot/be/read"));
     }
 
     #[test]

@@ -41,16 +41,26 @@ pub struct GcRow {
     /// status has not yet been flipped to `Exited`. Lets GC reap a dead row the
     /// reconcile sweep has not visited yet.
     pub pid_confirmed_dead: bool,
-    /// A one-shot `ask` row (empty short_id + no pid): it owns no worktree, so the
-    /// dirty-worktree guard does not apply -- it is reaped on terminal + grace
-    /// alone.
-    pub is_ask: bool,
+    /// Does this row own a REMOVABLE worktree? Only then does the cleanliness
+    /// guard mean anything.
+    ///
+    /// This started life as `is_ask`, exempting one-shot `ask` rows because they
+    /// own no worktree. That was one instance of the real predicate, and the
+    /// narrow version pinned 17 of 21 reapable rows on this machine: their `cwd`
+    /// is the CANONICAL CHECKOUT, which the row does not own and which is never
+    /// clean (one untracked `.claude/settings.json` was enough). The guard
+    /// protected nothing there and blocked everything.
+    ///
+    /// False for a one-shot ask, for a row whose cwd is the canonical checkout,
+    /// and for a cwd that is not a linked worktree at all.
+    pub owns_worktree: bool,
     /// `exited_at` parsed to epoch seconds; `None` when the row is not yet
     /// stamped (never observed dead before).
     pub exited_at: Option<i64>,
     /// Worktree cleanliness for a worktree-owning row: `Some(true)` clean,
     /// `Some(false)` dirty (uncommitted changes -> keep), `None` the probe could
-    /// not determine it (fail closed -> keep). Ignored for `is_ask` rows.
+    /// not determine it (fail closed -> keep). Ignored when `owns_worktree` is
+    /// false, because then there is nothing for it to protect.
     pub worktree_clean: Option<bool>,
 }
 
@@ -58,9 +68,10 @@ pub struct GcRow {
 ///
 /// The reap condition is all three of: (1) terminal status OR pid confirmed dead
 /// (with liveness re-checked, never trusting a stale `exited`), (2) strictly past
-/// `grace_secs` since `exited_at`, (3) the worktree is clean (or the row owns
-/// none). A row seen dead for the first time is `StampExit`ed rather than reaped,
-/// so a just-finished row stays visible for the whole grace window.
+/// `grace_secs` since `exited_at`, (3) the worktree is clean, OR the row owns no
+/// worktree for the guard to protect. A row seen dead for the first time is
+/// `StampExit`ed rather than reaped, so a just-finished row stays visible for the
+/// whole grace window.
 pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
     // (AC1-FR) A live worker -- re-checked -- is never touched. The caller clears
     // any stale `exited_at` on such a row separately.
@@ -84,8 +95,8 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
             if now.saturating_sub(exited) <= grace_secs {
                 return GcAction::Keep;
             }
-            if row.is_ask {
-                // No worktree to protect.
+            if !row.owns_worktree {
+                // No worktree to protect, so nothing for cleanliness to say.
                 return GcAction::Reap;
             }
             match row.worktree_clean {
@@ -110,7 +121,7 @@ mod tests {
             status: AgentStatus::Exited,
             is_live: false,
             pid_confirmed_dead: false,
-            is_ask: false,
+            owns_worktree: true,
             exited_at: Some(NOW - GRACE - 1),
             worktree_clean: Some(true),
         }
@@ -193,11 +204,65 @@ mod tests {
         // An ask row owns no worktree: a dirty/unknown cwd (the user's repo) must
         // not pin it forever.
         let row = GcRow {
-            is_ask: true,
+            owns_worktree: false,
             worktree_clean: Some(false),
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn row_in_the_canonical_checkout_is_not_pinned_by_its_dirt() {
+        // THE MEASURED CASE. 17 of 21 past-grace rows on this machine had `cwd`
+        // = the canonical checkout, kept by a single untracked
+        // `.claude/settings.json`. The row does not own that checkout and cannot
+        // remove it, so its dirt says nothing about whether the ROW may go.
+        let row = GcRow {
+            owns_worktree: false,
+            worktree_clean: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_row_that_does_own_a_dirty_worktree_is_still_kept() {
+        // The generalisation must not swallow the case the guard exists for.
+        // Two of the 21 were exactly this: a real linked worktree with real
+        // uncommitted edits. Those stay.
+        let row = GcRow {
+            owns_worktree: true,
+            worktree_clean: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn owning_no_worktree_never_shortcuts_liveness_or_grace() {
+        // `owns_worktree: false` skips ONE check. It must not become a fast path
+        // that reaps a live row or one still inside its grace window.
+        let live = GcRow {
+            owns_worktree: false,
+            is_live: true,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&live, NOW, GRACE), GcAction::Keep);
+
+        let in_grace = GcRow {
+            owns_worktree: false,
+            exited_at: Some(NOW - GRACE + 10),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&in_grace, NOW, GRACE), GcAction::Keep);
+
+        let not_terminal = GcRow {
+            owns_worktree: false,
+            status: AgentStatus::Idle,
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&not_terminal, NOW, GRACE), GcAction::Keep);
     }
 
     #[test]
