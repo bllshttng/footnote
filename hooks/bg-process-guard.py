@@ -117,8 +117,11 @@ def _tokens(text):
     # No comment character. shlex swallows from an unquoted `#` to end of line,
     # and `#` is ordinary shell text far more often than it starts a comment:
     # `echo ${#PATH}; yes > /dev/null` lost everything after the `${` and the
-    # generator was never seen. A real trailing comment costs nothing here,
-    # since its tokens land after the command and never in command position.
+    # generator was never seen. A real trailing comment survives as tokens, and
+    # that is only safe while every reader works in command position. It was not:
+    # `_has_bound` scanned every token, so `yes > /dev/null  # no timeout needed`
+    # read its own comment as the bound. Any new reader added here must take its
+    # answer from `_head_of`, never from a scan of the token list.
     lex.commenters = ""
     return list(lex)
 
@@ -243,23 +246,30 @@ def _has_bound(segment):
     A bound is read per segment rather than per whole command: a `timeout` on
     an unrelated earlier segment must not license an unbounded generator later
     in the same line.
+
+    Read in COMMAND POSITION, like everything else here. Scanning every token
+    let any ARGUMENT spelling `timeout` count as one, and three commands that
+    are literally specimen 1 walked through: `yes timeout > /dev/null`,
+    `yes -t 5 > /dev/null` (`-t` is a stress flag; `yes` just prints it
+    forever), and worst of all `yes > /dev/null  # no timeout needed`. Comment
+    text survives as tokens here on purpose, so the most ordinary thing an
+    agent writes was also the easiest bypass in the file.
     """
-    for i, tok in enumerate(segment):
-        # A redirect TARGET is a filename, not a command. Read as one,
-        # `yes 2> /tmp/gtimeout` carried a bound it never runs, and naming an
-        # output file is a bypass anyone can reach by accident.
-        if i and (">" in segment[i - 1] or "<" in segment[i - 1]):
-            continue
-        base = tok.rsplit("/", 1)[-1]
-        if base in {"timeout", "gtimeout"}:
-            return True
-        if tok.startswith("count="):  # dd
-            return True
-        if tok == "-t" and i + 1 < len(segment) and segment[i + 1].isdigit():
-            return True  # stress -t 60
-        if re.fullmatch(r"-t\d+", tok):
-            return True
-    return False
+    head, argv = _head_of(segment)
+    if head is None:
+        return False
+    if head in {"timeout", "gtimeout"}:
+        return True
+    # `-t <seconds>` bounds `stress`, and means nothing to anything else.
+    if head in {"stress", "stress-ng"}:
+        for i, tok in enumerate(argv):
+            if tok == "-t" and i + 1 < len(argv) and argv[i + 1].isdigit():
+                return True
+            if re.fullmatch(r"-t\d+", tok):
+                return True
+    # `count=` is dd's own operand, so it is safe to read positionally: it
+    # cannot be a redirect target and it names no other command.
+    return head == "dd" and any(a.startswith("count=") for a in _operands(argv))
 
 
 def _generator_reason(head, argv):

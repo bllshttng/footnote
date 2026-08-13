@@ -30,7 +30,7 @@ A PreToolUse hook on Bash, wired on both the claude and codex lanes. It denies a
 
 Refused shapes: `yes`, `while true`, `while :`, `until false`, `for ((;;))`, `sleep infinity`. Also `stress` and `stress-ng` with no `-t`, `dd` from an endless device with no `count=`, and a checksum reading one.
 
-Any of these makes it legal: `timeout`, `gtimeout`, `head` in the pipeline, `count=`, `ulimit -t`, `-t <seconds>`. A `break`, `exit`, or `return` in COMMAND position after the loop header also clears it. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Two things discriminate, and neither is the word. Command position: `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes. Position relative to the header: an escape leaves the loop it is inside, never one it precedes, so `cd /tmp || exit 1; while true; do sleep 60; done &` is still refused.
+These make it legal: `timeout` or `gtimeout` as the command, `count=` on `dd`, `-t <seconds>` on `stress`, and `ulimit -t` in an earlier command. So does piping INTO a reader that exits, as in `yes | head -c 1M`. Each is read in command position, so an argument spelling `timeout` is not a bound, and neither is a trailing comment mentioning one. `head` bounds only the stage that feeds it, so `head -c 1M f | yes` is still refused. A `break`, `exit`, or `return` in COMMAND position after the loop header also clears it. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Two things discriminate, and neither is the word. Command position: `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes. Position relative to the header: an escape leaves the loop it is inside, never one it precedes, so `cd /tmp || exit 1; while true; do sleep 60; done &` is still refused.
 
 Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
@@ -39,6 +39,8 @@ It denies whether or not the call sets `run_in_background`. A foreground unbound
 It is parse-only and imports nothing outside the standard library, `psutil` included. A hook runs under whatever bare interpreter the harness hands it. An ImportError here takes the guard down on every Bash call. It fails open on anything unexpected. A guard that breaks a session on its own bug is worse than the orphans it prevents.
 
 It does not reach every harness. opencode and agy have no PreToolUse lane here. A test fixture that spawns a subprocess never passes through the Bash tool at all. Those are the sweep's.
+
+It reads one level into `bash -c` and no further. A payload handed to `eval`, or detached by `screen -dmS` or `tmux new -d`, is never parsed. So `eval 'yes > /dev/null'` passes, and so does a command substitution. That is the fail-open direction on purpose. A guard that guesses at nested quoting refuses real work, and the sweep backstops what the guard misses. Adding `eval` to the recursion is the one cheap extension left.
 
 ## The sweep: `fno agents orphans`
 

@@ -88,6 +88,14 @@ DENIED = [
     # Read per segment, this was allowed and leaves specimen 1 behind after
     # one second.
     "timeout 1 true | yes > /dev/null",
+    # A bound counts only in COMMAND position. Scanning every token let any
+    # ARGUMENT spelling `timeout` license the generator, and the worst case is
+    # the most ordinary thing an agent writes: comment text survives as tokens
+    # here on purpose, so a trailing note mentioning the fix disabled the guard.
+    "yes > /dev/null  # no timeout needed",
+    "yes timeout > /dev/null",
+    # `-t` bounds `stress`. `yes` just prints it forever.
+    "yes -t 5 > /dev/null",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
