@@ -23,7 +23,7 @@ from typing import List, Literal, Optional
 import typer
 
 from fno.harness_identity import resolve_harness_identity
-from fno.tombstones import TombstoneGroup
+from fno.tombstones import tombstone_group_cls
 
 cli = typer.Typer(
     name="graph",
@@ -31,7 +31,7 @@ cli = typer.Typer(
     no_args_is_help=True,
     # Removed verbs under `backlog` refuse by name and say what replaced them,
     # instead of failing with the same message a typo gets.
-    cls=TombstoneGroup,
+    cls=tombstone_group_cls("backlog"),
     # The curated menu below is nouns; this line is the answer to "can I take
     # that back". It sits on the group help because that is the surface someone
     # deciding what is possible actually reads - a correction verb nobody can

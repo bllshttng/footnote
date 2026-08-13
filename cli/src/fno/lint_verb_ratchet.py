@@ -416,13 +416,18 @@ def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[s
         verbs |= set(_EQ_RE.findall("\n".join(mux_lines[fn_start:i])))
         families.setdefault(fam, set()).update(verbs)
 
+    # Emit FULL leaf paths rather than bare names fused from two levels: a mux
+    # top is `mux ls`, an outer top is `version`. Returning bare names forced the
+    # caller to re-derive which level each came from, and it got that wrong.
+    tops = {f"mux {t}" for t in tops} | outer
+
     if not families:
         raise VerbRatchetError(
             "verb-ratchet: the source scan found no verb families in "
             f"{RUST_SOURCES[1]}. An empty scan reads as 'no Rust verbs' and "
             "would pass a baseline that omits all of them; refusing instead."
         )
-    return tops | outer, families
+    return tops, families
 
 
 def probe_rust_families(binary: Path, families) -> dict[str, set[str]]:
@@ -564,12 +569,14 @@ def enumerate_rust_leaves() -> list[str]:
                 f"rather than adding the verb to a list."
             )
 
+    # `tops` already carries FULL leaf paths, so nothing is prefixed here. It
+    # used to be bare names fused from two levels, and everything not a family
+    # got a `mux ` prefix with `version` rescued by name. A second non-mux
+    # top-level arm would have landed in the baseline as a bogus `mux X` plus a
+    # missing bare one - latent, but the whole point of this module is that a
+    # new arm must not be silently mis-recorded.
     leaves = {f"mux {fam} {verb}" for fam, verbs in families.items() for verb in verbs}
-    leaves |= {f"mux {t}" for t in tops if t not in families}
-    leaves |= {t for t in tops if t not in families and t == "version"}
-    # `version` is dispatched at the outer level, so it is a bare leaf, not
-    # `mux version`; every other outer verb reaches Python and is not ours.
-    leaves.discard("mux version")
+    leaves |= {t for t in tops if t.split()[-1] not in families}
     return sorted(leaves)
 
 

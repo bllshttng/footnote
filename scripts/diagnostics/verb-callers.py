@@ -14,8 +14,8 @@ corrected zero set is a subset of the uncorrected one):
   (a) Pipe-joined help tables. ``using-fno`` writes ``fno agents spawn|ask|...``;
       only ``spawn`` follows ``fno agents`` as a discrete token, so a literal
       scan credits only ``spawn``. A verb-path token containing ``|`` with no
-      surrounding whitespace fans out to one candidate per alternative (reusing
-      the ``_parse_mux_usage`` idiom). Whitespace around the pipe is a markdown
+      surrounding whitespace fans out to one candidate per alternative.
+      Whitespace around the pipe is a markdown
       table cell and is left alone - the cell is split into separate tokens and
       the bare ``|`` is not a verb token.
   (b) Binary-form invocation. ``fno-agents loop-check`` credits the
@@ -400,7 +400,7 @@ def _is_argv_prefix_call(node) -> bool:
     return name in ARGV_PREFIX_HELPERS
 
 
-def sweep_internal(root: Path, leaves: set[str]) -> tuple[Counter, list[str]]:
+def sweep_internal(root: Path, leaves: set[str]) -> tuple[Counter, Counter, list[str]]:
     """Count ``cli/src`` call sites per leaf, and collect unresolvable ones.
 
     Two signals, both conservative (they may only ADD references, so a leaf can

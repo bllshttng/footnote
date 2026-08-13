@@ -64,7 +64,7 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # resolve_harness_identity() consults, in precedence order, while this defines
 # what has to be absent for a test or a preflight leg to behave like a fresh
 # checkout. Several modules read a session marker directly rather than through
-# the resolver - carveout/core.py, done/cli.py and log_cmd.py read
+# the resolver - carveout/core.py and done/cli.py read
 # CLAUDECODE_SESSION_ID, adapters/hermes.py additionally treats
 # HERMES_SESSION_ID as proof of an in-session run - so scrubbing only the
 # resolver's tuples leaves those paths resolving the live session.

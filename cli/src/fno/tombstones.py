@@ -13,10 +13,12 @@ outright, and the refusal then teaches:
     Error: `fno backlog inbox` was removed. Use `fno backlog capture` - it is
     the same command; `inbox` was a duplicate registration of the same app.
 
-The table is keyed by the FULL verb path so ``backlog inbox`` and a
-hypothetical top-level ``inbox`` never collide, and it is matched on the
-longest prefix so one entry covers a whole removed subtree rather than one line
-per leaf.
+The table is keyed by the FULL verb path, matched on longest prefix, so one
+entry covers a whole removed subtree rather than one line per leaf. Every
+lookup is exact: a group is handed its own user-facing path by
+:func:`tombstone_group_cls` rather than inferring one, because two rounds of
+inference each produced a tombstone that answered confidently for a verb
+nobody typed.
 
 Tombstones are not baselined verbs. They resolve to a refusal, never to a
 command, so they add nothing to the surface the ratchet counts - which is the
@@ -61,33 +63,27 @@ TOMBSTONES: dict[str, str] = {
 }
 
 
-def tombstone_for(path: str, *, allow_suffix: bool = True) -> tuple[str, str] | None:
+def tombstone_for(path: str) -> tuple[str, str] | None:
     """``(removed path, replacement)`` for the verb path ``path``.
 
-    Matched on longest prefix first, so a removed GROUP needs one entry rather
+    Matched on longest PREFIX only, so a removed GROUP needs one entry rather
     than one per leaf, and a deeper tombstone inside a removed subtree wins over
-    the shallower one.
+    the shallower one. There is no suffix matching, and it took three tries to
+    land on that.
 
-    Then matched on SUFFIX, which is the part that is not obvious. A group is
-    reachable two ways: through the root binary (``fno backlog inbox``, where
-    the context knows the full path) and directly (``runner.invoke(graph_cli,
-    ["inbox"])``, where it knows only ``inbox``, and under the group's internal
-    name ``graph`` rather than its user-facing ``backlog``). Keying strictly on
-    the absolute path guards the first path and silently misses the second -
-    the guard-on-one-of-N-paths shape - which is how the first version of this
-    passed a live CLI check and failed its own test.
+    A group is reachable two ways: through the root binary, where the context
+    knows the full path, and directly (``runner.invoke(graph_cli, ["inbox"])``),
+    where it knows only the leaf, under the group's INTERNAL name ``graph``
+    rather than its user-facing ``backlog``. Keying on ``ctx.command_path``
+    guarded the first and silently missed the second. Falling back to a suffix
+    match fixed that and broke something worse: a bare ``fno inbox`` matched the
+    deeper ``backlog inbox`` key and answered confidently about a removal that
+    had nothing to do with the name typed, and one level down ``fno backlog
+    log`` answered for the top-level ``log`` removal.
 
-    An ambiguous suffix (two removed verbs sharing a leaf name) resolves to
-    None, so the caller falls back to the generic unknown-command error. A
-    tombstone that names the wrong replacement is worse than none.
-
-    ``allow_suffix=False`` is for the ROOT group, and it is load-bearing. The
-    root knows its children are top-level, so a bare ``fno inbox`` must not
-    match the deeper ``backlog inbox`` key. It did, and it claimed a removal
-    that had nothing to do with the name typed: ``fno mail``'s own retired
-    ``inbox`` namespace is a different removal, and its test caught the
-    hijack. Suffix matching is for a subgroup that cannot see its own path,
-    never for the one place the full path is already known.
+    Both hijacks are one defect - guessing a path instead of knowing it - so the
+    fix is to know it. :func:`tombstone_group_cls` bakes the group's real
+    user-facing prefix into the class, and every lookup here is exact.
     """
     tokens = path.split()
     if not tokens:
@@ -96,12 +92,6 @@ def tombstone_for(path: str, *, allow_suffix: bool = True) -> tuple[str, str] | 
         key = " ".join(tokens[:n])
         if key in TOMBSTONES:
             return key, TOMBSTONES[key]
-    if not allow_suffix:
-        return None
-    suffix = tuple(tokens)
-    hits = [k for k in TOMBSTONES if tuple(k.split())[-len(suffix):] == suffix]
-    if len(hits) == 1:
-        return hits[0], TOMBSTONES[hits[0]]
     return None
 
 
@@ -122,35 +112,44 @@ class TombstoneGroup(typer.core.TyperGroup):
     """A group whose unknown-command error consults :data:`TOMBSTONES`.
 
     Subclasses ``TyperGroup``, not ``click.Group``: Typer asserts the ``cls=``
-    it is handed is one of its own, and a plain Click group fails at import
-    time rather than at the first unknown verb.
+    it is handed is one of its own, and a plain Click group fails at import time
+    rather than at the first unknown verb.
+
+    ``verb_prefix`` is the group's USER-FACING path, baked in by
+    :func:`tombstone_group_cls`. It is not read from the context, because the
+    context does not reliably know it: a direct ``runner.invoke`` sees only the
+    leaf, and ``fno backlog``'s own Typer name is ``graph``. Every attempt to
+    infer it produced a tombstone that answered for a verb nobody typed.
 
     Hooked at ``get_command`` rather than only at ``resolve_command``: both are
     reachable (``resolve_command`` on a real invocation, ``get_command`` from
     help rendering and from any tool that walks the tree), and a guard on one of
-    two paths is the shape that lets a removal ship looking guarded. Returning
-    ``None`` from ``get_command`` is what makes Click raise, so raising here
-    turns the anonymous error into the named one on every path that resolves a
-    child.
+    two paths is the shape that lets a removal ship looking guarded.
     """
+
+    verb_prefix: str = ""
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         cmd = super().get_command(ctx, cmd_name)
         if cmd is not None:
             return cmd
-        full = f"{self._verb_path(ctx)} {cmd_name}".strip()
+        full = f"{self.verb_prefix} {cmd_name}".strip()
         if tombstone_for(full) is not None:
             raise refuse(full)
         return None
 
-    @staticmethod
-    def _verb_path(ctx: click.Context) -> str:
-        """The verb path of ``ctx``, without the ``fno`` binary name.
 
-        ``ctx.command_path`` is the invoked spelling, so it reads ``fno-py
-        backlog`` under the Python entry point and ``fno backlog`` under the
-        Rust front. Dropping the first token normalises both to the path the
-        tombstone table is keyed by.
-        """
-        parts = (ctx.command_path or "").split()
-        return " ".join(parts[1:])
+def tombstone_group_cls(verb_prefix: str) -> type[TombstoneGroup]:
+    """A :class:`TombstoneGroup` that knows its own user-facing verb path.
+
+    Typer instantiates ``cls=`` with its own kwargs only, so the prefix cannot
+    be passed at construction. Baking it into a subclass is the same trick
+    ``make_lazy_group_cls`` uses for the root's lazy map.
+    """
+
+    class _Cls(TombstoneGroup):
+        pass
+
+    _Cls.verb_prefix = verb_prefix
+    _Cls.__name__ = f"TombstoneGroup_{verb_prefix or 'root'}"
+    return _Cls

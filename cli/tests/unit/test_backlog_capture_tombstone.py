@@ -84,6 +84,19 @@ def test_a_deep_tombstone_does_not_claim_the_bare_top_level_name() -> None:
     assert "No such command 'inbox'" in combined, combined
 
 
+def test_a_subgroup_does_not_claim_a_top_level_removal() -> None:
+    """`fno backlog log` is a typo, not the removed top-level `fno log`.
+
+    The same hijack the root guards, one level down. The group's baked-in
+    `verb_prefix` makes `backlog log` an exact lookup that misses, where a
+    suffix match would have answered for the top-level `log` removal.
+    """
+    for verb in ("log", "wake", "company"):
+        res = runner.invoke(_backlog_cli(), [verb, "list"])
+        assert res.exit_code != 0
+        assert "was removed" not in res.output, res.output
+
+
 def test_backlog_capture_hidden_but_invocable() -> None:
     """x-71b6 tiering: `capture` is hidden from the advertised backlog menu,
     but stays fully invocable."""
