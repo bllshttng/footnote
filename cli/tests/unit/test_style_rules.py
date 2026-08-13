@@ -192,6 +192,35 @@ def test_setext_underline_is_a_legal_break():
     assert 6 not in rule_set("The heading\n===\nthe paragraph under it.")
 
 
+def test_a_short_setext_underline_is_a_legal_break():
+    # A setext h2 closes on one dash. Sharing the thematic-break repeat group
+    # put a three-character floor on it and read the heading as a wrap.
+    assert 6 not in rule_set("The heading\n-\nthe paragraph under it.")
+    assert 6 not in rule_set("The heading\n--\nthe paragraph under it.")
+
+
+def test_paren_ordered_lists_are_legal_breaks():
+    # CommonMark reads `1)` exactly as `1.`.
+    assert 6 not in rule_set("1) first item.\n2) second item.\n3) third item.")
+
+
+def test_paren_ordered_item_gets_the_list_cap():
+    # The same miss quietly gave these items the 25-word paragraph cap.
+    body = " ".join("w" for _ in range(21))
+    assert 1 in rule_set("1) " + body + ".")
+
+
+def test_a_pipeless_table_is_not_charged():
+    body = "intro.\n\na | b\n--- | ---\n1 | 2\n\nafter."
+    assert 6 not in rule_set(body)
+
+
+def test_prose_carrying_a_pipe_is_still_checked():
+    # The delimiter row alone is blanked. Blanking a body-row shape would let
+    # any sentence carrying a pipe escape all six rules.
+    assert 4 in rule_set("run a | b and don't stop.")
+
+
 def test_link_reference_definitions_are_legal_breaks():
     assert 6 not in rule_set("[one]: https://a.example\n[two]: https://b.example")
 

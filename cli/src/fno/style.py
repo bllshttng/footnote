@@ -86,10 +86,12 @@ _COMMENT_EXCEPTION_RE = re.compile(r"<!--\s*style-exception:\s*(.+?)\s*-->")
 # CONTINUABLE blocks start a block AND accept a lazy continuation, so a bare
 # prose line under one IS a break inside a paragraph: a list item, a blockquote.
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
-# Covers the setext underlines `===` and `---`, and the thematic breaks `***`,
-# `___`, `- - -`. The spaced form needs the repeat group, so both live here.
+# Setext underlines and thematic breaks. The two need separate alternatives:
+# a setext underline is legal at ONE character (`-` alone closes an h2), while a
+# thematic break needs three. Folding them into the shared repeat group put the
+# 3-char floor on both and read `Heading\n-\nbody.` as a wrapped paragraph.
 _OWN_LINE_BREAK_RE = re.compile(
-    r"^\s{0,3}(?:=+[ \t]*|([-*_])[ \t]*(?:\1[ \t]*){2,})$"
+    r"^\s{0,3}(?:=+[ \t]*|-+[ \t]*|([-*_])[ \t]*(?:\1[ \t]*){2,})$"
 )
 # A block-level HTML open or close tag. A `<details>` block was the specimen.
 _HTML_BLOCK_RE = re.compile(r"^\s{0,3}</?[A-Za-z][\w-]*")
@@ -110,7 +112,13 @@ _LOG_RE = re.compile(
     r"^(\[[A-Z]{2,}\]|ERROR\b|WARN(?:ING)?\b|INFO\b|DEBUG\b|TRACE\b"
     r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})"
 )
-_LIST_MARKER_RE = re.compile(r"^\s{0,3}([-*+]|\d+\.)\s+")
+# `1)` is an ordered-list delimiter in CommonMark exactly as `1.` is. Accepting
+# only the dot charged rule 6 against a correct `1)` list with no legal fix, and
+# quietly gave those items the 25-word paragraph cap instead of the 20-word list
+# cap. That second miss predates rule 6.
+_LIST_MARKER_RE = re.compile(r"^\s{0,3}([-*+]|\d+[.)])\s+")
+# A GFM delimiter row written without leading pipes, e.g. `--- | ---`.
+_DELIMITER_ROW_RE = re.compile(r"^:?-+:?(?:[ \t]*\|[ \t]*:?-+:?)+[ \t]*$")
 _FILENAME_RE = re.compile(r"\b[\w./-]+\.(?:py|sh|rs|ts|js|toml|ya?ml|json|md|txt|lock)\b")
 _PATH_RE = re.compile(r"\b[A-Za-z][\w-]*(?:::|/)[\w./:-]*")
 _URL_RE = re.compile(r"[A-Za-z][\w.+-]*://\S*")
@@ -407,7 +415,14 @@ def _mask(text: str) -> str:
                 continue
             # A same-line comment falls through: _mask_inline strips just the
             # span, so prose trailing the comment is still checked.
-        if lead.startswith("|"):
+        # A table row. GFM allows a row with no leading pipe, and only the
+        # DELIMITER row is matched here, never a body row. A body row is
+        # `a | b`, which is also an ordinary sentence carrying a pipe, and
+        # blanking that shape would let any prose escape all six rules. Blanking
+        # the delimiter row alone is enough: it is not continuable, so the body
+        # row under it is never charged, and the header above it follows a blank
+        # line. A dash-and-colon cell grid cannot be prose.
+        if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead):
             out.append("")
             continue
         if _LOG_RE.match(lead):

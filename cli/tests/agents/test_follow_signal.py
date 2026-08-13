@@ -128,7 +128,10 @@ def test_interrupt_on_a_one_shot_dump_is_not_swallowed(tmp_path, monkeypatch):
         def write(self, text: str) -> int:
             raise KeyboardInterrupt
 
-    with pytest.raises(KeyboardInterrupt):
+    # SystemExit(130), not a bare KeyboardInterrupt: cmd_logs traps neither, so
+    # re-raising printed a traceback for an ordinary Ctrl-C. The code is what
+    # makes a truncated dump distinguishable, and 130 carries it without one.
+    with pytest.raises(SystemExit) as excinfo:
         read_mod.read_logs(
             name="follow-target",
             tail=None,
@@ -136,6 +139,7 @@ def test_interrupt_on_a_one_shot_dump_is_not_swallowed(tmp_path, monkeypatch):
             stdout=InterruptingWriter(),
             stderr=io.StringIO(),
         )
+    assert excinfo.value.code == 130
 
 
 def test_follow_jsonl_detects_window_spanning_truncate(tmp_path):

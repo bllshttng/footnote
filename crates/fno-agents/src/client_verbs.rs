@@ -2947,6 +2947,18 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
         return 13;
     }
 
+    // Arm SIGINT BEFORE the one-shot tail block, never inside `follow`. The
+    // block below is printed for a `--follow` invocation too, and arming inside
+    // `follow` left it unprotected: a Ctrl-C landing there took the default
+    // handler and killed the process at 130, while the Python twin exits clean.
+    // A guard on one of two reachable paths for one verb is decorative, so the
+    // receiver is armed here and threaded in.
+    let sigint = if args.follow {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok()
+    } else {
+        None
+    };
+
     // One-shot tail block (printed for both `logs` and `logs --follow`).
     match tail_lines_keepends(Path::new(log_path), args.tail) {
         Ok(block) => print!("{block}"),
@@ -2965,7 +2977,7 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or(args.name.as_str());
-        return crate::logs_client::follow(home, resolved_name).await;
+        return crate::logs_client::follow(home, resolved_name, sigint).await;
     }
     0
 }

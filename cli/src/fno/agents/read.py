@@ -422,7 +422,11 @@ def read_logs(
             # truncated tail exit 0 and read as a complete one, so a caller
             # could not tell the two apart. Only the follow loop is a session
             # the user ends on purpose.
-            raise
+            #
+            # SystemExit(130) rather than a bare re-raise: `cmd_logs` traps no
+            # KeyboardInterrupt, so re-raising printed a Python traceback for an
+            # ordinary Ctrl-C. 130 is the same distinguishable code without it.
+            raise SystemExit(130)
         # AC2-FR clean exit — no traceback on stderr.
         return LogsResult(exit_code=EXIT_OK)
 
