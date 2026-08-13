@@ -3,8 +3,11 @@ from __future__ import annotations
 import csv
 import importlib
 import importlib.util
+import re
 from collections import Counter
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -186,3 +189,92 @@ def test_each_python_group_dispatcher_reaches_the_original_action_command():
         else:
             assert adapter._action.callback.__code__ is destination.callback.__code__
         assert residual == first_t1["current-leaf"].split()[2:]
+
+
+FLAGS = REPO_ROOT / "scripts" / "ci" / "verb-collapse-flags.txt"
+LEGAL_TIERS = {"T1", "T2", "T3", "KEEP"}
+
+
+def _fake_root(tmp_path: Path, *, map_text: str, flags_text: str) -> Path:
+    """A repo root whose ci/ files are ours and whose fno source is the real one.
+
+    The enumerator refuses when the imported package is not the checkout's
+    source, so the symlink is load-bearing: it makes ``root/cli/src/fno``
+    resolve to the package already imported here.
+    """
+    (tmp_path / "cli" / "src").mkdir(parents=True)
+    (tmp_path / "cli" / "src" / "fno").symlink_to(REPO_ROOT / "cli" / "src" / "fno")
+    ci = tmp_path / "scripts" / "ci"
+    ci.mkdir(parents=True)
+    (ci / "verb-collapse-map.tsv").write_text(map_text)
+    (ci / "verb-collapse-flags.txt").write_text(flags_text)
+    return tmp_path
+
+
+def _raise_message(tmp_path, monkeypatch, *, map_text: str, flags_text: str) -> str:
+    from fno import lint_verb_ratchet as lint
+
+    root = _fake_root(tmp_path, map_text=map_text, flags_text=flags_text)
+    monkeypatch.setattr(lint, "_repo_root", lambda: root)
+    with pytest.raises(lint.VerbRatchetError) as excinfo:
+        list(lint.iter_python_leaves())
+    return str(excinfo.value)
+
+
+def test_map_refusal_carries_a_parseable_template_row(tmp_path, monkeypatch) -> None:
+    """The refusal must hand over the row format, not only the instruction.
+
+    Two people hit this gate cold within an hour and both reverse-engineered
+    the columns by reading the file. Asserting only that it raises passes just
+    as happily on the message that taught them nothing, so this parses the
+    template the message carries and checks it against the file's own header.
+    """
+    header = MAP.read_text(encoding="utf-8").splitlines()[0]
+    columns = header.split("\t")
+    message = _raise_message(
+        tmp_path,
+        monkeypatch,
+        map_text=header + "\n",
+        flags_text=FLAGS.read_text(encoding="utf-8"),
+    )
+
+    rows = [
+        line.strip()
+        for line in message.splitlines()
+        if len(line.split("\t")) == len(columns)
+    ]
+    assert len(rows) == 1, (
+        f"the refusal must carry exactly one {len(columns)}-column template row, "
+        f"found {len(rows)}"
+    )
+    leaf, tier, typing, refs, *_rest = rows[0].split("\t")
+    assert leaf.split()[0], "the template needs a group-qualified action"
+    assert tier in LEGAL_TIERS
+    assert typing == leaf, "a T1 template shows the typing unchanged"
+    assert refs.isdigit(), "refs is a reference count"
+    for column in columns:
+        assert column in message, f"the refusal never glosses the {column!r} column"
+    assert "verb-callers.py" in message, "say where the refs count comes from"
+
+
+def test_flags_refusal_says_what_to_do_about_each_side(tmp_path, monkeypatch) -> None:
+    """The hidden-option gate reported two set differences and stopped there."""
+    message = _raise_message(
+        tmp_path,
+        monkeypatch,
+        map_text=MAP.read_text(encoding="utf-8"),
+        flags_text="# emptied by the test\n",
+    )
+
+    templates = [
+        line.strip()
+        for line in message.splitlines()
+        if re.fullmatch(r"\s*[a-z][a-z0-9 -]* !--[a-z0-9-]+", line)
+    ]
+    assert len(templates) == 1, (
+        "the refusal must carry exactly one `<action> !--<option>` template, "
+        f"found {templates}"
+    )
+    assert "add that line" in message and "delete that line" in message, (
+        "code-only and file-only must each say which way to fix the file"
+    )
