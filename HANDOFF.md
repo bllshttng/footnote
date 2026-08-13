@@ -91,6 +91,22 @@ A self-review ran on the final head and its findings are closed, including one i
 The remaining work was not started, deferred, or carved out.
 It is simply not done, and the ordering above is the ordering to do it in.
 
+## One red you will meet, and it is not yours
+
+`cli/tests/unit/test_graph_sidecar_window.py::test_ac3hp_concurrent_writes_never_surface_corruption` failed once in the `smoke` and `smoke-dirty` jobs on this branch.
+
+It is not caused by anything in this cut.
+No commit here touches the graph store, the sidecar, or any locking path.
+It passes locally, 11 of 11, and its own history is a run of load-sensitivity fixes: widening the concurrent-write yield for loaded runners, and stopping reader threads from GIL-starving the writer.
+
+The measurement, for whoever picks it up: one `GraphCorruptionError` in 1254 reads, while a writer held the lock for 200 mutations.
+Two sibling readers reported the same single hit out of 2312 and 1158 reads.
+The readers do not take the lock, so this is the atomic-write window being observed rather than a test artifact.
+
+That is a real, rare product finding and it deserves its own node.
+It is recorded here rather than fixed because fixing an atomic-write race is not a verb-surface change, and burying it in this branch is how it gets lost.
+Do not "fix" it by widening the yield again.
+
 ## Two corrections carried in the PR body
 
 `gh` has 42 top-level groups and 205 leaf commands, measured the same way with a positive control.
