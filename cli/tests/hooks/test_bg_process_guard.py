@@ -96,6 +96,17 @@ DENIED = [
     "yes timeout > /dev/null",
     # `-t` bounds `stress`. `yes` just prints it forever.
     "yes -t 5 > /dev/null",
+    # `<` IS the read. Dropping `<` sources alongside `>` targets inverted the
+    # very distinction the carveout exists to draw, and every endless-device
+    # generator delivered by redirect walked through.
+    "cat < /dev/zero",
+    "base64 < /dev/urandom",
+    "wc -l < /dev/zero",
+    "md5 </dev/zero",
+    "cat 0< /dev/zero",
+    # A `case` arm's `)` opens the body, so command position restarts there.
+    # Left mid-segment, the body sat behind the `case` head and was never read.
+    "case $x in a) yes > /dev/null;; esac",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -151,6 +162,11 @@ ALLOWED = [
     # and one shared condition set refused a loop deliberately disabled.
     "while false; do echo hi; done",
     "until true; do echo hi; done",
+    # Reading an ordinary file by redirect is not reading an endless device.
+    # The `<` fix must not deny every redirect, only the endless sources.
+    "wc -l < report.txt",
+    "cat < report.txt",
+    "case $x in a) echo hi;; esac",
 ]
 
 

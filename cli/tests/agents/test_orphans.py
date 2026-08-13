@@ -58,9 +58,9 @@ def table(monkeypatch):
     """Substitute the process enumeration and neutralise the live probes, so a
     test scan sees exactly the rows it declares."""
     rows: list[dict] = []
-    monkeypatch.setattr(orphans, "_iter_processes", lambda: iter(rows))
+    monkeypatch.setattr(orphans, "_iter_processes", lambda *a, **k: iter(rows))
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: None)
-    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: False)
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: None)
     monkeypatch.setattr(orphans, "_repo_roots", lambda: ["/repo"])
     monkeypatch.setattr(orphans, "_census_pids", set)
     # NEVER let a test signal a real process. The fabricated probes are pinned
@@ -95,7 +95,7 @@ def _scan_with_working_control(monkeypatch, rows, **kwargs):
     rows.insert(1, _proc(9002, name="sleep", cwd="/repo"))
     pids = iter([9001, 9002])
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
-    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: True)
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: 1)
     return orphans.scan(**kwargs)
 
 
@@ -124,6 +124,44 @@ def test_a_real_fno_binary_is_not_claimed_by_the_name_arm() -> None:
     )
     assert orphans.was_renamed(daemon) is False
     assert orphans._attribute(daemon, ["/repo"]) is None
+
+
+def test_the_reaper_is_measured_not_assumed_to_be_pid_1(monkeypatch, table) -> None:
+    """A Linux host with a child subreaper reparents orphans to it, not to 1.
+
+    `systemd --user`, and anything else calling PR_SET_CHILD_SUBREAPER, becomes
+    the reaper. A literal `== 1` made both probes fail there, so every hourly
+    sweep printed `verdict withheld (scan-broken)` forever with no way to quiet
+    it. Here the reaper is 4242 and the sweep works exactly as it does on macOS.
+    """
+    rows = table
+    rows.insert(0, _proc(9001, name="sleep", argv0="fno-orphan-probe-t", cwd="/tmp/x", ppid=4242))
+    rows.insert(1, _proc(9002, name="sleep", cwd="/repo", ppid=4242))
+    rows.append(_proc(88, name="sleep", argv0="fno-load-x", cwd="/repo", ppid=4242))
+    # Still at PID 1, so on this host it is NOT an orphan.
+    rows.append(_proc(89, name="sleep", argv0="fno-load-y", cwd="/repo", ppid=1))
+    pids = iter([9001, 9002])
+    monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: 4242)
+
+    result = orphans.scan()
+    assert not result.broken, result.broken_reason
+    assert [f.pid for f in result.findings] == [88]
+
+
+def test_a_probe_that_never_reparents_withholds_the_verdict(monkeypatch, table) -> None:
+    """With no reaper there is nothing to compare a ppid against.
+
+    Counting against a guessed reaper is the absence trap; say the reaper is
+    unknown instead.
+    """
+    monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: 9001)
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: None)
+
+    result = orphans.scan()
+    assert result.broken
+    assert "reaper is unknown" in result.broken_reason
+    assert result.findings == []
 
 
 def test_an_out_of_enum_skip_probe_refuses(monkeypatch, table) -> None:
@@ -298,7 +336,7 @@ def test_missing_name_probe_withholds_the_verdict(monkeypatch, table) -> None:
     rows_with_cwd_probe_only.insert(0, _proc(9002, name="sleep", cwd="/repo"))
     pids = iter([9001, 9002])
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
-    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: True)
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: 1)
     result = orphans.scan()  # _kill/_pid_alive stubbed by the `table` fixture
     assert result.broken
     assert "NAME" in (result.broken_reason or "")
@@ -311,7 +349,7 @@ def test_missing_cwd_probe_withholds_the_verdict(monkeypatch, table) -> None:
     table.insert(0, _proc(9001, name="sleep", argv0="fno-orphan-probe-test", cwd="/tmp/x"))
     pids = iter([9001, 9002])
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
-    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: True)
+    monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: 1)
     result = orphans.scan()  # _kill/_pid_alive stubbed by the `table` fixture
     assert result.broken
     assert "CWD" in (result.broken_reason or "")

@@ -61,6 +61,13 @@ def _is_separator(tok):
     # read as a last-stage `yes` and was refused. Same carveout as `2>&1` above.
     if tok == "|&":
         return False
+    # A bare `)` opens a `case` arm's body, so command position restarts there.
+    # Without this the arm body sat mid-segment behind the `case` head and
+    # `case $x in a) yes > /dev/null;; esac` walked through. It also closes a
+    # subshell, where splitting costs nothing: the contents already had their
+    # own segment.
+    if tok == ")":
+        return True
     return bool(CONTROL_CHARS & set(tok)) or "||" in tok
 
 # Wrappers that are transparent to command position: `nohup yes` still runs
@@ -212,6 +219,14 @@ def _head_of(segment):
     wrapper = ""
     while i < len(segment):
         tok = segment[i]
+        # A leading all-punctuation token is shell grammar, not a command. `(`
+        # is transparent but `)` was not, so a `case` arm's closing paren sat in
+        # command position and `case $x in a) yes > /dev/null;; esac` walked
+        # through. Skipped rather than listed, since the lexer can leave several
+        # such shapes here.
+        if tok and all(ch in PUNCT_CHARS for ch in tok):
+            i += 1
+            continue
         base = tok.rsplit("/", 1)[-1]
         if base in TRANSPARENT:
             saw_wrapper = True
@@ -303,15 +318,25 @@ def _operands(argv):
 
     WRITING to an endless device is ordinary; only READING from one never ends.
     Read as argv, `cat report.txt > /dev/zero` looked like a read and was
-    refused. `_has_bound` already carries this carveout and this did not, which
-    is the same defect one function apart.
+    refused.
+
+    So this drops `>` targets ONLY. Dropping `<` sources too inverted the very
+    distinction the paragraph above draws: `<` IS the read, and skipping it let
+    `cat < /dev/zero`, `base64 < /dev/urandom` and `wc -l < /dev/zero` through,
+    every one of them a specimen-1-class process that never ends.
     """
     out = []
     for i, tok in enumerate(argv):
-        if ">" in tok or "<" in tok:
+        if ">" in tok:
+            continue  # the operator itself
+        if i and ">" in argv[i - 1]:
+            continue  # what it writes to
+        if "<" in tok:
+            # The operator, but never its source: that file is the operand.
+            stripped = tok.split("<")[-1]
+            if stripped:
+                out.append(stripped)  # `cat </dev/zero`, no space
             continue
-        if i and (">" in argv[i - 1] or "<" in argv[i - 1]):
-            continue  # the redirect's target
         out.append(tok)
     return out
 

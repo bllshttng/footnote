@@ -159,7 +159,7 @@ class ScanResult:
 # ─── enumeration ────────────────────────────────────────────────────────────
 
 
-def _iter_processes() -> Iterator[dict]:
+def _iter_processes(reaper: int = 1) -> Iterator[dict]:
     """Every process this uid can read, as plain dicts.
 
     Isolated behind one function so the tests can substitute a fabricated table
@@ -176,7 +176,7 @@ def _iter_processes() -> Iterator[dict]:
         # process this uid cannot inspect) must not drop the row: a process
         # with no readable cwd can still match the NAME arm.
         try:
-            if info.get("ppid") == 1:
+            if info.get("ppid") == reaper:
                 info["cwd"] = proc.cwd()
         except Exception:  # noqa: BLE001 -- unreadable cwd is not a verdict
             pass
@@ -295,23 +295,39 @@ def _spawn_probe(rename_to: Optional[str], cwd: str) -> Optional[int]:
         return None
 
 
-def _await_orphaned(pid: Optional[int], timeout_s: float = 3.0) -> bool:
-    """Wait until `pid` shows PPID 1. Reparenting is not instantaneous, and a
-    scan that races it reports its own probe missing and withholds the verdict
-    on a healthy machine."""
+def _await_orphaned(pid: Optional[int], timeout_s: float = 3.0) -> Optional[int]:
+    """The pid an orphan reparents to on this host, measured not assumed.
+
+    Returns that reaper's pid, or None when the probe never settled.
+
+    PID 1 is a macOS assumption. A Linux host where `systemd --user` (or any
+    ancestor that called PR_SET_CHILD_SUBREAPER, which some containers and
+    multiplexers do) is the reaper reparents an orphan to THAT manager. A
+    literal `== 1` made both probes fail there, so every hourly sweep printed
+    `verdict withheld (scan-broken)` forever with no way to quiet it. Hourly
+    noise nobody can act on is how a sweep gets ignored.
+
+    `_spawn_probe` already waits for the parent shell to exit, so the probe is
+    reparented by the time we hold its pid. Reparenting is still not
+    instantaneous, hence waiting for the same answer twice rather than trusting
+    the first read.
+    """
     if pid is None:
-        return False
+        return None
     import psutil
 
     deadline = time.time() + timeout_s
+    last = None
     while time.time() < deadline:
         try:
-            if psutil.Process(pid).ppid() == 1:
-                return True
+            ppid = psutil.Process(pid).ppid()
         except Exception:  # noqa: BLE001
-            return False
+            return None
+        if ppid and ppid != os.getpid() and ppid == last:
+            return ppid
+        last = ppid
         time.sleep(0.05)
-    return False
+    return None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -443,11 +459,18 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
         # as a traceback: exit 1, empty stdout, stderr swallowed by the hook,
         # stamp already written. Silence for a full window is the one outcome
         # this module exists to make impossible.
-        _await_orphaned(name_pid)
-        _await_orphaned(cwd_pid)
-        for info in _iter_processes():
+        # The reaper is MEASURED from our own probe, never assumed to be 1.
+        # Either probe answers it; they reparent the same way.
+        reaper = _await_orphaned(name_pid) or _await_orphaned(cwd_pid)
+        if reaper is None:
+            # No probe settled, so there is no reaper to compare against and
+            # every ppid test below would be meaningless. Say so instead of
+            # counting against a guess.
+            result.broken_reason = "no probe reparented, so the reaper is unknown"
+            return result
+        for info in _iter_processes(reaper):
             result.total += 1
-            if info.get("ppid") != 1:
+            if info.get("ppid") != reaper:
                 continue
             result.ppid1 += 1
             uids = info.get("uids")
@@ -503,7 +526,12 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
                 continue
             result.findings.append(finding)
     except Exception as exc:  # noqa: BLE001
-        result.broken_reason = f"enumeration failed: {exc}"
+        # Never overwrite a reason already set. `census unreadable` is set
+        # before this and names a fixable cause; replacing it with a generic
+        # enumeration error costs the operator the one line that says what to
+        # do. First reason wins, because the first one is the root.
+        if result.broken_reason is None:
+            result.broken_reason = f"enumeration failed: {exc}"
 
     # The kill control is measured AFTER the kill, never before it. Setting it
     # from "a probe was spawned" asserts an easier thing than the real kill
