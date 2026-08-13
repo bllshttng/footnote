@@ -376,14 +376,27 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     control passed" is itself an unfalsifiable claim.
     """
     result = ScanResult(reap_requested=reap)
+    if skip_probe not in (None, "name", "cwd"):
+        # An unrecognised value silently skipped nothing, the scan came back
+        # healthy, and an operator read that as "the control works". A
+        # falsifier that cannot fail is the shape this module's docstring
+        # refuses, and `FNO_ORPHANS_SKIP_PROBE=NAME` is one typo away.
+        result.broken_reason = (
+            f"FNO_ORPHANS_SKIP_PROBE={skip_probe!r} is not 'name' or 'cwd'"
+        )
+        return result
+
     roots = _repo_roots()
-    repo_root = roots[0] if roots else os.getcwd()
-    # Outside a repo, or with a git too old for `--path-format=absolute`, roots
-    # came back empty and the CWD arm had nothing to compare against. Every run
-    # then reported `CWD arm FAILED` and exited 2 on a healthy machine, which
-    # trains an operator to ignore the one line that must never be noise.
     if not roots:
-        roots = [repo_root]
+        # No git root means the CWD arm has no territory. The first fix here
+        # fell back to os.getcwd(), which made every PPID-1 process under $HOME
+        # a finding when the verb ran from a home directory: a wall of noise
+        # from the one command whose output has to stay trustworthy. Inventing
+        # territory to keep a control green is the absence trap wearing a
+        # different hat, so refuse and say which arm has nowhere to look.
+        result.broken_reason = "no git root here, so the CWD arm has no territory"
+        return result
+    repo_root = roots[0]
     # One fixed, empty directory rather than a fresh mkdtemp per run. A unique
     # temp dir has to be removed, and a sweep killed at the SessionStart time
     # bound never reaches its own cleanup, so it would leak one directory an

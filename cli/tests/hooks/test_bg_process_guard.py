@@ -313,6 +313,32 @@ def test_refusal_carries_the_replacement_verbatim() -> None:
     assert "SIGPIPE" in reason
 
 
+#: Each remedy the refusal advertises, and a command that takes the advice.
+#: ADD A ROW when you add a remedy to the refusal text.
+_ADVERTISED_REMEDIES = [
+    ("timeout", "timeout 300 yes > /dev/null"),
+    ("gtimeout", "gtimeout 300 yes > /dev/null"),
+    ("count=", "dd if=/dev/zero of=/dev/null count=10"),
+    ("ulimit -t", "ulimit -t 60; yes > /dev/null"),
+    ("-t <seconds>", "stress -c 8 -t 60"),
+    ("yes | head -c 1M", "yes | head -c 1M"),
+]
+
+
+@pytest.mark.parametrize("phrase,remedy", _ADVERTISED_REMEDIES)
+def test_every_advertised_remedy_actually_works(phrase: str, remedy: str) -> None:
+    """A refusal that names a fix it then refuses is worse than saying nothing.
+
+    Both have happened here. `ulimit -t` was advertised while its check was
+    dead code, and `head -c` was advertised as a standalone bound when only a
+    downstream reader bounds anything, so following the advice literally earned
+    a second refusal. This pins the text to the behaviour in both directions.
+    """
+    reason = guard.decide("yes > /dev/null &")
+    assert reason is not None and phrase in reason, f"no longer advertised: {phrase}"
+    assert guard.decide(remedy) is None, f"advertised but refused: {remedy}"
+
+
 def test_unbalanced_quotes_fail_open() -> None:
     assert guard.decide("echo \"oops\nyes > /dev/null &") is None
 

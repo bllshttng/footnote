@@ -126,6 +126,37 @@ def test_a_real_fno_binary_is_not_claimed_by_the_name_arm() -> None:
     assert orphans._attribute(daemon, ["/repo"]) is None
 
 
+def test_an_out_of_enum_skip_probe_refuses(monkeypatch, table) -> None:
+    """A falsifier that cannot fail is worse than no falsifier.
+
+    An unrecognised value skipped nothing, so the scan came back healthy and an
+    operator read that as proof the control works. `FNO_ORPHANS_SKIP_PROBE=NAME`
+    is one shift key away from that.
+    """
+    result = orphans.scan(skip_probe="NAME")
+    assert result.broken
+    assert "not 'name' or 'cwd'" in result.broken_reason
+    assert result.findings == []
+
+
+def test_outside_a_repo_the_sweep_withholds_rather_than_claim_cwd(
+    monkeypatch, table
+) -> None:
+    """No git root means the CWD arm has nowhere to look.
+
+    Falling back to os.getcwd() made every PPID-1 process under $HOME a
+    finding. Inventing territory to keep a control green is the absence trap in
+    a different hat.
+    """
+    monkeypatch.setattr(orphans, "_repo_roots", list)
+
+    result = orphans.scan()
+    assert result.broken
+    assert "no git root" in result.broken_reason
+    assert result.findings == []
+    assert "verdict withheld (scan-broken)" in orphans.render(result)
+
+
 def test_a_probe_that_died_on_its_own_does_not_certify_the_kill_path(
     monkeypatch, table
 ) -> None:

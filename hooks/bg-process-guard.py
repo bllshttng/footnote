@@ -279,12 +279,31 @@ def _generator_reason(head, argv):
         return "`sleep infinity` never returns."
     if head in {"stress", "stress-ng"}:
         return "`%s` runs until killed unless given `-t`." % head
-    if head == "dd" and any(a in {"if=/dev/zero", "if=/dev/urandom"} for a in argv):
+    operands = _operands(argv)
+    if head == "dd" and any(a in {"if=/dev/zero", "if=/dev/urandom"} for a in operands):
         return "`dd` from an endless device never reaches EOF without `count=`."
     if head in {"cat", "sha256sum", "shasum", "md5", "md5sum", "base64", "wc"}:
-        if any(a in {"/dev/zero", "/dev/urandom", "/dev/random"} for a in argv):
+        if any(a in {"/dev/zero", "/dev/urandom", "/dev/random"} for a in operands):
             return "reading an endless device never reaches EOF."
     return None
+
+
+def _operands(argv):
+    """`argv` without redirect operators and the filenames they name.
+
+    WRITING to an endless device is ordinary; only READING from one never ends.
+    Read as argv, `cat report.txt > /dev/zero` looked like a read and was
+    refused. `_has_bound` already carries this carveout and this did not, which
+    is the same defect one function apart.
+    """
+    out = []
+    for i, tok in enumerate(argv):
+        if ">" in tok or "<" in tok:
+            continue
+        if i and (">" in argv[i - 1] or "<" in argv[i - 1]):
+            continue  # the redirect's target
+        out.append(tok)
+    return out
 
 
 def _payload_of(head, argv):
@@ -406,8 +425,15 @@ def _refusal(reason, segment):
         "survivor answers \"whose is this?\" in `top` instead of by lsof "
         "archaeology, and `fno agents orphans --reap` may kill it unattended. "
         "Use bash explicitly: zsh has no `exec -a`.\n"
-        "Any of `timeout`, `gtimeout`, `head -c`, `count=`, `ulimit -t`, or "
-        "`-t <seconds>` satisfies this guard."
+        # Every remedy named here must actually satisfy the guard. `head -c`
+        # used to sit in this list as if it were a bound on its own, but only a
+        # DOWNSTREAM reader bounds anything, so following the advice literally
+        # earned a second refusal. `ulimit -t` was in the list while its check
+        # was dead code. A refusal that advertises a remedy it then refuses is
+        # worse than one that says nothing.
+        "Any of `timeout`, `gtimeout`, `count=`, `ulimit -t` in an earlier "
+        "command, or `-t <seconds>` satisfies this guard. So does piping INTO "
+        "a reader that exits, as in `yes | head -c 1M`."
         % (segment, reason, REPLACEMENT)
     )
 
