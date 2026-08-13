@@ -267,12 +267,20 @@ fi
 #    the operator already reads. A call plus a guard: every decision (what
 #    counts, ordering, the render cap) lives in the verb, since hooks/ is inside
 #    the control-plane LOC manifest and cli/src/fno/ is not. Silent on zero.
+#    A non-zero exit is NOT silence. `|| true` alone collapses a fired bound, a
+#    deployed fno too old to know the verb, and a genuinely empty queue into one
+#    empty string - the absence-as-success failure this whole block exists to
+#    prevent. So a failure says so in one line instead of reading as "clear".
 outstanding_content=""
 _wt_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
 if command -v fno >/dev/null 2>&1 && [[ -f "$_wt_lib" ]]; then
     # shellcheck source=../scripts/lib/with-timeout.sh
     source "$_wt_lib"
-    outstanding_content=$(with_timeout 3 fno outstanding 2>/dev/null || true)
+    outstanding_content=$(with_timeout 3 fno outstanding 2>/dev/null)
+    _out_rc=$?
+    if [[ $_out_rc -ne 0 ]]; then
+        outstanding_content="## Outstanding for you"$'\n\n'"could not be read (fno outstanding exit ${_out_rc}); run it directly."
+    fi
 fi
 
 # ── Combine context ───────────────────────────────────────────────────

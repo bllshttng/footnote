@@ -74,7 +74,9 @@ def test_scope_default_lists_only_this_session(
     assert "cv-mine1" in result.output
     assert "cv-mine2" in result.output
     assert "cv-theirs" not in result.output
-    assert "cv-orphan" not in result.output
+    # cv-orphan has no session_id, so it belongs to nobody and rides along.
+    # See test_carveout_null_session.py for why excluding it hides it forever.
+    assert "cv-orphan" in result.output
 
 
 def test_scope_default_banners_when_no_session_resolves(ledger: Path):
@@ -124,4 +126,5 @@ def test_scope_default_json_mode_is_scoped_too(
     result = runner.invoke(carveout_app, ["list", "--json"])
     assert result.exit_code == 0, result.output
     ids = [json.loads(line)["id"] for line in result.stdout.splitlines() if line.strip()]
-    assert sorted(ids) == ["cv-mine1", "cv-mine2"]
+    assert sorted(ids) == ["cv-mine1", "cv-mine2", "cv-orphan"]
+    assert "cv-theirs" not in ids

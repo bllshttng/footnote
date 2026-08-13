@@ -403,12 +403,17 @@ def read_carveouts(
     *,
     kind: Optional[str] = None,
     session_ids: Optional["set[str] | list[str]"] = None,
+    include_unscoped: bool = False,
 ) -> "list[dict[str, Any]]":
     """Read the carve-out ledger under ``root``; return parsed records in order.
 
     Filtered to ``kind`` when given (e.g. ``backfill`` for /pr merged's slot),
     and to ``session_ids`` when given (the carve-out's ``session_id`` must be in
-    the set). Session scoping mirrors ``retro.harvest.harvest_carveouts`` so the
+    the set). ``include_unscoped`` additionally keeps rows whose ``session_id``
+    is null: they belong to no session, so an equality filter would hide them
+    from every reader. The `list` default scope sets it; the explicit
+    ``--session-id`` / ``--pr-number`` filters deliberately do not, since those
+    ask a precise ownership question. Session scoping mirrors ``retro.harvest.harvest_carveouts`` so the
     backfill slot only handles backfills belonging to the merged PR's session(s),
     not another concurrent session's (codex P1 on PR #465).
 
@@ -443,8 +448,19 @@ def read_carveouts(
             continue
         if kind is not None and rec.get("kind") != kind:
             continue
-        if want_sessions is not None and str(rec.get("session_id")) not in want_sessions:
-            continue
+        if want_sessions is not None:
+            rec_session = rec.get("session_id")
+            # An ownerless row (session_id null) rides along with every scoped
+            # read. `add` mints these deliberately when no session resolves, so
+            # filtering on equality hides them from EVERY session forever, and
+            # add-then-list stops round-tripping for the caller that filed one.
+            # Explicit --session-id / --pr-number filters are unaffected: they
+            # pass include_unscoped=False.
+            if rec_session is None:
+                if not include_unscoped:
+                    continue
+            elif str(rec_session) not in want_sessions:
+                continue
         out.append(rec)
     return out
 

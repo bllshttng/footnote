@@ -277,7 +277,14 @@ def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
 def test_a_worker_with_no_questions_of_its_own_stays_short(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The hook fires in every session, so a bg worker's share must stay small."""
+    """The hook fires in every session, so a bg worker's share must stay small.
+
+    The cap is what keeps it small, not a presence branch. An earlier version
+    suppressed every row for a worker and produced two defects: it keyed on
+    "is a human here" rather than "is this a worker", so a gemini or agy
+    OPERATOR got the truncated form, and it printed "clear <id>" right after
+    hiding every id. Three rows plus a count is already short.
+    """
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
     for i in range(6):
         runner.invoke(outstanding_app, ["ask", f"question number {i}"])
@@ -286,10 +293,13 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
     monkeypatch.setenv("FNO_AGENT_SELF", "worker-quiet")
     monkeypatch.delenv("FNO_THINK_SPAWN_PRESENCE", raising=False)
     out = runner.invoke(outstanding_app, []).stdout
-    # The count still renders: a worker is told the queue exists.
     assert "6 open question" in out
-    # But not one row of the operator's queue, none of which it can answer.
-    assert "question number" not in out
+    # Bounded by the cap, never the whole queue.
+    assert out.count("question number") == 3
+    assert "3 more" in out
+    # Every rendered row carries an id, so the clear instruction has an operand.
+    assert "fno outstanding clear" in out
+    assert out.count("q-") >= 3
 
 
 def test_an_attended_session_does_see_other_sessions_questions(

@@ -24,6 +24,8 @@ from typing import Any, Optional
 RENDER_CAP = 3
 
 EVENTS_NAME = "events.jsonl"
+# `retro sweep-carveouts` skips this kind; /fno:pr merged owns it.
+BACKFILL_KIND = "backfill"
 QUESTION_EVENT = "operator_question"
 QUESTION_CLOSED_EVENT = "operator_question_closed"
 # Both question types share this prefix, so a raw line without it cannot be
@@ -196,17 +198,20 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
-def render(
-    outstanding: Outstanding,
-    *,
-    session_id: Optional[str] = None,
-    unattended: bool = False,
-) -> str:
+def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str:
     """Render the human block. Empty string when nothing is outstanding.
 
     Silence on zero is the correct steady state and must be reachable, which is
     why the test for it ships with a positive control asserting that non-zero
     input does render.
+
+    There is no attended-vs-worker branch. One existed, rendering a bare count
+    to a worker, and it produced two defects at once: it keyed on a presence
+    check that answers "is a human here" rather than "is this a worker", so a
+    gemini or agy operator got the truncated form, and the branch printed
+    "clear <id>" after suppressing every id. The ``RENDER_CAP`` already keeps
+    any session's share to three rows plus a count, which is what the short
+    render was for, so the branch bought nothing that the cap does not.
     """
     if outstanding.empty:
         return ""
@@ -230,9 +235,20 @@ def render(
         # Naming the clearing verb IS the fix. The harvest is manual by design
         # (a background hook that mints backlog nodes unattended is the wrong
         # shape) and nothing else ever tells a human what to run.
-        lines.append(
-            "  Clear with: fno retro sweep-carveouts (preview), --apply to file and consume."
+        #
+        # Route by kind. `retro sweep-carveouts` SKIPS backfill rows entirely
+        # (they belong to /fno:pr merged), so prescribing it against a
+        # backfill-only ledger sends the operator to a verb that clears
+        # nothing and reports the same count on every later session.
+        sweepable = sum(
+            n for kind, n in outstanding.carveout_by_kind.items() if kind != BACKFILL_KIND
         )
+        if sweepable:
+            lines.append(
+                "  Clear with: fno retro sweep-carveouts (preview), --apply to file and consume."
+            )
+        if outstanding.carveout_by_kind.get(BACKFILL_KIND):
+            lines.append("  Backfill rows are handled by /fno:pr merged, not by the sweep.")
         lines.append("")
 
     if outstanding.questions:
@@ -240,17 +256,14 @@ def render(
         theirs = [q for q in outstanding.questions if q not in mine]
         lines.append(f"{_plural(len(outstanding.questions), 'open question')} awaiting you.")
 
-        # A bg worker with none of its own renders the count and stops: the hook
-        # fires in every session, so N parallel workers each pay this render and
-        # a worker's share must stay small.
-        if unattended and not mine:
-            lines.append("  Answer with: fno outstanding clear <id> --answer \"...\"")
-            return "\n".join(lines).rstrip() + "\n"
-
         shown = (mine + theirs)[:RENDER_CAP]
         for q in shown:
             label = "[this session] " if q in mine else ""
-            lines.append(f"  {label}{q.id}  {q.question}")
+            # cwd/node are captured so a cross-project question names its
+            # origin. Rendering them is the whole reason they are recorded.
+            where = q.node or (Path(q.cwd).name if q.cwd else None)
+            suffix = f"  ({where})" if where else ""
+            lines.append(f"  {label}{q.id}  {q.question}{suffix}")
         dropped = len(outstanding.questions) - len(shown)
         if dropped:
             lines.append(f"  ... and {dropped} more.")

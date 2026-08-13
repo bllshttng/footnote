@@ -236,6 +236,7 @@ def list_carveouts(
     # month of every other session's rows and could not tell which were its
     # own. --all restores the global read for the consumers that need it.
     unscoped_reason = None
+    include_unscoped = False
     if pr_number is None and not sessions and not all_sessions:
         from fno.carveout.core import resolve_session_id
         from fno.paths import resolve_repo_root
@@ -243,6 +244,10 @@ def list_carveouts(
         current = resolve_session_id(resolve_repo_root())
         if current:
             sessions = [current]
+            # Ownerless rows ride along: `add` mints them whenever no session
+            # resolves, and dropping them here would hide them from every
+            # session forever (13 of 39 rows on this repo's ledger).
+            include_unscoped = True
         else:
             # Never a silent empty: a scoped read that returns nothing when no
             # session resolves cannot be told apart from a genuinely clear
@@ -254,7 +259,12 @@ def list_carveouts(
         # every carve-out read-only plus the reason, and consume none.
         sessions = None
     try:
-        rows = read_carveouts(resolve_carveout_root(), kind=kind, session_ids=sessions)
+        rows = read_carveouts(
+            resolve_carveout_root(),
+            kind=kind,
+            session_ids=sessions,
+            include_unscoped=include_unscoped,
+        )
     except CarveoutError as exc:
         # A present-but-unreadable ledger is a FAILED read, not "no carve-outs":
         # surface it loud (exit 1) like `add`, so /pr merged never treats an
