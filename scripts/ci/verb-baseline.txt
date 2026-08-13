@@ -187,14 +187,7 @@ event gate-escape
 event push-parent
 executor
 help
-lint flock-pattern
-lint menu-caps
-lint provider-stderr-merge
-lint shellout-drift
-lint spawn-paths
-lint stale-skill-refs
-lint style
-lint verb-ratchet
+lint
 loops ls
 loops pause-all
 loops resume-all

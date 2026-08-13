@@ -4,11 +4,32 @@ import os
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
+import typer
+import typer.main
+# click's runner, not typer's: the live `fno lint` resolves to a bare
+# TyperCommand (see _live_lint_command), and typer.testing.CliRunner only
+# accepts a Typer app.
+from click.testing import CliRunner
 
 from fno import paths
-from fno.lint_cli import app
+from fno.lint_cli import lint
 
+
+def _live_lint_command():
+    """The `fno lint` command in the exact shape the live CLI resolves.
+
+    `lint` is a plain-function registry entry, so `_lazy_group` wraps it in a
+    one-command Typer and takes `typer.main.get_command`, which collapses to a
+    bare command. Rebuilding it the same way here keeps the argv these tests
+    pass (`["flock-pattern", ...]`) identical to what a user types, rather than
+    testing a group shape that no longer exists.
+    """
+    sub = typer.Typer(add_completion=False)
+    sub.command(name="lint")(lint)
+    return typer.main.get_command(sub)
+
+
+app = _live_lint_command()
 
 runner = CliRunner()
 
