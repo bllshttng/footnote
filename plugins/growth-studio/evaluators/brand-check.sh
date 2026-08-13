@@ -102,14 +102,20 @@ if [ "${#banned[@]}" -gt 0 ]; then
   done
 fi
 
-# 3. One sentence per physical line. A prose line that does not end in terminal
-#    punctuation (. ! ? : ;) is a sentence split across lines, because a
-#    complete sentence on one line always terminates. Skip headings, list
-#    items, tables, code fences, image lines, blank lines, and a standalone
-#    founder-name line (a byline is a signature, not a wrapped sentence). The
-#    comparison is case-insensitive so a byline emitted in different case from
-#    the declared form is still skipped. allowed names are newline-delimited
-#    (a comma in a form would corrupt a CSV join).
+# 3. No sentence split across physical lines. A prose line that does not end in
+#    terminal punctuation (. ! ? : ;) is a sentence split across lines, because a
+#    complete sentence on one line always terminates.
+#
+#    This catches a hard wrap and nothing else. The house rule is stricter: a
+#    paragraph is ONE physical line, so a newline after every period breaks it
+#    too, and this check passes such a draft. Rule 6 of `fno lint style` is what
+#    refuses that shape. Both agree on the case here, so the checks compose.
+#
+#    Skip headings, list items, tables, code fences, image lines, blank lines,
+#    and a standalone founder-name line (a byline is a signature, not a wrapped
+#    sentence). The comparison is case-insensitive, so a byline emitted in a
+#    different case from the declared form is still skipped. Allowed names are
+#    newline-delimited, because a comma in a form would corrupt a CSV join.
 allowed_nl=""
 if [ "${#allowed_names[@]}" -gt 0 ]; then
   allowed_nl="$(printf '%s\n' "${allowed_names[@]}")"

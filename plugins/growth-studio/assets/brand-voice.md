@@ -13,7 +13,7 @@ brand-identity artifact, not this file.
 ## Do
 
 - Lead with the concrete fact or action, then the consequence.
-- One full sentence per physical line in prose.
+- One paragraph per physical line in prose. A newline starts the next paragraph.
 - Cite every claim with a bracket reference to a product-truth heading.
 - Prefer plain verbs (change, build, ship) over dressed-up synonyms.
 

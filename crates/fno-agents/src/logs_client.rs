@@ -20,7 +20,18 @@ use tokio_tungstenite::tungstenite::Message;
 /// Stream new log lines for `name` from the daemon. Returns the process exit
 /// code (0 on a clean detach / rotation; non-zero only when the daemon cannot
 /// be reached -- the signed-off divergence from Python's client-side poll).
-pub async fn follow(home: &AgentsHome, name: &str) -> i32 {
+///
+/// `sigint` is a receiver the caller already armed. Arming it here instead left
+/// the one-shot tail block that runs BEFORE this call unprotected, so a Ctrl-C
+/// in that window took the default handler and killed the process at 130 -- the
+/// exact window `read.py` closes on the Python side. The receiver is threaded in
+/// rather than re-armed so a signal landing in the window is delivered, not
+/// dropped. `None` keeps the old behavior of arming here.
+pub async fn follow(
+    home: &AgentsHome,
+    name: &str,
+    sigint: Option<tokio::signal::unix::Signal>,
+) -> i32 {
     let daemon_bin = resolve_daemon_bin();
     if let Err(e) = ensure_daemon(home, &daemon_bin).await {
         eprintln!("fno agents logs: daemon not running: {e}");
@@ -60,10 +71,13 @@ pub async fn follow(home: &AgentsHome, name: &str) -> i32 {
     };
     let (mut sink, mut source) = ws.split();
     let mut stdout = tokio::io::stdout();
-    let mut sigint = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-    {
-        Ok(s) => s,
-        Err(_) => {
+    let armed = match sigint {
+        Some(s) => Some(s),
+        None => tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok(),
+    };
+    let mut sigint = match armed {
+        Some(s) => s,
+        None => {
             // No SIGINT handler available; stream until the daemon ends it.
             return relay_until_end(&mut source, &mut stdout).await;
         }

@@ -1,6 +1,6 @@
 """Style checker for agent-authored text.
 
-Five rules, checked at the tool boundary. ``docs/style-rules.md`` is the
+Six rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
 state, no network. Every caller (``fno mail send``, the PR-body CI gate, the
 changed-markdown CI gate) routes through :func:`check`.
@@ -23,6 +23,7 @@ RULE_NAMES = {
     3: "modal",
     4: "contraction",
     5: "condition",
+    6: "wrap",
 }
 
 LIST_ITEM_CAP = 20
@@ -73,12 +74,51 @@ _ABBREVIATIONS = ("e.g.", "i.e.", "vs.", "etc.")
 _LINE_EXCEPTION_RE = re.compile(r"^\s*style-exception:\s*(.+?)\s*$", re.MULTILINE)
 _COMMENT_EXCEPTION_RE = re.compile(r"<!--\s*style-exception:\s*(.+?)\s*-->")
 
+# Rule 6. A paragraph is one physical line, so the only legal newline is one
+# that starts the next block. Two kinds of block start matter, and the split is
+# what keeps rule 6 from refusing correct markdown.
+#
+# OWN-LINE blocks take a whole line and cannot be continued, so the line after
+# one is always legal: a heading, a setext underline, a thematic break, a raw
+# HTML line, and a link reference definition. Every one of these was a live
+# false positive before it was listed here.
+#
+# CONTINUABLE blocks start a block AND accept a lazy continuation, so a bare
+# prose line under one IS a break inside a paragraph: a list item, a blockquote.
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+# Setext underlines and thematic breaks. The two need separate alternatives:
+# a setext underline is legal at ONE character (`-` alone closes an h2), while a
+# thematic break needs three. Folding them into the shared repeat group put the
+# 3-char floor on both and read `Heading\n-\nbody.` as a wrapped paragraph.
+_OWN_LINE_BREAK_RE = re.compile(
+    r"^\s{0,3}(?:=+[ \t]*|-+[ \t]*|([-*_])[ \t]*(?:\1[ \t]*){2,})$"
+)
+# A block-level HTML open or close tag. A `<details>` block was the specimen.
+_HTML_BLOCK_RE = re.compile(r"^\s{0,3}</?[A-Za-z][\w-]*")
+# A link reference definition. Several in a row are normal and are not a wrap.
+_REF_DEF_RE = re.compile(r"^\s{0,3}\[[^\]]+\]:\s")
+# A `key: value` field line. Mail carries receipts and the worker return
+# grammar AGENTS.md mandates, and `RESULT: SUCCESS` over `TASK: 2.1` is two
+# fields rather than one wrapped sentence. Rule 6 refused that grammar outright,
+# which left a codex worker no legal way to report. The key is ONE word with no
+# space, so a wrapped sentence is not exempted by a colon later in the line.
+# A prose line opening "Note: ..." is exempted too, and that missed break is the
+# cheaper error, the same trade the rule 4 closed list makes.
+_FIELD_LINE_RE = re.compile(r"^\s{0,3}[A-Za-z][\w.-]*:[ \t]")
+_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>")
+
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _LOG_RE = re.compile(
     r"^(\[[A-Z]{2,}\]|ERROR\b|WARN(?:ING)?\b|INFO\b|DEBUG\b|TRACE\b"
     r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})"
 )
-_LIST_MARKER_RE = re.compile(r"^\s{0,3}([-*+]|\d+\.)\s+")
+# `1)` is an ordered-list delimiter in CommonMark exactly as `1.` is. Accepting
+# only the dot charged rule 6 against a correct `1)` list with no legal fix, and
+# quietly gave those items the 25-word paragraph cap instead of the 20-word list
+# cap. That second miss predates rule 6.
+_LIST_MARKER_RE = re.compile(r"^\s{0,3}([-*+]|\d+[.)])\s+")
+# A GFM delimiter row written without leading pipes, e.g. `--- | ---`.
+_DELIMITER_ROW_RE = re.compile(r"^:?-+:?(?:[ \t]*\|[ \t]*:?-+:?)+[ \t]*$")
 _FILENAME_RE = re.compile(r"\b[\w./-]+\.(?:py|sh|rs|ts|js|toml|ya?ml|json|md|txt|lock)\b")
 _PATH_RE = re.compile(r"\b[A-Za-z][\w-]*(?:::|/)[\w./:-]*")
 _URL_RE = re.compile(r"[A-Za-z][\w.+-]*://\S*")
@@ -98,6 +138,10 @@ class Violation:
     ``sentence`` carries the masked text (code shown as the placeholder), so the
     word count reported in ``detail`` matches what the reader sees. ``detail`` is
     the actionable half: it names the sentence and the fix.
+
+    Rule 6 is the exception to both field names. Its unit is a LINE, not a
+    sentence, so it carries the 0-based line index and the whole masked line.
+    Read ``detail`` rather than these two fields: it always names the right unit.
     """
 
     rule: int
@@ -125,17 +169,23 @@ def has_exception(text: str) -> str | None:
 def check(text: str, *, surface: str = "mail") -> list[Violation]:
     """Return every violation found in ``text``.
 
-    ``surface`` is carried for forward compatibility (a future rule may scope by
-    surface); the five rules apply identically everywhere today. The text is
-    masked whole, then split into sentences per line, so a sentence and a line
-    are the same unit (the repo's one-sentence-per-line convention).
+    ``surface`` is carried for forward compatibility (a future rule can scope by
+    surface); the six rules apply identically everywhere today. The text is
+    masked whole, then each line is split into its sentences: a paragraph is one
+    physical line and carries as many sentences as it needs, and rule 6 is what
+    holds that shape.
     """
     del surface  # reserved; no rule scopes by surface yet
     return _run(text, None)
 
 
 def check_lines(text: str, line_numbers: set[int]) -> list[Violation]:
-    """Check only the given 1-based lines.
+    """Check only the given 1-based lines, and report only on those lines.
+
+    Rule 6 reads the line ABOVE a given line to decide whether it continues a
+    paragraph, so context comes from the whole text. The violation is still
+    charged to the given line, so this never annotates a line the caller did
+    not pass in.
 
     The whole text is masked first, so an added line inside an existing fenced
     block is masked as code (blanked) and skipped rather than read as prose.
@@ -147,17 +197,74 @@ def check_lines(text: str, line_numbers: set[int]) -> list[Violation]:
 
 
 def _run(text: str, only: set[int] | None) -> list[Violation]:
+    # A CRLF file broke every anchored block test at once: `lead == "---"` never
+    # matched `---\r`, so frontmatter stayed unblanked and rule 6 fired down the
+    # whole block. Normalising here keeps the line COUNT identical, so the
+    # caller's 1-based line numbers still line up.
+    text = text.replace("\r\n", "\n")
     masked = _mask(text)
     violations: list[Violation] = []
     sentence_index = 0
     raw_lines = text.split("\n")
     masked_lines = masked.split("\n")
+    # Rule 6 is the one rule that reads a pair of lines rather than a sentence,
+    # so its state lives here. It advances on EVERY line, including a line
+    # `only` excludes: an added line sitting under unchanged prose must still
+    # see that prose, or the added-lines gate reads it as paragraph-initial.
+    prev_continuable = False
+    # A table written without leading pipes. Tracked HERE and not in `_mask`,
+    # because the rows need an exemption from rule 6 and from nothing else.
+    # Blanking them in the mask bought that exemption by dropping them out of
+    # rules 1 to 5 as well, which let a long sentence carrying a pipe sit under
+    # a table and pass everything. Scoped this way the worst case is one missed
+    # wrap, never a missed semicolon or modal.
+    in_table = False
     for index, (raw_line, masked_line) in enumerate(zip(raw_lines, masked_lines), 1):
-        if not masked_line.strip():
-            continue
-        if only is not None and index not in only:
-            continue
+        blank = not masked_line.strip()
         is_list = bool(_LIST_MARKER_RE.match(raw_line))
+        if blank or "|" not in raw_line:
+            in_table = False
+        table_row = _starts_table_run(raw_line, raw_lines, index)
+        if table_row:
+            in_table = True
+        own_line = (
+            table_row
+            or (in_table and "|" in raw_line and not blank)
+            or bool(_HEADING_RE.match(raw_line))
+            or bool(_OWN_LINE_BREAK_RE.match(raw_line))
+            or bool(_HTML_BLOCK_RE.match(raw_line))
+            or bool(_REF_DEF_RE.match(raw_line))
+            or bool(_FIELD_LINE_RE.match(raw_line))
+        )
+        starts_block = is_list or own_line or bool(_BLOCKQUOTE_RE.match(raw_line))
+        # Only the CONTINUING line is charged, never the line above it.
+        #
+        # A break belongs to a pair, so scoping it to either half reads as the
+        # more complete rule. Measured on this tree, it is the unlandable one:
+        # 6519 rule-6 breaks sit in 185 legacy files, so editing one line of one
+        # paragraph charged the untouched line below it too, and a one-line typo
+        # fix could not pass without reflowing prose the author never opened.
+        # That is the flag-day rewrite the added-lines ratchet exists to avoid.
+        #
+        # The cost is a real blind spot, kept deliberately and documented in
+        # docs/style-rules.md: a new line inserted directly ABOVE untouched
+        # prose splits that paragraph and goes unreported until someone touches
+        # the line below. This module already trades the same way twice, at the
+        # rule 4 closed list and the rule 1 block-type cap. A missed break is
+        # cheaper than refusing a line the author never wrote.
+        in_scope = only is None or index in only
+        if not blank and not starts_block and prev_continuable and in_scope:
+            violations.append(
+                Violation(
+                    6, index - 1, masked_line.strip(),
+                    f"line {index} continues the paragraph above. "
+                    "A paragraph is one physical line. "
+                    "Join the two lines, or put a blank line between them.",
+                )
+            )
+        prev_continuable = not blank and not own_line
+        if blank or only is not None and index not in only:
+            continue
         work = _LIST_MARKER_RE.sub("", masked_line, count=1) if is_list else masked_line
         for sentence in _split_sentences(work):
             violations.extend(_check_sentence(sentence, sentence_index, is_list))
@@ -168,9 +275,12 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
 def format_violations(violations: list[Violation]) -> str:
     """Render violations as a self-teaching, rule-compliant refusal message.
 
-    The message itself passes the five rules: every banned word it names is
+    The message itself passes the six rules: every banned word it names is
     double-quoted, and the masking pass replaces quoted spans with one token
     before any rule runs, so a gate that violates its own rule never ships.
+    Rule 6 is why the lines are joined by a BLANK line rather than a newline.
+    Each line here is its own paragraph, so single newlines would make the
+    refusal an example of the break it refuses.
     """
     if not violations:
         return ""
@@ -179,7 +289,7 @@ def format_violations(violations: list[Violation]) -> str:
         name = RULE_NAMES.get(violation.rule, "?")
         lines.append(f"rule {violation.rule} ({name}): {violation.detail}")
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def _split_sentences(line: str) -> list[str]:
@@ -279,6 +389,7 @@ def _mask(text: str) -> str:
     for index, raw_line in enumerate(lines):
         lead = raw_line.lstrip()
 
+
         # Frontmatter: a leading `--- ... ---` block. Blank it line-for-line so
         # the masked text keeps the same line count as the raw text.
         if index == 0 and lead == "---":
@@ -319,7 +430,15 @@ def _mask(text: str) -> str:
                 continue
             # A same-line comment falls through: _mask_inline strips just the
             # span, so prose trailing the comment is still checked.
-        if lead.startswith("|"):
+        # A leading-pipe table row is unambiguous, so it is removed outright as
+        # it always has been. A PIPELESS row is deliberately NOT handled here.
+        # Blanking removes a line from all six rules, and the only thing a
+        # pipeless row ever needed was an exemption from rule 6. Two earlier
+        # attempts blanked it and each opened a rule-evasion hole, because a
+        # pipeless row is shaped exactly like a sentence carrying a pipe. That
+        # exemption now lives in `_run`, scoped to rule 6, so such a line is
+        # still checked for length, semicolons, modals, and contractions.
+        if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead):
             out.append("")
             continue
         if _LOG_RE.match(lead):
@@ -327,6 +446,30 @@ def _mask(text: str) -> str:
             continue
         out.append(_mask_inline(raw_line))
     return "\n".join(out)
+
+
+def _starts_table_run(raw_line: str, lines: "list[str]", index: int) -> bool:
+    """True when this 1-based line opens a table run, in either spelling.
+
+    Two openers count: a delimiter row, and the HEADER directly above one. The
+    header needs a lookahead, because it is indistinguishable from prose until
+    the delimiter row beneath it is read, and without it the header was charged
+    while every body row was exempt.
+
+    A paragraph above a setext underline is untouched, since a delimiter row
+    needs pipes and a bare dash run never matches one.
+    """
+    lead = raw_line.lstrip()
+    if _DELIMITER_ROW_RE.match(lead) or (
+        lead.startswith("|") and _DELIMITER_ROW_RE.match(lead.strip("| \t"))
+    ):
+        return True
+    if "|" not in raw_line:
+        return False
+    nxt = lines[index].lstrip() if index < len(lines) else ""
+    return bool(_DELIMITER_ROW_RE.match(nxt)) or (
+        nxt.startswith("|") and bool(_DELIMITER_ROW_RE.match(nxt.strip("| \t")))
+    )
 
 
 def _mask_inline(line: str) -> str:

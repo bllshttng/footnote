@@ -31,6 +31,43 @@ from fno.graph._constants import GRAPH_JSON
 # genuine corruption; a consistent read returns on the first attempt.
 _RETRY_ATTEMPTS = 12
 _RETRY_SLEEP_S = 0.023
+# Cap on the wait-out-the-writer loop, in `_RETRY_SLEEP_S` units (~0.9s). The
+# bound exists so a writer that dies holding the lock costs one slow read, never
+# a hung one. It is reached only after every ordinary retry has already failed.
+_WRITER_WAIT_ATTEMPTS = 40
+
+
+def _writer_active(path: Path) -> bool:
+    """True when a writer holds the graph lock at this instant.
+
+    A NON-BLOCKING probe, and the reason this is safe to call from the read
+    path. It never waits and never keeps the lock, so a caller that already
+    owns it cannot deadlock against itself. Anything unreadable answers False,
+    which leaves the caller's verdict exactly as it was without this call.
+    """
+    fd = None
+    try:
+        import fcntl
+
+        from fno.graph.store import _graph_lock_path
+
+        lock_path = _graph_lock_path(path)
+        if not lock_path.exists():
+            return False
+        fd = os.open(str(lock_path), os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    except (OSError, ImportError, RuntimeError):
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 class GraphCorruptionError(Exception):
@@ -136,6 +173,33 @@ def load_graph(path: Path | None = None, *, keep_malformed: bool = False) -> lis
             return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
 
         # Mismatch: likely the two-write window. Retry after a short sleep.
+        #
+        # On the LAST attempt, WAIT OUT the writer rather than retrying once more.
+        # A mismatch under a held lock is a live two-file update
+        # (`store._write_json` then `store._write_sha256_sidecar`), never
+        # corruption, and the fixed budget above cannot outlast a writer
+        # descheduled between those two statements. That is measured, not
+        # theoretical: three concurrent readers each reported exactly one false
+        # corruption over 10k-15k loads on a loaded CI runner, agreeing on the
+        # instant, which is one starved writer rather than random noise.
+        #
+        # The wait is keyed on the writer RELEASING, so it scales with how long
+        # that writer was starved. One extra sleep does not: it widens a 0.28s
+        # budget by 8% and still raises on the 300ms starvation this exists for.
+        # `_writer_active` never blocks and never holds, so a caller that
+        # already owns the lock cannot deadlock against itself, and a lock it
+        # cannot read leaves the verdict exactly as it was. The iteration cap is
+        # what keeps a wedged writer from hanging the read path forever.
+        if attempt == _RETRY_ATTEMPTS - 1:
+            for _ in range(_WRITER_WAIT_ATTEMPTS):
+                if not _writer_active(path):
+                    break
+                time.sleep(_RETRY_SLEEP_S)
+            raw_bytes = path.read_bytes()
+            actual_hash = hashlib.sha256(raw_bytes).hexdigest()
+            expected_hash = sidecar.read_text().strip() if sidecar.exists() else ""
+            if actual_hash == expected_hash:
+                return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
         if attempt < _RETRY_ATTEMPTS - 1:
             if os.environ.get("FNO_DEBUG"):
                 print(

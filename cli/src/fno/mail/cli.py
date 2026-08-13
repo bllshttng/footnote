@@ -236,12 +236,12 @@ def _enforce_body_cap(body: str) -> None:
 
 
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
-    """Refuse a body that breaks the five style rules.
+    """Refuse a body that breaks the six style rules.
 
     Fail-open: an empty body, the kill switch (``FNO_STYLE_ENFORCE=0``), a
     ``style-exception:`` line, or a non-empty ``--style-exception`` reason skips
     the check. The refusal names each broken rule and the offending sentence,
-    and the message itself passes the five rules.
+    and the message itself passes the six rules.
     """
     if os.environ.get("FNO_STYLE_ENFORCE") == "0" or not body:
         return

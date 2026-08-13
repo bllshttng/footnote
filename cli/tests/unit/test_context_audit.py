@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -954,6 +955,22 @@ def test_observer_fallbacks_always_preserve_original_output_input_and_exit(
         assert result.stdout == input_text + "::original", name
 
 
+def _await_marker(path: Path, timeout: float = 15.0) -> bool:
+    """Wait for a TERM-handler side effect, bounded.
+
+    The hook returns as soon as it has SENT the signal. The observer's bash trap
+    runs `touch` after that, on its own scheduling slice, so an instant assert
+    races the handler and flakes under parallel load. This asserts the same
+    positive marker and only widens the window it is allowed to arrive in.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return True
+        time.sleep(0.05)
+    return path.is_file()
+
+
 def test_nonreturning_observer_is_killed_without_changing_hook_result(
     tmp_path: Path,
 ) -> None:
@@ -1003,7 +1020,7 @@ def test_nonreturning_observer_is_killed_without_changing_hook_result(
         timeout=60,
     )
 
-    assert term_marker.is_file()
+    assert _await_marker(term_marker)
     assert result.returncode == 7
     assert result.stdout == '{"session_id":"hung-observer","source":"startup"}::original'
 
@@ -1153,7 +1170,7 @@ def test_session_start_wire_survives_nonreturning_observer(tmp_path: Path) -> No
     hung = invoke(hung_bin)
 
     assert baseline.returncode == hung.returncode == 0
-    assert term_marker.is_file()
+    assert _await_marker(term_marker)
     assert "<run-bounded><--timeout><2><--><uv>" in calls.read_text(
         encoding="utf-8"
     )

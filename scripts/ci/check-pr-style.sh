@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# check-pr-style.sh - CI gate: a PR body must pass the five style rules.
+# check-pr-style.sh - CI gate: a PR body must pass the six style rules.
 #
 # A PR body is the first thing a reviewer reads. An agent that learns the rule
 # only from a mail refusal pays a full CI round trip to find out, so the same
-# five rules run here, at the late gate. Mirrors check-pr-body-length.sh: fail
+# six rules run here, at the late gate. Mirrors check-pr-body-length.sh: fail
 # open when PR_BODY is unset (a local run or a draft with no body yet).
 #
 # The escape is a `style-exception:` line with a non-empty reason, handled by
