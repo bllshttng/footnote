@@ -289,6 +289,13 @@ def iter_corpus(root: Path):
     yield from iter_paths(root, CORPUS_DIRS + CORPUS_FILES)
 
 
+def iter_cull_corpus(root: Path):
+    """Contributor corpus with Rust integration tests removed from cull counts."""
+    for path in iter_corpus(root):
+        if not _is_crates_test_path(root, path):
+            yield path
+
+
 def _is_crates_test_path(root: Path, path: Path) -> bool:
     """Whether a path below crates/ is in a Rust integration-test tree."""
     try:
@@ -883,7 +890,9 @@ def main(argv: list[str] | None = None) -> int:
     # uncorrected one reproduces the original 92 bound and backs the
     # monotonicity invariant below, which guards every output mode
     # (corrected_zero must be a subset of uncorrected_zero).
-    counts_corr = sweep(root, leaves, binary_form=True, pipe_fan=True)
+    counts_corr = sweep(
+        root, leaves, binary_form=True, pipe_fan=True, paths=iter_cull_corpus(root)
+    )
     # The Rust argv arrays are references the token sweep structurally cannot
     # see, so they belong in EVERY mode, not just --dead. --curriculum's cull
     # list is the deletion-decision path; leaving it blind to this shape is the
@@ -919,7 +928,9 @@ def main(argv: list[str] | None = None) -> int:
     # list is the deletion-decision path and the most consequential output here.
     # A regression that invents false zero-callers fails loudly before any cull
     # list is emitted, not after.
-    counts_unc = sweep(root, leaves, binary_form=False, pipe_fan=False)
+    counts_unc = sweep(
+        root, leaves, binary_form=False, pipe_fan=False, paths=iter_cull_corpus(root)
+    )
     zero_unc = {leaf for leaf in leaves_list if counts_unc.get(leaf, 0) == 0}
     not_subset = [leaf for leaf in zero_corr if leaf not in zero_unc]
     if not_subset:
