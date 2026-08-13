@@ -65,12 +65,28 @@ def parse_agent_frontmatter(raw: str, path: Path) -> dict[str, Any]:
         # and failed the generated-agent contract.
         if rest and rest[0] in "|>" and rest[1:] in {"", "-", "+"}:
             folded = rest[0] == ">"
+            keep = rest[1:] == "+"
             block: list[str] = []
             i += 1
             while i < len(lines) and (lines[i].startswith(" ") or not lines[i].strip()):
                 block.append(lines[i][2:] if lines[i].startswith("  ") else lines[i].lstrip())
                 i += 1
-            data[key] = (" " if folded else "\n").join(block).rstrip()
+            if folded:
+                # YAML folds line breaks to spaces but keeps a BLANK line as a
+                # newline; joining everything with " " silently deletes every
+                # paragraph break and doubles the space where one was.
+                text = ""
+                for line in block:
+                    if not line.strip():
+                        text = text.rstrip() + "\n"
+                    elif text and not text.endswith("\n"):
+                        text += " " + line
+                    else:
+                        text += line
+                data[key] = text if keep else text.rstrip()
+            else:
+                text = "\n".join(block)
+                data[key] = text if keep else text.rstrip()
             continue
         if rest == "":
             items: list[str] = []

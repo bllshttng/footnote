@@ -30,12 +30,16 @@ set -euo pipefail
 # config.agents.profiles.<verb> and links the role-based-model-routing doc: the
 # per-stage axis is undiscoverable from the preamble without it (~66 tok/turn).
 #
-# LOWERED from 38400 to 37400, the first lowering in this file's history. Every
+# LOWERED from 38400 to 36726, the first lowering in this file's history. Every
 # entry above raises it; five raises and no cut is how the preamble reached 55
 # bytes of headroom with no commit to blame. .claude/rules/worktrees.md gave up
 # 2619 bytes (6839 -> 4220) by disclosing hook internals, removal, and the
 # enforcement wiring to docs/architecture/worktree-mechanics.md, and this line
 # banks that cut instead of leaving it as headroom for the next five edits.
+# 36726 is the measured 35726 plus half the band, so a later cut and a later
+# growth get the same room. An intermediate 37400 was written here first and
+# this comment kept naming it after the value moved, which left the only audit
+# trail for this constant 674 bytes wrong.
 # The gate is now two-sided (see RATCHET_NUDGE_BYTES below): a cut large enough
 # to push spare past the band fails until the ceiling follows it down.
 CEILING_BYTES=36726
@@ -277,8 +281,14 @@ MEASURED_ALWAYS_LOADED=$((TOTAL_BYTES + DESC_TOTAL))
 EXPECT_DESC=0
 while IFS= read -r candidate; do
   [[ -z "$candidate" ]] && continue
-  grep -qE '^description:' "$candidate" || continue
-  grep -qE '^disable-model-invocation:[[:space:]]*true' "$candidate" && continue
+  # Read the frontmatter slice only. Grepping the whole file made a BODY line
+  # at column zero (a doc that shows `disable-model-invocation: true` as an
+  # example) change this count, so the two readers disagreed over a file
+  # neither had mis-parsed and the failure blamed a nested skill. awk here
+  # rather than the reader's own list, so the enumerations stay independent.
+  front="$(awk 'NR==1 && $0!="---"{exit} NR==1{next} /^---$/{exit} {print}' "$candidate")"
+  grep -qE '^description:' <<< "$front" || continue
+  grep -qE '^disable-model-invocation:[[:space:]]*true' <<< "$front" && continue
   EXPECT_DESC=$((EXPECT_DESC + 1))
 done < <(
   { find "$REPO_ROOT/skills" -name 'SKILL.md' -type f 2>/dev/null || true; } \
@@ -402,10 +412,10 @@ elif (( BAND_APPLIES && DESC_SPARE > DESCRIPTIONS_BAND_BYTES )); then
   } >&2
 fi
 
-if (( DESC_FAILED )); then
-  exit 1
-fi
-
+# DESC_FAILED is carried, not exited on, so a PR that busts BOTH budgets sees
+# both remediations in one run. Exiting here printed the descriptions fix and
+# swallowed the file ceiling's "Largest:" guidance, which cost a second red CI
+# to read advice the same run already had in hand.
 if (( TOTAL_BYTES <= CEILING_BYTES )); then
   # Two-sided: under the ceiling by more than the band is also a failure. This
   # used to print an advisory and exit 0, which meant no cut was ever banked -
@@ -422,7 +432,7 @@ if (( TOTAL_BYTES <= CEILING_BYTES )); then
     } >&2
     exit 1
   fi
-  exit 0
+  exit "$DESC_FAILED"
 fi
 
 OVERAGE=$((TOTAL_BYTES - CEILING_BYTES))

@@ -20,6 +20,9 @@ from typer.testing import CliRunner
 ROOT = Path(__file__).resolve().parents[3]
 GATE = ROOT / "scripts" / "ci" / "check-preamble-budget.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "preamble-budget.yml"
+# One spelling of the heading. Two tests assert on its ABSENCE, and an
+# absence assertion against a string the script never emits cannot fail.
+DESCRIPTIONS_HEADING = "descriptions (always-loaded skill + agent pointers):"
 
 
 def _ceiling_bytes_from_script() -> int:
@@ -536,7 +539,7 @@ def test_descriptions_are_measured_and_reported() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "descriptions (always-loaded skill + agent pointers):" in result.stdout
+    assert DESCRIPTIONS_HEADING in result.stdout
     assert "measured always-loaded (these two budgets):" in result.stdout
     # Agents are in the budget, not just skills.
     assert "agent:" in result.stdout
@@ -723,19 +726,51 @@ def test_readers_that_disagree_fail_rather_than_pick_one(tmp_path: Path) -> None
     assert "the two readers disagree" in result.stderr
 
 
-def test_broken_reader_cannot_pass_as_zero(tmp_path: Path) -> None:
-    """A zero must never read as 'the skills are free'."""
+def test_a_fence_the_reader_cannot_open_is_caught(tmp_path: Path) -> None:
+    """A description the measuring reader skips must not pass as measured.
+
+    The Python reader needs a newline after the closing fence, because its
+    regex ends `\\n---\\n`. A file whose frontmatter closes at EOF satisfies the
+    cross-check's scan and not the reader's, so its description would go
+    unmeasured while the file looks ordinary. That is the live shape of "the
+    reader broke": not a total failure, one file silently dropped.
+
+    An earlier version of this test wrote a bare `description:` line with no
+    fence at all. Anchoring both scans to the frontmatter slice made that file
+    invisible to BOTH, correctly, and the test then passed for the wrong
+    reason.
+    """
     repo = _measured_tree(tmp_path)
-    broken = repo / "skills" / "broken" / "SKILL.md"
-    broken.parent.mkdir(parents=True, exist_ok=True)
-    # A description line grep can see, with no frontmatter fence for the reader.
-    broken.write_text("description: visible to grep only\n", encoding="utf-8")
-    (repo / "skills" / "alpha" / "SKILL.md").unlink()
+    skipped = repo / "skills" / "unterminated" / "SKILL.md"
+    skipped.parent.mkdir(parents=True, exist_ok=True)
+    skipped.write_text(
+        '---\nname: unterminated\ndescription: "real, and unmeasured"\n---',
+        encoding="utf-8",
+    )
 
     result = _run_at(repo)
 
     assert result.returncode == 1
     assert "the two readers disagree" in result.stderr
+
+
+def test_descriptions_heading_is_the_string_this_file_asserts_on() -> None:
+    """Pin the heading, because two tests below assert on its ABSENCE.
+
+    An absence assertion against a string the script never emits cannot fail.
+    This file shipped exactly that: the heading gained "+ agent" and the
+    negative assertion kept naming the old wording, so a descriptions block
+    printing on a zero-description tree would have stayed green. Asserting the
+    live heading exists somewhere is what makes the absence checks mean
+    something.
+    """
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert DESCRIPTIONS_HEADING in result.stdout, (
+        "the heading moved; every absence assertion in this file is now vacuous"
+    )
 
 
 def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
@@ -745,7 +780,7 @@ def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
     result = _run_at(tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "descriptions (always-loaded skill pointers):" not in result.stdout
+    assert DESCRIPTIONS_HEADING not in result.stdout
 
 
 def test_block_scalar_description_is_measured_at_its_content(tmp_path: Path) -> None:
