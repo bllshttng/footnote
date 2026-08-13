@@ -20954,10 +20954,16 @@ mod tests {
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         attach_place_keys(&mut v, b"9L", &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "the trailing commit key must not reach the socket");
+        assert!(
+            buf.is_empty(),
+            "the trailing commit key must not reach the socket"
+        );
         let picker = v.attach_place.as_ref().expect("picker stays open");
         assert_eq!(picker.cursor, 0, "and the cursor never moved");
-        assert!(v.notice.is_some(), "the operator is told why nothing happened");
+        assert!(
+            v.notice.is_some(),
+            "the operator is told why nothing happened"
+        );
     }
 
     #[tokio::test]
