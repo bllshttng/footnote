@@ -202,12 +202,28 @@ def test_crlf_frontmatter_does_not_read_as_prose():
     assert 6 not in rule_set("---\r\nkey: value\r\n---\r\nthe body line.\r\n")
 
 
-def test_check_lines_reports_a_break_the_added_line_starts():
-    # The mirror of the case below: a new prose line inserted directly ABOVE
-    # untouched prose splits that paragraph. Only the line below is the
-    # continuing half, and the diff never touched it.
+def test_field_lines_are_legal_breaks():
+    # The worker return grammar AGENTS.md mandates. Rule 6 refused it outright,
+    # which left a codex worker no legal way to report.
+    assert 6 not in rule_set("RESULT: SUCCESS\nTASK: 2.1")
+    assert 6 not in rule_set("status: green\npr: 123\nbranch: feature/x")
+
+
+def test_a_colon_later_in_the_line_does_not_exempt_a_wrap():
+    # The field key is one word with no space, so a wrapped sentence carrying a
+    # colon partway through is still a wrap.
+    assert 6 in rule_set("the gate refuses this: a paragraph\nbroken across lines.")
+
+
+def test_check_lines_never_charges_a_line_it_was_not_given():
+    # The deliberate blind spot. A new line inserted directly ABOVE untouched
+    # prose splits that paragraph and goes unreported, because charging the
+    # untouched line below would fail a one-line edit in any legacy doc.
+    # Documented in docs/style-rules.md beside the rule 1 and rule 4 trades.
     text = "this added line starts it\nan untouched continuation.\n"
-    assert 6 in {v.rule for v in style.check_lines(text, {1})}
+    assert style.check_lines(text, {1}) == []
+    reported = {v.sentence_index + 1 for v in style.check_lines(text, {2}) if v.rule == 6}
+    assert reported == {2}
 
 
 def test_check_lines_sees_the_unchanged_line_above():

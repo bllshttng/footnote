@@ -95,6 +95,14 @@ _OWN_LINE_BREAK_RE = re.compile(
 _HTML_BLOCK_RE = re.compile(r"^\s{0,3}</?[A-Za-z][\w-]*")
 # A link reference definition. Several in a row are normal and are not a wrap.
 _REF_DEF_RE = re.compile(r"^\s{0,3}\[[^\]]+\]:\s")
+# A `key: value` field line. Mail carries receipts and the worker return
+# grammar AGENTS.md mandates, and `RESULT: SUCCESS` over `TASK: 2.1` is two
+# fields rather than one wrapped sentence. Rule 6 refused that grammar outright,
+# which left a codex worker no legal way to report. The key is ONE word with no
+# space, so a wrapped sentence is not exempted by a colon later in the line.
+# A prose line opening "Note: ..." is exempted too, and that missed break is the
+# cheaper error, the same trade the rule 4 closed list makes.
+_FIELD_LINE_RE = re.compile(r"^\s{0,3}[A-Za-z][\w.-]*:[ \t]")
 _BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>")
 
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
@@ -164,7 +172,12 @@ def check(text: str, *, surface: str = "mail") -> list[Violation]:
 
 
 def check_lines(text: str, line_numbers: set[int]) -> list[Violation]:
-    """Check only the given 1-based lines.
+    """Check only the given 1-based lines, and report only on those lines.
+
+    Rule 6 reads the line ABOVE a given line to decide whether it continues a
+    paragraph, so context comes from the whole text. The violation is still
+    charged to the given line, so this never annotates a line the caller did
+    not pass in.
 
     The whole text is masked first, so an added line inside an existing fenced
     block is masked as code (blanked) and skipped rather than read as prose.
@@ -199,14 +212,25 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
             or bool(_OWN_LINE_BREAK_RE.match(raw_line))
             or bool(_HTML_BLOCK_RE.match(raw_line))
             or bool(_REF_DEF_RE.match(raw_line))
+            or bool(_FIELD_LINE_RE.match(raw_line))
         )
         starts_block = is_list or own_line or bool(_BLOCKQUOTE_RE.match(raw_line))
-        # A break belongs to the PAIR, so either half being in scope reports it.
-        # Charging it to the continuing line alone hid the mirror case: a new
-        # prose line inserted directly ABOVE untouched prose splits that
-        # paragraph and went unreported, because only the line below was in the
-        # pair and the diff never touched it.
-        in_scope = only is None or index in only or (index - 1) in only
+        # Only the CONTINUING line is charged, never the line above it.
+        #
+        # A break belongs to a pair, so scoping it to either half reads as the
+        # more complete rule. Measured on this tree, it is the unlandable one:
+        # 6519 rule-6 breaks sit in 185 legacy files, so editing one line of one
+        # paragraph charged the untouched line below it too, and a one-line typo
+        # fix could not pass without reflowing prose the author never opened.
+        # That is the flag-day rewrite the added-lines ratchet exists to avoid.
+        #
+        # The cost is a real blind spot, kept deliberately and documented in
+        # docs/style-rules.md: a new line inserted directly ABOVE untouched
+        # prose splits that paragraph and goes unreported until someone touches
+        # the line below. This module already trades the same way twice, at the
+        # rule 4 closed list and the rule 1 block-type cap. A missed break is
+        # cheaper than refusing a line the author never wrote.
+        in_scope = only is None or index in only
         if not blank and not starts_block and prev_continuable and in_scope:
             violations.append(
                 Violation(

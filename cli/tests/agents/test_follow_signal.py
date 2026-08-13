@@ -110,6 +110,34 @@ def test_keyboard_interrupt_during_the_tail_write_exits_clean(tmp_path, monkeypa
     assert "traceback" not in stderr_buf.getvalue().lower()
 
 
+def test_interrupt_on_a_one_shot_dump_is_not_swallowed(tmp_path, monkeypatch):
+    """A truncated tail must not read as a complete one.
+
+    The follow loop is a session the user ends on purpose, so it exits clean.
+    A one-shot dump has no such contract: swallowing the interrupt returned 0
+    with a half-written log, which a caller cannot tell from a full one.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    log_file = tmp_path / "follow.jsonl"
+    log_file.write_text('{"line": 1}\n', encoding="utf-8")
+    write_registry([_codex(log_path=str(log_file))])
+
+    from fno.agents import read as read_mod
+
+    class InterruptingWriter(io.StringIO):
+        def write(self, text: str) -> int:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        read_mod.read_logs(
+            name="follow-target",
+            tail=None,
+            follow=False,
+            stdout=InterruptingWriter(),
+            stderr=io.StringIO(),
+        )
+
+
 def test_follow_jsonl_detects_window_spanning_truncate(tmp_path):
     """Truncate-then-refill within a single poll window must surface, not emit garbage.
 

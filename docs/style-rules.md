@@ -56,10 +56,21 @@ Each of these starts the next block, so each one is a legal newline:
 - a blockquote
 - a raw HTML line, such as a `<details>` block
 - a link reference definition
+- a `key: value` field line, such as `RESULT: SUCCESS`
 
 A bare prose line under a list item is a lazy continuation, so rule 6 fires there. Fold it into the item, or start a new one.
 
-Rule 6 is the one rule that reads a pair of lines rather than one sentence. On the changed-markdown gate that has a consequence worth naming. An added line under an untouched paragraph line still fires, because the paragraph it joins is the unit, not the diff.
+The field-line escape exists because mail carries receipts and the worker return grammar. `RESULT: SUCCESS` over `TASK: 2.1` is two fields, never one wrapped sentence, and rule 6 refused that grammar outright. The key is one word with no space, so a colon partway through a sentence exempts nothing.
+
+## Rule 6 accepts one blind spot on purpose
+
+Rule 6 reads a pair of lines, and the changed-markdown gate reads added lines only. A break is charged to the CONTINUING line, never to the line above it.
+
+So a new line inserted directly above untouched prose splits that paragraph and goes unreported. It surfaces later, once someone touches the line below.
+
+Charging both halves is the more complete rule and it is the unlandable one. This tree holds 6519 rule-6 breaks across 185 legacy files. A one-line typo fix in any of them then demands a reflow of prose the author never opened. That is the flag-day rewrite the ratchet exists to avoid.
+
+This is the same trade as the rule 1 cap and the rule 4 closed list. A missed break is cheaper than refusing a line the author never wrote.
 
 ## Rule 1 splits on block type
 

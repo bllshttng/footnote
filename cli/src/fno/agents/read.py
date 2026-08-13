@@ -417,6 +417,12 @@ def read_logs(
                 err.write(f"failed to open log file for follow: {exc}\n")
                 return LogsResult(exit_code=1)
     except KeyboardInterrupt:
+        if not follow:
+            # A one-shot dump has no clean-exit contract. Swallowing here made a
+            # truncated tail exit 0 and read as a complete one, so a caller
+            # could not tell the two apart. Only the follow loop is a session
+            # the user ends on purpose.
+            raise
         # AC2-FR clean exit — no traceback on stderr.
         return LogsResult(exit_code=EXIT_OK)
 
