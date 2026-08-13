@@ -51,6 +51,26 @@ def test_map_covers_current_surface_once():
     assert len(mapped) == 322
 
 
+def test_map_matches_the_uncollapsed_click_action_inventory():
+    import click
+    import typer
+
+    from fno.cli import COLLAPSE_KEEP, LAZY_SUBCOMMANDS
+    from fno.lint_verb_ratchet import _iter_group_leaves
+
+    live: set[str] = set()
+    for group in COLLAPSE_KEEP:
+        import_path = LAZY_SUBCOMMANDS[group][0]
+        module_name, _, attr_name = import_path.rpartition(":")
+        obj = getattr(importlib.import_module(module_name), attr_name)
+        command = typer.main.get_command(obj)
+        context = click.Context(command, info_name=group)
+        live.update(path for path, _sub in _iter_group_leaves(command, context, group))
+
+    mapped = {leaf for leaf in _mapped_leaves() if leaf.split()[0] in COLLAPSE_KEEP}
+    assert live == mapped
+
+
 def test_t1_preserves_the_pre_collapse_typing_string():
     for row in _rows():
         if row["tier"] == "T1":

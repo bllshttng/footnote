@@ -42,6 +42,7 @@ class VerbRatchetError(Exception):
 
 
 BASELINE_REL = Path("scripts") / "ci" / "verb-baseline.txt"
+COLLAPSE_MAP_REL = Path("scripts") / "ci" / "verb-collapse-map.tsv"
 
 # The Rust front's leaf tree is READ FROM ITS DISPATCHERS, not listed here.
 #
@@ -240,6 +241,20 @@ def iter_python_leaves():
     from fno._lazy_group import collapse_click_group
     from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as _root_app
 
+    collapsed_groups = {
+        name
+        for name, entry in LAZY_SUBCOMMANDS.items()
+        if len(entry) == 3 and "collapse_keep" in entry[2]
+    }
+    mapped_actions = {
+        action
+        for line in (_repo_root() / COLLAPSE_MAP_REL).read_text().splitlines()[1:]
+        if line.strip()
+        for action in [line.split("\t", 1)[0]]
+        if action.split()[0] in collapsed_groups
+    }
+    live_actions: set[str] = set()
+
     # Eager inline commands (help, cost, review) are seeded on the main app, not
     # LAZY_SUBCOMMANDS, so resolve each from the root Click tree rather than emit
     # a bare name: a bare name would miss hidden options (review carries --sigma-*).
@@ -277,6 +292,9 @@ def iter_python_leaves():
             cmd = typer.main.get_command(obj)
             collapse_keep = options.get("collapse_keep")
             if collapse_keep is not None:
+                uncollapsed_ctx = click.Context(cmd, info_name=name)
+                for path, _sub in _iter_group_leaves(cmd, uncollapsed_ctx, name):
+                    live_actions.add(path)
                 cmd = collapse_click_group(cmd, keep=set(collapse_keep))
             if hasattr(cmd, "list_commands"):
                 ctx = click.Context(cmd, info_name=name)
@@ -298,6 +316,15 @@ def iter_python_leaves():
             sub = typer.Typer(add_completion=False)
             sub.command(name=name)(obj)
             yield name, typer.main.get_command(sub)
+
+    if live_actions != mapped_actions:
+        raise VerbRatchetError(
+            "verb-ratchet: collapsed action inventory drifted from "
+            "scripts/ci/verb-collapse-map.tsv; "
+            f"code-only={sorted(live_actions - mapped_actions)}, "
+            f"map-only={sorted(mapped_actions - live_actions)}. Allocate every new "
+            "action in the map before regenerating the registered-leaf baseline."
+        )
 
 
 def enumerate_python_leaves() -> list[str]:
