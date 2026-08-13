@@ -155,6 +155,23 @@ On the Python side, `dispatch_send` emits two events around the delivery attempt
 
 Both Python events carry the dispatch context envelope (request_id, caller attribution, transport) set by `build_context` before the delivery attempt, matching the pattern established by `dispatch_ask`.
 
+## A busy claude session enqueues, it does not corrupt (node x-1904)
+
+This document's injection gate governs the PTY lane (codex/gemini). The claude lane never goes through it - claude is always socket-delivered (Locked Decision 9). Both lanes historically shared one belief about a busy recipient: injecting mid-turn corrupts the composer, so delivery must wait for idle.
+
+Node x-1904 measured that belief false for the claude socket lane, directly off a live session's own transcript. A busy claude session does not corrupt its composer on an injected paste - it enqueues the paste and processes it at the next turn boundary. The evidence is a `queue-operation`/`enqueue` record written to the recipient's transcript at submit time, not at turn end:
+
+```json
+{"type":"queue-operation","operation":"enqueue","content":"<the injected turn's content>"}
+```
+
+This is distinct from the `queued_command` shape a submitted, turn-processed message eventually lands as; the `enqueue` record is what confirms the paste arrived, before the recipient's own turn has finished.
+
+Two consequences landed from this measurement:
+
+- `crates/fno/src/server.rs`'s `rerun_allowed` doc comment no longer claims "injecting a command mid-turn corrupts an agent's composer" as the reason it stays conservative for the `rerun` verb - that verb writes raw bytes via `pty.write_input`, a different write with no such measurement behind it, so the guard's rationale is now scoped to that write specifically.
+- `cli/src/fno/agents/dispatch.py`'s `_mux_pane_send` dropped the equivalent busy-veto for mail delivery (`guarded=True`, which rode `rerun_allowed` itself) and replaced it with a content confirm: poll the recipient's own transcript for the injected marker after the paste, mirroring `crates/fno-agents/src/mail_inject.rs`'s `confirm_content_after`/`escaped_marker` pair so both claude keystroke lanes (control.sock and mux pane) confirm delivery the same way.
+
 ## What Group 3 changes
 
 Group 3 of the cross-agent bus epic swaps the inbox store backing from the current per-recipient markdown thread files to a single global JSONL bus log (`~/.fno/bus/messages.jsonl`). The `write_new_thread` call in `dispatch_send` (step 4c, the durable envelope write) becomes a write to that log. The `send` verb's call sites, CLI flags, stdout contract, and delivery tier logic do not change - only the storage layer underneath the store API rotates.
