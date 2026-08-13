@@ -41,6 +41,13 @@ def _row(cid: str, session_id: str | None, kind: str = "oos-bug") -> dict:
 def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+    # resolve_repo_root is @cache'd and gets warmed with the REAL worktree root
+    # before this fixture's setenv lands, so without the clear the scoped read
+    # filters on the live session id and returns nothing - a green-looking
+    # empty that has nothing to do with the behavior under test.
+    import fno.paths as paths_mod
+
+    paths_mod.resolve_repo_root.cache_clear()
     path = tmp_path / ".fno" / "carveouts.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

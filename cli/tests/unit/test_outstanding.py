@@ -49,6 +49,16 @@ def _carveout(cid: str, kind: str, ts: str = "2026-07-14T04:27:55Z") -> dict:
 def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A hermetic canonical root; both legs resolve through it."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+    monkeypatch.delenv("FNO_BG", raising=False)
+    # resolve_repo_root is @cache'd and is warmed with the REAL worktree root
+    # before this fixture runs. Without the clear, session resolution reads the
+    # live target-state.md instead of this sandbox, and the ownership tests
+    # would pass on the real session id rather than the one they set.
+    import fno.paths as paths_mod
+
+    paths_mod.resolve_repo_root.cache_clear()
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 

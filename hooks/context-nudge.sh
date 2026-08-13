@@ -375,7 +375,10 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
     # self-review. Scope match is the discriminator, or any carveout silences it.
     RESOLVED=0
     if command -v fno >/dev/null 2>&1; then
-        CARVEOUTS=$(with_timeout 3 fno carveout list --json 2>/dev/null || true)
+        # --all is load-bearing: `carveout list` now scopes to the current
+        # session by default, and this check must see a carveout filed by ANY
+        # session (the king that stated the orphaning is usually not this one).
+        CARVEOUTS=$(with_timeout 3 fno carveout list --all --json 2>/dev/null || true)
         # carveout list --json emits JSONL (one object per line), so stream-filter
         # rather than map (which needs an array). Structured .scope field match,
         # Only a RECENT carveout (last 24h) counts: a historical one from a

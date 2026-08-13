@@ -173,6 +173,13 @@ def list_carveouts(
         "filter to them (replaces the ritual's jq+grep pipeline). Mutually "
         "exclusive with --session-id.",
     ),
+    all_sessions: bool = typer.Option(
+        False,
+        "--all",
+        help="Read the WHOLE ledger instead of just this session's rows. Needed "
+        "by any consumer that folds across sessions (the king orphan check "
+        "does; it filters by .scope over every row).",
+    ),
     as_json: bool = typer.Option(
         False,
         "--json",
@@ -222,6 +229,25 @@ def list_carveouts(
     # Typer gives [] for an unset repeatable option; pass None so "no filter"
     # is distinct from "filter to the empty set".
     sessions = session_id or None
+
+    # Default scope is THIS session. The unscoped read was the default while
+    # the safe path was opt-in, so an agent pointed at `carveout list` saw a
+    # month of every other session's rows and could not tell which were its
+    # own. --all restores the global read for the consumers that need it.
+    unscoped_reason = None
+    if pr_number is None and not sessions and not all_sessions:
+        from fno.carveout.core import resolve_session_id
+        from fno.paths import resolve_repo_root
+
+        current = resolve_session_id(resolve_repo_root())
+        if current:
+            sessions = [current]
+        else:
+            # Never a silent empty: a scoped read that returns nothing when no
+            # session resolves cannot be told apart from a genuinely clear
+            # ledger. Print every row AND say why.
+            unscoped_reason = "no active session"
+
     if pr_number is not None and not sessions:
         # Unresolved ownership is NOT "filter to nothing": the caller must see
         # every carve-out read-only plus the reason, and consume none.
@@ -249,6 +275,16 @@ def list_carveouts(
         if reason:
             # Never silent: the read-only branch must be able to state WHY.
             typer.echo(f"carveout: {reason}; listing read-only, not consumable", err=True)
+
+    if unscoped_reason is not None:
+        # A positive banner naming the count and the reason, so the reader can
+        # tell "everyone's rows" from "mine, and there are none".
+        typer.echo(
+            f"carveout: {unscoped_reason}; listing all {len(rows)} row(s) "
+            f"across every session. Pass --all to ask for this explicitly.",
+            err=True,
+        )
+
     for r in rows:
         if as_json:
             typer.echo(json.dumps(r, separators=(",", ":")))
