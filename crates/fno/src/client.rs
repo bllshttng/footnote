@@ -15139,6 +15139,7 @@ mod tests {
                 where_hint: None,
                 project: None,
                 lane: None,
+                plan_path: None,
                 head: false,
             }],
             backlog_lanes: vec![(crate::backlog_view::UNLANED.into(), 1)],
@@ -15176,6 +15177,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         };
         view.set_layout(LayoutView {
@@ -15233,6 +15235,7 @@ mod tests {
                 where_hint: hint.map(str::to_owned),
                 project: None,
                 lane: None,
+                plan_path: None,
                 head: false,
             };
         view.set_layout(LayoutView {
@@ -16299,6 +16302,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         }];
         let cards = |v: &View| {
@@ -17951,6 +17955,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         }];
         let hdr = v
@@ -19801,6 +19806,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         };
         let mut v = view_with_agents(vec![
@@ -19859,6 +19865,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         }
     }

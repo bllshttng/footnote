@@ -14638,6 +14638,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         };
         let backlog = [
@@ -15020,6 +15021,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         };
         let mut core = empty_core();
@@ -15091,6 +15093,7 @@ mod tests {
                 where_hint: None,
                 project: None,
                 lane: None,
+                plan_path: None,
                 head: false,
             },
             BacklogCard {
@@ -15103,6 +15106,7 @@ mod tests {
                 where_hint: None,
                 project: None,
                 lane: None,
+                plan_path: None,
                 head: false,
             },
         ];
@@ -15143,6 +15147,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         }];
         // Nothing known at all: the default copy.

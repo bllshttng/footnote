@@ -9,6 +9,10 @@
 //! here, kept in this file so the scheme allowlist and the call that acts on it
 //! cannot drift apart.
 
+use std::path::{Path, PathBuf};
+
+use crate::digest_overlay::ObsidianCfg;
+
 /// Schemes we will hand to the platform opener. Deliberately just these two.
 ///
 /// This is a trust boundary, not a nicety: an OSC 8 URI is arbitrary bytes
@@ -184,8 +188,23 @@ where
     if !is_openable(url) {
         return Err(format!("refused to open {}", for_notice(url)));
     }
+    run_opener(spawn, url)
+}
+
+/// Run the platform opener on `target` and map its outcome to the shared
+/// `Result`. Used by the web-URL opener, the fno-URI opener, and the plain-file
+/// opener so the spawn discipline (one argv element, stdio detached so a chatty
+/// opener cannot scribble over the alternate screen) lives in one place. The
+/// TRUST GATE that decides whether to reach this stays in each caller:
+/// [`open_url_with`] checks [`is_openable`]; [`open_fno_uri_with`] checks the
+/// `obsidian://` prefix. A gate missing from one path is the first pitfalls
+/// entry, so the gate is never folded in here.
+fn run_opener<S>(spawn: S, target: &str) -> Result<(), String>
+where
+    S: FnOnce(&str, &str) -> Result<std::process::ExitStatus, std::io::Error>,
+{
     let opener = opener_bin();
-    match spawn(opener, url) {
+    match spawn(opener, target) {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!("{opener} exited {}", s.code().unwrap_or(-1))),
         Err(e) => Err(format!("{opener}: {e}")),
@@ -202,6 +221,158 @@ fn spawn_opener(opener: &str, url: &str) -> Result<std::process::ExitStatus, std
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
+}
+
+// ── open plan (LD3) ─────────────────────────────────────────────────────────
+//
+// An open-plan menu item reaches Obsidian without widening what pane output can
+// trigger. obsidian:// is NOT added to OPENABLE_SCHEMES (above): that allowlist
+// guards bytes a pane chose, and admitting obsidian:// there would hand the
+// scheme to hostile pane output as well as to this menu item. The URI is
+// fno-constructed and gets its own opener, never falling back to open_url.
+
+/// An open-plan target resolved from a node's `plan_path` and the obsidian
+/// config. The type holds LD3's three rules so no call site can get them wrong:
+/// no plan -> [`PlanUnavailable::NoPlan`] (greyed); obsidian off ->
+/// [`PlanUnavailable::ObsidianOff`] (absent, no vault synthesised); a path
+/// outside the vault -> [`PlanLink::PlainFile`] (open as a file, labelled so).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanLink {
+    /// An `obsidian://open?vault=<name>&file=<encoded vault-relative path>` URI
+    /// fno constructed. Opened by [`open_fno_uri`], never via [`open_url`].
+    Obsidian { uri: String },
+    /// The plan lives outside the configured vault. Opened as a plain file.
+    PlainFile(PathBuf),
+    /// The item does not apply.
+    Unavailable(PlanUnavailable),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanUnavailable {
+    /// The node has no `plan_path`. Greyed with "no plan" as the reason.
+    NoPlan,
+    /// `obsidian.enabled` is false, or it is true with no vault configured.
+    /// Absent (never greyed); no vault name is synthesised.
+    ObsidianOff,
+}
+
+/// Resolve an open-plan target. Pure: reads no files. The vault root is resolved
+/// the same way `paths.py :: vault_root` resolves it (bare name -> `~/<name>`;
+/// absolute or `~`-prefixed honored as-is), and the URI carries the BASENAME of
+/// that root, so a bare `myvault` and an absolute `/Users/x/myvault` produce the
+/// same URI (a test pins this).
+pub fn plan_link(plan_path: Option<&Path>, cfg: &ObsidianCfg) -> PlanLink {
+    let Some(plan) = plan_path else {
+        return PlanLink::Unavailable(PlanUnavailable::NoPlan);
+    };
+    if !cfg.enabled {
+        return PlanLink::Unavailable(PlanUnavailable::ObsidianOff);
+    }
+    let Some(vault_cfg) = cfg.vault.as_deref().filter(|v| !v.is_empty()) else {
+        // enabled with no vault: the Python schema refuses this, but the Rust
+        // reader is permissive. Unavailable rather than synthesise a name.
+        return PlanLink::Unavailable(PlanUnavailable::ObsidianOff);
+    };
+    let root = resolve_vault_root(vault_cfg);
+    let vault_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(vault_cfg);
+    if let Ok(rel) = plan.strip_prefix(&root) {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        PlanLink::Obsidian {
+            uri: obsidian_open_uri(vault_name, &rel_str),
+        }
+    } else {
+        PlanLink::PlainFile(plan.to_path_buf())
+    }
+}
+
+/// Resolve the obsidian vault root from its config value, mirroring
+/// `paths.py :: vault_root`. Takes `home` so a test can fix HOME without touching
+/// the process environment.
+fn resolve_vault_root_with(vault: &str, home: Option<&Path>) -> PathBuf {
+    if let Some(rest) = vault.strip_prefix("~/") {
+        return home
+            .map(|h| h.join(rest.trim_end_matches('/')))
+            .unwrap_or_else(|| PathBuf::from(vault));
+    }
+    if vault == "~" {
+        return home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(vault));
+    }
+    let p = Path::new(vault);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    // bare name -> ~/<name>
+    match home {
+        Some(h) => h.join(vault),
+        None => PathBuf::from(vault),
+    }
+}
+
+fn resolve_vault_root(vault: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    resolve_vault_root_with(vault, home.as_deref())
+}
+
+/// Build `obsidian://open?vault=<name>&file=<encoded rel>`. The vault-relative
+/// path is percent-encoded as an RFC 3986 query component (unreserved chars and
+/// `/` preserved; space, `&`, `#` encoded so they cannot split or truncate the
+/// URI).
+fn obsidian_open_uri(vault: &str, rel_path: &str) -> String {
+    format!(
+        "obsidian://open?vault={}&file={}",
+        percent_encode_query(vault),
+        percent_encode_query(rel_path)
+    )
+}
+
+/// Percent-encode for an RFC 3986 query component: preserve unreserved chars
+/// (`A-Za-z0-9-._~`) and the `/` path separator; encode everything else. Kept
+/// local so the URI builder and its round-trip test cannot drift.
+fn percent_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &byte in s.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
+}
+
+/// Open an fno-constructed `obsidian://` URI with the platform opener. This is
+/// deliberately SEPARATE from [`open_url`]: it acts only on URIs fno built, so
+/// it does NOT gate on [`is_openable`] (which would refuse the non-web scheme);
+/// instead it refuses anything not carrying the `obsidian://` prefix. It never
+/// falls back to [`open_url`]: the separation is what keeps pane-sourced output
+/// from ever reaching this path.
+pub fn open_fno_uri(uri: &str) -> Result<(), String> {
+    open_fno_uri_with(spawn_opener, uri)
+}
+fn open_fno_uri_with<S>(spawn: S, uri: &str) -> Result<(), String>
+where
+    S: FnOnce(&str, &str) -> Result<std::process::ExitStatus, std::io::Error>,
+{
+    if !uri.starts_with("obsidian://") {
+        return Err(format!("refused to open {}", for_notice(uri)));
+    }
+    run_opener(spawn, uri)
+}
+
+/// Open a plan that resolved OUTSIDE the vault as a plain file. The path is
+/// fno-constructed (from the graph), never pane-sourced, so no scheme gate
+/// applies; the spawn discipline is shared via [`run_opener`].
+pub fn open_fno_path(path: &Path) -> Result<(), String> {
+    open_fno_path_with(spawn_opener, path)
+}
+fn open_fno_path_with<P>(spawn: P, path: &Path) -> Result<(), String>
+where
+    P: FnOnce(&str, &str) -> Result<std::process::ExitStatus, std::io::Error>,
+{
+    run_opener(spawn, &path.to_string_lossy())
 }
 
 #[cfg(test)]
@@ -380,5 +551,144 @@ mod tests {
         let long = format!("https://a.test/{}", "x".repeat(500));
         assert_eq!(for_notice(&long).chars().count(), 60);
         assert!(for_notice(&long).ends_with('…'));
+    }
+
+    // ── open plan (LD3) ──
+
+    fn cfg(enabled: bool, vault: Option<&str>) -> ObsidianCfg {
+        ObsidianCfg {
+            enabled,
+            vault: vault.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn openable_schemes_stays_at_exactly_two_and_excludes_obsidian() {
+        // The security boundary: the pane-sourced allowlist is http(s) only.
+        // obsidian:// lives behind a separate opener, never here.
+        assert_eq!(OPENABLE_SCHEMES.len(), 2);
+        assert!(
+            !OPENABLE_SCHEMES.iter().any(|s| s.contains("obsidian")),
+            "obsidian:// must never enter OPENABLE_SCHEMES"
+        );
+        assert!(is_openable("https://example.com"));
+        assert!(!is_openable("obsidian://open?vault=v&file=f"));
+    }
+
+    #[test]
+    fn resolve_vault_root_bare_absolute_and_tilde_share_the_basename() {
+        let home = Path::new("/Users/x");
+        // A bare name becomes ~/name; an absolute path and a ~-prefix are honored
+        // as-is. All three roots share the basename, so the URI's vault= matches.
+        let bare = resolve_vault_root_with("myvault", Some(home));
+        let abs = resolve_vault_root_with("/Users/x/myvault", Some(home));
+        let tilde = resolve_vault_root_with("~/myvault", Some(home));
+        assert_eq!(bare, PathBuf::from("/Users/x/myvault"));
+        assert_eq!(abs, bare);
+        assert_eq!(tilde, bare);
+        assert_eq!(bare.file_name(), Some(std::ffi::OsStr::new("myvault")));
+    }
+
+    #[test]
+    fn obsidian_uri_percent_encodes_space_amp_hash_and_round_trips() {
+        let uri = obsidian_open_uri("my vault", "a & b#c.md");
+        assert!(uri.contains("vault=my%20vault"), "{uri}");
+        let file = uri
+            .split("file=")
+            .nth(1)
+            .expect("file= present");
+        assert_eq!(file, "a%20%26%20b%23c.md", "space/&# encoded in the file value: {uri}");
+        // No raw space anywhere (it is never legitimate); the dangerous chars
+        // must not appear raw in the FILE value. The whole URI legitimately
+        // carries `&` as the vault/file separator, so that is checked on `file`.
+        assert!(!uri.contains(' '), "no raw space anywhere: {uri}");
+        assert!(!file.contains('&'), "no raw amp in file: {file}");
+        assert!(!file.contains('#'), "no raw hash in file: {file}");
+        // Round-trip: decoding the file component recovers the original path.
+        assert_eq!(pct_decode(file), "a & b#c.md");
+    }
+
+    #[test]
+    fn plan_link_rules_no_plan_and_obsidian_off() {
+        // No plan_path -> greyed "no plan".
+        assert_eq!(
+            plan_link(None, &cfg(true, Some("v"))),
+            PlanLink::Unavailable(PlanUnavailable::NoPlan)
+        );
+        // obsidian disabled -> absent, no vault synthesised.
+        let plan = Path::new("/v/x.md");
+        assert_eq!(
+            plan_link(Some(plan), &cfg(false, Some("v"))),
+            PlanLink::Unavailable(PlanUnavailable::ObsidianOff)
+        );
+        // enabled but no vault configured -> absent (no name invented).
+        assert_eq!(
+            plan_link(Some(plan), &cfg(true, None)),
+            PlanLink::Unavailable(PlanUnavailable::ObsidianOff)
+        );
+    }
+
+    #[test]
+    fn plan_link_in_vault_obsidian_outside_plain_file() {
+        // Absolute vault: resolve_vault_root honors it as-is, so this is
+        // independent of $HOME.
+        let inside = PathBuf::from("/opt/myvault/plans/x.md");
+        let outside = PathBuf::from("/elsewhere/y.md");
+        let link = plan_link(Some(&inside), &cfg(true, Some("/opt/myvault")));
+        match link {
+            PlanLink::Obsidian { uri } => {
+                assert!(uri.contains("vault=myvault"), "{uri}");
+                // `/` is preserved (Obsidian accepts it in the file param); only
+                // space, &, # are encoded.
+                assert!(uri.contains("file=plans/x.md"), "{uri}");
+            }
+            other => panic!("inside vault -> Obsidian, got {other:?}"),
+        }
+        let link = plan_link(Some(&outside), &cfg(true, Some("/opt/myvault")));
+        assert!(
+            matches!(link, PlanLink::PlainFile(_)),
+            "outside vault -> PlainFile, got {link:?}"
+        );
+    }
+
+    #[test]
+    fn open_fno_uri_refuses_non_obsidian_schemes() {
+        // A non-obsidian URI never reaches the opener (no fall-through to the
+        // pane-sourced open_url path either).
+        let mut spawned = false;
+        let out = open_fno_uri_with(
+            |_, _| {
+                spawned = true;
+                Ok(status(true))
+            },
+            "https://example.com",
+        );
+        assert!(out.is_err());
+        assert!(!spawned, "a non-obsidian URI must not reach the opener");
+        // obsidian:// (fno-constructed) reaches the opener.
+        let out = open_fno_uri_with(|_, _| Ok(status(true)), "obsidian://open?vault=v&file=f");
+        assert!(out.is_ok(), "obsidian:// opens: {out:?}");
+    }
+
+    /// Minimal percent-decode for the round-trip assertion (ASCII test paths).
+    fn pct_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let Ok(byte) = u8::from_str_radix(
+                    std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("GG"),
+                    16,
+                ) {
+                    out.push(byte as char);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
     }
 }

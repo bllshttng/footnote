@@ -1034,6 +1034,11 @@ pub struct BacklogCard {
     /// `_kanban_column` is the sole column authority; rank never changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<String>,
+    /// (v47) The node's `plan_path`, published by the graph reader so the open
+    /// plan menu item resolves without a subprocess. `None` for a node with no
+    /// plan (the item renders greyed, never a broken link).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_path: Option<String>,
     /// (v36) The head of the queue: the first Ready card in BOARD order. Marked
     /// explicitly so it reads as a fact rather than being inferred from row
     /// position, which lies once the section is scrolled or the top card is
@@ -3122,6 +3127,7 @@ mod tests {
                         // (v36) attribution + on-deck ride the same frame.
                         project: Some("fno".into()),
                         lane: Some("in-progress".into()),
+                        plan_path: None,
                         head: false,
                     },
                     BacklogCard {
@@ -3134,6 +3140,7 @@ mod tests {
                         where_hint: None,
                         project: None,
                         lane: None,
+                        plan_path: None,
                         head: true,
                     },
                 ],
