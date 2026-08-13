@@ -211,23 +211,50 @@ def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
     out = runner.invoke(outstanding_app, []).stdout
     assert "MINE:" in out
-    assert out.index("MINE:") < out.index("THEIRS:") if "THEIRS:" in out else True
-    # Labelled as this session's, so a worker can tell its own from the pile.
+    assert "THEIRS:" in out
+    assert out.index("MINE:") < out.index("THEIRS:")
+    # Labelled as this session's, so the agent that asked is the one prompted.
     assert "this session" in out.lower()
 
 
 def test_a_worker_with_no_questions_of_its_own_stays_short(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """The hook fires in every session, so a bg worker's share must stay small."""
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
     for i in range(6):
         runner.invoke(outstanding_app, ["ask", f"question number {i}"])
 
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-quiet")
+    monkeypatch.setenv("FNO_AGENT_SELF", "worker-quiet")
+    out = runner.invoke(outstanding_app, []).stdout
+    # The count still renders: a worker is told the queue exists.
+    assert "6 open question" in out
+    # But not one row of the operator's queue, none of which it can answer.
+    assert "question number" not in out
+
+
+def test_an_attended_session_does_see_other_sessions_questions(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The pair for the test above, and the reason ownership cannot be the gate.
+
+    The operator owns none of these questions - workers asked them - so gating
+    the render on ownership would show the one person who can answer exactly
+    nothing. Attendedness is the discriminator, not ownership.
+    """
+    monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-other")
+    for i in range(6):
+        runner.invoke(outstanding_app, ["ask", f"question number {i}"])
+
+    monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-operator")
+    monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
+    monkeypatch.delenv("FNO_BG", raising=False)
     out = runner.invoke(outstanding_app, []).stdout
     assert "6 open question" in out
-    # Capped render: a growing pile is visible as a number, not as a wall.
-    assert out.count("question number") <= 3
+    # Capped: a growing pile reads as a number, not as a wall.
+    assert out.count("question number") == 3
+    assert "3 more" in out
 
 
 def test_render_caps_rows_and_states_the_drop_count(root: Path):
