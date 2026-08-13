@@ -93,7 +93,7 @@ footnote/
 
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
 - **Search:** prefer `rg` / Grep over `grep -r` (which descends into nested worktrees); scope any `grep -r` to a path. For a load-bearing sweep use `RIPGREP_CONFIG_PATH= rg -uu`, not a bare `rg -uu` (`-u` ignores files, not globs); the over-exclusion trap is a pitfalls entry above.
-- **Markdown prose:** one full sentence per physical line (semantic line breaks); never wrap a sentence across lines. Governs prose paragraphs, not bullets/fences/tables.
+- **Prose style:** a paragraph is ONE physical line. A newline starts the next block. Six rules gate mail, PR, comments, docs: [docs/style-rules.md](docs/style-rules.md).
 - **Multi-CLI:** skills are portable; orchestration needs per-CLI hook config. See [docs/HARNESSES.md](docs/HARNESSES.md), [docs/architecture/multi-cli-hooks.md](docs/architecture/multi-cli-hooks.md), [docs/SKILL-COMPAT-MATRIX.md](docs/SKILL-COMPAT-MATRIX.md).
 
 ## Commands
