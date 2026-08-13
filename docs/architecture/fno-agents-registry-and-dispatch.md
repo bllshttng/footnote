@@ -57,15 +57,42 @@ The registry on disk is one JSON file at `state_dir() / "agents" / "registry.jso
 
 `AgentEntry` carries one optional session-id field per provider (`claude_short_id`, `codex_session_id`, `gemini_session_id`). Exactly one is set per entry, dictated by the `provider` field. This is a flat shape rather than a discriminated union — the simpler shape JSON-serializes cleanly and the provider field already communicates which session-id namespace applies. (The type-design analyzer flagged the union as deferred work; the flat shape has held across every provider added since.)
 
-### Schema-version guard
+### Schema-version guard: read forward, refuse to write, announce
 
-`load_registry` raises `RegistryVersionError` when:
+`registry.json` is global to every agent on the machine.
+The guard used to refuse any on-disk `schema_version` above the in-process constant.
+That inverted the blast radius.
+One process running ahead of the deployment took every deployed reader down at once, mail included.
+The symptom then surfaced far from the cause.
 
-1. The on-disk `schema_version` differs from the in-process constant.
-2. A row carries a `provider` outside `KNOWN_PROVIDERS` — catches typos like `"calude"` that would otherwise round-trip silently and confuse downstream dispatch.
-3. A row has unknown or missing fields — catches a future caller adding fields without bumping `schema_version`. The version guard is the single point of failure; if it misses, the registry should fail loud, not corrupt the in-memory entry.
+A newer store is now read rather than refused.
+That covers all four readers: Python `load_registry`, Rust `client_verbs::load_registry_entries`, and Rust `state::read_registry_tolerant`.
+Two things make reading forward safe, and neither is optional.
 
-All three diagnostics use the same exception class so callers can handle "alien shape" uniformly.
+- **Writes are refused while the on-disk schema is higher** (Python `write_registry`, Rust `update_registry`).
+  A read that drops what it cannot see must never write those rows back.
+  Doing so erases fields for every agent on the machine.
+  The Rust check runs under the same lock as the read.
+- **Every degraded read announces itself**, naming both versions.
+  A silent partial row is indistinguishable from a complete one.
+  A routing or liveness decision taken on one then leaves no trace.
+  Python announces per read.
+  Rust latches per observed version, because the daemon re-reads on a 5-second loop.
+
+Above our version, a row this fno cannot represent is skipped rather than fatal.
+That covers an unknown `status` or `host_mode` value, a missing now-required field, and an unknown key.
+Tolerating added keys alone was not enough.
+Widening an enum is one of the likelier reasons to bump a schema.
+A row-level refusal then took the whole shared read down by a different door.
+Skipped rows are announced with their indices.
+
+`load_registry` still raises `RegistryVersionError` for genuine damage, at any version:
+
+1. Malformed JSON, a non-object top level, or a `schema_version` that is missing or not a positive integer. Reading forward covers a version gap, never a torn file.
+2. A row with no valid identity token (`provider`/`harness`), which catches typos like `"calude"` that round-trip silently. Identity is a shape check rather than an enumeration, so one alien harness never bricks the shared read. Dispatch capability is gated at the spawn/ask seam instead.
+3. At or below the in-process version, a row with unknown or missing fields, or an unknown `status` or `host_mode`. There it means a writer bug rather than a version gap, so it stays loud.
+
+All diagnostics use the same exception class so callers can handle "alien shape" uniformly.
 
 ## Atomic write
 

@@ -432,8 +432,29 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let obj = raw
         .as_object()
         .ok_or_else(|| "registry top-level is not a JSON object".to_string())?;
+    // READ FORWARD, matching Python's load_registry. This store is global to
+    // every agent on the machine, so refusing a newer writer bricked every
+    // deployed reader at once rather than only the one that was behind. Rows are
+    // read as raw `Value` here and unknown keys are already ignored, so a newer
+    // store costs this path nothing but the fields it cannot see.
+    //
+    // The announcement is required, not courtesy: silently reading a partial row
+    // makes it indistinguishable from a complete one, and a routing decision
+    // taken on one leaves no trace. Fixing only Python would have left this
+    // path, the daemon, and mux still failing closed on the same file.
+    let mut read_forward = false;
     match obj.get("schema_version").and_then(Value::as_u64) {
         Some(v) if ACCEPTED_SCHEMA_VERSIONS.contains(&v) => {}
+        Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
+            read_forward = true;
+            eprintln!(
+                "fno agents: registry at {} is schema_version={v}, ahead of the \
+                 schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
+                 Reading the fields it knows and ignoring the rest; writes are \
+                 refused until this fno is upgraded. Rows may be incomplete.",
+                registry_path.display()
+            );
+        }
         other => {
             return Err(format!(
             "registry has schema_version={other:?}; this fno understands {REGISTRY_SCHEMA_VERSION}"
@@ -446,8 +467,44 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
         Some(Value::Array(rows)) => rows,
         Some(_) => return Err("registry 'agents' field is not a list".to_string()),
     };
-    for (i, row) in rows.iter().enumerate() {
-        let row = row
+    // Under read-forward a row-level refusal skips THAT ROW rather than the whole
+    // registry. Tolerating an added key was only half the fix: widening the
+    // `status` enum or dropping a field that is required today would still have
+    // failed every reader on the machine, which is the brick this path was just
+    // changed to prevent. At or below our own schema each of these stays fatal,
+    // where it means a writer bug rather than a version gap.
+    let mut skipped: Vec<usize> = Vec::new();
+    let mut kept: Vec<Value> = Vec::with_capacity(rows.len());
+    for (i, row_value) in rows.iter().enumerate() {
+        match validate_registry_row(i, row_value) {
+            Ok(()) => kept.push(row_value.clone()),
+            Err(_) if read_forward => skipped.push(i),
+            Err(e) => return Err(e),
+        }
+    }
+    if !skipped.is_empty() {
+        eprintln!(
+            "fno agents: registry at {}: skipped row(s) {skipped:?} this fno cannot \
+             represent at this schema_version. Those agents are invisible to this \
+             process until it is upgraded.",
+            registry_path.display()
+        );
+    }
+    let mut out = kept;
+    for row in &mut out {
+        if let Some(obj) = row.as_object_mut() {
+            backfill_row_aliases(obj);
+        }
+    }
+    Ok(out)
+}
+
+/// One registry row's shape checks, split out of [`load_registry_entries`] so a
+/// newer-schema read can skip a single unrepresentable row instead of refusing
+/// the shared file. Returns the same messages the inline checks used to return.
+fn validate_registry_row(i: usize, row_value: &Value) -> Result<(), String> {
+    {
+        let row = row_value
             .as_object()
             .ok_or_else(|| format!("registry row {i} is not a JSON object"))?;
         // Identity is one axis (x-8dfc): tolerate ANY well-shaped identity
@@ -469,7 +526,19 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
                 "fno agents: warning: registry row {name:?} has provider={provider:?} and harness={harness:?} (diverged); harness wins for identity"
             );
         }
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("live");
+        // Absent and present-but-not-a-string are different answers. Folding them
+        // together let a structured status from a newer writer silently become
+        // "live" and KEEP the row, so the three readers disagreed about the same
+        // file: this one listed the agent as live, the typed daemon path skipped
+        // the row, and Python raised. Reject a non-string so the read-forward skip
+        // above fires instead, and all three land on "cannot represent this row".
+        let status = match row.get("status") {
+            None | Some(Value::Null) => "live",
+            Some(Value::String(s)) => s.as_str(),
+            Some(other) => {
+                return Err(format!("registry row {i} has non-string status={other}"));
+            }
+        };
         if !KNOWN_STATUSES.contains(&status) {
             return Err(format!("registry row {i} has status={status:?}"));
         }
@@ -488,13 +557,7 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
             }
         }
     }
-    let mut out = rows.clone();
-    for row in &mut out {
-        if let Some(obj) = row.as_object_mut() {
-            backfill_row_aliases(obj);
-        }
-    }
-    Ok(out)
+    Ok(())
 }
 
 /// Reconcile one row's identity aliases so every verb body reads the same
@@ -4886,11 +4949,27 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v14 is the future-drift case a pre-bump reader would have on v13.
-        fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
+        // A NEWER schema_version now reads forward rather than erroring. The old
+        // refusal meant one source-ahead writer bricked every deployed reader on
+        // the machine at once; a reader that is merely behind must degrade, not
+        // take the fleet down. Matches Python load_registry.
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":99,"agents":[{valid}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":14,"agents":[{valid}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+
+        // A missing or non-integer version is damage, not a newer writer.
+        fs::write(&reg, r#"{"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":14,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as

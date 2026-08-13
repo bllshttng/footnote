@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Current registry schema version.
 ///
@@ -922,7 +923,57 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     if buf.trim().is_empty() {
         return Ok(Registry::default());
     }
-    let mut reg: Registry = serde_json::from_str(&buf)?;
+    let mut reg: Registry = match serde_json::from_str(&buf) {
+        Ok(reg) => reg,
+        Err(typed_err) => {
+            // A newer writer can widen a field's VALUES, not only add keys, and
+            // `AgentStatus` has no catch-all variant -- so one row carrying a
+            // status this binary has never heard of failed the WHOLE file at
+            // serde and took the daemon's registry reads down with it. Tolerating
+            // added keys alone left that door open.
+            //
+            // Retry per row, keeping the ones this binary can represent, but ONLY
+            // when the store says it is newer than us. At or below our own schema
+            // an unparseable row is a writer bug and stays fatal.
+            let probe: serde_json::Value = serde_json::from_str(&buf)?;
+            let on_disk = probe
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if on_disk <= REGISTRY_SCHEMA_VERSION as u64 {
+                return Err(typed_err.into());
+            }
+            let rows = probe
+                .get("agents")
+                .or_else(|| probe.get("entries"))
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut entries = Vec::with_capacity(rows.len());
+            let mut skipped: Vec<usize> = Vec::new();
+            for (i, row) in rows.into_iter().enumerate() {
+                match serde_json::from_value::<RegistryEntry>(row) {
+                    Ok(entry) => entries.push(entry),
+                    Err(_) => skipped.push(i),
+                }
+            }
+            if !skipped.is_empty() {
+                eprintln!(
+                    "fno agents: registry: skipped row(s) {skipped:?} this fno cannot \
+                     represent at schema_version={on_disk}. Those agents are invisible \
+                     to this process until it is upgraded."
+                );
+            }
+            Registry {
+                // Saturate rather than `as u32`. A truncating cast can wrap an
+                // absurd version DOWN to one at or below ours, and the write
+                // guard keys on that number -- so the one store we must never
+                // overwrite would be the one that looks safe to overwrite.
+                schema_version: u32::try_from(on_disk).unwrap_or(u32::MAX),
+                entries,
+            }
+        }
+    };
     // Harness identity back-fill (x-ec59): canonical fields resolve from the
     // legacy per-provider fields on every load, so a legacy row read by Rust and
     // a canonical row written by Rust both round-trip. Applied here (the single
@@ -945,11 +996,41 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     // accepted any u32. Reject anything outside 1..=REGISTRY_SCHEMA_VERSION so a
     // pre-inside-leg daemon refuses a v5 store (instead of silently dropping the
     // inside-leg report) and the current daemon refuses a future v6 store.
-    if reg.schema_version < 1 || reg.schema_version > REGISTRY_SCHEMA_VERSION {
+    // READ FORWARD (see Python load_registry and client_verbs). The earlier
+    // forward-compat guard refused a newer store so a stale reader could not
+    // silently drop a field. The refusal turned out to be the worse failure:
+    // registry.json is global to every agent here, so one process ahead of the
+    // deployment took the whole fleet's registry reads down at once. Serde
+    // ignores unknown fields on RegistryEntry, so a newer store reads as the
+    // subset this binary understands.
+    //
+    // Dropping a field is now made safe by refusing to WRITE (update_registry
+    // below) and by announcing every degraded read, rather than by refusing to
+    // look. A version below 1 is damage, not a newer writer, and still fails.
+    if reg.schema_version < 1 {
         return Err(StateError::UnsupportedSchemaVersion {
             found: reg.schema_version,
             max: REGISTRY_SCHEMA_VERSION,
         });
+    }
+    if reg.schema_version > REGISTRY_SCHEMA_VERSION {
+        // Announce once per observed version, not once per read. The rule this
+        // implements ("a degraded read must leave a trace") is right for a
+        // one-shot CLI and wrong for the daemon, which reads this file on a
+        // 5-second idle loop and on most request handlers: an operator sitting
+        // in a mixed-version state for ten minutes would get 120 copies. A new
+        // version still announces, so an upgrade or a further bump is never
+        // swallowed by the latch.
+        static LAST_ANNOUNCED: AtomicU32 = AtomicU32::new(0);
+        if LAST_ANNOUNCED.swap(reg.schema_version, Ordering::Relaxed) != reg.schema_version {
+            eprintln!(
+                "fno agents: registry is schema_version={}, ahead of the \
+                 schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
+                 Reading the fields it knows and ignoring the rest; writes are \
+                 refused until this fno is upgraded. Rows may be incomplete.",
+                reg.schema_version
+            );
+        }
     }
     Ok(reg)
 }
@@ -970,6 +1051,16 @@ where
     // classic footgun; locking the sidecar sidesteps it entirely).
     let lock = acquire_exclusive(&lock_path(path))?;
     let mut registry = read_existing_registry(path)?;
+    // The half of read-forward that protects the file. The read above drops
+    // fields this binary does not know, so writing those rows back would erase
+    // them for every agent on the machine. Checked under the lock, against what
+    // was actually read, so a writer that raced in between cannot slip past.
+    if registry.schema_version > REGISTRY_SCHEMA_VERSION {
+        return Err(StateError::UnsupportedSchemaVersion {
+            found: registry.schema_version,
+            max: REGISTRY_SCHEMA_VERSION,
+        });
+    }
     let before = registry
         .entries
         .iter()
@@ -2111,25 +2202,121 @@ mod tests {
     }
 
     #[test]
-    fn load_registry_rejects_unsupported_schema_version() {
-        // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v14, or - for an old daemon -
-        // a version it cannot interpret), while v1..=current still read.
+    fn load_registry_reads_a_newer_schema_forward() {
+        // This assertion was inverted deliberately. The old contract (Codex P2,
+        // ab-a171ceb2) refused a future version so a stale reader could not
+        // silently drop a field. Refusing turned out to be the worse failure:
+        // registry.json is shared by every agent on the machine, so one process
+        // ahead of the deployment took the whole fleet's reads down at once.
+        // Dropping a field is made safe by refusing to WRITE and by announcing
+        // the degrade, not by refusing to look.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
         std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
-        match load_registry(&path) {
+        assert!(
+            load_registry(&path).is_ok(),
+            "a newer writer must not brick this reader"
+        );
+        std::fs::write(&path, r#"{"schema_version":1,"agents":[]}"#).unwrap();
+        assert!(
+            load_registry(&path).is_ok(),
+            "v1 must still read (back-compat)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_newer_row_with_an_unknown_status_skips_that_row_only() {
+        // Added KEYS were only half the problem. AgentStatus has no catch-all
+        // variant, so one row carrying a status this binary never heard of used
+        // to fail the WHOLE file at serde and take the daemon's reads with it.
+        let dir = tmpdir("newer-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":14,"agents":[
+                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
+                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let reg = load_registry(&path).expect("one unrepresentable row must not brick the read");
+
+        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["readable"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_structured_status_from_a_newer_writer_skips_its_row_only() {
+        // The three readers must agree about the same file. This row used to be
+        // kept as "live" by the raw client path while the typed path skipped it,
+        // so `fno agents list` showed a worker the mail path could not see.
+        let dir = tmpdir("structured-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":14,"agents":[
+                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":{"state":"live","since":1},"created_at":"2026-01-01T00:00:00Z"},
+                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let reg = load_registry(&path).expect("a structured status must not brick the read");
+
+        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["readable"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_same_unknown_status_stays_fatal_at_our_own_schema() {
+        // At or below our schema an unknown value is a writer bug, not a gap.
+        let dir = tmpdir("current-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":13,"agents":[
+                {"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert!(load_registry(&path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_refuses_to_write_over_a_newer_schema() {
+        // The write block is what makes reading forward safe here.
+        let dir = tmpdir("version-write-guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        let newer = r#"{"schema_version":14,"agents":[]}"#;
+        std::fs::write(&path, newer).unwrap();
+
+        match update_registry(&path, |reg| reg.entries.clear()) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
                 assert_eq!(found, 14);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
         }
-        std::fs::write(&path, r#"{"schema_version":1,"agents":[]}"#).unwrap();
-        assert!(
-            load_registry(&path).is_ok(),
-            "v1 must still read (back-compat)"
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            newer,
+            "the refused write must leave the newer file byte-identical"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -16,11 +16,20 @@ Use ``update_registry(name, updater)`` for any production read-modify-write;
 
 ``write_registry`` uses an atomic temp-file + ``os.replace`` so a kill -9
 mid-write cannot corrupt the existing file. Schema version is bumped any
-time the on-disk shape changes; loading a registry with a different
-``schema_version`` raises ``RegistryVersionError`` so fno refuses to
-silently misread it. Malformed JSON, non-dict rows, and unknown providers
-all surface as ``RegistryVersionError`` too — callers handle alien shape
-through one exception type.
+time the on-disk shape changes.
+
+An OLDER on-disk schema is read transparently. A NEWER one is read
+forward: this file is global to every agent on the machine, so refusing it
+meant one process running ahead of the deployment bricked every deployed
+reader at once. Above our own version, a row this fno cannot represent is
+skipped rather than fatal, and the skip is announced. What makes that safe
+is ``write_registry`` REFUSING while the on-disk schema is higher, since a
+read that drops what it cannot see must never write those rows back.
+
+Malformed JSON, a missing or non-integer ``schema_version``, non-dict
+rows, and rows with no valid identity token all still surface as
+``RegistryVersionError`` — callers handle alien shape through one
+exception type. Reading forward covers a version gap, never a torn file.
 """
 from __future__ import annotations
 
@@ -31,7 +40,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
@@ -764,6 +773,34 @@ def _validate_single_live_ref(entry: AgentEntry) -> None:
         )
 
 
+def _refuse_write_over_newer_schema(target: Path) -> None:
+    """Refuse to overwrite a registry written by a newer fno.
+
+    This is the half of read-forward that protects the file. ``load_registry``
+    drops fields above its own schema, so entries read from a newer store are
+    incomplete by construction, and writing them back would erase every field
+    this fno cannot see -- for every agent on the machine, not just this one.
+
+    Only a readable, higher integer version blocks. A missing or unparseable
+    file is not a newer writer, and refusing there would leave a torn registry
+    unrepairable by the very command meant to rewrite it.
+    """
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(raw, dict):
+        return
+    on_disk = raw.get("schema_version")
+    if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
+        raise RegistryVersionError(
+            f"refusing to write registry at {target}: on-disk schema_version="
+            f"{on_disk} is newer than the schema_version={SCHEMA_VERSION} this "
+            "fno understands, and writing would drop the fields it cannot see. "
+            "Upgrade fno to match."
+        )
+
+
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
     """Atomically write the registry to disk.
 
@@ -774,6 +811,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     the orphan ``.tmp`` is unlinked so it doesn't accumulate on retry.
     """
     target = _registry_path(path)
+    _refuse_write_over_newer_schema(target)
     for e in entries:
         _validate_single_live_ref(e)
     payload = {
@@ -791,6 +829,12 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+
+
+#: Constructor keys of ``AgentEntry``, derived rather than listed so a new
+#: field never has to be remembered here. Used only on the read-forward path,
+#: to drop keys a newer writer added after this fno was built.
+_INIT_FIELD_NAMES = frozenset(f.name for f in fields(AgentEntry) if f.init)
 
 
 def _is_identity_token(value: object) -> bool:
@@ -860,15 +904,22 @@ def row_owning_session_id(
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     """Load the registry. Returns ``[]`` if the file does not exist.
 
-    Every alien-shape failure mode raises ``RegistryVersionError`` so
-    callers handle "this file looks wrong" through one exception type:
-    invalid JSON, top-level not-a-dict, ``agents`` not-a-list, row
-    not-a-dict, ``schema_version`` mismatch, an identity-less/corrupt-shape
-    row, and unknown / missing AgentEntry fields all map to that one error.
-    A future fno adding fields without bumping the schema_version must
-    not silently corrupt the in-memory entry. Identity (provider/harness) is
-    a shape check, not an enumeration (x-8dfc): one alien harness never bricks
-    the shared read; dispatch capability is gated at the spawn/ask seam.
+    Damage raises ``RegistryVersionError``, so callers handle "this file
+    looks wrong" through one exception type: invalid JSON, top-level
+    not-a-dict, ``agents`` not-a-list, a missing or non-integer
+    ``schema_version``, row not-a-dict, and an identity-less row.
+
+    A schema NEWER than ours is not damage and is read forward. Rows this
+    fno cannot represent are skipped and announced; the rest still resolve.
+    ``write_registry`` refuses while the on-disk schema is higher, which is
+    what stops a partial read from being written back over everyone else's
+    fields. AT or BELOW our own schema, an unknown field or an unknown
+    ``status`` / ``host_mode`` stays fatal, because there it means a writer
+    bug rather than a version gap.
+
+    Identity (provider/harness) is a shape check, not an enumeration: one
+    alien harness never bricks the shared read, and dispatch capability is
+    gated at the spawn/ask seam.
     """
     target = _registry_path(path)
     if not target.exists():
@@ -899,14 +950,33 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     # flags below key off ABSOLUTE version numbers, not SCHEMA_VERSION-relative
     # offsets, so future bumps don't silently mis-trigger v1/v2 synthesis.
     # Anything outside the range raises RegistryVersionError.
-    if not (
-        isinstance(on_disk_version, int)
-        and 1 <= on_disk_version <= SCHEMA_VERSION
-    ):
+    if not (isinstance(on_disk_version, int) and on_disk_version >= 1):
         raise RegistryVersionError(
             f"registry at {target} has schema_version={on_disk_version!r}, "
             f"this fno understands schema_version={SCHEMA_VERSION}. "
             "Upgrade or downgrade fno to match."
+        )
+    # READ FORWARD. This store is global to every agent on the machine, so a
+    # process running ahead of the deployment used to brick every deployed
+    # reader at once: mail died fleet-wide, with no announcement and a symptom
+    # that surfaced far from the cause. A newer writer is now read, not refused.
+    #
+    # Two things make that safe, and neither is optional.
+    #   - write_registry REFUSES while the on-disk schema is higher, because
+    #     reading forward drops fields this reader cannot see and a write from
+    #     that state would erase rows it never knew about.
+    #   - every degraded read announces itself below. Silence is the real trap:
+    #     it makes a partial row indistinguishable from a complete one, so a
+    #     routing or liveness decision taken on a truncated row leaves no trace.
+    read_forward = on_disk_version > SCHEMA_VERSION
+    if read_forward:
+        print(
+            f"fno agents: registry at {target} is schema_version="
+            f"{on_disk_version}, ahead of the schema_version={SCHEMA_VERSION} "
+            "this fno understands. Reading the fields it knows and ignoring the "
+            "rest; writes are refused until this fno is upgraded. Rows may be "
+            "incomplete.",
+            file=sys.stderr,
         )
     needs_v1_synthesis = on_disk_version == 1
     needs_v2_synthesis = on_disk_version <= 2
@@ -919,122 +989,164 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         )
 
     entries: list[AgentEntry] = []
+    skipped_rows: list[tuple[int, str]] = []
     for index, row in enumerate(agents_field):
-        if not isinstance(row, dict):
-            raise RegistryVersionError(
-                f"registry at {target} row {index} is not a JSON object "
-                f"(got {type(row).__name__})"
-            )
-        provider = row.get("provider")
-        harness = row.get("harness")
-        # Identity is one axis (x-8dfc). The read tolerates ANY well-shaped
-        # identity token so a single alien-harness row never bricks the shared
-        # registry read (mail send, spawn-collision check, whoami all ride it);
-        # "can THIS fno DISPATCH the row?" is enforced later at the spawn/ask
-        # seam via KNOWN_PROVIDERS, not here. The corruption guard survives as a
-        # shape check: at least one of provider/harness must be a valid token.
-        if not (_is_identity_token(provider) or _is_identity_token(harness)):
-            raise RegistryVersionError(
-                f"registry at {target} row {index} has no valid identity token "
-                f"(provider={provider!r}, harness={harness!r}); a row needs a "
-                "non-empty lowercase provider or harness. "
-                "Upgrade or downgrade fno to match."
-            )
-        # Divergence is loud, not fatal (x-8dfc): a writer bug stamping
-        # provider != harness surfaces in the skew window instead of silently
-        # after the v10 provider-field removal. harness wins for identity
-        # (the backfill below leaves both in place; session_id keys on harness).
-        if (
-            _is_identity_token(provider)
-            and _is_identity_token(harness)
-            and provider != harness
-        ):
-            print(
-                f"fno agents: warning: registry row {row.get('name')!r} has "
-                f"provider={provider!r} and harness={harness!r} (diverged); "
-                "harness wins for identity",
-                file=sys.stderr,
-            )
-        if needs_v1_synthesis:
-            row = {**row, "status": "live", "last_message_at": None}
-        if needs_v2_synthesis and "mcp_channel_id" not in row:
-            # v2 → v3 synthesis: socket-only agents have no MCP channel.
-            row = {**row, "mcp_channel_id": None}
-        # host_mode: absent key OR explicit null reads as "exec". Version-
-        # independent (the additive field is handled by absence, not a schema
-        # bump) so a Rust-written exec row (which omits the key) and any
-        # pre-host_mode row both materialize a concrete "exec" mode. An explicit
-        # "interactive" passes through unchanged. [interactive-drive node]
-        if row.get("host_mode") is None:
-            row = {**row, "host_mode": "exec"}
-        elif row["host_mode"] not in KNOWN_HOST_MODES:
-            raise RegistryVersionError(
-                f"registry at {target} row {index} has host_mode="
-                f"{row['host_mode']!r}; known values: "
-                f"{sorted(KNOWN_HOST_MODES)}. "
-                "Upgrade or downgrade fno to match."
-            )
-        # v2 entries carry an explicit status — guard against alien
-        # values landing in-memory via a tampered registry file. v1
-        # synthesis above pins "live" so it always passes.
-        if row.get("status", "live") not in KNOWN_STATUSES:
-            raise RegistryVersionError(
-                f"registry at {target} row {index} has status="
-                f"{row.get('status')!r}; known values: "
-                f"{sorted(KNOWN_STATUSES)}. "
-                "Upgrade or downgrade fno to match."
-            )
-        # Accept-on-read backfill (x-880e, v10): the removed identity keys
-        # (provider + the per-provider session-id trio) populate the canonical
-        # harness / harness_session_id and then die, so a legacy row round-trips
-        # losslessly and asdict never re-emits them. harness adopts provider when
-        # absent OR truthy-but-corrupt (whitespace/uppercase); the gate above
-        # guarantees at least one of provider/harness is a valid token, so the
-        # healed harness is always valid.
-        if not _is_identity_token(row.get("harness")) and _is_identity_token(row.get("provider")):
-            row = {**row, "harness": row["provider"]}
-        # sync_harness_aliases reads the per-provider session keys still present in
-        # the raw row and back-fills harness_session_id from the harness-matching
-        # one (canonical wins on divergence). Runs BEFORE the pop below.
-        row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
-        # Drop the removed identity keys now that their values have back-filled
-        # harness / harness_session_id, so they never reach AgentEntry(**row)
-        # (which no longer defines them) and never round-trip through asdict.
-        for _dead in ("provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"):
-            row.pop(_dead, None)
-        # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
-        # READ only -- a legacy row's jobId moves into `short_id` (the unified
-        # transport key) and the key dies here, so asdict never re-emits it.
-        # A conflicting pair keeps `short_id` (the drift this removal kills)
-        # and warns once, never silently prefers the legacy value.
-        legacy_short = row.pop("claude_short_id", None)
-        if legacy_short:
-            existing_short = row.get("short_id")
-            if not existing_short:
-                row["short_id"] = legacy_short
-            elif existing_short != legacy_short:
+        # Under read-forward ANY row-level refusal degrades to a skipped row
+        # rather than taking the whole shared read down. Wrapping the body,
+        # rather than guarding each check, is deliberate: a refusal added here
+        # later is covered without anyone remembering to guard it. Added KEYS
+        # were only half the problem -- a newer writer that widens the status or
+        # host_mode enum, or drops a field that is required today, still bricked
+        # every reader on the machine, which is the failure this file exists to
+        # stop. At or below our own schema every one of these stays fatal, where
+        # it means a writer bug rather than a version gap.
+        try:
+            if not isinstance(row, dict):
+                raise RegistryVersionError(
+                    f"registry at {target} row {index} is not a JSON object "
+                    f"(got {type(row).__name__})"
+                )
+            provider = row.get("provider")
+            harness = row.get("harness")
+            # Identity is one axis (x-8dfc). The read tolerates ANY well-shaped
+            # identity token so a single alien-harness row never bricks the shared
+            # registry read (mail send, spawn-collision check, whoami all ride it);
+            # "can THIS fno DISPATCH the row?" is enforced later at the spawn/ask
+            # seam via KNOWN_PROVIDERS, not here. The corruption guard survives as a
+            # shape check: at least one of provider/harness must be a valid token.
+            if not (_is_identity_token(provider) or _is_identity_token(harness)):
+                raise RegistryVersionError(
+                    f"registry at {target} row {index} has no valid identity token "
+                    f"(provider={provider!r}, harness={harness!r}); a row needs a "
+                    "non-empty lowercase provider or harness. "
+                    "Upgrade or downgrade fno to match."
+                )
+            # Divergence is loud, not fatal (x-8dfc): a writer bug stamping
+            # provider != harness surfaces in the skew window instead of silently
+            # after the v10 provider-field removal. harness wins for identity
+            # (the backfill below leaves both in place; session_id keys on harness).
+            if (
+                _is_identity_token(provider)
+                and _is_identity_token(harness)
+                and provider != harness
+            ):
                 print(
-                    f"fno agents: warning: registry row {row.get('name')!r} "
-                    f"carries short_id={existing_short!r} and legacy "
-                    f"claude_short_id={legacy_short!r}; keeping short_id",
+                    f"fno agents: warning: registry row {row.get('name')!r} has "
+                    f"provider={provider!r} and harness={harness!r} (diverged); "
+                    "harness wins for identity",
                     file=sys.stderr,
                 )
-        # `session_id` is a computed @property on AgentEntry, not an init field.
-        # A Rust PTY row may serialize it (Rust skips it when None, so this only
-        # fires for a row that recorded one); passing it to AgentEntry(**row)
-        # would TypeError. Drop it -- Python recomputes it from harness +
-        # harness_session_id (the identical projection Rust uses), so nothing
-        # recoverable is lost, and asdict re-omits it on write-back. (ab-b946b59c)
-        if "session_id" in row:
-            row = {k: v for k, v in row.items() if k != "session_id"}
-        try:
-            entries.append(AgentEntry(**row))
-        except TypeError as exc:
-            raise RegistryVersionError(
-                f"registry at {target} row {index} has malformed shape "
-                f"(unknown or missing fields): {exc}. "
-                "Upgrade or downgrade fno to match."
-            ) from exc
+            if needs_v1_synthesis:
+                row = {**row, "status": "live", "last_message_at": None}
+            if needs_v2_synthesis and "mcp_channel_id" not in row:
+                # v2 → v3 synthesis: socket-only agents have no MCP channel.
+                row = {**row, "mcp_channel_id": None}
+            # host_mode: absent key OR explicit null reads as "exec". Version-
+            # independent (the additive field is handled by absence, not a schema
+            # bump) so a Rust-written exec row (which omits the key) and any
+            # pre-host_mode row both materialize a concrete "exec" mode. An explicit
+            # "interactive" passes through unchanged. [interactive-drive node]
+            if row.get("host_mode") is None:
+                row = {**row, "host_mode": "exec"}
+            elif row["host_mode"] not in KNOWN_HOST_MODES:
+                raise RegistryVersionError(
+                    f"registry at {target} row {index} has host_mode="
+                    f"{row['host_mode']!r}; known values: "
+                    f"{sorted(KNOWN_HOST_MODES)}. "
+                    "Upgrade or downgrade fno to match."
+                )
+            # v2 entries carry an explicit status — guard against alien
+            # values landing in-memory via a tampered registry file. v1
+            # synthesis above pins "live" so it always passes.
+            if row.get("status", "live") not in KNOWN_STATUSES:
+                raise RegistryVersionError(
+                    f"registry at {target} row {index} has status="
+                    f"{row.get('status')!r}; known values: "
+                    f"{sorted(KNOWN_STATUSES)}. "
+                    "Upgrade or downgrade fno to match."
+                )
+            # Accept-on-read backfill (x-880e, v10): the removed identity keys
+            # (provider + the per-provider session-id trio) populate the canonical
+            # harness / harness_session_id and then die, so a legacy row round-trips
+            # losslessly and asdict never re-emits them. harness adopts provider when
+            # absent OR truthy-but-corrupt (whitespace/uppercase); the gate above
+            # guarantees at least one of provider/harness is a valid token, so the
+            # healed harness is always valid.
+            if not _is_identity_token(row.get("harness")) and _is_identity_token(row.get("provider")):
+                row = {**row, "harness": row["provider"]}
+            # sync_harness_aliases reads the per-provider session keys still present in
+            # the raw row and back-fills harness_session_id from the harness-matching
+            # one (canonical wins on divergence). Runs BEFORE the pop below.
+            row = sync_harness_aliases(dict(row), REGISTRY_LEGACY_SESSION_KEYS)
+            # Drop the removed identity keys now that their values have back-filled
+            # harness / harness_session_id, so they never reach AgentEntry(**row)
+            # (which no longer defines them) and never round-trip through asdict.
+            for _dead in ("provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"):
+                row.pop(_dead, None)
+            # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
+            # READ only -- a legacy row's jobId moves into `short_id` (the unified
+            # transport key) and the key dies here, so asdict never re-emits it.
+            # A conflicting pair keeps `short_id` (the drift this removal kills)
+            # and warns once, never silently prefers the legacy value.
+            legacy_short = row.pop("claude_short_id", None)
+            if legacy_short:
+                existing_short = row.get("short_id")
+                if not existing_short:
+                    row["short_id"] = legacy_short
+                elif existing_short != legacy_short:
+                    print(
+                        f"fno agents: warning: registry row {row.get('name')!r} "
+                        f"carries short_id={existing_short!r} and legacy "
+                        f"claude_short_id={legacy_short!r}; keeping short_id",
+                        file=sys.stderr,
+                    )
+            # `session_id` is a computed @property on AgentEntry, not an init field.
+            # A Rust PTY row may serialize it (Rust skips it when None, so this only
+            # fires for a row that recorded one); passing it to AgentEntry(**row)
+            # would TypeError. Drop it -- Python recomputes it from harness +
+            # harness_session_id (the identical projection Rust uses), so nothing
+            # recoverable is lost, and asdict re-omits it on write-back. (ab-b946b59c)
+            if "session_id" in row:
+                row = {k: v for k, v in row.items() if k != "session_id"}
+            # An unknown key is a writer bug AT or BELOW our schema, and stays fatal
+            # there. Above it, an unknown key is just a field added after this fno
+            # was built, so drop it rather than refuse the whole shared read. The
+            # write refusal below is what keeps the dropped fields from being lost.
+            if read_forward:
+                row = {k: v for k, v in row.items() if k in _INIT_FIELD_NAMES}
+            try:
+                entries.append(AgentEntry(**row))
+            except TypeError as exc:
+                raise RegistryVersionError(
+                    f"registry at {target} row {index} has malformed shape "
+                    f"(unknown or missing fields): {exc}. "
+                    "Upgrade or downgrade fno to match."
+                ) from exc
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Catching Exception, not just RegistryVersionError, is the point.
+            # "A row this fno cannot represent" is the contract, and a newer
+            # writer that turns `status` into a structured value reaches
+            # `value in KNOWN_STATUSES` with a dict and raises TypeError, which
+            # is not a RegistryVersionError and used to escape this handler and
+            # take the whole shared read down -- the same fleet-wide brick, by a
+            # third door. Any failure to build a row from a newer store is that
+            # row's problem, never every other agent's.
+            #
+            # The type is reported below so a genuine bug in this loop is still
+            # diagnosable rather than silently absorbed, and at or below our own
+            # schema nothing is caught at all.
+            if not read_forward:
+                raise
+            skipped_rows.append((index, type(exc).__name__))
+            continue
+    if skipped_rows:
+        detail = ", ".join(f"{i} ({why})" for i, why in skipped_rows)
+        print(
+            f"fno agents: registry at {target}: skipped row(s) {detail} this fno "
+            f"cannot represent at schema_version={on_disk_version}. Those agents "
+            "are invisible to this process until it is upgraded.",
+            file=sys.stderr,
+        )
     return entries
 
 

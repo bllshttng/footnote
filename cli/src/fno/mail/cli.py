@@ -546,10 +546,41 @@ def _reply_to_name_handle(
         try:
             reachable, ambiguous = discover_mod.resolve_reachable(target)
         except discover_mod.StoreReadError as exc:
-            raise typer.BadParameter(
-                f"sender handle {target!r} cannot be checked uniquely; unreadable "
-                f"stores: {', '.join(exc.failed)}"
-            ) from exc
+            # The uniqueness check exists to disambiguate a TYPED name. On this
+            # path the handle came off the answered message and was never typed,
+            # so an unreadable store is not evidence against it -- and refusing
+            # here defeats the one verb built so a worker never re-types a
+            # handle. The cost is total, not degraded: a worker whose thread
+            # arrived live has no id on the durable bus, so this refusal removed
+            # its only way to answer anyone.
+            #
+            # ``require_resolution`` marks the two cases where the handle IS a
+            # guess: a mutable alias on a session-addressed record, and a
+            # migrated legacy token. Those keep refusing, because there proven
+            # uniqueness is the only thing vouching for the address. Do not
+            # unify the two paths -- they differ in where the handle came from.
+            # ``exc.resolved`` is the discriminator, and it refuses the OPPOSITE
+            # of what it looks like. A visible candidate whose uniqueness went
+            # unproven is exactly the wake-a-stranger risk this guard exists for:
+            # an unreadable store may hold a session colliding on the same short
+            # id, so choosing the one row we can see is the guess. Keep refusing.
+            #
+            # No candidate anywhere is a different situation. There is nothing to
+            # choose between, so the reply falls to the durable floor addressed to
+            # the handle the answered message recorded. That wakes nobody and
+            # invents no address.
+            if require_resolution or exc.resolved is not None:
+                raise typer.BadParameter(
+                    f"sender handle {target!r} cannot be checked uniquely; unreadable "
+                    f"stores: {', '.join(exc.failed)}"
+                ) from exc
+            print(
+                f"note: reachability stores unreadable "
+                f"({', '.join(exc.failed)}); replying to {target!r} as recorded "
+                "on the answered message.",
+                file=sys.stderr,
+            )
+            reachable, ambiguous = None, []
         if ambiguous:
             raise typer.BadParameter(
                 f"sender handle {target!r} is ambiguous across sessions: "

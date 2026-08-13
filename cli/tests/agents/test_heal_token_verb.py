@@ -140,13 +140,15 @@ def test_all_sources_refuses_registry_and_store_collision_without_adopting(
 
 
 def test_all_sources_reports_unreadable_registry_as_unavailable(_scratch_stores):
-    from fno.agents.registry import SCHEMA_VERSION
+    """A store that cannot be read is unavailable, never a measured absence.
 
+    The fixture used to be SCHEMA_VERSION + 1. A newer store now reads forward,
+    so it no longer produces an unreadable registry: that refusal was taking the
+    whole machine's readers down whenever one process ran ahead of the deploy. A
+    torn file is the input that stays unreadable by design.
+    """
     registry = _scratch_stores / "agents" / "registry.json"
-    registry.write_text(
-        json.dumps({"schema_version": SCHEMA_VERSION + 1, "agents": []}),
-        encoding="utf-8",
-    )
+    registry.write_text("{ not json", encoding="utf-8")
 
     res = _run("deadbeef", "--all-sources")
 
