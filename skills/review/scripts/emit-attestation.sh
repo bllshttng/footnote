@@ -6,9 +6,20 @@
 # `fno-agents loop-check` can read it as gate evidence. The reviewer name is
 # NOT an allowlist here - a project-registered reviewer
 # (config.review.reviewer_registry, x-a534) attests through this same helper,
-# which is why the registry needed no new producer machinery. loop-check head-pins on the CURRENT HEAD - a pass on a prior commit
-# stops counting the moment a new commit lands, so this MUST run after the
-# reviewed commit is the tip.
+# which is why the registry needed no new producer machinery.
+#
+# STILL RUN THIS AFTER THE REVIEWED COMMIT IS THE TIP. The old rule here was
+# "a pass on a prior commit stops counting the moment a new commit lands",
+# and that is no longer true (x-5b99 / x-62a1): loop-check now decides
+# freshness from the PR's own code-diff identity, so an attestation carries
+# across a rebase or a documentation-only advance. It still dies on any real
+# code change, and it still dies on every failure path, so emitting before
+# committing pins a commit your findings are not about and buys nothing.
+#
+# WHAT THIS EVENT PROVES: that a commit was pinned. NOT that a review
+# happened. The review verb emits nothing itself, and this script records the
+# reviewer name and verdict it is PASSED. Nothing here can tell a real review
+# from a caller that typed the arguments.
 #
 # Usage: emit-attestation.sh <reviewer> [verdict]
 #   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
