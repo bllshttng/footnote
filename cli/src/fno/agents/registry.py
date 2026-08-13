@@ -16,11 +16,20 @@ Use ``update_registry(name, updater)`` for any production read-modify-write;
 
 ``write_registry`` uses an atomic temp-file + ``os.replace`` so a kill -9
 mid-write cannot corrupt the existing file. Schema version is bumped any
-time the on-disk shape changes; loading a registry with a different
-``schema_version`` raises ``RegistryVersionError`` so fno refuses to
-silently misread it. Malformed JSON, non-dict rows, and unknown providers
-all surface as ``RegistryVersionError`` too — callers handle alien shape
-through one exception type.
+time the on-disk shape changes.
+
+An OLDER on-disk schema is read transparently. A NEWER one is read
+forward: this file is global to every agent on the machine, so refusing it
+meant one process running ahead of the deployment bricked every deployed
+reader at once. Above our own version, a row this fno cannot represent is
+skipped rather than fatal, and the skip is announced. What makes that safe
+is ``write_registry`` REFUSING while the on-disk schema is higher, since a
+read that drops what it cannot see must never write those rows back.
+
+Malformed JSON, a missing or non-integer ``schema_version``, non-dict
+rows, and rows with no valid identity token all still surface as
+``RegistryVersionError`` — callers handle alien shape through one
+exception type. Reading forward covers a version gap, never a torn file.
 """
 from __future__ import annotations
 
@@ -895,15 +904,22 @@ def row_owning_session_id(
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     """Load the registry. Returns ``[]`` if the file does not exist.
 
-    Every alien-shape failure mode raises ``RegistryVersionError`` so
-    callers handle "this file looks wrong" through one exception type:
-    invalid JSON, top-level not-a-dict, ``agents`` not-a-list, row
-    not-a-dict, ``schema_version`` mismatch, an identity-less/corrupt-shape
-    row, and unknown / missing AgentEntry fields all map to that one error.
-    A future fno adding fields without bumping the schema_version must
-    not silently corrupt the in-memory entry. Identity (provider/harness) is
-    a shape check, not an enumeration (x-8dfc): one alien harness never bricks
-    the shared read; dispatch capability is gated at the spawn/ask seam.
+    Damage raises ``RegistryVersionError``, so callers handle "this file
+    looks wrong" through one exception type: invalid JSON, top-level
+    not-a-dict, ``agents`` not-a-list, a missing or non-integer
+    ``schema_version``, row not-a-dict, and an identity-less row.
+
+    A schema NEWER than ours is not damage and is read forward. Rows this
+    fno cannot represent are skipped and announced; the rest still resolve.
+    ``write_registry`` refuses while the on-disk schema is higher, which is
+    what stops a partial read from being written back over everyone else's
+    fields. AT or BELOW our own schema, an unknown field or an unknown
+    ``status`` / ``host_mode`` stays fatal, because there it means a writer
+    bug rather than a version gap.
+
+    Identity (provider/harness) is a shape check, not an enumeration: one
+    alien harness never bricks the shared read, and dispatch capability is
+    gated at the spawn/ask seam.
     """
     target = _registry_path(path)
     if not target.exists():
@@ -973,7 +989,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         )
 
     entries: list[AgentEntry] = []
-    skipped_rows: list[int] = []
+    skipped_rows: list[tuple[int, str]] = []
     for index, row in enumerate(agents_field):
         # Under read-forward ANY row-level refusal degrades to a skipped row
         # rather than taking the whole shared read down. Wrapping the body,
@@ -1106,17 +1122,29 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                     f"(unknown or missing fields): {exc}. "
                     "Upgrade or downgrade fno to match."
                 ) from exc
-        except RegistryVersionError:
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Catching Exception, not just RegistryVersionError, is the point.
+            # "A row this fno cannot represent" is the contract, and a newer
+            # writer that turns `status` into a structured value reaches
+            # `value in KNOWN_STATUSES` with a dict and raises TypeError, which
+            # is not a RegistryVersionError and used to escape this handler and
+            # take the whole shared read down -- the same fleet-wide brick, by a
+            # third door. Any failure to build a row from a newer store is that
+            # row's problem, never every other agent's.
+            #
+            # The type is reported below so a genuine bug in this loop is still
+            # diagnosable rather than silently absorbed, and at or below our own
+            # schema nothing is caught at all.
             if not read_forward:
                 raise
-            skipped_rows.append(index)
+            skipped_rows.append((index, type(exc).__name__))
             continue
     if skipped_rows:
+        detail = ", ".join(f"{i} ({why})" for i, why in skipped_rows)
         print(
-            f"fno agents: registry at {target}: skipped row(s) "
-            f"{skipped_rows} this fno cannot represent at "
-            f"schema_version={on_disk_version}. Those agents are invisible to "
-            "this process until it is upgraded.",
+            f"fno agents: registry at {target}: skipped row(s) {detail} this fno "
+            f"cannot represent at schema_version={on_disk_version}. Those agents "
+            "are invisible to this process until it is upgraded.",
             file=sys.stderr,
         )
     return entries

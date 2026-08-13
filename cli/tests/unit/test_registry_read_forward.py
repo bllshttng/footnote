@@ -152,17 +152,52 @@ def test_a_row_missing_a_now_required_field_skips_its_row(tmp_path: Path) -> Non
     assert [e.name for e in reg.load_registry(path)] == ["readable-worker"]
 
 
+@pytest.mark.parametrize("field", ["status", "host_mode"])
+@pytest.mark.parametrize("value", [{"state": "live"}, ["live"]])
+def test_a_structured_value_skips_its_row_rather_than_raising(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """The third door into the same brick, and the one that bypassed the guard.
+
+    `value in KNOWN_STATUSES` tests membership against a frozenset, so a dict or
+    list raises `TypeError: unhashable type` rather than `RegistryVersionError`.
+    That escaped a handler catching only the latter and took the whole shared
+    read down, which is the exact failure read-forward exists to prevent. Callers
+    catch `(OSError, RegistryVersionError)`, so it surfaced as a traceback.
+    """
+    path = tmp_path / "registry.json"
+    bad = {**_row("future-worker"), field: value}
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [bad, _row("readable-worker")])
+
+    entries = reg.load_registry(path)
+
+    assert [e.name for e in entries] == ["readable-worker"]
+
+
+def test_a_skipped_row_names_why_it_was_skipped(tmp_path: Path, capsys) -> None:
+    """A swallowed exception type is how a real bug hides inside a tolerated one."""
+    path = tmp_path / "registry.json"
+    bad = {**_row("future-worker"), "status": {"state": "live"}}
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [bad])
+
+    reg.load_registry(path)
+
+    assert "TypeError" in capsys.readouterr().err
+
+
 def test_a_skipped_row_is_announced_with_its_index(tmp_path: Path, capsys) -> None:
     """An invisible agent must never be silently invisible."""
     path = tmp_path / "registry.json"
     bad = {**_row("future-worker"), "status": "hibernating"}
-    _write_raw(path, reg.SCHEMA_VERSION + 1, [bad])
+    _write_raw(path, reg.SCHEMA_VERSION + 1, [_row("readable-worker"), bad])
 
     reg.load_registry(path)
 
     err = capsys.readouterr().err
     assert "skipped row" in err
-    assert "[0]" in err
+    # Row 1, not row 0: the index has to identify WHICH row went missing, so a
+    # bare "a row was skipped" would pass this while telling an operator nothing.
+    assert "1 (" in err, err
 
 
 def test_the_same_row_stays_fatal_at_our_own_schema(tmp_path: Path) -> None:

@@ -965,7 +965,11 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
                 );
             }
             Registry {
-                schema_version: on_disk as u32,
+                // Saturate rather than `as u32`. A truncating cast can wrap an
+                // absurd version DOWN to one at or below ours, and the write
+                // guard keys on that number -- so the one store we must never
+                // overwrite would be the one that looks safe to overwrite.
+                schema_version: u32::try_from(on_disk).unwrap_or(u32::MAX),
                 entries,
             }
         }
@@ -2242,6 +2246,32 @@ mod tests {
         .unwrap();
 
         let reg = load_registry(&path).expect("one unrepresentable row must not brick the read");
+
+        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["readable"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_structured_status_from_a_newer_writer_skips_its_row_only() {
+        // The three readers must agree about the same file. This row used to be
+        // kept as "live" by the raw client path while the typed path skipped it,
+        // so `fno agents list` showed a worker the mail path could not see.
+        let dir = tmpdir("structured-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":14,"agents":[
+                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":{"state":"live","since":1},"created_at":"2026-01-01T00:00:00Z"},
+                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let reg = load_registry(&path).expect("a structured status must not brick the read");
 
         let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["readable"]);

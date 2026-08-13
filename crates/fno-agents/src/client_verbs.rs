@@ -478,10 +478,7 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     for (i, row_value) in rows.iter().enumerate() {
         match validate_registry_row(i, row_value) {
             Ok(()) => kept.push(row_value.clone()),
-            Err(e) if read_forward => {
-                skipped.push(i);
-                let _ = e;
-            }
+            Err(_) if read_forward => skipped.push(i),
             Err(e) => return Err(e),
         }
     }
@@ -529,7 +526,19 @@ fn validate_registry_row(i: usize, row_value: &Value) -> Result<(), String> {
                 "fno agents: warning: registry row {name:?} has provider={provider:?} and harness={harness:?} (diverged); harness wins for identity"
             );
         }
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("live");
+        // Absent and present-but-not-a-string are different answers. Folding them
+        // together let a structured status from a newer writer silently become
+        // "live" and KEEP the row, so the three readers disagreed about the same
+        // file: this one listed the agent as live, the typed daemon path skipped
+        // the row, and Python raised. Reject a non-string so the read-forward skip
+        // above fires instead, and all three land on "cannot represent this row".
+        let status = match row.get("status") {
+            None | Some(Value::Null) => "live",
+            Some(Value::String(s)) => s.as_str(),
+            Some(other) => {
+                return Err(format!("registry row {i} has non-string status={other}"));
+            }
+        };
         if !KNOWN_STATUSES.contains(&status) {
             return Err(format!("registry row {i} has status={status:?}"));
         }
