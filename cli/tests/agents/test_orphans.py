@@ -343,6 +343,38 @@ def test_an_unreadable_census_breaks_the_scan(monkeypatch, table) -> None:
     assert "orphans:" not in orphans.render(result)
 
 
+def test_a_broken_scan_does_not_mark_its_findings_reported(
+    monkeypatch, table, tmp_path: Path
+) -> None:
+    """A withheld finding is not a reported finding.
+
+    `render` prints no list on a broken scan, so recording those findings as
+    seen let one census failure silence a real orphan on every healthy sweep
+    afterwards - the exact silence this module exists to make impossible.
+    """
+    table.append(_proc(95, name="grep", cwd="/repo"))
+    seen = tmp_path / ".orphan-sweep-seen"
+
+    monkeypatch.setattr(orphans, "_census_pids", lambda: None)
+    broken = _scan_with_working_control(monkeypatch, table)
+    assert broken.broken
+    assert orphans.filter_new(broken, seen) is True
+    assert "orphans:" not in orphans.render(broken)
+
+    monkeypatch.setattr(orphans, "_census_pids", lambda: set())
+    healthy = _scan_with_working_control(monkeypatch, table)
+    assert not healthy.broken
+    assert orphans.filter_new(healthy, seen) is True
+
+
+def test_a_report_run_claims_no_reap(monkeypatch, table) -> None:
+    """Without `--reap` no kill was attempted, so `reaped: 0` would be a lie
+    about a signal that was never sent."""
+    table.append(_proc(96, name="grep", cwd="/repo"))
+    result = _scan_with_working_control(monkeypatch, table)
+    assert "reaped" not in orphans.render(result)
+
+
 def test_filter_new_speaks_for_an_unseen_pid(monkeypatch, table, tmp_path: Path) -> None:
     seen = tmp_path / ".orphan-sweep-seen"
     seen.write_text("80:grep", encoding="utf-8")

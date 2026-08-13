@@ -310,11 +310,14 @@ if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
         # tests the session cwd, so a canonical checkout without one left the
         # write failing under `|| true`, the mtime at 0 forever, and the
         # "hourly" sweep spawning probes and reaping on EVERY session start.
-        mkdir -p "$(dirname "$orphan_stamp")" 2>/dev/null || true
-        : >"$orphan_stamp" 2>/dev/null || true
         # shellcheck source=scripts/lib/with-timeout.sh
         source "$orphan_lib" 2>/dev/null || true
         if declare -F with_timeout >/dev/null 2>&1; then
+            # Stamped only once the sweep is actually about to run. Stamping
+            # before the `declare` check burned a full hour window every time
+            # the source failed, and the sweep that never ran said nothing.
+            mkdir -p "$(dirname "$orphan_stamp")" 2>/dev/null || true
+            : >"$orphan_stamp" 2>/dev/null || true
             orphan_rc=0
             orphan_raw="$(with_timeout 20 fno agents orphans --reap --quiet-unless-new 2>/dev/null)" || orphan_rc=$?
             if [[ -n "$orphan_raw" ]]; then

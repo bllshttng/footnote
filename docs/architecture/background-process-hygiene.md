@@ -69,6 +69,8 @@ The rename requirement is not decoration either. `fno-agents-daemon` runs at PPI
 
 A clean machine here still reports long-lived daemons at PPID 1 whose cwd is the repo, including third-party ones. `--quiet-unless-new` reports each once and then stays silent. That is what the SessionStart hook uses. The bare verb always prints everything.
 
+A broken scan records nothing in the seen-file. It withheld its findings, so marking them reported would let one census failure silence a real orphan on every healthy sweep after it.
+
 ## Measured facts this document rests on
 
 - `exec -a fno-load-test sleep 20` gives a process whose `ps -o comm` reads `fno-load-test`. Its `psutil.name()` reads `sleep`. Its `psutil.cmdline()[0]` reads `fno-load-test`. psutil reads the executable on macOS. The rename lands in argv[0] alone. Attributing on `name()` makes the NAME arm unfirable, which the positive control caught on its first live run.

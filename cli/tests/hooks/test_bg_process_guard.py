@@ -59,6 +59,15 @@ DENIED = [
     "for i in 1 2; do yes >/dev/null; done",
     "if [ -f x ]; then yes > /dev/null; fi",
     "while read l; do yes > /dev/null; done < f",
+    # Downstream of a pipe. `_head_of` reads only the FIRST command of a
+    # segment, and every `|` used to mark the whole segment bounded, so the
+    # last stage - the one with no reader to deliver SIGPIPE - was never looked
+    # at at all.
+    ": | yes > /dev/null",
+    "echo hi | yes > /dev/null",
+    # An unquoted `#` is ordinary shell text far more often than it opens a
+    # comment. shlex swallowed from it to end of line and lost the generator.
+    "echo ${#PATH}; yes > /dev/null",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -91,6 +100,11 @@ ALLOWED = [
     "npm test\necho done",
     "printf x\ntimeout 5 yes",
     "for i in 1 2; do timeout 5 yes; done",
+    # `ulimit -t` is a shell setting, so it can only ever sit in an EARLIER
+    # segment than the process it bounds. Read per segment it bounded nothing,
+    # while the refusal text advertised it as one of the remedies.
+    "ulimit -t 60; yes > /dev/null",
+    "ls  # yes > /dev/null",
 ]
 
 
@@ -123,6 +137,24 @@ _WRAPS = [
     # so this produced `');'`, which matched no separator by equality and left
     # the whole line as a single segment. 84 of 1512 cases walked through here.
     "x=$(echo 1); {cmd}",
+    # Holes four, five and six reached a reviewer instead of this sweep, which
+    # is the claim two lines above falsified. All three were segmentation, not
+    # generator logic, so they enter as AXES rather than three point cases: the
+    # generator downstream of a pipe (nothing reads it, so no SIGPIPE arrives)
+    # and an unquoted `#` that shlex read as a comment and swallowed.
+    ": | {cmd}",
+    "echo hi | {cmd}",
+    "echo ${{#PATH}}; {cmd}",
+]
+
+#: Wrappers that legitimately BOUND whatever they wrap, so every generator
+#: under one must be allowed. `ulimit -t` is a shell setting and can only sit
+#: in an earlier segment than the process it bounds, which is why reading it
+#: per segment made the refusal advertise a remedy it then refused.
+_BOUNDING_WRAPS = [
+    "ulimit -t 60; {cmd}",
+    "timeout 300 bash -c '{cmd}'",
+    "{cmd} | head -c 1M",
 ]
 
 _PREFIXES = [
@@ -171,6 +203,23 @@ def test_no_wrapper_turns_a_legal_command_into_a_refusal(wrap: str) -> None:
         if guard.decide(wrap.format(cmd=cmd)) is not None
     ]
     assert not refused, f"{len(refused)} legal commands refused, e.g. {refused[0]!r}"
+
+
+@pytest.mark.parametrize("wrap", _BOUNDING_WRAPS)
+def test_a_bounding_wrapper_rescues_every_generator(wrap: str) -> None:
+    """The other direction of the same sweep.
+
+    A bound the refusal text advertises must actually work, under every prefix
+    and every generator. Two of the three bounds here were broken while their
+    names sat in the refusal message telling people to use them.
+    """
+    refused = [
+        wrap.format(cmd=prefix + gen)
+        for prefix in _PREFIXES
+        for gen in _GENERATORS
+        if guard.decide(wrap.format(cmd=prefix + gen)) is not None
+    ]
+    assert not refused, f"{len(refused)} bounded commands refused, e.g. {refused[0]!r}"
 
 
 def test_an_unbounded_loop_header_is_refused_whatever_its_body() -> None:

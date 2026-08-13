@@ -2310,8 +2310,9 @@ def cmd_orphans(
         # command exists to make impossible.
         # `filter_new` is called FIRST, never behind a short-circuiting `or`.
         # Recording this scan's findings is its side effect, and skipping it on
-        # a broken or reaping run left the seen-file stale after exactly the
-        # two most interesting sweeps.
+        # a reaping run left the seen-file stale after exactly the most
+        # interesting sweep. (A BROKEN scan records nothing - `filter_new`
+        # handles that itself, because `render` withheld the list.)
         is_new = filter_new(result, seen_path())
         # A reap ALWAYS speaks. A finding reported at 8 minutes is no longer new
         # when the next sweep kills it past the age gate, and that path

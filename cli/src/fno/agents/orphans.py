@@ -128,6 +128,10 @@ class ScanResult:
     reaped: list[Finding] = field(default_factory=list)
     control: dict[str, bool] = field(default_factory=dict)
     broken_reason: Optional[str] = None
+    #: Whether `--reap` was asked for. `render` must not print a `reaped:` line
+    #: on a plain report run: "reaped: 0" there reads as an attempted kill that
+    #: found nothing, when no kill was ever attempted.
+    reap_requested: bool = False
 
     @property
     def broken(self) -> bool:
@@ -344,7 +348,7 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     arm on purpose and watch the verdict be withheld. Without that, "the
     control passed" is itself an unfalsifiable claim.
     """
-    result = ScanResult()
+    result = ScanResult(reap_requested=reap)
     roots = _repo_roots()
     repo_root = roots[0] if roots else os.getcwd()
     # Outside a repo, or with a git too old for `--path-format=absolute`, roots
@@ -522,7 +526,7 @@ def render(result: ScanResult) -> str:
     if result.reaped:
         names = ", ".join(str(f.pid) for f in result.reaped)
         lines.append(f"reaped: {len(result.reaped)}  (fno-named, age > 10m: {names})")
-    elif result.findings:
+    elif result.reap_requested and result.findings:
         # Every orphan predating the guard is named whatever it was named, and
         # a name-gated reap can never touch it. Say so rather than letting the
         # gap read as a broken reap.
@@ -569,6 +573,12 @@ def filter_new(result: ScanResult, seen_path: Path) -> bool:
     caller may stay silent on False. Best-effort: an unreadable or unwritable
     file means "everything is new", which is the loud direction.
     """
+    if result.broken:
+        # A broken scan WITHHELD its findings: `render` prints the reason and no
+        # list. Recording them as reported would silence them on the next
+        # healthy sweep, so one census failure could hide a real orphan forever.
+        # Leave the file alone and answer loud; the caller speaks on broken too.
+        return True
     keys = {_seen_key(f) for f in result.findings}
     try:
         seen = set(seen_path.read_text(encoding="utf-8").split())

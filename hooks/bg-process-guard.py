@@ -98,7 +98,31 @@ def _tokens(text):
     lex = shlex.shlex(text, posix=True, punctuation_chars="();<>|&\n")
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
+    # No comment character. shlex swallows from an unquoted `#` to end of line,
+    # and `#` is ordinary shell text far more often than it starts a comment:
+    # `echo ${#PATH}; yes > /dev/null` lost everything after the `${` and the
+    # generator was never seen. A real trailing comment costs nothing here,
+    # since its tokens land after the command and never in command position.
+    lex.commenters = ""
     return list(lex)
+
+
+def _pipe_parts(segment):
+    """The commands of one pipeline, split on `|`.
+
+    Command position resets at every pipe. `_head_of` alone reads only the
+    FIRST command of a segment, so a generator downstream of a pipe was never
+    examined at all: `: | yes > /dev/null` was allowed.
+    """
+    parts, current = [], []
+    for tok in segment:
+        if tok == "|":
+            parts.append(current)
+            current = []
+        else:
+            current.append(tok)
+    parts.append(current)
+    return [p for p in parts if p]
 
 
 def _segments(tokens):
@@ -156,19 +180,7 @@ def _has_bound(segment):
         base = tok.rsplit("/", 1)[-1]
         if base in {"timeout", "gtimeout"}:
             return True
-        if tok == "|":
-            # A downstream reader bounds the pipeline. `yes` is refused because
-            # a /dev/null sink never goes away, so no SIGPIPE ever arrives;
-            # pipe it into a real command and that command's exit delivers one.
-            # `yes | apt-get install foo` is the standard auto-confirm idiom and
-            # refusing it is how a guard gets switched off.
-            # ponytail: a reader that never exits (`yes | wc -l`) still hangs.
-            # Deciding that statically needs a model of every consumer, so this
-            # accepts the false negative rather than break the common case.
-            return True
         if tok.startswith("count="):  # dd
-            return True
-        if base == "ulimit" and "-t" in segment[i + 1:]:
             return True
         if tok == "-t" and i + 1 < len(segment) and segment[i + 1].isdigit():
             return True  # stress -t 60
@@ -225,18 +237,38 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     ):
         return "`for ((;;))` is an unbounded loop header.", text.strip()
     for segment in _segments(_tokens(text)):
-        bounded = inherited_bound or _has_bound(segment)
-        head, argv = _head_of(segment)
-        if head is None:
-            continue
-        reason = _generator_reason(head, argv)
-        if reason and not bounded:
-            return reason, " ".join(segment)
-        payload = _payload_of(head, argv)
-        if payload:
-            found = _find_unbounded(payload, inherited_bound=bounded, depth=depth + 1)
-            if found:
-                return found
+        seg_bound = inherited_bound or _has_bound(segment)
+        parts = _pipe_parts(segment)
+        for idx, part in enumerate(parts):
+            # A downstream reader bounds the stage feeding it: `yes | head -c 1M`
+            # dies of SIGPIPE when head exits, and `yes | apt-get install foo` is
+            # the standard auto-confirm idiom that a guard must not refuse. The
+            # LAST stage has no reader, so the pipe bounds nothing for it.
+            # ponytail: a reader that never exits (`yes | wc -l`) still hangs.
+            # Deciding that statically needs a model of every consumer, so this
+            # accepts the false negative rather than break the common case.
+            bounded = seg_bound or idx < len(parts) - 1
+            head, argv = _head_of(part)
+            if head is None:
+                continue
+            if head == "ulimit":
+                # `ulimit -t` applies to the whole shell, so it can only ever sit
+                # in an EARLIER segment than the process it bounds. Read per
+                # segment it bounded nothing at all, and the refusal text below
+                # advertises it as a remedy: `ulimit -t 60; yes` was refused.
+                if "-t" in argv:
+                    inherited_bound = True
+                continue
+            reason = _generator_reason(head, argv)
+            if reason and not bounded:
+                return reason, " ".join(segment)
+            payload = _payload_of(head, argv)
+            if payload:
+                found = _find_unbounded(
+                    payload, inherited_bound=bounded, depth=depth + 1
+                )
+                if found:
+                    return found
     return None
 
 
