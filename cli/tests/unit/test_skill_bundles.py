@@ -46,6 +46,13 @@ def _shelled_python_has_yaml() -> bool:
     manifest parser's stdlib fallback cannot handle ``references:``/``agents:``
     blocks. CI's python3 carries it, so guarding here keeps a dev machine whose
     system interpreter lacks it from reading as a code failure.
+
+    Every test that shells out to the parser, the generator, or the freshness
+    gate needs this mark. Four did not carry it and failed on a machine whose
+    python3 has no PyYAML, reading as four broken bundles. A pack manifest
+    under ``plugins/`` declaring ``references:`` is enough to force the PyYAML
+    path for a whole-repo run, so a test touching no bundle at all still lands
+    here. A guard on some of the paths that reach one interpreter is decorative.
     """
     return _run(["python3", "-c", "import yaml"]).returncode == 0
 
@@ -56,6 +63,7 @@ requires_shelled_yaml = pytest.mark.skipif(
 )
 
 
+@requires_shelled_yaml
 def test_manifest_parser_emits_5col_tsv():
     """The parser emits 5-column TSV: type, skill, source, dest, meta_json."""
     result = _run(["python3", str(PARSER), str(MANIFEST)])
@@ -70,6 +78,7 @@ def test_manifest_parser_emits_5col_tsv():
         assert parts[0] in {"file", "reference", "agent", "pack-skill", "pack-agent"}, f"unknown type: {parts[0]}"
 
 
+@requires_shelled_yaml
 def test_generator_produces_byte_identical_file_bundles():
     """AC1-HP: every committed `file` bundle equals the canonical byte-for-byte."""
     result = _run(["python3", str(PARSER), str(MANIFEST)])
@@ -108,6 +117,7 @@ def test_generator_is_idempotent(tmp_path):
         assert p.read_bytes() == content, f"second run mutated {p}"
 
 
+@requires_shelled_yaml
 def test_generator_preserves_executable_bit():
     """Bundled scripts (file type) must keep their executable mode so callers
     can `bash $bundle` and `python3 $bundle` directly without chmod.
@@ -130,6 +140,7 @@ def test_generator_preserves_executable_bit():
         )
 
 
+@requires_shelled_yaml
 def test_freshness_check_passes_for_committed_state():
     """The CI gate exits 0 when committed bundles match the canonical."""
     result = _run(["bash", str(FRESH_CHECK)])
