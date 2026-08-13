@@ -222,8 +222,19 @@ enum SearchOp {
 /// agent row is a plain shell - always safe. An agent pane must prove idle: a
 /// `Done`/exited badge allows; a `Working`/`Blocked` badge refuses (busy); an
 /// unknown badge (liveness-only, no fresh hook report / manifest verdict)
-/// refuses fail-closed - injecting a command mid-turn corrupts an agent's
-/// composer, and false-ready is the forbidden direction.
+/// refuses fail-closed, and false-ready is the forbidden direction.
+///
+/// Refusing mid-turn is still the conservative call HERE, but not for the
+/// reason this comment used to give: node x-1904 measured, from a live claude
+/// session's own transcript, that a busy recipient does not corrupt its
+/// composer on an injected turn - it enqueues the paste and processes it at
+/// the next turn boundary (`queue-operation`/`enqueue`, confirmed via
+/// `crates/fno-agents/src/mail_inject.rs`). That measurement is about a
+/// bracketed-paste MAIL turn landing through the harness's own input-queue
+/// feature; it says nothing about `BlockNavOp::Rerun`'s write below, which
+/// puts a raw re-typed command line directly onto the pane's live input state
+/// (`pty.write_input`), not a message the composer is designed to buffer. No
+/// measurement establishes that write is safe mid-turn, so the guard stays.
 ///
 /// `agents` is the WHOLE cross-session registry, so the row match is scoped to
 /// `session` on the FULL `(session, pane)` ref (the same filter `agent_rows`
