@@ -200,22 +200,27 @@ Deciding whether it still applies used to happen twice, with two different rules
 
 The `github_app` axis had no rule at all.
 A bot verdict counted on any non-empty `state`, and nothing asked which commit the bot had read.
-On PR #826 codex submitted its review against `8e557ccd` at 17:51:48Z, and the coverage event at 19:09:43Z read `head_sha 89bc0b91, coverage covered, reviewed_count 2`.
+On PR #826 codex submitted its review against `8e557ccd` at 17:51:48Z.
+The coverage event at 19:09:43Z read `head_sha 89bc0b91, coverage covered, reviewed_count 2`.
 `89bc0b91` is a commit codex never saw.
 The same shape appears on #827 and on #824, where the inherited verdict was twelve hours old.
 
-The `local_attestation` axis had the opposite failure: a bare `head_sha == HEAD` equality, with no gradations.
-Addressing a review invalidated the proof the review happened, so an agent given three findings and fixing them in three commits owed three re-reviews.
+The `local_attestation` axis had the opposite failure.
+It used a bare `head_sha == HEAD` equality, with no gradations.
+Addressing a review invalidated the proof the review happened.
+An agent given three findings, fixing them in three commits, owed three re-reviews.
 Across footnote PRs 824-831, PR 828 moved through six heads and PR 830 through five.
 
-Both now call one predicate, `review_freshness(reviewed_sha, head_sha)` in `crates/fno-agents/src/loopcheck.rs`, which returns one of four states:
+Both now call one predicate, `review_freshness(reviewed_sha, head_sha)`.
+It lives in `crates/fno-agents/src/loopcheck.rs` and returns one of four states:
 
 - `fresh` - the reviewer read this exact commit.
-- `carried_base_sync` - the PR's own code delta is byte-identical; any tree difference came from the base moving. A rebase is this shape.
+- `carried_base_sync` - the PR's own code delta is byte-identical. Any tree difference came from the base moving. A rebase is this shape.
 - `carried_docs_only` - only documentation paths changed since the reviewed commit.
 - `stale` - everything else, **including every failure path**.
 
-`carried_*` is decided by comparing a **PR code-diff identity** at each commit: the diff from `merge-base(base, sha)` to `sha`, documentation paths dropped, hashed.
+`carried_*` is decided by comparing a **PR code-diff identity** at each commit.
+That identity is the diff from `merge-base(base, sha)` to `sha`, documentation paths dropped, hashed.
 Equal identities mean the code under review is byte-identical, whatever happened to the sha.
 That is what makes a rebase carry and a one-line code fix die.
 
@@ -223,58 +228,81 @@ That is what makes a rebase carry and a one-line code fix die.
 
 | Producer | `reviewed_sha` source | Cost |
 |---|---|---|
-| `github_app` | the review object's `.commit.oid` | none; already in the `gh pr view --json reviews` payload, previously discarded |
-| `local_attestation` | the attestation's own `data.head_sha` | none; already emitted |
+| `github_app` | the review object's `.commit.oid` | none, already in the `gh pr view --json reviews` payload |
+| `local_attestation` | the attestation's own `data.head_sha` | none, already emitted |
 
-Three separate places ask "has this reviewer reviewed this code", and all three go through the predicate: the coverage count, the `config.review.reviewers` attestation scan, and the required-bot presence check that drives `missing_bots` and the nudge.
-Fixing one and leaving the others on a bare equality would have left the gate exactly as tight as before, with the softening purely decorative.
+Three separate places ask "has this reviewer reviewed this code", and all three go through the predicate.
+They are the coverage count, the `config.review.reviewers` attestation scan, and the required-bot presence check that drives `missing_bots`.
+Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
+The softening is then purely decorative.
 
-A `stale` verdict is **recorded, not dropped**: `CoverageVerdict::Stale` says a reviewer responded against an older commit, which is a different fact from `absent` and calls for a different response (ask it to re-read, rather than wait for a first read).
+A `stale` verdict is **recorded, not dropped**.
+`CoverageVerdict::Stale` says a reviewer responded against an older commit.
+That is a different fact from `absent`, and it calls for a different response: ask for a re-read, rather than wait for a first read.
 
 ### What the carry rule does not buy
 
 It does not deliver relief from the re-review treadmill, and the measurement says so plainly.
-Of the 22 head-to-head transitions observed across PRs 824-831, computed against each PR's true base, **2 carry forward. The other 20 are genuine code change.**
+Of the 22 head-to-head transitions observed across PRs 824-831, **2 carry forward**.
+The other 20 are genuine code change, measured against each PR's true base.
 
 An earlier pass measured 63% and was wrong.
-Merged PRs' three-dot diff against the current `origin/main` is empty, and the hash of the empty string equals itself, so twelve transitions were matching an absence against an absence.
-That is why a carry requires a positive match between two SUCCESSFULLY COMPUTED identities, and why an empty code diff yields no identity at all.
+Merged PRs' three-dot diff against the current `origin/main` is empty, and the hash of the empty string equals itself.
+Twelve transitions were matching an absence against an absence.
+So a carry requires a positive match between two SUCCESSFULLY COMPUTED identities.
+An empty code diff yields no identity at all.
 `freshness_two_absent_identities_never_match` is the standing guard.
 
-What the rule does deliver is rebase-invariance, which fires precisely at the mandatory pre-merge rebase, where losing an attestation costs most.
-That is what makes the `github_app` tightening survivable, and it is not "five re-reviews become one".
+What the rule does deliver is rebase-invariance.
+It fires at the mandatory pre-merge rebase, where losing an attestation costs most.
+That is what makes the `github_app` tightening survivable.
+It is not "five re-reviews become one".
 
-**An unused-import removal still costs a full re-review.** `fix(tracker): drop unused json import (ruff F401)` changes a `.py` file, so it is code under any classifier that does not parse Python, and building an AST dependency for one commit shape is not worth it.
-A documentation-only PR never carries an attestation either: with no code in the diff there is no identity to match, and that is the fail-closed direction.
+**An unused-import removal still costs a full re-review.**
+`fix(tracker): drop unused json import (ruff F401)` changes a `.py` file.
+That is code under any classifier that does not parse Python, and an AST dependency for one commit shape is not worth it.
+A documentation-only PR never carries an attestation either.
+With no code in the diff there is no identity to match, which is the fail-closed direction.
 
 ### Named, not closed: the derivation-latency window
 
 A valid attestation can exist while the gate cannot see it, and this PR does not close that.
 
 Raw `review_attestation` events never leave the checkout they are emitted in.
-`scripts/setup/setup-worktree.sh` links `.fno/config.toml`, `.fno/carveouts.jsonl`, and `.fno/codemap.md` into a worktree; `events.jsonl` appears zero times in that script, so a worktree's event log is a real per-checkout file.
+`scripts/setup/setup-worktree.sh` links `.fno/config.toml`, `.fno/carveouts.jsonl`, and `.fno/codemap.md` into a worktree.
+`events.jsonl` appears zero times in that script, so a worktree's event log is a real per-checkout file.
 Only the DERIVED `review_coverage` aggregate reaches the global `~/.fno/events.jsonl`, written by the Rust runtime.
 So the propagation path is the aggregate, and the aggregate only exists after a loop-check run.
 
-PR #830 is the specimen: its attestation was emitted at 04:12:35 into a worktree-local log, and the canonical gate read `reviewed_count 0` until the Rust loop-check re-derived the global aggregate at 04:15.
+PR #830 is the specimen.
+Its attestation was emitted at 04:12:35 into a worktree-local log.
+The canonical gate read `reviewed_count 0` until the Rust loop-check re-derived the global aggregate at 04:15.
 Between emit and that run, the gate reads a stale aggregate for a PR that is genuinely reviewed.
 
 It is named here rather than fixed because both available fixes are worse than the window.
 Emitting raw attestations globally changes where a per-checkout log lives, which is propagation architecture and not freshness.
-Having the Python reader walk raw attestations would put a second implementation of the coverage computation beside the Rust one, which is the two-divergent-rules disease this whole document is about curing.
-The window is bounded by the loop-check interval and fails in the safe direction: the gate under-reports coverage and holds, it never over-reports and merges.
+Having the Python reader walk raw attestations puts a second implementation of the coverage computation beside the Rust one.
+That is the two-divergent-rules disease this document exists to cure.
+The window is bounded by the loop-check interval and fails in the safe direction.
+The gate under-reports coverage and holds. It never over-reports and merges.
 
 ### What an attestation proves
 
 It proves a commit was pinned. It does not prove a review happened.
 
-`/target` runs the review verb and then runs `skills/review/scripts/emit-attestation.sh`, which records the reviewer name and verdict it is PASSED.
-The review itself emits nothing, and nothing in the producer can tell a real review from a caller that typed the arguments.
+`/target` runs the review verb, then runs `skills/review/scripts/emit-attestation.sh`.
+That script records the reviewer name and verdict it is PASSED.
+The review itself emits nothing.
+Nothing in the producer can tell a real review from a caller that typed the arguments.
 The freshness half of the protocol is sound and is only half.
 
 Two consequences are recorded rather than gated.
-`self_attested_count` on the coverage event says how many of `reviewed_count` are the author attesting its own diff, because self-review is the DEFAULT path and refusing it would wedge every single-session PR (see below).
-The `model` field on an attestation records what the environment CLAIMED; the producer now refuses to record a claim it can prove false (a non-`claude*` model name with no non-Anthropic base URL cannot be the model that answered), but a claim that is merely unverified still records as given, because nothing available to a shell can check it.
+`self_attested_count` on the coverage event says how many of `reviewed_count` are the author attesting its own diff.
+It is recorded rather than gated because self-review is the DEFAULT path, and refusing it wedges every single-session PR.
+The `model` field records what the environment CLAIMED.
+The producer now refuses to record a claim it can prove false.
+A non-`claude*` model name with no non-Anthropic base URL cannot be the model that answered.
+A claim that is merely unverified still records as given, because nothing available to a shell can check it.
 
 ## Attestation origin: whose process rendered the verdict
 
@@ -299,9 +327,11 @@ anything.
 The origin is recorded, not gating.
 `reviewed_count` never consults it: every `reviewed` verdict counts toward
 coverage regardless of its origin, `self_attested` included.
-What the coverage event now adds is `self_attested_count`, so how much of the count is the author reviewing itself is a NUMBER a reader can see rather than a fact stated in prose.
+What the coverage event now adds is `self_attested_count`.
+How much of the count is the author reviewing itself is a NUMBER a reader can see, rather than a fact stated in prose.
 It is deliberately not called `independent_count`, for the reason given just below.
-A gate that wants to demand a second reader is one predicate over that number; that is a merge-authority decision, tracked separately.
+A gate that wants to demand a second reader is one predicate over that number.
+That is a merge-authority decision, tracked separately.
 
 **A green PR whose only attestation is `self_attested` is covered. Merge it.**
 `self_attested` is not a hold condition and has never been one.
@@ -316,9 +346,10 @@ fno agents spawn --name <name>-review "/code-review <size> for PR <n> against ma
 
 Two rules ride with the lane, each derived from a code fact.
 `--cwd` MUST be the author's worktree: `fno event emit` writes cwd-relative through `append_event`, and `local_latest_passes` reads only the project log, so a reviewer anywhere else emits an attestation its own loop-check never sees.
-NO `--fix`: the reviewer shares the worktree, so a fixing reviewer moves HEAD and can silently invalidate the author's own attestation, and re-opens the tree-corruption specimens.
+NO `--fix`: the reviewer shares the worktree, so a fixing reviewer moves HEAD and can silently invalidate the author's own attestation.
 One writer per worktree while a review is in flight; the author applies findings and re-attests, and the reviewer's attestation is then stale by design, which is the freshness rule working, not a bug.
-A `--fix` that touched only documentation would now carry rather than invalidate, which is exactly why the rule is not the reason for this constraint: the tree-corruption specimens are.
+A `--fix` that touches only documentation now carries rather than invalidates.
+That is exactly why the freshness rule is not the reason for this constraint. The tree-corruption specimens are.
 
 The lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author spawns a claude reviewer (or vice versa), so "different session" can mean "different model".
 The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the lane's headline value, `other_session`, is silently unreachable.
