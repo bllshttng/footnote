@@ -400,10 +400,13 @@ def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[s
 
     families: dict[str, set[str]] = {}
     for i, line in enumerate(mux_lines):
-        m = _UNKNOWN_VERB_RE.search(line)
-        if not m:
+        # Not `m`: that name is already bound to a Match by the top-level loop
+        # above, and rebinding it to an Optional is a type error rather than a
+        # style nit.
+        unknown = _UNKNOWN_VERB_RE.search(line)
+        if not unknown:
             continue
-        fam = m.group(1) or ""
+        fam = unknown.group(1) or ""
         fm = _FAMILY_RE.search(line)
         if fm:
             fam = fm.group(1)
