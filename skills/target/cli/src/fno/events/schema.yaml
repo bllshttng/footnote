@@ -808,7 +808,7 @@ event_types:
     consumers: [operator]
 
   - name: style_refusal
-    description: "A mail body was refused by the five-rule style gate before delivery. The retry rate (a refusal followed by a passing send in the same session) is a query over events.jsonl."
+    description: "A mail body was refused by the six-rule style gate before delivery. The retry rate (a refusal followed by a passing send in the same session) is a query over events.jsonl."
     sources: [target, subagent, test]
     data:
       required: [surface, rule_ids]
