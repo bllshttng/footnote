@@ -60,6 +60,110 @@ TOMBSTONES: dict[str, str] = {
         "registration of the identical Typer app, so every one of its nine "
         "subcommands was a duplicate of a `capture` subcommand"
     ),
+    # --- Leaves with zero callers anywhere a contributor reads, confirmed by a
+    # second whole-repo walk sharing no code with `verb-callers.py --dead`. A
+    # zero is a candidate, not a ruling: `loops resume-all` also scored zero and
+    # STAYS, because it is the only release for the `pause-all` kill switch and
+    # deleting it would strand a paused fleet.
+    "agents mcp": (
+        "`fno mcp` - the same Typer app. `agents mcp` was a second registration "
+        "of it, and the Rust daemon's deliver_envelope shells the top-level path"
+    ),
+    # Removed from BOTH fronts (Python routing table and client.rs dispatch).
+    # Half-removing would have left `fno agents push-channel` auto-routing to
+    # the binary while leaving the enumerated surface, which is the invisible
+    # live verb this whole node exists to make impossible.
+    "agents register-channel": (
+        "nothing - the channel CLI wrappers had no caller. The `channel.*` "
+        "daemon RPCs they fronted are live and untouched; the MCP sidecar "
+        "(`fno.mcp.sidecar`) speaks them directly, which is the real path"
+    ),
+    "agents unregister-channel": (
+        "nothing - see `fno agents register-channel`; the `channel.*` RPC is live"
+    ),
+    "agents push-channel": (
+        "nothing - see `fno agents register-channel`; the `channel.*` RPC is live"
+    ),
+    "backlog backfill-slugs": (
+        "nothing - the one-shot migration that gave every node a slug has run. "
+        "`fno backlog idea` assigns a slug at creation"
+    ),
+    "backlog briefs": (
+        "nothing - the last-N listing had no reader. The briefs themselves are "
+        "files under `paths.briefs_dir()` (`~/.fno/briefs/<id>.md`)"
+    ),
+    "backlog exec-graph": (
+        "nothing - the derived execution graph had no reader outside its own "
+        "compile step, which still runs"
+    ),
+    "backlog release": "`fno backlog unclaim` - `release` was an alias for it",
+    "backlog schedule": (
+        "nothing - the shadow-first frontier report never left shadow mode and "
+        "no gate ever read its exit code. `fno backlog next` picks work"
+    ),
+    "backlog tree": "`fno backlog view` - the board view nothing had switched off",
+    "backlog validate": (
+        "nothing - the unknown-blocker and cycle checks had no caller, in CI or "
+        "out. `fno backlog maintain` is the live hygiene pass but does NOT "
+        "check blocker integrity, and `backlog triage validate` validates a "
+        "proposal file rather than the graph"
+    ),
+    "backlog batch abandon": (
+        "`fno backlog batch ship` - it is the documented failure path and "
+        "already requeues members as individual PRs; `abandon` was wired to "
+        "nothing despite its docstring naming the daemon"
+    ),
+    "backlog batch close": (
+        "`fno backlog batch ship` - the only close path the daemon takes"
+    ),
+    "backlog batch policy": (
+        "nothing - the selection wiring that was to shell this verb never "
+        "landed. `fno backlog next` decides what runs"
+    ),
+    "backlog triage pile": (
+        "`fno backlog view` - the rendered board carries the deferred nodes. "
+        "`triage health` does NOT: it reports collisions, stale, "
+        "failure-prone, and the idea pile, not the deferred pile"
+    ),
+    "claim incarnation-fence": (
+        "`fno claim status <key>` - it reports the live holder, which is the "
+        "only ownership truth the fence was checking"
+    ),
+    "claim lane-count": (
+        "`fno claim list` - it shows the live claims this counted"
+    ),
+    "resume receipt version": (
+        "nothing - the schema version had no reader; "
+        "`fno resume receipt validate` fails on a version it cannot read"
+    ),
+    "runtime probe": "`fno doctor` - the live environment-health check",
+    "runtime reap-dead-workers": (
+        "`fno agents reap` - the live dead-row GC, and the same sweep the "
+        "daemon runs on its idle tick"
+    ),
+    "state list-fields": (
+        "nothing - the field list had no reader; the schema is "
+        "`cli/src/fno/schemas`"
+    ),
+    "state path": (
+        "nothing - it resolved only `ledger`, and nothing called it. "
+        "`fno.paths.ledger_json()` is the in-process resolver"
+    ),
+    "state validate": (
+        "nothing - `fno state set` validates on write, which is where an "
+        "invalid field is actually stopped"
+    ),
+    "stub-manifest check-pr": (
+        "`fno stub-manifest reconcile-validate` - the drift gate with callers"
+    ),
+    "stub-manifest validate": (
+        "`fno stub-manifest reconcile-validate` - it validates the manifest as "
+        "part of the check that runs"
+    ),
+    "target resume-bind": (
+        "`fno target init` - it acquires the node claim against the live "
+        "session pid, which is the rebinding this verb did separately"
+    ),
 }
 
 

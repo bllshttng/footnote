@@ -76,7 +76,6 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
         "unclaim",
         "the forward transition is a claim acquired by `fno target init`",
     ),
-    Pair("backlog", None, "release", "alias of `unclaim`; same forward"),
     # -- carve-outs --
     Pair("carveout", "add", "update"),
 )
@@ -88,16 +87,16 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
 # accept that it lands in the derived non-transition set.
 KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
-        "add", "advance", "archive", "backfill-slugs", "bases", "batch",
-        "briefs", "capture", "collisions", "cost", "decompose", "defer",
-        "dispatch-lanes", "done", "epic", "exec-graph", "find", "get", "groom",
+        "add", "advance", "archive", "bases", "batch",
+        "capture", "collisions", "cost", "decompose", "defer",
+        "dispatch-lanes", "done", "epic", "find", "get", "groom",
         "idea", "intake", "lane-fill", "lanes", "maintain", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
         "rank", "ready", "reconcile", "reconcile-findings", "rehash",
-        "relatedness", "release", "remove", "reopen", "reprioritize", "roadmap",
-        "schedule", "session", "status", "supersede", "tree", "triage",
+        "relatedness", "remove", "reopen", "reprioritize", "roadmap",
+        "session", "status", "supersede", "triage",
         "unarchive", "unclaim", "undefer", "unqueue", "unsupersede", "update",
-        "validate", "view",
+        "view",
     }),
     "carveout": frozenset({"add", "list", "resolve", "update"}),
 }

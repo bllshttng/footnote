@@ -69,23 +69,6 @@ def test_bad_domain_exit_1(tmp_path: Path) -> None:
 # --- cli_policy fail-safe (the dangerous direction) ------------------------
 
 
-def test_policy_node_lookup_failure_ships_solo(tmp_path: Path, monkeypatch) -> None:
-    """A failed `fno backlog get` must degrade to ship_solo, never join/start."""
-    import subprocess
-
-    class _Fail:
-        returncode = 1
-        stdout = ""
-        stderr = "boom"
-
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Fail())
-    # even with batching enabled, a lookup failure ships solo (conservative)
-    monkeypatch.setattr(B, "_load_batch_enabled", lambda: True)
-    r = _inv("policy", "-n", "x-unknown", "--root", str(tmp_path))
-    assert r.exit_code == 0
-    assert '"ship_solo"' in r.output
-
-
 # --- _safe path-traversal trust boundary -----------------------------------
 
 

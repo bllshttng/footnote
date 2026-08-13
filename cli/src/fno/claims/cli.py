@@ -67,12 +67,14 @@ from .core import (
     refresh_claim,
     release_claim,
 )
+from fno.tombstones import tombstone_group_cls
 
 
 cli = typer.Typer(
     name="claim",
     help="Work-claim coordination primitive",
     no_args_is_help=True,
+    cls=tombstone_group_cls("claim"),
 )
 
 
@@ -625,20 +627,6 @@ def lane_release(
         typer.echo(f"released lane {lane_id}")
 
 
-@cli.command(name="lane-count")
-def lane_count(
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Print the number of live lane slots (the DERIVED cap denominator)."""
-    from .lanes import active_lane_count
-
-    n = active_lane_count()
-    if json_output:
-        typer.echo(json.dumps({"active_lanes": n}))
-    else:
-        typer.echo(str(n))
-
-
 @cli.command(name="force-release")
 def force_release(
     key: str = typer.Argument(...),
@@ -656,36 +644,6 @@ def force_release(
         typer.echo(json.dumps({"key": key, "force_released": True, "reason": reason}))
     else:
         typer.echo(f"force-released: {key}")
-
-
-@cli.command(name="incarnation-fence")
-def incarnation_fence(
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Refuse outward actions when another incarnation holds this session's
-    single-writer claim (x-eea5 1.3). Exit 0 proceed, 2 fenced.
-
-    The ship phase calls this before a push/PR; ``fno pr merge`` runs the same
-    check inline. Read-only, best-effort-loud: an unreadable claims dir refuses
-    outward actions (fail closed). With no resolvable session identity the fence
-    is invisible (exit 0, proceed)."""
-    from .incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
-
-    uuid = resolve_fence_session_uuid()
-    if not uuid:
-        typer.echo("incarnation-fence: no session identity; invisible (proceed)", err=True)
-        raise typer.Exit(code=0)
-    blocked, reason = incarnation_fence_blocks(uuid)
-    if blocked:
-        typer.echo(f'<help reason="incarnation-fence" evidence="{reason}">', err=True)
-        typer.echo(reason, err=True)
-        if json_output:
-            typer.echo(json.dumps({"fence": "blocked", "reason": reason}))
-        raise typer.Exit(code=2)
-    if json_output:
-        typer.echo(json.dumps({"fence": "clear", "blocked": False}))
-    else:
-        typer.echo("incarnation-fence: clear (proceed)", err=True)
 
 
 __all__ = ["cli"]

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
+from fno.tombstones import tombstone_group_cls
 
 # Required keys on each stub entry. `symbol`/`contract_ref` are advisory (a stub
 # may be a whole file), so only the locators every de-stub pass needs are forced.
@@ -316,6 +317,7 @@ stub_manifest_app = typer.Typer(
     no_args_is_help=True,
     help="Stub-manifest: emit/validate the artifact a contract dependent's "
     "first pass records, and check whether a PR is held by an unreconciled one.",
+    cls=tombstone_group_cls("stub-manifest"),
 )
 
 
@@ -366,45 +368,6 @@ def cmd_write(
             typer.echo(f"reconcile dispatched for pending sentinel: {node}", err=True)
     except Exception as exc:  # noqa: BLE001 - the manifest write is the contract
         typer.echo(f"stub-manifest: pending-reconcile re-fire skipped: {exc}", err=True)
-
-
-@stub_manifest_app.command("validate")
-def cmd_validate(
-    path: Path = typer.Argument(..., help="path to a stub-manifest JSON file"),
-) -> None:
-    """Exit 0 if the manifest is well-formed, 1 otherwise."""
-    try:
-        m = load(path)
-    except FileNotFoundError:
-        typer.echo(f"stub-manifest: not found: {path}", err=True)
-        raise typer.Exit(1)
-    except StubManifestError as exc:
-        typer.echo(f"stub-manifest: {exc}", err=True)
-        raise typer.Exit(1)
-    typer.echo(f"ok: {len(m['stubs'])} stub(s), reconciled={bool(m.get('reconciled'))}")
-
-
-@stub_manifest_app.command("check-pr")
-def cmd_check_pr(
-    pr: int = typer.Option(..., "--pr-number", help="PR number"),
-    root: Path = typer.Option(Path("."), "--root", help="project root (default cwd)"),
-) -> None:
-    """Exit 2 (held) if merging this PR would ship unreconciled stubs, else 0."""
-    try:
-        held = unreconciled_manifest_for_pr(pr, root)
-    except Exception as exc:  # noqa: BLE001 - clean CLI exit over a raw traceback
-        typer.echo(f"stub-manifest: check-pr failed: {exc}", err=True)
-        raise typer.Exit(1)
-    if held:
-        typer.echo(
-            json.dumps(
-                {"pr": pr, "outcome": "held", "node": held.get("_node"),
-                 "stubs": len(held.get("stubs", []))},
-                separators=(",", ":"),
-            )
-        )
-        raise typer.Exit(2)
-    typer.echo(json.dumps({"pr": pr, "outcome": "clear"}, separators=(",", ":")))
 
 
 # Verdict -> CLI exit code. authorize/already-reconciled are success (0); drift

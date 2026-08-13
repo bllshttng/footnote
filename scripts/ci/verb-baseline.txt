@@ -40,18 +40,15 @@ agents list !--provider
 agents logs
 agents loop
 agents loop-check
-agents mcp send
 agents name
 agents needs
 agents nudge-peek
 agents peek
 agents ping
 agents probe-run
-agents push-channel
 agents reap
 agents reconcile
 agents register
-agents register-channel
 agents registry-json
 agents report
 agents restart
@@ -65,7 +62,6 @@ agents subscribe
 agents top
 agents trace
 agents truth
-agents unregister-channel
 agents verify-evidence
 agents wait
 agents watch
@@ -79,19 +75,14 @@ approvals show !--db
 backlog add !--tag
 backlog advance !--continuation
 backlog archive
-backlog backfill-slugs
 backlog bases
-backlog batch abandon
-backlog batch close
 backlog batch join
 backlog batch metrics
 backlog batch open
-backlog batch policy
 backlog batch prepare
 backlog batch ship
 backlog batch ship-closeable
 backlog batch status
-backlog briefs
 backlog capture add
 backlog capture archive
 backlog capture capture-pass
@@ -108,7 +99,6 @@ backlog defer
 backlog dispatch-lanes
 backlog done
 backlog epic status
-backlog exec-graph
 backlog find
 backlog get
 backlog groom
@@ -132,21 +122,17 @@ backlog reconcile-findings
 backlog rehash
 backlog relatedness build
 backlog relatedness get
-backlog release
 backlog remove
 backlog reopen
 backlog reprioritize
 backlog roadmap
-backlog schedule
 backlog session add
 backlog status
 backlog supersede
-backlog tree
 backlog triage apply
 backlog triage consistency
 backlog triage context
 backlog triage health
-backlog triage pile
 backlog triage projects
 backlog triage propose
 backlog triage rank
@@ -158,7 +144,6 @@ backlog undefer
 backlog unqueue
 backlog unsupersede
 backlog update !--tag !--untag
-backlog validate
 backlog view
 bundle check
 bundle lint
@@ -168,9 +153,7 @@ carveout resolve
 carveout update
 claim acquire
 claim force-release
-claim incarnation-fence
 claim lane-acquire
-claim lane-count
 claim lane-release
 claim list
 claim refresh
@@ -309,7 +292,6 @@ research
 restart
 resume receipt show
 resume receipt validate !--session
-resume receipt version
 resume receipt write !--session
 retro drain-postmortems
 retro run !--pr !--session
@@ -323,8 +305,6 @@ route env
 route ls
 route set
 route unset
-runtime probe
-runtime reap-dead-workers
 runtime register-worker
 runtime worktree
 scoreboard
@@ -340,17 +320,12 @@ skill-diff reconcile
 skill-diff tick
 state archive
 state init !--allow-stub
-state list-fields
-state path
 state set
 state show
-state validate
 status
 status-fanout
-stub-manifest check-pr
 stub-manifest reconcile-finalize
 stub-manifest reconcile-validate
-stub-manifest validate
 stub-manifest write
 target blast-check
 target check-contained
@@ -358,7 +333,6 @@ target check-review-gate
 target init !--provider
 target resolve-model !--provider
 target resolve-owned-identity
-target resume-bind
 target start !--provider
 target status
 test

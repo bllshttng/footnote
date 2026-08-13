@@ -570,14 +570,6 @@ def test_no_test_leaks_to_real_graph_html(tmp_graph, tmp_path):
 
 # --- tree ---
 
-def test_ac1_hp_graph_tree(tmp_graph):
-    """AC1-HP: fno graph tree shows output."""
-    _invoke("backlog", "add", "Root Feature")
-    r = _invoke("backlog", "tree")
-    assert r.exit_code == 0
-    assert "Root Feature" in r.output
-
-
 # --- status ---
 
 def test_ac1_hp_graph_status(tmp_graph):
@@ -589,14 +581,6 @@ def test_ac1_hp_graph_status(tmp_graph):
 
 
 # --- validate ---
-
-def test_ac1_hp_graph_validate_clean(tmp_graph):
-    """AC1-HP: fno graph validate on clean graph exits 0."""
-    _invoke("backlog", "add", "Clean")
-    r = _invoke("backlog", "validate")
-    assert r.exit_code == 0
-    assert "OK" in r.output or "no issues" in r.output.lower()
-
 
 # --- cost ---
 
@@ -626,14 +610,6 @@ def test_ac1_hp_graph_cost(tmp_graph):
 
 
 # --- briefs ---
-
-def test_ac1_hp_graph_briefs_empty(tmp_graph):
-    """AC1-HP: fno graph briefs returns JSON array."""
-    r = _invoke("backlog", "briefs")
-    assert r.exit_code == 0
-    data = json.loads(r.output)
-    assert isinstance(data, list)
-
 
 # --- remove ---
 
@@ -2176,28 +2152,6 @@ def test_next_selects_healthy_ready_node(tmp_graph):
     }])
     r = _invoke("backlog", "next", "--project", "fno")
     assert '"id": "ab-live"' in r.output
-
-
-def test_triage_pile_lists_deferred_oldest_first(tmp_graph):
-    _seed(tmp_graph, [
-        {"id": "ab-a", "title": "a", "project": "fno",
-         "deferred_at": "2026-01-01T00:00:00+00:00",
-         "deferred_reason": "stale-quarantine (guard)", "priority": "p2"},
-        {"id": "ab-b", "title": "b", "project": "fno",
-         "deferred_at": "2026-06-01T00:00:00+00:00",
-         "deferred_reason": "manual pause", "priority": "p1"},
-    ])
-    r = _invoke("backlog", "triage", "pile", "--json")
-    data = json.loads(r.stdout)
-    ids = [x["id"] for x in data["pile"]]
-    assert ids == ["ab-a", "ab-b"]  # oldest-deferred leads
-    assert data["pile"][0]["reason"] == "stale-quarantine (guard)"
-
-
-def test_triage_pile_empty_when_no_deferred(tmp_graph):
-    _seed(tmp_graph, [{"id": "ab-x", "title": "x", "project": "fno"}])
-    r = _invoke("backlog", "triage", "pile")
-    assert "triage pile empty" in r.output
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):

@@ -176,11 +176,6 @@ def test_cli_acquire_cap_release_flow(cli_claims_root):
     r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-b", "--max-lanes", "2"])
     assert r.exit_code == 0, r.output
 
-    # Count reflects two live lanes.
-    r = _runner.invoke(cli, ["lane-count", "--json"])
-    assert r.exit_code == 0
-    assert json.loads(r.output)["active_lanes"] == 2
-
     # Third acquisition is capped -> exit 1.
     r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-c", "--max-lanes", "2"])
     assert r.exit_code == 1, r.output
