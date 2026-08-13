@@ -132,17 +132,47 @@ def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
     return [latest[k] for k in order] + unkeyed
 
 
-def _fetch(pr: str, cwd: Optional[str]) -> Optional[dict]:
+def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
+    """Return (parsed json, reason). ``reason`` is empty on success.
+
+    The reason is carried rather than dropped because a bare ``verdict: error``
+    is unactionable. The cause is always on gh's stderr and used to be discarded
+    here, so a caller saw the same four fields for a deleted PR, a network
+    failure, and an exhausted API quota.
+    """
     res = run(
         ["gh", "pr", "view", pr, "--json", "state,statusCheckRollup"],
         cwd=cwd,
     )
     if not res.ok or not res.stdout.strip():
-        return None
+        return None, _fetch_reason(res)
     try:
-        return json.loads(res.stdout)
+        return json.loads(res.stdout), ""
     except json.JSONDecodeError:
-        return None
+        return None, "gh returned output that is not JSON"
+
+
+def _fetch_reason(res) -> str:
+    """Explain a failed gh read, and name the right bucket on a quota block.
+
+    A rate-limit block gets the extra clause because the obvious check disagrees
+    with it. ``gh pr view`` spends the GRAPHQL quota, while ``gh api rate_limit``
+    reports its top-level ``rate`` and ``resources.core`` bucket, which can read
+    5000 remaining at the same moment GraphQL sits at 0. An agent that polls in a
+    loop exhausts GraphQL first, then reads a clean bill of health and keeps
+    polling. Naming the bucket is what makes the wait end.
+    """
+    lines = [ln for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
+    detail = lines[-1].strip() if lines else "gh pr view failed with no message"
+    if "rate limit" in detail.lower():
+        return (
+            detail
+            + " | this is the GraphQL quota. `gh api rate_limit` reports the CORE"
+            " bucket and can read 5000 remaining while GraphQL is at 0, so check"
+            " `gh api rate_limit --jq .resources.graphql` and wait for its reset"
+            " rather than retrying."
+        )
+    return detail
 
 
 def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
@@ -175,10 +205,18 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     """
     import sys
 
-    pr_json = _fetch(pr, cwd)
+    pr_json, reason = _fetch(pr, cwd)
     if pr_json is None:
         sys.stdout.write(
-            json.dumps({"pr": pr, "verdict": "error", "settled": False, "green": False})
+            json.dumps(
+                {
+                    "pr": pr,
+                    "verdict": "error",
+                    "settled": False,
+                    "green": False,
+                    "reason": reason,
+                }
+            )
             + "\n"
         )
         return 4
