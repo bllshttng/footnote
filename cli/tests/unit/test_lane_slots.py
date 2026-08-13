@@ -150,7 +150,7 @@ def test_count_ignores_other_claim_kinds(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# CLI surface (fno claim lane-acquire / lane-release / lane-count)
+# CLI surface (fno claim acquire --lane / release --lane)
 # ---------------------------------------------------------------------------
 
 import json  # noqa: E402
@@ -171,25 +171,25 @@ def cli_claims_root(tmp_path, monkeypatch):
 
 def test_cli_acquire_cap_release_flow(cli_claims_root):
     # Two acquisitions fit under cap 2.
-    r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-a", "--max-lanes", "2"])
+    r = _runner.invoke(cli, ["acquire", "--lane", "node-a", "--max-lanes", "2"])
     assert r.exit_code == 0, r.output
-    r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-b", "--max-lanes", "2"])
+    r = _runner.invoke(cli, ["acquire", "--lane", "node-b", "--max-lanes", "2"])
     assert r.exit_code == 0, r.output
 
     # Third acquisition is capped -> exit 1.
-    r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-c", "--max-lanes", "2"])
+    r = _runner.invoke(cli, ["acquire", "--lane", "node-c", "--max-lanes", "2"])
     assert r.exit_code == 1, r.output
 
     # Release frees a slot; the third now fits.
-    r = _runner.invoke(cli, ["lane-release", "--lane-id", "node-a"])
+    r = _runner.invoke(cli, ["release", "--lane", "node-a"])
     assert r.exit_code == 0
-    r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-c", "--max-lanes", "2", "--json"])
+    r = _runner.invoke(cli, ["acquire", "--lane", "node-c", "--max-lanes", "2", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["lane_id"] == "node-c"
 
 
 def test_cli_acquire_rejects_bad_max_lanes(cli_claims_root):
-    r = _runner.invoke(cli, ["lane-acquire", "--lane-id", "node-a", "--max-lanes", "0"])
+    r = _runner.invoke(cli, ["acquire", "--lane", "node-a", "--max-lanes", "0"])
     assert r.exit_code == 2, r.output
 
 

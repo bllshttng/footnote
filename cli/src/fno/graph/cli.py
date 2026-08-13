@@ -3619,7 +3619,7 @@ def _release_node_lockfile(node_id: str) -> str:
         if state == "corrupted":
             typer.echo(
                 f"warning: lockfile {key} is corrupted; graph claim cleared but "
-                f"lockfile left intact. Use `fno claim force-release {key} -R <why>` "
+                f"lockfile left intact. Use `fno claim release {key} --force -R <why>` "
                 f"to repair.",
                 err=True,
             )
@@ -3637,7 +3637,7 @@ def _release_node_lockfile(node_id: str) -> str:
         typer.echo(
             f"warning: lockfile {key} held by LIVE holder {holder!r}; graph claim "
             f"cleared but lockfile left intact. Use "
-            f"`fno claim force-release {key} -R <why>` to override.",
+            f"`fno claim release {key} --force -R <why>` to override.",
             err=True,
         )
         return "lockfile left (live foreign holder)"

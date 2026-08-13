@@ -152,9 +152,6 @@ carveout list
 carveout resolve
 carveout update
 claim acquire
-claim force-release
-claim lane-acquire
-claim lane-release
 claim list
 claim refresh
 claim release

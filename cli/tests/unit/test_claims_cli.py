@@ -57,7 +57,7 @@ def test_ttl_parser_invalid_raises():
 def test_help_lists_all_verbs():
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for verb in ("acquire", "release", "refresh", "status", "list", "force-release"):
+    for verb in ("acquire", "release", "refresh", "status", "list"):
         assert verb in result.output
 
 
@@ -222,14 +222,26 @@ def test_list_with_prefix(cwd_tmp):
 
 def test_force_release_succeeds(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h"])
-    result = runner.invoke(cli, ["force-release", "k", "--reason", "operator override"])
+    result = runner.invoke(cli, ["release", "k", "--force", "--reason", "operator override"])
     assert result.exit_code == 0
 
 
 def test_force_release_empty_reason_exits_2(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h"])
-    # Typer's BadParameter on empty value goes through option parsing; pass empty string explicitly
-    result = runner.invoke(cli, ["force-release", "k", "--reason", ""])
+    result = runner.invoke(cli, ["release", "k", "--force", "--reason", ""])
+    assert result.exit_code == 2
+
+
+def test_force_release_rejects_a_holder(cwd_tmp):
+    """--force drops the claim regardless of owner, so --holder is meaningless.
+
+    Accepting both silently would read as "release it if I hold it, else force",
+    which is two different operations behind one invocation.
+    """
+    runner.invoke(cli, ["acquire", "k", "--holder", "h"])
+    result = runner.invoke(
+        cli, ["release", "k", "--force", "--reason", "why", "--holder", "h"]
+    )
     assert result.exit_code == 2
 
 

@@ -2540,7 +2540,7 @@ def _reacquire_node_claim(
             f"fno target start: cannot re-acquire {key}: "
             f"{type(exc).__name__}: {exc}. The claim state is unreadable or "
             f"corrupt; refusing to risk a duplicate claim. Clear it "
-            f"(fno claim force-release {key}) and retry.",
+            f"(fno claim release {key} --force -R <why>) and retry.",
             err=True,
         )
         raise typer.Exit(code=1)

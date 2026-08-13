@@ -626,7 +626,7 @@ def _release_lane_slot(node: str, cwd: str) -> None:
     log = logging.getLogger(__name__)
     try:
         rel = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "claim", "lane-release", "--lane-id", node],
+            [*_subprocess_util.fno_py_cmd(), "claim", "release", "--lane", node],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )
         if rel.returncode != 0:
@@ -691,7 +691,7 @@ def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
         rel = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "claim", "force-release", f"node:{node}",
+            [*_subprocess_util.fno_py_cmd(), "claim", "release", f"node:{node}", "--force",
              "-R", f"failover respawn {candidate.short_id}"],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )

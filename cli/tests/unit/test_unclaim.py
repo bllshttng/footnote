@@ -150,10 +150,10 @@ def test_unclaim_refuses_live_foreign_lockfile(tmp_graph, claims_root, monkeypat
     assert result.exit_code == 0, result.output
     # Graph claim still cleared...
     assert _read(tmp_graph)[0]["session_id"] is None
-    # ...but the live foreign lockfile is left intact, with a force-release hint.
+    # ...but the live foreign lockfile is left intact, with an override hint.
     assert _lock_exists("node:ab-1234abcd", claims_root)
     out = result.output + (result.stderr or "")
-    assert "force-release" in out
+    assert "release" in out and "--force" in out
 
 
 def _point_session_at(tmp_path: Path, monkeypatch, session_id: str) -> None:

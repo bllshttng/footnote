@@ -160,6 +160,22 @@ TOMBSTONES: dict[str, str] = {
         "`fno stub-manifest reconcile-validate` - it validates the manifest as "
         "part of the check that runs"
     ),
+    # --- Flag-shaped names: a verb whose name was a mode of another verb. The
+    # capability is unchanged and the collapse is mechanical, so each of these
+    # names the exact replacement invocation rather than a nearby verb.
+    "claim force-release": (
+        "`fno claim release <key> --force -R <why>` - the same administrative "
+        "drop, including the archive to .expired/. `--force` refuses without "
+        "`--reason`, as the old verb did"
+    ),
+    "claim lane-acquire": (
+        "`fno claim acquire --lane <id> --max-lanes <n>` - the same lane slot, "
+        "same exit 1 when the cap is full"
+    ),
+    "claim lane-release": (
+        "`fno claim release --lane <id>` - the same lane slot release, still "
+        "silent success when the lane holds none"
+    ),
     "target resume-bind": (
         "`fno target init` - it acquires the node claim against the live "
         "session pid, which is the rebinding this verb did separately"

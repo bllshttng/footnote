@@ -75,7 +75,7 @@ A parked node holds its `node:<id>` claim and appears as `node_closed{close:park
 
 ```bash
 fno claim list --prefix node:                    # see held claims
-fno claim force-release node:<id> --reason "..." # release for re-dispatch
+fno claim release node:<id> --force --reason "..." # release for re-dispatch
 ```
 
 ## Selection scope and precedence
