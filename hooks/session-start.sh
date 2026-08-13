@@ -295,13 +295,22 @@ if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
     # wrong session: worktree A records a finding, and worktree B's sweep an
     # hour later treats it as already reported and says nothing about an
     # orphan sitting in B.
-    orphan_root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    # `|| true` is load-bearing under `set -e`: git exits 128 outside a repo,
+    # and an unguarded command substitution in an assignment takes the WHOLE
+    # hook down with it. The suite caught exactly that - session-start returned
+    # 128 and injected nothing.
+    orphan_root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
     orphan_root=${orphan_root:+$(dirname "$orphan_root")}
     orphan_stamp="${orphan_root:-.}/.fno/.orphan-sweep-stamp"
     orphan_now=$(date +%s 2>/dev/null || echo 0)
     orphan_then=$(stat -c %Y "$orphan_stamp" 2>/dev/null || stat -f %m "$orphan_stamp" 2>/dev/null || echo 0)
     orphan_then=${orphan_then//[!0-9]/}
     if (( orphan_now - ${orphan_then:-0} >= ${FNO_ORPHAN_SWEEP_SECONDS:-3600} )); then
+        # The stamp's own directory, not the cwd's. The `-d .fno` guard above
+        # tests the session cwd, so a canonical checkout without one left the
+        # write failing under `|| true`, the mtime at 0 forever, and the
+        # "hourly" sweep spawning probes and reaping on EVERY session start.
+        mkdir -p "$(dirname "$orphan_stamp")" 2>/dev/null || true
         : >"$orphan_stamp" 2>/dev/null || true
         # shellcheck source=scripts/lib/with-timeout.sh
         source "$orphan_lib" 2>/dev/null || true
@@ -310,13 +319,19 @@ if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
             orphan_raw="$(with_timeout 20 fno agents orphans --reap --quiet-unless-new 2>/dev/null)" || orphan_rc=$?
             if [[ -n "$orphan_raw" ]]; then
                 orphan_content="## Orphan processes"$'\n'"$orphan_raw"
-            elif (( orphan_rc == 124 )); then
-                # The stamp is written BEFORE the run so a wedged sweep cannot
-                # re-fire every session. That means a fired bound would
-                # otherwise lose the whole report, reap included, for a full
-                # window and say nothing. Silence here is the failure the sweep
-                # exists to make impossible, so name it.
-                orphan_content="## Orphan processes"$'\n'"the sweep hit its 20s bound and was killed. Any reap it started is unrecorded. Run \`fno agents orphans\` by hand."
+            elif (( orphan_rc != 0 )); then
+                # ANY non-zero with no stdout, not just the 124 time bound. The
+                # likeliest case is a stale deployed `fno` with no `orphans`
+                # verb, which exits non-zero with its error on stderr and stderr
+                # is discarded here. The stamp is already written, so silence
+                # would cost a full window - the exact outcome the sweep exists
+                # to make impossible.
+                if (( orphan_rc == 124 )); then
+                    orphan_reason="hit its 20s bound and was killed. Any reap it started is unrecorded."
+                else
+                    orphan_reason="failed with exit ${orphan_rc}. A deployed \`fno\` predating the verb is the usual cause; try \`fno doctor --fix\`."
+                fi
+                orphan_content="## Orphan processes"$'\n'"the sweep ${orphan_reason} Run \`fno agents orphans\` by hand."
             fi
         fi
     fi

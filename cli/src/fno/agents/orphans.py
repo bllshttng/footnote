@@ -159,8 +159,10 @@ def _repo_roots() -> list[str]:
     """Paths whose descendants are attributable to this project.
 
     The canonical checkout covers `.claude/worktrees/*` because those live
-    inside it. An externally-based worktree is caught by the literal
-    `.claude/worktrees/` test in :func:`_attribute`.
+    inside it. `git worktree list` adds the rest: an externally-based worktree
+    under `config.paths.worktrees_base` is beneath neither the checkout nor a
+    literal `.claude/worktrees/` path, so a path test alone reported a clean
+    machine on those projects.
     """
     roots: list[str] = []
     try:
@@ -281,11 +283,21 @@ def _await_orphaned(pid: Optional[int], timeout_s: float = 3.0) -> bool:
 
 
 def _pid_alive(pid: int) -> bool:
+    """True when the pid still exists.
+
+    EPERM means the process is there and this uid cannot signal it, which is
+    ALIVE. Reading a bare OSError as death makes both the kill control and the
+    reap re-check answer "killed" for a process still running.
+    """
     try:
         os.kill(pid, 0)
         return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
 
 
 def _kill(pid: int) -> None:
@@ -304,7 +316,14 @@ def _kill(pid: int) -> None:
     try:
         os.kill(pid, signal.SIGKILL)
     except Exception:  # noqa: BLE001
-        pass
+        return
+    # SIGKILL is not instantaneous. Returning here with no grace made the
+    # caller's liveness re-check race it, and a probe that ignored SIGTERM for
+    # the full window reported `kill arm FAILED` microseconds before it died.
+    for _ in range(20):
+        if not _pid_alive(pid):
+            return
+        time.sleep(0.05)
 
 
 # ─── the scan ───────────────────────────────────────────────────────────────
@@ -320,6 +339,12 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     result = ScanResult()
     roots = _repo_roots()
     repo_root = roots[0] if roots else os.getcwd()
+    # Outside a repo, or with a git too old for `--path-format=absolute`, roots
+    # came back empty and the CWD arm had nothing to compare against. Every run
+    # then reported `CWD arm FAILED` and exited 2 on a healthy machine, which
+    # trains an operator to ignore the one line that must never be noise.
+    if not roots:
+        roots = [repo_root]
     # One fixed, empty directory rather than a fresh mkdtemp per run. A unique
     # temp dir has to be removed, and a sweep killed at the SessionStart time
     # bound never reaches its own cleanup, so it would leak one directory an
@@ -343,9 +368,6 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     # it.
     cwd_pid = None if skip_probe == "cwd" else _spawn_probe(None, repo_root)
 
-    _await_orphaned(name_pid)
-    _await_orphaned(cwd_pid)
-
     census_pids = _census_pids()
     now = time.time()
     uid = os.getuid()
@@ -353,6 +375,13 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     found_cwd_probe = False
 
     try:
+        # Inside the try, with the enumeration. `_await_orphaned` imports psutil
+        # and touches live processes, and an exception out here escaped scan()
+        # as a traceback: exit 1, empty stdout, stderr swallowed by the hook,
+        # stamp already written. Silence for a full window is the one outcome
+        # this module exists to make impossible.
+        _await_orphaned(name_pid)
+        _await_orphaned(cwd_pid)
         for info in _iter_processes():
             result.total += 1
             if info.get("ppid") != 1:
@@ -429,8 +458,15 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     # has not earned a kill signal.
     if reap and not result.broken:
         for finding in result.findings:
-            if finding.reapable():
-                _kill(finding.pid)
+            if not finding.reapable():
+                continue
+            _kill(finding.pid)
+            # Re-checked, never assumed. `_kill` swallows every exception and
+            # returns early when the first SIGTERM raises, so an unconditional
+            # append printed `reaped: N` for a process still running. The kill
+            # control proves the path works against a probe we own; it says
+            # nothing about this particular signal.
+            if not _pid_alive(finding.pid):
                 result.reaped.append(finding)
 
     result.findings.sort(key=lambda f: f.cpu_seconds, reverse=True)
@@ -470,7 +506,13 @@ def render(result: ScanResult) -> str:
 
 
 def _seen_key(f: Finding) -> str:
-    return f"{f.pid}:{f.name}"
+    """Identify the PROCESS, not the pid slot.
+
+    `pid:name` alone filters out a genuinely new orphan that lands on a reused
+    pid with the same command name, and the SessionStart nudge then stays
+    silent about it. The age bucket separates two processes that shared a slot.
+    """
+    return f"{f.pid}:{f.name}:{int(f.age_seconds) // 60}"
 
 
 def seen_path() -> Path:

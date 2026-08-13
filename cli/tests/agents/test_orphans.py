@@ -58,6 +58,14 @@ def table(monkeypatch):
     monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: False)
     monkeypatch.setattr(orphans, "_repo_roots", lambda: ["/repo"])
     monkeypatch.setattr(orphans, "_census_pids", set)
+    # NEVER let a test signal a real process. The fabricated probes are pinned
+    # to pids 9001/9002, which are ordinary live pids on a developer machine,
+    # and an unstubbed `_kill` sent them a real SIGTERM and a SIGKILL two
+    # seconds later. A test suite that kills the developer's own processes is a
+    # worse bug than anything it is testing. Individual tests re-stub `_kill`
+    # to record calls; the default here is that nothing escapes.
+    monkeypatch.setattr(orphans, "_kill", lambda pid: None)
+    monkeypatch.setattr(orphans, "_pid_alive", lambda pid: False)
     return rows
 
 
@@ -182,7 +190,7 @@ def test_missing_name_probe_withholds_the_verdict(monkeypatch, table) -> None:
     pids = iter([9001, 9002])
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
     monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: True)
-    result = orphans.scan()
+    result = orphans.scan()  # _kill/_pid_alive stubbed by the `table` fixture
     assert result.broken
     assert "NAME" in (result.broken_reason or "")
     rendered = orphans.render(result)
@@ -195,7 +203,7 @@ def test_missing_cwd_probe_withholds_the_verdict(monkeypatch, table) -> None:
     pids = iter([9001, 9002])
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
     monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: True)
-    result = orphans.scan()
+    result = orphans.scan()  # _kill/_pid_alive stubbed by the `table` fixture
     assert result.broken
     assert "CWD" in (result.broken_reason or "")
     assert "orphans:" not in orphans.render(result)

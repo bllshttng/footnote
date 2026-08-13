@@ -2308,12 +2308,16 @@ def cmd_orphans(
     if quiet_unless_new:
         # A broken scan always speaks: silence there is the exact failure this
         # command exists to make impossible.
-        # A reap ALWAYS speaks. `filter_new` keys on findings, and a finding
-        # reported at 8 minutes is no longer new when the next sweep kills it
-        # past the age gate. That path SIGKILLed a process and printed nothing,
-        # which is the one output that must never be silent. A broken scan
-        # speaks for the same reason.
-        speak = result.broken or bool(result.reaped) or filter_new(result, seen_path())
+        # `filter_new` is called FIRST, never behind a short-circuiting `or`.
+        # Recording this scan's findings is its side effect, and skipping it on
+        # a broken or reaping run left the seen-file stale after exactly the
+        # two most interesting sweeps.
+        is_new = filter_new(result, seen_path())
+        # A reap ALWAYS speaks. A finding reported at 8 minutes is no longer new
+        # when the next sweep kills it past the age gate, and that path
+        # SIGKILLed a process and printed nothing. A broken scan speaks for the
+        # same reason.
+        speak = result.broken or bool(result.reaped) or is_new
     if speak:
         print(_json.dumps(to_json(result), indent=2) if as_json else render(result))
     if result.broken:

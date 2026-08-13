@@ -40,15 +40,18 @@ SEGMENT_SEPARATORS = {";", "&&", "||", "&", "\n", "|&"}
 TRANSPARENT = {
     "nohup", "setsid", "exec", "time", "env", "command", "builtin",
     "nice", "ionice", "taskpolicy", "stdbuf", "caffeinate", "sudo",
-    # Shell keywords that open a body. `;` splits `do yes` into its own
-    # segment, and without these the walk stops at the keyword and reads the
-    # generator as an argument: `for i in 1 2; do yes; done` was allowed.
-    "do", "then", "else", "elif", "{", "!",
+    # Shell keywords and grouping that open a body. `;` splits `do yes` into
+    # its own segment, and without these the walk stops at the opener and reads
+    # the generator as an argument: `for i in 1 2; do yes; done` was allowed.
+    # `(` matters most: `( cmd & )` is THE canonical detach idiom, and this
+    # repo's own hooks use it, so the likeliest way to write specimen 1 walked
+    # straight past the guard.
+    "do", "then", "else", "elif", "{", "(", "!",
 }
 
-# `exec -a NAME` renames the process; the NAME is not the command. Skipping the
-# flag and its value keeps `exec -a fno-load-x1 yes` resolving to `yes`.
-TRANSPARENT_FLAGS_WITH_VALUE = {"-a", "-n", "-c"}
+#: Flags that swallow the next token, so skipping the flag alone still leaves a
+#: value where the command should be (`sudo -u me yes`).
+VALUE_FLAGS = {"-a", "-u", "-g", "-C", "-S", "-n", "-c", "-p", "-U"}
 
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 
@@ -95,20 +98,24 @@ def _head_of(segment):
     surfaces. Returns (None, []) for a segment with no command.
     """
     i = 0
+    saw_wrapper = False
     while i < len(segment):
         tok = segment[i]
         base = tok.rsplit("/", 1)[-1]
         if base in TRANSPARENT:
+            saw_wrapper = True
             i += 1
-            continue
-        if tok in TRANSPARENT_FLAGS_WITH_VALUE and i + 1 < len(segment):
-            # Only meaningful directly after a transparent wrapper (`exec -a`).
-            i += 2
             continue
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tok):
             # A leading assignment is a prefix, not the command: `FOO=1 yes` and
             # `env FOO=1 yes` both still run `yes`.
             i += 1
+            continue
+        if saw_wrapper and tok.startswith("-"):
+            # A wrapper's own options, not the command. Skipping only a fixed
+            # trio left `sudo -u me yes` resolving to a command called `-u`,
+            # which defeated the `sudo` and `env` entries above.
+            i += 2 if (tok in VALUE_FLAGS and i + 1 < len(segment)) else 1
             continue
         return base, segment[i + 1:]
     return None, []
