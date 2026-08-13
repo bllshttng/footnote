@@ -69,7 +69,7 @@ The rename requirement is not decoration either. `fno-agents-daemon` runs at PPI
 
 A clean machine here still reports long-lived daemons at PPID 1 whose cwd is the repo, including third-party ones. `--quiet-unless-new` reports each once and then stays silent. That is what the SessionStart hook uses. The bare verb always prints everything.
 
-A broken scan records nothing in the seen-file. It withheld its findings, so marking them reported would let one census failure silence a real orphan on every healthy sweep after it.
+A broken scan records nothing in the seen-file. It withheld its findings, so marking them reported lets one census failure silence a real orphan on every healthy sweep after it.
 
 ## Measured facts this document rests on
 
