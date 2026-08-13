@@ -144,10 +144,13 @@ $ fno mux pane focus 31
 31 squad=2 (billing) tab=7 clients_moved=1
 ```
 
-It resolves the pane session-wide, so a pane in another workspace or another tab needs no extra navigation, and focusing a finished pane clears its unseen marker exactly as clicking it would.
+It resolves the pane session-wide.
+A pane in another workspace or another tab needs no extra navigation.
+Focusing a finished pane also clears its unseen marker, exactly as clicking it does.
 
 Read `clients_moved`, not the exit code.
-A zero-exit reply proves the command was accepted, never that anything moved on screen; the count is how many attached viewers actually ended up looking at the pane.
+A zero-exit reply proves only that the command was accepted, never that anything moved on screen.
+The count is how many attached viewers actually ended up looking at the pane.
 
 Three refusals stay distinct, because "your pane is gone", "nobody is watching", and "your mux is not running" are different problems:
 
@@ -158,7 +161,9 @@ Three refusals stay distinct, because "your pane is gone", "nobody is watching",
 | No reachable mux session | 1 | `cannot reach session <name>` |
 
 There is deliberately no URL scheme for this.
-`link.rs` `OPENABLE_SCHEMES` guards untrusted pane-sourced bytes, and widening it to carry a deep link is a separate risk decision with its own blast radius; the verb reaches the same destination with none of that exposure.
+`link.rs` `OPENABLE_SCHEMES` guards untrusted pane-sourced bytes.
+Widening it to carry a deep link is a separate risk decision with its own blast radius.
+The verb reaches the same destination with none of that exposure.
 
 ## Why the asymmetries exist
 
