@@ -80,6 +80,67 @@ echo "$OUT" | grep -q "OAuth" && pass "oat token on routed lane -> OAuth warning
 OUT="$(run_hook "!!!bad model!!!" "not-a-url" "" 2>/dev/null)"; RC=$?
 [[ $RC -eq 0 ]] && pass "garbage env exits 0 (fail-open)" || fail "garbage env rc=$RC"
 
+# 8. Parity: the drift predicate is duplicated in
+#    skills/review/scripts/emit-attestation.sh, because a skill script may not
+#    source outside its own directory. Two copies of one predicate is the shape
+#    where a later edit fixes one and leaves the other, so drive BOTH over one
+#    env matrix and fail when they disagree - a third copy added later inherits
+#    this guarantee only by being added to the matrix, but a diverging edit to
+#    either existing copy is caught here.
+#
+#    The hook reports drift by warning. The emitter reports it by blanking the
+#    model it would otherwise stamp, so read its stderr summary: a non-empty
+#    ANTHROPIC_MODEL that surfaces as `model=unobserved` was judged inert.
+EMITTER="$REPO_ROOT/skills/review/scripts/emit-attestation.sh"
+if [[ ! -f "$EMITTER" ]]; then
+  fail "emitter not found at $EMITTER (parity matrix cannot run)"
+else
+  # Stub the event sink: this test asserts the model claim, never event writes.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/fno-stub"
+  chmod +x "$TMP/fno-stub"
+
+  emitter_drift() { # args: MODEL BASE -> echoes yes|no
+    local _m="$1" _b="$2" _out
+    [[ -z "$_m" ]] && { echo no; return; }   # no claim to blank
+    _out="$(cd "$REPO_ROOT" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+      ANTHROPIC_MODEL="$_m" ANTHROPIC_BASE_URL="$_b" FNO="$TMP/fno-stub" \
+      bash "$EMITTER" code-review pass 2>&1 >/dev/null)" || { echo error; return; }
+    case "$_out" in
+      *"model=unobserved"*) echo yes ;;
+      *) echo no ;;
+    esac
+  }
+
+  hook_drift() { # args: MODEL BASE -> echoes yes|no
+    case "$(run_hook "$1" "$2" "" 2>/dev/null)" in
+      *"ROUTING DRIFT"*) echo yes ;;
+      *) echo no ;;
+    esac
+  }
+
+  # model|base|expected-drift
+  MATRIX=(
+    "||no"
+    "claude-opus-4-8||no"
+    "glm-4.6||yes"
+    "glm-4.6|https://api.anthropic.com|yes"
+    "glm-4.6|https://eu.anthropic.com|yes"
+    "glm-4.6|https://open.bigmodel.cn/api/anthropic|no"
+    "glm-4.6|https://notanthropic.com/api|no"
+  )
+  for row in "${MATRIX[@]}"; do
+    IFS='|' read -r m b want <<<"$row"
+    got_hook="$(hook_drift "$m" "$b")"
+    got_emit="$(emitter_drift "$m" "$b")"
+    label="model='${m:-<unset>}' base='${b:-<unset>}'"
+    if [[ "$got_hook" == "$got_emit" && "$got_hook" == "$want" ]]; then
+      pass "drift parity ($label) -> $want"
+    else
+      fail "drift parity ($label): want=$want hook=$got_hook emitter=$got_emit"
+    fi
+  done
+fi
+
 echo ""
 echo "attest-model: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

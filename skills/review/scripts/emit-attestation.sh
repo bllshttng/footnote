@@ -82,6 +82,28 @@ if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
   provider="${provider##*@}"              # drop userinfo: a key in the URL must not land in the log
 fi
 
+# A foreign model name over an Anthropic base is the routing-drift case: the
+# request falls back to the primary Anthropic model, so ANTHROPIC_MODEL names a
+# model that did NOT answer. hooks/attest-model.sh already warns at SessionStart.
+# Warning there and stamping the value here anyway would put a known-false claim
+# in the one record the reviewers gate reads, so blank it: empty already means
+# NOT OBSERVABLE above, which is the honest reading of an inert name. Host match
+# is exact-or-subdomain so notanthropic.com stays foreign. This predicate is
+# duplicated from the hook because a skill script may not source outside its own
+# directory; tests/hooks/test_attest_model.sh drives both over one env matrix and
+# fails when they disagree.
+drift_host="${ANTHROPIC_BASE_URL:-}"
+drift_host="${drift_host#*://}"; drift_host="${drift_host%%/*}"
+drift_host="${drift_host##*@}"; drift_host="${drift_host%%:*}"
+case "$model" in
+  ""|claude*) ;;
+  *)
+    if [[ -z "$drift_host" || "$drift_host" == "anthropic.com" || "$drift_host" == *.anthropic.com ]]; then
+      model=""
+    fi
+    ;;
+esac
+
 # Record the harness session of the EMITTING PROCESS. This is the only field
 # that can tell an author-attested review from an independent one: session_id
 # (above) is grepped from the worktree manifest, so it equals manifest.session_id
