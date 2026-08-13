@@ -10,6 +10,7 @@ than it does.
 from __future__ import annotations
 
 import collections
+import os
 import time
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def _proc(
     name: str = "sleep",
     argv0: str | None = None,
     cwd: str | None = None,
-    uid: int = 501,
+    uid: int | None = None,
     ppid: int = 1,
     cpu: float = 0.0,
     age: float = 60.0,
@@ -36,7 +37,11 @@ def _proc(
         "ppid": ppid,
         "name": name,
         "cmdline": [argv0 if argv0 is not None else name, "30"],
-        "uids": (uid, uid, uid),
+        # Default to the RUNNING uid, never a literal. A hardcoded 501 passes on
+        # a mac and matches nothing on a CI runner, so every finding vanishes
+        # and the whole file goes green-on-nothing in one environment and red in
+        # the other.
+        "uids": (uid if uid is not None else os.getuid(),) * 3,
         "create_time": time.time() - age,
         "cpu_times": CpuTimes(cpu, 0.0),
         "cwd": cwd,
@@ -145,7 +150,7 @@ def test_unattributed_process_is_ignored(monkeypatch, table) -> None:
 
 def test_foreign_uid_is_skipped(monkeypatch, table) -> None:
     """Not reachable by the live control: both probes are ours."""
-    table.append(_proc(53, name="grep", cwd="/repo", uid=0))
+    table.append(_proc(53, name="grep", cwd="/repo", uid=os.getuid() + 1))
     result = _scan_with_working_control(monkeypatch, table)
     assert result.findings == []
 
