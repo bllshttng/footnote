@@ -719,6 +719,15 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
 /// predicate stops distinguishing a corpse from an honest holder.
 const STALE_MUTEX_STEAL: Duration = Duration::from_secs(120);
 
+/// A dir a steal disturbed and then put back (owner-token mismatch: a live
+/// lock, not the corpse we aged) is granted only this much fresh protection,
+/// not a full [`STALE_MUTEX_STEAL`]. Mirrors `fno.mutex.RESTORE_GRACE_S`; see
+/// its docstring for why - a disturbed holder is either about to release
+/// within milliseconds, or already gone, and only the second case is hurt by
+/// the shortened window. Wire protocol with the Python side; change both in
+/// lockstep, see `test_threshold_matches_the_rust_constant`.
+const RESTORE_GRACE: Duration = Duration::from_millis(500);
+
 /// Rename-steal `lock_dir` when it is older than [`STALE_MUTEX_STEAL`].
 ///
 /// True means retry `create_dir` immediately (the corpse is gone, or the lock
@@ -767,6 +776,14 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
             // A live lock swapped in between the age check and the rename
             // carries a different owner token: put it back and lose properly.
             if !same_owner(&reaped, &before_token) {
+                // A restored dir was disturbed once already: its holder may
+                // have released into the gap, leaving a lock nobody will
+                // remove. A fresh mtime would shield that orphan for the full
+                // steal threshold, so hand back only an honest-hold grace
+                // window instead - a live holder releases inside it; an
+                // orphan becomes stealable in RESTORE_GRACE rather than
+                // STALE_MUTEX_STEAL (mirrors the Python fix, x-474a).
+                backdate_mtime(&reaped, STALE_MUTEX_STEAL - RESTORE_GRACE);
                 if std::fs::rename(&reaped, lock_dir).is_err() {
                     eprintln!(
                         "claims: stole a live mutex at {} and could not restore it",
@@ -862,6 +879,31 @@ fn release_dir_mutex(lock_dir: &Path, token: &str) {
         lock_dir.display(),
         token
     );
+}
+
+/// Set `path`'s mtime to `age` in the past. Best-effort: a failure (read-only
+/// mount, path vanished mid-restore) is swallowed, mirroring
+/// `fno.mutex.steal_if_stale`'s `os.utime` - a reporting-adjacent backdate must
+/// never fail the restore it precedes. Via libc directly (already a direct
+/// dependency, see the test-only `age_dir` twin below) rather than pulling in
+/// a crate for one syscall.
+fn backdate_mtime(path: &Path, age: Duration) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let backdated = now.saturating_sub(age);
+    let t = libc::timeval {
+        tv_sec: backdated.as_secs() as libc::time_t,
+        tv_usec: 0,
+    };
+    let times = [t, t];
+    unsafe {
+        libc::utimes(c.as_ptr(), times.as_ptr());
+    }
 }
 
 /// Identity for a reaped lock dir via owner token. Mirrors
