@@ -90,6 +90,17 @@ The measured consequence of the rule stands: condition D keeps refusing closes u
 What changed is the escape hatch.
 A bad harvest is now recoverable with `fno backlog remove`, so being wrong here costs an annoyance rather than permanent graph litter.
 
+**A manual harvest still needs someone to be asked, and nobody ever was.**
+Measured on this repo 2026-08-12: 39 unharvested rows, oldest 29 days, every one of them `oos-bug`.
+Condition D reaches only `deferred` rows, and only at node-close time, which is not a moment anyone is looking for a list of chores.
+The `oos-bug` majority had no gate anywhere, so it simply accumulated, and the five `deferred` rows filed alongside it were harvested within a day of being blocked on.
+That contrast is the whole argument: the kind with a gate cleared, the kind without one did not.
+
+`fno outstanding` is the missing half of this trade.
+It is a read-only fold reporting the ledger's size, its kind split and the age of its oldest row, and it names `fno retro sweep-carveouts` as the thing that clears them.
+`hooks/session-start.sh` renders it where the operator already reads, beside the worktree-hygiene and mail blocks.
+The harvest stays manual and the reasoning above is unchanged; what changes is that a human is now told it is waiting.
+
 Dedup is the feature, not polish.
 Filing one node per carve-out is worse than not harvesting.
 A re-filed item becomes a duplicate that someone has to notice before `fno backlog remove` can clean it up.

@@ -206,8 +206,8 @@ def render(
                 head += f" ({_plural(age, 'day')} ago)"
         lines.append(head + ".")
         # Naming the clearing verb IS the fix. The harvest is manual by design
-        # (there is no `fno backlog delete`, so an irreversible mint must not
-        # run unattended) and nothing else ever tells a human what to run.
+        # (a background hook that mints backlog nodes unattended is the wrong
+        # shape) and nothing else ever tells a human what to run.
         lines.append(
             "  Clear with: fno retro sweep-carveouts (preview), --apply to file and consume."
         )
