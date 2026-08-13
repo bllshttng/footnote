@@ -183,6 +183,7 @@ event emit
 event gate-escape
 event push-parent
 executor
+fno-agents
 help
 lint
 loops ls
@@ -206,35 +207,7 @@ mail unread
 mail view
 mail withdraw
 mcp send
-mux attach
-mux block annotate
-mux block pipe
-mux doctor
-mux kill-server
-mux layout apply
-mux layout get
-mux layout graft
-mux ls
-mux pane break
-mux pane claim
-mux pane focus
-mux pane kill
-mux pane ls
-mux pane read
-mux pane release
-mux pane run
-mux pane send
-mux pane split
-mux pane wait
-mux serve
-mux server
-mux shell-init
-mux tab create
-mux tab join
-mux tab ls
-mux tab rename
-mux where
-mux workspace prune
+mux
 notify
 observer replay
 observer sweep
