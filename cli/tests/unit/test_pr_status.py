@@ -342,9 +342,83 @@ def test_read_review_coverage_from_events(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    assert read_review_coverage(7, cwd=str(tmp_path)) == {"coverage": "covered", "reviewed_count": 1}
+    assert read_review_coverage(7, cwd=str(tmp_path)) == {
+        "coverage": "covered",
+        "reviewed_count": 1,
+        # x-5b99: the covered head is surfaced so a reader can check WHICH
+        # commit was covered. An event from an older loop-check carries no
+        # per-verdict freshness, so nothing reads as stale - additive.
+        "self_attested_count": None,
+        "head_sha": "a",
+        "stale_verdicts": [],
+    }
     # A different PR -> no event -> unknown sentinel.
-    assert read_review_coverage(99, cwd=str(tmp_path)) == {"coverage": "unknown", "reviewed_count": None}
+    assert read_review_coverage(99, cwd=str(tmp_path)) == {
+        "coverage": "unknown",
+        "reviewed_count": None,
+        "self_attested_count": None,
+        "head_sha": None,
+        "stale_verdicts": [],
+    }
+
+
+def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
+    """x-5b99: a stale verdict and a fresh one used to render identically.
+
+    The specimen is PR #826: codex reviewed 8e557ccd while the gate evaluated
+    against 89bc0b91, and status printed "covered, reviewed_count 2" with no
+    way to learn that one of those two verdicts was for a commit codex never
+    saw.
+    """
+    import json
+
+    from fno.pr._reviews import read_review_coverage
+
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": 826,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "self_attested_count": 1,
+                    "head_sha": "89bc0b91",
+                    "verdicts": [
+                        {
+                            "producer": "github_app",
+                            "name": "chatgpt-codex-connector",
+                            "verdict": "stale",
+                            "reviewed_sha": "8e557ccd",
+                            "freshness": "stale",
+                        },
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "reviewed",
+                            "reviewed_sha": "89bc0b91",
+                            "freshness": "fresh",
+                        },
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    got = read_review_coverage(826, cwd=str(tmp_path))
+    assert got["head_sha"] == "89bc0b91"
+    assert got["self_attested_count"] == 1
+    assert got["stale_verdicts"] == [
+        {
+            "name": "chatgpt-codex-connector",
+            "producer": "github_app",
+            "reviewed_sha": "8e557ccd",
+            "freshness": "stale",
+        }
+    ]
 
 
 def test_run_status_fetch_failure_is_error(monkeypatch, capsys):

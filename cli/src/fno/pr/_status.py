@@ -21,7 +21,11 @@ import json
 from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
-from fno.pr._reviews import read_optional_review_state, read_review_coverage
+from fno.pr._reviews import (
+    _UNKNOWN_COVERAGE,
+    read_optional_review_state,
+    read_review_coverage,
+)
 
 # Rollup states that count as a pass (jq parity with _verify._PASS_STATES).
 _PASS_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -199,7 +203,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     try:
         coverage = read_review_coverage(int(pr), cwd)
     except Exception:
-        coverage = {"coverage": "unknown", "reviewed_count": None}
+        # The producer's own sentinel, not a copy of it: a second literal here
+        # is a shape that drifts the moment a key is added on one side only.
+        coverage = dict(_UNKNOWN_COVERAGE)
 
     sys.stdout.write(
         json.dumps(
@@ -236,6 +242,31 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             "'mutation($t: ID!){resolveReviewThread(input:{threadId: $t})"
             "{thread{isResolved}}}' -F t=<threadId>` (thread ids come from "
             "`reviewThreads` on the pullRequest).\n"
+        )
+
+    # Coverage used to print a word and a number with no way to check either.
+    # "covered, reviewed_count 2" rendered identically whether the reviewers had
+    # read this commit or one from twelve hours and two commits ago, and the
+    # word is the half a reader trusts. Name the commit that was covered, and
+    # name any reviewer whose verdict sits on an older one.
+    cov_head = coverage.get("head_sha")
+    stale = coverage.get("stale_verdicts") or []
+    if cov_head or stale:
+        line = f"note: review coverage {coverage.get('coverage')}"
+        if coverage.get("reviewed_count") is not None:
+            line += f" ({coverage['reviewed_count']} reviewed"
+            self_n = coverage.get("self_attested_count")
+            if self_n:
+                line += f", {self_n} self-attested"
+            line += ")"
+        if cov_head:
+            line += f" computed at {str(cov_head)[:8]}"
+        sys.stderr.write(line + "\n")
+    for v in stale:
+        sys.stderr.write(
+            f"note: {v.get('name')} ({v.get('producer')}) reviewed "
+            f"{str(v.get('reviewed_sha') or 'an unknown commit')[:8]}, whose code no longer "
+            "matches HEAD - that verdict does not count. Ask it to re-read.\n"
         )
     return code
 

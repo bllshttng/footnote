@@ -1179,6 +1179,90 @@ def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     assert _last_json(capsys)["outcome"] == "merged"
 
 
+def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """x-5b99: the exact hole, at the gate that was supposed to catch it.
+
+    The staleness check below the coverage guard compares the EVAL head against
+    the current PR head, and it works. It just answers a different question: a
+    coverage event computed thirty seconds ago is fresh by that measure while
+    the only verdict inside it came from a bot that read a commit two commits
+    back. A fresh eval carrying a stale bot verdict walked straight through.
+
+    What closes it is upstream (loop-check no longer counts a stale verdict, so
+    the count arrives at zero and the word arrives as "uncovered"), which is why
+    the merge logic here is UNCHANGED. This test pins that the shape now
+    refuses, so a later change that restores the old serialization cannot
+    quietly reopen the door.
+    """
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {
+            "coverage": "uncovered",
+            "reviewed_count": 0,
+            # Fresh eval: this IS the PR's current head, so the staleness check
+            # has nothing to object to.
+            "head_sha": "89bc0b91",
+            "verdicts": [
+                {
+                    "producer": "github_app",
+                    "name": "chatgpt-codex-connector",
+                    "verdict": "stale",
+                    "reviewed_sha": "8e557ccd",
+                    "freshness": "stale",
+                }
+            ],
+        },
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    # The refusal names coverage, not staleness: the eval was not stale.
+    assert "uncovered" in obj["reason"]
+
+
+def test_carried_local_attestation_still_satisfies_the_code_review_gate(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """x-62a1: a verdict carried across a rebase is a `reviewed` verdict here.
+
+    The merge gate reads the verdict enum, not the freshness, so the carry has
+    to arrive as `reviewed` for the required code-review entry to stay
+    satisfied. If a future change records a carry as its own verdict value
+    instead, this fails loudly rather than silently demanding a re-review at
+    the one moment losing an attestation costs most.
+    """
+    state = tmp_path / ".fno"
+    state.mkdir()
+    (state / "config.toml").write_text(
+        '[review]\nreviewers = ["code-review"]\n', encoding="utf-8"
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": "abc",
+            "verdicts": [
+                {
+                    "producer": "local_attestation",
+                    "name": "code-review",
+                    "verdict": "reviewed",
+                    "reviewed_sha": "oldhead",
+                    "freshness": "carried_base_sync",
+                }
+            ],
+        },
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
 def test_code_review_gate_rejects_unrelated_github_app_coverage(
     enabled, monkeypatch, capsys, tmp_path
 ):
@@ -1347,6 +1431,49 @@ def test_genuine_zero_names_an_absent_reviewer_and_its_consequence():
     assert "check config.review" in reason
     # The refused reviewer is not misreported as something we are waiting for.
     assert "chatgpt-codex-connector" not in reason
+
+
+def test_uncovered_still_names_the_cause_and_the_next_move():
+    """x-5b99 renamed a zero count from `covered` to `uncovered`, which sent the
+    most common refusal there is down the early-return that prints only the
+    word. Every test above pins the rich message against the LEGACY shape, so
+    nothing caught it. The word is now a prefix, not a replacement."""
+    cov = {
+        "coverage": "uncovered",
+        "reviewed_count": 0,
+        "head_sha": "abc",
+        "verdicts": [
+            {"producer": "github_app", "name": "gemini-code-assist", "verdict": "absent"}
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov)
+    assert "uncovered" in reason
+    assert "waiting on gemini-code-assist" in reason
+    assert "check config.review" in reason
+
+
+def test_a_stale_reviewer_is_named_and_asked_to_re_read():
+    """A reviewer that read an older commit is neither absent nor refused, and
+    "run the review verb at HEAD" is the one instruction that does not get it to
+    look again. Four zeros and a wrong next step is the absence-shaped lie the
+    stale verdict exists to delete."""
+    cov = {
+        "coverage": "uncovered",
+        "reviewed_count": 0,
+        "head_sha": "abc",
+        "verdicts": [
+            {
+                "producer": "github_app",
+                "name": "chatgpt-codex-connector",
+                "verdict": "stale",
+                "reviewed_sha": "8e557ccd",
+                "freshness": "stale",
+            }
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov)
+    assert "chatgpt-codex-connector reviewed an older commit" in reason
+    assert "review verb" not in reason
 
 
 def test_malformed_verdicts_do_not_raise():

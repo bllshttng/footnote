@@ -1232,6 +1232,248 @@ fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     (payload_is_code(&paths), false)
 }
 
+// ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
+//
+// Freshness used to be decided TWICE with two different rules: a `github_app`
+// verdict got none at all (a bot opinion was inherited across commits it never
+// read), while a `local_attestation` got a bare sha equality so strict that
+// addressing a review destroyed the proof the review happened. One design,
+// failing opposite ways on its two producers. `review_freshness` is the single
+// rule both now go through.
+
+/// Whether a review verdict still describes the code at HEAD.
+///
+/// The two `Carried` variants are the reason a carry was granted, recorded on
+/// the event so a carry is auditable and can never be mistaken for a fresh
+/// read. Only `Stale` stops a verdict counting toward coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Freshness {
+    /// The reviewer read this exact commit.
+    Fresh,
+    /// The PR's own code delta is byte-identical; any tree difference came from
+    /// the base moving under it. A rebase is this shape, which is what makes
+    /// the mandatory pre-merge rebase stop destroying attestations.
+    CarriedBaseSync,
+    /// Only documentation paths changed between the reviewed commit and HEAD.
+    CarriedDocsOnly,
+    /// Everything else, including every failure path.
+    Stale,
+}
+
+impl Freshness {
+    /// Whether a verdict at this freshness counts toward coverage.
+    pub fn counts(&self) -> bool {
+        !matches!(self, Freshness::Stale)
+    }
+}
+
+/// Pre-computed git facts for one `(reviewed_sha, head_sha)` pair, so
+/// [`review_freshness`] is pure and unit-tests with no git and no repository.
+#[derive(Debug, Clone, Default)]
+pub struct FreshnessFacts {
+    /// PR code-diff identity at the reviewed commit (see
+    /// [`pr_code_diff_identity`]).
+    pub reviewed_identity: Option<String>,
+    /// The same identity at HEAD.
+    pub head_identity: Option<String>,
+    /// Paths differing between the two TREES (two-dot). `None` on git failure.
+    pub tree_paths: Option<Vec<String>>,
+}
+
+/// The one freshness rule. Pure over pre-computed facts.
+///
+/// `Carried` requires a POSITIVE identity match between two successfully
+/// computed identities. Two `None`s never match, and neither does an empty
+/// result: matching an absence against an absence is what produced this plan's
+/// first (wrong) 63% carry-forward measurement, where every merged PR's
+/// three-dot diff against current `origin/main` was empty and `e3b0c442` - the
+/// hash of the empty string - compared equal to itself twelve times. The real
+/// figure was 2 of 22. Every failure path lands on `Stale`; there is no input
+/// on which a failure produces a carry.
+pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFacts) -> Freshness {
+    // No pinned commit is not evidence of freshness. An absent `commit.oid`, an
+    // attestation with no `head_sha`, and an unresolvable HEAD all land here.
+    if reviewed_sha.is_empty() || head_sha.is_empty() {
+        return Freshness::Stale;
+    }
+    if reviewed_sha == head_sha {
+        return Freshness::Fresh;
+    }
+    let (Some(reviewed), Some(head)) = (
+        facts.reviewed_identity.as_deref(),
+        facts.head_identity.as_deref(),
+    ) else {
+        return Freshness::Stale;
+    };
+    if reviewed != head {
+        return Freshness::Stale;
+    }
+    // The identities match, so the code under review is unchanged. The tree
+    // diff only names WHY, and a carry that cannot name its reason is not
+    // auditable - so an unreadable tree diff is Stale like any other failure.
+    let Some(paths) = facts.tree_paths.as_deref() else {
+        return Freshness::Stale;
+    };
+    if !paths.is_empty() && paths.iter().all(|p| is_documentation_path(p)) {
+        Freshness::CarriedDocsOnly
+    } else {
+        Freshness::CarriedBaseSync
+    }
+}
+
+/// The path from a `git diff --raw` line (`:<meta>\t<path>`), or `""`.
+/// `--no-renames` guarantees one path per line, so there is no second field.
+fn raw_diff_line_path(line: &str) -> &str {
+    line.split('\t').nth(1).unwrap_or("").trim()
+}
+
+/// Content identity of the PR's own CODE changes at `sha`: the three-dot diff
+/// from `merge-base(base, sha)`, documentation paths dropped, hashed.
+///
+/// `--raw --no-abbrev` emits one line per changed path carrying both blob
+/// SHAs, so the identity is content-exact without materializing a patch.
+/// `--no-renames` pins it against a per-user `diff.renames` config that would
+/// otherwise make two runs of the same comparison disagree.
+///
+/// `None` on any git failure AND when nothing outside documentation changed.
+/// An empty code diff is not positive evidence of anything, and letting two of
+/// them compare equal is the absence-matched-against-absence trap above. The
+/// cost is that a documentation-only PR never carries an attestation, which is
+/// the fail-closed direction and matches today's behavior exactly.
+fn pr_code_diff_identity(git_bin: &str, cwd: &Path, base: &str, sha: &str) -> Option<String> {
+    let out = Command::new(git_bin)
+        .args([
+            "diff",
+            "--raw",
+            "--no-abbrev",
+            "--no-renames",
+            &format!("{base}...{sha}"),
+        ])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.is_empty() && !is_documentation_path(raw_diff_line_path(l)))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for line in &lines {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(hasher.finalize().to_hex().to_string())
+}
+
+/// Paths differing between two TREES (two-dot), or `None` on git failure.
+fn git_tree_paths(git_bin: &str, cwd: &Path, a: &str, b: &str) -> Option<Vec<String>> {
+    let out = Command::new(git_bin)
+        .args(["diff", "--name-only", "--no-renames", a, b])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
+/// Resolves `reviewed_sha -> Freshness` against one HEAD, memoized so N
+/// verdicts at one commit cost one pair of git calls rather than N.
+///
+/// The HEAD identity is computed once, on first use: a session whose reviewers
+/// are all fresh (the common case) pays no git at all.
+pub struct FreshnessResolver<'a> {
+    git_bin: &'a str,
+    cwd: &'a Path,
+    /// The ref the PR merges into, already qualified (`origin/main`). An
+    /// unresolvable base yields no identity, hence `Stale` - fail closed.
+    base_ref: String,
+    head_sha: String,
+    head_identity: std::cell::RefCell<Option<Option<String>>>,
+    cache: std::cell::RefCell<std::collections::HashMap<String, Freshness>>,
+}
+
+impl<'a> FreshnessResolver<'a> {
+    pub fn new(git_bin: &'a str, cwd: &'a Path, base_ref: &str, head_sha: &str) -> Self {
+        let base = base_ref.trim();
+        Self {
+            git_bin,
+            cwd,
+            // `gh pr view` returns a BARE branch name, and a branch name may
+            // itself contain a slash (`release/2.0`), so "has a slash" does not
+            // mean "already remote-qualified" - it only means the caller may
+            // have passed one of ours. Test the `origin/` prefix instead: a
+            // bare `release/2.0` resolves to a local ref that a fresh worktree
+            // usually does not have, and the identity then fails to compute for
+            // every commit, silently taking the carry away on exactly the
+            // long-lived release branches that rebase most.
+            base_ref: if base.is_empty() {
+                "origin/main".to_string()
+            } else if base.starts_with("origin/") {
+                base.to_string()
+            } else {
+                format!("origin/{base}")
+            },
+            head_sha: head_sha.to_string(),
+            head_identity: std::cell::RefCell::new(None),
+            cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn head_identity(&self) -> Option<String> {
+        let mut slot = self.head_identity.borrow_mut();
+        slot.get_or_insert_with(|| {
+            pr_code_diff_identity(self.git_bin, self.cwd, &self.base_ref, &self.head_sha)
+        })
+        .clone()
+    }
+
+    /// Freshness of a verdict recorded at `reviewed_sha`. Never panics, never
+    /// fails: every unreadable input resolves to `Stale`.
+    pub fn freshness(&self, reviewed_sha: &str) -> Freshness {
+        if reviewed_sha.is_empty() {
+            return Freshness::Stale;
+        }
+        if reviewed_sha == self.head_sha {
+            return Freshness::Fresh;
+        }
+        if let Some(hit) = self.cache.borrow().get(reviewed_sha) {
+            return *hit;
+        }
+        let facts = FreshnessFacts {
+            reviewed_identity: pr_code_diff_identity(
+                self.git_bin,
+                self.cwd,
+                &self.base_ref,
+                reviewed_sha,
+            ),
+            head_identity: self.head_identity(),
+            tree_paths: git_tree_paths(self.git_bin, self.cwd, reviewed_sha, &self.head_sha),
+        };
+        let verdict = review_freshness(reviewed_sha, &self.head_sha, &facts);
+        self.cache
+            .borrow_mut()
+            .insert(reviewed_sha.to_string(), verdict);
+        verdict
+    }
+}
+
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
     let out = Command::new(git_bin)
         .args(["rev-parse", "HEAD"])
@@ -1312,7 +1554,7 @@ struct UnattestedReviewer {
 fn unattested_reviewers_scan(
     events_path: &Path,
     reviewers: &[String],
-    head_sha: &str,
+    freshness: &dyn Fn(&str) -> Freshness,
 ) -> (Vec<UnattestedReviewer>, usize) {
     let unsatisfied_all = || -> Vec<UnattestedReviewer> {
         reviewers
@@ -1369,7 +1611,13 @@ fn unattested_reviewers_scan(
             continue;
         };
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
-        if line_head != head_sha {
+        // The SAME predicate the coverage axis uses, not a second head-equality
+        // rule beside it. Leaving this one a bare equality would have made the
+        // softening decorative: this is the scan that satisfies
+        // `config.review.reviewers`, so a rebase that carried the coverage
+        // count would still have killed the required `code-review` entry and
+        // demanded the re-review the carry exists to prevent.
+        if !freshness(line_head).counts() {
             // Empty is not a head; recording it would put a `Some` in the
             // message with nothing to print.
             if line_head.is_empty() {
@@ -1513,6 +1761,7 @@ fn build_findings_block_reason(open: &[OpenFinding], malformed: usize) -> String
 #[allow(clippy::too_many_arguments)]
 fn read_pr_info(
     gh_bin: &str,
+    git_bin: &str,
     cwd: &Path,
     ci_declared_none: bool,
     no_external: bool,
@@ -1533,7 +1782,9 @@ fn read_pr_info(
             "pr",
             "view",
             "--json",
-            "state,number,headRefName,headRefOid,mergeable",
+            // baseRefName rides along for the freshness predicate's merge-base
+            // (x-5b99). Same call, same round trip, no new API cost.
+            "state,number,headRefName,headRefOid,mergeable,baseRefName",
         ])
         .current_dir(cwd)
         .output()
@@ -1593,6 +1844,18 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("UNKNOWN")
         .to_string();
+
+    // One freshness resolver for every reviewer on this PR (x-5b99 / x-62a1).
+    // Both producers and both presence scans read it, so there is one rule
+    // rather than the two divergent ones this replaces. Memoized per reviewed
+    // sha, and the HEAD identity is computed lazily, so a PR whose reviewers
+    // are all at HEAD (the common case) pays no git at all.
+    let base_ref = pr_json
+        .get("baseRefName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha);
+    let freshness = |sha: &str| resolver.freshness(sha);
 
     // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
     // web/mobile, or `gh pr merge`) is done regardless of whether the required
@@ -1683,7 +1946,7 @@ fn read_pr_info(
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
     let (unattested, malformed_attestations) =
-        unattested_reviewers_scan(events_path, reviewers, head_sha);
+        unattested_reviewers_scan(events_path, reviewers, &freshness);
     let reviewers_ok = unattested.is_empty();
     // Coverage reads the same events.jsonl as the attestation scan (its local
     // axis) plus the GitHub review arrays (its github_app axis). Read once;
@@ -1706,8 +1969,15 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        let coverage =
-            classify_coverage(&[], &[], &events_text, head_sha, &[], false, author_session);
+        let coverage = classify_coverage(
+            &[],
+            &[],
+            &events_text,
+            &[],
+            false,
+            author_session,
+            &freshness,
+        );
         (
             "none".to_string(),
             reviewers_ok,
@@ -1736,7 +2006,7 @@ fn read_pr_info(
         // create a missing_bot (never wait for it). FINDINGS honor the union:
         // an optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
-        let info = compute_review_info(&reviews_json, required_bots);
+        let info = compute_review_info(&reviews_json, required_bots, &freshness);
         // Per-missing-bot nudge classification (x-b167), computed AFTER the
         // usage-limit retain (which happened inside compute_review_info) so
         // the two give-up paths never compose (AC6): a usage_limited bot is
@@ -1888,10 +2158,10 @@ fn read_pr_info(
             reviews_arr,
             comments_arr,
             &events_text,
-            head_sha,
             &gh_logins,
             true,
             author_session,
+            &freshness,
         );
         (
             activity_ts,
@@ -2843,7 +3113,41 @@ impl ReviewInfo {
     }
 }
 
-fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> ReviewInfo {
+/// Newest review-or-comment timestamp on a PR, or `"none"`.
+///
+/// Split out of `compute_review_info` because one caller (the no-progress
+/// activity probe) wants ONLY this. Freshness does not and must not affect an
+/// activity timestamp - a stale review is still activity - and giving that
+/// caller the full ReviewInfo meant handing it a fabricated freshness resolver
+/// whose verdicts nobody reads. A function that cannot return the other fields
+/// makes that structural instead of a comment somebody later disbelieves.
+fn review_activity_ts(reviews_json: &Value) -> String {
+    let mut latest = String::new();
+    for (key, field) in [("reviews", "submittedAt"), ("comments", "createdAt")] {
+        for item in reviews_json
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+        {
+            let ts = item.get(field).and_then(|v| v.as_str()).unwrap_or("");
+            if !ts.is_empty() && ts > latest.as_str() {
+                latest = ts.to_string();
+            }
+        }
+    }
+    if latest.is_empty() {
+        "none".to_string()
+    } else {
+        latest
+    }
+}
+
+fn compute_review_info(
+    reviews_json: &Value,
+    required_bots: &[String],
+    freshness: &dyn Fn(&str) -> Freshness,
+) -> ReviewInfo {
     let reviews = reviews_json
         .get("reviews")
         .and_then(|v| v.as_array())
@@ -2855,7 +3159,7 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
 
-    let mut latest_ts = String::new(); // empty; "none" returned if no activity found
+    let final_ts = review_activity_ts(reviews_json);
     let mut passed: Vec<bool> = vec![false; required_bots.len()];
 
     for r in reviews {
@@ -2863,14 +3167,25 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
             .pointer("/author/login")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let submitted_at = r.get("submittedAt").and_then(|v| v.as_str()).unwrap_or("");
         let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("");
 
-        if !submitted_at.is_empty() && submitted_at > latest_ts.as_str() {
-            latest_ts = submitted_at.to_string();
-        }
-
-        if !state.is_empty() {
+        // A required bot's PRESENCE is the same question the coverage axis
+        // asks, so it goes through the same predicate. Without this the
+        // tightening is decorative on exactly the path that gates a merge: a
+        // required bot whose only verdict sits on a commit it read twelve
+        // hours and two commits ago would still satisfy `reviewed`, and a
+        // fresh local attestation beside it would carry the whole gate. A bot
+        // that goes stale returns to `missing_bots`, where the existing nudge
+        // path asks it to re-read - which is the correct response to "reviewed
+        // an older commit", and a different one from "has not reviewed".
+        if !state.is_empty()
+            && freshness(
+                r.pointer("/commit/oid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            )
+            .counts()
+        {
             for (i, bot) in required_bots.iter().enumerate() {
                 if login_matches_bot(login, bot) {
                     passed[i] = true;
@@ -2878,19 +3193,6 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
             }
         }
     }
-
-    for c in comments {
-        let created_at = c.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
-        if !created_at.is_empty() && created_at > latest_ts.as_str() {
-            latest_ts = created_at.to_string();
-        }
-    }
-
-    let final_ts = if latest_ts.is_empty() {
-        "none".to_string()
-    } else {
-        latest_ts
-    };
 
     let mut missing_bots: Vec<String> = required_bots
         .iter()
@@ -2983,9 +3285,18 @@ pub enum CoverageProducer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageVerdict {
-    /// Posted a review object (any non-empty state), or a head-pinned `pass`
-    /// attestation. The only verdict that counts toward coverage.
+    /// Posted a review object, or a `pass` attestation, against a commit whose
+    /// code still matches HEAD (`Freshness::counts()`). The only verdict that
+    /// counts toward coverage.
     Reviewed,
+    /// Responded, but against a commit whose code no longer matches HEAD
+    /// (x-5b99). Positive evidence that a reviewer READ AN OLDER COMMIT, which
+    /// is a different fact from `Absent` (never responded) and needs a
+    /// different response: nudge for a re-read, do not wait for a first read.
+    /// Recorded rather than dropped so the trail shows what happened; excluded
+    /// from the count, because inheriting a verdict across a commit its author
+    /// never saw is the defect this variant exists to make visible.
+    Stale,
     /// Responded and declined to review. Quota exhaustion is the first known
     /// shape (detected by `body_is_usage_limit`). Positive evidence a reviewer
     /// exists and will not help - exactly what a nudge or lane failover needs.
@@ -3069,6 +3380,22 @@ pub struct ReviewerVerdict {
     /// pre-existing attestation lands there unchanged.
     #[serde(skip_serializing_if = "is_attestation_origin_unknown")]
     pub attestation_origin: AttestationOrigin,
+    /// The commit this reviewer actually read: a github_app review object's
+    /// `.commit.oid`, or a local attestation's `data.head_sha`. Empty when
+    /// unknowable (a review object with no commit, a verdict with no review),
+    /// which [`review_freshness`] treats as `Stale` - fail closed.
+    ///
+    /// This is the field whose absence WAS the x-5b99 defect: the event pinned
+    /// the head at EVAL time, so a bot verdict rendered twelve hours and two
+    /// commits earlier serialized as coverage for a commit its author never
+    /// saw.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reviewed_sha: String,
+    /// Whether `reviewed_sha` still describes the code at HEAD. `None` on a
+    /// verdict with no review behind it (`Absent`, `Refused`), where there is
+    /// nothing to be fresh or stale about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<Freshness>,
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
@@ -3082,6 +3409,19 @@ impl CoverageReport {
     /// Count of `reviewed` verdicts, excluding human approvals. This is the one
     /// place that decides whether a human GitHub approval counts; flip the
     /// `!v.human_approval` guard to include them (the operator's deferred call).
+    /// How many of the counted verdicts are the author attesting its own diff.
+    /// Recorded, never gating - see `coverage_event_data` for why.
+    pub fn self_attested_count(&self) -> usize {
+        self.verdicts
+            .iter()
+            .filter(|v| {
+                v.verdict == CoverageVerdict::Reviewed
+                    && !v.human_approval
+                    && v.attestation_origin == AttestationOrigin::SelfAttested
+            })
+            .count()
+    }
+
     pub fn coverage_count(&self) -> Option<usize> {
         match &self.coverage {
             Coverage::Unknown => None,
@@ -3103,6 +3443,17 @@ fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
     matches!(o, AttestationOrigin::Unknown)
 }
 
+/// Order for "which of this reviewer's reviews is the best evidence". Fresh
+/// beats a carry beats stale; the two carry reasons are equally good, since
+/// both mean the code under review is unchanged.
+fn freshness_rank(f: Freshness) -> u8 {
+    match f {
+        Freshness::Fresh => 2,
+        Freshness::CarriedBaseSync | Freshness::CarriedDocsOnly => 1,
+        Freshness::Stale => 0,
+    }
+}
+
 /// Label a local attestation's authorship from its emitting session vs the
 /// worktree's authoring session. A match is `SelfAttested`; a non-empty
 /// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor or
@@ -3117,8 +3468,18 @@ fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> 
     }
 }
 
-/// Distinct `(reviewer, attester_session_id)` pairs whose LATEST head-pinned
-/// attestation is `pass`. Keying on the pair - not the reviewer name alone -
+/// One reviewer's latest `pass` attestation, and the commit it pinned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalPass {
+    reviewer: String,
+    attester: Option<String>,
+    /// The head this attestation pinned. Whether it still counts is
+    /// [`review_freshness`]'s call, not this scan's.
+    head: String,
+}
+
+/// Distinct `(reviewer, attester_session_id)` pairs whose LATEST
+/// attestation is `pass`, each with the head it pinned. Keying on the pair - not the reviewer name alone -
 /// keeps a same-session re-run collapsed (one key, last-writer-wins, retraction
 /// intact) while letting two sessions attesting under the same reviewer label
 /// coexist: before this, a spawned peer emitting `code-review` replaced the
@@ -3129,10 +3490,13 @@ fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> 
 /// `unattested_reviewers_scan`'s retraction handling. Pure: scans text, no IO.
 /// Presence-based: counts any reviewer regardless of the configured `reviewers`
 /// list, so a worker-run `/code-review` counts even when `reviewers: []`.
-fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<(String, Option<String>)> {
-    // (reviewer, attester_session_id) -> latest-at-head pass? The attester lives
-    // in the key so cross-session attestations join instead of replace.
-    let mut latest_at_head: std::collections::HashMap<(String, Option<String>), bool> =
+fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
+    // (reviewer, attester_session_id) -> (head it attested, was it a pass). The
+    // attester lives in the key so cross-session attestations join instead of
+    // replace. The HEAD is no longer a filter, it is a RESULT: which head an
+    // attestation pinned is what the freshness predicate needs, and dropping
+    // every non-matching line here is what made a rebase destroy a review.
+    let mut latest: std::collections::HashMap<(String, Option<String>), (String, bool)> =
         std::collections::HashMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -3151,7 +3515,7 @@ fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<(String, O
         let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
             continue;
         };
-        if line_head != head_sha {
+        if line_head.is_empty() {
             continue;
         }
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
@@ -3169,14 +3533,23 @@ fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<(String, O
         // reviews performed, not approvals granted - the hold on a bad review
         // lives on `open_review_findings` and on `unattested_reviewers_scan`,
         // which keeps its name key (the config.review.reviewers gate).
-        latest_at_head.insert((r.trim_start_matches('/').to_string(), attester), is_pass);
+        latest.insert(
+            (r.trim_start_matches('/').to_string(), attester),
+            (line_head.to_string(), is_pass),
+        );
     }
-    let mut out: Vec<(String, Option<String>)> = latest_at_head
+    let mut out: Vec<LocalPass> = latest
         .into_iter()
-        .filter(|(_, pass)| *pass)
-        .map(|((r, attester), _)| (r, attester))
+        .filter(|(_, (_, pass))| *pass)
+        .map(|((reviewer, attester), (head, _))| LocalPass {
+            reviewer,
+            attester,
+            head,
+        })
         .collect();
-    out.sort();
+    out.sort_by(|a, b| {
+        (&a.reviewer, &a.attester, &a.head).cmp(&(&b.reviewer, &b.attester, &b.head))
+    });
     out
 }
 
@@ -3217,12 +3590,12 @@ pub fn classify_coverage(
     reviews: &[Value],
     comments: &[Value],
     events_text: &str,
-    head_sha: &str,
     github_app_logins: &[String],
     github_read_ok: bool,
     author_session: Option<&str>,
+    freshness: &dyn Fn(&str) -> Freshness,
 ) -> CoverageReport {
-    let local_passes = local_head_pinned_passes(events_text, head_sha);
+    let local_passes = local_latest_passes(events_text);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
 
     if github_read_ok {
@@ -3233,7 +3606,11 @@ pub fn classify_coverage(
         // review (chatgpt-codex-connector reviewing on a default
         // no-required-bots config still counts). A known App is a BOT_PROFILES
         // login or a configured github_app; a bare `[bot]` suffix is not.
-        let mut reviewed_authors: Vec<String> = Vec::new();
+        //
+        // Each author keeps its FRESHEST review, not its latest: `.commit.oid`
+        // says which commit that review read, and an author that reviewed
+        // several commits is covered by whichever of them still describes HEAD.
+        let mut reviewed_authors: Vec<(String, String, Freshness)> = Vec::new();
         for r in reviews {
             let author = r
                 .pointer("/author/login")
@@ -3246,11 +3623,26 @@ pub fn classify_coverage(
             if state.is_empty() {
                 continue;
             }
-            if !reviewed_authors
-                .iter()
-                .any(|a| logins_correspond(a, author))
+            // The commit the reviewer actually read. Already in this payload
+            // (`gh pr view --json reviews`) and discarded until now, so pinning
+            // the github_app axis costs no new API call. Absent -> "" ->
+            // Stale, which is the fail-closed direction.
+            let oid = r
+                .pointer("/commit/oid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let fresh = freshness(oid);
+            match reviewed_authors
+                .iter_mut()
+                .find(|(a, _, _)| logins_correspond(a, author))
             {
-                reviewed_authors.push(author.to_string());
+                Some(entry) => {
+                    if freshness_rank(fresh) > freshness_rank(entry.2) {
+                        entry.1 = oid.to_string();
+                        entry.2 = fresh;
+                    }
+                }
+                None => reviewed_authors.push((author.to_string(), oid.to_string(), fresh)),
             }
         }
         // (2) One verdict per unique configured login: reviewed if a
@@ -3264,22 +3656,43 @@ pub fn classify_coverage(
                 continue;
             }
             seen.push(login.to_string());
-            let reviewed = reviewed_authors.iter().any(|a| logins_correspond(a, login));
-            let verdict = if reviewed {
-                CoverageVerdict::Reviewed
-            } else {
-                let refused = comments.iter().any(|c| {
-                    let ca = c
-                        .pointer("/author/login")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    logins_correspond(ca, login)
-                        && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
-                });
-                if refused {
-                    CoverageVerdict::Refused
-                } else {
-                    CoverageVerdict::Absent
+            let hit = reviewed_authors
+                .iter()
+                .find(|(a, _, _)| logins_correspond(a, login));
+            let (verdict, reviewed_sha, fresh) = match hit {
+                // Reviewed at a commit that still describes HEAD, or reviewed
+                // at one that does not. Both are a response; only the first is
+                // coverage. Recording the second as `Stale` rather than
+                // silently dropping it is what makes the tightening auditable.
+                Some((_, sha, f)) => (
+                    if f.counts() {
+                        CoverageVerdict::Reviewed
+                    } else {
+                        CoverageVerdict::Stale
+                    },
+                    sha.clone(),
+                    Some(*f),
+                ),
+                None => {
+                    let refused = comments.iter().any(|c| {
+                        let ca = c
+                            .pointer("/author/login")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        logins_correspond(ca, login)
+                            && body_is_usage_limit(
+                                c.get("body").and_then(|v| v.as_str()).unwrap_or(""),
+                            )
+                    });
+                    (
+                        if refused {
+                            CoverageVerdict::Refused
+                        } else {
+                            CoverageVerdict::Absent
+                        },
+                        String::new(),
+                        None,
+                    )
                 }
             };
             verdicts.push(ReviewerVerdict {
@@ -3288,18 +3701,26 @@ pub fn classify_coverage(
                 verdict,
                 human_approval: false,
                 attestation_origin: AttestationOrigin::Unknown,
+                reviewed_sha,
+                freshness: fresh,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
         // (reviewed), so coverage reflects the review that actually happened.
-        for author in &reviewed_authors {
+        for (author, sha, fresh) in &reviewed_authors {
             if !seen.iter().any(|s| logins_correspond(author, s)) {
                 verdicts.push(ReviewerVerdict {
                     producer: CoverageProducer::GithubApp,
                     name: author.clone(),
-                    verdict: CoverageVerdict::Reviewed,
+                    verdict: if fresh.counts() {
+                        CoverageVerdict::Reviewed
+                    } else {
+                        CoverageVerdict::Stale
+                    },
                     human_approval: false,
                     attestation_origin: AttestationOrigin::Unknown,
+                    reviewed_sha: sha.clone(),
+                    freshness: Some(*fresh),
                 });
             }
         }
@@ -3322,33 +3743,62 @@ pub fn classify_coverage(
             }
             if r.get("state").and_then(|v| v.as_str()) == Some("APPROVED") {
                 seen_human.insert(author.to_string());
+                // Freshness applies here too, though it changes no count: a
+                // human approval is excluded either way. It changes what a
+                // human READS in `fno pr status`, and an approval rendered
+                // identically whether or not its author saw this code is the
+                // same lie one axis down.
+                let oid = r
+                    .pointer("/commit/oid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let fresh = freshness(oid);
                 verdicts.push(ReviewerVerdict {
                     producer: CoverageProducer::GithubApp,
                     name: author.to_string(),
-                    verdict: CoverageVerdict::Reviewed,
+                    verdict: if fresh.counts() {
+                        CoverageVerdict::Reviewed
+                    } else {
+                        CoverageVerdict::Stale
+                    },
                     human_approval: true,
                     attestation_origin: AttestationOrigin::Unknown,
+                    reviewed_sha: oid.to_string(),
+                    freshness: Some(fresh),
                 });
             }
         }
     }
 
-    // local_attestation axis: one `reviewed` per distinct head-pinned pass,
-    // labeled with whether the authoring session emitted it.
-    for (name, attester) in &local_passes {
+    // local_attestation axis: one verdict per distinct latest `pass`, labeled
+    // with whether the authoring session emitted it, and pinned to the head the
+    // attestation itself recorded rather than to the head at eval time.
+    for lp in &local_passes {
+        let fresh = freshness(&lp.head);
         verdicts.push(ReviewerVerdict {
             producer: CoverageProducer::LocalAttestation,
-            name: name.clone(),
-            verdict: CoverageVerdict::Reviewed,
+            name: lp.reviewer.clone(),
+            verdict: if fresh.counts() {
+                CoverageVerdict::Reviewed
+            } else {
+                CoverageVerdict::Stale
+            },
             human_approval: false,
-            attestation_origin: classify_attestation_origin(attester.as_deref(), author_session),
+            attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
+            reviewed_sha: lp.head.clone(),
+            freshness: Some(fresh),
         });
     }
 
-    // Unknown only when the GitHub read failed AND there is no confirmed local
-    // review. A head-pinned local pass is positive evidence that trumps a bot
-    // outage, so coverage is Known(local) in that case, not Unknown.
-    let coverage = if !github_read_ok && local_passes.is_empty() {
+    // Unknown only when the GitHub read failed AND no local review still
+    // describes HEAD. A COUNTING local pass is positive evidence that trumps a
+    // bot outage, so coverage is Known(local) in that case, not Unknown. A
+    // stale local pass is not evidence of anything current, so it must not
+    // rescue the read the way a fresh one does.
+    let local_counts = verdicts.iter().any(|v| {
+        v.producer == CoverageProducer::LocalAttestation && v.verdict == CoverageVerdict::Reviewed
+    });
+    let coverage = if !github_read_ok && !local_counts {
         Coverage::Unknown
     } else {
         Coverage::Covered(
@@ -3378,8 +3828,18 @@ fn coverage_event_data(
     head_sha: &str,
     repo: &str,
 ) -> serde_json::Value {
+    // Three states, not two. `Covered(0)` is a real known zero and
+    // `Coverage::is_covered()` has always returned false for it, but the
+    // serializer rendered every `Covered(n)` as the string "covered" - so
+    // `coverage: "covered"` and `reviewed_count: 0` co-occurred on three PRs
+    // in flight, and the reassuring WORD sat beside the honest NUMBER. A
+    // reader trusts the word. Emitting "uncovered" for a zero makes the two
+    // agree, and it is additive for every current consumer: they all already
+    // test `coverage == "covered" AND count > 0`, so a historical "covered"
+    // event with a zero count keeps reading as not-covered.
     let coverage_str = match &rep.coverage {
         Coverage::Unknown => "unknown",
+        Coverage::Covered(0) => "uncovered",
         Coverage::Covered(_) => "covered",
     };
     let mut data = serde_json::json!({
@@ -3390,11 +3850,47 @@ fn coverage_event_data(
     });
     if let Coverage::Covered(n) = &rep.coverage {
         data["reviewed_count"] = serde_json::json!(n);
+        // How much of that count is the author reviewing its own diff. Nothing
+        // gates on it: self-review is the DEFAULT path (`self_review_required`
+        // floors `/code-review` onto the author's own head), so refusing a
+        // self-attested pass would wedge every single-session PR, and whether
+        // it SHOULD is a merge-authority decision rather than a freshness one.
+        // What was missing is that the answer lived only in prose. It is a
+        // number on the verdict now, so a reader can see it and a future gate
+        // is one predicate rather than a redesign. Deliberately not called
+        // `independent_count`: the schema is explicit that `other_session` is
+        // not independence, and this must not launder that.
+        data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
     }
     if !repo.is_empty() {
         data["repo"] = serde_json::json!(repo);
     }
     data
+}
+
+/// Whether every `github_app` verdict went stale WITHOUT naming a commit.
+///
+/// One bot with an empty `commit.oid` is a payload quirk. EVERY bot with an
+/// empty one, and none reviewed, is the signature of a `gh` too old to return
+/// the field - which makes freshness unresolvable for the whole axis, forever,
+/// so a required bot never clears and the loop has no reachable exit. Failing
+/// closed is right; reporting it as "reviewed an older commit" is not, because
+/// the fix is a gh upgrade rather than a re-read.
+///
+/// Requires at least one stale verdict, so a PR with no bot reviews at all
+/// (every verdict `Absent`) never matches: an absence of reviewers is a
+/// different fact from an absence of commits on the reviews that exist.
+fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
+    let github: Vec<&ReviewerVerdict> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::GithubApp)
+        .collect();
+    let staleness: Vec<&&ReviewerVerdict> = github
+        .iter()
+        .filter(|v| v.verdict == CoverageVerdict::Stale)
+        .collect();
+    !staleness.is_empty() && staleness.iter().all(|v| v.reviewed_sha.is_empty())
 }
 
 /// One-line coverage summary for the terminal message and receipts (x-0eaf
@@ -3463,6 +3959,18 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .map(|v| v.name.as_str())
                 .collect();
+            // Stale reviewers are NAMED too. Without this the receipt for the
+            // x-5b99 specimen reads "0 reviewed, 0 refused, 0 errored, 0
+            // absent" - four zeros describing a PR a bot really did review, at
+            // an older commit. That is the absence-shaped lie the Stale variant
+            // exists to delete, and dropping it from the one line a human reads
+            // puts it straight back.
+            let stale: Vec<&str> = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Stale)
+                .map(|v| v.name.as_str())
+                .collect();
             // Never prescribe the local verb while anyone is absent, and never
             // suppress the next action entirely either. Both were tried here and
             // both were wrong: the offer walks a worker into self-attesting past
@@ -3474,19 +3982,57 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
             // The escape is that this line cannot know required-ness and should
             // not try. Name who is outstanding and point at the one move that is
             // safe whichever they are: check whether they are still configured.
-            let next = if absent.is_empty() {
-                "run the review verb at HEAD".to_string()
-            } else {
+            let next = if !absent.is_empty() {
                 format!(
                     "waiting on {} - if a reviewer there is uninstalled or no longer configured, check config.review",
                     absent.join(", ")
                 )
+            } else if !stale.is_empty() && blind_to_reviewed_commits(rep) {
+                // EVERY github_app verdict is stale AND none carries a commit at
+                // all. That is not "the bots read an older commit", it is "we
+                // cannot see which commit any bot read", and the two need
+                // opposite responses. `gh pr view --json reviews` supplies
+                // `commit.oid`; a gh too old to return it makes every bot review
+                // stale forever, so a required bot never clears and the loop
+                // blocks with no reachable exit. Failing closed is correct, but
+                // a closed gate that reports the wrong cause is the same
+                // absence-shaped lie this whole change deletes - so say which
+                // absence it is.
+                format!(
+                    "no review carries a reviewed commit ({}) - `gh pr view --json reviews` must return `commit.oid`; upgrade gh, then ask for a re-read",
+                    stale.join(", ")
+                )
+            } else if !stale.is_empty() {
+                // A re-read by the reviewer that already responded, not a local
+                // self-attest: "run the review verb" would walk a worker past a
+                // reviewer that may be REQUIRED and has simply gone stale.
+                format!(
+                    "{} reviewed an older commit whose code no longer matches HEAD - ask for a re-read",
+                    stale.join(", ")
+                )
+            } else {
+                "run the review verb at HEAD".to_string()
+            };
+            // `stale` counts in the tally and is NAMED in the next action, like
+            // `absent`. `refused` keeps its inline names, because a refusal is
+            // terminal and never drives the next action, so the tally is the
+            // only place a reader can learn who declined.
+            //
+            // Either way the parenthetical is dropped when the list is empty.
+            // A trailing `()` is a shape a previous fix deleted from this exact
+            // line, and the refused bucket had quietly kept printing it in
+            // every case where nothing refused - which is most of them.
+            let refused_names = if refused.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", refused.join(", "))
             };
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - {}.",
+                "review coverage: 0 reviewed, {} refused{}, {} errored, {} stale, {} absent. No head-pinned pass attestation for this head - {}.",
                 refused.len(),
-                refused.join(", "),
+                refused_names,
                 errored,
+                stale.len(),
                 absent.len(),
                 next
             )
@@ -4704,7 +5250,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 {
                     Ok(ro) if ro.status.success() => {
                         let rv: Value = serde_json::from_slice(&ro.stdout).unwrap_or(Value::Null);
-                        compute_review_info(&rv, &required_bots).latest_ts
+                        review_activity_ts(&rv)
                     }
                     _ => "none".to_string(),
                 }
@@ -5066,6 +5612,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
         // Run done() for code units
         let done_result = run_done(
             gh_bin,
+            git_bin,
             &cwd,
             settings.ci_declared_none,
             manifest.no_external,
@@ -5803,6 +6350,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 #[allow(clippy::too_many_arguments)]
 fn run_done(
     gh_bin: &str,
+    git_bin: &str,
     cwd: &Path,
     ci_declared_none: bool,
     no_external: bool,
@@ -5819,6 +6367,7 @@ fn run_done(
 ) -> Result<PrInfo, (String, String)> {
     read_pr_info(
         gh_bin,
+        git_bin,
         cwd,
         ci_declared_none,
         no_external,
@@ -7095,6 +7644,452 @@ mod tests {
         ));
     }
 
+    // ── review freshness: the one predicate (x-5b99 / x-62a1) ───────────────
+
+    fn facts(reviewed: Option<&str>, head: Option<&str>, tree: Option<&[&str]>) -> FreshnessFacts {
+        FreshnessFacts {
+            reviewed_identity: reviewed.map(str::to_string),
+            head_identity: head.map(str::to_string),
+            tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn freshness_same_sha_is_fresh() {
+        // No git facts needed at all: the reviewer read this exact commit.
+        assert_eq!(
+            review_freshness("abc123", "abc123", &FreshnessFacts::default()),
+            Freshness::Fresh
+        );
+    }
+
+    #[test]
+    fn freshness_base_sync_carries() {
+        // PR 829's specimen: a 153-file rebase whose PR code diff is identical.
+        assert_eq!(
+            review_freshness(
+                "3f64bc31",
+                "83d2b4ce",
+                &facts(
+                    Some("ident-a"),
+                    Some("ident-a"),
+                    Some(&["crates/fno/src/lib.rs"])
+                )
+            ),
+            Freshness::CarriedBaseSync
+        );
+    }
+
+    #[test]
+    fn freshness_identical_trees_carry_as_base_sync() {
+        // An empty tree diff must not fall through the "all paths are docs"
+        // branch, which is vacuously true over an empty list.
+        assert_eq!(
+            review_freshness("aaa", "bbb", &facts(Some("i"), Some("i"), Some(&[]))),
+            Freshness::CarriedBaseSync
+        );
+    }
+
+    #[test]
+    fn freshness_docs_only_carries_with_its_reason() {
+        // PR 830's specimen: one documentation file moved the head.
+        assert_eq!(
+            review_freshness(
+                "e2976abc",
+                "1ef60959",
+                &facts(
+                    Some("i"),
+                    Some("i"),
+                    Some(&["docs/architecture/x.md", "README.md"])
+                )
+            ),
+            Freshness::CarriedDocsOnly
+        );
+    }
+
+    #[test]
+    fn freshness_code_change_dies() {
+        // 20 of the 22 measured transitions are this: genuine code change, and
+        // no rule that refuses to guess can absorb them.
+        assert_eq!(
+            review_freshness(
+                "aaa",
+                "bbb",
+                &facts(Some("i-old"), Some("i-new"), Some(&["a.rs"]))
+            ),
+            Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_missing_identity_dies() {
+        // Git failure on either side: fail closed, re-review.
+        assert_eq!(
+            review_freshness("aaa", "bbb", &facts(None, Some("i"), Some(&[]))),
+            Freshness::Stale
+        );
+        assert_eq!(
+            review_freshness("aaa", "bbb", &facts(Some("i"), None, Some(&[]))),
+            Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_two_absent_identities_never_match() {
+        // THE regression guard. A first measurement pass reported 63%
+        // carry-forward and was wrong: merged PRs' three-dot diff against
+        // current origin/main is empty, e3b0c442 is the SHA-256 of the empty
+        // string, and twelve transitions matched absence against absence. The
+        // true figure was 2 of 22. `Carried` requires two Some values that are
+        // equal - never two empties, however they arose.
+        assert_eq!(
+            review_freshness("aaa", "bbb", &facts(None, None, Some(&[]))),
+            Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_absent_reviewed_sha_dies() {
+        // A github_app review object with no `commit.oid`, or an attestation
+        // with no head_sha. An empty sha must never match an empty head.
+        assert_eq!(
+            review_freshness("", "", &facts(Some("i"), Some("i"), Some(&[]))),
+            Freshness::Stale
+        );
+        assert_eq!(
+            review_freshness("", "bbb", &facts(Some("i"), Some("i"), Some(&[]))),
+            Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_unreadable_tree_diff_dies() {
+        // Matching identities but no way to name the carry reason: a carry that
+        // cannot say why it carried is not auditable.
+        assert_eq!(
+            review_freshness("aaa", "bbb", &facts(Some("i"), Some("i"), None)),
+            Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_only_stale_stops_counting() {
+        assert!(Freshness::Fresh.counts());
+        assert!(Freshness::CarriedBaseSync.counts());
+        assert!(Freshness::CarriedDocsOnly.counts());
+        assert!(!Freshness::Stale.counts());
+    }
+
+    #[test]
+    fn code_diff_identity_drops_docs_and_is_none_when_only_docs_changed() {
+        // The identity is computed from `git diff --raw` lines, so exercise the
+        // path classifier and the empty-result rule on that exact shape.
+        let code = ":100644 100644 aaa bbb M\tcrates/fno/src/lib.rs";
+        let docs = ":100644 100644 ccc ddd M\tdocs/architecture/review-lanes.md";
+        assert_eq!(raw_diff_line_path(code), "crates/fno/src/lib.rs");
+        assert!(!is_documentation_path(raw_diff_line_path(code)));
+        assert!(is_documentation_path(raw_diff_line_path(docs)));
+    }
+
+    #[test]
+    fn freshness_resolver_qualifies_a_bare_base_ref() {
+        // `gh pr view` returns `main`, not `origin/main`; a bare branch name
+        // resolves to the local ref, which in a stale worktree is not the base.
+        let cwd = std::env::temp_dir();
+        assert_eq!(
+            FreshnessResolver::new("git", &cwd, "main", "abc").base_ref,
+            "origin/main"
+        );
+        assert_eq!(
+            FreshnessResolver::new("git", &cwd, "origin/release", "abc").base_ref,
+            "origin/release"
+        );
+        // A slash in the name is not remote-qualification: `release/2.0` is a
+        // bare branch and must still be qualified, or the identity resolves
+        // against a local ref the worktree may not have.
+        assert_eq!(
+            FreshnessResolver::new("git", &cwd, "release/2.0", "abc").base_ref,
+            "origin/release/2.0"
+        );
+        assert_eq!(
+            FreshnessResolver::new("git", &cwd, "", "abc").base_ref,
+            "origin/main"
+        );
+    }
+
+    // ── both producers go through the one predicate (x-5b99 / x-62a1) ───────
+
+    /// PR #826's real payload shape: codex submitted at `8e557ccd` while the
+    /// gate evaluated against head `89bc0b91`, two commits later.
+    fn pr826_reviews() -> Vec<Value> {
+        vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector"},
+            "state": "COMMENTED",
+            "submittedAt": "2026-08-12T17:51:48Z",
+            "commit": {"oid": "8e557ccdecec07abc7e409ad8d888318016612c1"}
+        })]
+    }
+
+    #[test]
+    fn github_app_verdict_at_an_older_commit_is_stale_and_uncovers_the_pr() {
+        // THE x-5b99 specimen. Before this, the github_app axis read `state !=
+        // ""` and never asked which commit the review was submitted against,
+        // so this exact payload produced `coverage: covered, reviewed_count:
+        // 1` for a commit codex never saw. The state is non-empty here on
+        // purpose: that is the whole of what the old rule looked at.
+        let rep = classify_coverage(
+            &pr826_reviews(),
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::Stale,
+        );
+        let v = &rep.verdicts[0];
+        assert_eq!(v.verdict, CoverageVerdict::Stale);
+        assert_eq!(v.freshness, Some(Freshness::Stale));
+        assert_eq!(v.reviewed_sha, "8e557ccdecec07abc7e409ad8d888318016612c1");
+        assert_eq!(rep.coverage, Coverage::Covered(0));
+        // And the word a human reads now agrees with the number beside it.
+        let data = coverage_event_data(826, &rep, "89bc0b91", "");
+        assert_eq!(data["coverage"], serde_json::json!("uncovered"));
+        assert_eq!(data["reviewed_count"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn github_app_verdict_carried_across_a_rebase_still_counts() {
+        // The same payload where the head moved by a rebase rather than a code
+        // change: the reviewer's read still describes the code, so it counts.
+        let rep = classify_coverage(
+            &pr826_reviews(),
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::CarriedBaseSync,
+        );
+        assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Reviewed);
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn github_app_review_without_a_commit_oid_fails_closed() {
+        // An older review object, or a payload shape change, leaves no commit
+        // to pin. That is an absence, and an absence is never freshness.
+        let reviews = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector"},
+            "state": "APPROVED"
+        })];
+        let rep = classify_coverage(
+            &reviews,
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            // The real predicate, not a stub: an empty sha must reach Stale on
+            // its own rather than because a fake said so.
+            &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+        );
+        assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
+        assert_eq!(rep.coverage, Coverage::Covered(0));
+    }
+
+    #[test]
+    fn coverage_receipt_names_a_stale_reviewer_instead_of_four_zeros() {
+        // The receipt for the x-5b99 specimen used to read "0 reviewed, 0
+        // refused, 0 errored, 0 absent" - four zeros over a PR codex really did
+        // review, at an older commit - and then prescribed the local verb,
+        // which is the one move that does NOT get the bot to re-read.
+        let rep = classify_coverage(
+            &pr826_reviews(),
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::Stale,
+        );
+        let line = coverage_receipt_line(&rep);
+        // Counted in the tally, NAMED in the next action - the same split the
+        // absent bucket uses, and the reason the line carries no empty `()`.
+        assert!(line.contains("1 stale,"), "{line}");
+        assert!(line.contains("chatgpt-codex-connector"), "{line}");
+        assert!(!line.contains("()"), "{line}");
+        assert!(line.contains("ask for a re-read"), "{line}");
+        assert!(!line.contains("run the review verb"), "{line}");
+    }
+
+    #[test]
+    fn coverage_receipt_separates_an_old_commit_from_no_commit_at_all() {
+        // Both shapes are "stale", and they need OPPOSITE responses. A bot that
+        // read an older commit needs a re-read. A whole axis with no commit on
+        // any review needs a gh upgrade, because `commit.oid` is where
+        // freshness comes from and without it every bot review is stale
+        // forever - a required bot never clears and the loop has no exit.
+        let no_commit = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED"
+        })];
+        let rep = classify_coverage(
+            &no_commit,
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+        );
+        let line = coverage_receipt_line(&rep);
+        assert!(
+            line.contains("no review carries a reviewed commit"),
+            "{line}"
+        );
+        assert!(line.contains("upgrade gh"), "{line}");
+
+        // The ordinary stale case keeps the re-read instruction and must NOT
+        // mention gh: the payload named a commit, it is simply an older one.
+        let old_commit = classify_coverage(
+            &pr826_reviews(),
+            &[],
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::Stale,
+        );
+        let line = coverage_receipt_line(&old_commit);
+        assert!(line.contains("ask for a re-read"), "{line}");
+        assert!(!line.contains("upgrade gh"), "{line}");
+    }
+
+    fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
+                     "attester_session_id": "sess-author"}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn local_attestation_survives_a_carrying_head_move() {
+        // THE x-62a1 relief, and the only relief the measurement supports: an
+        // attestation at an older commit whose code identity still matches
+        // keeps counting. Before this, the scan dropped every line whose head
+        // was not byte-equal to the current one, so the mandatory pre-merge
+        // rebase destroyed a review that was still entirely valid.
+        let events = attestation_line("code-review", "oldhead", "pass");
+        let rep = classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
+            Freshness::CarriedBaseSync
+        });
+        assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Reviewed);
+        assert_eq!(rep.verdicts[0].reviewed_sha, "oldhead");
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn local_attestation_dies_on_a_real_code_change() {
+        // The other 91%. No rule that refuses to guess can absorb these.
+        let events = attestation_line("code-review", "oldhead", "pass");
+        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Stale);
+        assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
+        assert_eq!(rep.coverage, Coverage::Covered(0));
+    }
+
+    #[test]
+    fn a_later_fail_still_revokes_an_earlier_pass_across_heads() {
+        // Retraction ordering must survive the scan no longer filtering by
+        // head: a `fail` posted after a `pass` revokes it, even when the two
+        // sit on different commits that both carry.
+        let events = format!(
+            "{}\n{}",
+            attestation_line("code-review", "headA", "pass"),
+            attestation_line("code-review", "headB", "fail")
+        );
+        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
+        assert!(rep.verdicts.is_empty());
+        assert_eq!(rep.coverage, Coverage::Covered(0));
+    }
+
+    #[test]
+    fn a_stale_local_pass_does_not_rescue_a_failed_github_read() {
+        // Positive local evidence trumps a bot outage (x-0eaf). A STALE local
+        // pass is not positive evidence of anything current, so it must not
+        // buy `covered` the way a fresh one does.
+        let events = attestation_line("code-review", "oldhead", "pass");
+        let rep = classify_coverage(&[], &[], &events, &[], false, None, &|_| Freshness::Stale);
+        assert_eq!(rep.coverage, Coverage::Unknown);
+
+        let fresh = classify_coverage(&[], &[], &events, &[], false, None, &|_| Freshness::Fresh);
+        assert_eq!(fresh.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn coverage_event_reports_how_much_of_the_count_is_self_attested() {
+        // The self-review question answered as a number on the verdict rather
+        // than in prose. It gates nothing; it is now READABLE.
+        let events = format!(
+            "{}\n{}",
+            attestation_line("code-review", "h", "pass"),
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "sigma", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-peer"}
+            })
+        );
+        let rep = classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
+            Freshness::Fresh
+        });
+        assert_eq!(rep.coverage, Coverage::Covered(2));
+        assert_eq!(rep.self_attested_count(), 1);
+        let data = coverage_event_data(826, &rep, "h", "");
+        assert_eq!(data["coverage"], serde_json::json!("covered"));
+        assert_eq!(data["reviewed_count"], serde_json::json!(2));
+        assert_eq!(data["self_attested_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn required_reviewer_gate_honors_the_same_carry() {
+        // The N-reachable-paths check. `config.review.reviewers` is satisfied
+        // by a DIFFERENT scan than the coverage count, so a carry granted to
+        // one and refused by the other leaves the gate exactly as tight as
+        // before and the softening purely decorative.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("events.jsonl");
+        std::fs::write(&p, attestation_line("code-review", "oldhead", "pass")).unwrap();
+        let reviewers = vec!["code-review".to_string()];
+
+        let carried = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::CarriedBaseSync).0;
+        assert!(
+            carried.is_empty(),
+            "a carried attestation must satisfy the gate"
+        );
+
+        let stale = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::Stale).0;
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].superseded_head.as_deref(), Some("oldhead"));
+    }
+
+    #[test]
+    fn a_required_bot_that_went_stale_returns_to_missing_bots() {
+        // The other reachable path: `missing_bots` drives the presence gate and
+        // the nudge. A required bot whose only verdict sits on a commit it read
+        // two commits ago has not reviewed THIS code, and the correct response
+        // is to ask it to re-read.
+        let json = serde_json::json!({"reviews": pr826_reviews(), "comments": []});
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let stale = compute_review_info(&json, &required, &|_| Freshness::Stale);
+        assert_eq!(stale.missing_bots, required);
+        let carried = compute_review_info(&json, &required, &|_| Freshness::CarriedDocsOnly);
+        assert!(carried.missing_bots.is_empty());
+        // Activity timestamp is not a freshness question: a stale review is
+        // still activity, and the no-progress probe must keep seeing it.
+        assert_eq!(stale.latest_ts, "2026-08-12T17:51:48Z");
+        assert_eq!(review_activity_ts(&json), "2026-08-12T17:51:48Z");
+    }
+
     // ── review_coverage reaches BOTH logs, scoped by repo (x-f43c) ───────────
 
     #[test]
@@ -7154,6 +8149,20 @@ mod tests {
         }
     }
 
+    /// The bare sha equality the predicate replaced, as a freshness resolver.
+    /// The pre-x-5b99 tests below run against it unchanged: with no carry ever
+    /// granted, the new code must reproduce the old behavior exactly, and any
+    /// test that moves is a regression rather than the intended softening.
+    fn sha_equality_freshness(head: &str) -> impl Fn(&str) -> Freshness + '_ {
+        move |sha: &str| {
+            if !sha.is_empty() && sha == head {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        }
+    }
+
     /// The list half of the scan. Production reads the count too, so this
     /// wrapper lives here rather than as an unused function in the binary.
     fn unattested_reviewers(
@@ -7161,7 +8170,7 @@ mod tests {
         reviewers: &[String],
         head_sha: &str,
     ) -> Vec<UnattestedReviewer> {
-        unattested_reviewers_scan(events_path, reviewers, head_sha).0
+        unattested_reviewers_scan(events_path, reviewers, &sha_equality_freshness(head_sha)).0
     }
 
     /// The gate's boolean view of `unattested_reviewers`, exactly as
@@ -8450,7 +9459,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let (out, malformed) = unattested_reviewers_scan(&p, &["sigma".to_string()], "h");
+        let (out, malformed) =
+            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h"));
         assert_eq!(out.len(), 1, "a corrupt line never satisfies the gate");
         assert_eq!(malformed, 1, "and it is counted, not silently dropped");
 
@@ -8467,7 +9477,7 @@ mod tests {
         // A clean file adds nothing to the message.
         std::fs::write(&p, r#"{"type":"loop_check","data":{}}"#).unwrap();
         assert_eq!(
-            unattested_reviewers_scan(&p, &["sigma".to_string()], "h").1,
+            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h")).1,
             0
         );
         assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true)
@@ -10653,7 +11663,7 @@ mod tests {
             ],
             "comments": []
         });
-        let info = compute_review_info(&json, &required);
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
         assert!(!info.all_required_passed());
         assert_eq!(info.missing_bots, vec!["gemini-code-assist".to_string()]);
         assert_eq!(info.latest_ts, "2026-06-05T01:00:00Z");
@@ -10841,7 +11851,7 @@ mod tests {
             ],
             "comments": []
         });
-        let info = compute_review_info(&json, &required);
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
         assert!(!info.all_required_passed());
     }
 
@@ -10862,7 +11872,7 @@ mod tests {
                  "createdAt": "2026-07-06T01:00:00Z"}
             ]
         });
-        let info = compute_review_info(&json, &required);
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
         // Detection still holds: the bot is classified rate-limited, not missing.
         assert!(info.missing_bots.is_empty());
         assert_eq!(
@@ -10889,7 +11899,7 @@ mod tests {
                  "createdAt": "2026-07-06T01:00:00Z"}
             ]
         });
-        let info = compute_review_info(&json, &required);
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
         assert_eq!(
             info.missing_bots,
             vec!["chatgpt-codex-connector".to_string()]
@@ -10915,7 +11925,7 @@ mod tests {
                  "createdAt": "2026-07-06T01:00:00Z"}
             ]
         });
-        let info = compute_review_info(&json, &required);
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
         assert!(info.missing_bots.is_empty());
         assert!(info.usage_limited.is_empty());
         assert!(info.all_required_passed());
