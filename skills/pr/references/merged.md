@@ -81,7 +81,8 @@ tail line); the verb exits non-zero so a partial run is never readable as
 success. Four statuses exist and `deferred` is the one that is easy to misread:
 `ok` done, `skipped` nothing was owed, `failed` it broke, `deferred` the work is
 still owed and a later sweep does it. The archive leg defers whenever the ritual
-runs from inside the worktree it would remove, which is the usual case. A re-run is resume-safe: completed legs no-op, failed legs retry, no
+runs from inside the worktree it targets for removal, which is the usual case.
+A re-run is resume-safe: completed legs no-op, failed legs retry, no
 leg double-applies (reconcile/retro/advance/sync/skill-diff each dedup on their
 own markers and claims).
 
