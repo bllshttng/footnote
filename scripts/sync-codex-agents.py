@@ -58,13 +58,19 @@ def parse_agent_frontmatter(raw: str, path: Path) -> dict[str, Any]:
         key, rest = line.split(":", 1)
         key = key.strip()
         rest = rest.strip()
-        if rest in {"|", ">"}:
+        # Block scalar header, with the chomping indicators YAML allows: |, |-,
+        # |+, >, >-, >+. Accepting only the bare marker left `description: |-`
+        # parsed as the literal string "|-" with the body appended as loose
+        # continuation lines, which put "<example>" into a codex description
+        # and failed the generated-agent contract.
+        if rest and rest[0] in "|>" and rest[1:] in {"", "-", "+"}:
+            folded = rest[0] == ">"
             block: list[str] = []
             i += 1
             while i < len(lines) and (lines[i].startswith(" ") or not lines[i].strip()):
                 block.append(lines[i][2:] if lines[i].startswith("  ") else lines[i].lstrip())
                 i += 1
-            data[key] = "\n".join(block).rstrip()
+            data[key] = (" " if folded else "\n").join(block).rstrip()
             continue
         if rest == "":
             items: list[str] = []

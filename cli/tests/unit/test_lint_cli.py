@@ -260,6 +260,64 @@ def _repo_with_renamed_doc(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, new, old
 
 
+def test_count_and_reader_read_the_same_diff(tmp_path: Path, monkeypatch) -> None:
+    """Both sides of the count guard must ask git the SAME question.
+
+    git computes a different edit script at zero context than at the default
+    three. Reindenting a YAML scalar into a block in agents/verifier.md counts
+    19 added lines at default context and 18 at -U0. The guard compared a
+    default-context `--numstat` against `-U0` line numbers and reported an
+    instrument failure on a file with nothing wrong in it, telling the author
+    it was not theirs to annotate. Both numbers were right about different
+    questions.
+
+    Asserted on the argv rather than through a fixture, deliberately. The
+    divergence needs a specific interaction of blank lines and indentation
+    that a reduced fixture does not reproduce: a synthetic repo built for this
+    passed with the bug still present, which makes it a test that cannot fail.
+    The invariant is one flag, so pin the flag.
+    """
+    import os
+
+    from fno import lint_cli
+
+    repo, new, _old = _repo_with_renamed_doc(tmp_path)
+    (repo / new).write_text("A short added line.\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "edit")
+
+    seen: list[list[str]] = []
+    real_run_git = lint_cli._run_git
+
+    def recording_run_git(argv, *args, **kwargs):
+        seen.append(list(argv))
+        return real_run_git(argv, *args, **kwargs)
+
+    monkeypatch.setattr(lint_cli, "_run_git", recording_run_git)
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        lint_cli._style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    numstat = [argv for argv in seen if "--numstat" in argv]
+    reader = [argv for argv in seen if "-U0" in argv and "--numstat" not in argv]
+
+    # Positive controls: both calls must actually have happened, or the two
+    # assertions below pass over an empty list and prove nothing.
+    assert numstat, f"no --numstat call was made: {seen}"
+    assert reader, f"no -U0 line-number read was made: {seen}"
+    assert all("-U0" in argv for argv in numstat), (
+        "the count side must read the same zero-context diff as the reader, "
+        f"else the guard compares two different edit scripts: {numstat}"
+    )
+
+
 def test_added_line_nums_ignores_a_pure_rename(tmp_path: Path) -> None:
     from fno.lint_cli import _git_added_line_nums
 

@@ -692,8 +692,15 @@ def _style_added_lines(
     # nothing. Measured before this: one trimmed doc beside one normal doc failed
     # the whole gate, demanding a style-exception marker in a file the author had
     # only shortened. A mode-only change did the same.
+    # -U0 here is load-bearing, not decoration. The per-file reader below runs
+    # `git diff -U0`, and git computes a DIFFERENT edit script at zero context
+    # than at the default three: reindenting a block in agents/verifier.md
+    # counts 19 added lines at default context and 18 at -U0. Comparing the two
+    # for equality then reports an instrument failure on a file nobody can fix,
+    # because both numbers are right about different questions. Both sides must
+    # read the same diff.
     numstat = _run_git(
-        _pinned_diff_argv("--numstat", "-z", f"{diff_base}...HEAD"),
+        _pinned_diff_argv("--numstat", "-z", "-U0", f"{diff_base}...HEAD"),
         repo,
         label=f"counting changed lines ({diff_base}...HEAD)",
     )
