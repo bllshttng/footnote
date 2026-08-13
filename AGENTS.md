@@ -98,7 +98,7 @@ footnote/
 
 ## Commands
 
-Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (`/fno:review sigma|peer`, `/fno:think what-if|panel`, `/fno:pr create|check|merged`, `/fno:do flat|waves`). Everything else stays invocable by full name; the advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
+Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (table below). Everything else stays invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
 
 | Command | Purpose |
 |---------|---------|
