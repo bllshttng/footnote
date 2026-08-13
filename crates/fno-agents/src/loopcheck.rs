@@ -4013,13 +4013,26 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
             } else {
                 "run the review verb at HEAD".to_string()
             };
+            // `stale` counts in the tally and is NAMED in the next action, like
+            // `absent`. `refused` keeps its inline names, because a refusal is
+            // terminal and never drives the next action, so the tally is the
+            // only place a reader can learn who declined.
+            //
+            // Either way the parenthetical is dropped when the list is empty.
+            // A trailing `()` is a shape a previous fix deleted from this exact
+            // line, and the refused bucket had quietly kept printing it in
+            // every case where nothing refused - which is most of them.
+            let refused_names = if refused.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", refused.join(", "))
+            };
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} stale ({}), {} absent. No head-pinned pass attestation for this head - {}.",
+                "review coverage: 0 reviewed, {} refused{}, {} errored, {} stale, {} absent. No head-pinned pass attestation for this head - {}.",
                 refused.len(),
-                refused.join(", "),
+                refused_names,
                 errored,
                 stale.len(),
-                stale.join(", "),
                 absent.len(),
                 next
             )
@@ -7900,7 +7913,11 @@ mod tests {
             &|_| Freshness::Stale,
         );
         let line = coverage_receipt_line(&rep);
-        assert!(line.contains("1 stale (chatgpt-codex-connector)"), "{line}");
+        // Counted in the tally, NAMED in the next action - the same split the
+        // absent bucket uses, and the reason the line carries no empty `()`.
+        assert!(line.contains("1 stale,"), "{line}");
+        assert!(line.contains("chatgpt-codex-connector"), "{line}");
+        assert!(!line.contains("()"), "{line}");
         assert!(line.contains("ask for a re-read"), "{line}");
         assert!(!line.contains("run the review verb"), "{line}");
     }
