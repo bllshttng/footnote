@@ -5206,6 +5206,23 @@ def _switchboard_exchange(
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
+# Liveness-scaled confirm budget (node x-1904, change 2). The enqueue record is
+# written at submit time, not at turn end, so a healthy busy recipient confirms
+# in well under a second -- the default 10s budget already exists only to cover
+# recipients the daemon successfully attached to, i.e. ones already proven
+# alive. What it currently does wrong is convert "the CR has not landed yet
+# because the recipient is deep in a long tool call" into a live-miss, handing
+# the message to a queue nobody drains. When the SENDER's own liveness signal
+# (`_registered_family1_state`) independently reports the recipient mid-turn,
+# raise the poll budget to ~30s (120 * 250ms) so a long tool call has room to
+# yield back to the prompt before we give up; any other recipient keeps the
+# unscaled default. A live recipient that still has not enqueued within the
+# raised budget is genuinely wedged, a different fact from "busy" (change 4
+# reports it as such via the reason token). Not a fixed sleep: the poll still
+# exits the instant the enqueue lands.
+_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS = 120
+_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S = 40.0
+
 # Rust mux pane exit code for a guarded send the server refused because the
 # recipient pane's turn is not takeable (crates/fno/src/mux_cli.rs
 # EXIT_TARGET_NOT_IDLE). The delivery ladder reads it as turn-not-taken -> a
@@ -5522,6 +5539,7 @@ def _mail_inject_claude(
     *,
     sender: Optional[str] = None,
     reason_out: Optional[list] = None,
+    liveness_scaled: bool = False,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -5539,6 +5557,13 @@ def _mail_inject_claude(
     as a plain bool are unaffected. A missing binary, subprocess failure, or
     unparseable stdout names that boundary too, so the receipt never silently
     reverts to a bare live-miss at the Python edge.
+
+    ``liveness_scaled`` (node x-1904, change 2): pass the raised confirm budget
+    (``_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS``) when the caller's OWN liveness
+    signal already reports the recipient mid-turn, so a long tool call gets room
+    to yield back to the prompt before the confirm gives up. The unscaled
+    default otherwise (a recipient we cannot independently prove busy stays on
+    the tight budget, converting a wedged send to durable quickly).
 
     ``sender`` is the invoking session's mail handle, forwarded to the binary's
     audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
@@ -5559,13 +5584,17 @@ def _mail_inject_claude(
     argv = [str(binary), "mail-inject", "--session", recipient]
     if sender:
         argv += ["--sender", sender]
+    timeout = _MAIL_INJECT_TIMEOUT_S
+    if liveness_scaled:
+        argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
+        timeout = _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S
     try:
         proc = subprocess.run(
             argv,
             input=text,
             capture_output=True,
             text=True,
-            timeout=_MAIL_INJECT_TIMEOUT_S,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         _record("probe-unavailable")
@@ -5908,6 +5937,7 @@ def _deliver_live(
     mail: "Optional[_MailCtx]" = None,
     sender_entry: "Optional[AgentEntry]" = None,
     reason_out: "Optional[list]" = None,
+    family1_state: Optional[str] = None,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node x-1f23).
@@ -5918,6 +5948,14 @@ def _deliver_live(
     a durable demotion receipt can name WHY the live lane missed instead of a
     generic live-miss. A side-channel, not a second return value, so callers
     and test mocks that read this as a plain bool are unaffected.
+
+    ``family1_state`` (node x-1904, change 2) is the caller's ALREADY-COMPUTED
+    :func:`_registered_family1_state` classification for ``entry`` -- passed in
+    rather than recomputed here, since ``dispatch_send`` already resolves it
+    before calling this function and a second call would re-read the recipient
+    transcript for no new information. ``"working"`` (mid-turn, per
+    :func:`_registered_family1_state`) scales the claude control.sock confirm
+    budget so a long tool call has room to yield before we give up.
 
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
@@ -6050,7 +6088,12 @@ def _deliver_live(
     if not recipient:
         _record("no-recipient")
         return False
-    return _mail_inject_claude(recipient, wrapped, reason_out=reason_out)
+    return _mail_inject_claude(
+        recipient,
+        wrapped,
+        reason_out=reason_out,
+        liveness_scaled=family1_state == "working",
+    )
 
 
 def _registered_family1_state(entry: "AgentEntry") -> str:
@@ -6461,6 +6504,7 @@ def dispatch_send(
                         mail_ctx,
                         sender_entry=sender_entry,
                         reason_out=_live_reason,
+                        family1_state=family1_state,
                     )
                     if _live_delivered:
                         delivery = "hosted"
