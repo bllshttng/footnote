@@ -105,6 +105,9 @@ def write_frontmatter(path: Path, data: Dict[str, Any], body: str) -> None:
         default_flow_style=False,
         allow_unicode=True,
         sort_keys=False,
+        # width=inf: manifests carry free text (input, reason, last_failure_error);
+        # PyYAML's best_width=80 would fold those mid-sentence.
+        width=float("inf"),
     )
     content = f"---\n{yaml_block}---\n{body}"
     atomic_write(Path(path), content)

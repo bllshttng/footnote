@@ -1,5 +1,9 @@
 # Claude Code temp files
 .claude/*.local.md
+# Local permission allowlist. setup-worktree.sh symlinks it into every
+# worktree, so without this line a `git add -A` there stages a personal
+# config into a public repo on any machine lacking a global ignore for it.
+.claude/settings.local.json
 .claude/audit-progress.txt
 .claude/plans
 .claude/scheduled_tasks.lock
@@ -63,10 +67,14 @@ __pycache__/
 .codex/*
 !.codex/agents/
 !.codex/agents/*.toml
-# No trailing slash: setup-worktree.sh link_dir's this one into a SYMLINK, and a
-# `foo/` rule matches directories only, so the slash form left every linked
-# worktree dirty and preflight refusing (same defect as the .claude/* links
-# below). .agents/.codex/.codex-plugin keep their glob form on purpose: each
+
+# No trailing slash: setup-worktree.sh links .gemini as a symlink, which git
+# treats as a file. .agents and .codex keep the `/*` form on purpose - a bare
+# entry would ignore the whole directory and defeat the re-includes above,
+# since git cannot re-include a path under an ignored directory. A `foo/` rule
+# matches directories only, so the slash form left every linked worktree dirty 
+# and preflight refusing (same defect as the .claude/* link below). 
+# .agents/.codex/.codex-plugin keep their glob form on purpose: each
 # holds tracked files, so link_dir hits its non-empty-real-dir refusal and they
 # are never symlinks - and .codex-plugin must stay shippable besides.
 .gemini
