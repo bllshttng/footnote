@@ -3579,7 +3579,10 @@ mod tests {
             clients_moved: 2,
         };
         let bytes = serde_json::to_vec(&focused).unwrap();
-        assert_eq!(focused, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
+        assert_eq!(
+            focused,
+            serde_json::from_slice::<ServerMsg>(&bytes).unwrap()
+        );
     }
 
     #[test]

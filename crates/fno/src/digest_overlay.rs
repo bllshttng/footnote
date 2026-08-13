@@ -352,8 +352,14 @@ fn project_root(cwd: &Path) -> PathBuf {
 /// The project config roots, HIGHEST precedence first: this checkout, then the
 /// canonical one behind it when this is a linked worktree.
 fn config_roots(cwd: &Path) -> Vec<PathBuf> {
+    config_roots_with(cwd, canonical_suppressed_by_env())
+}
+
+/// [`config_roots`] with the suppression decision passed in, so a test can
+/// exercise the walk without depending on an env var it does not control.
+fn config_roots_with(cwd: &Path, suppressed: bool) -> Vec<PathBuf> {
     let root = project_root(cwd);
-    let canonical = canonical_root(&root);
+    let canonical = canonical_root_with(&root, suppressed);
     std::iter::once(root).chain(canonical).collect()
 }
 
@@ -363,6 +369,16 @@ fn config_roots(cwd: &Path) -> Vec<PathBuf> {
 /// the whole process shares.
 fn canonical_suppressed(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|v| v == std::ffi::OsStr::new("1"))
+}
+
+/// The live env read, in ONE place. Everything below takes the answer as an
+/// argument, so a test never inherits it: `scripts/ci/preflight.sh` exports
+/// `FNO_NO_CANONICAL_CONFIG=1` for its hermetic runner, which used to make the
+/// canonical-candidate test assert `Some(...)` against a function forced to
+/// return `None` - green everywhere except the one gate that runs before a
+/// push.
+fn canonical_suppressed_by_env() -> bool {
+    canonical_suppressed(std::env::var_os("FNO_NO_CANONICAL_CONFIG").as_deref())
 }
 
 /// The main checkout behind a linked worktree, when the worktree has no config
@@ -387,12 +403,18 @@ fn canonical_suppressed(value: Option<&std::ffi::OsStr>) -> bool {
 /// outside the checkout, and it costs no subprocess on the attach path. Change
 /// one and check the other.
 fn canonical_root(worktree: &Path) -> Option<PathBuf> {
-    // Preflight's hermetic runner drops THIS candidate only. Exactly "1"; any
-    // other value is inert, matching `config/__init__.py` and
-    // `fno_agents::agents_config` verbatim. A third reader with its own idea of
-    // truthiness would resurrect the very split-brain this candidate fixes,
-    // just for operators who set it to "0" or "true".
-    if canonical_suppressed(std::env::var_os("FNO_NO_CANONICAL_CONFIG").as_deref()) {
+    canonical_root_with(worktree, canonical_suppressed_by_env())
+}
+
+/// [`canonical_root`] with the suppression decision passed in.
+///
+/// Preflight's hermetic runner drops THIS candidate only. Exactly "1"; any
+/// other value is inert, matching `config/__init__.py` and
+/// `fno_agents::agents_config` verbatim. A third reader with its own idea of
+/// truthiness would resurrect the very split-brain this candidate fixes, just
+/// for operators who set it to "0" or "true".
+fn canonical_root_with(worktree: &Path, suppressed: bool) -> Option<PathBuf> {
+    if suppressed {
         return None;
     }
     let gitdir = std::fs::read_to_string(worktree.join(".git")).ok()?;
@@ -796,18 +818,35 @@ mod tests {
         )
         .expect("gitdir file");
 
+        // Suppression is passed IN, never inherited: preflight's hermetic
+        // runner exports FNO_NO_CANONICAL_CONFIG=1, which forced the plain
+        // `canonical_root` to None and made this test fail in the one place it
+        // most needed to run - the gate before a push. Taking it as an argument
+        // also means these asserts cannot race a sibling test mutating a
+        // process-wide variable.
         assert_eq!(
-            canonical_root(&wt).as_deref(),
+            canonical_root_with(&wt, false).as_deref(),
             Some(canonical.as_path()),
             "a linked worktree resolves the checkout behind it"
         );
         assert_eq!(
-            config_roots(&wt.join("crates/fno")),
+            config_roots_with(&wt.join("crates/fno"), false),
             vec![wt.clone(), canonical.clone()],
             "this checkout outranks canonical, and canonical is still reachable"
         );
         // The main checkout has no checkout behind it.
-        assert_eq!(canonical_root(&canonical), None);
+        assert_eq!(canonical_root_with(&canonical, false), None);
+        // ...and the preflight seam really does drop the candidate.
+        assert_eq!(
+            canonical_root_with(&wt, true),
+            None,
+            "FNO_NO_CANONICAL_CONFIG=1 drops the canonical candidate"
+        );
+        assert_eq!(
+            config_roots_with(&wt.join("crates/fno"), true),
+            vec![wt.clone()],
+            "and leaves this checkout as the only root"
+        );
 
         // Only the exact value "1" suppresses the candidate, matching
         // config/__init__.py ("Exactly \"1\"; any other value inert") and

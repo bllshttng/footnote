@@ -12625,14 +12625,19 @@ mod tests {
         apply_hit(&mut view, hit, &mut buf).await.unwrap();
         let picker = view.attach_place.expect("picker opened");
         assert_ne!(
-            picker.target(), Some(mid),
+            picker.target(),
+            Some(mid),
             "target must not be the virtual mission id"
         );
         assert!(
             !picker.squads.contains(&mid),
             "the mission id must not be offered as a placement choice"
         );
-        assert_eq!(picker.target(), Some(1), "falls back to the active real squad");
+        assert_eq!(
+            picker.target(),
+            Some(1),
+            "falls back to the active real squad"
+        );
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
@@ -20367,12 +20372,16 @@ mod tests {
         );
 
         // Walk to the 10th (index 9): past the digit range by construction.
-        attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
+            .await
+            .unwrap();
         assert!(buf.is_empty(), "walking the list attaches nothing");
         assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
 
         // ...and on to the 14th, where the clamp stops it.
-        attach_place_keys(&mut v, b"jjjjjjjj", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"jjjjjjjj", &mut buf)
+            .await
+            .unwrap();
         let picker = v.attach_place.as_ref().unwrap();
         assert_eq!(picker.target(), Some(14), "the last workspace is reachable");
         assert_eq!(picker.cursor, 13, "clamped at the end, no wrap");
@@ -20461,7 +20470,9 @@ mod tests {
         );
 
         // Destinations are 2..=14; index 12 is the 14th workspace.
-        move_pick_keys(&mut v, b"jjjjjjjjjjjj", &mut buf).await.unwrap();
+        move_pick_keys(&mut v, b"jjjjjjjjjjjj", &mut buf)
+            .await
+            .unwrap();
         assert!(buf.is_empty(), "walking the list moves nothing");
         let picker = v.move_pick.as_ref().expect("the picker stays open");
         assert_eq!(picker.target(), Some(14), "the last workspace is reachable");
@@ -20489,7 +20500,10 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"z", &mut buf).await.unwrap();
         assert!(buf.is_empty());
-        assert!(v.move_pick.is_some(), "an unmapped key is ignored, not fatal");
+        assert!(
+            v.move_pick.is_some(),
+            "an unmapped key is ignored, not fatal"
+        );
         // `q` still closes instantly. A bare Esc lands on the FOLLOWING keypress
         // instead, which is fold_selector_keys' documented behaviour and the
         // price of supporting arrows at all: a lone ESC is indistinguishable

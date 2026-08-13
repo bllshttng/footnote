@@ -17005,7 +17005,12 @@ mod tests {
         // the RESOLVED location rather than echoing the request.
         let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
         let (p3, t3) = add_second_squad(&mut core);
-        let view_before = core.clients.iter().find(|c| c.id == client_id).unwrap().view;
+        let view_before = core
+            .clients
+            .iter()
+            .find(|c| c.id == client_id)
+            .unwrap()
+            .view;
         assert_eq!(view_before.0, 1, "precondition: viewing squad 1");
 
         let reply = core.pane_focus(p3);
@@ -17040,7 +17045,12 @@ mod tests {
         // pane` wording `Command::FocusPane` already refuses with, and the
         // viewer does not move a millimetre on the way to the refusal.
         let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
-        let before = core.clients.iter().find(|c| c.id == client_id).unwrap().view;
+        let before = core
+            .clients
+            .iter()
+            .find(|c| c.id == client_id)
+            .unwrap()
+            .view;
         match core.pane_focus(999_999) {
             ServerMsg::Err { code, msg } => {
                 assert_eq!(code, err_code::DEAD_PANE);
@@ -17049,7 +17059,11 @@ mod tests {
             other => panic!("expected Err, got {other:?}"),
         }
         assert_eq!(
-            core.clients.iter().find(|c| c.id == client_id).unwrap().view,
+            core.clients
+                .iter()
+                .find(|c| c.id == client_id)
+                .unwrap()
+                .view,
             before,
             "a refusal moves nobody"
         );
