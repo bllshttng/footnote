@@ -4719,10 +4719,25 @@ def _daemon_rpc(
 
 
 # read_timeout exceeds the daemon's per-turn ceiling
-# (SWITCHBOARD_TURN_TIMEOUT_MS=120s) so a real reply is not cut short. The
-# demote/probe case answers in well under a second (a failed stream.ping), so
-# normal sends to non-stream sessions are not slowed materially.
+# (SWITCHBOARD_TURN_TIMEOUT_MS=120s) so a real reply is not cut short. Used ONLY
+# by the detached background relay continuation (_relay_worker_loop, x-1f23):
+# it runs off-thread, so a sender never waits on it, and a genuine multi-hop
+# stream exchange legitimately wants the full ceiling.
 _SWITCHBOARD_READ_TIMEOUT = 130.0
+# The FIRST hop's read budget (node x-1904, change 6), separate from the relay's
+# above: this one is SYNCHRONOUS -- the sender blocks on it -- so it must not
+# inherit the relay's 130s. Measured specimen: a daemon that connected fine
+# (the 1s connect timeout below was never the problem) then read-timed-out at
+# the full 130s on what this module's own comment already documents as a
+# "well under a second" fast-fail case, on two separate sends (killed by the
+# operator at 90s and 120s having produced neither a live delivery nor a
+# durable row); a third send eventually succeeded through the mail-inject
+# fallback lane after paying the whole 130s first. So the daemon's own
+# documented fast-fail promise cannot be trusted for up to 130s; enforce a
+# much tighter bound with headroom over "well under a second" for a genuine
+# fast reply, and fall through to the lane that works well before a human
+# gives up and kills the process by hand.
+_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT = 15.0
 # A SHORT connect timeout: every claude send now tries the switchboard first, so
 # a DOWN/wedged daemon must not tax the common (non-stream) path — it should fail
 # the connect fast and demote, rather than burn the 3s default before the
@@ -5114,14 +5129,21 @@ def _switchboard_exchange(
     caller then demotes to the MCP/socket path).
 
     The FIRST hop (drive B with ``body``) is the actual ``send A->B`` delivery and
-    runs synchronously so the delivered/demote decision is exact. When
-    ``config.agents.a2a.auto`` is True (the default) the bounded autonomous relay
-    that follows (drive A with B's reply, then B with A's reply, ... up to
-    ``config.agents.a2a.turn_ceiling`` total turns) is kicked off in a DETACHED
-    background process and the caller returns ``True`` immediately (ab-3bd520ab) —
-    it no longer blocks for up to ``turn_ceiling × 130s``. When ``auto`` is False,
-    a single OBSERVED hop drives B and mirrors B's reply into A's view, with no
-    autonomous relay.
+    runs synchronously so the delivered/demote decision is exact. Its read
+    budget is ``_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT`` (node x-1904, change 6),
+    NOT the relay's 130s: the sender blocks on this call, and a daemon that
+    fails to honor its own documented "well under a second" fast-fail promise
+    must not tax a sender for over two minutes before falling through to a lane
+    that works (measured specimen: two sends killed by hand at 90s/120s, a
+    third that paid the whole 130s before succeeding through the mail-inject
+    fallback). When ``config.agents.a2a.auto`` is True (the default) the
+    bounded autonomous relay that follows (drive A with B's reply, then B with
+    A's reply, ... up to ``config.agents.a2a.turn_ceiling`` total turns) is
+    kicked off in a DETACHED background process and the caller returns
+    ``True`` immediately (ab-3bd520ab) — it no longer blocks for up to
+    ``turn_ceiling × 130s``, so the relay hop keeps the full ceiling: nothing
+    is waiting on it. When ``auto`` is False, a single OBSERVED hop drives B
+    and mirrors B's reply into A's view, with no autonomous relay.
     """
     auto, ceiling = _load_a2a_settings()
     # US6 (ab-098967b4): the first-use confirm gates the first autonomous hop.
@@ -5145,7 +5167,7 @@ def _switchboard_exchange(
         _SWITCHBOARD_RPC_METHOD,
         params,
         connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
-        read_timeout=_SWITCHBOARD_READ_TIMEOUT,
+        read_timeout=_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT,
     )
     if (
         sb is None
@@ -6222,7 +6244,21 @@ def dispatch_send(
             flush=True,
         )
 
-    # 3. Per-agent flock.
+    # 3. Per-agent flock. Confirmed (node x-1904, change 6): this `with` block
+    # spans the ENTIRE rest of the send, including the live-delivery attempt
+    # below -- not only the registry read/identity-check mutation it exists to
+    # guard (the "second resolution under that lock closes the read/lock race"
+    # comment a few lines down). A live-delivery attempt at a busy recipient
+    # can now take up to `_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S` (40s, change
+    # 2's own budget raise) or the switchboard's 130s relay ceiling, so a
+    # second sender addressing the SAME busy recipient serializes behind the
+    # whole first attempt rather than just the identity check -- the specimen
+    # measured delivering this plan's own report ("Waiting for agent
+    # 'king-footnote-g3' lock..." with no progress until killed). Narrowing
+    # this to cover only the registry mutation is a real fix but a nontrivial
+    # restructuring of a concurrency-sensitive 300-line function under time
+    # pressure is the wrong place to guess; filed as a carveout rather than
+    # rushed here.
     try:
         with hold_agent_lock(
             canonical_name,
