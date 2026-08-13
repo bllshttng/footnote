@@ -76,6 +76,8 @@ trap 'rm -rf "$SBX" "$BINDIR"' EXIT
 mkdir -p "$SBX/.fno/agents"
 printf 'schema_version: 1\nconfig:\n  state_dir: %s/.fno/\n' "$SBX" > "$SBX/.fno/settings.yaml"
 touch "$SBX/.fno/.path-migration-done"   # prevent [setup] state_dir re-migration
+LATCHES="$SBX/.fno/latches"               # latches live in a subdir, not the root
+mkdir -p "$LATCHES"
 printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' > "$SBX/.fno/config.toml"
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
@@ -190,7 +192,7 @@ run_hook "$(payload "$SBX/t.jsonl")"
 assert_absent "AC7: second fire same band is latched" "$OUT" '"decision":"block"'
 
 # crowned but BELOW trigger -> exit 0, no block, no output
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/low.jsonl" 300000   # 30% < 40
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_eq     "AC7: below trigger exits 0" "$RC" "0"
@@ -205,7 +207,7 @@ assert_contains "AC7: next band blocks again" "$OUT" '60% used'
 # The probe ran for every session at the old crown gate and was discarded; now
 # an uncrowned session past the GENERAL trigger (50) blocks with its own message
 # + session_context_nudge event. Clear latches + registry first.
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry no no
 write_transcript "$SBX/t.jsonl" 500000   # 50% >= general trigger 50
 run_hook "$(payload "$SBX/t.jsonl")"
@@ -216,14 +218,14 @@ assert_contains "AC17: reason names the general trigger" "$OUT" 'session compact
 events_has session_context_nudge && ok "AC17: session_context_nudge event emitted" || bad "AC17: no session_context_nudge event"
 
 # uncrowned BELOW the general trigger -> exit 0, no block
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/low.jsonl" 300000   # 30% < 50
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_eq     "AC17: uncrowned below trigger exits 0" "$RC" "0"
 assert_absent "AC17: uncrowned below trigger no block" "$OUT" '"decision":"block"'
 
 # === AC14: orphan block names both workers + the three resolutions ============
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry yes yes                       # crowned king + 2 live children
 write_transcript "$SBX/low.jsonl" 300000     # below trigger -> isolate orphan check
 run_hook "$(payload "$SBX/low.jsonl")"
@@ -240,21 +242,21 @@ assert_contains "AC14: names resolution 3 (carveout)" "$OUT" 'carveout add'
 events_has king_orphan_block && ok "AC14: king_orphan_block event emitted" || bad "AC14: no king_orphan_block event"
 
 # === AC15: a carveout carrying the scope suppresses the orphan block ==========
-rm -f "$SBX/.fno"/.context-nudge-ctx-* 2>/dev/null      # keep ctx latch; clear orphan latch
-rm -f "$SBX/.fno"/.context-nudge-orphan-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-ctx-* 2>/dev/null      # keep ctx latch; clear orphan latch
+rm -f "$LATCHES"/.context-nudge-orphan-* 2>/dev/null
 fno carveout add -k deferred --scope "$SCOPE" "workers review-orphaned; advisory self-review" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "AC15: carveout suppresses orphan block" "$OUT" 'cannot be a pure pass'
 
 # a carveout for a DIFFERENT scope does NOT suppress
-rm -f "$SBX/.fno"/.context-nudge-orphan-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-orphan-* 2>/dev/null
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true   # drop the matching-scope carveout from above
 fno carveout add -k deferred --scope "other-scope" "unrelated" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_contains "AC15: wrong-scope carveout does not suppress" "$OUT" 'cannot be a pure pass'
 
 # === AC16: both checks fire in one output; orphan resolved does not kill ctx ===
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 # remove the matching carveout so orphans are unresolved again; keep king + children
 fno carveout list --json >/dev/null 2>&1   # (carveouts persist; clear by truncating)
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true
@@ -269,7 +271,7 @@ assert_contains "AC16: orphan reason present" "$OUT" 'cannot be a pure pass'
 # or a cwd with no .fno) must not re-nudge within the same band. Pre-fix the
 # CWD-relative latch made the second fire block (or never latch at all from a
 # cwd with no .fno).
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry yes no
 write_transcript "$SBX/t.jsonl" 500000   # 50%, band 5
 cd "$SBX"                                 # cwd with a .fno
@@ -284,7 +286,7 @@ cd "$SBX"                                 # restore for any trailing steps
 # A 200k window (unlisted model) at 55% used does NOT fire quality (MIN_WINDOW),
 # and with 90k remaining it clears the RESERVE floor too, so the hook is silent.
 # The same percentage on a 1M window would block (covered by AC5/AC17).
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry no no
 write_transcript "$SBX/small.jsonl" 110000 "gpt-5-codex"   # 200k window, 55%, 90k left
 run_hook "$(payload "$SBX/small.jsonl")"
@@ -294,7 +296,7 @@ assert_absent "AC19: small window no quality block" "$OUT" '"decision":"block"'
 # === AC20: capacity branch fires on a small window near the floor ==============
 # Same 200k window, but 60k remaining (<= RESERVE): capacity fires even though
 # quality can never fire on this window. Latches once per band like the rest.
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/small.jsonl" 140000 "gpt-5-codex"   # 200k window, 70%, 60k left
 run_hook "$(payload "$SBX/small.jsonl")"
 assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
@@ -306,7 +308,7 @@ assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decisio
 # A Stop that re-fires after a previous block is mid-compaction: re-blocking
 # loops, nudging is noise. The hook exits before any check, even on a payload
 # that would otherwise block.
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/t.jsonl" 550000                      # 55% on 1M would block
 run_hook "$(payload_compact "$SBX/t.jsonl")"
 assert_eq     "AC21: compaction re-fire exits 0" "$RC" "0"
@@ -322,7 +324,7 @@ git -C "$FLUSH_REPO" init -q
 git -C "$FLUSH_REPO" config user.email t@t.t
 git -C "$FLUSH_REPO" config user.name t
 git -C "$FLUSH_REPO" commit -q --allow-empty -m base      # a HEAD to track
-rm -f "$SBX/.fno"/.context-nudge-flush* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-flush* 2>/dev/null
 for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "x$i" > "$FLUSH_REPO/file$i.txt"; done
 write_transcript "$SBX/low.jsonl" 300000                   # 30% -> isolate from ctx
 cd "$FLUSH_REPO"
@@ -340,7 +342,7 @@ assert_absent "AC22: stop 4 latched (once per band)" "$OUT" '"decision":"block"'
 cd "$SBX"
 
 # === AC23: clean tree -> no flush output =====================================
-rm -f "$SBX/.fno"/.context-nudge-flush* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-flush* 2>/dev/null
 git -C "$FLUSH_REPO" add -A && git -C "$FLUSH_REPO" commit -q -m "land the work"
 write_transcript "$SBX/low.jsonl" 300000
 cd "$FLUSH_REPO"
@@ -354,7 +356,7 @@ cd "$SBX"
 # A /target session (plan_path bound) gets the flush wording; a bare session
 # (no plan, no crown) gets the write-a-canon-doc wording. Same pressure, only
 # the ask changes. plan_path comes from the target manifest, read best-effort.
-rm -f "$SBX/.fno"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
 write_registry no no
 printf -- '---\nplan_path: /plans/test.md\n---\n' > "$SBX/.fno/target-state.md"
 write_transcript "$SBX/t.jsonl" 500000
@@ -362,7 +364,7 @@ run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC24: plan_path set -> plan-bound wording" "$OUT" 'plan bound'
 assert_contains "AC24: plan-bound wording names SUMMARY.md" "$OUT" 'SUMMARY.md'
 # no manifest -> neither shape -> canon-doc wording
-rm -f "$SBX/.fno"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC24: no plan -> full-doc (canon doc) wording" "$OUT" 'canon doc'
 
@@ -370,7 +372,7 @@ assert_contains "AC24: no plan -> full-doc (canon doc) wording" "$OUT" 'canon do
 # The king message states the neighbourhood roll-up from the same registry read.
 # A peer king (disjoint scope) surfaces in the message; an isolated king gets no
 # roll-up clutter (existing AC5/AC14 cover the zero-peer case unchanged).
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry yes no yes                              # crowned king + 1 peer king
 write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
@@ -388,7 +390,7 @@ assert_contains "AC25: king roll-up names the peer king" "$OUT" 'peer king'
 # any transport, so this case is decided in Python and does not depend on whether
 # the DEPLOYED fno-agents binary carries --probe. Keying it on the roster instead
 # would make the assertion flip the moment the binary is updated.
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 write_registry_without_self
 write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
@@ -408,7 +410,7 @@ assert_contains "gate: miss is not a death claim" "$OUT" 'NOT a claim that you a
 # this sandbox has no business faking. What is under test here is the hook's
 # BRANCHING on the verdict; which verdict each lane deserves is pinned in
 # cli/tests/test_mail_send_check.py, next to the code that decides it.
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 check_shim() {  # check_shim <line-to-print> <exit-code>
   SHIMDIR="$(mktemp -d)"
   { printf '#!/usr/bin/env bash\n'
@@ -440,7 +442,7 @@ assert_contains "gate: path is not a landing" "$OUT" 'A path is not a landing'
 # broken hook rather than an unmeasurable check. The shim intercepts only
 # `mail send ... --check` and delegates everything else to the real fno, so the
 # rest of the nudge (plan_path, handoff path, carveouts) behaves normally.
-rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 check_shim 'unmeasurable: probe-unavailable (the fno-agents binary is absent, too old to carry --probe, or did not answer)' 3
 run_hook "$(payload "$SBX/t.jsonl")"
 unshim
@@ -453,6 +455,75 @@ HOOK_SRC="$(cat "$HOOK")"
 assert_absent "hook: no raw mail-inject prescription" "$HOOK_SRC" 'mail-inject'
 assert_absent "hook: no deleted crown verb"           "$HOOK_SRC" 'agents crown'
 assert_absent "hook: no deleted succession flag"      "$HOOK_SRC" '--succeed'
+
+# === Latch location + lifetime =================================================
+# The hook wrote four dotfiles per session per band into the state-dir top level
+# and deleted none of them: 395 of 527 root entries six days after it landed. A
+# file nobody deletes is a file nobody owns, so these assert the location AND
+# the deleter, not just the location.
+
+# A fresh fire lands in latches/ and leaves the state-dir top level alone.
+rm -rf "$LATCHES"; rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry yes no
+write_transcript "$SBX/lt.jsonl" 500000
+run_hook "$(payload "$SBX/lt.jsonl")"
+new_latches=$(find "$LATCHES" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
+root_latches=$(find "$SBX/.fno" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
+[ "$new_latches" -gt 0 ] && ok "latch: fires into latches/" || bad "latch: nothing written to latches/ (found $new_latches)"
+assert_eq "latch: nothing lands at the state-dir top level" "$root_latches" "0"
+# Positive control: the counter can see a root file when one is really there.
+touch "$SBX/.fno/.context-nudge-probe-control"
+control=$(find "$SBX/.fno" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "latch: root counter is not blind" "$control" "1"
+
+# A legacy top-level latch is swept on the next fire, whatever its age. That
+# probe file from the positive control above is one, so the sweep must take it.
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+touch "$SBX/.fno/.context-nudge-flush-legacy-session"
+run_hook "$(payload "$SBX/lt.jsonl")"
+swept=$(find "$SBX/.fno" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "latch: legacy top-level latches are swept" "$swept" "0"
+
+# A latch older than two days is pruned; one inside the window survives.
+rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
+touch -t "$(date -u -r $(( $(date +%s) - 5*86400 )) +%Y%m%d%H%M 2>/dev/null || date -u -d '5 days ago' +%Y%m%d%H%M)" \
+      "$LATCHES/.context-nudge-flush-stale-session"
+touch "$LATCHES/.context-nudge-flush-fresh-session"
+run_hook "$(payload "$SBX/lt.jsonl")"
+[ -e "$LATCHES/.context-nudge-flush-stale-session" ] \
+  && bad "latch: 5-day-old latch survived the prune" \
+  || ok "latch: 5-day-old latch pruned"
+[ -e "$LATCHES/.context-nudge-flush-fresh-session" ] \
+  && ok "latch: fresh latch survives the prune" \
+  || bad "latch: fresh latch was pruned"
+
+# The location follows config.state_dir, not $HOME. Point state_dir at a dir
+# that is NOT $HOME/.fno; a latch landing under $HOME/.fno means the hook read
+# the home dir rather than the resolver, which is the bug one directory down.
+ALT_STATE="$SBX/alt-state"
+mkdir -p "$ALT_STATE"
+printf 'schema_version: 1\nconfig:\n  state_dir: %s/\n' "$ALT_STATE" > "$SBX/alt-settings.yaml"
+touch "$ALT_STATE/.path-migration-done"
+cp "$SBX/.fno/config.toml" "$ALT_STATE/config.toml" 2>/dev/null || true
+cp -R "$SBX/.fno/agents" "$ALT_STATE/agents" 2>/dev/null || true
+rm -rf "$LATCHES"
+( export FNO_CONFIG="$SBX/alt-settings.yaml"; run_hook "$(payload "$SBX/lt.jsonl")" \
+  ; find "$ALT_STATE/latches" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ' > "$SBX/alt-count" )
+alt_count="$(cat "$SBX/alt-count" 2>/dev/null || echo 0)"
+home_count=$(find "$SBX/.fno/latches" -maxdepth 1 -type f -name '.context-nudge-*' 2>/dev/null | wc -l | tr -d ' ')
+[ "$alt_count" -gt 0 ] && ok "latch: follows an overridden config.state_dir" \
+  || bad "latch: nothing under the overridden state_dir (found $alt_count)"
+assert_eq "latch: overridden state_dir writes nothing under \$HOME/.fno" "$home_count" "0"
+
+assert_contains "latch: resolves through the shell stub" "$HOOK_SRC" 'fno paths shell-stub'
+assert_contains "latch: has a deleter" "$HOOK_SRC" '-mtime +2 -delete'
+
+# latches/ absent at fire time must not error.
+rm -rf "$LATCHES"
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+run_hook "$(payload "$SBX/lt.jsonl")"
+assert_eq "latch: missing latches/ still exits 0" "$RC" "0"
+[ -d "$LATCHES" ] && ok "latch: missing latches/ is created" || bad "latch: latches/ not created"
 # Positive control for the three sweeps above: a needle that IS present, so a
 # passing absent-assertion proves the haystack was read rather than empty.
 assert_contains "hook: sweep positive control" "$HOOK_SRC" 'fno agents spawn -k'
