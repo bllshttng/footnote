@@ -126,6 +126,24 @@ def test_a_real_fno_binary_is_not_claimed_by_the_name_arm() -> None:
     assert orphans._attribute(daemon, ["/repo"]) is None
 
 
+def test_a_probe_that_died_on_its_own_does_not_certify_the_kill_path(
+    monkeypatch, table
+) -> None:
+    """The control must prove WE ended the probe, not that it is gone.
+
+    Reading only "it is gone now" lets a completely broken `_kill` report a
+    healthy kill arm against any short-lived probe, and `--reap` then runs
+    behind a control that never tested anything.
+    """
+    monkeypatch.setattr(orphans, "_kill", lambda pid: False)  # signal never landed
+    monkeypatch.setattr(orphans, "_pid_alive", lambda pid: False)  # but it is gone
+
+    result = _scan_with_working_control(monkeypatch, table)
+    assert result.broken, "a kill nobody made cannot certify the kill path"
+    assert "kill arm FAILED" in result.broken_reason
+    assert "verdict withheld (scan-broken)" in orphans.render(result)
+
+
 def test_a_process_that_died_on_its_own_is_not_credited_as_reaped(
     monkeypatch, table
 ) -> None:

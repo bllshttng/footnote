@@ -497,12 +497,16 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     # does, which is the exact lie this module exists to refuse: `_kill`
     # swallows every exception, so a broken kill path would report healthy
     # while `--reap` silently no-opped and still printed `reaped: N`.
+    # Both halves here too, for the same reason the reap needs both: a probe
+    # that exited on its own certifies nothing about the kill path, and reading
+    # only "it is gone now" lets a completely broken `_kill` report healthy on
+    # any short-lived probe. The control must prove WE ended it.
     killed_ok = True
     for pid in (name_pid, cwd_pid):
         if pid is None:
             continue
-        _kill(pid)
-        killed_ok = killed_ok and not _pid_alive(pid)
+        signalled = _kill(pid)
+        killed_ok = killed_ok and signalled and not _pid_alive(pid)
 
     result.control = {
         "NAME": found_name_probe,
