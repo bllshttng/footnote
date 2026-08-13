@@ -276,8 +276,11 @@ _wt_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
 if command -v fno >/dev/null 2>&1 && [[ -f "$_wt_lib" ]]; then
     # shellcheck source=../scripts/lib/with-timeout.sh
     source "$_wt_lib"
-    outstanding_content=$(with_timeout 3 fno outstanding 2>/dev/null)
-    _out_rc=$?
+    # `|| _out_rc=$?` on the ASSIGNMENT, never a bare command: this script runs
+    # under `set -e`, so an unguarded non-zero exit here aborts the whole hook
+    # and every earlier block is lost with it.
+    _out_rc=0
+    outstanding_content=$(with_timeout 3 fno outstanding 2>/dev/null) || _out_rc=$?
     if [[ $_out_rc -ne 0 ]]; then
         outstanding_content="## Outstanding for you"$'\n\n'"could not be read (fno outstanding exit ${_out_rc}); run it directly."
     fi
