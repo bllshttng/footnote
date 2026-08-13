@@ -347,4 +347,5 @@ worktree ensure
 worktree overlap-record
 worktree overlaps
 worktree policy
+worktree reapable
 worktree status
