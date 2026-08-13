@@ -1100,12 +1100,24 @@ fn squad_store_check() -> Check {
         };
     };
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
+    // ONE argument set with the prune that actually runs. This counter used to
+    // hardcode `include_named: false` and pass an empty `live_cwds`, so the
+    // number the operator read could disagree with what a prune would do.
+    let live_cwds = live_pane_cwds();
+    let now = crate::squad_store::now_epoch_secs();
     let orphan = loaded
         .squads
         .iter()
         .filter(|sq| {
             matches!(
-                crate::squad_store::prune_decision(sq, false, Some(&live), &[], &origin_exists),
+                crate::squad_store::prune_decision_at(
+                    sq,
+                    false,
+                    Some(&live),
+                    &live_cwds,
+                    &origin_exists,
+                    now,
+                ),
                 crate::squad_store::PruneDecision::Prune
             )
         })
@@ -1285,8 +1297,16 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
     let live_ref = live.as_ref();
 
+    let now = crate::squad_store::now_epoch_secs();
     let decide = |sq: &crate::squad_store::StoredSquad| {
-        crate::squad_store::prune_decision(sq, include_named, live_ref, &live_cwds, &origin_exists)
+        crate::squad_store::prune_decision_at(
+            sq,
+            include_named,
+            live_ref,
+            &live_cwds,
+            &origin_exists,
+            now,
+        )
     };
 
     // Both paths produce the same receipt type. Dry-run builds it from a

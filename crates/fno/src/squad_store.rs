@@ -517,21 +517,32 @@ pub fn prune_decision(
     live_cwds: &[String],
     origin_exists: &dyn Fn(&str) -> bool,
 ) -> PruneDecision {
+    prune_decision_at(squad, include_named, live, live_cwds, origin_exists, None)
+}
+
+/// [`prune_decision`] with the clock injected, for the empty-member grace window.
+///
+/// `now_epoch` is `None` when the caller has no clock to offer; then a
+/// zero-member squad is KEPT rather than pruned, because without a clock a fresh
+/// recruit and a finished squad are indistinguishable.
+///
+/// MEMBER DEADNESS OUTRANKS ORIGIN EXISTENCE, and that ordering is the fix.
+/// The origin check used to run first and return `Keep` on any surviving dir.
+/// Measured on this machine: all 15 squads' origins are REPO ROOTS
+/// (`/code/footnote/footnote`, `/c3po`, `/.claude`), never worktrees. A repo root
+/// never disappears, so that arm returned `Keep` forever and 12 of 15 finished
+/// squads were immortal. A directory existing says nothing about whether anything
+/// is still running in it.
+pub fn prune_decision_at(
+    squad: &StoredSquad,
+    include_named: bool,
+    live: Option<&std::collections::HashSet<String>>,
+    live_cwds: &[String],
+    origin_exists: &dyn Fn(&str) -> bool,
+    now_epoch: Option<i64>,
+) -> PruneDecision {
     if !squad.name.is_empty() && !include_named {
         return PruneDecision::SkipNamed;
-    }
-    // Any surviving origin dir keeps the squad (cheap fs check; re-run under lock).
-    if squad.origins.iter().any(|o| origin_exists(o.as_str())) {
-        return PruneDecision::Keep;
-    }
-    // No surviving origin. A live pane mapped to the squad protects it; a live
-    // pane's cwd would itself be a surviving dir, so this guards the rare
-    // pane-in-an-unrecorded-cwd edge.
-    if live_cwds
-        .iter()
-        .any(|cwd| origin_owned(&squad.origins, cwd))
-    {
-        return PruneDecision::Keep;
     }
     // Every non-tombstone member must be provably dead. A member not in the live
     // set is dead; with the set absent (query failed) every member is unknown.
@@ -545,7 +556,96 @@ pub fn prune_decision(
             _ => {}
         }
     }
+    if !squad.members.is_empty() {
+        // Member records exist and not one of them is live. That is direct
+        // evidence about THIS squad, and it settles the question. No fact about
+        // a directory may overturn it.
+        //
+        // The live-pane check used to run before this and matched any pane whose
+        // cwd sits under an origin. With repo-root origins that is nearly every
+        // pane on the machine, so one live session kept every finished squad in
+        // the same repo. Measured: it held 9 of the 12 finished squads here,
+        // including two with nine dead members each.
+        return PruneDecision::Prune;
+    }
+
+    // NO MEMBER RECORDS AT ALL is the ambiguous case, and only that one.
+    //
+    // A tombstoned member is positive evidence that someone registered and died.
+    // An EMPTY list is an absence, and a squad mid-recruit is indistinguishable
+    // from one whose members are long gone. Nine of the fifteen squads measured
+    // here are member-less, so this is the common case rather than an edge.
+    //
+    // With no members to judge by, the directory heuristics are all we have. A
+    // live pane under an origin might BE this squad's unrecorded worker, a
+    // vanished origin means there is nothing left to recruit into, and otherwise
+    // only the clock separates a fresh squad from a finished one.
+    if live_cwds
+        .iter()
+        .any(|cwd| origin_owned(&squad.origins, cwd))
+    {
+        return PruneDecision::Keep;
+    }
+    if squad.origins.iter().any(|o| origin_exists(o.as_str()))
+        && !empty_squad_past_grace(squad, now_epoch)
+    {
+        return PruneDecision::KeepUnknown;
+    }
     PruneDecision::Prune
+}
+
+/// How long a member-less squad is protected after creation. Matches the agents
+/// dead-row grace so both surfaces forget a finished session on one clock.
+pub const EMPTY_SQUAD_GRACE_SECS: i64 = 3600;
+
+/// Wall-clock epoch seconds for the grace window, or `None` if unreadable.
+/// `None` keeps every member-less squad, which is the safe direction.
+pub fn now_epoch_secs() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// Has a member-less squad outlived the window in which it might still be
+/// recruiting? Unparseable or absent `created_at` reads as NOT past grace, so an
+/// unstamped squad is kept rather than destroyed on a missing field.
+fn empty_squad_past_grace(squad: &StoredSquad, now_epoch: Option<i64>) -> bool {
+    let Some(now) = now_epoch else {
+        return false;
+    };
+    let Some(created) = parse_stamp_epoch(&squad.created_at) else {
+        return false;
+    };
+    now.saturating_sub(created) > EMPTY_SQUAD_GRACE_SECS
+}
+
+/// Parse the store's cosmetic `YYYY-MM-DDThh:mm:ssZ` stamp to epoch seconds.
+///
+/// Hand-rolled because the stamp is a fixed shape and this crate carries no date
+/// dependency. Anything that does not match returns `None`, which the caller
+/// reads as "cannot age it", i.e. keep.
+fn parse_stamp_epoch(stamp: &str) -> Option<i64> {
+    let b = stamp.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| stamp.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days since the epoch via the civil-from-days algorithm (Howard Hinnant's),
+    // which is exact for any proleptic Gregorian date and needs no table.
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3_600 + mi * 60 + s)
 }
 
 /// One squad the prune actually removed (the receipt is built from these, under
@@ -1780,7 +1880,11 @@ mod tests {
             ),
             PruneDecision::Prune
         );
-        // A surviving origin -> Keep (AC2-EDGE).
+        // A surviving origin no longer outranks member deadness. This assertion
+        // used to expect Keep, and that expectation WAS the defect: every squad
+        // origin measured on this machine is a repo root, a directory that never
+        // disappears, so the old arm kept 12 of 15 finished squads immortal. A
+        // directory existing says nothing about whether anything runs in it.
         assert_eq!(
             prune_decision(
                 &squad("", "k1", &["/alive", "/g"], &["deadbeef"]),
@@ -1789,7 +1893,7 @@ mod tests {
                 &no_cwds,
                 &exists
             ),
-            PruneDecision::Keep
+            PruneDecision::Prune
         );
         // A live member -> Keep.
         assert_eq!(
@@ -1848,7 +1952,12 @@ mod tests {
                 PruneDecision::Prune
             );
         }
-        // A live pane mapped to a gone-origin squad -> Keep.
+        // A live pane no longer overrides a squad's OWN dead members. The pane
+        // is matched by "cwd sits under an origin", and with repo-root origins
+        // that is nearly every pane on the machine: one live session kept 9 of
+        // the 12 finished squads measured here, two of them with nine dead
+        // members each. A member-less squad still gets this protection, since
+        // there the pane may BE its unrecorded worker (asserted just below).
         {
             let cwds = vec!["/gone/child".to_string()];
             assert_eq!(
@@ -1859,9 +1968,220 @@ mod tests {
                     &cwds,
                     &gone
                 ),
+                PruneDecision::Prune
+            );
+        }
+        // ...but a MEMBER-LESS squad with a live pane under its origin is kept.
+        {
+            let cwds = vec!["/gone/child".to_string()];
+            assert_eq!(
+                prune_decision(&squad("", "k1", &["/gone"], &[]), false, live_some, &cwds, &gone),
                 PruneDecision::Keep
             );
         }
+    }
+
+    // -- The empty-member grace window --------------------------------------
+    //
+    // Nine of the fifteen squads measured on this machine have ZERO members. A
+    // squad mid-recruit and a squad whose members are long gone look identical
+    // there, and only the clock separates them, so this is the case most likely
+    // to destroy something a person is still using.
+
+    /// A member-less squad stamped `created_at`, for the grace tests.
+    fn empty_squad(created_at: &str) -> StoredSquad {
+        StoredSquad {
+            name: String::new(),
+            key: "k1".into(),
+            origins: vec!["/alive".into()],
+            members: Vec::new(),
+            created_at: created_at.into(),
+            tab_specs: Vec::new(),
+        }
+    }
+
+    /// 2026-08-13T12:00:00Z in epoch seconds, from an INDEPENDENT implementation
+    /// (`python3 -c "datetime.fromisoformat(...).timestamp()"`), so a wrong
+    /// parser cannot agree with itself. The first value written here was wrong
+    /// and this assertion is what caught it.
+    const T_NOON: i64 = 1_786_622_400;
+
+    #[test]
+    fn stamp_parser_matches_a_known_epoch() {
+        assert_eq!(parse_stamp_epoch("2026-08-13T12:00:00Z"), Some(T_NOON));
+        assert_eq!(parse_stamp_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_stamp_epoch("2000-03-01T00:00:00Z"), Some(951_868_800));
+        // Leap day, the case a naive month table gets wrong.
+        assert_eq!(parse_stamp_epoch("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+    }
+
+    #[test]
+    fn unparseable_stamp_keeps_the_squad() {
+        // Cannot age it -> cannot claim it is finished.
+        for bad in ["", "not-a-date", "2026-08-13", "20260813T120000Z", "xxxx-08-13T12:00:00Z"] {
+            assert_eq!(parse_stamp_epoch(bad), None, "{bad:?} must not parse");
+            assert_eq!(
+                prune_decision_at(
+                    &empty_squad(bad),
+                    false,
+                    Some(&std::collections::HashSet::new()),
+                    &[],
+                    &|_| true,
+                    Some(T_NOON),
+                ),
+                PruneDecision::KeepUnknown,
+                "{bad:?} must keep"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_member_less_squad_is_never_pruned() {
+        let live = std::collections::HashSet::new();
+        // Created one second ago: recruiting, not finished.
+        assert_eq!(
+            prune_decision_at(
+                &empty_squad("2026-08-13T11:59:59Z"),
+                false,
+                Some(&live),
+                &[],
+                &|_| true,
+                Some(T_NOON),
+            ),
+            PruneDecision::KeepUnknown
+        );
+    }
+
+    #[test]
+    fn the_grace_boundary_keeps_until_strictly_past() {
+        let live = std::collections::HashSet::new();
+        let decide = |created: &str, now: i64| {
+            prune_decision_at(&empty_squad(created), false, Some(&live), &[], &|_| true, Some(now))
+        };
+        // Exactly at the window: still kept.
+        assert_eq!(
+            decide("2026-08-13T12:00:00Z", T_NOON + EMPTY_SQUAD_GRACE_SECS),
+            PruneDecision::KeepUnknown
+        );
+        // One second past: prunable.
+        assert_eq!(
+            decide("2026-08-13T12:00:00Z", T_NOON + EMPTY_SQUAD_GRACE_SECS + 1),
+            PruneDecision::Prune
+        );
+    }
+
+    #[test]
+    fn a_clock_we_cannot_read_keeps_every_member_less_squad() {
+        // `None` is "no clock". Without one, a fresh recruit and a finished squad
+        // are the same thing, so nothing may be destroyed on the guess.
+        assert_eq!(
+            prune_decision_at(
+                &empty_squad("2020-01-01T00:00:00Z"),
+                false,
+                Some(&std::collections::HashSet::new()),
+                &[],
+                &|_| true,
+                None,
+            ),
+            PruneDecision::KeepUnknown
+        );
+    }
+
+    #[test]
+    fn a_vanished_origin_resolves_the_ambiguity_without_waiting() {
+        // Nothing left to recruit INTO, so the clock is not needed.
+        assert_eq!(
+            prune_decision_at(
+                &empty_squad("2026-08-13T11:59:59Z"),
+                false,
+                Some(&std::collections::HashSet::new()),
+                &[],
+                &|_| false,
+                Some(T_NOON),
+            ),
+            PruneDecision::Prune
+        );
+    }
+
+    #[test]
+    fn a_tombstoned_member_is_evidence_and_needs_no_grace() {
+        // The distinction the grace window turns on. A tombstone RECORDS that a
+        // member registered and died; an empty list records nothing. Three of the
+        // fifteen squads measured are all-tombstoned, and they are finished now,
+        // not in an hour.
+        let mut s = empty_squad("2026-08-13T11:59:59Z");
+        s.members = vec![StoredMember {
+            attach_id: "deadbeef".into(),
+            tombstone: true,
+            tab_name: None,
+        }];
+        assert_eq!(
+            prune_decision_at(
+                &s,
+                false,
+                Some(&std::collections::HashSet::new()),
+                &[],
+                &|_| true,
+                Some(T_NOON),
+            ),
+            PruneDecision::Prune
+        );
+    }
+
+    #[test]
+    fn grace_never_overrides_liveness_or_the_name_skip() {
+        // The window may only ever DELAY a prune. It must not become a path that
+        // reaps something live or something the operator named.
+        let mut live = std::collections::HashSet::new();
+        live.insert("live0001".to_string());
+        let mut s = empty_squad("2020-01-01T00:00:00Z"); // long past grace
+        s.members = vec![m("live0001")];
+        assert_eq!(
+            prune_decision_at(&s, false, Some(&live), &[], &|_| true, Some(T_NOON)),
+            PruneDecision::Keep
+        );
+
+        let named = {
+            let mut n = empty_squad("2020-01-01T00:00:00Z");
+            n.name = "mine".into();
+            n
+        };
+        assert_eq!(
+            prune_decision_at(
+                &named,
+                false,
+                Some(&std::collections::HashSet::new()),
+                &[],
+                &|_| true,
+                Some(T_NOON),
+            ),
+            PruneDecision::SkipNamed
+        );
+
+        // A live pane still protects a past-grace member-less squad.
+        assert_eq!(
+            prune_decision_at(
+                &empty_squad("2020-01-01T00:00:00Z"),
+                false,
+                Some(&std::collections::HashSet::new()),
+                &["/alive/child".to_string()],
+                &|_| true,
+                Some(T_NOON),
+            ),
+            PruneDecision::Keep
+        );
+    }
+
+    #[test]
+    fn prune_decision_delegates_to_the_clocked_form() {
+        // One predicate, two entry points. The clockless wrapper must not drift
+        // into a second opinion.
+        let live = std::collections::HashSet::new();
+        let s = empty_squad("2020-01-01T00:00:00Z");
+        assert_eq!(
+            prune_decision(&s, false, Some(&live), &[], &|_| true),
+            prune_decision_at(&s, false, Some(&live), &[], &|_| true, None)
+        );
     }
 
     #[test]
@@ -1879,14 +2199,21 @@ mod tests {
         let outcome =
             prune(|sq| prune_decision(sq, false, Some(&live), &[], &|p| p == "/survives")).unwrap();
 
+        // BOTH unnamed squads go. `kept` has a surviving origin, and that used to
+        // save it; a squad whose every member is dead is finished wherever its
+        // directory happens to live.
         assert_eq!(
             outcome.removed_count(),
-            1,
-            "only the gone-origin unnamed squad is pruned"
+            2,
+            "a surviving origin no longer keeps a squad whose members are all dead"
         );
+        let mut removed_keys: Vec<&str> =
+            outcome.removed.iter().map(|r| r.key.as_str()).collect();
+        removed_keys.sort_unstable();
         assert_eq!(
-            outcome.removed[0].key, "dead",
-            "the receipt names the squad actually removed"
+            removed_keys,
+            vec!["dead", "kept"],
+            "the receipt names the squads actually removed"
         );
         assert_eq!(
             outcome.skipped_named, 1,
@@ -1899,8 +2226,8 @@ mod tests {
             "prunable squad gone"
         );
         assert!(
-            after.squads.iter().any(|s| s.key == "kept"),
-            "surviving-origin squad kept"
+            !after.squads.iter().any(|s| s.key == "kept"),
+            "a surviving origin does not save a squad whose members are all dead"
         );
         assert!(
             after.squads.iter().any(|s| s.name == "named"),
