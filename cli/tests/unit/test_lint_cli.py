@@ -4,11 +4,32 @@ import os
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
+import typer
+import typer.main
+# click's runner, not typer's: the live `fno lint` resolves to a bare
+# TyperCommand (see _live_lint_command), and typer.testing.CliRunner only
+# accepts a Typer app.
+from click.testing import CliRunner
 
 from fno import paths
-from fno.lint_cli import app
+from fno.lint_cli import lint
 
+
+def _live_lint_command():
+    """The `fno lint` command in the exact shape the live CLI resolves.
+
+    `lint` is a plain-function registry entry, so `_lazy_group` wraps it in a
+    one-command Typer and takes `typer.main.get_command`, which collapses to a
+    bare command. Rebuilding it the same way here keeps the argv these tests
+    pass (`["flock-pattern", ...]`) identical to what a user types, rather than
+    testing a group shape that no longer exists.
+    """
+    sub = typer.Typer(add_completion=False)
+    sub.command(name="lint")(lint)
+    return typer.main.get_command(sub)
+
+
+app = _live_lint_command()
 
 runner = CliRunner()
 
@@ -756,3 +777,31 @@ def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> No
     # gets back in beside the config pin.
     by_flag = [c for c in diffs if "--find-renames" in c or "-M" in c]
     assert not by_flag, f"rename detection respelled as a flag: {by_flag}"
+
+
+def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
+    """Every option a check accepts must exist on `fno lint`.
+
+    The eight subcommands each carried their own options; the collapse turned
+    those into options on one verb, dispatched by signature. A check parameter
+    with no matching option on the dispatcher is UNREACHABLE - the flag is
+    rejected as unknown before any check runs.
+
+    That is exactly what shipped: `style` declares `--surface/--stdin/--files/
+    --diff-base` and the first pass wired none of them, so `fno lint style
+    --surface markdown` died with "No such option" in a CI job four steps
+    removed from the change. This compares the two sets directly, so the next
+    check with a new option fails here instead.
+    """
+    import inspect
+
+    import fno.lint_cli as L
+
+    declared = set(inspect.signature(L.lint).parameters) - {"check"}
+    for name, fn_name in L.CHECKS.items():
+        accepted = set(inspect.signature(getattr(L, fn_name)).parameters)
+        missing = accepted - declared
+        assert not missing, (
+            f"`fno lint {name}` accepts {sorted(missing)}, which `fno lint` does "
+            f"not declare, so those flags are unreachable. Add them to lint()."
+        )

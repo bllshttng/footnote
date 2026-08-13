@@ -333,52 +333,6 @@ def test_decisions_cover_every_ready_node(monkeypatch, tmp_path):
 
 # -- CLI seam: `fno backlog schedule` --
 
-def test_cli_schedule_refuses_no_shadow(monkeypatch):
-    """The --no-shadow refusal is the ONLY interlock keeping this feature
-    read-only, so it gets a test rather than resting on a docstring promise.
-    It must refuse before reaching the report, and exit 2, not 0 or 1.
-    """
-    from typer.testing import CliRunner
-
-    from fno.graph import cli as gcli
-
-    def must_not_run(*a, **k):
-        raise AssertionError("live scheduling ran despite the refusal")
-
-    monkeypatch.setattr(advance, "schedule_shadow", must_not_run)
-
-    res = CliRunner().invoke(gcli.cli, ["schedule", "--no-shadow"])
-
-    assert res.exit_code == 2, res.stdout
-    assert "not enabled yet" in res.output
-
-
-def test_cli_schedule_echoes_report_json(monkeypatch):
-    """Shadow mode is the default: no flag needed, and the report is the stdout."""
-    import json
-
-    from typer.testing import CliRunner
-
-    from fno.graph import cli as gcli
-
-    seen = {}
-    report = {"effective_cap": 2, "requested_cap": 3, "selected": [], "degraded": []}
-
-    def fake_shadow(max_lanes, project=None, *, mission=None):
-        seen.update(max_lanes=max_lanes, project=project, mission=mission)
-        return report
-
-    monkeypatch.setattr(advance, "schedule_shadow", fake_shadow)
-
-    res = CliRunner().invoke(
-        gcli.cli, ["schedule", "--max", "3", "--project", "fno"]
-    )
-
-    assert res.exit_code == 0, res.stdout
-    assert json.loads(res.stdout) == report
-    assert seen == {"max_lanes": 3, "project": "fno", "mission": None}
-
-
 def test_duplicate_ready_ids_are_decided_once(monkeypatch, tmp_path):
     """A ready list repeating an id must not yield two decisions for it.
 
@@ -417,30 +371,6 @@ def test_a_pick_becomes_a_collision_comparator_for_later_picks(monkeypatch, tmp_
     assert [(d["id"], d["reason"]) for d in r["serialized"]] == [
         ("n-b", "high-collision:n-a")
     ]
-
-
-def test_cli_schedule_exits_nonzero_on_a_degraded_report(monkeypatch):
-    """A degraded report still prints in full, but must not exit 0.
-
-    `degraded` is only visible to a reader that parses the JSON; a shell gate
-    keying on $? would treat a collapsed frontier as a clean one. Exit 1 keeps
-    it distinguishable from the --no-shadow refusal, which is 2.
-    """
-    import json
-
-    from typer.testing import CliRunner
-
-    from fno.graph import cli as gcli
-
-    report = {"effective_cap": 2, "selected": [], "degraded": ["inflight"]}
-    monkeypatch.setattr(
-        advance, "schedule_shadow", lambda *a, **k: report
-    )
-
-    res = CliRunner().invoke(gcli.cli, ["schedule", "--max", "2"])
-
-    assert res.exit_code == 1, res.stdout
-    assert json.loads(res.stdout) == report, "the report must still be emitted"
 
 
 def test_degraded_plan_path_resolution_reaches_the_report(monkeypatch, tmp_path):

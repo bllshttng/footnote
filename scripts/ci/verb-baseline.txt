@@ -22,11 +22,10 @@
 #   flag-exception: <rationale>
 # (same shape as `verb-exception:`; removals are free and need no line).
 #
-# Scope: the hidden-option coverage is fno-py only. The Rust front is
-# constant-listed in lint_verb_ratchet.py (RUST_FRONT_VERBS), not introspected,
-# so a clap `hide = true` option on it is invisible to this gate - and to
-# `fno mux --help`, which is how it stays hidden. The lint output names this
-# boundary on every green run.
+# Scope: the hidden-option coverage is fno-py only. The Rust front's VERBS are
+# read from its dispatchers and cross-checked against the live binary, but its
+# FLAGS are not enumerated, so a hidden flag on a mux verb is invisible to this
+# gate. The lint output names that boundary on every green run.
 agents adopt
 agents ask !--provider
 agents attach
@@ -41,18 +40,15 @@ agents list !--provider
 agents logs
 agents loop
 agents loop-check
-agents mcp send
 agents name
 agents needs
 agents nudge-peek
 agents peek
 agents ping
 agents probe-run
-agents push-channel
 agents reap
 agents reconcile
 agents register
-agents register-channel
 agents registry-json
 agents report
 agents restart
@@ -66,7 +62,6 @@ agents subscribe
 agents top
 agents trace
 agents truth
-agents unregister-channel
 agents verify-evidence
 agents wait
 agents watch
@@ -80,19 +75,14 @@ approvals show !--db
 backlog add !--tag
 backlog advance !--continuation
 backlog archive
-backlog backfill-slugs
 backlog bases
-backlog batch abandon
-backlog batch close
 backlog batch join
 backlog batch metrics
 backlog batch open
-backlog batch policy
 backlog batch prepare
 backlog batch ship
 backlog batch ship-closeable
 backlog batch status
-backlog briefs
 backlog capture add
 backlog capture archive
 backlog capture capture-pass
@@ -109,20 +99,10 @@ backlog defer
 backlog dispatch-lanes
 backlog done
 backlog epic status
-backlog exec-graph
 backlog find
 backlog get
 backlog groom
 backlog idea !--tag
-backlog inbox add
-backlog inbox archive
-backlog inbox capture-pass
-backlog inbox dismiss
-backlog inbox empty-pass
-backlog inbox list
-backlog inbox promote
-backlog inbox scan
-backlog inbox tidy
 backlog intake !--batch
 backlog lane-fill
 backlog lanes
@@ -142,21 +122,17 @@ backlog reconcile-findings
 backlog rehash
 backlog relatedness build
 backlog relatedness get
-backlog release
 backlog remove
 backlog reopen
 backlog reprioritize
 backlog roadmap
-backlog schedule
 backlog session add
 backlog status
 backlog supersede
-backlog tree
 backlog triage apply
 backlog triage consistency
 backlog triage context
 backlog triage health
-backlog triage pile
 backlog triage projects
 backlog triage propose
 backlog triage rank
@@ -168,7 +144,6 @@ backlog undefer
 backlog unqueue
 backlog unsupersede
 backlog update !--tag !--untag
-backlog validate
 backlog view
 bundle check
 bundle lint
@@ -177,21 +152,12 @@ carveout list
 carveout resolve
 carveout update
 claim acquire
-claim force-release
-claim incarnation-fence
-claim lane-acquire
-claim lane-count
-claim lane-release
 claim list
 claim refresh
 claim release
 claim session-pid
 claim status
 codemap
-company join
-company propose
-company show
-company topology
 config accounts
 config active-backlog
 config doctor
@@ -218,18 +184,7 @@ event gate-escape
 event push-parent
 executor
 help
-lint flock-pattern
-lint menu-caps
-lint provider-stderr-merge
-lint shellout-drift
-lint spawn-paths
-lint stale-skill-refs
-lint style
-lint verb-ratchet
-log activity
-log milestone
-log user-note
-log warning
+lint
 loops ls
 loops pause-all
 loops resume-all
@@ -252,11 +207,15 @@ mail view
 mail withdraw
 mcp send
 mux attach
+mux block annotate
 mux block pipe
 mux doctor
 mux kill-server
+mux layout apply
 mux layout get
+mux layout graft
 mux ls
+mux pane break
 mux pane claim
 mux pane kill
 mux pane ls
@@ -264,6 +223,7 @@ mux pane read
 mux pane release
 mux pane run
 mux pane send
+mux pane split
 mux pane wait
 mux serve
 mux server
@@ -319,12 +279,10 @@ pr-watch refresh
 pr-watch status
 pr-watch tick
 pr-watch uninstall
-reality-check gh !--pr
 research
 restart
 resume receipt show
 resume receipt validate !--session
-resume receipt version
 resume receipt write !--session
 retro drain-postmortems
 retro run !--pr !--session
@@ -338,8 +296,6 @@ route env
 route ls
 route set
 route unset
-runtime probe
-runtime reap-dead-workers
 runtime register-worker
 runtime worktree
 scoreboard
@@ -355,17 +311,12 @@ skill-diff reconcile
 skill-diff tick
 state archive
 state init !--allow-stub
-state list-fields
-state path
 state set
 state show
-state validate
 status
 status-fanout
-stub-manifest check-pr
 stub-manifest reconcile-finalize
 stub-manifest reconcile-validate
-stub-manifest validate
 stub-manifest write
 target blast-check
 target check-contained
@@ -374,7 +325,6 @@ target denominator-ratio
 target init !--provider
 target resolve-model !--provider
 target resolve-owned-identity
-target resume-bind
 target start !--provider
 target status
 test
@@ -384,9 +334,6 @@ tokens
 update
 upgrade
 version
-wake clear
-wake drop
-wake list
 whoami
 worker blueprint
 worker external !--pr

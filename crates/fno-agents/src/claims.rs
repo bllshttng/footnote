@@ -1083,7 +1083,7 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
             Err(ReadError::GoneAway) => continue, // released under us; retry
             Err(ReadError::Corrupted(e)) => {
                 // Refuse to reclaim what we cannot verify; leave the file for
-                // `fno claim force-release`.
+                // `fno claim release --force`.
                 return AcquireOutcome::Error(e);
             }
         };

@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from fno.tombstones import tombstone_group_cls
 
-cli = typer.Typer(name="runtime", help="manage runtime workers and worktrees", no_args_is_help=True)
+cli = typer.Typer(name="runtime", help="manage runtime workers and worktrees", no_args_is_help=True, cls=tombstone_group_cls("runtime"))
 
 
 @cli.callback()
@@ -48,33 +49,6 @@ for _sub in _STUB_SUBCOMMANDS:
 # ---------------------------------------------------------------------------
 # probe
 # ---------------------------------------------------------------------------
-
-@cli.command(name="probe")
-def probe_cmd(
-    ctx: typer.Context,
-    adapter: str = typer.Option("claude-code", help="adapter name (unused in probe, reserved)"),
-    plugin_path: Optional[Path] = typer.Option(
-        None,
-        "--plugin-path",
-        help="path to plugin.json (default: .claude-plugin/plugin.json)",
-    ),
-    json_flag: bool = typer.Option(False, "--json", "-J", help="output JSON"),
-) -> None:
-    """Run preflight checks and report environment health."""
-    from fno.runtime.probe import run_probe
-
-    all_passed, checks = run_probe(plugin_path=plugin_path)
-
-    payload = {
-        "ok": all_passed,
-        "checks": [c.to_dict() for c in checks],
-    }
-
-    typer.echo(json.dumps(payload))
-
-    exit_code = 0 if all_passed else 4
-    raise typer.Exit(code=exit_code)
-
 
 # ---------------------------------------------------------------------------
 # worktree
@@ -152,32 +126,3 @@ def register_worker_cmd(
 # reap-dead-workers
 # ---------------------------------------------------------------------------
 
-@cli.command(name="reap-dead-workers")
-def reap_dead_workers_cmd(
-    ctx: typer.Context,
-    workers_file: Optional[Path] = typer.Option(
-        None,
-        "--workers-file",
-        help="path to workers.jsonl (default: .fno/workers.jsonl)",
-    ),
-    artifacts_dir: Optional[Path] = typer.Option(
-        None,
-        "--artifacts-dir",
-        help="directory containing ship-{session_id}.md artifacts",
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", "-N", help="report without mutating"),
-    threshold: int = typer.Option(30, "--threshold", help="abandonment threshold in minutes"),
-    json_flag: bool = typer.Option(False, "--json", "-J", help="output JSON"),
-) -> None:
-    """Reap abandoned workers (status started + stale heartbeat + no ship artifact)."""
-    from fno.runtime.reap import reap_dead_workers
-
-    report = reap_dead_workers(
-        workers_file=workers_file,
-        artifacts_dir=artifacts_dir,
-        dry_run=dry_run,
-        threshold_minutes=threshold,
-    )
-
-    typer.echo(json.dumps(report))
-    raise typer.Exit(code=0)

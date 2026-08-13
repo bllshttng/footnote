@@ -69,18 +69,13 @@ KNOWN_USAGE = (
 )
 
 
-def test_parse_mux_usage_fans_out_pane_alternatives():
-    leaves = vr._parse_mux_usage(KNOWN_USAGE)
-    assert "version" in leaves
-    assert "mux server" in leaves
-    assert "mux serve" in leaves
-    assert "mux block pipe" in leaves
-    assert "mux workspace prune" in leaves
-    # the pipe-expanded pane family: all eight, no literal "|"
-    for pane in ("ls", "read", "run", "send", "wait", "kill", "claim", "release"):
-        assert f"mux pane {pane}" in leaves
-    assert "mux shell-init" in leaves  # <zsh|bash> is positional, not a path token
-    assert "|" not in "".join(leaves)
+# The usage string is no longer PARSED into the verb set - parsing it was half
+# the tautology, since it and the Python constant were written together and
+# omitted the same verbs. It survives here only as the `mux pane` reachability
+# anchor, which is all `enumerate_rust_leaves` still reads it for. The verb set
+# comes from `scan_rust_source` (real dispatchers) cross-checked against
+# `probe_rust_families` (the live binary's own refusal), and the behavioural
+# proof that the scan reads source lives in test_verb_ratchet_source_scan.py.
 
 
 # --------------------------------------------------------------------------- #
@@ -155,37 +150,50 @@ def test_fail_closed_when_stale_front_lacks_mux(monkeypatch):
         vr.enumerate_rust_leaves()
 
 
-def test_fail_closed_when_rust_advertises_unknown_verb(monkeypatch):
+def _reachable_front(monkeypatch):
+    """A Rust front that answers `version` and `mux --help` truthfully."""
     monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    usage = KNOWN_USAGE.replace("mux block pipe", "mux frobnicate flag")  # new advertised verb
     monkeypatch.setattr(
         vr.subprocess, "run",
         _fake_run({
             "version": (0, '{"git_rev":"abc","package":"0.3.1"}', ""),
-            "mux": (2, "", usage),
+            "mux": (2, "", KNOWN_USAGE),
         }),
     )
-    with pytest.raises(vr.VerbRatchetError, match="not listed in RUST_FRONT_VERBS"):
+
+
+def test_fail_closed_when_source_dispatches_an_unadvertised_verb(monkeypatch):
+    # The dispatcher grew an arm and its own refusal message was not updated.
+    # This is the shape that let five live verbs sit unbaselined behind green.
+    _reachable_front(monkeypatch)
+    monkeypatch.setattr(vr, "scan_rust_source", lambda *a: (set(), {"pane": {"ls", "brandnew"}}))
+    monkeypatch.setattr(vr, "probe_rust_families", lambda *a: {"pane": {"ls"}})
+    with pytest.raises(vr.VerbRatchetError, match="does not name: brandnew"):
         vr.enumerate_rust_leaves()
 
 
-def test_fail_closed_when_rust_drops_an_advertised_verb(monkeypatch):
-    # Reverse check: a non-hidden constant verb that vanishes from the usage
-    # (Rust match arm + usage line both removed, constant left stale) must fail
-    # closed - the guard-on-one-of-N-paths gap the module warns about.
+def test_fail_closed_when_binary_advertises_a_verb_the_scan_missed(monkeypatch):
+    # The other direction: the front says it takes a verb the source scan could
+    # not see. That means the scan is blind to some dispatch shape, and a blind
+    # scan silently under-reports the surface - so it must refuse, not shrug.
+    _reachable_front(monkeypatch)
+    monkeypatch.setattr(vr, "scan_rust_source", lambda *a: (set(), {"pane": {"ls"}}))
+    monkeypatch.setattr(vr, "probe_rust_families", lambda *a: {"pane": {"ls", "unseen"}})
+    with pytest.raises(vr.VerbRatchetError, match="scan did not find: unseen"):
+        vr.enumerate_rust_leaves()
+
+
+def test_fail_closed_when_the_probe_negative_control_does_not_fire(monkeypatch):
+    # If the front does not refuse the bogus probe verb by name, its advertised
+    # set cannot be read. An empty set here would read as "this family has no
+    # verbs" and pass against a baseline that omits them all.
     monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    usage = KNOWN_USAGE.replace(
-        "fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] | ", ""
-    )
     monkeypatch.setattr(
         vr.subprocess, "run",
-        _fake_run({
-            "version": (0, '{"git_rev":"abc","package":"0.3.1"}', ""),
-            "mux": (2, "", usage),
-        }),
+        _fake_run({"mux": (0, "", "")}),  # accepts the probe, says nothing
     )
-    with pytest.raises(vr.VerbRatchetError, match="no longer shows"):
-        vr.enumerate_rust_leaves()
+    with pytest.raises(vr.VerbRatchetError, match="negative control did not fire"):
+        vr.probe_rust_families(Path("/fake/fno"), {"pane"})
 
 
 def test_fail_closed_on_subprocess_timeout(monkeypatch):
@@ -333,7 +341,7 @@ def test_check_ok_message_names_scope_and_hidden_count(monkeypatch, tmp_path):
     report = _check_live(monkeypatch, tmp_path, _LIVE_F, vr.generate(_LIVE_F))
     assert report.ok is True
     assert "fno-py only" in report.message
-    assert "Rust front is constant-listed" in report.message
+    assert "verbs are read from source, its flags are not" in report.message
     assert "5 leaves" in report.message
     assert "1 hidden option " in report.message
 

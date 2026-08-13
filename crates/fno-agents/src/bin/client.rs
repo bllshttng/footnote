@@ -1441,8 +1441,6 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--message",
         "--name",
         "--session-id",
-        "--cc-session-id",
-        "--channel-id",
         "--status",
         "--from-name",
         "--timeout",
@@ -1558,36 +1556,6 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // The daemon reads `mode`; codex/gemini ignore it. (`drive --mode`
                 // is a different parser and never reaches build_request.)
                 params.insert("mode".into(), str_arg(&mut it, "--mode")?);
-            }
-            "--cc-session-id" => {
-                params.insert("cc_session_id".into(), str_arg(&mut it, "--cc-session-id")?);
-            }
-            "--channel-id" => {
-                params.insert("mcp_channel_id".into(), str_arg(&mut it, "--channel-id")?);
-            }
-            "--envelope" => {
-                // push-channel delivery envelope (JSON object). `-` reads it from
-                // stdin (envelopes can be large). Absent -> confirm-only push.
-                let arg = str_arg(&mut it, "--envelope")?;
-                let arg = arg.as_str().unwrap_or_default();
-                let raw: String = if arg == "-" {
-                    use std::io::Read;
-                    let mut s = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut s)
-                        .map_err(|e| format!("read --envelope from stdin: {e}"))?;
-                    s
-                } else {
-                    arg.to_string()
-                };
-                let val: Value = serde_json::from_str(&raw)
-                    .map_err(|e| format!("--envelope must be a JSON object: {e}"))?;
-                // Fail fast client-side: the daemon also rejects a non-object,
-                // but catching it here avoids a pointless IPC round-trip.
-                if !val.is_object() {
-                    return Err("--envelope must be a JSON object".to_string());
-                }
-                params.insert("envelope".into(), val);
             }
             "--status" => {
                 params.insert("status".into(), str_arg(&mut it, "--status")?);
@@ -1846,17 +1814,6 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "agent.rm"
         }
         "reconcile" => "agent.reconcile",
-        "register-channel" => {
-            // Help advertises `register-channel --cc-session-id <id> [<name>]`;
-            // map the optional positional name so the daemon can resolve the
-            // target agent by name on first registration (Codex P2).
-            if let Some(name) = positional.first() {
-                params.insert("name".into(), Value::String(name.clone()));
-            }
-            "channel.register_channel"
-        }
-        "unregister-channel" => "channel.unregister_channel",
-        "push-channel" => "channel.push_to_channel",
         other => return Err(format!("unknown verb: {other}")),
     };
 
@@ -2466,9 +2423,6 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
     "reconcile",
-    "register-channel --cc-session-id <id> [<name>]",
-    "unregister-channel --channel-id <id>",
-    "push-channel --channel-id <id> [--envelope <json|->]  (no envelope = confirm-only)",
     "drive-authority [--json]",
     "trace [options]",
     "ping",
@@ -2541,9 +2495,6 @@ mod tests {
             "stop",
             "rm",
             "reconcile",
-            "register-channel",
-            "unregister-channel",
-            "push-channel",
             "drive-authority",
             "trace",
             "ping",
@@ -3399,19 +3350,6 @@ mod tests {
         // The verb's own --timeout/--cwd are NOT set from the payload tokens.
         assert!(params.get("timeout").is_none());
         assert!(params.get("cwd").is_none());
-    }
-
-    #[test]
-    fn register_channel_maps_positional_name() {
-        let args = vec![
-            "--cc-session-id".to_string(),
-            "cc-1".to_string(),
-            "worker-A".to_string(),
-        ];
-        let (method, params) = build_request("register-channel", &args).unwrap();
-        assert_eq!(method, "channel.register_channel");
-        assert_eq!(params["name"], "worker-A");
-        assert_eq!(params["cc_session_id"], "cc-1");
     }
 
     #[test]

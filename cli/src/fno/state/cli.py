@@ -10,8 +10,9 @@ import typer
 import yaml
 
 from fno.handoff.output import merge_json_flag
+from fno.tombstones import tombstone_group_cls
 
-cli = typer.Typer(name="state", help="manage fno state files", no_args_is_help=True)
+cli = typer.Typer(name="state", help="manage fno state files", no_args_is_help=True, cls=tombstone_group_cls("state"))
 
 
 @cli.callback()
@@ -260,53 +261,6 @@ def _output_validation_error(ctx: typer.Context, exc) -> None:
 
 
 @cli.command()
-def validate(
-    ctx: typer.Context,
-    path: Optional[Path] = typer.Option(None, "--path", help="path to state file"),
-    type_: Optional[str] = typer.Option(None, "--type", help="state type: target"),
-) -> None:
-    """Validate a state file against its schema."""
-    from fno.state.io import read_frontmatter
-    from fno.schemas import load_schema
-    from pydantic import ValidationError
-
-    state_path = _resolve_path(path, type_)
-    try:
-        data, _body = read_frontmatter(state_path)
-    except FileNotFoundError as exc:
-        if _json_mode(ctx):
-            typer.echo(json.dumps({"valid": False, "errors": [{"msg": str(exc)}]}))
-        else:
-            typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-    detected_type = type_ or _detect_type(state_path)
-    try:
-        Schema = load_schema(detected_type)
-    except ValueError as exc:
-        if _json_mode(ctx):
-            typer.echo(json.dumps({"valid": False, "errors": [{"msg": str(exc)}]}))
-        else:
-            typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1)
-
-    try:
-        Schema.model_validate(data)
-    except ValidationError as exc:
-        errors = exc.errors()
-        if _json_mode(ctx):
-            typer.echo(json.dumps({"valid": False, "errors": errors}, default=str))
-        else:
-            typer.echo(f"invalid: {exc}", err=True)
-        raise typer.Exit(code=1)
-
-    if _json_mode(ctx):
-        typer.echo(json.dumps({"valid": True}))
-    else:
-        typer.echo("valid")
-
-
-@cli.command()
 def init(
     ctx: typer.Context,
     type_: str = typer.Option("target", "--type", help="state type: target"),
@@ -388,41 +342,3 @@ def archive(
     else:
         typer.echo(f"archived: {state_path} -> {archive_path}")
 
-
-@cli.command(name="list-fields")
-def list_fields(
-    ctx: typer.Context,
-    type_: str = typer.Option("target", "--type", help="state type: target"),
-) -> None:
-    """List all known fields for a state type."""
-    from fno.schemas import load_schema
-
-    try:
-        Schema = load_schema(type_)
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1)
-
-    fields = list(Schema.model_fields.keys())
-
-    if _json_mode(ctx):
-        typer.echo(json.dumps(fields))
-    else:
-        for f in fields:
-            typer.echo(f)
-
-
-@cli.command(name="path")
-def path_(name: str = typer.Argument(..., help="state file to resolve: ledger")) -> None:
-    """Print the fno.paths-resolved absolute path for a named state file."""
-    from fno.paths import ledger_json
-
-    resolvers = {"ledger": ledger_json}  # extend when a second caller needs it
-    resolver = resolvers.get(name)
-    if resolver is None:
-        typer.echo(
-            f"error: unknown state file '{name}'; known: {', '.join(sorted(resolvers))}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    typer.echo(str(resolver()))

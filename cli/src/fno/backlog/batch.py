@@ -32,6 +32,7 @@ from fno import _subprocess_util
 from typing import Callable, Iterator, Literal, Optional
 
 import typer
+from fno.tombstones import tombstone_group_cls
 
 _LOG = logging.getLogger(__name__)
 
@@ -968,6 +969,7 @@ cli = typer.Typer(
     name="batch",
     help="Batch-lane state: coalesce same-domain nodes into one PR (opt-in).",
     no_args_is_help=True,
+    cls=tombstone_group_cls("backlog batch"),
 )
 
 
@@ -1036,50 +1038,6 @@ def cli_join(
     except (BatchError, BatchValidationError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1)
-
-
-@cli.command("close")
-def cli_close(
-    domain: str = typer.Option(..., "--domain", "-d"),
-    pr_url: Optional[str] = typer.Option(None, "--pr-url"),
-    root: Optional[str] = typer.Option(None, "--root"),
-) -> None:
-    """Close the open batch (mark shipped) and print its members."""
-    try:
-        _emit(close_batch(domain=domain, pr_url=pr_url, root=_root_opt(root)))
-    except NoOpenBatch as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(2)
-    except (BatchError, BatchValidationError) as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(1)
-
-
-@cli.command("abandon")
-def cli_abandon(
-    domain: str = typer.Option(..., "--domain", "-d"),
-    root: Optional[str] = typer.Option(None, "--root"),
-) -> None:
-    """Abandon the open batch AND requeue its members as individual PRs.
-
-    v1 failure policy: clears every member's graph `batch` mark so they resurface
-    in `fno backlog next`. The daemon calls this when a batched member fails.
-    """
-    r = _root_opt(root)
-    try:
-        batch = abandon_batch(domain=domain, root=r)
-    except NoOpenBatch as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(2)
-    except (BatchError, BatchValidationError) as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(1)
-    requeued = member_ids(batch)
-    _clear_member_batch_marks(requeued, root=r)
-    # `member_count`/`requeued` feed the Wave-4-trigger metric: the daemon
-    # journals them on the abandon event so `batch metrics` can count the clean
-    # members a v1 abandon dragged into a requeue (runs_wasted). Additive.
-    _emit({**batch, "member_count": len(requeued), "requeued": requeued})
 
 
 @cli.command("ship")
@@ -1207,43 +1165,3 @@ def _load_batch_enabled(root: Optional[Path] = None) -> bool:
         return False
 
 
-@cli.command("policy")
-def cli_policy(
-    node: str = typer.Option(..., "--node", "-n", help="Candidate node id."),
-    root: Optional[str] = typer.Option(None, "--root"),
-) -> None:
-    """Emit the batch decision (ship_solo|start|join) for a candidate node.
-
-    Reads config.batch.enabled and the node via `fno backlog get`, then applies
-    the pure policy. The selection path (Wave 2 wiring) shells to this verb.
-    """
-    import subprocess
-
-    node_dict: Optional[dict] = None
-    try:
-        proc = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "backlog", "get", node], capture_output=True, text=True, timeout=30
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            node_dict = json.loads(proc.stdout)
-        else:
-            _LOG.warning(
-                "fno backlog get %s failed (rc=%s): %s",
-                node, proc.returncode, (proc.stderr or "").strip()[:200],
-            )
-    except Exception as e:  # noqa: BLE001
-        _LOG.warning("fno backlog get %s errored: %s", node, e)
-
-    if node_dict is None:
-        # Could not read the node's size/priority. Ship solo — the conservative
-        # direction: never pool a possibly-large (size:L) or drop-everything
-        # (p0) node into a shared batch PR on missing data. Degrading to a bare
-        # id would erase solo-eligibility and silently defeat the SOLO rule.
-        _emit(BatchDecision("ship_solo", "", "node lookup failed; shipping solo").to_dict())
-        return
-
-    resolved_root = _root_opt(root)
-    decision = decide_batch_action(
-        node_dict, enabled=_load_batch_enabled(resolved_root), root=resolved_root
-    )
-    _emit(decision.to_dict())

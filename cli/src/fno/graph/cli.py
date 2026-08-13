@@ -23,11 +23,15 @@ from typing import List, Literal, Optional
 import typer
 
 from fno.harness_identity import resolve_harness_identity
+from fno.tombstones import tombstone_group_cls
 
 cli = typer.Typer(
     name="graph",
     help="Feature graph management",
     no_args_is_help=True,
+    # Removed verbs under `backlog` refuse by name and say what replaced them,
+    # instead of failing with the same message a typo gets.
+    cls=tombstone_group_cls("backlog"),
     # The curated menu below is nouns; this line is the answer to "can I take
     # that back". It sits on the group help because that is the surface someone
     # deciding what is possible actually reads - a correction verb nobody can
@@ -46,12 +50,14 @@ cli.add_typer(_triage_cli, name="triage")
 
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
-# `fno mail` (cross-project messaging). `fno backlog inbox` is kept as a
-# hidden deprecated alias (same Typer app, byte-identical behavior).
+# `fno mail` (cross-project messaging).
+#
+# `inbox` was a SECOND registration of this same app, so all nine of its
+# subcommands were duplicates and the surface paid for them twice. It is gone;
+# `fno.tombstones` keeps the name reachable as a signpost.
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
 cli.add_typer(_capture_cli, name="capture", hidden=True)
-cli.add_typer(_capture_cli, name="inbox", hidden=True)
 
 # Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.
@@ -3613,7 +3619,7 @@ def _release_node_lockfile(node_id: str) -> str:
         if state == "corrupted":
             typer.echo(
                 f"warning: lockfile {key} is corrupted; graph claim cleared but "
-                f"lockfile left intact. Use `fno claim force-release {key} -R <why>` "
+                f"lockfile left intact. Use `fno claim release {key} --force -R <why>` "
                 f"to repair.",
                 err=True,
             )
@@ -3631,7 +3637,7 @@ def _release_node_lockfile(node_id: str) -> str:
         typer.echo(
             f"warning: lockfile {key} held by LIVE holder {holder!r}; graph claim "
             f"cleared but lockfile left intact. Use "
-            f"`fno claim force-release {key} -R <why>` to override.",
+            f"`fno claim release {key} --force -R <why>` to override.",
             err=True,
         )
         return "lockfile left (live foreign holder)"
@@ -3683,14 +3689,6 @@ def cmd_unclaim(
     ),
 ) -> None:
     """Free a claimed node in one call (graph claim + safe lockfile release)."""
-    _unclaim_node(task_id)
-
-
-@cli.command("release", hidden=True)
-def cmd_release(
-    task_id: str = typer.Argument(..., help="Alias for `unclaim`"),
-) -> None:
-    """Alias for `unclaim`: free a claimed node in one call."""
     _unclaim_node(task_id)
 
 
@@ -4221,57 +4219,6 @@ def cmd_lane_fill(
 
 
 # -- schedule (shadow) --
-
-@cli.command("schedule", hidden=True)
-def cmd_schedule(
-    shadow: bool = typer.Option(
-        True,
-        "--shadow/--no-shadow",
-        help="Shadow (read-only) mode. Only mode today; live dispatch is a "
-        "later change gated on measured shadow evidence.",
-    ),
-    max_lanes: Optional[int] = typer.Option(
-        None, "--max", help="Requested cap (default: config.parallel.max_lanes)."
-    ),
-    project: Optional[str] = typer.Option(
-        None, "--project", "-p", help="Filter by project name"
-    ),
-    mission: Optional[str] = typer.Option(
-        None, "--mission", help="Restrict selection to this mission's nodes."
-    ),
-) -> None:
-    """Shadow-first bounded scheduler: a read-only frontier decision report (x-24f7).
-
-    Emits, for the current ready set, which nodes WOULD dispatch as concurrent
-    lanes and a typed reason for every node held back (serialized) or that could
-    not be assessed (unevaluated). Acquires no claim and spawns nothing. The
-    ``effective_cap`` is the bounded initial-rollout ceiling; ``requested_cap``
-    is what was asked. Live dispatch under this frontier is a separate change,
-    gated on measured shadow evidence per the plan's read-only-first sequence.
-    """
-    if not shadow:
-        typer.echo(
-            "Error: live scheduling is not enabled yet - only --shadow (read-only) "
-            "is supported. Live dispatch is gated on measured shadow evidence.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    from fno.backlog.advance import schedule_shadow
-
-    if max_lanes is None:
-        from fno.config import load_settings
-        max_lanes = load_settings().parallel.max_lanes
-
-    report = schedule_shadow(max_lanes, project, mission=mission)
-    typer.echo(json.dumps(report, indent=2))
-    # A degraded report is still printed in full - a reader wanting the frontier
-    # anyway can have it - but it must not exit 0. This report is the evidence
-    # that authorizes live scheduling, and a shell gate keying on $? cannot see
-    # the `degraded` list. Exit 1 (2 is the not-enabled-yet refusal above).
-    if report["degraded"]:
-        raise typer.Exit(code=1)
-
 
 # -- dispatch-lanes --
 
@@ -5237,28 +5184,6 @@ cli.add_typer(session_app, name="session", hidden=True)
 
 # -- backfill-slugs --
 
-@cli.command("backfill-slugs", hidden=True)
-def cmd_backfill_slugs() -> None:
-    """Assign a title-derived slug to every node lacking one (ab-f82e8083).
-
-    A one-time, idempotent, lock-safe pass: existing slugs are never rewritten,
-    so re-running changes nothing. (Every graph mutation also slugs new nodes
-    automatically via ensure_slugs; this verb is the explicit operator trigger
-    that backfills the whole legacy graph in one call.)
-    """
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph.slug import ensure_slugs
-
-    assigned = [0]
-
-    def mutator(entries):
-        assigned[0] = ensure_slugs(entries)
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-    typer.echo(json.dumps({"slugs_assigned": assigned[0]}, indent=2))
-
-
 # -- view --
 
 @cli.command("view")
@@ -5391,69 +5316,6 @@ def cmd_roadmap(
 
 # -- tree --
 
-@cli.command("tree", hidden=True)
-def cmd_tree(
-    project: Optional[str] = typer.Option(None, help="Filter by project"),
-    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
-) -> None:
-    from fno.graph.store import read_graph
-    from fno.graph._intake import _graph_sort_key_fn
-
-    entries = read_graph(_graph_path())
-
-    if project:
-        entries = [e for e in entries if e.get("project") == project]
-    if roadmap_id:
-        entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
-
-    if not entries:
-        typer.echo("No graph entries found.")
-        return
-
-    STATUS_ICONS = {
-        "done": "[x]",
-        "in_progress": "[~]",
-        "ready": "[ ]",
-        "blocked": "[B]",
-        "idea": "[i]",
-        "deferred": "[d]",
-    }
-    id_to_entry = {e["id"]: e for e in entries}
-    children_map: dict = {}
-    for e in entries:
-        parent = e.get("parent")
-        children_map.setdefault(parent, []).append(e)
-
-    def print_tree(parent_id, indent=0):
-        children = children_map.get(parent_id, [])
-        children.sort(key=_graph_sort_key_fn)
-        for child in children:
-            icon = STATUS_ICONS.get(child.get("status", "ready"), "[ ]")
-            title = child.get("title", "?")
-            eid = child["id"]
-            prefix = "  " * indent
-            suffix = ""
-            if child.get("pr_number"):
-                suffix += f" PR#{child['pr_number']}"
-            if child.get("cost_usd"):
-                suffix += f" ${child['cost_usd']:.2f}"
-            typer.echo(f"{prefix}{icon} {eid} {title}{suffix}")
-            print_tree(eid, indent + 1)
-
-    roots = [e for e in entries if e.get("parent") is None or e.get("parent") not in id_to_entry]
-    for root in sorted(roots, key=_graph_sort_key_fn):
-        icon = STATUS_ICONS.get(root.get("status", "ready"), "[ ]")
-        title = root.get("title", "?")
-        eid = root["id"]
-        suffix = ""
-        if root.get("pr_number"):
-            suffix += f" PR#{root['pr_number']}"
-        if root.get("cost_usd"):
-            suffix += f" ${root['cost_usd']:.2f}"
-        typer.echo(f"{icon} {eid} {title}{suffix}")
-        print_tree(eid, 1)
-
-
 # -- status --
 
 @cli.command("status", hidden=True)
@@ -5555,126 +5417,7 @@ def cmd_status(
 
 # -- briefs --
 
-@cli.command("briefs", hidden=True)
-def cmd_briefs(
-    limit: int = typer.Option(5, help="Number of briefs to load"),
-) -> None:
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
-    done_with_briefs = [
-        e for e in entries
-        if e.get("status") == "done" and e.get("has_brief")
-    ]
-    done_with_briefs.sort(key=lambda e: e.get("completed_at", ""), reverse=True)
-
-    recent = done_with_briefs[:limit]
-    older = done_with_briefs[limit:]
-    briefs_dir = _briefs_dir()
-
-    output = []
-    for e in recent:
-        brief_path = briefs_dir / f"{e['id']}.md"
-        brief_text = ""
-        if brief_path.exists():
-            brief_text = brief_path.read_text().strip()
-        output.append({
-            "id": e["id"],
-            "title": e.get("title"),
-            "completed_at": e.get("completed_at"),
-            "brief": brief_text,
-        })
-
-    for e in older:
-        brief_path = briefs_dir / f"{e['id']}.md"
-        summary = ""
-        if brief_path.exists():
-            lines = brief_path.read_text().strip().split("\n")
-            summary = lines[0] if lines else ""
-        output.append({
-            "id": e["id"],
-            "title": e.get("title"),
-            "completed_at": e.get("completed_at"),
-            "brief": f"(compressed) {summary}",
-        })
-
-    typer.echo(json.dumps(output, indent=2))
-
-
 # -- validate --
-
-@cli.command("validate", hidden=True)
-def cmd_validate(
-    roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
-) -> None:
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
-    if roadmap_id:
-        entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
-
-    if not entries:
-        typer.echo("No entries to validate.")
-        return
-
-    errors = []
-    warnings = []
-    id_set = {e["id"] for e in entries}
-
-    for e in entries:
-        for blocker_id in e.get("blocked_by", []):
-            if blocker_id not in id_set:
-                errors.append(f"{e['id']} blocked by unknown node {blocker_id}")
-
-    id_to_entry = {e["id"]: e for e in entries}
-    visited: set = set()
-    rec_stack: set = set()
-
-    def _has_cycle(node_id):
-        visited.add(node_id)
-        rec_stack.add(node_id)
-        node = id_to_entry.get(node_id)
-        if node:
-            for blocker_id in node.get("blocked_by", []):
-                if blocker_id not in visited:
-                    if _has_cycle(blocker_id):
-                        return True
-                elif blocker_id in rec_stack:
-                    errors.append(f"Circular dependency involving {node_id} and {blocker_id}")
-                    return True
-        rec_stack.discard(node_id)
-        return False
-
-    for e in entries:
-        if e["id"] not in visited:
-            _has_cycle(e["id"])
-
-    seen_ids: set = set()
-    for e in entries:
-        eid = e.get("id")
-        if eid in seen_ids:
-            errors.append(f"Duplicate ID: {eid}")
-        seen_ids.add(eid)
-
-    for e in entries:
-        parent = e.get("parent")
-        if parent and parent not in id_set:
-            warnings.append(f"{e['id']} has parent {parent} not in graph")
-
-    if errors:
-        typer.echo(f"ERRORS ({len(errors)}):")
-        for err in errors:
-            typer.echo(f"  - {err}")
-    if warnings:
-        typer.echo(f"WARNINGS ({len(warnings)}):")
-        for warn in warnings:
-            typer.echo(f"  - {warn}")
-    if not errors and not warnings:
-        typer.echo(f"OK: {len(entries)} entries, no issues found.")
-
-    if errors:
-        raise typer.Exit(code=1)
-
 
 # -- cost --
 
@@ -5955,6 +5698,31 @@ def _expand_id_args(raw_ids: list[str]) -> list[str]:
             seen.add(tid)
             out.append(tid)
     return out
+
+
+@cli.command("queued", hidden=True)
+def cmd_queued(
+    project: Optional[str] = typer.Option(None, help="Filter by project name"),
+    all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
+) -> None:
+    """List nodes the user has queued for action. JSON output, sorted by priority."""
+    from fno.graph.store import read_graph
+    from fno.graph._intake import filter_by_project, _graph_sort_key_fn
+
+    entries = read_graph(_graph_path())
+    queued = [e for e in entries
+              if e.get("queued_at")
+              and not e.get("completed_at")
+              and not e.get("deferred_at")]
+    queued = filter_by_project(queued, project, all_)
+    queued.sort(key=_graph_sort_key_fn)
+
+    output = [{
+        "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
+        "project": e.get("project"), "queued_at": e.get("queued_at"),
+        "queued_reason": e.get("queued_reason"), "status": e.get("status"),
+    } for e in queued]
+    typer.echo(json.dumps(output, indent=2))
 
 
 @cli.command(
@@ -6487,31 +6255,6 @@ def cmd_pick(
         )
     else:
         typer.echo("(no changes)")
-
-
-@cli.command("queued", hidden=True)
-def cmd_queued(
-    project: Optional[str] = typer.Option(None, help="Filter by project name"),
-    all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
-) -> None:
-    """List nodes the user has queued for action. JSON output, sorted by priority."""
-    from fno.graph.store import read_graph
-    from fno.graph._intake import filter_by_project, _graph_sort_key_fn
-
-    entries = read_graph(_graph_path())
-    queued = [e for e in entries
-              if e.get("queued_at")
-              and not e.get("completed_at")
-              and not e.get("deferred_at")]
-    queued = filter_by_project(queued, project, all_)
-    queued.sort(key=_graph_sort_key_fn)
-
-    output = [{
-        "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
-        "project": e.get("project"), "queued_at": e.get("queued_at"),
-        "queued_reason": e.get("queued_reason"), "status": e.get("status"),
-    } for e in queued]
-    typer.echo(json.dumps(output, indent=2))
 
 
 @cli.command("undefer", hidden=True)
@@ -10993,71 +10736,3 @@ def _exec_liveness(state: str) -> str:
             "corrupted": "unknown", "free": ""}.get(state, "")
 
 
-@cli.command("exec-graph", hidden=True)
-def cmd_exec_graph(
-    id: str = typer.Argument(..., help="Root node ab-id, slug, or bare hex."),
-    as_json: bool = typer.Option(True, "--json/--human", "-J", help="Emit stable JSON (default) or a human summary."),
-    validate: bool = typer.Option(False, "--validate", help="Round-trip the compiled graph through strict parse; exit 2 on any defect."),
-) -> None:
-    """Compile and inspect the derived execution graph for a node (read-only).
-
-    Derives a disposable typed topology from canonical state (blocked_by
-    ordering, file ownership, verifiers, evidence). Never mutates the graph;
-    compilation failure degrades to a collapsed serial graph rather than error.
-    """
-    from fno.graph.execution import MalformedGraphError, compile_graph, ExecGraph
-    from fno.graph.fuzzy import resolve_node
-
-    entries = _resolve_entries_or_exit(id)
-    match = resolve_node(id, entries)
-    if match.kind != "exact":
-        typer.echo(f"Error: could not resolve node {id!r} exactly", err=True)
-        raise typer.Exit(code=3)
-    root = match.candidates[0]["id"]
-
-    by_id = {e.get("id"): e for e in entries if e.get("id")}
-    scope = _relevant_exec_scope(root, by_id)
-
-    selected = []
-    for nid in scope:
-        e = dict(by_id[nid])
-        # Live-state truth from the lockfile, NOT the graph snapshot: a worker
-        # can hold node:<id> without updating locked_by, and a dead holder can
-        # linger in the graph (AGENTS.md: the live lockfile is the only
-        # ownership truth). Best-effort - a read-only surface never crashes on
-        # a claims-layer hiccup.
-        try:
-            from fno.claims.core import claim_status
-            from fno.claims.io import claims_root_for
-            key = f"node:{nid}"
-            st = claim_status(key, root=claims_root_for(key))
-            e["claim_holder"] = st.get("holder") or ""
-            e["liveness"] = _exec_liveness(str(st.get("state") or ""))
-        except Exception as exc:  # noqa: BLE001 - inspection must not fail on claims IO
-            # A probe failure is NOT "free": conflating "couldn't read" with
-            # "unclaimed" would render a live-held node as available. Mark it
-            # unknown and leave a trace rather than silently claiming free.
-            typer.echo(f"warning: claim probe failed for {nid}: {exc}", err=True)
-            e["claim_holder"] = ""
-            e["liveness"] = "unknown"
-        selected.append(e)
-
-    graph = compile_graph(root, selected)
-
-    if validate:
-        try:
-            ExecGraph.from_dict(graph.to_dict())
-        except MalformedGraphError as exc:
-            typer.echo(f"Error: compiled graph failed strict validation: {exc}", err=True)
-            raise typer.Exit(code=2)
-
-    if as_json:
-        typer.echo(graph.to_json())
-        return
-    kinds = ", ".join(sorted({e.kind for e in graph.edges})) or "none"
-    typer.echo(f"root={graph.root} collapsed={graph.collapsed}")
-    typer.echo(f"nodes={len(graph.nodes)} edges={len(graph.edges)} ({kinds}) barriers={len(graph.barriers)}")
-    for n in sorted(graph.nodes, key=lambda n: n.node_id):
-        typer.echo(f"  {n.node_id}  [{n.justification}] {n.objective}")
-    for b in sorted(graph.barriers, key=lambda b: b.at):
-        typer.echo(f"  barrier @ {b.at}: fan-in from {', '.join(b.expected)}")

@@ -1186,13 +1186,15 @@ pub fn doctor(json: bool) -> i32 {
 /// `prune` exists today; a bare verb or an unknown verb is usage. Carries the
 /// tokens after the verb family verbatim, like `pane`/`block`.
 ///
-/// The retired spelling `fno mux squad` still dispatches here (main.rs) and is
-/// deliberately unadvertised, mirroring how `--squad` is hidden-deprecated
-/// alongside the canonical `--workspace`. The user-facing/internal vocabulary
-/// split that leaves behind - `workspace` everywhere a person types, `squad`
-/// throughout this crate's identifiers - is a decision, not an unfinished
-/// rename: renaming ~2900 internal sites buys no user-visible change and
-/// collides with every in-flight mux branch. The two remaining user-adjacent
+/// The retired `fno mux squad` spelling is GONE: it was an unadvertised alias
+/// of this family, named by nothing outside its own test, and a second spelling
+/// of one verb is a leaf the surface pays for twice. `--squad` stays a
+/// hidden-deprecated flag alias alongside the canonical `--workspace`. The
+/// user-facing/internal vocabulary split that leaves behind - `workspace`
+/// everywhere a person types, `squad` throughout this crate's identifiers - is
+/// a decision, not an unfinished rename: renaming ~2900 internal sites buys no
+/// user-visible change and collides with every in-flight mux branch. The two
+/// remaining user-adjacent
 /// spellings, the `squad` key in the `--json` placement receipt and
 /// `~/.fno/squads.json`, ride the next change that bumps `PROTO_VERSION` or
 /// migrates the store for a real reason, where the compatibility window and

@@ -122,32 +122,6 @@ def test_resolve_manifest_run_id_only_is_none(tmp_path, monkeypatch):
     assert resolve_fence_session_uuid(tmp_path) is None
 
 
-def test_verb_blocked_exits_nonzero(monkeypatch):
-    monkeypatch.setattr("fno.claims.incarnation.resolve_fence_session_uuid", lambda: "uuid1")
-    monkeypatch.setattr(
-        "fno.claims.incarnation.incarnation_fence_blocks",
-        lambda u, **k: (True, "session:uuid1 held by target-session:other"),
-    )
-    r = runner.invoke(claims_cli, ["incarnation-fence"])
-    assert r.exit_code == 2
-    assert "incarnation-fence" in r.output
-
-
-def test_verb_clear_proceeds(monkeypatch):
-    monkeypatch.setattr("fno.claims.incarnation.resolve_fence_session_uuid", lambda: "uuid1")
-    monkeypatch.setattr(
-        "fno.claims.incarnation.incarnation_fence_blocks", lambda u, **k: (False, "")
-    )
-    r = runner.invoke(claims_cli, ["incarnation-fence"])
-    assert r.exit_code == 0
-
-
-def test_verb_no_identity_proceeds(monkeypatch):
-    monkeypatch.setattr("fno.claims.incarnation.resolve_fence_session_uuid", lambda: None)
-    r = runner.invoke(claims_cli, ["incarnation-fence"])
-    assert r.exit_code == 0
-
-
 def test_run_merge_blocked_by_fence(monkeypatch, tmp_path):
     # The merge outward action refuses when the fence blocks (before any merge work).
     monkeypatch.setattr(

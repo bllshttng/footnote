@@ -51,9 +51,13 @@ The three **(typer, hidden)** subcommands are the only machine subcommands that 
 
 | Subcommand | State |
 |------|-------|
-| `register-channel` / `unregister-channel` / `push-channel` / `subscribe` | The intended pub/sub avenue for the MCP-route comms channel (Discord and/or agent-to-agent, each session subscribed to a channel). Zero shell call sites as of this writing and untested end-to-end - deliberate infra, **not dead code**. Rust-only, so already absent from `fno agents --help`. Do not cut. |
+| `subscribe` | Streams registry state transitions and pane exits. The surviving half of the pub/sub avenue for the MCP-route comms channel. |
+| ~~`register-channel` / `unregister-channel` / `push-channel`~~ | **Removed.** The CLI wrappers had no caller in any language, and the sidecar that actually registers channels (`fno.mcp.sidecar`) never went through them. `fno agents <verb>` refuses each by name; the table lives in `cli/src/fno/tombstones.py`. |
 
-A subcommand with zero shell call sites is *not-yet-wired*, not dead: cutting requires proving no shell call site **and** no internal dispatch **and** no forward intent. The channel subcommands fail that test (forward intent is explicit), so they stay.
+A subcommand with zero shell call sites is *not-yet-wired*, not dead.
+Cutting requires proving no shell call site **and** no internal dispatch **and** no forward intent.
+The three channel wrappers were cut on the first two, with the forward intent judged already served by the sidecar path.
+The `channel.*` daemon RPCs (`protocol.rs`, `daemon.rs`) are untouched, so rewiring a CLI front is a re-add, not a rebuild.
 
 ## The a2a reply contract (x-605c)
 

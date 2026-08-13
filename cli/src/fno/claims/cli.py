@@ -67,12 +67,14 @@ from .core import (
     refresh_claim,
     release_claim,
 )
+from fno.tombstones import tombstone_group_cls
 
 
 cli = typer.Typer(
     name="claim",
     help="Work-claim coordination primitive",
     no_args_is_help=True,
+    cls=tombstone_group_cls("claim"),
 )
 
 
@@ -128,8 +130,22 @@ def _node_aware_root(key: str):
 
 @cli.command()
 def acquire(
-    key: str = typer.Argument(..., help="Lock key, e.g. node:ab-1234abcd"),
-    holder: str = typer.Option(..., "--holder", help="Symbolic owner string"),
+    key: Optional[str] = typer.Argument(
+        None, help="Lock key, e.g. node:ab-1234abcd. Omit when using --lane."
+    ),
+    holder: str = typer.Option("", "--holder", help="Symbolic owner string"),
+    lane: Optional[str] = typer.Option(
+        None,
+        "--lane",
+        help=(
+            "Acquire a LANE SLOT for this lane id instead of a keyed claim "
+            "(was `claim lane-acquire --lane-id`). Requires --max-lanes; "
+            "takes no KEY and no --holder."
+        ),
+    ),
+    max_lanes: Optional[int] = typer.Option(
+        None, "--max-lanes", help="With --lane: concurrency cap (>=1; 1 == sequential)."
+    ),
     reason: str = typer.Option("", "--reason", "-R", help="Optional rationale recorded in audit"),
     ttl: str = typer.Option("", "--ttl", help="TTL expression like 30m, 1h, 3600s (omit => PID-liveness)"),
     metadata: str = typer.Option("{}", "--metadata", help="JSON object passed verbatim"),
@@ -156,7 +172,39 @@ def acquire(
         ),
     ),
 ) -> None:
-    """Acquire a claim on KEY for HOLDER. Idempotent re-acquire if HOLDER matches."""
+    """Acquire a claim on KEY for HOLDER. Idempotent re-acquire if HOLDER matches.
+
+    With ``--lane <id> --max-lanes N`` this acquires a lane SLOT instead, which
+    is the same operation against a different claim space; it was a separate
+    ``lane-acquire`` verb whose name was its own flag.
+    """
+    if lane is not None:
+        if key is not None or max_lanes is None or holder:
+            typer.echo(
+                "validation error: --lane takes no KEY and no --holder, and "
+                "requires --max-lanes (a lane slot is acquired by lane id, not "
+                "by claim key)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _acquire_lane(lane=lane, max_lanes=max_lanes, ttl=ttl, json_output=json_output)
+        return
+    # --max-lanes is meaningless without --lane, and silently ignoring it is how
+    # someone migrating off `lane-acquire` gets an ordinary claim with the cap
+    # not enforced and nothing on stderr to say so.
+    if max_lanes is not None:
+        typer.echo(
+            "validation error: --max-lanes is the lane-slot cap and requires "
+            "--lane <id>",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if key is None:
+        typer.echo("validation error: KEY is required (or use --lane <id>)", err=True)
+        raise typer.Exit(code=2)
+    if not holder:
+        typer.echo("validation error: --holder is required", err=True)
+        raise typer.Exit(code=2)
     # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
     # (a one-shot `fno claim acquire` from a shell dies ~1s later, so the claim went
     # instantly STALE -- the footgun). Default instead to the durable session
@@ -214,8 +262,27 @@ def acquire(
 
 @cli.command()
 def release(
-    key: str = typer.Argument(...),
-    holder: str = typer.Option(..., "--holder"),
+    key: Optional[str] = typer.Argument(None, help="Claim key. Omit when using --lane."),
+    holder: str = typer.Option("", "--holder"),
+    lane: Optional[str] = typer.Option(
+        None,
+        "--lane",
+        help=(
+            "Release the LANE SLOT held by this lane id instead of a keyed "
+            "claim (was `claim lane-release --lane-id`). Takes no KEY."
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help=(
+            "Administratively drop the claim regardless of owner, archiving it "
+            "to .expired/ (was `claim force-release`). Requires --reason and "
+            "takes no --holder."
+        ),
+    ),
+    reason: str = typer.Option("", "--reason", "-R", help="With --force: required audit rationale."),
     strict: bool = typer.Option(False, "--strict", help="Raise if holder does not match"),
     stamp_do: bool = typer.Option(
         False, "--stamp-do",
@@ -235,7 +302,65 @@ def release(
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Release a claim we own. Silent success if already released."""
+    """Release a claim we own. Silent success if already released.
+
+    Three modes that were three verbs, because two of the names were flags:
+    the default releases a claim we hold, ``--lane <id>`` releases a lane slot,
+    and ``--force`` drops a claim regardless of owner.
+    """
+    # A flag that belongs to another mode is REFUSED, never ignored. Silently
+    # dropping `--stamp-do` on the force path (or `--reason` on the plain one)
+    # loses exactly the provenance the flag was passed to record, and the caller
+    # gets exit 0 saying it worked.
+    if lane is not None:
+        if key is not None or force or holder or strict or stamp_do or rollback_do or reason:
+            typer.echo(
+                "validation error: --lane takes only the lane id (no KEY, and "
+                "none of --force/--holder/--strict/--reason/--stamp-do/"
+                "--rollback-do): a lane slot has no owner and no do window",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _release_lane(lane=lane, json_output=json_output)
+        return
+    if key is None:
+        typer.echo("validation error: KEY is required (or use --lane <id>)", err=True)
+        raise typer.Exit(code=2)
+    if reason and not force:
+        typer.echo(
+            "validation error: --reason records the --force override and has no "
+            "effect on an ordinary release",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if force:
+        if strict or stamp_do or rollback_do:
+            typer.echo(
+                "validation error: --force is the administrative drop and takes "
+                "none of --strict/--stamp-do/--rollback-do (there is no owner to "
+                "check and no do window to stamp)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if holder:
+            typer.echo(
+                "validation error: --force drops the claim regardless of owner, "
+                "so --holder is meaningless with it",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if not reason:
+            typer.echo(
+                "validation error: --force requires --reason (the override is "
+                "recorded in the audit trail)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _force_release(key=key, reason=reason, json_output=json_output)
+        return
+    if not holder:
+        typer.echo("validation error: --holder is required (or use --force)", err=True)
+        raise typer.Exit(code=2)
     if stamp_do and rollback_do:
         typer.echo(
             "validation error: --stamp-do and --rollback-do are mutually "
@@ -576,14 +701,8 @@ def session_pid(
     # else: emit nothing on stdout so `$(fno claim session-pid)` is empty.
 
 
-@cli.command(name="lane-acquire")
-def lane_acquire(
-    lane_id: str = typer.Option(..., "--lane-id", help="Unique lane identity (typically the node id)"),
-    max_lanes: int = typer.Option(..., "--max-lanes", help="Concurrency cap (>=1; 1 == sequential)"),
-    ttl: str = typer.Option("1h", "--ttl", help="Slot TTL; the owner refreshes while the lane is alive"),
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Acquire a lane slot gated on the live-claim cap (parallel mode, x-42d5).
+def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> None:
+    """The former `claim lane-acquire`, now the --lane mode of `claim acquire`.
 
     Exit 1 when the cap is full (no free slot) - the same "retry later" code as
     a held claim. The cap is enforced by atomic slot acquisition, never a count.
@@ -592,7 +711,7 @@ def lane_acquire(
 
     try:
         claim = acquire_lane_slot(
-            max_lanes=max_lanes, lane_id=lane_id, ttl_ms=_parse_ttl(ttl)
+            max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h")
         )
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
@@ -604,48 +723,25 @@ def lane_acquire(
 
     if json_output:
         out = claim.to_yaml_dict()
-        out["lane_id"] = lane_id
+        out["lane_id"] = lane
         typer.echo(json.dumps(out))
     else:
-        typer.echo(f"acquired lane slot {claim.key} for lane {lane_id}")
+        typer.echo(f"acquired lane slot {claim.key} for lane {lane}")
 
 
-@cli.command(name="lane-release")
-def lane_release(
-    lane_id: str = typer.Option(..., "--lane-id", help="Lane identity to release"),
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Release the lane slot held by LANE_ID. Silent success if it holds none."""
+def _release_lane(*, lane: str, json_output: bool) -> None:
+    """The former `claim lane-release`. Silent success if the lane holds none."""
     from .lanes import release_lane_slot
 
-    release_lane_slot(lane_id=lane_id)
+    release_lane_slot(lane_id=lane)
     if json_output:
-        typer.echo(json.dumps({"lane_id": lane_id, "released": True}))
+        typer.echo(json.dumps({"lane_id": lane, "released": True}))
     else:
-        typer.echo(f"released lane {lane_id}")
+        typer.echo(f"released lane {lane}")
 
 
-@cli.command(name="lane-count")
-def lane_count(
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Print the number of live lane slots (the DERIVED cap denominator)."""
-    from .lanes import active_lane_count
-
-    n = active_lane_count()
-    if json_output:
-        typer.echo(json.dumps({"active_lanes": n}))
-    else:
-        typer.echo(str(n))
-
-
-@cli.command(name="force-release")
-def force_release(
-    key: str = typer.Argument(...),
-    reason: str = typer.Option(..., "--reason", "-R", help="Required: audit rationale"),
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Administratively drop a claim regardless of owner. Archived to .expired/."""
+def _force_release(*, key: str, reason: str, json_output: bool) -> None:
+    """The former `claim force-release`. Archived to .expired/."""
     try:
         force_release_claim(key=key, reason=reason, root=_node_aware_root(key))
     except ClaimValidationError as exc:
@@ -656,36 +752,6 @@ def force_release(
         typer.echo(json.dumps({"key": key, "force_released": True, "reason": reason}))
     else:
         typer.echo(f"force-released: {key}")
-
-
-@cli.command(name="incarnation-fence")
-def incarnation_fence(
-    json_output: bool = typer.Option(False, "--json", "-J"),
-) -> None:
-    """Refuse outward actions when another incarnation holds this session's
-    single-writer claim (x-eea5 1.3). Exit 0 proceed, 2 fenced.
-
-    The ship phase calls this before a push/PR; ``fno pr merge`` runs the same
-    check inline. Read-only, best-effort-loud: an unreadable claims dir refuses
-    outward actions (fail closed). With no resolvable session identity the fence
-    is invisible (exit 0, proceed)."""
-    from .incarnation import incarnation_fence_blocks, resolve_fence_session_uuid
-
-    uuid = resolve_fence_session_uuid()
-    if not uuid:
-        typer.echo("incarnation-fence: no session identity; invisible (proceed)", err=True)
-        raise typer.Exit(code=0)
-    blocked, reason = incarnation_fence_blocks(uuid)
-    if blocked:
-        typer.echo(f'<help reason="incarnation-fence" evidence="{reason}">', err=True)
-        typer.echo(reason, err=True)
-        if json_output:
-            typer.echo(json.dumps({"fence": "blocked", "reason": reason}))
-        raise typer.Exit(code=2)
-    if json_output:
-        typer.echo(json.dumps({"fence": "clear", "blocked": False}))
-    else:
-        typer.echo("incarnation-fence: clear (proceed)", err=True)
 
 
 __all__ = ["cli"]
