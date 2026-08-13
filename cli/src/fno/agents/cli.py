@@ -2264,6 +2264,58 @@ def cmd_top(
     print(render_top(as_json=as_json, include_subagents=show_subagents))
 
 
+@agents_app.command("orphans", hidden=True)
+def cmd_orphans(
+    reap: bool = typer.Option(
+        False,
+        "--reap",
+        help="Kill findings that are BOTH fno-named and older than 10 minutes. "
+        "Everything else is reported and left alone.",
+    ),
+    quiet_unless_new: bool = typer.Option(
+        False,
+        "--quiet-unless-new",
+        help="Print nothing when every finding was already reported by a "
+        "previous run. For the SessionStart nudge; a broken scan still speaks.",
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", "-J", help="Emit the same content as JSON."
+    ),
+) -> None:
+    """Report processes that outlived whatever started them, with a control.
+
+    The counterpart to ``hooks/bg-process-guard.py``: the guard refuses a
+    process that can never end, this finds the ones that already survived. It
+    is the only path-agnostic layer in that design, so a test fixture, a
+    non-Claude harness and a leaking hook all land here.
+
+    Before counting anything it plants two orphans of its own, one per arm of
+    the attribution predicate, and must find both. When it cannot, it prints
+    ``verdict withheld (scan-broken)`` and exits 2 WITHOUT an orphan count: a
+    clean machine and a half-blind instrument must never print the same line.
+    Break an arm on purpose with ``FNO_ORPHANS_SKIP_PROBE=name|cwd``.
+
+    ``--reap`` kills only what we named ourselves. Attribution is a heuristic,
+    and a heuristic must not hold a kill signal.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from fno.agents.orphans import filter_new, render, scan, to_json
+
+    skip = os.environ.get("FNO_ORPHANS_SKIP_PROBE") or None
+    result = scan(reap=reap, skip_probe=skip)
+    speak = True
+    if quiet_unless_new:
+        # A broken scan always speaks: silence there is the exact failure this
+        # command exists to make impossible.
+        speak = result.broken or filter_new(result, _Path(".fno/.orphan-sweep-seen"))
+    if speak:
+        print(_json.dumps(to_json(result), indent=2) if as_json else render(result))
+    if result.broken:
+        raise typer.Exit(2)
+
+
 def _registry_falsifier(handle: str) -> str | None:
     """The falsifier for ``handle``, read off its registry row. Never raises.
 
