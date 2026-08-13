@@ -428,6 +428,20 @@ def _seen_key(f: Finding) -> str:
     return f"{f.pid}:{f.name}"
 
 
+def seen_path() -> Path:
+    """Where the already-reported set lives, anchored to the repo root.
+
+    Not a bare relative `.fno/...`: a caller with an unexpected cwd would nest
+    a second state directory somewhere it does not belong, which is the
+    cwd-anchoring bug class `scripts/ci/check-placement-rule.sh` exists to
+    catch. Falls back to cwd only outside a repo, where there is no root to
+    anchor to.
+    """
+    roots = _repo_roots()
+    base = Path(roots[0]) if roots else Path.cwd()
+    return base / ".fno" / ".orphan-sweep-seen"
+
+
 def filter_new(result: ScanResult, seen_path: Path) -> bool:
     """Record this scan's findings and answer "is any of them new?".
 

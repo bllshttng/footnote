@@ -2299,9 +2299,8 @@ def cmd_orphans(
     and a heuristic must not hold a kill signal.
     """
     import json as _json
-    from pathlib import Path as _Path
 
-    from fno.agents.orphans import filter_new, render, scan, to_json
+    from fno.agents.orphans import filter_new, render, scan, seen_path, to_json
 
     skip = os.environ.get("FNO_ORPHANS_SKIP_PROBE") or None
     result = scan(reap=reap, skip_probe=skip)
@@ -2309,7 +2308,7 @@ def cmd_orphans(
     if quiet_unless_new:
         # A broken scan always speaks: silence there is the exact failure this
         # command exists to make impossible.
-        speak = result.broken or filter_new(result, _Path(".fno/.orphan-sweep-seen"))
+        speak = result.broken or filter_new(result, seen_path())
     if speak:
         print(_json.dumps(to_json(result), indent=2) if as_json else render(result))
     if result.broken:
