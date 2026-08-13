@@ -354,8 +354,9 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("docs-before-ship phase-ordering guard", ".", "bash tests/test-docs-before-ship.sh"),
     (".fno/ dir-hygiene harness", ".",
      "python3 tests/metrics/test_completion_summary_path.py\n"
-     "bash tests/lib/test_rotate_append_log.sh\n"
-     "bash scripts/tests/test_prune_fno_dir.sh"),
+     "bash tests/lib/test_rotate_append_log.sh"),
+    ("state-dir path gate self-test", ".",
+     "bash scripts/tests/check-no-hardcoded-paths-selftest.sh"),
     ("corrections.log placement migration", ".", "bash scripts/tests/test_corrections_migrate.sh"),
     ("placement-rule lint self-test", ".", "bash scripts/tests/test_check_placement_rule.sh"),
     ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents", "cargo build"),
