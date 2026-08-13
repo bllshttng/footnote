@@ -402,11 +402,9 @@ fn canonical_suppressed_by_env() -> bool {
 /// method, not only in code: this one cannot see a repo whose git dir lives
 /// outside the checkout, and it costs no subprocess on the attach path. Change
 /// one and check the other.
-fn canonical_root(worktree: &Path) -> Option<PathBuf> {
-    canonical_root_with(worktree, canonical_suppressed_by_env())
-}
-
-/// [`canonical_root`] with the suppression decision passed in.
+///
+/// `suppressed` is passed IN rather than read here, so a test never inherits
+/// the env: `canonical_suppressed_by_env` is the one live read, in `config_roots`.
 ///
 /// Preflight's hermetic runner drops THIS candidate only. Exactly "1"; any
 /// other value is inert, matching `config/__init__.py` and
