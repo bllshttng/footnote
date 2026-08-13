@@ -24,11 +24,15 @@ from fno.carveout.core import (
 carveout_app = typer.Typer(
     no_args_is_help=True,
     help=(
-        "Capture left-out work (deferred decisions, out-of-scope bugs, data "
-        "backfills the merged PR enables) to .fno/carveouts.jsonl. "
-        "Advisory: call it the moment you leave work undone; the retro-triage "
-        "harvest at merge turns deferred/oos-bug into backlog nodes (deduped, "
-        "classified), while `backfill` is handled by /fno:pr merged."
+        "LAST RESORT for work too big to land in this PR. Fix what you find "
+        "instead: a problem you can fix here gets fixed here, in this PR, as "
+        "its own commit - SIZE is the only justification for filing instead. "
+        "Records to .fno/carveouts.jsonl; the retro-triage harvest at merge "
+        "turns deferred/oos-bug into backlog nodes (deduped, classified), "
+        "while `backfill` is handled by /fno:pr merged. That harvest is "
+        "manual: `fno retro sweep-carveouts --apply` is the only thing that "
+        "clears the ledger, so every row you file is a chore for a human. "
+        "See `fno outstanding` for what has piled up."
     ),
 )
 
@@ -81,7 +85,7 @@ def add(
         "provenance, not chosen here.",
     ),
 ) -> None:
-    """Record one deferred decision, out-of-scope bug, or data backfill for later triage."""
+    """Last resort: record work too big for this PR. Anything smaller, fix here instead."""
     if kind not in VALID_KINDS:
         typer.echo(
             f"carveout: invalid --kind '{kind}' "
@@ -133,6 +137,15 @@ def add(
         typer.echo(
             "carveout: no active session; carve-out recorded unscoped", err=True
         )
+
+    # The size test on stderr, never stdout: machine consumers read the id.
+    typer.echo(
+        "carveout: filed as a last resort - SIZE is the only justification. "
+        "If this was small enough to fix in this PR, fix it here and "
+        "`fno carveout resolve` this row. Clears only via "
+        "`fno retro sweep-carveouts --apply`, which nobody runs unprompted.",
+        err=True,
+    )
 
     # stdout carries the value: the new carve-out id.
     typer.echo(cv.id)
