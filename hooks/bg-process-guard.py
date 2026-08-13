@@ -49,6 +49,13 @@ def _is_separator(tok):
     """
     if not tok or any(ch not in PUNCT_CHARS for ch in tok):
         return False
+    # A `&` next to a redirect arrow is part of the redirect, never a control
+    # operator. shlex merges `2>&1` into `2`, `>&`, `1`, and treating `>&` as a
+    # separator split `yes 2>&1 | head -c 1M` into `['yes','2']` and
+    # `['1','|','head',...]`, stranding the bound in the wrong segment and
+    # refusing a legitimately bounded command.
+    if ">" in tok or "<" in tok:
+        return False
     return bool(CONTROL_CHARS & set(tok)) or "||" in tok
 
 # Wrappers that are transparent to command position: `nohup yes` still runs
@@ -149,7 +156,15 @@ def _has_bound(segment):
         base = tok.rsplit("/", 1)[-1]
         if base in {"timeout", "gtimeout"}:
             return True
-        if base == "head":  # `yes | head -c 1M` ends on its own
+        if tok == "|":
+            # A downstream reader bounds the pipeline. `yes` is refused because
+            # a /dev/null sink never goes away, so no SIGPIPE ever arrives;
+            # pipe it into a real command and that command's exit delivers one.
+            # `yes | apt-get install foo` is the standard auto-confirm idiom and
+            # refusing it is how a guard gets switched off.
+            # ponytail: a reader that never exits (`yes | wc -l`) still hangs.
+            # Deciding that statically needs a model of every consumer, so this
+            # accepts the false negative rather than break the common case.
             return True
         if tok.startswith("count="):  # dd
             return True
@@ -170,8 +185,6 @@ def _generator_reason(head, argv):
                 "always accepts.")
     if head in {"while", "until"} and argv and argv[0] in {"true", ":", "false"}:
         return "`%s %s` is an unbounded loop header." % (head, argv[0])
-    if head == "for" and any(";;" in tok for tok in argv):
-        return "`for ((;;))` is an unbounded loop header."
     if head == "sleep" and argv and argv[0] in {"infinity", "inf"}:
         return "`sleep infinity` never returns."
     if head in {"stress", "stress-ng"}:
@@ -202,6 +215,15 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     """
     if depth > 2:
         return None
+    # `for ((;;))` cannot be found per segment: `((;;))` is all punctuation, so
+    # the lexer emits it as one operator token and _is_separator splits there,
+    # leaving a `for` segment with empty argv. Matched on the raw text instead,
+    # and only when the whole command carries no bound at all, so
+    # `for ((;;)); do timeout 5 x; done` still passes.
+    if re.search(r"for\s*\(\(\s*;\s*;\s*\)\)", text) and not any(
+        _has_bound(seg) for seg in _segments(_tokens(text))
+    ):
+        return "`for ((;;))` is an unbounded loop header.", text.strip()
     for segment in _segments(_tokens(text)):
         bounded = inherited_bound or _has_bound(segment)
         head, argv = _head_of(segment)

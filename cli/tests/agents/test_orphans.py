@@ -31,6 +31,7 @@ def _proc(
     ppid: int = 1,
     cpu: float = 0.0,
     age: float = 60.0,
+    create: float | None = None,
 ) -> dict:
     return {
         "pid": pid,
@@ -42,7 +43,11 @@ def _proc(
         # and the whole file goes green-on-nothing in one environment and red in
         # the other.
         "uids": (uid if uid is not None else os.getuid(),) * 3,
-        "create_time": time.time() - age,
+        # An explicit `create` pins the process identity across two fabricated
+        # scans. Deriving it from `age` alone makes "the same process an hour
+        # later" a DIFFERENT process, which is a test that cannot see a
+        # start-time-keyed bug.
+        "create_time": create if create is not None else time.time() - age,
         "cpu_times": CpuTimes(cpu, 0.0),
         "cwd": cwd,
     }
@@ -285,6 +290,57 @@ def test_filter_new_is_loud_once_then_quiet(monkeypatch, table, tmp_path: Path) 
     seen = tmp_path / ".orphan-sweep-seen"
     assert orphans.filter_new(result, seen) is True
     assert orphans.filter_new(result, seen) is False
+
+
+def test_seen_key_ignores_age(monkeypatch, table, tmp_path: Path) -> None:
+    """The bug the first two filter_new tests could not see.
+
+    They reused one ScanResult inside one second. Keying on an age BUCKET made
+    the key advance every minute, so a long-lived daemon read as new at every
+    hourly sweep and reprinted at every session start forever. The key must
+    depend on the process's START time, which is fixed, never on how long it
+    has been running, which is not.
+
+    Asserted on the key directly rather than through two fabricated scans: a
+    second scan with a different create_time is a DIFFERENT process, so that
+    route cannot express "the same process, later" at all.
+    """
+    born = time.time() - 600
+    common = dict(
+        pid=90, name="node", exe_name="node", renamed=False, cmdline="node",
+        cwd="/repo", cpu_seconds=0.0, start_time=born, arm="CWD",
+    )
+    young = orphans.Finding(age_seconds=600, **common)
+    old = orphans.Finding(age_seconds=600 + 3600, **common)
+    assert orphans._seen_key(young) == orphans._seen_key(old)
+
+    seen = tmp_path / ".orphan-sweep-seen"
+    table.append(_proc(90, name="node", cwd="/repo", create=born))
+    result = _scan_with_working_control(monkeypatch, table)
+    assert orphans.filter_new(result, seen) is True
+    assert orphans.filter_new(result, seen) is False
+
+
+def test_a_concurrent_sweeps_probe_is_not_an_orphan(monkeypatch, table) -> None:
+    """Two sweeps inside one 30s probe lifetime is likely, because worktrees of
+    one repo share the hourly stamp. Neither may report the other's control."""
+    table.append(
+        _proc(91, name="sleep", argv0="fno-orphan-probe-beef", cwd="/tmp/other")
+    )
+    result = _scan_with_working_control(monkeypatch, table)
+    assert result.findings == []
+
+
+def test_an_unreadable_census_breaks_the_scan(monkeypatch, table) -> None:
+    """An empty exclusion set reads as "no live workers" and hands every
+    `claude --bg` process to a reap that SessionStart runs unattended."""
+    table.append(_proc(92, name="claude", cwd="/repo", age=3600))
+    monkeypatch.setattr(orphans, "_census_pids", lambda: None)
+    result = _scan_with_working_control(monkeypatch, table, reap=True)
+    assert result.broken
+    assert "census" in (result.broken_reason or "")
+    assert result.reaped == []
+    assert "orphans:" not in orphans.render(result)
 
 
 def test_filter_new_speaks_for_an_unseen_pid(monkeypatch, table, tmp_path: Path) -> None:

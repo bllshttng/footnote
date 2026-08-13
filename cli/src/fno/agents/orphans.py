@@ -47,6 +47,11 @@ REAP_MIN_AGE_S = 600
 
 PROBE_LIFETIME_S = 30
 
+#: Name a sweep gives its own NAME probe. Excluded from findings so two sweeps
+#: running inside one probe lifetime do not report each other's controls, which
+#: the shared hourly stamp across worktrees makes likely.
+PROBE_PREFIX = FNO_PREFIX + "orphan-probe-"
+
 
 def display_name(info: dict) -> str:
     """What an operator sees in `top`: argv[0], not the executable.
@@ -85,6 +90,7 @@ class Finding:
     cwd: Optional[str]
     cpu_seconds: float
     age_seconds: float
+    start_time: float
     arm: str  # NAME | CWD
 
     @property
@@ -195,7 +201,7 @@ def _repo_roots() -> list[str]:
     return roots
 
 
-def _census_pids() -> set[int]:
+def _census_pids() -> Optional[set[int]]:
     """PIDs of live workers that are supposed to exist.
 
     Load-bearing, not defensive. A `claude --bg` worker is detached to PPID 1
@@ -207,8 +213,12 @@ def _census_pids() -> set[int]:
         from fno.agents.spawn_gate import census
 
         return {w.pid for w in census().workers if w.pid}
-    except Exception:  # noqa: BLE001 -- an unreadable census excludes nothing
-        return set()
+    except Exception:  # noqa: BLE001
+        # None, never an empty set. An empty set reads as "no live workers" and
+        # hands every legitimate `claude --bg` process to `--reap`, which
+        # SessionStart runs unattended. A census this module cannot read is a
+        # broken instrument, and a broken scan reaps nothing.
+        return None
 
 
 def _attribute(info: dict, roots: Iterable[str]) -> Optional[str]:
@@ -309,9 +319,7 @@ def _kill(pid: int) -> None:
         return
     for _ in range(20):
         time.sleep(0.1)
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not _pid_alive(pid):
             return
     try:
         os.kill(pid, signal.SIGKILL)
@@ -362,13 +370,20 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
     # match first and prove nothing about names.
     name_pid = (
         None if skip_probe == "name"
-        else _spawn_probe(f"{FNO_PREFIX}orphan-probe-{nonce}", str(scratch))
+        else _spawn_probe(f"{PROBE_PREFIX}{nonce}", str(scratch))
     )
     # CWD probe: its own ordinary name, in the repo. Only the CWD arm can claim
     # it.
     cwd_pid = None if skip_probe == "cwd" else _spawn_probe(None, repo_root)
 
     census_pids = _census_pids()
+    if census_pids is None:
+        # Refuse rather than proceed with no exclusion set. Every legitimate
+        # `claude --bg` worker is at PPID 1 with a worktree cwd, so an
+        # unreadable census turns the fleet into findings, and SessionStart
+        # runs `--reap` unattended.
+        result.broken_reason = "census unreadable"
+        census_pids = set()
     now = time.time()
     uid = os.getuid()
     found_name_probe = False
@@ -404,6 +419,10 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
             arm = _attribute(info, roots)
             if arm is None:
                 continue
+            if display_name(info).startswith(PROBE_PREFIX) and pid not in (
+                name_pid, cwd_pid
+            ):
+                continue  # another sweep's live probe, not an orphan
 
             create = info.get("create_time") or now
             times = info.get("cpu_times")
@@ -417,6 +436,7 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
                 cwd=info.get("cwd"),
                 cpu_seconds=cpu,
                 age_seconds=max(0.0, now - create),
+                start_time=create,
                 arm=arm,
             )
             if pid == name_pid:
@@ -511,13 +531,16 @@ def render(result: ScanResult) -> str:
 
 
 def _seen_key(f: Finding) -> str:
-    """Identify the PROCESS, not the pid slot.
+    """Identify the PROCESS, not the pid slot, using its START TIME.
 
     `pid:name` alone filters out a genuinely new orphan that lands on a reused
-    pid with the same command name, and the SessionStart nudge then stays
-    silent about it. The age bucket separates two processes that shared a slot.
+    pid with the same command name. An age BUCKET fixes that and breaks the
+    quiet gate instead: age advances every minute, so a long-lived daemon gets
+    a fresh key at every hourly sweep, reads as new forever, and reprints at
+    every session start. Start time is stable for the life of the process,
+    which is the property the key actually needs.
     """
-    return f"{f.pid}:{f.name}:{int(f.age_seconds) // 60}"
+    return f"{f.pid}:{f.name}:{int(f.start_time)}"
 
 
 def seen_path() -> Path:
