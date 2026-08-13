@@ -896,9 +896,13 @@ fn backdate_mtime(path: &Path, age: Duration) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     let backdated = now.saturating_sub(age);
+    // Sub-second precision matters here: truncating to tv_usec: 0 rounds the
+    // timestamp DOWN (older), and RESTORE_GRACE is itself sub-second (500ms),
+    // so dropping up to 999ms could already push the restored dir past
+    // STALE_MUTEX_STEAL the instant it lands - a zero-length grace window.
     let t = libc::timeval {
         tv_sec: backdated.as_secs() as libc::time_t,
-        tv_usec: 0,
+        tv_usec: backdated.subsec_micros() as libc::suseconds_t,
     };
     let times = [t, t];
     unsafe {
@@ -2266,6 +2270,42 @@ mod tests {
         // lutimes, not utimes: identical for a real dir, and the only one that
         // works on the dangling-symlink case below.
         assert_eq!(unsafe { libc::lutimes(c.as_ptr(), times.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn restore_grace_is_shorter_than_the_steal_threshold() {
+        // Twin of the Python test_AC7_EDGE: a grace >= the threshold backdates
+        // into the future, permanently un-stealable.
+        assert!(RESTORE_GRACE < STALE_MUTEX_STEAL);
+        assert!(RESTORE_GRACE > Duration::ZERO);
+    }
+
+    #[test]
+    fn backdate_mtime_grants_a_grace_window_not_a_fresh_reprieve() {
+        // Twin of the Python test_AC2_HP: a dir backdated by
+        // STALE_MUTEX_STEAL - RESTORE_GRACE becomes stealable again only after
+        // RESTORE_GRACE elapses, not the full threshold.
+        let td = TempDir::new().unwrap();
+        let dir = td.path().join("a.lock.d");
+        std::fs::create_dir(&dir).unwrap();
+
+        backdate_mtime(&dir, STALE_MUTEX_STEAL - RESTORE_GRACE);
+
+        let age = std::fs::symlink_metadata(&dir)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        // Not yet stale: still inside the grace window.
+        assert!(age <= STALE_MUTEX_STEAL, "backdated dir is already stale");
+        // But within a second of the threshold, i.e. the grace window is
+        // nearly spent, not a full fresh STALE_MUTEX_STEAL of protection.
+        assert!(
+            STALE_MUTEX_STEAL - age <= RESTORE_GRACE + Duration::from_secs(1),
+            "backdated dir kept more than a grace window of protection: {age:?} old, \
+             threshold {STALE_MUTEX_STEAL:?}"
+        );
     }
 
     #[test]
