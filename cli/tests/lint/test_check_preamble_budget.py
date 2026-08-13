@@ -591,29 +591,71 @@ def test_descriptions_match_an_independent_reader_per_file() -> None:
     )
 
 
-def test_malformed_agent_frontmatter_is_known_and_bounded() -> None:
-    """Three agent frontmatters are not valid YAML. Guard against a fourth.
+def test_every_frontmatter_parses_strictly() -> None:
+    """No skill or agent frontmatter may fail a strict YAML parse.
 
-    `agents/verifier.md` shows the cost: its description spans lines unquoted,
-    so a strict parser gets nothing and the harness falls back to a generic
-    label. The pointer never reaches the agent. Fixing them is its own change;
-    this test stops the set from growing quietly in the meantime.
+    The reader that ships is line-based, which is why this went unnoticed: a
+    colon mid-line survives, because the reader takes the rest of the line. A
+    value that spans lines does not. `agents/verifier.md` wrote 18 unquoted
+    lines, so a strict parser got nothing and the harness rendered the literal
+    string "Agent from fno plugin" in place of its description.
+
+    Same root cause as the wrapped-scalar defect in the plan stamper: one
+    line-based frontmatter reader, two independent symptoms.
     """
     unparseable = []
-    for path in sorted((ROOT / "agents").glob("*.md")):
+    for path in sorted((ROOT / "agents").glob("*.md")) + sorted(
+        (ROOT / "skills").glob("*/SKILL.md")
+    ):
         match = re.match(r"^---\n(.*?)\n---\n", path.read_text(encoding="utf-8"), re.S)
         if not match:
             continue
         try:
             yaml.safe_load(match.group(1))
-        except yaml.YAMLError:
-            unparseable.append(path.name)
+        except yaml.YAMLError as exc:
+            unparseable.append(f"{path.name}: {str(exc).splitlines()[0]}")
 
-    assert unparseable == [
-        "code-reviewer.md",
-        "type-design-analyzer.md",
-        "verifier.md",
-    ], f"the malformed-frontmatter set changed: {unparseable}"
+    assert unparseable == [], f"frontmatter a strict parser rejects: {unparseable}"
+
+
+def test_repaired_descriptions_kept_their_whole_text() -> None:
+    """Parse success alone is not the bar: a truncation also parses.
+
+    The first repair attempt bounded the value with a bare `^word:` regex,
+    which matched a prose line reading "Examples:" and cut the description
+    there. That result is valid YAML and still loses most of the pointer, so
+    the assertion has to be on content, not on parseability.
+    """
+    expected_openings = {
+        "verifier.md": "Use this agent to verify task completion against requirements.",
+        "code-reviewer.md": "Use this agent when you need to review code for adherence",
+        "type-design-analyzer.md": "Use this agent when you need expert analysis of type design",
+    }
+
+    for name, opening in expected_openings.items():
+        path = ROOT / "agents" / name
+        match = re.match(r"^---\n(.*?)\n---\n", path.read_text(encoding="utf-8"), re.S)
+        front = yaml.safe_load(match.group(1))
+        description = front["description"]
+
+        assert description.startswith(opening), f"{name}: description was truncated at the front"
+        # The two that carry worked examples must still carry them: the
+        # truncation this guards against cuts exactly there.
+        if name in {"verifier.md", "code-reviewer.md"}:
+            assert "<example>" in description, f"{name}: examples lost"
+            assert description.rstrip().endswith("</example>"), f"{name}: tail lost"
+
+    # verifier.md is the one with an observed cost, so pin its size directly.
+    match = re.match(
+        r"^---\n(.*?)\n---\n",
+        (ROOT / "agents" / "verifier.md").read_text(encoding="utf-8"),
+        re.S,
+    )
+    verifier = yaml.safe_load(match.group(1))["description"]
+    assert len(verifier.encode("utf-8")) > 600, (
+        f"verifier description is {len(verifier.encode())} B; a line-based read of the "
+        "old form scored it at 114"
+    )
 
 
 def test_user_invoked_skill_costs_nothing(tmp_path: Path) -> None:
