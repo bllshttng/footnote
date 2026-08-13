@@ -1,6 +1,6 @@
 ---
 name: blueprint
-description: "Create implementation blueprints (plans) as a single .md doc. Given a /think design doc, mutate it in place; given an idea, create one. 'quick' scales the sections down for bugs and 1-session work; every plan is one .md == one PR == one node. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
+description: "Create an implementation plan as a single .md doc that is a contract for the implementer. Take an idea, a node, or cited findings and produce a BDD-aware plan. One .md == one PR == one node. The frontmatter is locked. The body is whatever makes the plan understood. Use when: 'create plan', 'implementation blueprint', 'break this down', 'how should we build'."
 argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <design-doc-path | feature-description> [--no-linear]"
 ---
 
@@ -24,7 +24,6 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Gate | Read its section when |
 |------|-----------------------|
 | Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
-| Failure Mode Ingestion | the argument resolves to a design-doc path - MANDATORY, refuses if `## Failure Modes` is missing |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
 | Model Pin / Model Routing | the plan frontmatter sets `model:` or `model_tier:` |
@@ -100,11 +99,10 @@ fi
 
 ### Process
 
-1. **Understand** the request (ask if unclear). If the argument resolves to
-   a design-doc file, run the **Failure Mode Ingestion** gate ([references/blueprint-gates.md](references/blueprint-gates.md#failure-mode-ingestion-mandatory-when-a-design-doc-is-supplied)) BEFORE
-   anything else. A missing `## Failure Modes` section halts the skill with
-   the verbatim refusal message; a present section becomes the seed list
-   for AC4-EDGE citations inline in the Changes section.
+1. **Understand** the request. Clarify anything ambiguous before proceeding. If the design doc carries a
+   `## Failure Modes` section, use it as the seed for error-path acceptance
+   criteria (AC4-EDGE) cited inline in the Changes section. A research doc
+   without one is fine: the `what-if` brief asks that question against source.
 2. **Structural context** — Generate a fresh codemap:
    ```bash
    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -138,9 +136,10 @@ fi
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
    proceeds; it does not block.
-2b. **Discovery ownership** - A supplied design doc never re-runs discovery: `/think` owns that reasoning, and `/blueprint` compiles its artifact even when it has no exact `## Discovery` or `## Assumptions` heading.
-   Run discovery when creating a fresh plan from raw prose or a direct node-seeded path with no completed design artifact.
-   Load `references/discovery-gate.md` then; use 3 questions max with `quick` and 5 otherwise.
+2b. **Discovery grounding** - A supplied design doc carries cited findings, and `/blueprint` compiles it without re-running discovery.
+   When creating a fresh plan from raw prose or a node-seeded path with no cited findings, blueprint grounds itself first. Run `fno think inspect "<seed>" --json` for the receipt. It reports duplicate candidates, schema status, and the active pitfalls.
+   Then load `references/discovery-gate.md`. Ask at most 3 questions with `quick`, or 5 otherwise.
+   For a plan that needs deeper investigation than the receipt, run `/think` first. Think writes cited findings that blueprint then compiles.
 
 3. **Write** the plan.
 
@@ -162,9 +161,14 @@ fi
 
    If a design doc was supplied, run the **Executor Lock Transcription** gate
    ([references/blueprint-gates.md](references/blueprint-gates.md#executor-lock-transcription-when-a-design-doc-supplies-a-locked-decision)) before writing the plan body so the parser's output can be
-   inlined into the plan's frontmatter as `executor: <value>`. Empty parser
-   output leaves the frontmatter without an `executor:` field, falling through to
-   runtime surface inference.
+   inlined into the plan's frontmatter as `executor: <value>`. The gate runs
+   [references/detect-surface.sh](references/detect-surface.sh) over the design
+   text to classify the surface (frontend-touching, backend-only, mixed), then
+   applies the decision rules in
+   [references/executor-routing-prompt.md](references/executor-routing-prompt.md)
+   to pick the executor and write it as a Locked Decision. Empty parser output
+   leaves the frontmatter without an `executor:` field, falling through to
+   runtime surface inference (overridable via `FNO_EXECUTOR_OVERRIDE`).
 
    **Enrich the Execution Strategy before it becomes executable.**
    Run `mutate_doc.py` with `--draft`; it produces the deterministic wave/task skeleton while keeping a design-status document in `design`.
@@ -357,16 +361,15 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 ```
 1. Read design doc + frontmatter
 2. Validate: status must be "design" (or "ready" if `rewrite` passed)
-3. Validate: required sections present (## Failure Modes mandatory)
-4. Detect codebase state (skip if --mode greenfield|brownfield):
+3. Detect codebase state (--mode greenfield|brownfield skips this):
    - Read ## Architecture section, extract file path mentions
    - >= 50% exist -> brownfield; < 50% exist -> greenfield
-5. Build ## Execution Strategy (waves YAML block)
-6. Brownfield only: ## File Ownership Map, ## Patterns to Reuse
-7. Update frontmatter: status -> ready (design stays a draft until `--finalize`), execution_mode, waves, kill_criteria
-8. On `--finalize`: validate the proposed ready + `acceptance_contract: compiled-v1` contract (every task acceptance reference resolves) and atomically stamp both
-9. Write atomically (tempfile + os.replace in same directory)
-10. Auto-intake to backlog via `fno backlog intake` (handled by skill body)
+4. Build ## Execution Strategy (waves YAML block)
+5. Brownfield only: ## File Ownership Map, ## Patterns to Reuse
+6. Update frontmatter: status -> ready (design stays a draft until `--finalize`), execution_mode, waves, kill_criteria
+7. On `--finalize`: validate the proposed ready + `acceptance_contract: compiled-v1` contract (every task acceptance reference resolves) and atomically stamp both
+8. Write atomically (tempfile + os.replace in same directory)
+9. Auto-intake to backlog via `fno backlog intake` (handled by skill body)
 ```
 
 ### Modifiers
@@ -403,7 +406,7 @@ python3 skills/blueprint/scripts/mutate_doc.py <doc-path> \
 Exit codes:
 - `0` success
 - `1` doc already at status:ready without --rewrite; or path is a nonexistent file / feature description (redirect to /think)
-- `2` required section missing (## Failure Modes) or section ownership violation
+- `2` section ownership violation
 - `3` frontmatter status missing / invalid
 
 ### Section ownership
@@ -416,7 +419,7 @@ Exit codes:
 - `execution_mode`, `waves` (frontmatter)
 - `acceptance_contract` (frontmatter; stamped `compiled-v1` at finalize)
 
-Any attempt to write outside this allowlist exits 2. /think-owned sections (Overview, Architecture, User Stories, Failure Modes, Acceptance Criteria, Locked Decisions, etc.) are never touched.
+Any attempt to write outside this allowlist exits 2. Author-owned sections (Overview, Architecture, User Stories, Failure Modes, Acceptance Criteria, Locked Decisions, etc.) are never touched.
 
 ### Acceptance criteria compilation
 
@@ -476,14 +479,13 @@ Environment-specific traps that defy reasonable assumptions.
 
 - **A node-id argument must render `claims:` into the plan frontmatter, or intake DUPLICATES the node.** `/blueprint x-8af8` claims that node only if the plan writes a literal `claims: x-8af8` line; the template's commented `# claims:` is a doc note, not a substitute. The post-write refusal (Plan Claims Ingestion gate) halts before adoption when it is missing.
 - **A design-doc path with a typo must fail loud, never degrade to raw-description mode.** The path-shape classifier treats anything with `/`, `.md`, `~`, `./`, `../`, `/` as a path; a nonexistent one exits 1 with "file not found" rather than silently planning from the literal string.
-- **`## Failure Modes` at level 2 exactly.** The gate greps `^## Failure Modes$` case-sensitively; a level-3 heading or in-prose mention does NOT satisfy it, and the gate refuses rather than auto-generating the section.
 - **A malformed epic `max_children` (non-integer, `< 1`) is refused UP FRONT, before grouping** - not deferred to decompose, because a single-group collapse skips decompose entirely and would let the bad cap pass silently.
 - **`done_probes` must end in a predicate and assert freshness.** `... | tail -5` masks the real exit status (reads as a pass); `test -f <file>` passes vacuously against launch-day residue. Bound every probe in time.
 - **Plans save to the Obsidian vault, not git `docs/`.** Use `fno plan path --slug`; never hand-assemble the filename.
 
 ## References
 
-- [references/blueprint-gates.md](references/blueprint-gates.md) - All state-keyed gates (claims, failure-mode, schema, executor, model, provenance, PRODUCT.md, impeccable_stages, done_probes, kill-criteria detail, collision, peer heads-up)
+- [references/blueprint-gates.md](references/blueprint-gates.md) - All state-keyed gates (claims, schema, executor, model, provenance, PRODUCT.md, impeccable_stages, done_probes, kill-criteria detail, collision, peer heads-up)
 - [references/epic-decomposition.md](references/epic-decomposition.md) - `group N` bounded epic decomposition
 - [references/discovery-gate.md](references/discovery-gate.md) - Discovery-gate question protocol
 - [references/quick-template.md](references/quick-template.md) - Full plan template

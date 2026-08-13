@@ -29,7 +29,7 @@ You: Shift+Tab -> Plan Mode -> ExitPlanMode(plan) -> APPROVE
    detect-> detect-pending-plan.sh detect  ->  result=pending
         |
         v  [backfill]  skills/target/scripts/backfill-plan.sh + the skill body
-   body -> skeleton -> (LLM synthesizes ## Failure Modes + 5 BDD ACs) ->
+   body -> skeleton -> (LLM synthesizes 5 BDD ACs) ->
    check-sections (<=2 retries) -> /blueprint -> render-diff
         |
         v  "Execute autonomously? [y/N]"
@@ -45,7 +45,7 @@ You: Shift+Tab -> Plan Mode -> ExitPlanMode(plan) -> APPROVE
 | Session-start wipe | `hooks/helpers/init-target-state.sh` | Removes a stale sidecar on fresh init (session-mismatch or past-TTL), mirroring `.target-cancelled`. |
 | Backfill scaffolding | `skills/target/scripts/backfill-plan.sh` | `skeleton` / `check-sections` / `render-diff` — the deterministic parts. |
 | Detection + consume | `skills/target/scripts/detect-pending-plan.sh` | `detect` / `body` / `consume` — precedence, body extraction, atomic consume. |
-| Orchestration | `skills/target/SKILL.md` §3f-pm | The LLM-facing flow, including the one new reasoning step (synthesizing Failure Modes + ACs). |
+| Orchestration | `skills/target/SKILL.md` §3f-pm | The LLM-facing flow, including the one new reasoning step (synthesizing the 5 BDD ACs). |
 | Contract | `skills/target/references/plan-mode-backfill.md` | Sidecar schema + backfill contract. |
 
 ## The sidecar `.fno/.pending-plan.md`
@@ -55,19 +55,19 @@ scalars. `status` is the one mutable field: `pending` → `consumed`, flipped
 ONLY after confirm-yes. Body is the native plan, byte-for-byte. Last-writer-wins
 (a fresh approval overwrites a prior pending sidecar).
 
-## The chicken-and-egg, and why synthesis precedes /blueprint
+## Why synthesis precedes /blueprint
 
-`/blueprint` hard-refuses a doc without `## Failure Modes` (literal
-`grep -q '^## Failure Modes$'`) and requires `status` ∈ {design, ready}. A
-native plan has neither. So the adapter must synthesize `## Failure Modes` (the
-four sub-labels Boundaries/Errors/Invariants/Concurrency) and the 5 BDD AC types
-(HP/ERR/UI/EDGE/FR) **before** calling `/blueprint`. Those are `/think`'s
-artifacts: native Plan Mode replaces `/think`'s interactive *exploration*, and
-the adapter runs `/think`'s *artifact generation* against the approved plan. The
-synthesis is LLM-powered (it reads the plan's intent); `check-sections` is the
-deterministic gate that bounds retries to 2 and names exactly what is missing so
-a retry re-synthesizes only the rejected section. A native plan that already
-contains a section is reused, never duplicated.
+`/blueprint` compiles acceptance criteria, so a native plan needs the 5 BDD AC
+types (HP/ERR/UI/EDGE/FR) synthesized **before** `/blueprint` runs. `/blueprint`
+no longer requires a `## Failure Modes` section (that refusal retired with the
+think-era contract) and first-fills frontmatter on a doc that has none, so a
+native plan needs neither Failure Modes nor hand-written frontmatter to pass
+through. Native Plan Mode replaces `/think`'s interactive *exploration*. The
+adapter runs the deterministic *artifact generation* (the AC synthesis) against
+the approved plan. The synthesis is LLM-powered (it reads the plan's intent).
+`check-sections` is the deterministic gate that bounds retries to 2 and names
+exactly what is missing so a retry re-synthesizes only the rejected section. A
+native plan that already contains a section is reused, never duplicated.
 
 ## Concurrency: the consume CAS
 

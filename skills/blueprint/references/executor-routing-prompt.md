@@ -1,32 +1,30 @@
 # Executor Routing Prompt
 
-**Load when:** Step 6.5 of `/think` (after the UI state machine audit, before
-generating BDD acceptance criteria). The skill calls into this reference to
-detect surface mix, decide whether to prompt or auto-lock, and write the
-result to the design doc's `## Locked Decisions` section.
+When `/blueprint` reaches the Executor Lock Transcription gate on a design doc that touches a frontend or mixed surface, load this reference.
+It detects the surface mix, decides whether to prompt or auto-lock, and writes the result to the design doc's `## Locked Decisions` section.
 
-The output of this step is a single Locked Decision entry that `/blueprint` will
-later transcribe into the implementation plan's `executor:` frontmatter
-(see `skills/blueprint/SKILL.md`, section "Executor Lock Transcription"). The
-section anchor is more stable than a step number because step ordering
-shifts with skill revisions; the section heading is the contract.
+The output of this step is a single Locked Decision entry that `/blueprint`
+transcribes into the implementation plan's `executor:` frontmatter (see
+`skills/blueprint/SKILL.md`, section "Executor Lock Transcription"). The
+section anchor is more stable than a step number. Step ordering shifts with
+skill revisions, but the section heading is the contract.
 
 ## Why this exists
 
-Today the operator routes tasks through a three-tier resolver
-(`task.executor` → `plan.executor` → surface inference); the surface matcher
+The operator routes tasks through a three-tier resolver
+(`task.executor` → `plan.executor` → surface inference). The surface matcher
 lives in the in-package module `fno.executor._surface` and is locked by
-PR #196's plan. But
-the design phase, where the surface decision is actually being made, has no
+PR #196's plan.
+But the design phase, where the surface decision is actually made, has no
 hook for capturing intent. Plan authors who understand the resolver can set
-`executor:` manually; everyone else gets surface inference at runtime, which
-is the right default but cannot express "I want the design-aware loop on
+`executor:` manually. Everyone else gets surface inference at runtime, which
+is the right default. It cannot express "I want the design-aware loop on
 this whole plan" up front.
 
-`/think` is the right place to capture that intent because the architecture
-section, user stories, and file lists already imply the surface mix. The
-work this reference codifies is: read those signals, decide on a routing,
-and lock it.
+`/blueprint` is the right place to capture that intent. The design doc's
+architecture section, user stories, and file lists already imply the surface
+mix. The work this reference codifies is to read those signals, decide on a
+routing, and lock it.
 
 ## Detection rules
 
@@ -52,14 +50,14 @@ The helper anchors on:
 
 Matching is word-boundary anchored (`\bform\b` matches "form button" but
 not "inform users") and case-insensitive on nouns and frameworks. The
-filename arm is case-sensitive - frontend folder conventions are reliably
-lowercase, and case-insensitive filename matching would silently misroute
+filename arm is case-sensitive. Frontend folder conventions are reliably
+lowercase, and case-insensitive filename matching can silently misroute
 backend `api/` directories.
 
 Outputs:
 
 - `frontend-touching` - frontend signals only. Lock to `impeccable`.
-- `backend-only` - backend signals only. No lock; runtime resolver picks
+- `backend-only` - backend signals only. No lock. The runtime resolver picks
   `do` via surface inference.
 - `mixed` - both signals fire. Lock plan-level to `do` and surface
   per-task `executor: impeccable` overrides for tasks whose file lists
@@ -74,22 +72,18 @@ Outputs:
 
 There are three call modes, in priority order:
 
-1. **CLI flag (`cli-flag` provenance).** If `FNO_EXECUTOR_OVERRIDE`
-   is set in the environment, write that value to Locked Decisions
-   immediately. No detection, no prompt. This is how `/target M
-   --executor <value>` plumbs intent down to /think. Acceptable values:
-   `do`, `impeccable`, `mixed` (case-insensitive). Garbage values must
-   be rejected at /target entry, not silently accepted here.
-2. **Target autonomous (`auto-detected` provenance).** If
-   `.fno/target-state.md` exists, /think is running inside an
-   autonomous target session and cannot block on user input. Run the
-   detection rules and lock the result without prompting. Pure-backend
-   sessions never lock at all; the absence of a lock is the signal.
-3. **Standalone interactive (`user-confirmed` provenance).** No CLI
-   flag, no target context. If the detection result is anything other
-   than `backend-only` or `unknown`, fire the prompt below and capture
-   the user's answer. If the detection is `backend-only` or `unknown`,
-   skip the prompt entirely.
+1. If `FNO_EXECUTOR_OVERRIDE` is set (the `cli-flag` path), write that value to Locked Decisions immediately.
+   No detection, no prompt.
+   This is how `/target M --executor <value>` plumbs intent down to `/blueprint`.
+   Acceptable values are `do`, `impeccable`, or `mixed` (case-insensitive).
+   Garbage values are rejected at `/target` entry, not accepted here.
+2. If `.fno/target-state.md` exists (the `auto-detected` path), `/blueprint` runs inside an autonomous target session and cannot block on user input.
+   Run the detection rules and lock the result without prompting.
+   Pure-backend sessions never lock at all.
+   The absence of a lock is the signal.
+3. With no CLI flag and no target context (the `user-confirmed` path), `/blueprint` runs standalone.
+   If the detection result is anything other than `backend-only` or `unknown`, fire the prompt below and capture the user's answer.
+   Otherwise skip the prompt entirely.
 
 ## Prompt template (standalone mode only)
 
@@ -112,7 +106,7 @@ Re-prompt on malformed responses. Map common variations:
 - `2`, `impeccable`, `frontend`, `design` → `impeccable`
 - `3`, `mixed`, `both`, `per-task` → `mixed`
 - anything else → re-prompt with the choices restated. Never auto-resolve
-  to a silent default; that hides intent.
+  to a silent default. That hides intent.
 
 ## Decision capture format
 
@@ -140,9 +134,9 @@ N. **Executor routing**: plan-level `executor: do` (cli-flag).
 ```
 
 The provenance suffix is one of `(auto-detected)`, `(user-confirmed)`,
-`(cli-flag)`. `/blueprint` parses with tolerance for whitespace, casing, and
-absent suffixes (per Domain Pitfall #4) but writes the suffix through when
-present so the source of the decision survives PR review.
+`(cli-flag)`.
+`/blueprint` parses with tolerance for whitespace, casing, and absent suffixes (per Domain Pitfall #4).
+When the suffix is present, `/blueprint` writes it through so the source of the decision survives PR review.
 
 ## Mixed-mode per-task overrides
 
@@ -164,7 +158,7 @@ nothing inherit the plan default.
 - It does not modify `fno.executor._surface`. The runtime
   inference list is locked by PR #196's plan and stays as-is.
 - It does not pick `/impeccable` subcommands. The choice is
-  `do | impeccable | mixed`; the agent decides which subcommands to run
+  `do | impeccable | mixed`. The agent decides which subcommands to run
   inside `impeccable` (today: `craft` + `critique`).
 - It does not retro-stamp existing plans. Only plans authored via the
   new `/think → /blueprint` flow get the lock. Older plans rely on surface

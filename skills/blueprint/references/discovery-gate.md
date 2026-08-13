@@ -5,8 +5,11 @@ making assumptions and moving forward - this protocol forces unknowns into
 the open where they can be answered (by the user) or made explicit (by the
 model in autonomous mode).
 
-`/think` owns discovery for a supplied design artifact.
-`/blueprint` consumes that artifact without re-running this protocol; the presence or absence of an exact `## Discovery` or `## Assumptions` heading is not a second planning gate.
+When `/think` runs, it writes cited findings. A supplied design artifact
+carries them, and `/blueprint` consumes it without re-running this protocol.
+When think did not run, `/blueprint` grounds itself on the receipt in step 1
+below. The presence or absence of an exact `## Discovery` or `## Assumptions`
+heading is not a second planning gate.
 
 ## When to Run
 
@@ -18,7 +21,7 @@ model in autonomous mode).
 
 ## The Protocol
 
-1. Read the codebase context (codemap, existing code, docs)
+1. Run `fno think inspect "<seed>" --json` and read the whole receipt. It reports typed source status for the repository, the graph node, duplicate candidates, PR search, schema, and the active pitfalls. Inspect what it cites before forming any question.
 2. Enumerate 3-5 unknowns as a numbered list of targeted questions
 3. Each question must be specific and actionable
 4. Questions should cover these categories:
@@ -95,10 +98,10 @@ Skip the discovery gate if any of these are true:
 |-----------|--------|
 | `input_type: plan` | Plan already exists - unknowns were (should have been) resolved |
 | Size `-S` | Small tasks don't justify discovery ceremony |
-| A supplied /think design artifact exists | Discovery belongs to /think; Blueprint compiles the result |
+| A supplied /think design artifact exists | Think already did the discovery. Blueprint compiles the result |
 | Pure greenfield with no codebase | No code to discover unknowns from |
 
-Detection for Blueprint is artifact-based: an existing design-doc input means think already owns discovery.
+Detection for Blueprint is artifact-based. An existing design-doc input means think already wrote cited findings.
 Target's own idea-first discovery retains its separate scratchpad detection contract.
 
 ## Schema Reconciliation (DB-backed repos)

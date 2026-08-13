@@ -41,4 +41,4 @@ def test_blueprint_enriches_and_validates_before_intake() -> None:
 def test_raw_prose_and_node_seeded_inputs_keep_discovery() -> None:
     blueprint = _read("skills/blueprint/SKILL.md")
 
-    assert "raw prose or a direct node-seeded path" in blueprint
+    assert "raw prose or a node-seeded path" in blueprint

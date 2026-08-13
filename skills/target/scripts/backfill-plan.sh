@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # backfill-plan.sh - deterministic scaffolding for the Plan Mode backfill adapter.
 #
-# Turns a native Plan Mode plan into a gate-passing fno design doc. The one
-# genuinely new piece of reasoning - synthesizing ## Failure Modes and the 5 BDD
-# Acceptance Criteria from the native plan's intent - is LLM-powered and lives in
+# Turns a native Plan Mode plan into an fno design doc. The one
+# genuinely new piece of reasoning - synthesizing the 5 BDD Acceptance
+# Criteria from the native plan's intent - is LLM-powered and lives in
 # the /target skill body (see skills/target/SKILL.md and references/plan-mode-backfill.md).
 # This script owns only the deterministic parts so they can be unit-tested:
 #
@@ -15,11 +15,10 @@
 #       (a section already present is reused, never duplicated).
 #
 #   check-sections <doc>
-#       Validate the gate-required structure: a ## Failure Modes heading with the
-#       four sub-labels (Boundaries/Errors/Invariants/Concurrency) and a
-#       ## Acceptance Criteria section carrying all 5 BDD AC types
-#       (HP/ERR/UI/EDGE/FR). Prints each MISSING item (one per line, prefixed
-#       `missing: `) so a retry can re-synthesize ONLY the rejected piece.
+#       Validate the structure blueprint compiles: a ## Acceptance Criteria
+#       section carrying all 5 BDD AC types (HP/ERR/UI/EDGE/FR). Prints each
+#       MISSING item (one per line, prefixed `missing: `) so a retry can
+#       re-synthesize ONLY the rejected piece.
 #       Exit 0 = complete; exit 1 = something missing.
 #
 #   render-diff <native-plan-file> <enriched-doc>
@@ -106,16 +105,6 @@ cmd_check_sections() {
   [[ -r "$doc" ]] || die "doc not readable: $doc"
 
   local missing=()
-
-  # ## Failure Modes heading (the literal /blueprint hard-refuses without).
-  if ! grep -qE '^## Failure Modes[[:space:]]*$' "$doc"; then
-    missing+=("failure-modes-heading")
-  fi
-  # The four Failure Modes sub-labels (bold labels, the /think format).
-  local label
-  for label in Boundaries Errors Invariants Concurrency; do
-    grep -qE "\\*\\*${label}\\*\\*" "$doc" || missing+=("failure-modes-sublabel:${label}")
-  done
 
   # ## Acceptance Criteria heading.
   if ! grep -qE '^## Acceptance Criteria[[:space:]]*$' "$doc"; then

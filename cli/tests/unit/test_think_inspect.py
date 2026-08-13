@@ -12,7 +12,7 @@ def _result(argv: list[str], cwd: Path | None = None, timeout: int = 10):
         value = "feature/x-4007\n" if "--abbrev-ref" in argv else "abc123def456\n"
         return subprocess.CompletedProcess(argv, 0, value, "")
     if argv[:2] == ["git", "status"]:
-        return subprocess.CompletedProcess(argv, 0, " M skills/think/references/think.md\n", "")
+        return subprocess.CompletedProcess(argv, 0, " M skills/think/SKILL.md\n", "")
     if argv[:2] == ["git", "log"]:
         return subprocess.CompletedProcess(argv, 0, "abc123\tPrior change\n", "")
     if argv[:3] == ["gh", "pr", "list"]:
@@ -87,7 +87,7 @@ def test_receipt_collects_grounding_without_writes(tmp_path: Path) -> None:
     assert after == before
     assert receipt["version"] == 1
     assert receipt["repository"]["branch"] == "feature/x-4007"
-    assert receipt["repository"]["dirty_paths"] == ["skills/think/references/think.md"]
+    assert receipt["repository"]["dirty_paths"] == ["skills/think/SKILL.md"]
     assert receipt["graph"]["resolved"]["id"] == "x-4007"
     assert receipt["graph"]["parent"]["id"] == "x-7a93"
     assert [row["id"] for row in receipt["graph"]["duplicates"]] == ["x-1111"]

@@ -488,33 +488,27 @@ class TestAC1ERRRewrite:
 
 
 # ---------------------------------------------------------------------------
-# AC1-EDGE: missing ## Failure Modes
+# AC1-EDGE: ## Failure Modes is optional. The refusal retired with the
+# think-era contract; a research doc without it blueprints fine.
 # ---------------------------------------------------------------------------
 
 
 class TestAC1EDGE:
-    def test_missing_failure_modes_exits_2(self, tmp_path):
-        """AC1-EDGE: missing ## Failure Modes -> exit 2."""
-        # Create a doc without ## Failure Modes
+    def test_missing_failure_modes_is_accepted(self, tmp_path):
+        """A doc without ## Failure Modes mutates successfully (exit 0)."""
         doc = tmp_path / "no_failure_modes.md"
         doc.write_text(
-            "---\nstatus: design\n---\n\n# Test\n\n## Overview\n\nSome overview.\n\n"
-            "## User Stories\n\n**US1:** Some story.\n",
+            "---\nstatus: design\ncreated: 2026-01-01\n---\n\n# Test\n\n## Overview\n\nSome overview.\n\n"
+            "## Architecture\n\nnew files\n\n## User Stories\n\n**US1:** Some story.\n",
             encoding="utf-8",
         )
-        result = _run_mutate(doc)
-        assert result.returncode == 2, \
-            f"Expected exit 2 for missing Failure Modes, got {result.returncode}\nstderr: {result.stderr}"
-
-    def test_missing_failure_modes_stderr_message(self, tmp_path):
-        """AC1-EDGE: stderr message mentions Failure Modes and /think."""
-        doc = tmp_path / "no_failure_modes.md"
-        doc.write_text(
-            "---\nstatus: design\n---\n\n# Test\n\n## Overview\n\nSome overview.\n",
-            encoding="utf-8",
+        result = _run_mutate(doc, "--mode", "greenfield", "--draft")
+        assert result.returncode == 0, (
+            f"Expected exit 0 (Failure Modes optional), got {result.returncode}\nstderr: {result.stderr}"
         )
-        result = _run_mutate(doc)
-        assert "Failure Modes" in result.stderr, f"Expected 'Failure Modes' in stderr: {result.stderr}"
+        assert "## Execution Strategy" in doc.read_text(encoding="utf-8"), (
+            "mutate should produce an Execution Strategy without Failure Modes"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -555,12 +549,14 @@ class TestAC3HP:
         assert result.returncode == 1, \
             f"Expected exit 1 for nonexistent path, got {result.returncode}"
 
-    def test_nonexistent_path_stderr_mentions_think(self, tmp_path):
-        """AC3-HP: redirect message mentions /think."""
+    def test_nonexistent_path_stderr_mentions_plan_path(self, tmp_path):
+        """AC3-HP: missing doc points to fno plan path, not /think."""
         nonexistent = tmp_path / "does_not_exist.md"
         result = _run_mutate(nonexistent)
-        assert "/think" in result.stderr or "think" in result.stderr.lower(), \
-            f"Expected /think redirect in stderr: {result.stderr}"
+        assert "plan path" in result.stderr.lower(), \
+            f"Expected 'fno plan path' guidance in stderr: {result.stderr}"
+        assert "think" not in result.stderr.lower(), \
+            f"blueprint owns the plan; no /think redirect: {result.stderr}"
 
     def test_nonexistent_path_stderr_mentions_path(self, tmp_path):
         """AC3-HP: redirect message includes the attempted path."""
@@ -588,8 +584,8 @@ class TestAC3EDGE:
         assert result.returncode == 1, \
             f"Expected exit 1 for feature description, got {result.returncode}"
 
-    def test_feature_description_mentions_think(self):
-        """AC3-EDGE: redirect message mentions /think for raw descriptions."""
+    def test_feature_description_mentions_plan_path(self):
+        """AC3-EDGE: raw description points to fno plan path, not /think."""
         cmd = [sys.executable, str(MUTATE_SCRIPT), "build a new feature"]
         result = subprocess.run(
             cmd,
@@ -598,7 +594,8 @@ class TestAC3EDGE:
             cwd=str(REPO_ROOT),
         )
         stderr = result.stderr.lower()
-        assert "think" in stderr, f"Expected 'think' redirect in stderr: {result.stderr}"
+        assert "plan path" in stderr, f"Expected 'fno plan path' guidance in stderr: {result.stderr}"
+        assert "think" not in stderr, f"blueprint owns the plan; no /think redirect: {result.stderr}"
 
 
 # ---------------------------------------------------------------------------

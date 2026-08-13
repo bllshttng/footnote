@@ -17,14 +17,14 @@ Exit codes:
     0  success
     1  doc already in ready (or higher) status without --rewrite; or path is
        a feature description / nonexistent file (redirect to /think)
-    2  required section missing (## Failure Modes) or section ownership
-       violation
+    2  section ownership violation
     3  frontmatter status missing / invalid / unreadable
 """
 from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import json
 import os
 import re
@@ -62,7 +62,7 @@ if str(_CLI_SRC) not in sys.path:
 
 # E402: these imports intentionally follow the sys.path.insert above so the
 # in-repo `fno.plan.*` package resolves when run as a standalone script.
-from fno.plan._doc import load_plan, FrontmatterError  # noqa: E402
+from fno.plan._doc import load_plan, load_plan_text, FrontmatterError  # noqa: E402
 from fno.plan._ownership import (  # noqa: E402
     BLUEPRINT_WRITE_ALLOWLIST,
     assert_blueprint_can_write,
@@ -114,6 +114,33 @@ _DEFAULT_KILL_CRITERIA = [
         "reason": "Same test failing 3+ iterations - root cause unclear",
     },
 ]
+
+
+def _first_fill_block() -> str:
+    """The locked frontmatter block for a doc that carries none.
+
+    Blueprint owns frontmatter outright: think is a research skill and writes
+    findings with no frontmatter. The frontmatter is the one locked part of the
+    plan, so every field knowable at mutation time is present and valid the
+    moment blueprint touches the doc: `status` (design, the blueprint entry
+    rung), `created`, `type`, and `sources`. `node` and `claims` are omitted
+    here because they are not knowable until intake binds the backlog node; the
+    Claims-Ingestion gate refuses to adopt a plan whose node never bound, so a
+    shipped plan never carries a stale or empty identity. `title` and
+    `kill_criteria` are documented in the skill as part of the locked contract
+    and are written by the agent or defaulted during mutation. A doc that
+    already opens with `---` is left untouched, so a malformed block still
+    surfaces as FrontmatterError rather than being silently overwritten.
+    """
+    today = datetime.date.today().isoformat()
+    return (
+        "---\n"
+        f"status: design\n"
+        f"created: {today}\n"
+        f"type: blueprint\n"
+        f"sources: []\n"
+        "---\n\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -759,8 +786,9 @@ def mutate(
     arg_str = str(doc_path)
     if not _looks_like_path(arg_str):
         msg = (
-            f"No design doc found. Run `/think \"{arg_str}\"` first, then "
-            f"`/blueprint <resulting-doc-path>`. Or invoke `/target` for the full chain."
+            f"Blueprint owns the whole plan, but needs a save path. "
+            f"Resolve one with `fno plan path --slug \"<slug>\"` (add `--node <id>` "
+            f"for a node-seeded plan), then pass that path. Or pass a node id directly."
         )
         return 1, msg
 
@@ -768,14 +796,21 @@ def mutate(
     resolved = doc_path.expanduser().resolve() if not doc_path.is_absolute() else doc_path
     if not resolved.exists():
         msg = (
-            f"Design doc at {resolved} is missing or unreadable. "
-            f"Run `/think` first to create the design doc, then pass the resulting path."
+            f"No doc at {resolved}. Blueprint creates plans via `fno plan path`; "
+            f"pass a resolved path, or pass a node id and let the skill seed the doc."
         )
         return 1, msg
 
     # --- Load doc ---
+    # A research doc carries no frontmatter; blueprint first-fills the minimal
+    # block in memory before parsing. A doc that opens with `---` is parsed
+    # as-is, so malformed YAML still raises FrontmatterError (exit 3) rather
+    # than being papered over.
     try:
-        plan = load_plan(resolved)
+        raw_text = resolved.read_text(encoding="utf-8")
+        if not raw_text.startswith("---"):
+            raw_text = _first_fill_block() + raw_text
+        plan = load_plan_text(raw_text)
     except FrontmatterError as exc:
         return 3, f"Frontmatter parse error: {exc}"
     except OSError as exc:
@@ -818,12 +853,6 @@ def mutate(
         return 1, (
             "doc already has a Blueprint execution draft; pass `rewrite` to regenerate it "
             "or `--finalize` after enrichment."
-        )
-
-    # --- Validate required sections ---
-    if not plan.has_section("Failure Modes"):
-        return 2, (
-            "design doc missing required ## Failure Modes section; run /think first."
         )
 
     # --- Detect mode ---
