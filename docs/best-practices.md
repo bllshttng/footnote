@@ -32,9 +32,16 @@ The loop is built to survive compactions and provider hiccups; resist babysittin
 
 Watch for that, not for the absence of output. A run that escalates cleanly is healthier than one that keeps churning.
 
-## Capture left-out work as you go
+## Fix what you find, and carve out only what is too big
 
-The moment you consciously defer a decision or spot an out-of-scope bug, record it so it does not evaporate when the session ends:
+A problem you spot mid-task gets FIXED in the current PR, as its own atomic commit.
+It holds even for a problem unrelated to the task you came for.
+Fix it now, because your context is already warm and the next session's will not be.
+
+When the work is too big to land here without derailing the PR, carve it out.
+Size is the only justification.
+A carve-out is a chore you hand to a human, not work you did.
+When you want something visible on the board, file a backlog node instead.
 
 ```bash
 fno carveout add --kind deferred --need "<open question>" "<what + why>"
@@ -42,10 +49,18 @@ fno carveout add --kind oos-bug --priority p2 "<what + why>"
 ```
 
 The retro-triage harvest at merge turns surviving items into backlog nodes.
+That harvest is manual by design.
+Only `fno retro sweep-carveouts --apply` clears the ledger, and nothing runs it for you.
+Run `fno outstanding` to see what has piled up.
 
 ## One worktree per feature, in the right place
 
-Isolate parallel work in its own worktree so sessions do not fight over the same checkout or shared state. Most worktree pain is placement: create at `~/conductor/workspaces/<repo>/<name>` and run `bash scripts/setup/setup-worktree.sh`, rather than adding a worktree from inside another one or working on a protected branch. The implementation-entry gates will refuse a write on a protected branch and point you at the fix.
+Isolate parallel work in its own worktree so sessions do not fight over the same checkout or shared state.
+Most worktree pain is placement.
+Create at the harness-native default, `<repo>/.claude/worktrees/<name>`, then run `bash scripts/setup/setup-worktree.sh`.
+Do not add a worktree from inside another one, and do not work on a protected branch.
+To put them elsewhere, set `config.paths.worktrees_base` together with `worktree.policy = "external"`.
+The implementation-entry gates will refuse a write on a protected branch and point you at the fix.
 
 ## Route ships through the fno verbs
 

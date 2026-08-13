@@ -821,6 +821,53 @@ def mail_escalation(
     return _build("mail_escalation", source, data)
 
 
+QUESTION_CAP = 2000
+
+
+def operator_question(
+    *,
+    question_id: str,
+    question: str,
+    session_id: str | None = None,
+    cwd: str | None = None,
+    node: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build an ``operator_question`` event (an agent needs a human answer).
+
+    Captured at ASK time. Deriving it later from transcript shape loses it the
+    moment another turn lands, which is the common case in a mail-driven mesh.
+    """
+    data: dict[str, Any] = {
+        "question_id": question_id,
+        "question": question[:QUESTION_CAP],
+    }
+    for key, value in (("session_id", session_id), ("cwd", cwd), ("node", node)):
+        if value is not None:
+            data[key] = value
+    return _build("operator_question", source, data)
+
+
+def operator_question_closed(
+    *,
+    question_id: str,
+    answer: str | None = None,
+    closed_by: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build an ``operator_question_closed`` event.
+
+    Explicit close only - no auto-expiry, and the fold treats a double close as
+    a no-op rather than an error.
+    """
+    data: dict[str, Any] = {"question_id": question_id}
+    if answer is not None:
+        data["answer"] = answer[:QUESTION_CAP]
+    if closed_by is not None:
+        data["closed_by"] = closed_by
+    return _build("operator_question_closed", source, data)
+
+
 def agent_raw_inject(
     *,
     target_session: str,
@@ -1187,6 +1234,9 @@ __all__ = [
     "mail_escalation",
     "mission_complete",
     "mission_started",
+    "QUESTION_CAP",
+    "operator_question",
+    "operator_question_closed",
     "phase_0_decision",
     "phase_transition",
     "session_satisfied",

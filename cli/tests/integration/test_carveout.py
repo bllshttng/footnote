@@ -37,6 +37,14 @@ def _repo(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+    # resolve_repo_root is @cache'd and can already be warmed with the real
+    # checkout by the time this fixture runs, so the setenv above lands too
+    # late and session resolution reads the LIVE target-state.md instead of the
+    # one _write_state puts in tmp_path. Without this clear, AC1-HP asserts
+    # against whatever session happens to be running the suite.
+    import fno.paths as paths_mod
+
+    paths_mod.resolve_repo_root.cache_clear()
     return tmp_path
 
 

@@ -238,6 +238,8 @@ mux workspace prune
 notify
 observer replay
 observer sweep
+outstanding ask
+outstanding clear
 paths emit-shell
 paths handoff !--session
 paths shell-stub
