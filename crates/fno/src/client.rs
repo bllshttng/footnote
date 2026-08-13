@@ -1006,9 +1006,26 @@ enum RenameTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttachPlace {
     id: String,
-    target: u64,
+    /// Index into `squads` of the highlighted destination. A CURSOR, not a
+    /// squad id: the picker now moves like every other overlay, and an index
+    /// cannot name a workspace that is not in the list the operator is reading.
+    /// Staleness is still checked at commit, because the layout can change
+    /// under an open picker.
+    cursor: usize,
+    /// Every non-mission workspace, uncapped. It used to be `.take(9)`, which
+    /// silently dropped the 10th onward - at 14 squads five simply did not
+    /// exist as far as the operator could tell.
     squads: Vec<u64>,
     esc: Vec<u8>,
+}
+
+impl AttachPlace {
+    /// The selected destination squad id, or `None` when the list is empty.
+    /// The one place `cursor` is turned back into an id, so no caller can
+    /// index `squads` out of step with the drawn highlight.
+    fn target(&self) -> Option<u64> {
+        self.squads.get(self.cursor).copied()
+    }
 }
 
 /// Client-local in-scrollback search state (v12, x-e780).
@@ -2086,6 +2103,10 @@ impl View {
         self.move_pick = Some((src, squads));
     }
 
+    /// Open the attach-placement picker on `squads`, pre-selecting `target`.
+    /// The caller still resolves the default destination (the row's own squad,
+    /// else the active one, else the first); this converts it to the cursor
+    /// index once, here, rather than leaving an id and an index to drift.
     fn open_attach_place(&mut self, id: String, target: u64, squads: Vec<u64>) {
         self.selector = None;
         self.answers = None;
@@ -2100,7 +2121,7 @@ impl View {
         self.clear_peek();
         self.attach_place = Some(AttachPlace {
             id,
-            target,
+            cursor: squads.iter().position(|s| *s == target).unwrap_or(0),
             squads,
             esc: Vec::new(),
         });
@@ -4691,6 +4712,7 @@ impl View {
                 &chrome,
                 lines,
                 &self.theme,
+                None,
             );
         } else if let Some(m) = &self.keys_modal {
             // x-8ccf US3: the centered which-key modal replaces the old top-left
@@ -4739,6 +4761,7 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                None,
             );
         } else if let Some((src, squads)) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
@@ -4754,6 +4777,7 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                None,
             );
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
@@ -4767,6 +4791,11 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                // +1 for the header line: keep the CURSOR row on screen. Without
+                // this an uncapped list on a short terminal would put the 10th
+                // workspace behind the fold while still selecting it, which is
+                // the same unreachability the .take(9) caused.
+                Some(picker.cursor + 1),
             );
         } else if let Some(conn) = &self.connections {
             // x-84d7 Connections modal: accounts + combos lists. Drawn from the
@@ -4782,6 +4811,7 @@ impl View {
                 &chrome,
                 &conn.render(),
                 &self.theme,
+                None,
             );
         } else if let Some(peek) = &self.peek {
             // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
@@ -4809,6 +4839,7 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                None,
             );
         } else if let Some(nav) = &self.nav {
             // x-653d navigator: the filtered flat catalog + query/chip line. Rows
@@ -4827,6 +4858,11 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
+                // The navigator is the uncapped selector this whole change
+                // points operators at, so its cursor must stay on screen too:
+                // a session with more rows than the viewport would otherwise
+                // drive the selection below the fold. +1 for the query line.
+                Some(nav.cursor + 1),
             );
         }
 
@@ -5236,9 +5272,16 @@ impl View {
         lines
     }
 
+    /// Build the attach-placement picker lines: a header, one row per candidate
+    /// workspace, then a footer where each axis names its OWN keys.
+    ///
+    /// Rows past the ninth carry no number, because no digit reaches them. The
+    /// drawn numbering therefore never lies about what a digit will do, which is
+    /// the property that lets the list be uncapped and the digit accelerator
+    /// stay nine-wide without the two contradicting each other.
     fn attach_place_lines(&self, picker: &AttachPlace) -> Vec<String> {
         const W: usize = 54;
-        let mut lines = vec![pad_to(" attach placement · digit selects workspace", W)];
+        let mut lines = vec![pad_to(" attach placement", W)];
         for (i, &sid) in picker.squads.iter().enumerate() {
             let name = self
                 .layout
@@ -5247,10 +5290,18 @@ impl View {
                 .find(|s| s.id == sid)
                 .map(|s| s.name.as_str())
                 .unwrap_or("(gone)");
-            let marker = if sid == picker.target { '›' } else { ' ' };
-            lines.push(pad_to(&format!(" {marker} {} {name}", i + 1), W));
+            let marker = if i == picker.cursor { '›' } else { ' ' };
+            // Only the first nine are digit-addressable; the rest get a blank
+            // gutter rather than a number no key produces.
+            let ord = if i < 9 {
+                (i + 1).to_string()
+            } else {
+                " ".into()
+            };
+            lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
         }
-        lines.push(pad_to(" h/← left · j/↓ down · k/↑ up · l/→ right", W));
+        lines.push(pad_to(" hjkl/arrows move · 1-9 jump to first nine", W));
+        lines.push(pad_to(" HJKL split left/down/up/right", W));
         lines.push(pad_to(" enter/space here · t new tab · esc/q cancel", W));
         lines
     }
@@ -7116,6 +7167,7 @@ fn draw_lines_overlay<S: AsRef<str>>(
     chrome: &chrome::Chrome,
     lines: &[S],
     theme: &Theme,
+    follow: Option<usize>,
 ) {
     let (base_r, base_c) = content_origin;
     let (content_rows, content_cols) = content_dims;
@@ -7136,22 +7188,36 @@ fn draw_lines_overlay<S: AsRef<str>>(
     let overhead = chrome.rows_overhead();
     let body_budget = content_rows.saturating_sub(overhead);
     let total = lines.len();
-    let (take, scroll) = if total > body_budget {
+    let (start, take, scroll) = if total > body_budget {
         // Covers body_budget == 0 (a viewport shorter than the chrome
         // overhead): windows to zero body rows instead of painting the whole
         // body plus its border past the content viewport.
+        //
+        // `follow` is the body index that MUST stay visible - a cursor. Without
+        // it the window is top-pinned, which is right for a static body and
+        // wrong for one the operator drives: the tenth row of a fourteen-row
+        // picker on a short terminal would be selectable and invisible, which is
+        // the same "you cannot reach it" defect as truncating the list. The
+        // window scrolls by the minimum needed to contain the cursor, so it only
+        // moves at the edges. `pos` then reports where the window really is,
+        // making the scrollbar thumb truthful rather than always parked at 0.
+        let start = match follow.filter(|_| body_budget > 0) {
+            Some(f) => f.saturating_sub(body_budget - 1).min(total - body_budget),
+            None => 0,
+        };
         (
+            start,
             body_budget,
             Some(chrome::Scroll {
-                pos: 0,
+                pos: start,
                 total,
                 visible: body_budget,
             }),
         )
     } else {
-        (total, None)
+        (0, total, None)
     };
-    let body: Vec<chrome::BodyLine> = lines[..take]
+    let body: Vec<chrome::BodyLine> = lines[start..start + take]
         .iter()
         .map(|l| chrome::BodyLine::from_str(l.as_ref()))
         .collect();
@@ -11257,17 +11323,43 @@ async fn attach_place_keys(
 
     for key in keys {
         if (b'1'..=b'9').contains(&key) {
+            // The digit accelerator now JUMPS THE CURSOR rather than setting a
+            // separate selection, so the two axes cannot disagree about what is
+            // selected. Out of range (fewer than N workspaces) is a BEL, not a
+            // silent no-op: the operator asked for a row that is not there.
             let idx = (key - b'1') as usize;
-            let target = view
-                .attach_place
-                .as_ref()
-                .and_then(|picker| picker.squads.get(idx))
-                .copied();
-            match target.filter(|sid| view.layout.squads.iter().any(|s| s.id == *sid)) {
-                Some(target) => view.attach_place.as_mut().unwrap().target = target,
-                None => {
-                    view.set_notice("workspace is no longer available".into());
-                    return Ok(StdinFlow::Continue);
+            match view.attach_place.as_mut() {
+                Some(picker) if idx < picker.squads.len() => picker.cursor = idx,
+                _ => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+            continue;
+        }
+
+        // Lowercase h/j/k/l MOVE the cursor. They used to commit the attach with
+        // a split direction, which made a wrong guess a finalized placement
+        // rather than a mis-set toggle - and because `fold_selector_keys`
+        // rewrites the arrows to these same bytes irreversibly, pressing Down to
+        // scan the list attached the agent. Cursor motion is what the arrows
+        // already mean in every sibling overlay, so that is what they mean here.
+        //
+        // Split direction moves to UPPERCASE, which is not a new convention but
+        // the mux's existing one: keys.rs binds lowercase hjkl to focus movement
+        // and uppercase HJKL to resize. Lowercase navigates, uppercase acts on
+        // geometry. This picker was the one overlay that broke that rule.
+        let step = match key {
+            b'k' | b'h' => Some(-1isize),
+            b'j' | b'l' => Some(1isize),
+            _ => None,
+        };
+        if let Some(delta) = step {
+            if let Some(picker) = view.attach_place.as_mut() {
+                let len = picker.squads.len();
+                if len > 0 {
+                    // Clamped, no wrap - same discipline as the navigator cursor.
+                    let cur = picker.cursor.min(len - 1) as isize;
+                    picker.cursor = (cur + delta).clamp(0, len as isize - 1) as usize;
                 }
             }
             continue;
@@ -11276,12 +11368,12 @@ async fn attach_place_keys(
         // (x-fbb1) Enter/Space = attach here: repoint the focused pane; the server picks
         // swap-viewer vs take-over-idle-shell. "Here" is the stronger primary CTA, so it owns
         // the confirm keys; `t` alone is the secondary new-tab. Route-anchored, so here ignores
-        // the digit-selected workspace (CurrentRoute + here, never a split).
+        // the cursor-selected workspace (CurrentRoute + here, never a split).
         let (split, here) = match key {
-            b'h' => (Some(Some(Dir::Left)), false),
-            b'j' => (Some(Some(Dir::Down)), false),
-            b'k' => (Some(Some(Dir::Up)), false),
-            b'l' => (Some(Some(Dir::Right)), false),
+            b'H' => (Some(Some(Dir::Left)), false),
+            b'J' => (Some(Some(Dir::Down)), false),
+            b'K' => (Some(Some(Dir::Up)), false),
+            b'L' => (Some(Some(Dir::Right)), false),
             b'\r' | b'\n' | b' ' => (Some(None), true),
             b't' => (Some(None), false),
             0x1b | b'q' => {
@@ -11299,9 +11391,13 @@ async fn attach_place_keys(
             view.set_notice("agent is no longer attachable".into());
             return Ok(StdinFlow::Continue);
         }
-        // Here is route-anchored - it never touches the digit-selected
+        // Here is route-anchored - it never touches the cursor-selected
         // workspace, so a vanished target must not block it (only split/new-tab).
-        if !here && !view.layout.squads.iter().any(|s| s.id == picker.target) {
+        // The staleness check still runs at commit, because the layout can shift
+        // under an open picker; the cursor only guarantees the index is in range
+        // of the list as drawn, not that the squad still exists.
+        let dst = picker.target();
+        if !here && !dst.is_some_and(|sid| view.layout.squads.iter().any(|s| s.id == sid)) {
             view.set_notice("workspace is no longer available".into());
             return Ok(StdinFlow::Continue);
         }
@@ -11310,10 +11406,9 @@ async fn attach_place_keys(
             &ClientMsg::Command(Command::AttachAgent {
                 id: picker.id,
                 placement: PanePlacement {
-                    target: if here {
-                        PaneTarget::CurrentRoute
-                    } else {
-                        PaneTarget::SquadId(picker.target)
+                    target: match dst.filter(|_| !here) {
+                        Some(sid) => PaneTarget::SquadId(sid),
+                        None => PaneTarget::CurrentRoute,
                     },
                     split,
                     here,
@@ -12428,14 +12523,14 @@ mod tests {
         apply_hit(&mut view, hit, &mut buf).await.unwrap();
         let picker = view.attach_place.expect("picker opened");
         assert_ne!(
-            picker.target, mid,
+            picker.target(), Some(mid),
             "target must not be the virtual mission id"
         );
         assert!(
             !picker.squads.contains(&mid),
             "the mission id must not be offered as a placement choice"
         );
-        assert_eq!(picker.target, 1, "falls back to the active real squad");
+        assert_eq!(picker.target(), Some(1), "falls back to the active real squad");
     }
 
     fn meta(id: u64, name: &str, tabs: usize, active_tab: usize) -> SquadMeta {
@@ -13326,6 +13421,7 @@ mod tests {
             &chrome,
             &lines,
             &Theme::default_theme(),
+            None,
         );
 
         // The framed block (top + 2 body + bottom = 4 rows) centers in the
@@ -13370,6 +13466,7 @@ mod tests {
             &chrome,
             &lines,
             &Theme::default_theme(),
+            None,
         );
         let painted = |c: char| cells.iter().any(|cell| cell.c == c);
         // Positive markers: the windowed-in rows are painted.
@@ -13405,6 +13502,7 @@ mod tests {
             &chrome,
             &lines,
             &Theme::default_theme(),
+            None,
         );
         let painted = |c: char| cells.iter().any(|cell| cell.c == c);
         // No body content reaches the buffer: the body budget was zero.
@@ -19598,9 +19696,10 @@ mod tests {
             "a not-yet-spawned watch-only peek attach opens the placement picker"
         );
         assert!(buf2.is_empty(), "nothing sent until a direction is chosen");
-        // Choose a right split -> AttachAgent with split Right.
+        // Choose a right split -> AttachAgent with split Right. Uppercase: the
+        // lowercase twins are cursor motion now.
         let mut buf2b: Vec<u8> = Vec::new();
-        attach_place_keys(&mut v, b"l", &mut buf2b).await.unwrap();
+        attach_place_keys(&mut v, b"L", &mut buf2b).await.unwrap();
         let mut cur = std::io::Cursor::new(buf2b);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
@@ -20052,9 +20151,11 @@ mod tests {
         assert!(buf.is_empty(), "nothing sent until a direction is chosen");
         assert!(v.attach_place.is_some(), "Enter opens the placement picker");
         assert_eq!(v.selector, None, "the picker replaces the selector");
-        // Choosing a direction sends the AttachAgent with that split.
+        // Choosing a direction sends the AttachAgent with that split. Uppercase:
+        // lowercase now moves the cursor (arrows fold to the same bytes, so a
+        // scan of the list must never commit).
         let mut buf2: Vec<u8> = Vec::new();
-        attach_place_keys(&mut v, b"j", &mut buf2).await.unwrap();
+        attach_place_keys(&mut v, b"J", &mut buf2).await.unwrap();
         let mut cur = std::io::Cursor::new(buf2);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
@@ -20073,7 +20174,7 @@ mod tests {
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
         let picker = v.attach_place.as_ref().expect("placement picker opens");
         assert_eq!(picker.id, "c19cd2c3");
-        assert_eq!(picker.target, 1);
+        assert_eq!(picker.target(), Some(1));
         assert_eq!(picker.squads, vec![1, 2]);
         let overlay = v.attach_place_lines(picker).join("\n");
         for label in ["left", "right", "up", "down", "new tab", "cancel"] {
@@ -20085,11 +20186,14 @@ mod tests {
 
     #[tokio::test]
     async fn attach_placement_selects_target_and_direction() {
+        // The digit jumps the cursor; UPPERCASE commits with a split direction.
+        // Lowercase `h` here would now only move the cursor (see
+        // attach_placement_arrows_move_the_cursor_without_attaching).
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, b"2h", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"2H", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
         let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
         assert_eq!(
@@ -20110,15 +20214,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_placement_invalid_target_digit_drops_the_input_batch() {
+    async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
+        // A digit past the end of the list is a BEL, not a selection and not a
+        // notice claiming the workspace is "no longer available" - it was never
+        // there. The cursor stays put and the picker stays open, so the operator
+        // can just press the right key next.
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, b"9h", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"9", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "an out-of-range digit sends nothing");
+        let picker = v.attach_place.as_ref().expect("picker stays open");
+        assert_eq!(picker.cursor, 0, "and moves the cursor nowhere");
+    }
+
+    #[tokio::test]
+    async fn attach_placement_arrows_move_the_cursor_without_attaching() {
+        // AC3-FR, the exact reported defect: `j` (and therefore Down, which
+        // fold_selector_keys rewrites to `j`) used to return
+        // Some(Some(Dir::Down)) and attach IMMEDIATELY. Scanning the list with
+        // the arrow keys finalized a placement the operator never chose. This is
+        // the test that had to fail before the fix.
+        for key in [b"j".as_slice(), b"\x1b[B".as_slice()] {
+            let mut v = unified_rows_view();
+            v.selector = Some(8); // bg-claude
+            let mut buf = Vec::new();
+            selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+            assert_eq!(v.attach_place.as_ref().unwrap().cursor, 0);
+            attach_place_keys(&mut v, key, &mut buf).await.unwrap();
+            assert!(buf.is_empty(), "key {key:?} must send no AttachAgent");
+            let picker = v.attach_place.as_ref().expect("picker stays open");
+            assert_eq!(picker.cursor, 1, "key {key:?} moves the cursor");
+            assert_eq!(picker.target(), Some(2));
+        }
+        // ...and back up, clamped at the top rather than wrapping.
+        let mut v = unified_rows_view();
+        v.selector = Some(8);
+        let mut buf = Vec::new();
+        selector_keys(&mut v, b"p", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"kk", &mut buf).await.unwrap();
         assert!(buf.is_empty());
-        assert_eq!(v.attach_place.as_ref().unwrap().target, 1);
-        assert!(v.notice.is_some());
+        assert_eq!(
+            v.attach_place.as_ref().unwrap().cursor,
+            0,
+            "clamped, no wrap"
+        );
     }
 
     #[tokio::test]
@@ -20193,9 +20334,11 @@ mod tests {
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        v.attach_place.as_mut().unwrap().target = 2;
+        // Park the cursor on squad 2, then delete it out from under the open
+        // picker: the cursor guarantees an in-range index, never a live squad.
+        v.attach_place.as_mut().unwrap().cursor = 1;
         v.layout.squads.retain(|s| s.id != 2);
-        attach_place_keys(&mut v, b"l", &mut buf).await.unwrap();
+        attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
         assert!(buf.is_empty());
         assert!(v.notice.is_some());
         assert!(v.attach_place.is_none());

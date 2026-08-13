@@ -694,6 +694,7 @@ impl FakeClient {
             | ServerMsg::TabList { .. }
             | ServerMsg::LayoutTree { .. }
             | ServerMsg::PaneLocation { .. }
+            | ServerMsg::PaneFocused { .. }
             | ServerMsg::TabSpawned { .. }
             | ServerMsg::LayoutApplied { .. }
             | ServerMsg::LayoutGrafted { .. } => {}
