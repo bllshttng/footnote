@@ -31,7 +31,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
@@ -764,6 +764,34 @@ def _validate_single_live_ref(entry: AgentEntry) -> None:
         )
 
 
+def _refuse_write_over_newer_schema(target: Path) -> None:
+    """Refuse to overwrite a registry written by a newer fno.
+
+    This is the half of read-forward that protects the file. ``load_registry``
+    drops fields above its own schema, so entries read from a newer store are
+    incomplete by construction, and writing them back would erase every field
+    this fno cannot see -- for every agent on the machine, not just this one.
+
+    Only a readable, higher integer version blocks. A missing or unparseable
+    file is not a newer writer, and refusing there would leave a torn registry
+    unrepairable by the very command meant to rewrite it.
+    """
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(raw, dict):
+        return
+    on_disk = raw.get("schema_version")
+    if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
+        raise RegistryVersionError(
+            f"refusing to write registry at {target}: on-disk schema_version="
+            f"{on_disk} is newer than the schema_version={SCHEMA_VERSION} this "
+            "fno understands, and writing would drop the fields it cannot see. "
+            "Upgrade fno to match."
+        )
+
+
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
     """Atomically write the registry to disk.
 
@@ -774,6 +802,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     the orphan ``.tmp`` is unlinked so it doesn't accumulate on retry.
     """
     target = _registry_path(path)
+    _refuse_write_over_newer_schema(target)
     for e in entries:
         _validate_single_live_ref(e)
     payload = {
@@ -791,6 +820,12 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
+
+
+#: Constructor keys of ``AgentEntry``, derived rather than listed so a new
+#: field never has to be remembered here. Used only on the read-forward path,
+#: to drop keys a newer writer added after this fno was built.
+_INIT_FIELD_NAMES = frozenset(f.name for f in fields(AgentEntry) if f.init)
 
 
 def _is_identity_token(value: object) -> bool:
@@ -899,14 +934,33 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     # flags below key off ABSOLUTE version numbers, not SCHEMA_VERSION-relative
     # offsets, so future bumps don't silently mis-trigger v1/v2 synthesis.
     # Anything outside the range raises RegistryVersionError.
-    if not (
-        isinstance(on_disk_version, int)
-        and 1 <= on_disk_version <= SCHEMA_VERSION
-    ):
+    if not (isinstance(on_disk_version, int) and on_disk_version >= 1):
         raise RegistryVersionError(
             f"registry at {target} has schema_version={on_disk_version!r}, "
             f"this fno understands schema_version={SCHEMA_VERSION}. "
             "Upgrade or downgrade fno to match."
+        )
+    # READ FORWARD. This store is global to every agent on the machine, so a
+    # process running ahead of the deployment used to brick every deployed
+    # reader at once: mail died fleet-wide, with no announcement and a symptom
+    # that surfaced far from the cause. A newer writer is now read, not refused.
+    #
+    # Two things make that safe, and neither is optional.
+    #   - write_registry REFUSES while the on-disk schema is higher, because
+    #     reading forward drops fields this reader cannot see and a write from
+    #     that state would erase rows it never knew about.
+    #   - every degraded read announces itself below. Silence is the real trap:
+    #     it makes a partial row indistinguishable from a complete one, so a
+    #     routing or liveness decision taken on a truncated row leaves no trace.
+    read_forward = on_disk_version > SCHEMA_VERSION
+    if read_forward:
+        print(
+            f"fno agents: registry at {target} is schema_version="
+            f"{on_disk_version}, ahead of the schema_version={SCHEMA_VERSION} "
+            "this fno understands. Reading the fields it knows and ignoring the "
+            "rest; writes are refused until this fno is upgraded. Rows may be "
+            "incomplete.",
+            file=sys.stderr,
         )
     needs_v1_synthesis = on_disk_version == 1
     needs_v2_synthesis = on_disk_version <= 2
@@ -1027,6 +1081,12 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         # recoverable is lost, and asdict re-omits it on write-back. (ab-b946b59c)
         if "session_id" in row:
             row = {k: v for k, v in row.items() if k != "session_id"}
+        # An unknown key is a writer bug AT or BELOW our schema, and stays fatal
+        # there. Above it, an unknown key is just a field added after this fno
+        # was built, so drop it rather than refuse the whole shared read. The
+        # write refusal below is what keeps the dropped fields from being lost.
+        if read_forward:
+            row = {k: v for k, v in row.items() if k in _INIT_FIELD_NAMES}
         try:
             entries.append(AgentEntry(**row))
         except TypeError as exc:
