@@ -387,20 +387,40 @@ pub struct GcSummary {
     pub kept_dirty: Vec<(String, String)>,
 }
 
-/// `git status --porcelain` cleanliness of a worktree-owning row's `cwd`.
-/// `Some(true)` clean, `Some(false)` dirty (uncommitted changes), `None` the
-/// probe could not determine it (git errored / not a repo) -> the caller fails
-/// closed and keeps the row.
+/// Can this worktree-owning row's `cwd` be removed without destroying work?
+/// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
+/// -> the caller fails closed and keeps the row.
+///
+/// Routes through `fno worktree reapable`, the same answer the `--merged` sweep
+/// and `archive-worktree.sh` use, so three call sites cannot drift apart (an
+/// equivalence test pins that they agree). The old rule here was "is
+/// `git status --porcelain` empty", which blocked on a tracked file merely
+/// MISSING from disk - content HEAD still holds, so removal loses nothing.
+///
+/// Permission needs BOTH a clean exit and the literal `reapable=yes` marker. A
+/// stale `fno` predating the verb exits non-zero with no receipt, which is
+/// indistinguishable from any other non-answer, so every unknown degrades to
+/// `None` and the row is kept. That is exactly the prior behaviour.
 fn worktree_clean_probe(cwd: &str) -> Option<bool> {
-    let out = std::process::Command::new("git")
+    let out = std::process::Command::new("fno")
         .current_dir(cwd)
-        .args(["status", "--porcelain"])
+        .args(["worktree", "reapable", cwd])
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() {
+        // Never read a bare exit 0 as permission: an empty stdout (a shim that
+        // swallowed the verb) would otherwise reap a live worktree.
+        return if text.contains("reapable=yes") {
+            Some(true)
+        } else {
+            None
+        };
     }
-    Some(out.stdout.iter().all(u8::is_ascii_whitespace))
+    if text.contains("reapable=no") {
+        return Some(false);
+    }
+    None
 }
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock

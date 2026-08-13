@@ -203,6 +203,14 @@ resolve-plan-executor.sh
 # hooks/megawalk-stop-hook.sh; tests source the lib directly. Pure sourcing
 # library; no standalone CLI of its own.
 
+# The shared "is removing this worktree safe?" answer. Sourced by
+# scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
+# exposes wt_reapable. It is the bash ADAPTER for the wrapped entry point
+# `fno worktree reapable` (cli/src/fno/worktree_reapable.py), which is where the
+# classifier actually lives, so a second wrapper would be a third opinion on a
+# question that must have exactly one. Pure sourcing library; no CLI of its own.
+worktree-reapable.sh
+
 # Bounded append-log rotation (.fno/ dir-hygiene, ab-d5a984f6). A thin
 # `bash <path> <file> <max_bytes>` helper invoked by hooks/convo-signal-capture.sh
 # to cap convo-signals.jsonl; tests run it directly. Pure utility, not a
