@@ -558,10 +558,17 @@ def _foreign_command(text: str, pos: int) -> bool:
     Only a STRING LITERAL counts. Anything computed (``fno_bin()``, a variable,
     a qualified path) is credited, because the array is the signal and guessing
     at a non-literal is how a live verb gets deleted.
+
+    The lookback must not cross a statement boundary. A builder-style command
+    (``let mut c = Command::new(fno_bin()); ... c.args(["backlog", "done"]);``)
+    can have an unrelated one-line ``Command::new("git")…`` between the two, and
+    charging the fno array to that git call is the ONE direction this file
+    forbids - it drops a live caller and authorises a deletion. A ``;`` between
+    the two ends the chain, so the array belongs to something else.
     """
     window = text[max(0, pos - 400):pos]
     idx = window.rfind("Command::new(")
-    if idx == -1:
+    if idx == -1 or ";" in window[idx:]:
         return False
     m = _RUST_CMD_LITERAL_RE.match(window, idx)
     return bool(m) and m.group(1).rsplit("/", 1)[-1] in FOREIGN_BINARIES
@@ -807,8 +814,18 @@ def main(argv: list[str] | None = None) -> int:
     # monotonicity invariant below, which guards every output mode
     # (corrected_zero must be a subset of uncorrected_zero).
     counts_corr = sweep(root, leaves, binary_form=True, pipe_fan=True)
+    # The Rust argv arrays are references the token sweep structurally cannot
+    # see, so they belong in EVERY mode, not just --dead. --curriculum's cull
+    # list is the deletion-decision path; leaving it blind to this shape is the
+    # exact failure the shape was added to fix. Folding them in only ADDS
+    # references, so the subset invariant below still holds.
+    rust_counts = sweep_rust_argv(root, leaves)
+    counts_corr.update(rust_counts)
 
+    # Checked against the rust counter alone, never the merged one: a floor a
+    # working text sweep could satisfy on its own is not a control on this sweep.
     failed = check_controls(counts_corr)
+    failed += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
     # A broken sweep emits no candidate list, even in self-check.
     if failed and not args.self_check:
         print("verb-callers: positive control(s) failed - sweep is broken, no list:", file=sys.stderr)

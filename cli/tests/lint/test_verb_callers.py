@@ -118,6 +118,58 @@ def test_rust_argv_sweep_credits_the_array_not_the_command(tmp_path):
     assert counts["backlog done"] == 0, "crates/*/target is build output, not source"
 
 
+def _broken_argv_sweep(tmp_path) -> Path:
+    """A copy of the script whose argv-array pattern matches nothing."""
+    broken = tmp_path / "verb-callers.py"
+    text = SCRIPT.read_text()
+    needle = 're.compile(r"\\.args\\(\\s*&?\\s*\\[([^\\]]*)\\]", re.S)'
+    assert needle in text, "the argv-array pattern moved; update this test"
+    broken.write_text(
+        text.replace(needle, 're.compile(r"\\.NO_SUCH_CALL\\(\\[([^\\]]*)\\]", re.S)')
+    )
+    return broken
+
+
+def test_rust_argv_credits_a_builder_command_past_a_foreign_one_liner(tmp_path):
+    """The foreign-binary lookback must not cross a statement boundary.
+
+    A builder-style command holds the fno binary in a variable and calls
+    ``.args`` several lines later, so an unrelated one-line ``Command::new("git")``
+    in between becomes the nearest preceding one. Charging the fno array to it
+    drops a live caller - the one direction the sweep forbids, because a missing
+    reference is what authorises a deletion.
+    """
+    src = tmp_path / "crates" / "fno" / "src"
+    src.mkdir(parents=True)
+    (src / "builder.rs").write_text(
+        "let mut cmd = Command::new(fno_bin());\n"
+        'Command::new("git").args(["fetch", "origin"]).status()?;\n'
+        'cmd.args(["backlog", "done"]);\n'
+    )
+    counts = vc.sweep_rust_argv(tmp_path, {"backlog done", "fetch origin"})
+    assert counts["backlog done"] == 1, "a builder-style fno argv must still be credited"
+    assert counts["fetch origin"] == 0, "the git one-liner is still skipped"
+
+
+def test_broken_argv_sweep_also_refuses_the_zero_list(tmp_path):
+    """The controls must reach the modes that decide a deletion, not only --dead.
+
+    ``--zero`` and ``--curriculum`` produce the cull-candidate list. A sweep
+    blind to the argv-array shape names a live verb as a cull candidate, so a
+    broken sweep must refuse here exactly as it does under --dead.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(_broken_argv_sweep(tmp_path)), "--zero"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
+    out = proc.stdout + proc.stderr
+    assert "no list" in out, out
+    for leaf in vc.RUST_ARGV_CONTROLS:
+        assert f"rust-argv/{leaf}" in out, f"{leaf} not named in the refusal:\n{out}"
+    assert "cull candidates" not in out, out
+
+
 def test_rust_argv_controls_refuse_to_emit_a_list_when_the_sweep_breaks(tmp_path):
     """The RED path, pinned. A green-only test cannot tell a working gate from a dead one.
 
@@ -126,16 +178,8 @@ def test_rust_argv_controls_refuse_to_emit_a_list_when_the_sweep_breaks(tmp_path
     run must exit 2, and no dead set may be printed - an emitted list is the
     failure mode this control set exists to prevent.
     """
-    broken = tmp_path / "verb-callers.py"
-    text = SCRIPT.read_text()
-    needle = 're.compile(r"\\.args\\(\\s*&?\\s*\\[([^\\]]*)\\]", re.S)'
-    assert needle in text, "the argv-array pattern moved; update this test"
-    broken.write_text(
-        text.replace(needle, 're.compile(r"\\.NO_SUCH_CALL\\(\\[([^\\]]*)\\]", re.S)')
-    )
-
     proc = subprocess.run(
-        [sys.executable, str(broken), "--dead"],
+        [sys.executable, str(_broken_argv_sweep(tmp_path)), "--dead"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
     assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
