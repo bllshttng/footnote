@@ -78,6 +78,101 @@ def test_read_logs_codex_follow_swallows_keyboard_interrupt(tmp_path, monkeypatc
     assert "{\"line\": 1}" in stdout_buf.getvalue()
 
 
+def test_keyboard_interrupt_during_the_tail_write_exits_clean(tmp_path, monkeypatch):
+    """The window the subprocess test kept flaking on, pinned directly.
+
+    The tail write is the readiness marker a follower waits on. A guard that
+    opened only at the follow branch left that write unprotected, so a SIGINT
+    arriving the moment the process looked ready took the default handler and
+    killed it with 130. Interrupting the write itself is that exact window.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    log_file = tmp_path / "follow.jsonl"
+    log_file.write_text('{"line": 1}\n', encoding="utf-8")
+    write_registry([_codex(log_path=str(log_file))])
+
+    from fno.agents import read as read_mod
+
+    class InterruptingWriter(io.StringIO):
+        def write(self, text: str) -> int:
+            raise KeyboardInterrupt
+
+    stderr_buf = io.StringIO()
+    result = read_mod.read_logs(
+        name="follow-target",
+        tail=None,
+        follow=True,
+        stdout=InterruptingWriter(),
+        stderr=stderr_buf,
+    )
+
+    assert result.exit_code == 0
+    assert "traceback" not in stderr_buf.getvalue().lower()
+
+
+def test_interrupt_on_a_one_shot_dump_is_not_swallowed(tmp_path, monkeypatch):
+    """A truncated tail must not read as a complete one.
+
+    The follow loop is a session the user ends on purpose, so it exits clean.
+    A one-shot dump has no such contract: swallowing the interrupt returned 0
+    with a half-written log, which a caller cannot tell from a full one.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    log_file = tmp_path / "follow.jsonl"
+    log_file.write_text('{"line": 1}\n', encoding="utf-8")
+    write_registry([_codex(log_path=str(log_file))])
+
+    from fno.agents import read as read_mod
+
+    class InterruptingWriter(io.StringIO):
+        def write(self, text: str) -> int:
+            raise KeyboardInterrupt
+
+    # SystemExit(130), not a bare KeyboardInterrupt: cmd_logs traps neither, so
+    # re-raising printed a traceback for an ordinary Ctrl-C. The code is what
+    # makes a truncated dump distinguishable, and 130 carries it without one.
+    with pytest.raises(SystemExit) as excinfo:
+        read_mod.read_logs(
+            name="follow-target",
+            tail=None,
+            follow=False,
+            stdout=InterruptingWriter(),
+            stderr=io.StringIO(),
+        )
+    assert excinfo.value.code == 130
+
+
+def test_follow_interrupted_before_the_loop_still_exits_clean(tmp_path, monkeypatch):
+    """AC2-FR is keyed on the ARGUMENT, and that is deliberate.
+
+    Keying it on loop entry was tried and reverted. The tail write is the
+    readiness marker a follower waits on, so an interrupt between that write and
+    the loop would exit 130 again, which is the intermittent failure this guard
+    was written to remove. For a stream the operator stopped on purpose the tail
+    is a preamble, so a short preamble is not a truncated deliverable.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    log_file = tmp_path / "follow.jsonl"
+    log_file.write_text('{"line": 1}\n', encoding="utf-8")
+    write_registry([_codex(log_path=str(log_file))])
+
+    from fno.agents import read as read_mod
+
+    def _boom(path, tail=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(read_mod, "_read_jsonl_tail", _boom)
+
+    result = read_mod.read_logs(
+        name="follow-target",
+        tail=None,
+        follow=True,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    assert result.exit_code == 0
+
+
 def test_follow_jsonl_detects_window_spanning_truncate(tmp_path):
     """Truncate-then-refill within a single poll window must surface, not emit garbage.
 

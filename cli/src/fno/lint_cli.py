@@ -367,14 +367,19 @@ def verb_ratchet(update: bool = False) -> None:
     raise typer.Exit(0 if report.ok else 1)
 
 
-_STYLE_SURFACES = ("mail", "pr-body", "markdown")
+# `comment` has no chokepoint. A PR comment goes out through `gh pr comment`,
+# which this repo never wraps, so the author runs the check by hand. It is named
+# here so a comment body is checkable at all, and docs/style-rules.md says
+# plainly that nothing enforces it. A surface that reads as a guard and refuses
+# nothing is worse than no surface.
+_STYLE_SURFACES = ("mail", "pr-body", "markdown", "comment")
 
 
 def style(
     surface: str = typer.Option(
         "mail",
         "--surface",
-        help="Where the text is read: mail, pr-body, or markdown. The five rules apply the same everywhere.",
+        help="Where the text is read: mail, pr-body, markdown, or comment. The six rules apply the same everywhere.",
     ),
     stdin: bool = typer.Option(
         False,
@@ -393,12 +398,13 @@ def style(
         "A whole-file gate is unlandable because existing prose already breaks the rules.",
     ),
 ) -> None:
-    """Check text against the five style rules in docs/style-rules.md.
+    """Check text against the six style rules in docs/style-rules.md.
 
     A list-item sentence is 20 words or fewer, and every other sentence is 25
     or fewer. No semicolon. No "should", "would", "may", "might", or "could".
     No contractions. If a sentence carries "if" or "when", that word starts the
-    sentence. Code, paths, flags, and quoted output do not count.
+    sentence. A paragraph is one physical line, so a newline starts the next
+    block. Code, paths, flags, and quoted output do not count.
 
     Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
     this gate. That second 2 fires when git and this verb disagree about how
@@ -409,7 +415,10 @@ def style(
     from fno import style as style_mod
 
     if surface not in _STYLE_SURFACES:
-        typer.echo(f"style: unknown surface {surface!r} (mail, pr-body, markdown)", err=True)
+        # Spelled from the tuple, never beside it. The hand-written list this
+        # replaces matched the tuple until `comment` was added, and then did not.
+        known = ", ".join(_STYLE_SURFACES)
+        typer.echo(f"style: unknown surface {surface!r} ({known})", err=True)
         raise typer.Exit(2)
     if diff_base is not None and surface != "markdown":
         typer.echo("style: --diff-base applies to --surface markdown only.", err=True)

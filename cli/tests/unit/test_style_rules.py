@@ -1,9 +1,14 @@
-"""Tests for the five-rule style checker (``cli/src/fno/style.py``).
+"""Tests for the six-rule style checker (``cli/src/fno/style.py``).
 
 Each rule is covered positive and negative, plus the two deliberate sharp
 edges: rule 4 must not flag the possessive "agent's", and rule 5 must skip the
 hyphenated compounds "if-branch" and "when-clause". Every masking construct is
 exercised, since "code does not count" is the load-bearing exemption.
+
+Rule 6 gets the widest negative coverage of the six. It is the only rule that
+reads a PAIR of lines, so every block that legally owns a newline (blank line,
+list marker, heading, table row, fence, frontmatter, thematic break) needs its
+own case. A false positive there refuses correct markdown.
 """
 from __future__ import annotations
 
@@ -124,6 +129,200 @@ def test_hyphenated_compounds_skip():
     assert 5 not in rule_set("a when-clause gates the run.")
 
 
+# --- Rule 6: a paragraph is one physical line --------------------------------
+
+def test_newline_inside_a_paragraph_fails():
+    assert 6 in rule_set("the gate refuses a break\ninside this paragraph.")
+
+
+def test_one_line_paragraph_passes():
+    assert 6 not in rule_set("the gate refuses a break inside this paragraph.")
+
+
+def test_many_sentences_on_one_line_pass():
+    assert not rule_set("first sentence here. second sentence here. third one here.")
+
+
+def test_blank_line_starts_the_next_paragraph():
+    assert 6 not in rule_set("first paragraph here.\n\nsecond paragraph here.")
+
+
+def test_list_items_are_legal_breaks():
+    assert 6 not in rule_set("- first item here.\n- second item here.\n- third item here.")
+
+
+def test_lazy_list_continuation_fails():
+    # A bare prose line under a list item is a break inside that item.
+    assert 6 in rule_set("- the item starts here\nand runs onto this line.")
+
+
+def test_prose_after_a_heading_passes():
+    assert 6 not in rule_set("# The heading\nthe paragraph under it.")
+
+
+def test_prose_after_a_table_passes():
+    body = "intro line here.\n| a | b |\n|---|---|\nclosing line here."
+    assert 6 not in rule_set(body)
+
+
+def test_prose_after_a_fence_passes():
+    assert 6 not in rule_set("intro here.\n```\ncode()\n```\nclosing here.")
+
+
+def test_prose_after_frontmatter_passes():
+    assert 6 not in rule_set("---\nkey: value\n---\nthe body line.")
+
+
+def test_prose_after_a_thematic_break_passes():
+    assert 6 not in rule_set("first paragraph.\n---\nsecond paragraph.")
+
+
+def test_blockquote_lines_are_legal_breaks():
+    assert 6 not in rule_set("> quoted line one.\n> quoted line two.")
+
+
+def test_raw_html_block_lines_are_legal_breaks():
+    # A <details> block was the live false positive: three consecutive lines of
+    # valid markdown that rule 6 refused with no correct fix available.
+    body = "<details>\n<summary>the summary</summary>\nthe body line.\n</details>"
+    assert 6 not in rule_set(body)
+
+
+def test_setext_underline_is_a_legal_break():
+    assert 6 not in rule_set("The heading\n===\nthe paragraph under it.")
+
+
+def test_a_short_setext_underline_is_a_legal_break():
+    # A setext h2 closes on one dash. Sharing the thematic-break repeat group
+    # put a three-character floor on it and read the heading as a wrap.
+    assert 6 not in rule_set("The heading\n-\nthe paragraph under it.")
+    assert 6 not in rule_set("The heading\n--\nthe paragraph under it.")
+
+
+def test_paren_ordered_lists_are_legal_breaks():
+    # CommonMark reads `1)` exactly as `1.`.
+    assert 6 not in rule_set("1) first item.\n2) second item.\n3) third item.")
+
+
+def test_paren_ordered_item_gets_the_list_cap():
+    # The same miss quietly gave these items the 25-word paragraph cap.
+    body = " ".join("w" for _ in range(21))
+    assert 1 in rule_set("1) " + body + ".")
+
+
+def test_a_pipeless_table_is_not_charged():
+    # THREE body rows on purpose. A one-row table passes even when only the
+    # delimiter row is blanked, so a single-row fixture pinned nothing and let
+    # a real multi-row table keep failing from its second row on.
+    body = "intro.\n\na | b\n--- | ---\n1 | 2\n3 | 4\n5 | 6\n\nafter."
+    assert 6 not in rule_set(body)
+
+
+def test_a_pipeless_table_header_is_not_charged_rule_6():
+    # The header is proven a table row by the delimiter row BELOW it, so it
+    # needs a lookahead. Without one it was charged rule 6 while every body row
+    # was waived, which applies one rule to one row of a table and not the rest.
+    body = "Intro paragraph.\n\nflag | what it does\n--- | ---\nx | y\n"
+    assert 6 not in rule_set(body)
+
+
+def test_prose_after_a_pipeless_table_keeps_every_other_rule():
+    # The hole that survived two fixes. A pipeless row is shaped like a sentence
+    # carrying a pipe, so blanking it in the mask waived ALL six rules. The
+    # waiver is rule 6 only now, and the proof is that the sentence reports the
+    # same rules under a table as it does standing alone.
+    bad = (
+        "You should use a | b here and it is a very long sentence with lots and "
+        "lots and lots of extra words beyond the cap; really."
+    )
+    assert rule_set("a | b\n--- | ---\n1 | 2\n" + bad + "\n") == rule_set(bad + "\n")
+    assert {1, 2, 3} <= rule_set(bad + "\n")
+
+
+def test_a_mixed_pipe_table_body_row_is_not_charged_rule_6():
+    # A delimiter row written WITH pipes above body rows written without them is
+    # valid GFM: leading pipes are per-row optional.
+    assert 6 not in rule_set("| a | b |\n| --- | --- |\n1 | 2\n3 | 4\n")
+
+
+def test_table_state_does_not_leak_past_a_fence():
+    # The severe one. The table flag was cleared only on the fall-through path,
+    # so a fence straight after a table carried it onward and blanked the next
+    # prose line holding a pipe. That line escaped ALL six rules, not just 6.
+    body = "a | b\n--- | ---\nc | d\n```\ncode\n```\nUse a | b; you should stop.\n"
+    assert {2, 3} <= rule_set(body)
+
+
+def test_table_state_does_not_leak_past_indented_code():
+    body = "a | b\n--- | ---\nc | d\n    indented\nUse a | b; you should stop.\n"
+    assert {2, 3} <= rule_set(body)
+
+
+def test_a_paragraph_above_a_setext_underline_is_not_a_table_header():
+    # The lookahead must not swallow this: a delimiter row needs pipes, and
+    # `---` alone is a setext underline.
+    assert 6 not in rule_set("The heading\n---\nthe paragraph under it.")
+
+
+def test_a_table_stops_exempting_once_it_ends():
+    # Position is what exempts a body row, so the exemption must end with the
+    # table. Otherwise every pipe-free wrap after one would go unchecked.
+    body = "a | b\n--- | ---\n1 | 2\n\nprose that wraps\nonto a second line."
+    assert 6 in rule_set(body)
+
+
+def test_prose_carrying_a_pipe_is_still_checked():
+    # The delimiter row alone is blanked. Blanking a body-row shape would let
+    # any sentence carrying a pipe escape all six rules.
+    assert 4 in rule_set("run a | b and don't stop.")
+
+
+def test_link_reference_definitions_are_legal_breaks():
+    assert 6 not in rule_set("[one]: https://a.example\n[two]: https://b.example")
+
+
+def test_crlf_frontmatter_does_not_read_as_prose():
+    # Every anchored block test failed at once on CRLF, so frontmatter stayed
+    # unblanked and rule 6 fired down the whole block.
+    assert 6 not in rule_set("---\r\nkey: value\r\n---\r\nthe body line.\r\n")
+
+
+def test_field_lines_are_legal_breaks():
+    # The worker return grammar AGENTS.md mandates. Rule 6 refused it outright,
+    # which left a codex worker no legal way to report.
+    assert 6 not in rule_set("RESULT: SUCCESS\nTASK: 2.1")
+    assert 6 not in rule_set("status: green\npr: 123\nbranch: feature/x")
+
+
+def test_a_colon_later_in_the_line_does_not_exempt_a_wrap():
+    # The field key is one word with no space, so a wrapped sentence carrying a
+    # colon partway through is still a wrap.
+    assert 6 in rule_set("the gate refuses this: a paragraph\nbroken across lines.")
+
+
+def test_check_lines_never_charges_a_line_it_was_not_given():
+    # The deliberate blind spot. A new line inserted directly ABOVE untouched
+    # prose splits that paragraph and goes unreported, because charging the
+    # untouched line below would fail a one-line edit in any legacy doc.
+    # Documented in docs/style-rules.md beside the rule 1 and rule 4 trades.
+    text = "this added line starts it\nan untouched continuation.\n"
+    assert style.check_lines(text, {1}) == []
+    reported = {v.sentence_index + 1 for v in style.check_lines(text, {2}) if v.rule == 6}
+    assert reported == {2}
+
+
+def test_check_lines_sees_the_unchanged_line_above():
+    # The added line continues prose that the diff never touched, so rule 6
+    # must still fire. State advances on every line, not only checked ones.
+    text = "an unchanged paragraph line\nthis added line continues it.\n"
+    assert 6 in {v.rule for v in style.check_lines(text, {2})}
+
+
+def test_check_lines_first_added_line_after_a_blank_passes():
+    text = "unchanged paragraph.\n\nthis added line starts its own.\n"
+    assert 6 not in {v.rule for v in style.check_lines(text, {3})}
+
+
 # --- Masking: code does not count --------------------------------------------
 
 def test_inline_code_span_is_one_word():
@@ -234,6 +433,14 @@ def test_the_refusal_message_passes_its_own_rules():
     # style-checked; every banned word it names is quoted, so masking exempts it.
     text = "you should don't; run if x."
     msg = style.format_violations(style.check(text))
+    assert style.check(msg) == [], msg
+
+
+def test_the_refusal_message_survives_a_rule_6_violation():
+    # Rule 6 is the one rule whose refusal is multi-line by nature, so it is the
+    # one most able to break the self-consistency invariant above.
+    msg = style.format_violations(style.check("a paragraph broken\nacross two lines."))
+    assert "rule 6" in msg
     assert style.check(msg) == [], msg
 
 

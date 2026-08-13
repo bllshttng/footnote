@@ -1,6 +1,6 @@
 name: markdown-style
 
-# ADDED lines only under docs/, skills/, agents/ must pass the five style rules.
+# ADDED lines only under docs/, skills/, agents/ must pass the six style rules.
 # A whole-file gate is unlandable while existing prose breaks the rules; the
 # added-lines ratchet lets the trees converge without a flag-day rewrite. The
 # gate is fail-loud: a touched gated tree with zero inspected lines fails too,

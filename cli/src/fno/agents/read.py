@@ -374,42 +374,72 @@ def read_logs(
 
     # Codex/gemini logs are JSON-Lines; emit raw text by default.
     # `--tail N` slices the last N records, `--follow` polls.
+    # The KeyboardInterrupt guard opens BEFORE the tail READ, not after it and
+    # not after the write. Two earlier placements each closed only part of the
+    # window: at the follow branch it missed the write, and above the write it
+    # still missed the read, which is the slowest step of the three on a large
+    # log and so the likeliest place for a Ctrl-C to land. The Rust twin arms
+    # SIGINT before its own read, so this is also what keeps the two paths
+    # describing the same protected region.
     try:
-        records = _read_jsonl_tail(log_path, tail=tail)
-    except OSError as exc:
-        err.write(f"failed to read {log_path}: {exc}\n")
-        return LogsResult(exit_code=1)
-
-    for line in records:
-        out.write(line)
-        if not line.endswith("\n"):
-            out.write("\n")
-
-    if follow:
-        # Best-effort 500ms polling loop for codex/gemini. Claude logs
-        # delegate follow to harnesses.claude.logs which has its own
-        # signal-safe implementation. OSError covers the open-time race
-        # (log deleted/rotated between the tail read above and the
-        # _follow_jsonl open below) — without it the operator sees a
-        # traceback for what is a normal rotation event.
         try:
-            _follow_jsonl(log_path, stdout=out, stderr=err)
-        except KeyboardInterrupt:
-            # AC2-FR clean exit — no traceback on stderr.
-            return LogsResult(exit_code=EXIT_OK)
-        except FileNotFoundError as exc:
-            # Open-time race: log file was removed between the tail read
-            # above and the _follow_jsonl open. Treat as the same shape
-            # as the mid-stream disappearance the inner loop detects.
-            err.write(f"log file disappeared before follow could attach: {exc}\n")
-            return LogsResult(exit_code=EXIT_NOT_FOUND)
+            records = _read_jsonl_tail(log_path, tail=tail)
         except OSError as exc:
-            # Other open-time failures (e.g. PermissionError, EIO) are
-            # genuine infrastructure problems — surface them with a
-            # distinct message + generic exit so callers can tell them
-            # apart from the "disappeared" case.
-            err.write(f"failed to open log file for follow: {exc}\n")
+            err.write(f"failed to read {log_path}: {exc}\n")
             return LogsResult(exit_code=1)
+
+        for line in records:
+            out.write(line)
+            if not line.endswith("\n"):
+                out.write("\n")
+
+        if follow:
+            # Best-effort 500ms polling loop for codex/gemini. Claude logs
+            # delegate follow to harnesses.claude.logs which has its own
+            # signal-safe implementation. OSError covers the open-time race
+            # (log deleted/rotated between the tail read above and the
+            # _follow_jsonl open below) — without it the operator sees a
+            # traceback for what is a normal rotation event. These two arms
+            # stay scoped to the open so their messages keep naming the open.
+            try:
+                _follow_jsonl(log_path, stdout=out, stderr=err)
+            except FileNotFoundError as exc:
+                # Open-time race: log file was removed between the tail read
+                # above and the _follow_jsonl open. Treat as the same shape
+                # as the mid-stream disappearance the inner loop detects.
+                err.write(f"log file disappeared before follow could attach: {exc}\n")
+                return LogsResult(exit_code=EXIT_NOT_FOUND)
+            except OSError as exc:
+                # Other open-time failures (e.g. PermissionError, EIO) are
+                # genuine infrastructure problems — surface them with a
+                # distinct message + generic exit so callers can tell them
+                # apart from the "disappeared" case.
+                err.write(f"failed to open log file for follow: {exc}\n")
+                return LogsResult(exit_code=1)
+    except KeyboardInterrupt:
+        if not follow:
+            # Branch on the ARGUMENT, not on whether the loop was entered.
+            #
+            # Keying this on loop entry was tried and reverted. It reopens the
+            # race this guard exists to close: the tail write is the readiness
+            # marker a follower waits on, so a SIGINT arriving between that
+            # write and the loop would exit 130 again, which is the exact
+            # intermittent failure the guard was written for. It also
+            # contradicts AC2-FR, whose contract is that `--follow` interrupted
+            # exits clean, full stop. For a stream the operator stopped on
+            # purpose the tail is a preamble, so a short preamble is not a
+            # truncated deliverable.
+            #
+            # A one-shot dump is the opposite case and keeps the strict rule: it
+            # has no clean-exit contract, and swallowing there made a truncated
+            # tail exit 0 and read as a complete one.
+            #
+            # SystemExit(130) rather than a bare re-raise: `cmd_logs` traps no
+            # KeyboardInterrupt, so re-raising printed a Python traceback for an
+            # ordinary Ctrl-C. 130 is the same distinguishable code without it.
+            raise SystemExit(130)
+        # AC2-FR clean exit — no traceback on stderr.
+        return LogsResult(exit_code=EXIT_OK)
 
     return LogsResult(exit_code=EXIT_OK)
 

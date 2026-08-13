@@ -244,10 +244,10 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
     """
     monkeypatch.setattr(
         _status, "_fetch",
-        lambda pr, cwd: {
+        lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-        },
+        }, ""),
     )
     monkeypatch.setattr(
         _status, "read_optional_review_state",
@@ -270,10 +270,10 @@ def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     """The hint is advice, not decoration: silent when there is nothing to do."""
     monkeypatch.setattr(
         _status, "_fetch",
-        lambda pr, cwd: {
+        lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-        },
+        }, ""),
     )
     monkeypatch.setattr(
         _status, "read_optional_review_state",
@@ -291,10 +291,10 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "_fetch",
-        lambda pr, cwd: {
+        lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-        },
+        }, ""),
     )
     # Stub the review read (no gh) so the frozen contract is deterministic.
     monkeypatch.setattr(
@@ -421,8 +421,53 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
     ]
 
 
+def test_rate_limit_reason_names_the_graphql_bucket():
+    # The trap this message exists for: `gh pr view` spends GraphQL, while the
+    # obvious check reports CORE and can read full at the same moment.
+    res = Result(
+        returncode=1,
+        stdout="",
+        stderr="GraphQL: API rate limit already exceeded for user ID 1.",
+    )
+    reason = _status._fetch_reason(res)
+    assert "graphql" in reason.lower()
+    assert "resources.graphql" in reason
+
+
+def test_rate_limit_reason_survives_a_trailing_hint():
+    # gh appends a hint after the error. Reading only the last line handed the
+    # caller the hint and dropped the clause naming the bucket.
+    res = Result(
+        returncode=1,
+        stdout="",
+        stderr=(
+            "GraphQL: API rate limit already exceeded for user ID 1.\n"
+            "Try authenticating with: gh auth login\n"
+        ),
+    )
+    reason = _status._fetch_reason(res)
+    assert "resources.graphql" in reason
+    assert reason.startswith("GraphQL: API rate limit")
+
+
+def test_fetch_reason_passes_an_ordinary_failure_through():
+    res = Result(returncode=1, stdout="", stderr="could not resolve to a PullRequest")
+    assert _status._fetch_reason(res) == "could not resolve to a PullRequest"
+
+
+def test_fetch_reason_never_returns_empty_on_a_silent_failure():
+    # An empty reason would rebuild the unactionable verdict this replaces.
+    assert _status._fetch_reason(Result(returncode=1, stdout="", stderr="")).strip()
+
+
+def test_error_verdict_carries_the_reason(monkeypatch, capsys):
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: (None, "quota gone"))
+    assert _status.run_status("99") == 4
+    assert _json.loads(capsys.readouterr().out)["reason"] == "quota gone"
+
+
 def test_run_status_fetch_failure_is_error(monkeypatch, capsys):
-    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: None)
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: (None, "boom"))
     code = _status.run_status("99")
     assert code == 4
     import json
@@ -586,10 +631,10 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
     monkeypatch.setattr(
         _status,
         "_fetch",
-        lambda pr, cwd: {
+        lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-        },
+        }, ""),
     )
     monkeypatch.setattr(
         _status,
@@ -612,10 +657,10 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
     monkeypatch.setattr(
         _status,
         "_fetch",
-        lambda pr, cwd: {
+        lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-        },
+        }, ""),
     )
     monkeypatch.setattr(
         _status,

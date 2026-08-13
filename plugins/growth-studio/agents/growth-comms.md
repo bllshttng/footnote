@@ -28,7 +28,7 @@ that happened. Both ground every claim in a verified product-truth fact.
   omit it when byline is off.
 - Cite every claim as `[Heading]` against a product-truth heading.
 - Lead with the shipped fact, then the consequence for the reader.
-- One full sentence per physical line in prose.
+- One paragraph per physical line in prose. A newline starts the next paragraph.
 - Return the structured result JSON so the orchestrator records the draft.
 
 ## Don't
