@@ -234,6 +234,17 @@ def _kanban_card(
             note = (extra.get("note") or "").strip()
             body_lines.append(f"  {label}{' - ' + note if note else ''}")
 
+    # artifact_url: the user-supplied design/doc link (fno done --link). Shown
+    # on the board so the field has a purpose-built reader, not just a writer.
+    # Non-http(s) schemes render as code so a markdown auto-linker cannot turn a
+    # javascript:/data: URI into a clickable anchor (parity with render_html).
+    artifact_url = (entry.get("artifact_url") or "").strip()
+    if artifact_url:
+        if artifact_url.startswith(("https://", "http://")):
+            body_lines.append(f"  artifact: {artifact_url}")
+        else:
+            body_lines.append(f"  artifact: `{artifact_url}`")
+
     if body_lines:
         return header + "\n" + "\n".join(body_lines)
     return header

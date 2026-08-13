@@ -186,6 +186,50 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return oid or None
 
 
+_REPO_FROM_URL = re.compile(r"github\.com/([^/]+/[^/]+?)(?:\.git)?/pull/")
+
+
+def _row_repo(row: dict) -> Optional[str]:
+    """The ``owner/name`` repo a ledger delivery row belongs to, parsed from its
+    ``pr_url``. None when the row has no usable url (older rows); callers treat
+    None as 'do not filter on repo' so a missing url never silently drops a plan.
+    """
+    url = row.get("pr_url")
+    if isinstance(url, str):
+        m = _REPO_FROM_URL.search(url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _plan_path_for_pr(pr_number: int, repo: Optional[str] = None) -> Optional[str]:
+    """The plan_path bound to this PR's delivery row in the ledger, or None.
+
+    The ledger is global (cross-repo), and PR numbers are per-repo, so a bare
+    number match can return a foreign repo's plan. ``repo`` (``owner/name``)
+    scopes the match to this repository via the row's ``pr_url``; a row without a
+    parseable url is still considered, so the filter fails open rather than
+    silently dropping a plan. None means no plan - the fidelity gate is a no-op
+    for the PR. A ledger read failure is also None: a missing ledger must not
+    block a merge that has no plan-fidelity signal to evaluate."""
+    try:
+        from fno import paths as _paths
+        from fno.scoreboard.fold import load_ledger_rows
+
+        for row in load_ledger_rows(_paths.ledger_json()):
+            if row.get("pr_number") != pr_number:
+                continue
+            row_repo = _row_repo(row)
+            if repo is not None and row_repo is not None and row_repo != repo:
+                continue
+            pp = row.get("plan_path")
+            if isinstance(pp, str) and pp.strip():
+                return pp
+    except Exception:  # noqa: BLE001 - the gate is advisory on a missing ledger
+        return None
+    return None
+
+
 def _coverage_refused_reason(
     cov: Optional[dict],
     head: Optional[str] = None,
@@ -1073,6 +1117,34 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # staleness check above already refused a current mismatch; this makes gh
     # itself refuse if the head moves between here and the merge.
     covered_head = (cov.get("head_sha") or "") if cov and review_lane else ""
+
+    # (2c) Plan fidelity guard (x-cbab): the inverse of the coverage guard on the
+    # ownership axis - review_coverage is Rust-computed/Python-read; plan fidelity
+    # is Python-computed (fno.plan.fidelity)/read here. A plan whose declared
+    # deliverables did not all ship refuses the merge unless each shortfall
+    # carries a carveout (a PR-body sentence is not one). Skipped when the PR
+    # carries no plan (no denominator) or is not a code payload. The join is
+    # plan-grain, so an inline run with no separate planning thread has zero
+    # planned rows and passes; this catches an orphan plan that never shipped.
+    # A merge gate is required because a stop-gate-only check is skipped by a
+    # direct `fno pr merge`; the stop gate (loopcheck.rs) holds the other path.
+    _plan_path = _plan_path_for_pr(pr_number, repo)
+    if _plan_path and _pr_payload_is_code(repo, pr_number):
+        from fno.plan.fidelity import compute_plan_fidelity
+
+        try:
+            _fid = compute_plan_fidelity(plan_path=_plan_path)
+        except Exception as exc:  # noqa: BLE001 - fail OPEN: a broken probe must not wedge a green merge
+            _fid = {"refused": False, "reason": f"fidelity probe degraded: {exc}"}
+        if _fid.get("refused"):
+            _emit(
+                pr_number,
+                "blocked",
+                f"plan fidelity refused: {_fid.get('reason', 'uncovered shortfall')}",
+                "none",
+                err=True,
+            )
+            return 2
 
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a

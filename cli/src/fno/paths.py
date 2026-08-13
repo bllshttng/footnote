@@ -754,6 +754,34 @@ def briefs_dir() -> Path:
     return state_dir() / "briefs"
 
 
+def sidecar_dir() -> Path:
+    """Per-item footnote-owned sidecar directory (``~/.fno/sidecar/``).
+
+    Rides ``state_dir`` (so it follows the existing ``config.paths`` /
+    ``state_dir`` override) with no config knob of its own: one file per work
+    item, keyed by the url-encoded opaque id. Sibling of graph.json and
+    ledger.json so it inherits the same relocate-without-new-machinery rule.
+    """
+    return state_dir() / "sidecar"
+
+
+def sidecar_path(node_id: str) -> Path:
+    """Path to one item's sidecar file.
+
+    Reuses the claims key encoder (``urllib.parse.quote``, ``safe=""``) so an
+    id containing a path separator (``owner/repo#123``) lands as one filename
+    rather than a nested path.
+
+    Uses stdlib urllib.parse.quote directly rather than fno.claims.io.encode_key:
+    claims is a core-layer module and imports paths, so reaching into it from
+    here (platform) would create a platform -> core -> platform layer cycle.
+    The encoding mirrors claims' quote(safe="") so the two stay consistent.
+    """
+    from urllib.parse import quote
+
+    return sidecar_dir() / f"{quote(node_id, safe='')}.json"
+
+
 def fleet_dir() -> Path:
     """Return the fleet directory."""
     settings = _settings()

@@ -13,13 +13,17 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 ## Guides (task-oriented)
 
 - [guides/target.md](guides/target.md) - the autonomous loop: flags, gates, cross-project, resume
+- [guides/how-done-is-decided.md](guides/how-done-is-decided.md) - how the stop gate decides a run is done
 - [guides/think-and-plan.md](guides/think-and-plan.md) - design exploration, plan creation, wave execution
 - [guides/pr-lifecycle.md](guides/pr-lifecycle.md) - review, create, check, merged: the PR arc by hand
+- [guides/review.md](guides/review.md) - sigma panel versus a cross-model second opinion
+- [guides/fix.md](guides/fix.md) - fast repair versus methodical diagnosis
 - [guides/agents-quickstart.md](guides/agents-quickstart.md) - spawn and message peer agents (claude/codex/gemini)
 - [guides/execution-modes.md](guides/execution-modes.md) - when to use target vs do vs operator
 - [guides/per-task-executors.md](guides/per-task-executors.md) - how operator resolves an executor per task
 - [guides/megawalk-walker.md](guides/megawalk-walker.md) - the continuous-delivery loop
 - [guides/cross-project-inbox.md](guides/cross-project-inbox.md) - messaging between projects
+- [guides/worktrees.md](guides/worktrees.md) - isolate each feature in its own worktree
 - [guides/utilities.md](guides/utilities.md) - debug, code review
 - [guides/reading-shipped-plans.md](guides/reading-shipped-plans.md) - the completion-stamp format
 

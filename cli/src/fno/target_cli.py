@@ -993,6 +993,79 @@ def check_contained() -> None:
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
 
+@target_app.command("denominator-ratio", hidden=True)
+def denominator_ratio(
+    since_days: int = typer.Option(
+        28, "--since-days", help="Events lookback window in days."
+    ),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the ratio as JSON."),
+) -> None:
+    """The deliverables-1 ratio (x-cbab): is the cheap --deliverables exit a bypass?
+
+    Reads ``target_denominator`` events. Of declared-denominator inits (plan or
+    deliverables), the fraction that used ``--deliverables 1``: past roughly 80
+    percent the exit is reflexive and ``enumerated_scope`` needs widening. A
+    stamped 1 still beats an absent denominator, so this measures drift, not
+    correctness.
+    """
+    import json as _json
+    from datetime import datetime, timedelta
+
+    from fno.paths import resolve_repo_root
+    from fno.scoreboard.fold import read_jsonl_events
+
+    events = read_jsonl_events(
+        [resolve_repo_root() / ".fno" / "events.jsonl"], {"target_denominator"}
+    )
+    cutoff = datetime.now() - timedelta(days=since_days)
+
+    def _ts(e):
+        raw = e.get("ts")
+        # naive-local compare; events are written naive-local (fold._parse_ts).
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", ""))
+        except (ValueError, TypeError):
+            return None
+
+    counts = {"plan": 0, "deliverables": 0, "none": 0}
+    ones = 0
+    for e in events:
+        if _ts(e) is None or _ts(e) < cutoff:
+            continue
+        raw = e.get("data")
+        data = raw if isinstance(raw, dict) else {}
+        d = data.get("denominator")
+        if d in counts:
+            counts[d] += 1
+        if d == "deliverables" and data.get("count") == 1:
+            ones += 1
+
+    declared = counts["plan"] + counts["deliverables"]
+    ratio = round(100 * ones / declared, 1) if declared else None
+    verdict = (
+        "no declared-denominator inits in window"
+        if declared == 0
+        else ("bypass: deliverables:1 dominates; widen enumerated_scope" if (ratio or 0) >= 80 else "healthy")
+    )
+    out = {
+        "deliverables_1_ratio_pct": ratio,
+        "deliverables_1": ones,
+        "plan_backed": counts["plan"],
+        "deliverables_declared": counts["deliverables"],
+        "none": counts["none"],
+        "since_days": since_days,
+        "verdict": verdict,
+    }
+    if json_out:
+        typer.echo(_json.dumps(out, indent=2))
+        return
+    typer.echo(
+        f"deliverables:1 ratio: {ratio if ratio is not None else 'n/a'}%  "
+        f"({ones} of {declared} declared; plan={counts['plan']}, "
+        f"deliverables={counts['deliverables']}, none={counts['none']})  {verdict}"
+    )
+
+
 @target_app.command("status")
 def status(
     node: Optional[str] = typer.Argument(
@@ -1079,6 +1152,16 @@ def init(
         "and so cannot pass the token through --input. There is deliberately no "
         "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
     ),
+    deliverables: Optional[int] = typer.Option(
+        None,
+        "--deliverables",
+        help="Declare the deliverable count for a plan-less code run: the scope "
+        "denominator. Stamps `deliverables: N` into the manifest so a run that "
+        "ships fewer than N leaves a falsifiable shortfall instead of an "
+        "inexpressible one. Omit for plan-backed runs (the plan is the "
+        "denominator). The cheap N=1 exit is deliberate; a stamped 1 is "
+        "falsifiable where an absent denominator is not.",
+    ),
 ) -> None:
     """Bootstrap a target session via the canonical init script.
 
@@ -1092,6 +1175,22 @@ def init(
             "Refusing to write a stub state file (empty input + plan); the stop "
             "hook would archive it, and a re-running bootstrap loops.\n"
             'Example: fno target init --input "fix the login redirect bug"',
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # The denominator is a positive integer or absent. Zero/negative is refused
+    # at parse, never stored: a stamped 0 would read as "deliver nothing" and
+    # invert the gate. Absent (the default) leaves the field out of the manifest
+    # entirely, which is distinct from 0 - absence is the unmeasurable case the
+    # denominator gate keys on, never a measured-zero (AC1-DENOM). Runs before
+    # the review gates and plugin resolution: a usage error surfaces as itself,
+    # not as a later missing-plugin or unsatisfiable-reviewer message.
+    if deliverables is not None and deliverables <= 0:
+        typer.echo(
+            f"fno target init: --deliverables must be a positive integer (got "
+            f"{deliverables}). Omit it for plan-backed runs; the plan's task "
+            f"count is the denominator.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -1257,6 +1356,24 @@ def init(
                     err=True,
                 )
 
+    # Scope denominator gate (x-cbab): a code node dispatched with no plan and no
+    # --deliverables makes 'shipped M of N' inexpressible. Fires only for a
+    # resolved node - a free-text idea makes its own denominator via /blueprint,
+    # and a bound plan back-filled just above already satisfies it. Sits AFTER
+    # the back-fill so a node with a bound plan is never refused for lacking one,
+    # and BEFORE the manifest is written (no state on a refusal). enumerated_scope
+    # withdraws the cheap --deliverables exit for an unambiguously enumerated node.
+    # Exit 2 matches init's other refusals; REVIEW_GATE_REFUSED (9) is the
+    # check-review-gate verb's code, re-stamped from this 2 for shell callers.
+    from fno.target.denominator import absent_denominator_refusal
+
+    _denom_refusal = absent_denominator_refusal(
+        node=_dispatch_node, plan_path=plan_path, deliverables=deliverables
+    )
+    if _denom_refusal:
+        typer.echo(_denom_refusal, err=True)
+        raise typer.Exit(code=2)
+
     env = dict(os.environ)
     env["TARGET_START"] = "1"
     # Change D (x-a7be): resolve `attended` from the substrate before the bash
@@ -1280,6 +1397,8 @@ def init(
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
     if dispatch_provider:
         env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
+    if deliverables is not None:
+        env["TARGET_DELIVERABLES"] = str(deliverables)
     # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns
     # inherit the parent env wholesale, so per-provider scrubbing cannot cover it).
     env["TARGET_BEASTMODE"] = "1" if beastmode else ""
@@ -1300,7 +1419,43 @@ def init(
         _maybe_dispatch_work_start()
         _maybe_reconcile_lane_slot()
         _maybe_check_resume_receipt()
+        _record_denominator_choice(plan_path, deliverables, _dispatch_node)
     raise typer.Exit(code=propagate_returncode(proc.returncode))
+
+
+def _record_denominator_choice(
+    plan_path: Optional[str], deliverables: Optional[int], node: Optional[dict]
+) -> None:
+    """Emit a ``target_denominator`` event for the deliverables-1 ratio (x-cbab).
+
+    Best-effort: a recording failure never fails a successful init. The cheap
+    ``--deliverables`` exit is the load-bearing bypass risk (reflexive N=1
+    degrades the gate to a formality); this event is how that abuse gets measured
+    off the events log instead of noticed by hand.
+    """
+    try:
+        from fno.events import _build, append_event
+        from fno.target.denominator import enumerated_scope
+
+        if plan_path and plan_path.strip():
+            denominator = "plan"
+        elif deliverables is not None:
+            denominator = "deliverables"
+        else:
+            denominator = "none"
+        data: dict = {"denominator": denominator}
+        if deliverables is not None:
+            data["count"] = deliverables
+        if isinstance(node, dict):
+            data["enumerated"] = enumerated_scope(
+                str(node.get("title") or ""), str(node.get("details") or "")
+            )
+        # init's cwd IS the repo root (the manifest was just written to
+        # .fno/target-state.md relative), so the default events path lands beside
+        # it without a resolve_repo_root git round-trip on every successful init.
+        append_event(_build("target_denominator", "target", data))
+    except Exception:  # noqa: BLE001 - a measurement failure must not fail init
+        pass
 
 
 def _warn_no_merge_dropped() -> None:

@@ -2,6 +2,41 @@
 
 From install to your first shipped PR, then the handful of commands you'll actually run day to day.
 
+## First five minutes
+
+Install to a shipped PR in six steps.
+The rest of this page fills in the details.
+
+1. In a Claude Code session, install the plugin, then restart the session:
+   ```
+   /plugin marketplace add bllshttng/footnote
+   /plugin install fno@footnote
+   ```
+2. Confirm the CLI is live:
+   ```bash
+   fno --version
+   ```
+   If that fails, install the Rust front door with `cargo install fno`.
+3. Confirm GitHub is authenticated:
+   ```bash
+   gh auth status
+   ```
+   This is the most common cold-start failure.
+   If it is not, run `gh auth login`.
+4. Run the setup wizard and accept every default:
+   ```bash
+   fno setup wizard
+   ```
+5. Point the loop at a small task:
+   ```
+   /fno:target "add a health check endpoint that returns server status"
+   ```
+6. Walk away.
+   When it ships, the PR URL prints.
+
+That is the whole path to a first PR.
+When a step breaks, the sections below cover what to change.
+
 ## Install
 
 In any Claude Code session:

@@ -11,6 +11,7 @@ use crate::{completion_output::allow_output, delivery_completion::pr_passes};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -5186,7 +5187,25 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     }
                 }
 
-                let (reviewed, probes_passed) = (pr_info.reviewed, probe_block.is_none());
+                // plan fidelity (x-cbab): the stop-gate half of AC5. A plan whose
+                // declared deliverables did not all ship blocks DonePRGreen until
+                // each shortfall carries a carveout - the agent files one and the
+                // next eval passes. Gated on the same conjuncts as done_probes and
+                // fail-open on a stale/missing fno (the merge gate is the backstop).
+                let mut fidelity_block: Option<String> = None;
+                if pr_open && ci_ok && pr_info.reviewed && head_shipped {
+                    let fno_bin =
+                        std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
+                    match evaluate_plan_fidelity(manifest.plan_path.as_deref(), &fno_bin, &cwd) {
+                        FidelityGate::Refused { reason } => fidelity_block = Some(reason),
+                        _ => {}
+                    }
+                }
+
+                let (reviewed, probes_passed) = (
+                    pr_info.reviewed,
+                    probe_block.is_none() && fidelity_block.is_none(),
+                );
                 if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
                     // Coverage gate (x-0eaf): the three pr_passes conjuncts all ask
                     // "did anyone object"; coverage asks "did anyone review". A
@@ -5654,12 +5673,16 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
                 // done() false on promise -> block with named reason. P2
                 // (ab-098967b4): enrich with a loop-boundary inbox nudge.
-                // A failed probe IS the blocker when everything else is green;
-                // build_block_reason would otherwise report a healthy PR.
+                // A failed probe OR a fidelity refusal IS the blocker when
+                // everything else is green; build_block_reason would otherwise
+                // report a healthy PR.
                 let reason = crate::nudge::append_inbox_nudge(
-                    &probe_block.clone().unwrap_or_else(|| {
-                        build_block_reason(&pr_info, &head_sha, open_findings.is_empty())
-                    }),
+                    &probe_block
+                        .clone()
+                        .or(fidelity_block.clone())
+                        .unwrap_or_else(|| {
+                            build_block_reason(&pr_info, &head_sha, open_findings.is_empty())
+                        }),
                     &cwd,
                     &session_id,
                 );
@@ -5979,6 +6002,60 @@ enum ProbeGate {
         reason: String,
         results: Value,
     },
+}
+
+/// Plan-fidelity stop gate (x-cbab). The stop-gate half of AC5; the merge gate
+/// (`_merge.py`, which imports the core in-process) is the other. Shells
+/// `fno plan fidelity --json <plan_path>` and blocks DonePRGreen when a planned
+/// deliverable is unjoined and uncovered by a carveout - the agent must file a
+/// carveout before it may stop. Mirrors `ProbeGate`'s shape deliberately.
+#[derive(Debug)]
+enum FidelityGate {
+    /// No plan, or the probe degraded. A missing/stale `fno` (one without the
+    /// `plan fidelity` verb) must NOT wedge the stop gate - the merge gate is the
+    /// backstop, and `fno doctor` flags the staleness. Fail open here.
+    Absent,
+    Pass,
+    Refused {
+        reason: String,
+    },
+}
+
+/// Run `fno plan fidelity --json` for the bound plan and classify the decision.
+///
+/// Fail-open on every error path (no fno, non-zero exit, unparseable JSON): the
+/// stop gate must not block on a broken probe. The inversion lives in the Python
+/// core (`fno.plan.fidelity`); Rust only reads the `refused` bool, so there is
+/// one implementation of the join and the gate and the loop cannot drift.
+/// `fno_bin` is resolved by the caller (from `FNO_LOOPCHECK_FNO_BIN`, default
+/// `fno`) so this function is hermetically testable with a stub script.
+fn evaluate_plan_fidelity(plan_path: Option<&str>, fno_bin: &OsStr, cwd: &Path) -> FidelityGate {
+    let plan = match plan_path {
+        Some(p) if !p.is_empty() => p,
+        _ => return FidelityGate::Absent,
+    };
+    let out = match Command::new(fno_bin)
+        .args(["plan", "fidelity", plan, "--json"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return FidelityGate::Absent,
+    };
+    let v: Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(_) => return FidelityGate::Absent,
+    };
+    match v.get("refused").and_then(|r| r.as_bool()) {
+        Some(true) => FidelityGate::Refused {
+            reason: v
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("plan has unjoined deliverables with no covering carveout")
+                .to_string(),
+        },
+        _ => FidelityGate::Pass,
+    }
 }
 
 /// Unwrap a YAML scalar to the string a YAML parser would produce.
@@ -6949,6 +7026,74 @@ fn probe_run_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── plan fidelity stop gate (x-cbab) ──────────────────────────────────────
+    //
+    // Hermetic: a stub `fno` script emits canned JSON, so the gate is exercised
+    // without the real CLI. Mirrors the merge-gate half (tested in Python); the
+    // two readers are independent by design.
+
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn _write_fno_stub(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fno-fid-{}-{}", std::process::id(), name));
+        fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("fno");
+        fs::write(&stub, format!("#!/bin/sh\necho '{}'", body)).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        stub
+    }
+
+    #[test]
+    fn plan_fidelity_gate_blocks_an_uncovered_shortfall() {
+        let stub = _write_fno_stub(
+            "refuse",
+            r#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#,
+        );
+        let cwd = std::env::temp_dir();
+        match evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd) {
+            FidelityGate::Refused { reason } => assert!(reason.contains("unjoined")),
+            other => panic!("expected Refused, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_fidelity_gate_passes_when_not_refused() {
+        let stub = _write_fno_stub("pass", r#"{"refused": false}"#);
+        let cwd = std::env::temp_dir();
+        assert!(matches!(
+            evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd),
+            FidelityGate::Pass
+        ));
+    }
+
+    #[test]
+    fn plan_fidelity_gate_absent_without_a_plan() {
+        let stub = _write_fno_stub("absent", r#"{"refused": true}"#);
+        let cwd = std::env::temp_dir();
+        assert!(matches!(
+            evaluate_plan_fidelity(None, stub.as_os_str(), &cwd),
+            FidelityGate::Absent
+        ));
+        assert!(matches!(
+            evaluate_plan_fidelity(Some(""), stub.as_os_str(), &cwd),
+            FidelityGate::Absent
+        ));
+    }
+
+    #[test]
+    fn plan_fidelity_gate_fails_open_on_an_unparseable_or_missing_fno() {
+        // A stale fno without the verb prints an error, not JSON. The stop gate
+        // must not block on that - the merge gate is the backstop, and fail-open
+        // here is what keeps a stale install from wedging every run.
+        let stub = _write_fno_stub("stale", "No such command: fidelity");
+        let cwd = std::env::temp_dir();
+        assert!(matches!(
+            evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd),
+            FidelityGate::Absent
+        ));
+    }
 
     // ── review_coverage reaches BOTH logs, scoped by repo (x-f43c) ───────────
 

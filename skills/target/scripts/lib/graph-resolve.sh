@@ -42,12 +42,25 @@ if [[ -z "${GRAPH_JSON_PATH:-}" ]] && command -v fno >/dev/null 2>&1; then
 fi
 GRAPH_JSON="${GRAPH_JSON:-${GRAPH_JSON_PATH:-$HOME/.fno/graph.json}}"
 
+# Single fno-vs-external-vs-none classifier, shared with parse-claims-arg.sh so
+# the id-shape test has one home. Sourced as a bundled sibling (BASH_SOURCE
+# resolves beside this file at both the repo-root and skills/ locations).
+source "$(dirname "${BASH_SOURCE[0]}")/node-id.sh"
+
 resolve_arg() {
     local arg="$1"
-    # Pass through anything that isn't an ab- query unless the caller
-    # explicitly opts in to title fuzzy matching. Most /target callers pass
-    # raw feature descriptions that we must not collapse to a graph node.
-    if [[ ! "$arg" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] && [[ "${RESOLVE_FUZZY:-0}" != "1" ]]; then
+    local kind
+    kind="$(node_id_kind "$arg")"
+    # External ids are opaque work handles, never graph-resolvable. Not even
+    # under RESOLVE_FUZZY, which is for title matching rather than id matching.
+    if [[ "$kind" == "external" ]]; then
+        echo "$arg"
+        return 0
+    fi
+    # Non-ids pass through unless the caller opted into title fuzzy matching.
+    # Most /target callers pass raw feature descriptions that we must not
+    # collapse to a graph node.
+    if [[ "$kind" == "none" ]] && [[ "${RESOLVE_FUZZY:-0}" != "1" ]]; then
         echo "$arg"
         return 0
     fi
@@ -137,11 +150,13 @@ PYEOF
 # Mirrors the pre-fuzzy behavior so older environments are not regressed.
 _resolve_arg_legacy() {
     local arg="$1"
-    if [[ ! "$arg" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+    local kind
+    kind="$(node_id_kind "$arg")"
+    if [[ "$kind" != "fno" ]]; then
         # A partial/short id (fewer hex than a real id) cannot be resolved
         # without the python module. Surface this explicitly so a user typing a
         # prefix in a non-Python environment doesn't see silent passthrough
-        # and assume the resolver worked.
+        # and assume the resolver worked. External ids pass through silently.
         if [[ "$arg" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]+$ ]]; then
             echo "[graph-resolve] partial/short node id '$arg' cannot resolve in legacy mode; pass a full <prefix>-<4..8 hex> id or install the fno python package" >&2
         fi

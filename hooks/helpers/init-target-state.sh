@@ -997,6 +997,15 @@ EOF
   # Authority grant (`/target yolo`): omitted unless granted, so absence is the default.
   _authority_line=""
   [[ "${TARGET_BEASTMODE:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
+  # Scope denominator (x-cbab): a declared deliverable count for a plan-less
+  # code run. Omitted unless --deliverables was passed, so absence (not 0) is
+  # the unmeasurable state the denominator gate and the deliverables-1 ratio
+  # measurement key on - a stamped 0 would invert the gate, so the Python side
+  # refuses <=0 before this runs and only a positive int reaches the manifest.
+  _deliverables_line=""
+  if [[ -n "${TARGET_DELIVERABLES:-}" ]]; then
+    _deliverables_line="deliverables: ${TARGET_DELIVERABLES}"$'\n'
+  fi
   # Work-evidence baseline for the do-provenance stamp; `null` fails it closed.
   _initial_head=$(git -C "$REPO_ROOT" rev-parse --verify -q HEAD 2>/dev/null || echo null)
 
@@ -1010,7 +1019,7 @@ created_at: $TIMESTAMP
 initial_head: $_initial_head
 input: "${escaped_input}"
 plan_path: "${escaped_plan_path}"
-cross_project: $CROSS_PROJECT
+${_deliverables_line}cross_project: $CROSS_PROJECT
 # Harness identity (canonical). harness supersedes provider; harness_session_id
 # supersedes claude_session_id/codex_thread_id. Those legacy keys stay for one
 # release as aliases (removed next release).

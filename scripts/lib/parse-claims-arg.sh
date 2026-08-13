@@ -19,6 +19,11 @@
 
 set -euo pipefail
 
+# Single fno-vs-external-vs-none classifier, shared with graph-resolve.sh so the
+# id-shape test has one home. Sourced as a bundled sibling (BASH_SOURCE resolves
+# beside this file at both the repo-root and skills/ locations).
+source "$(dirname "${BASH_SOURCE[0]}")/node-id.sh"
+
 ARG="${1:-}"
 
 if [[ -z "$ARG" ]]; then
@@ -26,7 +31,11 @@ if [[ -z "$ARG" ]]; then
     exit 0
 fi
 
-if [[ ! "$ARG" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+# Only an fno node id is a /blueprint claim target. External tracker ids and
+# non-ids are not fno claims; the caller falls through to its path/description
+# classifier. A shape match used to trigger `fno backlog get` on any matching
+# token, which hard-failed for an external id that collided with the fno shape.
+if [[ "$(node_id_kind "$ARG")" != "fno" ]]; then
     printf 'CLAIMS_ID=""\n'
     exit 0
 fi

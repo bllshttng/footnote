@@ -228,6 +228,48 @@ def brief(
 
 
 @plan_app.command(
+    "fidelity",
+    help=(
+        "Gate decision: did this plan ship every planned deliverable? Refuses "
+        "(exit 1) when a planned deliverable is unjoined and uncovered by a "
+        "carveout. The same join as the scoreboard, inverted on the ownership "
+        "axis - telemetry marks an unjoined plan n/a, the gate refuses it. "
+        "--json emits the decision object both gate readers consume."
+    ),
+)
+def fidelity(
+    plan_path: str = typer.Argument(..., help="Path to the plan markdown file"),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the decision as JSON."),
+    since_days: int = typer.Option(
+        180, "--since-days", help="Ledger lookback window in days."
+    ),
+) -> None:
+    """The plan-fidelity gate decision for one plan (x-cbab)."""
+    from fno.plan.fidelity import compute_plan_fidelity
+
+    decision = compute_plan_fidelity(plan_path=plan_path, since_days=since_days)
+    if json_out:
+        typer.echo(json.dumps(decision, indent=2))
+        return
+    _render_fidelity(decision)
+    if decision.get("refused"):
+        raise typer.Exit(code=1)
+
+
+def _render_fidelity(decision: dict) -> None:
+    out = sys.stdout.write
+    if decision.get("refused"):
+        out(f"REFUSED: {decision.get('reason', 'uncovered shortfall')}\n")
+    else:
+        out("pass: every planned deliverable shipped or is covered by a carveout\n")
+    out(
+        f"  planned={decision.get('planned', 0)} "
+        f"delivered={decision.get('delivered', 0)} "
+        f"carveouts={decision.get('carveouts', 0)}\n"
+    )
+
+
+@plan_app.command(
     "validate",
     help=(
         "Validate a single-doc plan (read-only). The default checks frontmatter "
