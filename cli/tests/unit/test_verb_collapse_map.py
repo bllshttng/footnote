@@ -112,7 +112,14 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
 
 def test_live_baseline_matches_the_projected_allocation():
     leaves = _leaves()
-    assert len(leaves) == 85
+    rows = _rows()
+    mapped_groups = {row["current-leaf"].split()[0] for row in rows}
+    projected = {
+        row["current-leaf"] if row["tier"] == "KEEP" else row["current-leaf"].split()[0]
+        for row in rows
+    }
+    assert {leaf for leaf in leaves if leaf.split()[0] in mapped_groups} == projected
+    assert len(leaves) <= 99
     assert "fno-agents" in leaves
 
 
