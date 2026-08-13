@@ -7585,21 +7585,18 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    fn _write_fno_stub(name: &str, body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fno-fid-{}-{}", std::process::id(), name));
-        fs::create_dir_all(&dir).unwrap();
-        let stub = dir.join("fno");
+    fn _write_fno_stub(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("fno");
         fs::write(&stub, format!("#!/bin/sh\necho '{}'", body)).unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-        stub
+        (dir, stub)
     }
 
     #[test]
     fn plan_fidelity_gate_blocks_an_uncovered_shortfall() {
-        let stub = _write_fno_stub(
-            "refuse",
-            r#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#,
-        );
+        let (_dir, stub) =
+            _write_fno_stub(r#"{"refused": true, "reason": "1 unjoined, 0 carveouts"}"#);
         let cwd = std::env::temp_dir();
         match evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd) {
             FidelityGate::Refused { reason } => assert!(reason.contains("unjoined")),
@@ -7609,7 +7606,7 @@ mod tests {
 
     #[test]
     fn plan_fidelity_gate_passes_when_not_refused() {
-        let stub = _write_fno_stub("pass", r#"{"refused": false}"#);
+        let (_dir, stub) = _write_fno_stub(r#"{"refused": false}"#);
         let cwd = std::env::temp_dir();
         assert!(matches!(
             evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd),
@@ -7619,7 +7616,7 @@ mod tests {
 
     #[test]
     fn plan_fidelity_gate_absent_without_a_plan() {
-        let stub = _write_fno_stub("absent", r#"{"refused": true}"#);
+        let (_dir, stub) = _write_fno_stub(r#"{"refused": true}"#);
         let cwd = std::env::temp_dir();
         assert!(matches!(
             evaluate_plan_fidelity(None, stub.as_os_str(), &cwd),
@@ -7636,7 +7633,7 @@ mod tests {
         // A stale fno without the verb prints an error, not JSON. The stop gate
         // must not block on that - the merge gate is the backstop, and fail-open
         // here is what keeps a stale install from wedging every run.
-        let stub = _write_fno_stub("stale", "No such command: fidelity");
+        let (_dir, stub) = _write_fno_stub("No such command: fidelity");
         let cwd = std::env::temp_dir();
         assert!(matches!(
             evaluate_plan_fidelity(Some("/x/plan.md"), stub.as_os_str(), &cwd),
