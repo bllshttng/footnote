@@ -945,11 +945,31 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
     // accepted any u32. Reject anything outside 1..=REGISTRY_SCHEMA_VERSION so a
     // pre-inside-leg daemon refuses a v5 store (instead of silently dropping the
     // inside-leg report) and the current daemon refuses a future v6 store.
-    if reg.schema_version < 1 || reg.schema_version > REGISTRY_SCHEMA_VERSION {
+    // READ FORWARD (see Python load_registry and client_verbs). The earlier
+    // forward-compat guard refused a newer store so a stale reader could not
+    // silently drop a field. The refusal turned out to be the worse failure:
+    // registry.json is global to every agent here, so one process ahead of the
+    // deployment took the whole fleet's registry reads down at once. Serde
+    // ignores unknown fields on RegistryEntry, so a newer store reads as the
+    // subset this binary understands.
+    //
+    // Dropping a field is now made safe by refusing to WRITE (update_registry
+    // below) and by announcing every degraded read, rather than by refusing to
+    // look. A version below 1 is damage, not a newer writer, and still fails.
+    if reg.schema_version < 1 {
         return Err(StateError::UnsupportedSchemaVersion {
             found: reg.schema_version,
             max: REGISTRY_SCHEMA_VERSION,
         });
+    }
+    if reg.schema_version > REGISTRY_SCHEMA_VERSION {
+        eprintln!(
+            "fno agents: registry is schema_version={}, ahead of the \
+             schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
+             Reading the fields it knows and ignoring the rest; writes are \
+             refused until this fno is upgraded. Rows may be incomplete.",
+            reg.schema_version
+        );
     }
     Ok(reg)
 }
@@ -970,6 +990,16 @@ where
     // classic footgun; locking the sidecar sidesteps it entirely).
     let lock = acquire_exclusive(&lock_path(path))?;
     let mut registry = read_existing_registry(path)?;
+    // The half of read-forward that protects the file. The read above drops
+    // fields this binary does not know, so writing those rows back would erase
+    // them for every agent on the machine. Checked under the lock, against what
+    // was actually read, so a writer that raced in between cannot slip past.
+    if registry.schema_version > REGISTRY_SCHEMA_VERSION {
+        return Err(StateError::UnsupportedSchemaVersion {
+            found: registry.schema_version,
+            max: REGISTRY_SCHEMA_VERSION,
+        });
+    }
     let before = registry
         .entries
         .iter()
@@ -2111,25 +2141,50 @@ mod tests {
     }
 
     #[test]
-    fn load_registry_rejects_unsupported_schema_version() {
-        // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v14, or - for an old daemon -
-        // a version it cannot interpret), while v1..=current still read.
+    fn load_registry_reads_a_newer_schema_forward() {
+        // This assertion was inverted deliberately. The old contract (Codex P2,
+        // ab-a171ceb2) refused a future version so a stale reader could not
+        // silently drop a field. Refusing turned out to be the worse failure:
+        // registry.json is shared by every agent on the machine, so one process
+        // ahead of the deployment took the whole fleet's reads down at once.
+        // Dropping a field is made safe by refusing to WRITE and by announcing
+        // the degrade, not by refusing to look.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
         std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
-        match load_registry(&path) {
+        assert!(
+            load_registry(&path).is_ok(),
+            "a newer writer must not brick this reader"
+        );
+        std::fs::write(&path, r#"{"schema_version":1,"agents":[]}"#).unwrap();
+        assert!(
+            load_registry(&path).is_ok(),
+            "v1 must still read (back-compat)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_refuses_to_write_over_a_newer_schema() {
+        // The write block is what makes reading forward safe here.
+        let dir = tmpdir("version-write-guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        let newer = r#"{"schema_version":14,"agents":[]}"#;
+        std::fs::write(&path, newer).unwrap();
+
+        match update_registry(&path, |reg| reg.entries.clear()) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
                 assert_eq!(found, 14);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
         }
-        std::fs::write(&path, r#"{"schema_version":1,"agents":[]}"#).unwrap();
-        assert!(
-            load_registry(&path).is_ok(),
-            "v1 must still read (back-compat)"
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            newer,
+            "the refused write must leave the newer file byte-identical"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

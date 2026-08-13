@@ -432,8 +432,27 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let obj = raw
         .as_object()
         .ok_or_else(|| "registry top-level is not a JSON object".to_string())?;
+    // READ FORWARD, matching Python's load_registry. This store is global to
+    // every agent on the machine, so refusing a newer writer bricked every
+    // deployed reader at once rather than only the one that was behind. Rows are
+    // read as raw `Value` here and unknown keys are already ignored, so a newer
+    // store costs this path nothing but the fields it cannot see.
+    //
+    // The announcement is required, not courtesy: silently reading a partial row
+    // makes it indistinguishable from a complete one, and a routing decision
+    // taken on one leaves no trace. Fixing only Python would have left this
+    // path, the daemon, and mux still failing closed on the same file.
     match obj.get("schema_version").and_then(Value::as_u64) {
         Some(v) if ACCEPTED_SCHEMA_VERSIONS.contains(&v) => {}
+        Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
+            eprintln!(
+                "fno agents: registry at {} is schema_version={v}, ahead of the \
+                 schema_version={REGISTRY_SCHEMA_VERSION} this fno understands. \
+                 Reading the fields it knows and ignoring the rest; writes are \
+                 refused until this fno is upgraded. Rows may be incomplete.",
+                registry_path.display()
+            );
+        }
         other => {
             return Err(format!(
             "registry has schema_version={other:?}; this fno understands {REGISTRY_SCHEMA_VERSION}"
@@ -4886,11 +4905,27 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v14 is the future-drift case a pre-bump reader would have on v13.
-        fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
+        // A NEWER schema_version now reads forward rather than erroring. The old
+        // refusal meant one source-ahead writer bricked every deployed reader on
+        // the machine at once; a reader that is merely behind must degrade, not
+        // take the fleet down. Matches Python load_registry.
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":99,"agents":[{valid}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":14,"agents":[{valid}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+
+        // A missing or non-integer version is damage, not a newer writer.
+        fs::write(&reg, r#"{"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":14,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as
