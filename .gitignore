@@ -1,7 +1,7 @@
 # Claude Code temp files
 .claude/*.local.md
 .claude/audit-progress.txt
-.claude/plans/
+.claude/plans
 .claude/scheduled_tasks.lock
 .claude/scheduled_tasks.json
 .claude/worktrees/
@@ -80,10 +80,12 @@ internal
 cli/dist/
 cli/.venv/
 
-# managed by link-skills.py
-.claude/skills/
-.claude/commands/
-.claude/agents/
+# managed by link-skills.py (real dirs) and setup-worktree.sh (symlinks).
+# No trailing slash: git treats a symlink as a file, so `.claude/skills/`
+# would not match the symlink setup-worktree.sh creates in every worktree.
+.claude/skills
+.claude/commands
+.claude/agents
 .claude/.skill-scoping-state.json
 # local runtime hook logs (never commit)
 .claude/hooks/
