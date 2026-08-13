@@ -20315,6 +20315,190 @@ mod tests {
         assert!(v.attach_place.is_none());
     }
 
+    /// Replace a view's layout with `n` real workspaces (ids 1..=n), so a picker
+    /// opened over it has to cope with more destinations than there are digits.
+    /// 14 is the operator's real number, and the number at which five used to
+    /// vanish.
+    fn widen_to_squads(v: &mut View, n: u64) {
+        v.layout.squads = (1..=n).map(|i| meta(i, &format!("ws{i}"), 1, 0)).collect();
+    }
+
+    /// The `display_rows()` index of the attachable bg-claude agent row. Read
+    /// rather than hardcoded, because widening the workspace list shifts every
+    /// row index below it.
+    fn attachable_agent_row(v: &View) -> usize {
+        v.display_rows()
+            .iter()
+            .position(|r| {
+                matches!(r, DisplayRow::Agent(a)
+                    if a.pane_id.is_none() && !a.exited && a.attach_id.is_some())
+            })
+            .expect("an attachable agent row")
+    }
+
+    /// Open the attach picker through the CLICK door (`apply_hit`), which does
+    /// not depend on a sideline row index.
+    async fn open_attach_by_click(v: &mut View) {
+        apply_hit(
+            v,
+            ChromeHit::OpenAttachPlace {
+                id: "c19cd2c3".into(),
+                squad: None,
+            },
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn attach_picker_reaches_past_the_ninth_workspace() {
+        // AC3-HP: with 14 workspaces, the 10th and the 14th are REACHABLE. Under
+        // `.take(9)` they were not in the list at all, so no key could get to
+        // them and nothing told the operator they existed.
+        let mut v = unified_rows_view();
+        widen_to_squads(&mut v, 14);
+        open_attach_by_click(&mut v).await;
+        let mut buf = Vec::new();
+        assert_eq!(
+            v.attach_place.as_ref().unwrap().squads.len(),
+            14,
+            "every workspace is a candidate, not the first nine"
+        );
+
+        // Walk to the 10th (index 9): past the digit range by construction.
+        attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "walking the list attaches nothing");
+        assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
+
+        // ...and on to the 14th, where the clamp stops it.
+        attach_place_keys(&mut v, b"jjjjjjjj", &mut buf).await.unwrap();
+        let picker = v.attach_place.as_ref().unwrap();
+        assert_eq!(picker.target(), Some(14), "the last workspace is reachable");
+        assert_eq!(picker.cursor, 13, "clamped at the end, no wrap");
+
+        // Committing there really targets the 14th, not a nine-capped stand-in.
+        attach_place_keys(&mut v, b"L", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+                assert_eq!(placement.target, PaneTarget::SquadId(14));
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_picker_rows_past_nine_carry_no_digit() {
+        // The drawn numbering must never lie about what a digit will do: nine
+        // digits exist, so exactly nine rows are numbered and the rest are not.
+        let mut v = unified_rows_view();
+        widen_to_squads(&mut v, 14);
+        open_attach_by_click(&mut v).await;
+        let picker = v.attach_place.as_ref().unwrap();
+        let lines = v.attach_place_lines(picker);
+        assert!(lines[9].contains("9 ws9"), "the ninth row is numbered");
+        assert!(
+            !lines[10].contains("10 ws10"),
+            "the tenth carries no ordinal: {:?}",
+            lines[10]
+        );
+        assert!(lines[10].contains("ws10"), "but it IS listed");
+    }
+
+    #[tokio::test]
+    async fn both_attach_picker_entry_paths_build_the_same_candidate_list() {
+        // The click path (apply_hit) and the keyboard path (p/Enter) used to
+        // build this list independently, which is how they drifted before. One
+        // helper now feeds both; this pins that they cannot drift again by
+        // asserting the two paths agree on the SAME layout.
+        // Two views built identically: unified_rows_view() is deterministic, so
+        // the only difference between them is which door gets opened.
+        let widen = |v: &mut View| {
+            widen_to_squads(v, 14);
+            v.layout.squads.push(mission_meta(5, "epic  0/4"));
+        };
+        let mut click = unified_rows_view();
+        widen(&mut click);
+        let mut keyboard = unified_rows_view();
+        widen(&mut keyboard);
+
+        open_attach_by_click(&mut click).await;
+
+        keyboard.selector = Some(attachable_agent_row(&keyboard));
+        selector_keys(&mut keyboard, b"p", &mut Vec::new())
+            .await
+            .unwrap();
+
+        let a = click.attach_place.as_ref().expect("click opens the picker");
+        let b = keyboard
+            .attach_place
+            .as_ref()
+            .expect("keyboard opens the picker");
+        assert_eq!(a.squads, b.squads, "one list, two doors");
+        assert_eq!(a.squads.len(), 14, "and it is the uncapped one");
+        assert!(
+            !a.squads.iter().any(|&id| is_mission_squad(id)),
+            "with the mission sentinel excluded on both"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_picker_reaches_past_the_ninth_workspace() {
+        // The same ceiling in the OTHER overlay. Pinning it only where the
+        // operator happened to hit it would leave the class half-fixed - which
+        // is the whole reason wave 3b exists.
+        let mut v = two_pane_view();
+        widen_to_squads(&mut v, 14);
+        v.selector = Some(0); // squad 1
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"m", &mut buf).await.unwrap();
+        let picker = v.move_pick.as_ref().expect("picker opens");
+        assert_eq!(
+            picker.squads.len(),
+            13,
+            "every workspace but the source is a destination"
+        );
+
+        // Destinations are 2..=14; index 12 is the 14th workspace.
+        move_pick_keys(&mut v, b"jjjjjjjjjjjj", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "walking the list moves nothing");
+        let picker = v.move_pick.as_ref().expect("the picker stays open");
+        assert_eq!(picker.target(), Some(14), "the last workspace is reachable");
+
+        // Enter commits the cursor, so the destination past nine is not just
+        // visible but selectable.
+        move_pick_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::MoveTab { squad, .. }) => assert_eq!(squad, 14),
+            other => panic!("expected MoveTab, got {other:?}"),
+        }
+        assert!(v.move_pick.is_none(), "committing closes the picker");
+    }
+
+    #[tokio::test]
+    async fn move_picker_ignores_an_unmapped_key_instead_of_closing() {
+        // It used to close on ANY key that was not a digit. That was safe while
+        // it was single-shot and digit-only; with a cursor it would mean the
+        // picker vanished under the operator mid-scan.
+        let mut v = two_pane_view();
+        widen_to_squads(&mut v, 14);
+        v.selector = Some(0);
+        selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(buf.is_empty());
+        assert!(v.move_pick.is_some(), "an unmapped key is ignored, not fatal");
+        // `q` still closes instantly. A bare Esc lands on the FOLLOWING keypress
+        // instead, which is fold_selector_keys' documented behaviour and the
+        // price of supporting arrows at all: a lone ESC is indistinguishable
+        // from the head of `ESC [ A` until the next byte arrives. Every other
+        // folded overlay behaves the same way.
+        move_pick_keys(&mut v, b"q", &mut buf).await.unwrap();
+        assert!(v.move_pick.is_none(), "q cancels");
+    }
+
     #[tokio::test]
     async fn attach_placement_out_of_range_digit_bels_and_moves_nothing() {
         // A digit past the end of the list is a BEL, not a selection and not a

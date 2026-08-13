@@ -1476,6 +1476,29 @@ mod tests {
     fn client_keys_prefix_unmapped_swallows_with_bell() {
         // The 'q' must NOT be forwarded - swallow + BEL.
         assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
+
+        // (x-3e17, AC2-INV) The never-leak guarantee, swept over the whole byte
+        // space rather than one specimen. This design deliberately adds NO
+        // scanner chord and NO held-byte state - the discoverability fix is
+        // four label strings - and this is what pins that: if a later change
+        // starts accumulating bytes after the prefix, some byte in this sweep
+        // stops being a lone Bell and the assertion names it.
+        //
+        // ESC is excluded because it legitimately opens a multi-byte arrow scan
+        // (Partial, not Bell); the digits and the prefix are structural
+        // specials with their own rows.
+        let bound: std::collections::HashSet<u8> =
+            key_bindings().into_iter().map(|kb| kb.key).collect();
+        for b in 0u8..=255 {
+            if b == prefix() || b == 0x1b || (b'1'..=b'9').contains(&b) || bound.contains(&b) {
+                continue;
+            }
+            assert_eq!(
+                scan_all(&[&[prefix(), b]]),
+                vec![Event::Bell],
+                "prefix + unmapped {b:#04x} must swallow with one BEL and leak nothing"
+            );
+        }
     }
 
     #[test]
