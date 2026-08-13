@@ -393,6 +393,11 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
                 continue
             result.same_uid += 1
             pid = info.get("pid")
+            # A row with no pid is unusable: it cannot be excluded by census,
+            # reported by number, or killed. Dropping it beats carrying an
+            # Optional through every downstream field.
+            if not isinstance(pid, int):
+                continue
             if pid in census_pids or pid == os.getpid():
                 result.census_excluded += 1
                 continue
