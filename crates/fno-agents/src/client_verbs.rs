@@ -4641,6 +4641,8 @@ mod tests {
             pid_confirmed_dead: false,
             owns_worktree: true,
             exited_at: None,
+            liveness_surface: true,
+            transcript_fresh: Some(false),
             worktree_clean: None,
         };
         assert_eq!(

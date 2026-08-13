@@ -656,6 +656,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
+    // saying what `fno worktree cleanup --merged` WOULD archive. Report-only by
+    // construction, because a timer tick is not proof that work landed; removal
+    // stays on the merge-triggered path. Emitted even when the counts are zero,
+    // so a quiet repo cannot be mistaken for a sweep that never ran.
+    "worktree_sweep",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",

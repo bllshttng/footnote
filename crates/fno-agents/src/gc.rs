@@ -56,7 +56,44 @@ pub struct GcRow {
     pub owns_worktree: bool,
     /// `exited_at` parsed to epoch seconds; `None` when the row is not yet
     /// stamped (never observed dead before).
+    ///
+    /// READ THE NAME SCEPTICALLY. This is not when the process exited. It is
+    /// when a GC sweep FIRST OBSERVED the row as non-live, written by the only
+    /// production writer (`gc_sweep`), which computes one timestamp per pass and
+    /// applies it to every newly-observed row. Rows across unrelated tenants and
+    /// projects therefore share a stamp to the second; processes do not exit in
+    /// synchronised batches, and that batching is the proof the field measures a
+    /// sweep tick rather than an exit.
+    ///
+    /// So a stamp is evidence that a sweep once failed to reach a worker, not
+    /// that the worker died. A claude bg thread that finished a turn is idle and
+    /// resumable, and `fno agents ask` correctly calls it "live but not currently
+    /// routable" while the registry says exited and stamps this clock. Never reap
+    /// on this field alone; see `transcript_fresh`.
     pub exited_at: Option<i64>,
+    /// Does this row have any way of being alive at all? True when it records a
+    /// pid or a short_id; false for a one-shot `ask` row, which carries neither.
+    ///
+    /// A row with no liveness surface needs no corroboration, because there is no
+    /// worker there to protect. This is a POSITIVE fact about the row rather than
+    /// an exemption: nothing can be running behind an identity that was never
+    /// recorded.
+    pub liveness_surface: bool,
+    /// The second, INDEPENDENT liveness signal, required before any reap.
+    ///
+    /// `Some(true)` the worker's transcript was written recently (it is alive, or
+    /// at least idle-and-resumable), `Some(false)` positively stale, `None` we
+    /// could not tell.
+    ///
+    /// Transcript mtime is used because this repo has already paid for the
+    /// lesson: receipts, manifest snapshots, process argv, and liveness probes
+    /// have each lied about a live session, and only the live lockfile and the
+    /// transcript stayed truthful.
+    ///
+    /// Reaping requires `Some(false)` — a POSITIVE reading of staleness. `None`
+    /// keeps the row, because an absence of freshness has two explanations and
+    /// only one of them is a dead worker.
+    pub transcript_fresh: Option<bool>,
     /// Worktree cleanliness for a worktree-owning row: `Some(true)` clean,
     /// `Some(false)` dirty (uncommitted changes -> keep), `None` the probe could
     /// not determine it (fail closed -> keep). Ignored when `owns_worktree` is
@@ -95,6 +132,25 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
             if now.saturating_sub(exited) <= grace_secs {
                 return GcAction::Keep;
             }
+            // CORROBORATION GATE. `status` and `exited_at` both derive from one
+            // sweep's failure to reach a worker, so they are a single signal
+            // wearing two hats and cannot confirm each other. Removal needs at
+            // least one POSITIVE, independent reading that the worker is gone.
+            //
+            // Three qualify. A pid whose start time no longer matches is a
+            // process that provably ended. A transcript untouched for the whole
+            // window is a session that provably stopped writing. A row with no
+            // liveness surface at all never had a worker to lose.
+            //
+            // None of them available means keep. Reaping a live session destroys
+            // work in progress and, worse, the only process able to satisfy its
+            // own PR's review gate.
+            let independently_gone = row.pid_confirmed_dead
+                || row.transcript_fresh == Some(false)
+                || !row.liveness_surface;
+            if !independently_gone {
+                return GcAction::Keep;
+            }
             if !row.owns_worktree {
                 // No worktree to protect, so nothing for cleanliness to say.
                 return GcAction::Reap;
@@ -123,6 +179,8 @@ mod tests {
             pid_confirmed_dead: false,
             owns_worktree: true,
             exited_at: Some(NOW - GRACE - 1),
+            liveness_surface: true,
+            transcript_fresh: Some(false),
             worktree_clean: Some(true),
         }
     }
@@ -209,6 +267,109 @@ mod tests {
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- The corroboration gate ---------------------------------------------
+    //
+    // THE SPECIMEN. A worker named `testspawn` (short_id 626ef4a2) answered its
+    // prompt and went idle. Four surfaces gave three verdicts:
+    //
+    //   registry.json     status "exited", exited_at 2026-08-13T18:52:57Z
+    //   fno agents ask    "live but not currently routable"
+    //   fno agents peek   by short_id: not found; by name: renders the transcript
+    //   agent view        Done
+    //
+    // Done is a TURN state, not a process state. A claude bg thread that finished
+    // a turn is idle and resumable, and its transcript is what says so.
+
+    #[test]
+    fn a_stamped_row_whose_transcript_is_fresh_is_never_reaped() {
+        // The specimen. `status` and `exited_at` both say gone; the transcript
+        // says otherwise, and the transcript wins.
+        let row = GcRow {
+            transcript_fresh: Some(true),
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn an_unreadable_transcript_keeps_the_row() {
+        // No positive reading of death -> no removal. An absence of freshness has
+        // two explanations and only one is a dead worker.
+        let row = GcRow {
+            transcript_fresh: None,
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn status_and_exited_at_alone_never_authorise_a_reap() {
+        // They are ONE signal wearing two hats: `gc_sweep` writes the stamp when a
+        // sweep fails to reach a worker, so it cannot corroborate the status that
+        // produced it. Batched stamps shared to the second across unrelated
+        // tenants are the proof.
+        let row = GcRow {
+            status: AgentStatus::Exited,
+            is_live: false,
+            pid_confirmed_dead: false,
+            owns_worktree: false,
+            exited_at: Some(NOW - GRACE - 1),
+            liveness_surface: true,
+            transcript_fresh: None,
+            worktree_clean: Some(true),
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn a_confirmed_dead_pid_is_independent_evidence_on_its_own() {
+        // A pid whose start time no longer matches is a process that provably
+        // ended. That does not come from the sweep, so it corroborates.
+        let row = GcRow {
+            pid_confirmed_dead: true,
+            transcript_fresh: None,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_row_with_no_liveness_surface_needs_no_corroboration() {
+        // A one-shot ask records neither pid nor short_id. Nothing can be running
+        // behind an identity that was never recorded, so there is nobody to
+        // protect. This is a positive fact, not an exemption.
+        let row = GcRow {
+            liveness_surface: false,
+            pid_confirmed_dead: false,
+            transcript_fresh: None,
+            owns_worktree: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn corroboration_never_overrides_the_earlier_guards() {
+        // A positive death signal permits a reap; it must not skip liveness, the
+        // grace window, or terminal status.
+        let live = GcRow {
+            is_live: true,
+            pid_confirmed_dead: true,
+            transcript_fresh: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&live, NOW, GRACE), GcAction::Keep);
+
+        let in_grace = GcRow {
+            exited_at: Some(NOW - GRACE + 10),
+            transcript_fresh: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&in_grace, NOW, GRACE), GcAction::Keep);
     }
 
     #[test]

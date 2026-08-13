@@ -510,6 +510,29 @@ pub fn worktree_sweep(
     swept
 }
 
+/// Has this worker's transcript been written recently enough to call it alive?
+///
+/// `Some(true)` touched within `window_secs`, `Some(false)` positively stale,
+/// `None` no path recorded or the file cannot be stat'd.
+///
+/// This is the INDEPENDENT half of the reap decision. `status` and `exited_at`
+/// are one signal wearing two hats: `gc_sweep` sets the stamp when a sweep first
+/// fails to reach a worker, so they cannot corroborate each other. A claude bg
+/// thread that finished a turn is idle and resumable, not gone, and a batched
+/// stamp says nothing about which it is. Its transcript does.
+///
+/// `None` never grants permission. An unreadable transcript has two
+/// explanations and only one of them is a dead worker.
+fn transcript_fresh_probe(log_path: Option<&str>, now: i64, window_secs: i64) -> Option<bool> {
+    let path = log_path.filter(|p| !p.is_empty())?;
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(now.saturating_sub(secs) <= window_secs)
+}
+
 /// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
 /// plain directory?
 ///
@@ -761,7 +784,19 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         let terminal_or_dead = matches!(e.status, AgentStatus::Exited | AgentStatus::PermanentDead)
             || pid_confirmed_dead;
         let past_grace = matches!(exited_at, Some(t) if now.saturating_sub(t) > grace_secs);
-        let needs_probe = !is_live && terminal_or_dead && past_grace && owns_worktree;
+        // The second signal, read whenever a reap is otherwise on the table.
+        // Cheap (one stat), and it is the discrimination `status` cannot make:
+        // an idle-but-resumable bg thread keeps touching its transcript.
+        let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
+            transcript_fresh_probe(e.log_path.as_deref(), now, grace_secs)
+        } else {
+            None
+        };
+        let needs_probe = !is_live
+            && terminal_or_dead
+            && past_grace
+            && owns_worktree
+            && transcript_fresh == Some(false);
         let worktree_clean = if needs_probe {
             worktree_clean_probe(&e.cwd)
         } else {
@@ -774,6 +809,10 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             pid_confirmed_dead,
             owns_worktree,
             exited_at,
+            // A one-shot ask carries neither pid nor short_id: no worker can be
+            // hiding behind an identity that was never recorded.
+            liveness_surface: e.pid.is_some() || !e.short_id.is_empty(),
+            transcript_fresh,
             worktree_clean,
         };
         let id = if e.short_id.is_empty() {
@@ -5303,6 +5342,77 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     }
 
     #[test]
+    fn transcript_probe_reads_freshness_and_fails_to_unknown() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let now = now_epoch_secs();
+
+        // No path recorded, and a path that does not exist: UNKNOWN, never a
+        // cheerful "stale". The caller reads None as "keep".
+        assert_eq!(transcript_fresh_probe(None, now, 3600), None);
+        assert_eq!(transcript_fresh_probe(Some(""), now, 3600), None);
+        assert_eq!(
+            transcript_fresh_probe(Some("/nonexistent/transcript.jsonl"), now, 3600),
+            None
+        );
+
+        let fresh = dir.path().join("fresh.jsonl");
+        std::fs::write(&fresh, "{}\n").unwrap();
+        assert_eq!(
+            transcript_fresh_probe(Some(&fresh.to_string_lossy()), now, 3600),
+            Some(true),
+            "a just-written transcript is a worker that is still around"
+        );
+
+        let stale = dir.path().join("stale.jsonl");
+        std::fs::write(&stale, "{}\n").unwrap();
+        assert!(std::process::Command::new("touch")
+            .args(["-t", "200001010000", &stale.to_string_lossy()])
+            .status()
+            .expect("touch runs")
+            .success());
+        assert_eq!(
+            transcript_fresh_probe(Some(&stale.to_string_lossy()), now, 3600),
+            Some(false),
+            "a transcript untouched for the window is a session that stopped"
+        );
+    }
+
+    #[test]
+    fn the_exit_stamp_is_written_per_sweep_not_per_exit() {
+        // NAMING THE BATCH WRITER. `gc_sweep` is the only production writer of
+        // `exited_at`, and it computes ONE timestamp per pass and applies it to
+        // every row it newly observes as dead. That is why rows across unrelated
+        // tenants and projects share a stamp to the second: the field measures a
+        // sweep tick, not an exit.
+        //
+        // This test pins the shape so the field cannot quietly start looking like
+        // real exit evidence and get trusted on its own again.
+        let home = tmp_home("gc-batch-stamp");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            for n in ["ask-a", "ask-b", "ask-c"] {
+                r.entries.push(ask_row(n, None));
+            }
+        })
+        .unwrap();
+
+        gc_sweep(&home, &emitter, Duration::from_secs(3600));
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let stamps: std::collections::BTreeSet<String> = reg
+            .entries
+            .iter()
+            .filter_map(|e| e.exited_at.clone())
+            .collect();
+        assert_eq!(reg.entries.len(), 3, "nothing reaped on the stamping pass");
+        assert_eq!(
+            stamps.len(),
+            1,
+            "three unrelated rows share one stamp: it is a sweep tick, not an exit"
+        );
+    }
+
+    #[test]
     fn linked_worktree_detection_separates_owners_from_passers_through() {
         // The whole ownership test is `.git` being a FILE (a `gitdir:` pointer)
         // rather than a directory. Getting it backwards would either pin every
@@ -5380,6 +5490,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             dead.status = AgentStatus::Exited;
             dead.cwd = dead_repo.to_string_lossy().into_owned();
             dead.exited_at = Some("2020-01-01T00:00:00Z".into());
+            dead.log_path = Some(stale_log(&dead_repo));
             dead.harness_session_id = Some("dead-harness-uuid".into());
             r.entries.push(dead);
 
@@ -5387,6 +5498,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             done.status = AgentStatus::Exited;
             done.cwd = done_repo.to_string_lossy().into_owned();
             done.exited_at = Some("2020-01-01T00:00:00Z".into());
+            done.log_path = Some(stale_log(&done_repo));
             done.harness_session_id = Some("done-harness-uuid".into());
             r.entries.push(done);
         })
@@ -5457,6 +5569,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             row.status = AgentStatus::Exited;
             row.cwd = repo.to_string_lossy().into_owned();
             row.exited_at = Some("2020-01-01T00:00:00Z".into());
+            row.log_path = Some(stale_log(&repo));
             registry.entries.push(row);
         })
         .unwrap();
@@ -5495,6 +5608,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             row.status = AgentStatus::Exited;
             row.cwd = repo.to_string_lossy().into_owned();
             row.exited_at = Some("2020-01-01T00:00:00Z".into());
+            row.log_path = Some(stale_log(&repo));
             registry.entries.push(row);
         })
         .unwrap();
@@ -6174,6 +6288,27 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     // --- find_uuid_backfill_row (x-c393): backfill a null-uuid bg row ---------
 
     /// A `claude --bg` row: jobId in `short_id`, `claude_session_uuid` null.
+    /// A transcript file for a fixture row that is genuinely finished.
+    ///
+    /// The corroboration gate needs a POSITIVE reading that a worker stopped
+    /// writing, and these tests run with a zero grace window, so any file that
+    /// already exists reads as stale. A fixture with no transcript at all reads
+    /// as UNKNOWN and is kept, which is the correct production behaviour and
+    /// would silently hollow out these assertions.
+    fn stale_log(dir: &std::path::Path) -> String {
+        let p = dir.join("transcript.jsonl");
+        std::fs::write(&p, "{}\n").unwrap();
+        // BACKDATE IT. A file written this second reads as fresh even against a
+        // zero-length window, so a fixture that only creates the file proves the
+        // opposite of what it claims.
+        assert!(std::process::Command::new("touch")
+            .args(["-t", "200001010000", &p.to_string_lossy()])
+            .status()
+            .expect("touch runs")
+            .success());
+        p.to_string_lossy().into_owned()
+    }
+
     fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = rentry(name, AgentStatus::Live, None);
         e.legacy_provider = "claude".into();
