@@ -898,7 +898,7 @@ def main(argv: list[str] | None = None) -> int:
     # list is the deletion-decision path; leaving it blind to this shape is the
     # exact failure the shape was added to fix. Folding them in only ADDS
     # references, so the subset invariant below still holds.
-    rust_counts = sweep_rust_argv(root, leaves)
+    rust_counts = sweep_rust_argv(root, leaves, tests=False)
     counts_corr.update(rust_counts)
     crates_test_counts = sweep(
         root, leaves, binary_form=True, pipe_fan=True,
