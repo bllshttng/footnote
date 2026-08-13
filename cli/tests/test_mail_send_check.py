@@ -4,14 +4,24 @@ The point of ``--check`` is that a caller can gate ADVICE on it, so a wrong yes
 is worse than no answer at all: the Stop hook that prescribes ``/compact`` reads
 this verdict to decide between "fire it yourself" and "ask your operator".
 
-The self/peer split on the mux lane is the subtle one and it is why this file
-exists. ``_raw_send`` pastes with ``guarded=True``, which rides the server-side
-turn-taken interlock and refuses ``EXIT_TARGET_NOT_IDLE`` while the recipient is
-mid-turn. A session asking about ITSELF is mid-turn by construction -- it is
-running the command inside its own turn -- so a live pane, not merely an exited
-one, can never self-inject through that lane. Reporting a path there would be
-exactly the false prescription the flag exists to prevent (codex review, PR
-"context-nudge prescribed three things that cannot run").
+The mux lane used to carry a self/peer split, and this file was written to pin
+it: ``_raw_send`` pasted with ``guarded=True``, which rode the server-side
+turn-taken interlock and refused ``EXIT_TARGET_NOT_IDLE`` while the recipient
+was mid-turn. A session asking about ITSELF is mid-turn by construction -- it
+is running the command inside its own turn -- so a live pane, not merely an
+exited one, could never self-inject through that lane, and reporting a path
+would have been exactly the false prescription the flag exists to prevent
+(codex review, PR "context-nudge prescribed three things that cannot run").
+
+Node x-1904 removed that veto. Measurement (not inference) showed the guard
+was ``rerun_allowed``, borrowed from the rerun verb, and a busy claude session
+actually enqueues an injected paste rather than corrupting its composer -- see
+the doc comment on ``rerun_allowed`` in ``crates/fno/src/server.rs`` for the
+specimen. ``_raw_send`` now pastes unguarded and confirms by content against
+the recipient's own transcript, landing even mid-turn, the same property the
+control.sock lane already had (which is why control.sock never carried this
+split either). So self and peer are no longer a structurally different
+question on the mux lane: both get "the row recording a pane IS the path."
 """
 from __future__ import annotations
 
@@ -66,18 +76,21 @@ SELF_SID = "sid-me"
 MUX = {"session": "fno", "pane_id": "%1"}
 
 
-def test_self_on_guarded_mux_lane_is_not_injectable(tmp_path):
-    """The finding this file was written for: a live pane is still no self path."""
+def test_self_on_unguarded_mux_lane_is_injectable(tmp_path):
+    """x-1904: the de-veto makes a self-directed mux pane a path again.
+
+    Before the de-veto, a live pane was structurally unreachable for a self
+    send (the guard refused any mid-turn recipient, and self is always
+    mid-turn). Now the paste is unguarded and confirms by content, landing
+    even mid-turn -- the same property the control.sock lane already had."""
     _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID, mux=MUX)])
     out, code = _run(
         ["/compact", "--to-self", "--raw", "--check"],
         {"CLAUDE_CODE_SESSION_ID": SELF_SID},
         tmp_path,
     )
-    assert code == 1, out
-    assert out.startswith("not-injectable:"), out
-    assert "mid-turn" in out, "the reason must name WHY, or a reader retries forever"
-    assert "operator" in out, "a no-path answer has to say what the session CAN do"
+    assert code == 0, out
+    assert out.startswith("injectable: mux-pane"), out
 
 
 def test_peer_on_mux_lane_is_injectable(tmp_path):

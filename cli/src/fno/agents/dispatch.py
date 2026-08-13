@@ -5283,25 +5283,119 @@ def _build_mail_ctx(
     )
 
 
+# Poll budget for the mux lane's content confirm (node x-1904, change 3),
+# matched to the claude control.sock lane's default (crates/fno-agents/src/
+# mail_inject.rs DEFAULT_ATTEMPTS/DEFAULT_INTERVAL_MS): 40 * 250ms = 10s. Kept
+# in parity so neither keystroke lane is structurally more patient than the
+# other for the same "did the paste land" question.
+_MUX_CONFIRM_ATTEMPTS = 40
+_MUX_CONFIRM_INTERVAL_S = 0.25
+
+
+def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
+    """Locate the mux recipient's OWN claude transcript by session uuid, the
+    confirm target for :func:`_mux_pane_send`'s ``confirm`` mode (node x-1904).
+
+    Reuses the resolver `fno.doctor._find_transcript_for` already used for the
+    self-diagnostic surface rather than writing a second transcript-by-uuid
+    walk (the Rust control.sock lane's own mirror is `find_transcript` in
+    `crates/fno-agents/src/claude_drive.rs`). None when the entry carries no
+    resolvable full session uuid, or no matching transcript file exists --
+    both fail the confirm closed, never open.
+    """
+    from fno.doctor import _find_transcript_for
+
+    session_id = entry.harness_session_id or entry.session_id
+    if not session_id:
+        return None
+    return _find_transcript_for(session_id)
+
+
+def _mux_content_confirm(
+    transcript: Path,
+    marker: str,
+    since_byte: int,
+    *,
+    attempts: int = _MUX_CONFIRM_ATTEMPTS,
+    interval_s: float = _MUX_CONFIRM_INTERVAL_S,
+) -> bool:
+    """Poll ``transcript`` for ``marker`` in lines appended after ``since_byte``
+    (node x-1904, change 3): content, not growth, mirroring the claude
+    control.sock lane's ``confirm_content_after``/``escaped_marker`` pair
+    (``crates/fno-agents/src/mail_inject.rs``) so both keystroke lanes confirm
+    delivery the same way. ``marker`` is escaped the same way ``json.dumps``
+    would embed it in a JSON string field, since a claude transcript line
+    stores the turn's text JSON-encoded -- matching Rust's
+    ``serde_json::to_string`` + quote-strip. An empty escaped marker (an empty
+    ``text``) never confirms; a submitted turn is recorded verbatim, an unsent
+    paste records nothing, so a busy recipient's unrelated transcript growth
+    never carries our marker by accident.
+    """
+    import json
+
+    escaped = json.dumps(marker)[1:-1]
+    if not escaped:
+        return False
+    needle = escaped.encode("utf-8")
+    for _ in range(max(attempts, 1)):
+        try:
+            with transcript.open("rb") as fh:
+                fh.seek(since_byte)
+                for raw_line in fh:
+                    if needle in raw_line:
+                        return True
+        except OSError:
+            pass
+        time.sleep(interval_s)
+    return False
+
+
 def _mux_pane_send(
-    entry: "AgentEntry", text: str, *, guarded: bool = True, sender: Optional[str] = None
+    entry: "AgentEntry",
+    text: str,
+    *,
+    guarded: bool = True,
+    sender: Optional[str] = None,
+    confirm: bool = False,
 ) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
-    When ``guarded`` (the mail-delivery default, US4), the paste rides the
-    server-side turn-taken interlock: a pane whose recipient is mid-turn refuses
-    with EXIT_TARGET_NOT_IDLE and this returns False -- a ``stalled`` demotion to
-    the caller's durable floor -- rather than swallowing the bytes and letting the
-    sender report ``hosted`` (Locked Decision 4: hosted-on-bytes-written is
-    banned). A guarded send does NOT hold the pane's writer claim: the server
-    guard refuses any pane whose claim a live pid holds ("busy: relay"), so
-    holding our own claim would self-block every guarded send; the atomic
-    server-side idle check is itself the interleave protection for the paste.
+    When ``guarded``, the paste rides the server-side turn-taken interlock: a
+    pane whose recipient is mid-turn refuses with EXIT_TARGET_NOT_IDLE and this
+    returns False -- a ``stalled`` demotion to the caller's durable floor --
+    rather than swallowing the bytes and letting the sender report ``hosted``
+    (Locked Decision 4: hosted-on-bytes-written is banned). A guarded send does
+    NOT hold the pane's writer claim: the server guard refuses any pane whose
+    claim a live pid holds ("busy: relay"), so holding our own claim would
+    self-block every guarded send; the atomic server-side idle check is itself
+    the interleave protection for the paste. No caller opts into this branch any
+    more (node x-1904): the guard was `rerun_allowed`, borrowed from the rerun
+    verb, and a busy recipient enqueues an injected paste rather than corrupting
+    a composer (measured, not inferred -- see the doc comment on
+    `rerun_allowed` in `crates/fno/src/server.rs`), so refusing before any byte
+    was written vetoed exactly the delivery this transport can make. Left in
+    place (not deleted) as a real capability of the underlying `fno mux pane
+    send --guarded` verb, which the rerun caller still legitimately wants.
 
-    ``guarded=False`` is the raw channel the writer-claim holder owns (peer
-    follow-up); it holds the claim across the text-then-CR burst so no other
-    writer interleaves. The claim is best-effort (an unclaimed pane refuses the
-    acquire; send proceeds), but a failed send fails closed -> durable.
+    ``guarded=False`` is the raw channel the writer-claim holder owns; it holds
+    the claim across the text-then-CR burst so no other writer interleaves. The
+    claim is best-effort (an unclaimed pane refuses the acquire; send proceeds),
+    but a failed send fails closed -> durable.
+
+    ``confirm`` (node x-1904, mail-delivery default): the mux lane had no
+    confirm at all before this -- the busy-veto stood in for one, wrongly,
+    since it refused before any byte was written rather than checking whether
+    the byte landed. When set, a bytes-written success from the unguarded paste
+    is not enough: poll the recipient's OWN transcript for the injected turn's
+    content (mirrors the claude control.sock lane's
+    ``confirm_content_after``/``escaped_marker`` pair in
+    ``crates/fno-agents/src/mail_inject.rs``, so both lanes confirm the same
+    way -- content, not growth). No confirmable transcript, or the marker never
+    lands within the poll budget, both report False; a confirm that "passes" on
+    an unreadable transcript is the false-positive shape the pitfalls corpus
+    warns against. Ignored when ``guarded`` (a guarded send's idle check was
+    itself standing in for a confirm, and this flag governs the unguarded path
+    replacing it).
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -5401,9 +5495,28 @@ def _mux_pane_send(
         _audit_raw_inject(sent)
         return sent
 
+    # Baseline BEFORE the paste (not after): the confirm below scans only lines
+    # appended past this offset, so it never matches something already in the
+    # transcript when we started.
+    confirm_transcript = _mux_recipient_transcript(entry) if confirm else None
+    confirm_baseline: Optional[int] = None
+    if confirm_transcript is not None:
+        try:
+            confirm_baseline = confirm_transcript.stat().st_size
+        except OSError:
+            confirm_transcript = None
+
     claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
     try:
         sent = _paste_then_submit()
+        if sent and confirm:
+            # Bytes-written alone is Locked-Decision-4 banned as a hosted
+            # verdict; confirm by content against the recipient's own
+            # transcript, never optimistically on an unreadable one.
+            marker = text.split("\n", 1)[0]
+            sent = confirm_transcript is not None and confirm_baseline is not None and (
+                _mux_content_confirm(confirm_transcript, marker, confirm_baseline)
+            )
         _audit_raw_inject(sent)
         return sent
     finally:
@@ -5993,7 +6106,7 @@ def _deliver_live(
             reason_out.append(reason)
 
     if entry.mux:
-        mux_delivered = _mux_pane_send(entry, wrapped)
+        mux_delivered = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
         if not mux_delivered:
             _record("mux-send-failed")
         return mux_delivered

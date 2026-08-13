@@ -1516,7 +1516,7 @@ def _name_lane_send(
                 # pane and reports hosted -- suppressing the durable copy the
                 # real recipient still needs.
                 if entry.status == "live":
-                    injected = _mux_pane_send(entry, wrapped)
+                    injected = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
@@ -2007,39 +2007,26 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     # "A path exists" is the whole claim.
     if check:
         if entry.mux:
-            # SELF on the mux lane has no path, and this is not the stale-pane
-            # caveat -- it is structural. `_raw_send` pastes with `guarded=True`,
-            # which rides the server-side turn-taken interlock and refuses
-            # EXIT_TARGET_NOT_IDLE while the recipient is mid-turn. A session
-            # asking about ITSELF is mid-turn by construction: it is running this
-            # command inside its own turn. So a live pane, not merely an exited
-            # one, can never self-inject through this lane, and reporting a path
-            # would be the same false prescription this flag exists to prevent.
-            # The control.sock lane differs for a real reason: it pastes into the
-            # input box and retries the CR, so a mid-turn recipient still lands it.
-            if self_ok or _self_recipient(name, resolved_session_id=session_id):
-                print(
-                    "not-injectable: mux-pane is guarded and refuses a mid-turn "
-                    "recipient, and a session asking about itself is mid-turn by "
-                    "construction; ask your operator to type the verb instead"
-                )
-                raise typer.Exit(code=1)
-            if not session_id:
-                # The self/peer split above is the whole answer on this lane, and
-                # `_self_recipient` cannot decide it from an empty id (an empty
-                # candidate has no handle tier). So this run did not establish
-                # "peer" -- report that, rather than defaulting to the yes.
-                _unmeasurable(
-                    f"the registry row for {name!r} carries no harness_session_id, "
-                    "so this run cannot tell whether the mux pane is yours (never "
-                    "injectable, guarded mid-turn) or a peer's; re-register it with "
-                    "`fno agents register`"
-                )
-            # A PEER on the mux lane can be idle, so the row recording a pane IS
-            # the path. Not verified against the mux server here: a pane that has
-            # since exited still reads injectable, and the send answers that in
-            # about a second rather than a second subprocess answering it now.
-            print("injectable: mux-pane (a paste can still refuse a mid-turn pane)")
+            # SELF used to have no path on this lane, structurally: `_raw_send`
+            # pasted with `guarded=True`, which rides the server-side turn-taken
+            # interlock and refuses EXIT_TARGET_NOT_IDLE while the recipient is
+            # mid-turn, and a session asking about ITSELF is mid-turn by
+            # construction (running this command inside its own turn). Node
+            # x-1904 removed that veto: the guard was `rerun_allowed`, borrowed
+            # from the rerun verb, refusing a delivery the transport can
+            # actually make -- a busy claude session enqueues an injected paste
+            # rather than corrupting its composer (measured, not inferred; see
+            # `crates/fno/src/server.rs`). `_raw_send` now pastes unguarded and
+            # confirms by content against the recipient's own transcript
+            # (`_mux_pane_send(..., confirm=True)`), landing even mid-turn --
+            # the same property the control.sock lane already had, which is why
+            # that lane never carried a self/peer split. Self and peer are no
+            # longer a structurally different question on this lane either: the
+            # row recording a mux pane IS the path, for both. Not verified
+            # against the mux server here: a pane that has since exited still
+            # reads injectable, and the send answers that in about a second
+            # rather than a second subprocess answering it now.
+            print("injectable: mux-pane (a paste still needs the confirm to land)")
             raise typer.Exit(code=0)
         if not session_id:
             # Reachable only under --check, which is exempt from the
@@ -2085,7 +2072,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     own = current_session_id()
     sender = canonical_handle(own) if own else None
     if entry.mux:
-        delivered = _mux_pane_send(entry, stripped, sender=sender)
+        delivered = _mux_pane_send(entry, stripped, guarded=False, confirm=True, sender=sender)
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(session_id, stripped, sender=sender)
 

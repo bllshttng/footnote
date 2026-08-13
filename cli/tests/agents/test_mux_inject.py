@@ -1,11 +1,20 @@
 """Mail live-inject dispatch on the registry mux ref (4a-G2/G3, task 4.9/4.10).
 
-A mux-hosted mail row routes through `fno mux pane send --guarded` (US4): the
-server-side turn-taken interlock refuses a mid-turn recipient, so a stalled paste
-demotes to the durable bus instead of a false hosted receipt. A guarded send does
-NOT hold the writer claim -- the server guard reads any live claim holder as
-`busy: relay`, so holding our own claim would self-block every guarded send. The
-unguarded peer-follow-up lane still holds the claim around the text-then-CR burst.
+Node x-1904 de-vetoed the mail-delivery mux lane: it no longer routes through
+`fno mux pane send --guarded`. A busy claude session enqueues an injected
+paste rather than corrupting its composer (measured, not inferred; see
+`crates/fno/src/server.rs`), so the server-side turn-taken interlock that
+refused a mid-turn recipient before any byte was written vetoed exactly the
+delivery this transport can make. Mail delivery now pastes unguarded and
+confirms by content against the recipient's own transcript
+(`test_mux_pane_guarded.py` in `tests/unit/` covers that confirm path in
+detail); this file keeps the `guarded=True` mechanism tests below because the
+underlying capability is still real (the rerun verb still wants it -- refusing
+mid-turn is the conservative call for a rerun, unlike mail), just no longer
+what mail-delivery routing exercises. A guarded send does NOT hold the writer
+claim -- the server guard reads any live claim holder as `busy: relay`, so
+holding our own claim would self-block every guarded send. The unguarded
+peer-follow-up lane still holds the claim around the text-then-CR burst.
 The mux subprocess is faked; the real socket path is the agent_edge e2e.
 """
 from __future__ import annotations
@@ -59,9 +68,10 @@ def _patch_mux(monkeypatch, fake: FakeMux) -> None:
 
 
 def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
-    # The mail-delivery default is guarded (US4): the server-side interlock is
-    # the authority, so the send never holds the writer claim (which the guard
-    # would read as busy: relay and self-refuse). Just paste --guarded, then CR.
+    # guarded=True (no mail-delivery caller passes it any more, node x-1904):
+    # the server-side interlock is the authority, so the send never holds the
+    # writer claim (which the guard would read as busy: relay and self-refuse).
+    # Just paste --guarded, then CR.
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux()
@@ -81,8 +91,9 @@ def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
 
 
 def test_guarded_dead_pane_fails_closed_with_no_cr(monkeypatch) -> None:
-    # A guarded paste the server refuses (or a dead pane) returns False with no
-    # CR submit -- and no claim/release, since a guarded send never claims.
+    # guarded=True: a paste the server refuses (or a dead pane) returns False
+    # with no CR submit -- and no claim/release, since a guarded send never
+    # claims. Real behavior for the rerun caller; mail no longer reaches this.
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux(fail_verbs={"send"})
@@ -203,7 +214,9 @@ def test_deliver_live_dispatches_on_mux_ref_before_legacy_lanes(
 
     seen = []
     monkeypatch.setattr(
-        dispatch_mod, "_mux_pane_send", lambda entry, text: seen.append(entry.name) or True
+        dispatch_mod,
+        "_mux_pane_send",
+        lambda entry, text, **_k: seen.append(entry.name) or True,
     )
     monkeypatch.setattr(
         dispatch_mod,
