@@ -642,11 +642,11 @@ def set_cmd(
         False,
         "--local/--global",
         "-l/-g",
-        help="Write the project-local .fno/settings.yaml instead of the "
-        "per-user global ~/.fno/settings.yaml (default global).",
+        help="Write the project-local .fno/config.toml instead of the "
+        "per-user global ~/.fno/config.toml (default global).",
     ),
 ) -> None:
-    """Set one or more config keys in settings.yaml (atomic, schema-validated).
+    """Set one or more config keys in config.toml (atomic, schema-validated).
 
     Two forms:
 
@@ -757,8 +757,8 @@ def unset_cmd(
         False,
         "--local/--global",
         "-l/-g",
-        help="Remove from the project-local .fno/settings.yaml instead of the "
-        "per-user global ~/.fno/settings.yaml (default global).",
+        help="Remove from the project-local .fno/config.toml instead of the "
+        "per-user global ~/.fno/config.toml (default global).",
     ),
 ) -> None:
     """Remove a config key, reverting it to the model default.

@@ -441,6 +441,8 @@ attach_digest = true
 attach_digest_threshold_min = 10
 # Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).
 hover_focus = true
+# Mux chrome theme: terminal (default, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker.
+# theme = <unset>   # optional; no default
 
 [dev]
 # Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default).

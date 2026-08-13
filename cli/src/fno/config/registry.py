@@ -319,6 +319,11 @@ FIELD_META: dict[str, Meta] = {
     "mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
     "mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
     "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
+    "mux.theme": Meta(
+        "advanced",
+        "Mux chrome theme: terminal (default, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker.",
+        default_source="default",
+    ),
     # --- config.dev.* (x-88b9: maintainer local-dev) ---
     "dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
     # --- config.context.* (x-edf5: project-supplied context artifacts) ---
