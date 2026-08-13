@@ -29,7 +29,19 @@ set -euo pipefail
 # Raised by a further 300 for the stage-table pointer in AGENTS.md, which names
 # config.agents.profiles.<verb> and links the role-based-model-routing doc: the
 # per-stage axis is undiscoverable from the preamble without it (~66 tok/turn).
-CEILING_BYTES=38400
+#
+# LOWERED from 38400 to 37400, the first lowering in this file's history. Every
+# entry above raises it; five raises and no cut is how the preamble reached 55
+# bytes of headroom with no commit to blame. .claude/rules/worktrees.md gave up
+# 2619 bytes (6839 -> 4220) by disclosing hook internals, removal, and the
+# enforcement wiring to docs/architecture/worktree-mechanics.md, and this line
+# banks that cut instead of leaving it as headroom for the next five edits.
+# The gate is now two-sided (see RATCHET_NUDGE_BYTES below): a cut large enough
+# to push spare past the band fails until the ceiling follows it down.
+CEILING_BYTES=37400
+# The working band under the ceiling. Spare above this fails the gate and names
+# the value to write, so a cut is banked in the same PR that makes it rather
+# than becoming headroom. Ordinary edits move far less than this and pass.
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 JSON_MODE=0
@@ -206,8 +218,22 @@ else
 fi
 
 if (( TOTAL_BYTES <= CEILING_BYTES )); then
-  if (( ! QUIET && ! JSON_MODE && SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
-    echo "check-preamble-budget: advisory: lower CEILING_BYTES; more than ${RATCHET_NUDGE_BYTES} bytes are unused"
+  # Two-sided: under the ceiling by more than the band is also a failure. This
+  # used to print an advisory and exit 0, which meant no cut was ever banked -
+  # CEILING_BYTES was raised five times and lowered never, so each cut silently
+  # became room for the next growth. The message names the value to write so
+  # the fix is a paste, not arithmetic.
+  if (( SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
+    SUGGESTED=$((TOTAL_BYTES + RATCHET_NUDGE_BYTES))
+    if (( ! QUIET && ! JSON_MODE )); then
+      {
+        echo "check-preamble-budget: ${TOTAL_BYTES} / ${CEILING_BYTES} bytes leaves ${SPARE_BYTES} spare, more than the ${RATCHET_NUDGE_BYTES}-byte band."
+        echo "  The preamble shrank and the ceiling did not follow it down, so the cut"
+        echo "  is unbanked: it stays available as headroom for the next growth."
+        echo "  Fix: set CEILING_BYTES=${SUGGESTED} in this script, in this PR."
+      } >&2
+    fi
+    exit 1
   fi
   exit 0
 fi
