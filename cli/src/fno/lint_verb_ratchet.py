@@ -423,12 +423,20 @@ def probe_fno_agents_actions(binary: Path) -> set[str]:
     result = _run_front(binary, ["__fno_verb_probe__"])
     output = (result.stdout or "") + (result.stderr or "")
     marker = "__fno_verb_probe__"
+    # Both refusals name the probed BINARY. This gate reads a compiled artifact
+    # while every other check in the lint reads source, so a binary built before
+    # the current checkout fails here and sends the reader to the source scan
+    # that is fine. Rebuild is the first thing to try, and the path says which.
     if marker not in output:
-        raise VerbRatchetError("verb-ratchet: fno-agents did not refuse the positive probe by name")
+        raise VerbRatchetError(
+            f"verb-ratchet: {binary} did not refuse the positive probe by name; "
+            "if it predates this checkout, rebuild it first (cargo build)"
+        )
     match = re.search(r"\(expected ([^)]+)\)", output[output.index(marker) :])
     if match is None:
         raise VerbRatchetError(
-            "verb-ratchet: fno-agents refusal did not report its expected actions"
+            f"verb-ratchet: {binary} refused without reporting its expected actions; "
+            "if it predates this checkout, rebuild it first (cargo build)"
         )
     return {value.strip() for value in match.group(1).split("|") if value.strip()}
 

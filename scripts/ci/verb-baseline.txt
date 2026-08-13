@@ -3,6 +3,15 @@
 # AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
 # Remove or add a line only in the same PR that removes or adds the verb.
 #
+# ALLOCATE THE ACTION FIRST. A new action must have a row in
+# scripts/ci/verb-collapse-map.tsv before this file can regenerate, or the lint
+# refuses with `collapsed action inventory drifted ... code-only=[...]`. Copy a
+# neighbouring row: tier T1 keeps the pre-collapse typing, and the refs column
+# comes from the sweep in scripts/diagnostics/verb-callers.py, not from a guess.
+# The map's contract test pins the inventory count, so that number moves in the
+# same PR. Two separate branches hit this within one hour on 2026-08-13, which
+# is why it is written here rather than learned twice.
+#
 # To regenerate after an intentional change:
 #   uv run --project cli fno-py lint verb-ratchet --update
 # then commit this file in that PR. Run it that way, not as a bare `fno`: a bare
