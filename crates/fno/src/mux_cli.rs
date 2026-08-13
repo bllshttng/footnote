@@ -1367,10 +1367,20 @@ fn squad_prune(args: &[OsString]) -> i32 {
         let verb = if applied { "pruned" } else { "would prune" };
         for sq in &removed {
             println!(
-                "{verb} {} origins={} members={}",
+                "{verb} {} origins={} members={} - {}",
                 prune_identity(sq),
                 sq.origins.join(","),
-                sq.members
+                sq.members,
+                crate::squad_store::prune_reason(sq)
+            );
+        }
+        let memberless = removed.iter().filter(|sq| sq.members == 0).count();
+        if memberless > 0 {
+            println!(
+                "{memberless} of {} had no member records at all. Nothing recorded who worked \
+                 there, so the removal rests on directory and age. Recording members is the fix \
+                 that makes this judgeable.",
+                removed.len()
             );
         }
         if applied && removed.is_empty() {
@@ -1439,6 +1449,7 @@ fn render_prune_json(
                 "key": sq.key,
                 "origins": sq.origins,
                 "members": sq.members,
+                "reason": crate::squad_store::prune_reason(sq),
             })
         })
         .collect();

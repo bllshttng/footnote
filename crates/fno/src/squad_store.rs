@@ -580,15 +580,23 @@ pub fn prune_decision_at(
     // live pane under an origin might BE this squad's unrecorded worker, a
     // vanished origin means there is nothing left to recruit into, and otherwise
     // only the clock separates a fresh squad from a finished one.
+    // ONE GRACE WINDOW, BOTH ARMS. Each directory heuristic is a guess about a
+    // squad too young to judge, so each expires on the same clock. The pane arm
+    // used to be unconditional, and an arm that never ages beside one that ages
+    // after an hour is an asymmetry inside a single predicate: measured here,
+    // six member-less squads weeks old were held by panes that merely shared a
+    // repo root with them. A pane in a repo is a coincidence of directory, not
+    // evidence about a squad nobody has recruited into for three weeks.
+    if empty_squad_past_grace(squad, now_epoch) {
+        return PruneDecision::Prune;
+    }
     if live_cwds
         .iter()
         .any(|cwd| origin_owned(&squad.origins, cwd))
     {
         return PruneDecision::Keep;
     }
-    if squad.origins.iter().any(|o| origin_exists(o.as_str()))
-        && !empty_squad_past_grace(squad, now_epoch)
-    {
+    if squad.origins.iter().any(|o| origin_exists(o.as_str())) {
         return PruneDecision::KeepUnknown;
     }
     PruneDecision::Prune
@@ -656,6 +664,21 @@ pub struct PrunedSquad {
     pub key: String,
     pub origins: Vec<String>,
     pub members: usize,
+}
+
+/// Why a removal happened, for the receipt.
+///
+/// A member-less squad is removed on directory heuristics and a clock, never on
+/// evidence about itself, because no member was ever recorded for it. That is a
+/// data defect, and a prune that deletes its traces silently erases the only
+/// evidence the defect exists. So the receipt says which removals were of that
+/// kind and the summary counts them.
+pub fn prune_reason(sq: &PrunedSquad) -> &'static str {
+    if sq.members == 0 {
+        "no member ever recorded - removed on origin and age, not on its own evidence"
+    } else {
+        "every recorded member is dead"
+    }
 }
 
 impl From<&StoredSquad> for PrunedSquad {
@@ -2180,10 +2203,30 @@ mod tests {
             PruneDecision::SkipNamed
         );
 
-        // A live pane still protects a past-grace member-less squad.
+        // ONE CLOCK FOR BOTH DIRECTORY ARMS.
+        //
+        // A live pane protects a member-less squad only while it is young enough
+        // for that pane to plausibly BE its unrecorded worker. Past grace it does
+        // not, and this assertion is the one that changed: the pane arm used to
+        // be unconditional, so a squad weeks old stayed immortal while any
+        // session ran in the same repo. Measured here, that held six of them.
         assert_eq!(
             prune_decision_at(
                 &empty_squad("2020-01-01T00:00:00Z"),
+                false,
+                Some(&std::collections::HashSet::new()),
+                &["/alive/child".to_string()],
+                &|_| true,
+                Some(T_NOON),
+            ),
+            PruneDecision::Prune
+        );
+        // ...and WITHIN grace the same pane still protects it, so the arm is
+        // aged, not deleted. Without this pair, "past grace prunes" would also
+        // pass against a predicate that ignored panes entirely.
+        assert_eq!(
+            prune_decision_at(
+                &empty_squad("2026-08-13T11:59:00Z"),
                 false,
                 Some(&std::collections::HashSet::new()),
                 &["/alive/child".to_string()],
