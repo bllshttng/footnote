@@ -151,6 +151,46 @@ SUBSTITUTION_CONTROLS = {
     "loops status": 1,
 }
 
+# The FOURTH shape: a Rust argv ARRAY. `Command::new(fno_bin()).args(["claim",
+# "sweep", "--json"])` puts no binary token beside the verb, so the tokenizer
+# above credits nothing and a live verb scores zero.
+#
+#   crates/fno/src/needs_overlay.rs      .args(["needs", ...])   -> `agents needs`
+#   crates/fno-agents/src/finalize.rs    .args(["pr", "base-lineage-check", ...])
+#
+# Key on the ARRAY, never on the Command expression. A first attempt keyed on
+# `Command::new(<ident>_bin())` and missed needs_overlay.rs outright, because the
+# real call reads `tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())`
+# and the qualifier's `::` and parens defeat that pattern.
+_RUST_ARGS_RE = re.compile(r"\.args\(\s*&?\s*\[([^\]]*)\]", re.S)
+_RUST_STR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_RUST_CMD_LITERAL_RE = re.compile(r'Command::new\(\s*"([^"]+)"')
+
+# An array is skipped ONLY when the nearest preceding `Command::new` names one
+# of THESE literals. The set is enumerated on purpose and must never be inverted
+# into "skip any literal that is not fno": that rule kills a live verb the day
+# someone adds a wrapper under a new name. This file's own rule decides the
+# direction - a false positive keeps a verb alive, a false negative deletes a
+# live one - so over-collection is the safe error and this list stays long.
+FOREIGN_BINARIES = {
+    "bash", "cargo", "echo", "env", "false", "gh", "git", "jq", "node", "npm",
+    "open", "printf", "python", "python3", "sh", "sleep", "tmux", "true", "uv",
+}
+
+# One control per SHAPE, not one per site. Four shapes, each verified as a real
+# baselined leaf at a real call site:
+#   agents needs           the fno-agents prefix case (array is ["needs"])
+#   notify                 single-token leaf
+#   plan fidelity          two-token leaf
+#   pr base-lineage-check  hyphenated leaf, and proof that `pr` traffic is
+#                          separable from the `gh pr view` arrays next to it
+RUST_ARGV_CONTROLS = {
+    "agents needs": 1,
+    "notify": 1,
+    "plan fidelity": 1,
+    "pr base-lineage-check": 1,
+}
+
 ORIGINAL_ZERO_BOUND = 92  # the uncorrected sweep's zero count; the delta baseline
 
 
@@ -512,6 +552,62 @@ def sweep_shell_dynamic(root: Path) -> list[str]:
     return sorted(set(sites))
 
 
+def _foreign_command(text: str, pos: int) -> bool:
+    """True when the nearest preceding ``Command::new`` names a foreign binary.
+
+    Only a STRING LITERAL counts. Anything computed (``fno_bin()``, a variable,
+    a qualified path) is credited, because the array is the signal and guessing
+    at a non-literal is how a live verb gets deleted.
+
+    The lookback must not cross a statement boundary. A builder-style command
+    (``let mut c = Command::new(fno_bin()); ... c.args(["backlog", "done"]);``)
+    can have an unrelated one-line ``Command::new("git")…`` between the two, and
+    charging the fno array to that git call is the ONE direction this file
+    forbids - it drops a live caller and authorises a deletion. A ``;`` between
+    the two ends the chain, so the array belongs to something else.
+    """
+    window = text[max(0, pos - 400):pos]
+    idx = window.rfind("Command::new(")
+    if idx == -1 or ";" in window[idx:]:
+        return False
+    m = _RUST_CMD_LITERAL_RE.match(window, idx)
+    return bool(m) and m.group(1).rsplit("/", 1)[-1] in FOREIGN_BINARIES
+
+
+def sweep_rust_argv(root: Path, leaves: set[str]) -> Counter:
+    """Count leaves named by a Rust argv array under ``crates/``."""
+    counts: Counter = Counter()
+    crates = root / "crates"
+    if not crates.is_dir():
+        return counts
+    for dp, dn, fn in os.walk(crates):
+        dn[:] = [d for d in dn if d not in SKIP_DIRS and d != "target"]
+        for name in fn:
+            if not name.endswith(".rs"):
+                continue
+            try:
+                text = (Path(dp) / name).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for m in _RUST_ARGS_RE.finditer(text):
+                if _foreign_command(text, m.start()):
+                    continue
+                combo: list[str] = []
+                for tok in _RUST_STR_RE.findall(m.group(1)):
+                    if not _VERB_RE.fullmatch(tok) or len(combo) == 3:
+                        break
+                    combo.append(tok)
+                if not combo:
+                    continue
+                before = sum(counts.values())
+                _credit_longest(tuple(combo), leaves, counts)
+                if sum(counts.values()) == before:
+                    # An `fno-agents` argv omits the `agents` its leaf carries:
+                    # the array reads ["needs"] and the leaf is `agents needs`.
+                    _credit_longest(("agents", *combo[:2]), leaves, counts)
+    return counts
+
+
 def sweep_buckets(root: Path, leaves: set[str], extra_prefixes=()) -> dict[str, Counter]:
     """Per-bucket reference counts, so a deletion knows what it costs."""
     out: dict[str, Counter] = {}
@@ -604,6 +700,10 @@ def dead_set(root: Path, leaves_list: list[str]):
     wrappers = discover_shell_wrappers(root)
     buckets = sweep_buckets(root, leaves, extra_prefixes=wrappers)
     ast_counts, itext_counts, dynamic = sweep_internal(root, leaves)
+    # `crates` already sits in the runtime bucket, so an argv-array credit is a
+    # runtime reference like any other shell-out from that tree.
+    rust_counts = sweep_rust_argv(root, leaves)
+    buckets["runtime"].update(rust_counts)
 
     failures: list[str] = []
     ext_total: Counter = Counter()
@@ -613,6 +713,7 @@ def dead_set(root: Path, leaves_list: list[str]):
     failures += [
         f"substitution/{f}" for f in check_controls(ext_total, SUBSTITUTION_CONTROLS)
     ]
+    failures += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
     failures += [f"ast/{f}" for f in check_controls(ast_counts, AST_CONTROLS)]
     failures += [f"internal-text/{f}" for f in check_controls(itext_counts, INTERNAL_TEXT_CONTROLS)]
 
@@ -713,8 +814,18 @@ def main(argv: list[str] | None = None) -> int:
     # monotonicity invariant below, which guards every output mode
     # (corrected_zero must be a subset of uncorrected_zero).
     counts_corr = sweep(root, leaves, binary_form=True, pipe_fan=True)
+    # The Rust argv arrays are references the token sweep structurally cannot
+    # see, so they belong in EVERY mode, not just --dead. --curriculum's cull
+    # list is the deletion-decision path; leaving it blind to this shape is the
+    # exact failure the shape was added to fix. Folding them in only ADDS
+    # references, so the subset invariant below still holds.
+    rust_counts = sweep_rust_argv(root, leaves)
+    counts_corr.update(rust_counts)
 
+    # Checked against the rust counter alone, never the merged one: a floor a
+    # working text sweep could satisfy on its own is not a control on this sweep.
     failed = check_controls(counts_corr)
+    failed += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
     # A broken sweep emits no candidate list, even in self-check.
     if failed and not args.self_check:
         print("verb-callers: positive control(s) failed - sweep is broken, no list:", file=sys.stderr)

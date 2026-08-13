@@ -82,6 +82,125 @@ def test_curriculum_end_to_end_reports_complement():
     assert "cull candidates in complement" in proc.stdout
 
 
+def test_rust_argv_sweep_credits_the_array_not_the_command(tmp_path):
+    """The fourth shell shape, and the two ways of getting its filter wrong.
+
+    A Rust shell-out puts the verb inside an argv array with no binary token
+    beside it, so the whitespace sweep credits nothing. The array is therefore
+    the signal. Two directions matter and both are asserted here: an ENUMERATED
+    foreign literal is skipped, and an UNKNOWN literal is credited, because a
+    "skip anything that is not fno" rule deletes a live verb the day a wrapper
+    lands under a new name.
+    """
+    src = tmp_path / "crates" / "fno" / "src"
+    src.mkdir(parents=True)
+    (src / "sites.rs").write_text(
+        'Command::new(fno_bin()).args(["plan", "fidelity", "--json"]);\n'
+        # the qualifier shape that defeated keying on Command::new
+        "tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())\n"
+        '    .args(["needs", "--json"]);\n'
+        'Command::new("git").args(["notify"]);\n'
+        'Command::new("candidate_fno").args(["mail", "send"]);\n'
+    )
+    (tmp_path / "crates" / "fno" / "target").mkdir()
+    (tmp_path / "crates" / "fno" / "target" / "build.rs").write_text(
+        'Command::new(fno_bin()).args(["backlog", "done"]);\n'
+    )
+
+    counts = vc.sweep_rust_argv(
+        tmp_path, {"plan fidelity", "agents needs", "notify", "mail send", "backlog done"}
+    )
+    assert counts["plan fidelity"] == 1
+    # the array reads ["needs"]; the leaf carries the `agents` the argv omits
+    assert counts["agents needs"] == 1
+    assert counts["notify"] == 0, "an enumerated foreign literal must be skipped"
+    assert counts["mail send"] == 1, "an UNKNOWN literal must be credited, never skipped"
+    assert counts["backlog done"] == 0, "crates/*/target is build output, not source"
+
+
+def _broken_argv_sweep(tmp_path) -> Path:
+    """A copy of the script whose argv-array pattern matches nothing."""
+    broken = tmp_path / "verb-callers.py"
+    text = SCRIPT.read_text()
+    needle = 're.compile(r"\\.args\\(\\s*&?\\s*\\[([^\\]]*)\\]", re.S)'
+    assert needle in text, "the argv-array pattern moved; update this test"
+    broken.write_text(
+        text.replace(needle, 're.compile(r"\\.NO_SUCH_CALL\\(\\[([^\\]]*)\\]", re.S)')
+    )
+    return broken
+
+
+def test_rust_argv_credits_a_builder_command_past_a_foreign_one_liner(tmp_path):
+    """The foreign-binary lookback must not cross a statement boundary.
+
+    A builder-style command holds the fno binary in a variable and calls
+    ``.args`` several lines later, so an unrelated one-line ``Command::new("git")``
+    in between becomes the nearest preceding one. Charging the fno array to it
+    drops a live caller - the one direction the sweep forbids, because a missing
+    reference is what authorises a deletion.
+    """
+    src = tmp_path / "crates" / "fno" / "src"
+    src.mkdir(parents=True)
+    (src / "builder.rs").write_text(
+        "let mut cmd = Command::new(fno_bin());\n"
+        'Command::new("git").args(["fetch", "origin"]).status()?;\n'
+        'cmd.args(["backlog", "done"]);\n'
+    )
+    counts = vc.sweep_rust_argv(tmp_path, {"backlog done", "fetch origin"})
+    assert counts["backlog done"] == 1, "a builder-style fno argv must still be credited"
+    assert counts["fetch origin"] == 0, "the git one-liner is still skipped"
+
+
+def test_broken_argv_sweep_also_refuses_the_zero_list(tmp_path):
+    """The controls must reach the modes that decide a deletion, not only --dead.
+
+    ``--zero`` and ``--curriculum`` produce the cull-candidate list. A sweep
+    blind to the argv-array shape names a live verb as a cull candidate, so a
+    broken sweep must refuse here exactly as it does under --dead.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(_broken_argv_sweep(tmp_path)), "--zero"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
+    out = proc.stdout + proc.stderr
+    assert "no list" in out, out
+    for leaf in vc.RUST_ARGV_CONTROLS:
+        assert f"rust-argv/{leaf}" in out, f"{leaf} not named in the refusal:\n{out}"
+    assert "cull candidates" not in out, out
+
+
+def test_rust_argv_controls_refuse_to_emit_a_list_when_the_sweep_breaks(tmp_path):
+    """The RED path, pinned. A green-only test cannot tell a working gate from a dead one.
+
+    Runs a COPY of the script with the argv-array pattern replaced by one that
+    matches nothing, against the real corpus. The four controls must fail, the
+    run must exit 2, and no dead set may be printed - an emitted list is the
+    failure mode this control set exists to prevent.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(_broken_argv_sweep(tmp_path)), "--dead"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, f"a failed control must exit 2, got {proc.returncode}"
+    out = proc.stdout + proc.stderr
+    assert "no list emitted" in out, out
+    for leaf in vc.RUST_ARGV_CONTROLS:
+        assert f"rust-argv/{leaf}" in out, f"{leaf} not named in the refusal:\n{out}"
+    assert "dead:" not in out, f"a broken sweep must emit NO candidate list:\n{out}"
+
+
+def test_rust_argv_controls_are_real_leaves():
+    """A control naming a verb that no longer exists cannot fail for the right reason.
+
+    It would fail on every run, get read as noise, and end up deleted or its
+    floor dropped to zero - which is how a control set stops defending anything.
+    """
+    leaves = set(vc.load_leaves(REPO_ROOT))
+    missing = sorted(set(vc.RUST_ARGV_CONTROLS) - leaves)
+    assert not missing, f"rust-argv controls name non-leaves: {missing}"
+
+
 def test_curriculum_with_self_check_runs_self_check():
     """--self-check takes precedence over --curriculum.
 
