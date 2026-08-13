@@ -1,23 +1,24 @@
 ---
 name: verifier
-description: Use this agent to verify task completion against requirements. Spawned automatically after archer agent completes.
+description: |-
+  Use this agent to verify task completion against requirements. Spawned automatically after archer agent completes.
 
-Examples:
-<example>
-Context: Task executor claims auth implementation complete
-orchestrator: "Spawning verifier to check auth implementation"
-<commentary>
-Verifier independently validates all acceptance criteria before marking task as done.
-</commentary>
-</example>
-<example>
-Context: Developer claims feature is ready for review
-user: "I've finished the user dashboard feature"
-assistant: "I'll spawn the verifier agent to validate all requirements are met before proceeding."
-<commentary>
-Use verifier to objectively check deliverables against PLAN.md criteria.
-</commentary>
-</example>
+  Examples:
+  <example>
+  Context: Task executor claims auth implementation complete
+  orchestrator: "Spawning verifier to check auth implementation"
+  <commentary>
+  Verifier independently validates all acceptance criteria before marking task as done.
+  </commentary>
+  </example>
+  <example>
+  Context: Developer claims feature is ready for review
+  user: "I've finished the user dashboard feature"
+  assistant: "I'll spawn the verifier agent to validate all requirements are met before proceeding."
+  <commentary>
+  Use verifier to objectively check deliverables against PLAN.md criteria.
+  </commentary>
+  </example>
 model: haiku
 color: yellow
 tools: ["Read", "Grep", "Glob", "Bash"]

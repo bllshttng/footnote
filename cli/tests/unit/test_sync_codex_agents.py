@@ -133,3 +133,58 @@ nickname_candidates: [custom, worker]""",
 
     assert data["sandbox_mode"] == "workspace-write"
     assert data["nickname_candidates"] == ["custom", "worker"]
+
+
+def test_chomped_block_scalar_is_read_as_its_body(
+    tmp_path: Path, sync_codex_agents: ModuleType
+) -> None:
+    """`|-` is a valid header, and reading it as a value is the whole bug.
+
+    The parser matched the bare markers `|` and `>` only, so `description: |-`
+    parsed as the literal string "|-" with the indented body appended as loose
+    continuation lines. That put an example block into a codex description and
+    broke the contract forbidding it. The repaired agent files use `|-`,
+    because that is what makes their round trip byte-exact.
+    """
+    _generated, data = generate_fixture(
+        tmp_path,
+        sync_codex_agents,
+        "name: fixture\ndescription: |-\n  A short pointer sentence.\nmodel: haiku",
+        "Body.\n",
+    )
+
+    assert data["description"] == "A short pointer sentence."
+
+
+def test_folded_scalar_keeps_paragraph_breaks(
+    tmp_path: Path, sync_codex_agents: ModuleType
+) -> None:
+    """YAML folds a line break to a space and a BLANK line to a newline.
+
+    Joining every line with " " deletes each paragraph break and leaves a
+    doubled space where one was. Asserted against PyYAML on the PARSER, not on
+    the generated toml: codex_description collapses all whitespace downstream,
+    so a test at that layer passes either way and proves nothing.
+    """
+    import pathlib
+
+    import yaml
+
+    raw = (
+        "name: fixture\n"
+        "description: >\n"
+        "  first line\n"
+        "  same paragraph\n"
+        "\n"
+        "  second paragraph\n"
+        "model: haiku"
+    )
+
+    parsed = sync_codex_agents.parse_agent_frontmatter(raw, pathlib.Path("fixture.md"))
+
+    assert parsed["description"] == "first line same paragraph\nsecond paragraph"
+    assert "  " not in parsed["description"], (
+        "a dropped blank line leaves a doubled space"
+    )
+    # The reference reader, modulo the trailing newline clip chomping keeps.
+    assert parsed["description"] == yaml.safe_load(raw)["description"].rstrip("\n")
