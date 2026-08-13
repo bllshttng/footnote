@@ -51,6 +51,20 @@ def test_load_curriculum_empty_file(tmp_path):
     assert taught == set() and unknown == []
 
 
+def test_load_curriculum_maps_known_action_typing_to_live_dispatcher(tmp_path):
+    curr = tmp_path / "curriculum.txt"
+    curr.write_text("backlog get\nbacklog typo\n")
+    (tmp_path / "verb-collapse-map.tsv").write_text(
+        "current-leaf\ttier\tpost-collapse-typing\trefs\treason-if-not-T1\n"
+        "backlog get\tT1\tbacklog get\t1\t\n"
+    )
+
+    taught, unknown = vc.load_curriculum(curr, {"backlog"})
+
+    assert taught == {"backlog"}
+    assert unknown == ["backlog typo"]
+
+
 def test_curriculum_end_to_end_reports_complement():
     """The real curriculum partitions the live surface, with cull candidates.
 

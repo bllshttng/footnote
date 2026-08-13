@@ -234,8 +234,33 @@ def load_curriculum(path: Path, leaves: set[str]) -> tuple[set[str], list[str]]:
         line = line.split("#", 1)[0].strip()
         if line:
             raw.append(line)
-    taught = set(raw) & leaves
-    unknown = sorted(set(raw) - leaves)
+    typing_surface: set[str] = set()
+    allocation = path.with_name("verb-collapse-map.tsv")
+    if allocation.is_file():
+        for row in allocation.read_text().splitlines()[1:]:
+            current_leaf, *_ = row.split("\t")
+            typing_surface.add(current_leaf)
+
+    taught: set[str] = set()
+    unknown: list[str] = []
+    for entry in sorted(set(raw)):
+        if entry in leaves:
+            taught.add(entry)
+            continue
+        if entry in typing_surface:
+            tokens = entry.split()
+            dispatcher = next(
+                (
+                    " ".join(tokens[:size])
+                    for size in range(len(tokens) - 1, 0, -1)
+                    if " ".join(tokens[:size]) in leaves
+                ),
+                None,
+            )
+            if dispatcher is not None:
+                taught.add(dispatcher)
+                continue
+        unknown.append(entry)
     return taught, unknown
 
 
@@ -886,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {f}", file=sys.stderr)
         return 2
 
-    zero_corr = [l for l in leaves_list if counts_corr.get(l, 0) == 0]
+    zero_corr = [leaf for leaf in leaves_list if counts_corr.get(leaf, 0) == 0]
 
     # Monotonicity invariant: the two false-positive fixes can only ADD
     # references, so the corrected zero set must be a subset of the uncorrected
@@ -895,13 +920,13 @@ def main(argv: list[str] | None = None) -> int:
     # A regression that invents false zero-callers fails loudly before any cull
     # list is emitted, not after.
     counts_unc = sweep(root, leaves, binary_form=False, pipe_fan=False)
-    zero_unc = {l for l in leaves_list if counts_unc.get(l, 0) == 0}
-    not_subset = [l for l in zero_corr if l not in zero_unc]
+    zero_unc = {leaf for leaf in leaves_list if counts_unc.get(leaf, 0) == 0}
+    not_subset = [leaf for leaf in zero_corr if leaf not in zero_unc]
     if not_subset:
         print("verb-callers: corrected zero set is NOT a subset of uncorrected - "
               "a fix removed references, which is impossible:", file=sys.stderr)
-        for l in not_subset[:10]:
-            print(f"  {l}", file=sys.stderr)
+        for leaf in not_subset[:10]:
+            print(f"  {leaf}", file=sys.stderr)
         return 2
 
     # --self-check is an instrument-health mode that takes precedence over every
@@ -941,7 +966,9 @@ def main(argv: list[str] | None = None) -> int:
         # agree.
         try:
             from fno.lint_verb_ratchet import enumerate_all_leaves
-            registry = {l.split(' !')[0].strip() for l in enumerate_all_leaves()}
+            registry = {
+                leaf.split(' !')[0].strip() for leaf in enumerate_all_leaves()
+            }
             baseline_set = set(leaves_list)
             print(f"baseline freshness (file vs its own generator, NOT an "
                   f"independent check): baseline={len(baseline_set)} "
@@ -974,8 +1001,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {u}", file=sys.stderr)
             return 2
         zero_set = set(zero_corr)
-        complement = [l for l in leaves_list if l not in taught]
-        cull = sorted(l for l in complement if l in zero_set)
+        complement = [leaf for leaf in leaves_list if leaf not in taught]
+        cull = sorted(leaf for leaf in complement if leaf in zero_set)
         print(f"baseline leaves: {len(leaves_list)}")
         print(f"taught (curriculum): {len(taught)}")
         print(f"complement (untaught): {len(complement)}")
@@ -983,8 +1010,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"complement kept (has external caller): {len(complement) - len(cull)}")
         if cull:
             print("cull candidates:")
-            for l in cull:
-                print(f"  {l}")
+            for leaf in cull:
+                print(f"  {leaf}")
         return 0
 
     enrichment = load_enrichment(root)
@@ -1009,7 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
     header = f"{'leaf':34} {'refs':>5}  {'file:line':28}  help"
     lines.append(header)
     lines.append("-" * len(header))
-    for leaf in sorted(rows, key=lambda l: (counts_corr.get(l, 0), l)):
+    for leaf in sorted(rows, key=lambda item: (counts_corr.get(item, 0), item)):
         fl, hl = enrichment.get(leaf, ("", ""))
         if not enrichment_live:
             fl = fl or "(needs fno env)"
