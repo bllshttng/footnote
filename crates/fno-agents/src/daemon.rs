@@ -401,6 +401,115 @@ pub struct GcSummary {
 /// stale `fno` predating the verb exits non-zero with no receipt, which is
 /// indistinguishable from any other non-answer, so every unknown degrades to
 /// `None` and the row is kept. That is exactly the prior behaviour.
+/// Distinct canonical repo roots the registry knows about, deduplicated.
+///
+/// A linked worktree is not its own repo, so its rows fold into the checkout
+/// that owns them and the sweep runs once per repo rather than once per row.
+fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
+    let Ok(loaded) = state::load_registry(&home.registry_json()) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &loaded.entries {
+        let root = if e.project_root.is_empty() {
+            e.cwd.clone()
+        } else {
+            e.project_root.clone()
+        };
+        if !root.is_empty() && std::path::Path::new(&root).is_dir() {
+            seen.insert(root);
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// How long between worktree report sweeps. Long on purpose: this is the
+/// backstop for what the merge-triggered ritual missed, not a control loop.
+const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
+
+/// One repo's worktree-sweep reading, parsed from the verb's `Summary:` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorktreeSweepReport {
+    pub eligible: usize,
+    pub kept: usize,
+    pub dirty: usize,
+}
+
+/// Parse `fno worktree cleanup --merged`'s summary line.
+///
+/// Returns `None` rather than a zeroed report when the line is absent. A sweep
+/// that could not read its own output must not report "0 eligible, 0 dirty",
+/// which is indistinguishable from a clean machine: an absence has two
+/// explanations and a count must only ever come from a real reading.
+pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
+    let line = stdout.lines().find(|l| l.trim_start().starts_with("Summary:"))?;
+    let num_before = |needle: &str| -> Option<usize> {
+        let idx = line.find(needle)?;
+        line[..idx].split_whitespace().last()?.parse().ok()
+    };
+    Some(WorktreeSweepReport {
+        eligible: num_before(" would archive")?,
+        kept: num_before(" kept (")?,
+        dirty: num_before(" dirty")?,
+    })
+}
+
+/// Report-only worktree sweep, one line per repo, on a 24h floor.
+///
+/// REPORTS, NEVER REMOVES, and that split is deliberate. A merged PR is external
+/// proof the work landed; a timer tick proves nothing. Removal stays on the
+/// merge-triggered path, gated by the existing `post_merge.self_reap`. There is
+/// no second config knob, because two off-switches for one decision strand
+/// whoever flips the wrong one.
+///
+/// `run` is injected so the policy is testable without shelling out.
+pub fn worktree_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    now: i64,
+    roots: &[String],
+    run: &dyn Fn(&str) -> Option<String>,
+) -> usize {
+    let stamp = home.root().join("worktree-sweep.stamp");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
+        return 0;
+    }
+    let mut swept = 0;
+    for root in roots {
+        // Emit for EVERY repo, including the ones that read zero. A tick that
+        // stays silent when it finds nothing cannot be told from a tick that
+        // never ran, and this sweep exists precisely to surface what the
+        // ritual missed.
+        match run(root).as_deref().and_then(parse_worktree_sweep) {
+            Some(r) => {
+                let _ = emitter.emit(
+                    "worktree_sweep",
+                    &json!({
+                        "repo": root,
+                        "eligible": r.eligible,
+                        "kept": r.kept,
+                        "dirty": r.dirty,
+                        "mode": "report-only",
+                    }),
+                );
+                swept += 1;
+            }
+            None => {
+                let _ = emitter.emit(
+                    "worktree_sweep",
+                    &json!({"repo": root, "mode": "report-only", "error": "unreadable-summary"}),
+                );
+            }
+        }
+    }
+    let _ = std::fs::write(&stamp, now.to_string());
+    swept
+}
+
 /// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
 /// plain directory?
 ///
@@ -1170,6 +1279,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // `claude stop` is a subprocess; a large marker set must never serialize
     // inline in the select arm and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -1214,6 +1324,30 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // registry write); the grace window makes exact cadence
                 // non-critical, so running it on the idle tick is fine.
                 let _ = gc_sweep(&ctx.home, &ctx.emitter, ctx.opts.dead_row_grace);
+                // Worktree report sweep: the backstop for what the merge ritual
+                // missed. Its own 24h stamp makes it a near-no-op on this tick,
+                // but the verb shells git across every worktree when it does
+                // fire, so it runs off-loop behind a one-in-flight gate like the
+                // scrape sweep. Report-only by construction.
+                if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&worktree_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        let roots = registry_repo_roots(&home);
+                        let now = now_epoch_secs();
+                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
+                            std::process::Command::new("fno")
+                                .current_dir(root)
+                                .args(["worktree", "cleanup", "--merged"])
+                                .output()
+                                .ok()
+                                .filter(|o| o.status.success())
+                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        });
+                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
                 // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
                 // workers finalize marked terminal, so a shipped bg /target frees
                 // its slot instead of parking at an idle prompt forever. Spawned
@@ -5086,6 +5220,86 @@ mod tests {
                 .and_then(Value::as_str),
             Some("ask-old")
         );
+    }
+
+    /// The real summary line, copied from this machine's output.
+    const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
+Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
+
+    #[test]
+    fn sweep_summary_parses_the_real_line() {
+        let r = parse_worktree_sweep(REAL_SUMMARY).expect("parses");
+        assert_eq!(r.eligible, 12);
+        assert_eq!(r.kept, 37);
+        assert_eq!(r.dirty, 5);
+    }
+
+    #[test]
+    fn sweep_summary_absent_is_none_not_zero() {
+        // A zeroed report is indistinguishable from a clean machine. An absence
+        // has two explanations and only a real reading may produce a count.
+        assert!(parse_worktree_sweep("").is_none());
+        assert!(parse_worktree_sweep("some other output\n").is_none());
+    }
+
+    #[test]
+    fn sweep_reports_every_repo_including_the_quiet_ones() {
+        let home = tmp_home("wt-sweep-quiet");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let quiet = "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
+
+        let swept = worktree_sweep(
+            &home, &emitter, 1_000_000,
+            &["/repo/a".into(), "/repo/b".into()],
+            &|_| Some(quiet.to_string()),
+        );
+
+        assert_eq!(swept, 2, "a tick that finds nothing must still report");
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert_eq!(log.matches("worktree_sweep").count(), 2);
+        assert!(log.contains("report-only"));
+    }
+
+    #[test]
+    fn sweep_honours_its_own_24h_floor() {
+        let home = tmp_home("wt-sweep-floor");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let out = |_: &str| Some(REAL_SUMMARY.to_string());
+        let now = 1_000_000;
+
+        assert_eq!(worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &out), 1);
+        // Same day: skipped entirely, no second reading.
+        assert_eq!(worktree_sweep(&home, &emitter, now + 60, &["/repo/a".into()], &out), 0);
+        // A day later: fires again.
+        assert_eq!(
+            worktree_sweep(&home, &emitter, now + 86_401, &["/repo/a".into()], &out),
+            1
+        );
+    }
+
+    #[test]
+    fn sweep_never_passes_apply() {
+        // Ruling: a merged PR is proof, a timer tick is not. Removal lives on the
+        // merge-triggered path only. Pin that this sweep cannot grow an --apply.
+        let src = include_str!("daemon.rs");
+        let idx = src
+            .find("fn worktree_sweep(")
+            .expect("worktree_sweep exists");
+        let body = &src[idx..idx + 2000.min(src.len() - idx)];
+        assert!(!body.contains("--apply"));
+    }
+
+    #[test]
+    fn sweep_records_an_unreadable_summary_rather_than_inventing_zeros() {
+        let home = tmp_home("wt-sweep-unreadable");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        let swept = worktree_sweep(&home, &emitter, 1_000_000, &["/repo/a".into()], &|_| None);
+
+        assert_eq!(swept, 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("unreadable-summary"));
+        assert!(!log.contains("\"eligible\""));
     }
 
     #[test]
