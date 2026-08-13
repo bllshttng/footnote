@@ -63,7 +63,12 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _events(events_path: Path) -> list[dict]:
     if not events_path.exists():
         return []
-    return [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+    return [
+        event
+        for line in events_path.read_text().splitlines()
+        if line.strip()
+        and not (event := json.loads(line))["type"].startswith("claim_")
+    ]
 
 
 def _hold(key: str) -> None:

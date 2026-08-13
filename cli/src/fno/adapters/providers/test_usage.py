@@ -789,6 +789,9 @@ class TestDispatchOneQuotaDefer:
         import fno.dispatch as dispatch_mod
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        from fno import paths
+        paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
@@ -823,6 +826,9 @@ class TestDispatchOneQuotaDefer:
         import fno.dispatch as dispatch_mod
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        from fno import paths
+        paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
@@ -860,6 +866,9 @@ class TestRequiredBotHeadroomCheck:
         from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
+        monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        from fno import paths
+        paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
         # Config: one required bot backed by codex.
         review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)

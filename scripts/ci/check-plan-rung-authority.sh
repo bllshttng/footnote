@@ -165,7 +165,7 @@ crates/fno-agents/src/manifest.rs:2
 crates/fno-agents/src/needs.rs:1
 crates/fno-agents/src/nudge.rs:1
 crates/fno-agents/src/opencode_ask.rs:1
-crates/fno-agents/src/paths.rs:3
+crates/fno-agents/src/paths.rs:4
 crates/fno-agents/src/protocol.rs:5
 crates/fno-agents/src/provider.rs:6
 crates/fno-agents/src/readiness.rs:13

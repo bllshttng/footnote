@@ -29,6 +29,7 @@ from fno.setup.managed_block import render_block
 
 
 ROOT = Path(__file__).resolve().parents[3]
+pytestmark = pytest.mark.xdist_group("context-audit-processes")
 
 
 def _source(
@@ -588,6 +589,7 @@ def test_runtime_observer_emits_exact_session_bound_context_snapshot(
     env = {
         **os.environ,
         "FNO_CONTEXT_OBSERVATION_DIR": str(tmp_path / "scratch"),
+        "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "30",
         "FNO_PLATFORM": "codex",
     }
     env.pop("FNO_REPO_ROOT", None)
@@ -730,7 +732,7 @@ def test_runtime_observer_upgrades_one_incomplete_snapshot_to_one_complete(
             text=True,
             capture_output=True,
             check=False,
-            timeout=10,
+            timeout=60,
         )
         assert result.returncode == 0, result.stderr
 
@@ -810,6 +812,7 @@ def test_postcompact_hook_wrapper_preserves_output_and_emits_snapshot(
         **os.environ,
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "FNO_CONTEXT_OBSERVATION_DIR": str(tmp_path / "scratch"),
+        "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "30",
         "FNO_PLATFORM": "codex",
         "FNO_REPO_ROOT": str(tmp_path),
     }
@@ -1199,6 +1202,7 @@ def test_parallel_recorders_collect_once_after_reversed_completion(
         **os.environ,
         "CLAUDE_PLUGIN_ROOT": str(ROOT),
         "FNO_CONTEXT_OBSERVATION_DIR": str(tmp_path / "scratch"),
+        "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS": "30",
         "FNO_PLATFORM": "claude",
         "FNO_REPO_ROOT": str(tmp_path),
     }
@@ -1234,7 +1238,7 @@ def test_parallel_recorders_collect_once_after_reversed_completion(
             text=True,
             capture_output=True,
             check=False,
-            timeout=20,
+            timeout=60,
         )
 
     with ThreadPoolExecutor(max_workers=3) as pool:

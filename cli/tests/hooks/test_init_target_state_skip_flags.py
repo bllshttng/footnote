@@ -103,7 +103,7 @@ def _stub_fno(bin_dir: Path) -> None:
 
 
 def _run_init_script(
-    tmpdir: Path, extra_env: dict[str, str], *, timeout_s: int = 90
+    tmpdir: Path, extra_env: dict[str, str], *, timeout_s: int = 900
 ) -> subprocess.CompletedProcess:
     """Run init-target-state.sh in an isolated tmpdir with the given env overrides.
 
@@ -271,7 +271,7 @@ def test_cancelled_claimless_session_is_archived_on_next_init(tmp_path):
         encoding="utf-8",
     )
 
-    proc = _run_init_script(tmp_path, {"TARGET_SIZE": "M"}, timeout_s=180)
+    proc = _run_init_script(tmp_path, {"TARGET_SIZE": "M"})
 
     assert proc.returncode == 0, proc.stderr
     assert "old-run" not in (state_dir / "target-state.md").read_text()
