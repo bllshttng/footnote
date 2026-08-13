@@ -78,6 +78,38 @@ def test_read_logs_codex_follow_swallows_keyboard_interrupt(tmp_path, monkeypatc
     assert "{\"line\": 1}" in stdout_buf.getvalue()
 
 
+def test_keyboard_interrupt_during_the_tail_write_exits_clean(tmp_path, monkeypatch):
+    """The window the subprocess test kept flaking on, pinned directly.
+
+    The tail write is the readiness marker a follower waits on. A guard that
+    opened only at the follow branch left that write unprotected, so a SIGINT
+    arriving the moment the process looked ready took the default handler and
+    killed it with 130. Interrupting the write itself is that exact window.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    log_file = tmp_path / "follow.jsonl"
+    log_file.write_text('{"line": 1}\n', encoding="utf-8")
+    write_registry([_codex(log_path=str(log_file))])
+
+    from fno.agents import read as read_mod
+
+    class InterruptingWriter(io.StringIO):
+        def write(self, text: str) -> int:
+            raise KeyboardInterrupt
+
+    stderr_buf = io.StringIO()
+    result = read_mod.read_logs(
+        name="follow-target",
+        tail=None,
+        follow=True,
+        stdout=InterruptingWriter(),
+        stderr=stderr_buf,
+    )
+
+    assert result.exit_code == 0
+    assert "traceback" not in stderr_buf.getvalue().lower()
+
+
 def test_follow_jsonl_detects_window_spanning_truncate(tmp_path):
     """Truncate-then-refill within a single poll window must surface, not emit garbage.
 

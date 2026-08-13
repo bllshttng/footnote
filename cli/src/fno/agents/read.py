@@ -380,36 +380,45 @@ def read_logs(
         err.write(f"failed to read {log_path}: {exc}\n")
         return LogsResult(exit_code=1)
 
-    for line in records:
-        out.write(line)
-        if not line.endswith("\n"):
-            out.write("\n")
+    # The KeyboardInterrupt guard opens BEFORE the tail write, not after it.
+    # That write is the readiness marker a follower waits on, so a guard that
+    # started at the follow branch below left a window where the process looked
+    # ready and was not yet protected. A SIGINT landing there took the default
+    # handler and killed the process with 130, which reads as broken SIGINT
+    # handling when the process was merely slow to start. Widening the guard
+    # closes the window instead of widening the wait that races it.
+    try:
+        for line in records:
+            out.write(line)
+            if not line.endswith("\n"):
+                out.write("\n")
 
-    if follow:
-        # Best-effort 500ms polling loop for codex/gemini. Claude logs
-        # delegate follow to harnesses.claude.logs which has its own
-        # signal-safe implementation. OSError covers the open-time race
-        # (log deleted/rotated between the tail read above and the
-        # _follow_jsonl open below) — without it the operator sees a
-        # traceback for what is a normal rotation event.
-        try:
-            _follow_jsonl(log_path, stdout=out, stderr=err)
-        except KeyboardInterrupt:
-            # AC2-FR clean exit — no traceback on stderr.
-            return LogsResult(exit_code=EXIT_OK)
-        except FileNotFoundError as exc:
-            # Open-time race: log file was removed between the tail read
-            # above and the _follow_jsonl open. Treat as the same shape
-            # as the mid-stream disappearance the inner loop detects.
-            err.write(f"log file disappeared before follow could attach: {exc}\n")
-            return LogsResult(exit_code=EXIT_NOT_FOUND)
-        except OSError as exc:
-            # Other open-time failures (e.g. PermissionError, EIO) are
-            # genuine infrastructure problems — surface them with a
-            # distinct message + generic exit so callers can tell them
-            # apart from the "disappeared" case.
-            err.write(f"failed to open log file for follow: {exc}\n")
-            return LogsResult(exit_code=1)
+        if follow:
+            # Best-effort 500ms polling loop for codex/gemini. Claude logs
+            # delegate follow to harnesses.claude.logs which has its own
+            # signal-safe implementation. OSError covers the open-time race
+            # (log deleted/rotated between the tail read above and the
+            # _follow_jsonl open below) — without it the operator sees a
+            # traceback for what is a normal rotation event. These two arms
+            # stay scoped to the open so their messages keep naming the open.
+            try:
+                _follow_jsonl(log_path, stdout=out, stderr=err)
+            except FileNotFoundError as exc:
+                # Open-time race: log file was removed between the tail read
+                # above and the _follow_jsonl open. Treat as the same shape
+                # as the mid-stream disappearance the inner loop detects.
+                err.write(f"log file disappeared before follow could attach: {exc}\n")
+                return LogsResult(exit_code=EXIT_NOT_FOUND)
+            except OSError as exc:
+                # Other open-time failures (e.g. PermissionError, EIO) are
+                # genuine infrastructure problems — surface them with a
+                # distinct message + generic exit so callers can tell them
+                # apart from the "disappeared" case.
+                err.write(f"failed to open log file for follow: {exc}\n")
+                return LogsResult(exit_code=1)
+    except KeyboardInterrupt:
+        # AC2-FR clean exit — no traceback on stderr.
+        return LogsResult(exit_code=EXIT_OK)
 
     return LogsResult(exit_code=EXIT_OK)
 
