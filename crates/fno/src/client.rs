@@ -880,7 +880,7 @@ struct View {
     /// selector `m` overlay is open. A digit sends [`Command::MoveTab`] for a tab
     /// source or [`Command::MovePane`] (cross-squad) for a pane source; the id
     /// is re-validated against the current catalog before it goes on the wire.
-    move_pick: Option<(MoveSrc, Vec<u64>)>,
+    move_pick: Option<MovePick>,
     /// Pending target and geometry for selector `p` placement.
     attach_place: Option<AttachPlace>,
     /// (x-96e8) The squad the selector cursor is tracking across a `J`/`K`
@@ -1001,6 +1001,38 @@ enum ConfirmKind {
 enum RenameTarget {
     Tab(TabId),
     Squad(u64),
+}
+
+/// The move-tab / move-pane destination picker's state (x-96e8, cursored by
+/// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
+/// cursor or the escape carry an arrow key needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MovePick {
+    src: MoveSrc,
+    /// Every candidate destination, uncapped (see `View::move_dst_squads`).
+    squads: Vec<u64>,
+    /// Index into `squads` of the highlighted destination.
+    cursor: usize,
+    /// Escape-sequence carry across reads, so an arrow split at a read boundary
+    /// neither closes the picker nor leaks its tail into the pane.
+    esc: Vec<u8>,
+}
+
+impl MovePick {
+    /// The selected destination squad id, or `None` for an empty list.
+    fn target(&self) -> Option<u64> {
+        self.squads.get(self.cursor).copied()
+    }
+
+    /// A freshly opened picker: cursor at the top, no escape carry.
+    fn new(src: MoveSrc, squads: Vec<u64>) -> Self {
+        Self {
+            src,
+            squads,
+            cursor: 0,
+            esc: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2086,8 +2118,9 @@ impl View {
     }
 
     /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
-    /// candidate destination squads (source excluded, capped at 9) in the order
-    /// a digit selects them. Same overlay-clearing discipline as the others.
+    /// candidate destination squads (source excluded). Same overlay-clearing
+    /// discipline as the others. The cursor starts at the top; the list is no
+    /// longer capped at the digit range, so rows past nine are cursor-only.
     fn open_move_pick(&mut self, src: MoveSrc, squads: Vec<u64>) {
         self.selector = None;
         self.answers = None;
@@ -2100,7 +2133,7 @@ impl View {
         self.recruit_esc.clear();
         self.attach_place = None;
         self.clear_peek();
-        self.move_pick = Some((src, squads));
+        self.move_pick = Some(MovePick::new(src, squads));
     }
 
     /// Open the attach-placement picker on `squads`, pre-selecting `target`.
@@ -2266,16 +2299,41 @@ impl View {
     }
 
     /// The candidate destination squads for a Move-to-workspace gesture on a row
-    /// owned by `own`: every other non-mission workspace, capped at the picker's
-    /// 9-digit range. Shared by the menu entry's construction and its dispatch so
-    /// the two cannot drift on what counts as a destination.
+    /// owned by `own`: every other non-mission workspace. Shared by the menu
+    /// entry's construction, its dispatch, and the tab-move picker so the three
+    /// cannot drift on what counts as a destination.
+    ///
+    /// It used to `.take(9)`, the digit range. At 14 workspaces that dropped
+    /// five with no notice, and a list that silently omits its tail is worse
+    /// than one that admits it: the operator cannot tell a missing workspace
+    /// from a gone one. The digit accelerator is still nine wide; the LIST is
+    /// not, and the pickers carry a cursor to reach the rest.
     fn move_dst_squads(&self, own: Option<u64>) -> Vec<u64> {
         self.layout
             .squads
             .iter()
             .map(|s| s.id)
             .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
-            .take(9)
+            .collect()
+    }
+
+    /// The candidate destination workspaces for an attach placement: every
+    /// non-mission workspace. A synthetic mission squad is a render-time
+    /// grouping header, not a real squad `place_spawned_pane` can route into,
+    /// so it is excluded here rather than at each call site.
+    ///
+    /// Both entry paths into the placement picker (the click path through
+    /// `apply_hit` and the keyboard path through `p`/Enter) built this list
+    /// independently and identically. Two constructions of one list is the
+    /// N-reachable-paths trap in miniature: the mission-squad exclusion had
+    /// already been fixed twice, and the `.take(9)` cap had to be removed
+    /// twice. Now there is one.
+    fn attach_dst_squads(&self) -> Vec<u64> {
+        self.layout
+            .squads
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !is_mission_squad(*id))
             .collect()
     }
 
@@ -4763,10 +4821,10 @@ impl View {
                 &self.theme,
                 None,
             );
-        } else if let Some((src, squads)) = &self.move_pick {
+        } else if let Some(picker) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
-            let lines = self.move_pick_lines(src, squads);
+            let lines = self.move_pick_lines(picker);
             let chrome = chrome::Chrome::new("move to", Anchor::Center).footer("esc cancel");
             draw_lines_overlay(
                 &mut cells,
@@ -4777,7 +4835,9 @@ impl View {
                 &chrome,
                 &lines,
                 &self.theme,
-                None,
+                // +1 for the header line: an uncapped list must not park its
+                // cursor behind the fold (same reason as the attach picker).
+                Some(picker.cursor + 1),
             );
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
@@ -5252,14 +5312,14 @@ impl View {
     /// selects it. A candidate that vanished from the catalog since open still
     /// renders (labelled) - the digit is re-validated on press, and the server
     /// refuses a stale id regardless.
-    fn move_pick_lines(&self, src: &MoveSrc, squads: &[u64]) -> Vec<String> {
+    fn move_pick_lines(&self, picker: &MovePick) -> Vec<String> {
         const W: usize = 40;
-        let verb = match src {
+        let verb = match picker.src {
             MoveSrc::Tab(_) => "move tab to:",
             MoveSrc::Pane(_) => "move pane to:",
         };
-        let mut lines = vec![pad_to(&format!(" {verb} · digit selects · esc cancel"), W)];
-        for (i, &sid) in squads.iter().enumerate() {
+        let mut lines = vec![pad_to(&format!(" {verb}"), W)];
+        for (i, &sid) in picker.squads.iter().enumerate() {
             let name = self
                 .layout
                 .squads
@@ -5267,8 +5327,19 @@ impl View {
                 .find(|s| s.id == sid)
                 .map(|s| s.name.as_str())
                 .unwrap_or("(gone)");
-            lines.push(pad_to(&format!(" {} {name}", i + 1), W));
+            let marker = if i == picker.cursor { '›' } else { ' ' };
+            // Only the first nine are digit-addressable; the rest get a blank
+            // gutter, so the drawn numbering never promises a key that does
+            // not exist.
+            let ord = if i < 9 {
+                (i + 1).to_string()
+            } else {
+                " ".into()
+            };
+            lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
         }
+        lines.push(pad_to(" hjkl/arrows move · enter move here", W));
+        lines.push(pad_to(" 1-9 move to first nine · esc/q cancel", W));
         lines
     }
 
@@ -9451,14 +9522,7 @@ async fn apply_hit(
             // exclude it here so a mission-grouped row's placement falls back
             // to a real target (the row's cwd match, else active, else first)
             // instead of leaking the virtual id into the picker.
-            let squads: Vec<u64> = view
-                .layout
-                .squads
-                .iter()
-                .map(|s| s.id)
-                .filter(|id| !is_mission_squad(*id))
-                .take(9)
-                .collect();
+            let squads: Vec<u64> = view.attach_dst_squads();
             if squads.is_empty() {
                 view.set_notice("no workspace to attach into".into());
             } else {
@@ -10997,14 +11061,7 @@ async fn selector_keys(
                 // this one and `place_spawned_pane` cannot route it. Same reason
                 // the two no-op cases stay distinct: "no workspace" and "not
                 // attachable" are different problems to report.
-                let squads: Vec<u64> = view
-                    .layout
-                    .squads
-                    .iter()
-                    .map(|s| s.id)
-                    .filter(|id| !is_mission_squad(*id))
-                    .take(9)
-                    .collect();
+                let squads: Vec<u64> = view.attach_dst_squads();
                 match picked {
                     Some((id, owner)) if !squads.is_empty() => {
                         let target = owner
@@ -11192,19 +11249,12 @@ async fn selector_keys(
                 .and_then(|squad| {
                     let sq = view.layout.squads.iter().find(|s| s.id == squad)?;
                     let tid = sq.tabs.get(sq.active_tab).or_else(|| sq.tabs.first())?.id;
-                    let dsts: Vec<u64> = view
-                        .layout
-                        .squads
-                        .iter()
-                        // Exclude the source AND mission sentinels: a mission id
-                        // resolves to no server-side squad, so MoveTab into one is
-                        // refused. The other destination sites (Move-to-workspace,
-                        // the `p` attach picker) already guard this; the tab picker
-                        // was the holdout.
-                        .filter(|s| s.id != squad && !is_mission_squad(s.id))
-                        .map(|s| s.id)
-                        .take(9)
-                        .collect();
+                    // Exclude the source AND mission sentinels: a mission id
+                    // resolves to no server-side squad, so MoveTab into one is
+                    // refused. That rule now lives in `move_dst_squads`, which
+                    // the Move-to-workspace menu entry already uses - this site
+                    // was a fourth hand-rolled copy of the same list.
+                    let dsts: Vec<u64> = view.move_dst_squads(Some(squad));
                     (!dsts.is_empty()).then_some((tid, dsts))
                 });
                 match picked {
@@ -11222,23 +11272,77 @@ async fn selector_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Move-tab picker keys (x-96e8): a digit `1..=9` selects the numbered
-/// destination squad and sends [`Command::MoveTab`]; the captured id is
-/// re-validated against the CURRENT catalog first (stale -> BEL + close, the
-/// server refuses a stale id regardless). Esc/q cancels; any other key closes
-/// without acting. `take()` clears the picker either way, so a stale overlay
-/// can never resurrect a second move.
+/// Move-tab / move-pane picker keys (x-96e8; cursored by x-3e17).
+///
+/// Two axes reach the same destination. A digit `1..=9` commits the numbered
+/// squad in one keystroke, exactly as it always has - that is why digits still
+/// COMMIT here while in the attach picker they only select. The attach picker
+/// needs a second axis (the split direction) and so cannot commit on a digit;
+/// this picker has no second axis, so a one-key move is the whole gesture and
+/// there is nothing to gain by making it two.
+///
+/// The cursor is what reaches PAST nine, now that the list is uncapped: hjkl
+/// and the arrows move it, Enter/Space commits it. Which means the picker is no
+/// longer single-shot - it must survive a keypress that is neither. An unmapped
+/// key is now ignored rather than closing the overlay, because "j closed my
+/// picker" is exactly the surprise the cursor exists to remove.
+///
+/// The captured id is re-validated against the CURRENT catalog before sending
+/// (stale -> BEL + close; the server refuses a stale id regardless).
 async fn move_pick_keys(
     view: &mut View,
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    let Some((src, squads)) = view.move_pick.take() else {
-        return Ok(StdinFlow::Continue);
+    let keys = {
+        let Some(picker) = view.move_pick.as_mut() else {
+            return Ok(StdinFlow::Continue);
+        };
+        let mut esc = std::mem::take(&mut picker.esc);
+        let keys = fold_selector_keys(&mut esc, bytes);
+        picker.esc = esc;
+        keys
     };
-    match bytes.first() {
-        Some(&b) if (b'1'..=b'9').contains(&b) => {
-            let idx = (b - b'1') as usize;
+
+    for key in keys {
+        // Cursor motion first: it is the only branch that leaves the picker open
+        // and unchanged otherwise.
+        let step = match key {
+            b'k' | b'h' => Some(-1isize),
+            b'j' | b'l' => Some(1isize),
+            _ => None,
+        };
+        if let Some(delta) = step {
+            if let Some(picker) = view.move_pick.as_mut() {
+                let len = picker.squads.len();
+                if len > 0 {
+                    let cur = picker.cursor.min(len - 1) as isize;
+                    picker.cursor = (cur + delta).clamp(0, len as isize - 1) as usize;
+                }
+            }
+            continue;
+        }
+        // A digit picks by ordinal, Enter/Space picks whatever the cursor is on.
+        // Everything else either cancels or is ignored.
+        let idx = match key {
+            b'1'..=b'9' => (key - b'1') as usize,
+            b'\r' | b'\n' | b' ' => match view.move_pick.as_ref() {
+                Some(p) => p.cursor,
+                None => return Ok(StdinFlow::Continue),
+            },
+            0x1b | b'q' => {
+                view.move_pick = None;
+                return Ok(StdinFlow::Continue);
+            }
+            _ => continue,
+        };
+        // Committing consumes the picker, so a stale overlay can never
+        // resurrect a second move.
+        let Some(picker) = view.move_pick.take() else {
+            return Ok(StdinFlow::Continue);
+        };
+        let (src, squads) = (picker.src, picker.squads);
+        {
             match squads.get(idx) {
                 // The captured id must still name a live squad; the server
                 // refuses a stale id regardless, but pre-validating saves a
@@ -11299,9 +11403,7 @@ async fn move_pick_keys(
                 }
             }
         }
-        // Esc/q cancel silently; any other key just closes (the picker is
-        // single-shot, cleared by take() above).
-        _ => {}
+        return Ok(StdinFlow::Continue);
     }
     Ok(StdinFlow::Continue)
 }
@@ -23080,7 +23182,7 @@ mod tests {
         assert!(buf.is_empty(), "opening the picker sends nothing");
         assert_eq!(
             v.move_pick,
-            Some((MoveSrc::Tab(1), vec![2])),
+            Some(MovePick::new(MoveSrc::Tab(1), vec![2])),
             "picker captures the squad's active tab id and the non-source squads"
         );
 
@@ -23112,7 +23214,10 @@ mod tests {
         v.layout.squads.push(mission_meta(5, "epic  0/4"));
         v.selector = Some(0); // squad 1
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
-        let (_, dsts) = v.move_pick.expect("picker opens with squad 2 available");
+        let dsts = v
+            .move_pick
+            .expect("picker opens with squad 2 available")
+            .squads;
         assert!(
             !dsts.iter().any(|&id| is_mission_squad(id)),
             "no mission sentinel in the destinations"
@@ -23125,7 +23230,7 @@ mod tests {
         // A digit sends MoveTab for the numbered squad; a captured id that
         // vanished is refused locally (no wire message).
         let mut v = two_pane_view();
-        v.move_pick = Some((MoveSrc::Tab(7), vec![2])); // move tab 7 to squad 2 (digit 1)
+        v.move_pick = Some(MovePick::new(MoveSrc::Tab(7), vec![2])); // move tab 7 to squad 2 (digit 1)
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -23138,7 +23243,7 @@ mod tests {
 
         // A stale captured id (not in the current catalog) sends nothing.
         let mut v = two_pane_view();
-        v.move_pick = Some((MoveSrc::Tab(7), vec![999]));
+        v.move_pick = Some(MovePick::new(MoveSrc::Tab(7), vec![999]));
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert!(
@@ -23216,7 +23321,7 @@ mod tests {
             id: 200,
             label: "dst".into(),
         });
-        v.move_pick = Some((MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
+        v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert_eq!(
@@ -23232,7 +23337,7 @@ mod tests {
 
         // Destination with no leaf pane: anchor is None -> a notice, no command.
         let mut v = two_pane_view(); // squad 2's tabs carry no PaneMeta here
-        v.move_pick = Some((MoveSrc::Pane(10), vec![2]));
+        v.move_pick = Some(MovePick::new(MoveSrc::Pane(10), vec![2]));
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert!(buf.is_empty(), "no anchor -> nothing on the wire");
