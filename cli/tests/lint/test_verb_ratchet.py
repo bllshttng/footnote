@@ -114,6 +114,18 @@ def test_rust_front_override_unset_falls_back_to_path(monkeypatch):
     assert vr._locate_rust_front() == Path("/on/path/fno")
 
 
+def test_fno_agents_front_prefers_worktree_build_before_path(monkeypatch, tmp_path):
+    built = tmp_path / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+    built.parent.mkdir(parents=True)
+    built.write_text("binary")
+    built.chmod(0o755)
+    monkeypatch.delenv("FNO_AGENTS_FRONT", raising=False)
+    monkeypatch.setattr(vr, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/installed/fno-agents")
+
+    assert vr._locate_fno_agents_front() == built
+
+
 def test_fail_closed_when_version_not_rust_front(monkeypatch):
     monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
     # version exits nonzero -> unreachable

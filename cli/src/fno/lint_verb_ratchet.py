@@ -420,6 +420,9 @@ def _locate_fno_agents_front() -> Optional[Path]:
     override = os.environ.get("FNO_AGENTS_FRONT", "").strip()
     if override:
         return Path(override)
+    worktree = _repo_root() / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
+    if worktree.is_file() and os.access(worktree, os.X_OK):
+        return worktree
     found = shutil.which("fno-agents")
     return Path(found) if found else None
 
