@@ -55,7 +55,12 @@ Run `fno outstanding` to see what has piled up.
 
 ## One worktree per feature, in the right place
 
-Isolate parallel work in its own worktree so sessions do not fight over the same checkout or shared state. Most worktree pain is placement: create at the harness-native default, `<repo>/.claude/worktrees/<name>`, and run `bash scripts/setup/setup-worktree.sh`, rather than adding a worktree from inside another one or working on a protected branch. Set `config.paths.worktrees_base` together with `worktree.policy = "external"` to put them somewhere else. The implementation-entry gates will refuse a write on a protected branch and point you at the fix.
+Isolate parallel work in its own worktree so sessions do not fight over the same checkout or shared state.
+Most worktree pain is placement.
+Create at the harness-native default, `<repo>/.claude/worktrees/<name>`, then run `bash scripts/setup/setup-worktree.sh`.
+Do not add a worktree from inside another one, and do not work on a protected branch.
+To put them elsewhere, set `config.paths.worktrees_base` together with `worktree.policy = "external"`.
+The implementation-entry gates will refuse a write on a protected branch and point you at the fix.
 
 ## Route ships through the fno verbs
 
