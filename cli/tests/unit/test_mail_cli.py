@@ -496,7 +496,7 @@ def _stub_pane_rung(
 
     calls: list = []
 
-    def _send(resolved_entry, text):
+    def _send(resolved_entry, text, **_kw):
         calls.append((resolved_entry, text))
         return pane_sends
 
