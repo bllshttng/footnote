@@ -1,0 +1,323 @@
+current-leaf	tier	post-collapse-typing	refs	reason-if-not-T1
+agents adopt	T1	agents adopt	6	
+agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
+agents attach	T1	agents attach	13	
+agents digest	T1	agents digest	7	
+agents discovered-json	T1	agents discovered-json	9	
+agents drive-authority	T1	agents drive-authority	9	
+agents finalize	T1	agents finalize	26	
+agents gate	T1	agents gate	6	
+agents heal-token	T1	agents heal-token	8	
+agents kill-check	T1	agents kill-check	4	
+agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
+agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
+agents loop	KEEP	agents loop	61	deliberate readability slack for a high-traffic distinct operation
+agents loop-check	KEEP	agents loop-check	61	deliberate readability slack for a high-traffic distinct operation
+agents name	T1	agents name	5	
+agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to needs_overlay
+agents nudge-peek	T1	agents nudge-peek	6	
+agents peek	T1	agents peek	29	
+agents ping	T1	agents ping	3	
+agents probe-run	T1	agents probe-run	3	
+agents reap	T1	agents reap	15	
+agents reconcile	T1	agents reconcile	12	
+agents register	T1	agents register	2	
+agents registry-json	T1	agents registry-json	3	
+agents report	T1	agents report	3	
+agents restart	T1	agents restart	6	
+agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
+agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
+agents spawn	KEEP	agents spawn	256	deliberate readability slack for a high-traffic distinct operation
+agents spawn-guard	T1	agents spawn-guard	5	
+agents status	T1	agents status	5	
+agents stop	T1	agents stop	22	
+agents subscribe	T1	agents subscribe	2	
+agents top	T1	agents top	20	
+agents trace	T1	agents trace	14	
+agents truth	T1	agents truth	16	
+agents verify-evidence	T1	agents verify-evidence	7	
+agents wait	T1	agents wait	10	
+agents watch	T1	agents watch	5	
+agents whoami	T1	agents whoami	9	
+annotate add	T1	annotate add	8	
+annotate list	KEEP	annotate list	0	ruled KEEP: read-back half of the live annotate write path
+annotate resolve	T1	annotate resolve	5	
+approvals decide	T1	approvals decide	2	
+approvals ls	T1	approvals ls	2	
+approvals show	T1	approvals show	3	
+backlog add	T1	backlog add	3	
+backlog advance	KEEP	backlog advance	43	deliberate readability slack for a high-traffic distinct operation
+backlog archive	T1	backlog archive	2	
+backlog bases	T1	backlog bases	0	
+backlog batch join	T1	backlog batch join	1	
+backlog batch metrics	T1	backlog batch metrics	0	
+backlog batch open	T1	backlog batch open	1	
+backlog batch prepare	T1	backlog batch prepare	1	
+backlog batch ship	T1	backlog batch ship	3	
+backlog batch ship-closeable	T1	backlog batch ship-closeable	1	
+backlog batch status	T1	backlog batch status	1	
+backlog capture add	T1	backlog capture add	6	
+backlog capture archive	T1	backlog capture archive	1	
+backlog capture capture-pass	T1	backlog capture capture-pass	1	
+backlog capture dismiss	T1	backlog capture dismiss	1	
+backlog capture empty-pass	T1	backlog capture empty-pass	2	
+backlog capture list	T1	backlog capture list	3	
+backlog capture promote	T1	backlog capture promote	1	
+backlog capture scan	T1	backlog capture scan	1	
+backlog capture tidy	T1	backlog capture tidy	3	
+backlog collisions check	T1	backlog collisions check	11	
+backlog cost	T1	backlog cost	1	
+backlog decompose	T1	backlog decompose	8	
+backlog defer	T1	backlog defer	14	
+backlog dispatch-lanes	T1	backlog dispatch-lanes	1	
+backlog done	KEEP	backlog done	42	deliberate readability slack for a high-traffic distinct operation
+backlog epic status	T1	backlog epic status	7	
+backlog find	T1	backlog find	23	
+backlog get	KEEP	backlog get	87	deliberate readability slack for a high-traffic distinct operation
+backlog groom	T1	backlog groom	20	
+backlog idea	T1	backlog idea	34	
+backlog intake	T1	backlog intake	32	
+backlog lane-fill	T1	backlog lane-fill	2	
+backlog lanes	T1	backlog lanes	2	
+backlog maintain	T1	backlog maintain	7	
+backlog new	T1	backlog new	38	
+backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
+backlog note	T1	backlog note	1	
+backlog pick	T1	backlog pick	2	
+backlog project-root	T1	backlog project-root	6	
+backlog provenance	T1	backlog provenance	7	
+backlog queue	T1	backlog queue	1	
+backlog queued	KEEP	backlog queued	1	ruled KEEP: read-back half of the live backlog queue path
+backlog rank	T1	backlog rank	20	
+backlog ready	T1	backlog ready	21	
+backlog reconcile	KEEP	backlog reconcile	44	deliberate readability slack for a high-traffic distinct operation
+backlog reconcile-findings	T1	backlog reconcile-findings	0	
+backlog rehash	T1	backlog rehash	4	
+backlog relatedness build	T1	backlog relatedness build	0	
+backlog relatedness get	T1	backlog relatedness get	0	
+backlog remove	T1	backlog remove	7	
+backlog reopen	T1	backlog reopen	3	
+backlog reprioritize	T1	backlog reprioritize	1	
+backlog roadmap	T1	backlog roadmap	1	
+backlog session add	T1	backlog session add	4	
+backlog status	T1	backlog status	1	
+backlog supersede	T1	backlog supersede	10	
+backlog triage apply	T1	backlog triage apply	3	
+backlog triage consistency	T1	backlog triage consistency	2	
+backlog triage context	T1	backlog triage context	7	
+backlog triage health	T1	backlog triage health	19	
+backlog triage projects	T1	backlog triage projects	2	
+backlog triage propose	T1	backlog triage propose	1	
+backlog triage rank	T1	backlog triage rank	2	
+backlog triage trend	T1	backlog triage trend	2	
+backlog triage validate	T1	backlog triage validate	1	
+backlog unarchive	T1	backlog unarchive	2	
+backlog unclaim	T1	backlog unclaim	8	
+backlog undefer	T1	backlog undefer	14	
+backlog unqueue	T1	backlog unqueue	0	
+backlog unsupersede	T1	backlog unsupersede	0	
+backlog update	KEEP	backlog update	92	deliberate readability slack for a high-traffic distinct operation
+backlog view	T1	backlog view	3	
+bundle check	T1	bundle check	11	
+bundle lint	T1	bundle lint	2	
+carveout add	T1	carveout add	27	
+carveout list	T1	carveout list	3	
+carveout resolve	T1	carveout resolve	3	
+carveout update	T1	carveout update	2	
+claim acquire	T1	claim acquire	27	
+claim list	T1	claim list	9	
+claim refresh	T1	claim refresh	5	
+claim release	KEEP	claim release	38	deliberate readability slack for a high-traffic distinct operation
+claim session-pid	T1	claim session-pid	2	
+claim status	T1	claim status	32	
+codemap	KEEP	codemap	18	single-leaf group
+config accounts	KEEP	config accounts	71	deliberate readability slack for a high-traffic distinct operation
+config active-backlog	T1	config active-backlog	5	
+config doctor	T1	config doctor	20	
+config get	KEEP	config get	69	deliberate readability slack for a high-traffic distinct operation
+config rm	T1	config rm	0	
+config schema	T1	config schema	10	
+config set	KEEP	config set	43	deliberate readability slack for a high-traffic distinct operation
+config status-sinks	T1	config status-sinks	2	
+config unset	T1	config unset	5	
+context	KEEP	context	15	single-leaf group
+cost	KEEP	cost	7	single-leaf group
+delivery	KEEP	delivery	7	single-leaf group
+dispatch one	T1	dispatch one	9	
+dispatch resolve	T1	dispatch resolve	23	
+doctor	KEEP	doctor	78	single-leaf group
+done	KEEP	done	48	single-leaf group
+evals grade	T1	evals grade	11	
+evals graduate	T1	evals graduate	2	
+evals report	T1	evals report	1	
+evals run	T1	evals run	3	
+event audit	T1	event audit	5	
+event emit	KEEP	event emit	40	deliberate readability slack for a high-traffic distinct operation
+event gate-escape	T1	event gate-escape	3	
+event push-parent	T1	event push-parent	3	
+executor	KEEP	executor	13	single-leaf group
+help	KEEP	help	37	single-leaf group
+lint	KEEP	lint	29	single-leaf group
+loops ls	T1	loops ls	1	
+loops pause-all	T1	loops pause-all	1	
+loops resume-all	KEEP	loops resume-all	0	ruled KEEP: only release for the pause-all kill switch
+loops status	T1	loops status	3	
+mail ack	T1	mail ack	10	
+mail drain	T1	mail drain	10	
+mail drain-self	T1	mail drain-self	6	
+mail lint	T1	mail lint	1	
+mail list	T1	mail list	15	
+mail migrate-bus	T1	mail migrate-bus	0	
+mail notify-self	T1	mail notify-self	4	
+mail rebuild-render	T1	mail rebuild-render	1	
+mail reply	T1	mail reply	18	
+mail send	KEEP	mail send	184	deliberate readability slack for a high-traffic distinct operation
+mail sent	T1	mail sent	2	
+mail status	T1	mail status	9	
+mail triage	T1	mail triage	8	
+mail unread	T1	mail unread	16	
+mail view	T1	mail view	2	
+mail withdraw	T1	mail withdraw	2	
+mcp send	KEEP	mcp send	10	single-leaf group
+mux attach	T1	mux attach	11	
+mux block annotate	T1	mux block annotate	4	
+mux block pipe	T1	mux block pipe	6	
+mux doctor	T1	mux doctor	7	
+mux kill-server	T1	mux kill-server	9	
+mux layout apply	T1	mux layout apply	14	
+mux layout get	T1	mux layout get	2	
+mux layout graft	T1	mux layout graft	15	
+mux ls	T1	mux ls	15	
+mux pane break	T1	mux pane break	1	
+mux pane claim	T1	mux pane claim	2	
+mux pane focus	T1	mux pane focus	2	
+mux pane kill	T1	mux pane kill	11	
+mux pane ls	T1	mux pane ls	10	
+mux pane read	T1	mux pane read	12	
+mux pane release	T1	mux pane release	1	
+mux pane run	T1	mux pane run	26	
+mux pane send	T1	mux pane send	13	
+mux pane split	T1	mux pane split	1	
+mux pane wait	T1	mux pane wait	7	
+mux serve	T1	mux serve	15	
+mux server	T1	mux server	5	
+mux shell-init	T1	mux shell-init	13	
+mux tab create	T1	mux tab create	2	
+mux tab join	T1	mux tab join	3	
+mux tab ls	T1	mux tab ls	2	
+mux tab rename	T1	mux tab rename	3	
+mux where	T1	mux where	16	
+mux workspace prune	T1	mux workspace prune	14	
+notify	KEEP	notify	18	single-leaf group
+observer replay	T1	observer replay	1	
+observer sweep	T1	observer sweep	4	
+paths emit-shell	T1	paths emit-shell	6	
+paths handoff	T1	paths handoff	9	
+paths shell-stub	T1	paths shell-stub	20	
+paths verify	T1	paths verify	7	
+phase	KEEP	phase	16	single-leaf group
+plan brief	T1	plan brief	4	
+plan fidelity	T1	plan fidelity	5	
+plan folder-audit	T1	plan folder-audit	0	
+plan graduate	T1	plan graduate	2	
+plan migrate-keys	T1	plan migrate-keys	1	
+plan path	T1	plan path	28	
+plan reconcile-status	T1	plan reconcile-status	5	
+plan rung	T1	plan rung	26	
+plan set-expected	T1	plan set-expected	1	
+plan stamp	T1	plan stamp	5	
+plan sync	T1	plan sync	3	
+plan validate	T1	plan validate	14	
+plugins activate	T1	plugins activate	1	
+plugins deactivate	T1	plugins deactivate	1	
+plugins inspect	T1	plugins inspect	1	
+plugins ls	T1	plugins ls	2	
+plugins verify	T1	plugins verify	4	
+posture apply	KEEP	posture apply	1	single-leaf group
+pr base-check	T1	pr base-check	0	
+pr base-lineage-check	T1	pr base-lineage-check	6	
+pr evidence-check	T1	pr evidence-check	1	
+pr evidence-required	T1	pr evidence-required	1	
+pr global-receipt-events-path	T1	pr global-receipt-events-path	0	
+pr logs	T1	pr logs	1	
+pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distinct operation
+pr next-receipt-generation	T1	pr next-receipt-generation	0	
+pr rebase	T1	pr rebase	21	
+pr ritual	T1	pr ritual	24	
+pr status	T1	pr status	19	
+pr sync-canonical	T1	pr sync-canonical	2	
+pr verify	T1	pr verify	13	
+pr-watch heal	T1	pr-watch heal	3	
+pr-watch install	T1	pr-watch install	3	
+pr-watch refresh	T1	pr-watch refresh	1	
+pr-watch status	T1	pr-watch status	3	
+pr-watch tick	T1	pr-watch tick	2	
+pr-watch uninstall	T1	pr-watch uninstall	1	
+research	KEEP	research	18	single-leaf group
+restart	KEEP	restart	17	single-leaf group
+resume receipt show	T1	resume receipt show	1	
+resume receipt validate	T1	resume receipt validate	3	
+resume receipt write	T1	resume receipt write	2	
+retro drain-postmortems	T1	retro drain-postmortems	2	
+retro run	T1	retro run	23	
+retro sweep-carveouts	T1	retro sweep-carveouts	3	
+review	KEEP	review	27	single-leaf group
+roles context	T1	roles context	2	
+roles ls	T1	roles ls	1	
+roles resolve	T1	roles resolve	2	
+roles show	T1	roles show	2	
+route env	T1	route env	4	
+route ls	T1	route ls	3	
+route set	T1	route set	4	
+route unset	T1	route unset	1	
+runtime register-worker	T1	runtime register-worker	1	
+runtime worktree	T1	runtime worktree	3	
+scoreboard	KEEP	scoreboard	13	single-leaf group
+setup cli-hooks	T1	setup cli-hooks	8	
+setup cli-hooks-codex	T1	setup cli-hooks-codex	4	
+setup codex-plugin	T1	setup codex-plugin	10	
+setup migrate-config	T1	setup migrate-config	1	
+setup migrate-paths	T1	setup migrate-paths	8	
+setup plan	T1	setup plan	7	
+setup post-merge	T1	setup post-merge	6	
+setup wizard	T1	setup wizard	10	
+skill-diff reconcile	T1	skill-diff reconcile	1	
+skill-diff tick	T1	skill-diff tick	4	
+state archive	T1	state archive	1	
+state init	T1	state init	3	
+state set	T1	state set	20	
+state show	T1	state show	7	
+status	KEEP	status	22	single-leaf group
+status-fanout	KEEP	status-fanout	4	single-leaf group
+stub-manifest reconcile-finalize	T1	stub-manifest reconcile-finalize	1	
+stub-manifest reconcile-validate	T1	stub-manifest reconcile-validate	2	
+stub-manifest write	T1	stub-manifest write	2	
+target blast-check	T1	target blast-check	3	
+target check-contained	T1	target check-contained	4	
+target check-review-gate	T1	target check-review-gate	4	
+target denominator-ratio	T1	target denominator-ratio	2	
+target init	KEEP	target init	90	deliberate readability slack for a high-traffic distinct operation
+target resolve-model	T1	target resolve-model	2	
+target resolve-owned-identity	T1	target resolve-owned-identity	3	
+target start	T1	target start	31	
+target status	T1	target status	8	
+test	KEEP	test	108	single-leaf group
+think dispatch	T1	think dispatch	4	
+think inspect	T1	think inspect	7	
+tokens	KEEP	tokens	4	single-leaf group
+update	KEEP	update	88	single-leaf group
+upgrade	KEEP	upgrade	1	single-leaf group
+version	KEEP	version	15	single-leaf group
+whoami	KEEP	whoami	45	single-leaf group
+worker blueprint	T1	worker blueprint	0	
+worker external	T1	worker external	0	
+worker reconcile	T1	worker reconcile	0	
+worker review	T1	worker review	0	
+worker ship	T1	worker ship	2	
+worktree archive	T1	worktree archive	2	
+worktree cleanup	T1	worktree cleanup	6	
+worktree ensure	T1	worktree ensure	30	
+worktree overlap-record	T1	worktree overlap-record	3	
+worktree overlaps	T1	worktree overlaps	5	
+worktree policy	T1	worktree policy	9	
+worktree status	T1	worktree status	1	

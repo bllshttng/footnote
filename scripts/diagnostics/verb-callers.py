@@ -92,9 +92,10 @@ CORPUS_FILES = ["AGENTS.md", "README.md"]
 # on purpose; they are the one bucket a deletion is allowed to take with it.
 BUCKETS: dict[str, tuple[str, ...]] = {
     "user": ("skills", "docs", "agents", "commands", "AGENTS.md", "README.md"),
-    "runtime": ("scripts", "hooks", "crates"),
+    "runtime": ("scripts", "hooks"),
     "tests": ("cli/tests", "tests"),
 }
+CRATES_ROOT = "crates"
 INTERNAL_ROOT = "cli/src"
 
 # Skip dirs reachable from the corpus that hold no contributor-readable text:
@@ -191,6 +192,11 @@ RUST_ARGV_CONTROLS = {
     "pr base-lineage-check": 1,
 }
 
+# A Rust integration-test reference must prove the test sweep ran, never keep a
+# runtime capability alive. `test` is named by a crates/**/tests/** fixture in
+# the real corpus, so this marker fails if those paths fall back into runtime.
+CRATES_TEST_CONTROLS = {"test": 1}
+
 ORIGINAL_ZERO_BOUND = 92  # the uncorrected sweep's zero count; the delta baseline
 
 
@@ -255,6 +261,22 @@ def iter_paths(root: Path, entries):
 
 def iter_corpus(root: Path):
     yield from iter_paths(root, CORPUS_DIRS + CORPUS_FILES)
+
+
+def _is_crates_test_path(root: Path, path: Path) -> bool:
+    """Whether a path below crates/ is in a Rust integration-test tree."""
+    try:
+        rel = path.relative_to(root / CRATES_ROOT)
+    except ValueError:
+        return False
+    return "tests" in rel.parts
+
+
+def iter_crates_paths(root: Path, *, tests: bool):
+    """Split crates source between runtime and tests without double-crediting."""
+    for path in iter_paths(root, (CRATES_ROOT,)):
+        if _is_crates_test_path(root, path) is tests:
+            yield path
 
 
 def _clean(tok: str) -> str:
@@ -574,7 +596,9 @@ def _foreign_command(text: str, pos: int) -> bool:
     return bool(m) and m.group(1).rsplit("/", 1)[-1] in FOREIGN_BINARIES
 
 
-def sweep_rust_argv(root: Path, leaves: set[str]) -> Counter:
+def sweep_rust_argv(
+    root: Path, leaves: set[str], *, tests: bool | None = None,
+) -> Counter:
     """Count leaves named by a Rust argv array under ``crates/``."""
     counts: Counter = Counter()
     crates = root / "crates"
@@ -585,8 +609,11 @@ def sweep_rust_argv(root: Path, leaves: set[str]) -> Counter:
         for name in fn:
             if not name.endswith(".rs"):
                 continue
+            path = Path(dp) / name
+            if tests is not None and _is_crates_test_path(root, path) is not tests:
+                continue
             try:
-                text = (Path(dp) / name).read_text(encoding="utf-8", errors="ignore")
+                text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             for m in _RUST_ARGS_RE.finditer(text):
@@ -616,6 +643,14 @@ def sweep_buckets(root: Path, leaves: set[str], extra_prefixes=()) -> dict[str, 
             root, leaves, binary_form=True, pipe_fan=True,
             paths=iter_paths(root, entries), extra_prefixes=extra_prefixes,
         )
+    out["runtime"].update(sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=False), extra_prefixes=extra_prefixes,
+    ))
+    out["tests"].update(sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=True), extra_prefixes=extra_prefixes,
+    ))
     return out
 
 
@@ -702,8 +737,13 @@ def dead_set(root: Path, leaves_list: list[str]):
     ast_counts, itext_counts, dynamic = sweep_internal(root, leaves)
     # `crates` already sits in the runtime bucket, so an argv-array credit is a
     # runtime reference like any other shell-out from that tree.
-    rust_counts = sweep_rust_argv(root, leaves)
+    rust_counts = sweep_rust_argv(root, leaves, tests=False)
     buckets["runtime"].update(rust_counts)
+    buckets["tests"].update(sweep_rust_argv(root, leaves, tests=True))
+    crates_test_counts = sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=True), extra_prefixes=wrappers,
+    )
 
     failures: list[str] = []
     ext_total: Counter = Counter()
@@ -714,6 +754,10 @@ def dead_set(root: Path, leaves_list: list[str]):
         f"substitution/{f}" for f in check_controls(ext_total, SUBSTITUTION_CONTROLS)
     ]
     failures += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
+    failures += [
+        f"crates-tests/{f}"
+        for f in check_controls(crates_test_counts, CRATES_TEST_CONTROLS)
+    ]
     failures += [f"ast/{f}" for f in check_controls(ast_counts, AST_CONTROLS)]
     failures += [f"internal-text/{f}" for f in check_controls(itext_counts, INTERNAL_TEXT_CONTROLS)]
 
@@ -821,14 +865,22 @@ def main(argv: list[str] | None = None) -> int:
     # references, so the subset invariant below still holds.
     rust_counts = sweep_rust_argv(root, leaves)
     counts_corr.update(rust_counts)
+    crates_test_counts = sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=True),
+    )
 
     # Checked against the rust counter alone, never the merged one: a floor a
     # working text sweep could satisfy on its own is not a control on this sweep.
     failed = check_controls(counts_corr)
     failed += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
-    # A broken sweep emits no candidate list, even in self-check.
-    if failed and not args.self_check:
-        print("verb-callers: positive control(s) failed - sweep is broken, no list:", file=sys.stderr)
+    failed += [
+        f"crates-tests/{f}"
+        for f in check_controls(crates_test_counts, CRATES_TEST_CONTROLS)
+    ]
+    # A broken sweep emits no candidate list, including from self-check.
+    if failed:
+        print("verb-callers: positive control(s) failed - sweep is broken, no list emitted:", file=sys.stderr)
         for f in failed:
             print(f"  {f}", file=sys.stderr)
         return 2
@@ -855,9 +907,21 @@ def main(argv: list[str] | None = None) -> int:
     # output mode (--curriculum, --summary, --zero, default), matching the
     # return-early ordering the other modes already share.
     if args.self_check:
-        ok = not failed and not not_subset
-        print("controls:", "PASS" if not failed else "FAIL",
-              {k: counts_corr.get(k, 0) for k in CONTROLS})
+        _, _, _, _, health_failures, _ = dead_set(root, leaves_list)
+        if health_failures:
+            print(
+                "verb-callers: positive control(s) failed - no list emitted:",
+                file=sys.stderr,
+            )
+            for failure in health_failures:
+                print(f"  {failure}", file=sys.stderr)
+            return 2
+        ok = not not_subset
+        print(
+            "controls: PASS "
+            "(substitution, rust-argv, crates-tests, ast, internal-text)",
+            {k: counts_corr.get(k, 0) for k in CONTROLS},
+        )
         print(f"uncorrected zero: {len(zero_unc)}  corrected zero: {len(zero_corr)}  "
               f"rescued by fixes: {len(zero_unc) - len(zero_corr)}")
         print(f"vs the original {ORIGINAL_ZERO_BOUND} bound: {len(zero_corr)} now "

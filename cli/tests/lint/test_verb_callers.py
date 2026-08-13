@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "diagnostics" / "verb-callers.py"
 
@@ -199,6 +201,55 @@ def test_rust_argv_controls_are_real_leaves():
     leaves = set(vc.load_leaves(REPO_ROOT))
     missing = sorted(set(vc.RUST_ARGV_CONTROLS) - leaves)
     assert not missing, f"rust-argv controls name non-leaves: {missing}"
+
+
+def test_crates_test_paths_move_from_runtime_to_tests(tmp_path):
+    """Rust integration tests are tests, not runtime reachability evidence."""
+    source = tmp_path / "crates" / "widget" / "src"
+    tests = tmp_path / "crates" / "widget" / "tests"
+    source.mkdir(parents=True)
+    tests.mkdir(parents=True)
+    (source / "lib.rs").write_text("ordinary runtime source\n")
+    (tests / "surface.rs").write_text("fno test\n")
+
+    buckets = vc.sweep_buckets(tmp_path, {"test"})
+
+    assert buckets["tests"]["test"] == 1
+    assert buckets["runtime"]["test"] == 0
+
+
+def _broken_crates_test_split(tmp_path) -> Path:
+    """A copy whose Rust-test classifier can never recognize a test path."""
+    broken = tmp_path / "verb-callers.py"
+    text = SCRIPT.read_text()
+    needle = 'return "tests" in rel.parts'
+    assert needle in text, "the Rust-test path classifier moved; update this test"
+    broken.write_text(text.replace(needle, "return False", 1))
+    return broken
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--dead"],
+        ["--zero"],
+        ["--summary"],
+        ["--curriculum", str(REPO_ROOT / "scripts" / "ci" / "curriculum.txt")],
+        ["--self-check"],
+    ],
+)
+def test_broken_crates_test_split_refuses_every_candidate_output(tmp_path, args):
+    """Every decision path fails closed when the path-split control breaks."""
+    proc = subprocess.run(
+        [sys.executable, str(_broken_crates_test_split(tmp_path)), *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 2, out
+    assert "crates-tests/test" in out, out
+    assert "no list" in out, out
 
 
 def test_curriculum_with_self_check_runs_self_check():
