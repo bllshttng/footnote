@@ -263,12 +263,10 @@ if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then
     mail_content=$(bash "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" 2>/dev/null || echo "")
 fi
 
-# 7. outstanding — unharvested carve-outs and open operator questions. This is
-#    the delivery leg: both stores were already readable and neither was ever
-#    put where the operator looks. Deliberately a call plus a guard; every
-#    decision (what counts, ordering, the render cap) lives in the verb, since
-#    hooks/ is inside the control-plane LOC manifest and cli/ is not. Silent
-#    when nothing is outstanding, which is the correct steady state.
+# 7. outstanding — unharvested carve-outs + open operator questions, put where
+#    the operator already reads. A call plus a guard: every decision (what
+#    counts, ordering, the render cap) lives in the verb, since hooks/ is inside
+#    the control-plane LOC manifest and cli/src/fno/ is not. Silent on zero.
 outstanding_content=""
 _wt_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
 if command -v fno >/dev/null 2>&1 && [[ -f "$_wt_lib" ]]; then
