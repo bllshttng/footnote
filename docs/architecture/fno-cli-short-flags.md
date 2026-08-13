@@ -82,7 +82,7 @@ Typer/Click cannot hide one name of a multi-name option.
 So each alias is a SEPARATE `typer.Option(..., hidden=True)` parameter.
 `merge_deprecated_alias` folds it into the canonical value at the top of the command body.
 Legacy-only use works but warns on stderr, never stdout, so JSON consumers are safe.
-Passing both spellings is refused as a usage error (exit 2) even when the values agree.
+Even when the values agree, passing both spellings is refused as a usage error (exit 2).
 Two formerly-required options became `Optional` plus an explicit missing-option check.
 They are `backlog cost --session-id`, and `reality-check gh --pr-number` before that sub-app was removed.
 The hidden alias forces a `None` default, which is why.
