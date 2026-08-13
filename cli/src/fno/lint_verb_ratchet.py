@@ -591,8 +591,12 @@ def enumerate_rust_leaves() -> list[str]:
             raise VerbRatchetError(
                 f"verb-ratchet: `mux {fam}` dispatches verb(s) its own refusal "
                 f"message does not name: {', '.join(sorted(src - live))}. "
-                f"The dispatcher and its usage string disagree, so one of them "
-                f"is wrong - fix the message in crates/fno/src/mux_cli.rs (or "
+                f"Probed {binary} at git_rev {rev}: if that predates the source "
+                f"being scanned, this is a STALE BINARY rather than a real "
+                f"disagreement - the verbs above exist only in the tree, so "
+                f"rebuild and re-run with FNO_RUST_FRONT pointed at it. "
+                f"Otherwise the dispatcher and its usage string disagree, so one "
+                f"of them is wrong - fix the message in crates/fno/src/mux_cli.rs (or "
                 f"remove the arm), then regenerate the baseline."
             )
         if live - src:
