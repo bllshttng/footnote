@@ -4626,6 +4626,13 @@ struct LoopCheckArgs {
     now_override: Option<String>,
     gh_bin: String,
     git_bin: String,
+    /// Override for the ambient author harness (default: the env markers read
+    /// by `claims::resolve_harness`). `--author-harness none` pins "no harness".
+    /// Every other ambient input here already had an override, and this one did
+    /// not, so a test inherited whatever harness ran it: the four review-gate
+    /// cases passed in CI and failed under `cargo test` from inside Claude Code,
+    /// where the marker floors a self-review reviewer they do not expect.
+    author_harness_override: Option<String>,
     /// When set, the full Stop-hook JSON payload is read from stdin so
     /// `last_assistant_message` becomes the primary intent channel
     /// (ab-223d2dae). Flag-gated so manual terminal invocations never hang
@@ -4645,6 +4652,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut now_override: Option<String> = None;
     let mut gh_bin = std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "gh".to_string());
     let mut git_bin = std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
+    let mut author_harness_override: Option<String> = None;
     let mut hook_input_stdin = false;
 
     // Skip the "loop-check" verb itself if present
@@ -4681,6 +4689,8 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             gh_bin = val;
         } else if let Some(val) = try_flag_value(arg, "--git-bin", args, &mut i) {
             git_bin = val;
+        } else if let Some(val) = try_flag_value(arg, "--author-harness", args, &mut i) {
+            author_harness_override = Some(val);
         } else if arg == "--hook-input-stdin" {
             // Bare boolean flag (no value): try_flag_value would consume the
             // next token as a value, so it is matched directly (ab-223d2dae).
@@ -4706,6 +4716,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         now_override,
         gh_bin,
         git_bin,
+        author_harness_override,
         hook_input_stdin,
     })
 }
@@ -4959,7 +4970,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // Resolve the must-have-reviewed list once (code default when unset). The
     // author harness (from the ambient env markers, shared with claims.rs) drives
     // the same-model peer guard (x-c2e7); None leaves the set unchanged.
-    let author_harness = crate::claims::resolve_harness();
+    // `--author-harness none` pins the no-harness case, which an absent flag
+    // cannot express, and an absent flag keeps reading the ambient markers.
+    let author_harness = match parsed.author_harness_override.as_deref() {
+        Some("none") | Some("") => None,
+        Some(h) => Some(h.to_string()),
+        None => crate::claims::resolve_harness(),
+    };
     let required_bots = resolved_required_bots_for_author(&settings, author_harness.as_deref());
     let mut required_reviewers = settings.reviewers.clone();
     for reviewer in resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()) {
@@ -6306,7 +6323,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     allow_output(
                         "block",
                         None,
-                        &format!("gh read '{failed_read}' failed; retrying next fire"),
+                        &format!(
+                            "gh read '{failed_read}' failed; retrying next fire. {failed_stderr}"
+                        ),
                         this_fire,
                         Some(fingerprint),
                     ),

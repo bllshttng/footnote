@@ -370,6 +370,15 @@ fn fire(args: &[&str]) -> (i32, Decision) {
     // by the bash e2e harness, which controls HOME per case).
     args_owned.push("--global-settings".to_string());
     args_owned.push("/nonexistent/global-settings.yaml".to_string());
+    // Hermeticity, second door: the author harness came from ambient env
+    // markers, so these cases passed in CI (no marker) and failed under
+    // `cargo test` run from inside Claude Code, where the marker floors a
+    // self-review reviewer the review-gate cases do not expect. A case that
+    // wants a real harness passes its own `--author-harness`, and this skips.
+    if !args.iter().any(|a| a.starts_with("--author-harness")) {
+        args_owned.push("--author-harness".to_string());
+        args_owned.push("none".to_string());
+    }
     let (code, json_str) = fno_agents::loopcheck::run_loop_check_capture(&args_owned);
     let d: Decision = serde_json::from_str(&json_str).expect(&format!(
         "run_loop_check returned non-JSON (code={code}): {json_str}"
