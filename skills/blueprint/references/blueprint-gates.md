@@ -68,7 +68,7 @@ mistake), use `fno backlog intake <plan>.md --claims ab-XXX`.
 
 A plan that changes the database without ever naming a real table, enum, or
 constraint is planning blind. This gate makes a DB-touching plan cite the
-schema, the same way Failure Mode Ingestion makes a plan carry failure modes.
+schema.
 It is graduated: full / large plans fail closed, quick / small plans warn.
 
 **When the gate fires (AC3-FR).** Only when the codemap has a
