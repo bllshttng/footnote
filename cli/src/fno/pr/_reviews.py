@@ -83,7 +83,9 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
 
 
 # x-0eaf: coverage read degrades to this on any failure (additive, fail-open).
-_UNKNOWN_COVERAGE = {
+# Annotated because the values are heterogeneous (str, None, list) and mypy
+# cannot infer a useful type from the literal alone.
+_UNKNOWN_COVERAGE: dict[str, object] = {
     "coverage": "unknown",
     "reviewed_count": None,
     "self_attested_count": None,
