@@ -416,7 +416,7 @@ def style(
 
     if surface not in _STYLE_SURFACES:
         # Spelled from the tuple, never beside it. The hand-written list this
-        # replaces already omitted a surface the tuple accepted.
+        # replaces matched the tuple until `comment` was added, and then did not.
         known = ", ".join(_STYLE_SURFACES)
         typer.echo(f"style: unknown surface {surface!r} ({known})", err=True)
         raise typer.Exit(2)

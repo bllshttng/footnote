@@ -75,12 +75,26 @@ _LINE_EXCEPTION_RE = re.compile(r"^\s*style-exception:\s*(.+?)\s*$", re.MULTILIN
 _COMMENT_EXCEPTION_RE = re.compile(r"<!--\s*style-exception:\s*(.+?)\s*-->")
 
 # Rule 6. A paragraph is one physical line, so the only legal newline is one
-# that starts the next block. A heading and a thematic break own their line
-# outright, so the line after either one is always legal. A list item and a
-# blockquote start a block AND accept a lazy continuation, so a bare prose line
-# under either is a break inside a paragraph.
+# that starts the next block. Two kinds of block start matter, and the split is
+# what keeps rule 6 from refusing correct markdown.
+#
+# OWN-LINE blocks take a whole line and cannot be continued, so the line after
+# one is always legal: a heading, a setext underline, a thematic break, a raw
+# HTML line, and a link reference definition. Every one of these was a live
+# false positive before it was listed here.
+#
+# CONTINUABLE blocks start a block AND accept a lazy continuation, so a bare
+# prose line under one IS a break inside a paragraph: a list item, a blockquote.
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
-_THEMATIC_BREAK_RE = re.compile(r"^\s{0,3}([-*_])[ \t]*(\1[ \t]*){2,}$")
+# Covers the setext underlines `===` and `---`, and the thematic breaks `***`,
+# `___`, `- - -`. The spaced form needs the repeat group, so both live here.
+_OWN_LINE_BREAK_RE = re.compile(
+    r"^\s{0,3}(?:=+[ \t]*|([-*_])[ \t]*(?:\1[ \t]*){2,})$"
+)
+# A block-level HTML open or close tag. A `<details>` block was the specimen.
+_HTML_BLOCK_RE = re.compile(r"^\s{0,3}</?[A-Za-z][\w-]*")
+# A link reference definition. Several in a row are normal and are not a wrap.
+_REF_DEF_RE = re.compile(r"^\s{0,3}\[[^\]]+\]:\s")
 _BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>")
 
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
@@ -108,6 +122,10 @@ class Violation:
     ``sentence`` carries the masked text (code shown as the placeholder), so the
     word count reported in ``detail`` matches what the reader sees. ``detail`` is
     the actionable half: it names the sentence and the fix.
+
+    Rule 6 is the exception to both field names. Its unit is a LINE, not a
+    sentence, so it carries the 0-based line index and the whole masked line.
+    Read ``detail`` rather than these two fields: it always names the right unit.
     """
 
     rule: int
@@ -158,6 +176,11 @@ def check_lines(text: str, line_numbers: set[int]) -> list[Violation]:
 
 
 def _run(text: str, only: set[int] | None) -> list[Violation]:
+    # A CRLF file broke every anchored block test at once: `lead == "---"` never
+    # matched `---\r`, so frontmatter stayed unblanked and rule 6 fired down the
+    # whole block. Normalising here keeps the line COUNT identical, so the
+    # caller's 1-based line numbers still line up.
+    text = text.replace("\r\n", "\n")
     masked = _mask(text)
     violations: list[Violation] = []
     sentence_index = 0
@@ -171,11 +194,20 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
     for index, (raw_line, masked_line) in enumerate(zip(raw_lines, masked_lines), 1):
         blank = not masked_line.strip()
         is_list = bool(_LIST_MARKER_RE.match(raw_line))
-        is_heading = bool(_HEADING_RE.match(raw_line))
-        is_break = bool(_THEMATIC_BREAK_RE.match(raw_line))
-        starts_block = is_list or is_heading or is_break or bool(_BLOCKQUOTE_RE.match(raw_line))
-        checked = only is None or index in only
-        if not blank and not starts_block and prev_continuable and checked:
+        own_line = (
+            bool(_HEADING_RE.match(raw_line))
+            or bool(_OWN_LINE_BREAK_RE.match(raw_line))
+            or bool(_HTML_BLOCK_RE.match(raw_line))
+            or bool(_REF_DEF_RE.match(raw_line))
+        )
+        starts_block = is_list or own_line or bool(_BLOCKQUOTE_RE.match(raw_line))
+        # A break belongs to the PAIR, so either half being in scope reports it.
+        # Charging it to the continuing line alone hid the mirror case: a new
+        # prose line inserted directly ABOVE untouched prose splits that
+        # paragraph and went unreported, because only the line below was in the
+        # pair and the diff never touched it.
+        in_scope = only is None or index in only or (index - 1) in only
+        if not blank and not starts_block and prev_continuable and in_scope:
             violations.append(
                 Violation(
                     6, index - 1, masked_line.strip(),
@@ -184,8 +216,8 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
                     "Join the two lines, or put a blank line between them.",
                 )
             )
-        prev_continuable = not blank and not is_heading and not is_break
-        if blank or not checked:
+        prev_continuable = not blank and not own_line
+        if blank or only is not None and index not in only:
             continue
         work = _LIST_MARKER_RE.sub("", masked_line, count=1) if is_list else masked_line
         for sentence in _split_sentences(work):

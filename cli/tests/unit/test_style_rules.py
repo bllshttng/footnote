@@ -181,6 +181,35 @@ def test_blockquote_lines_are_legal_breaks():
     assert 6 not in rule_set("> quoted line one.\n> quoted line two.")
 
 
+def test_raw_html_block_lines_are_legal_breaks():
+    # A <details> block was the live false positive: three consecutive lines of
+    # valid markdown that rule 6 refused with no correct fix available.
+    body = "<details>\n<summary>the summary</summary>\nthe body line.\n</details>"
+    assert 6 not in rule_set(body)
+
+
+def test_setext_underline_is_a_legal_break():
+    assert 6 not in rule_set("The heading\n===\nthe paragraph under it.")
+
+
+def test_link_reference_definitions_are_legal_breaks():
+    assert 6 not in rule_set("[one]: https://a.example\n[two]: https://b.example")
+
+
+def test_crlf_frontmatter_does_not_read_as_prose():
+    # Every anchored block test failed at once on CRLF, so frontmatter stayed
+    # unblanked and rule 6 fired down the whole block.
+    assert 6 not in rule_set("---\r\nkey: value\r\n---\r\nthe body line.\r\n")
+
+
+def test_check_lines_reports_a_break_the_added_line_starts():
+    # The mirror of the case below: a new prose line inserted directly ABOVE
+    # untouched prose splits that paragraph. Only the line below is the
+    # continuing half, and the diff never touched it.
+    text = "this added line starts it\nan untouched continuation.\n"
+    assert 6 in {v.rule for v in style.check_lines(text, {1})}
+
+
 def test_check_lines_sees_the_unchanged_line_above():
     # The added line continues prose that the diff never touched, so rule 6
     # must still fire. State advances on every line, not only checked ones.

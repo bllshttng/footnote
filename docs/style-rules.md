@@ -27,7 +27,9 @@ So a warm document is not one with longer sentences. It is one that tells the re
 
 A worker who reads both rules without this section picks one and drops the other. That is the whole reason this section exists.
 
-## The six machine-checked rules
+## What the checker enforces
+
+The house style above is the standard a person writes to. The list below is the part a machine can decide, so the two lists are different things and both count six. The checker is the floor, never the whole style. A draft that passes it can still bury the point, and no gate catches that.
 
 1. A list-item sentence is 20 words or fewer. Every other sentence is 25 words or fewer.
 2. No semicolon. Write two sentences.
@@ -50,8 +52,10 @@ Each of these starts the next block, so each one is a legal newline:
 - a table row
 - a fence
 - frontmatter
-- a thematic break
+- a thematic break or a setext underline
 - a blockquote
+- a raw HTML line, such as a `<details>` block
+- a link reference definition
 
 A bare prose line under a list item is a lazy continuation, so rule 6 fires there. Fold it into the item, or start a new one.
 
