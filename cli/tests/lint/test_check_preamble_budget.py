@@ -536,30 +536,19 @@ def test_descriptions_are_measured_and_reported() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "descriptions (always-loaded skill pointers):" in result.stdout
-    assert "always loaded, both budgets:" in result.stdout
+    assert "descriptions (always-loaded skill + agent pointers):" in result.stdout
+    assert "measured always-loaded (these two budgets):" in result.stdout
+    # Agents are in the budget, not just skills.
+    assert "agent:" in result.stdout
 
 
-def test_descriptions_total_matches_an_independent_reader() -> None:
-    """Cross-check the gate's regex reader against a yaml-based one.
+def test_descriptions_match_an_independent_reader_per_file() -> None:
+    """Cross-check the gate's regex reader against PyYAML, file by file.
 
-    Two readers that disagree mean one of them is wrong, and the budget is only
-    worth having if the number under it is the real number.
+    Per-file rather than on the total, so two errors cannot cancel out. Files
+    PyYAML rejects are skipped and asserted separately below: three agent
+    frontmatters in this repo are not valid YAML today.
     """
-    expected = 0
-    for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
-        text = skill.read_text(encoding="utf-8")
-        match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
-        if not match:
-            continue
-        front = yaml.safe_load(match.group(1)) or {}
-        if front.get("disable-model-invocation"):
-            continue
-        description = front.get("description")
-        if not description:
-            continue
-        expected += len(str(description).encode("utf-8"))
-
     payload = json.loads(
         subprocess.run(
             ["bash", str(GATE), "--json"],
@@ -569,11 +558,62 @@ def test_descriptions_total_matches_an_independent_reader() -> None:
             timeout=30,
         ).stdout
     )
+    measured = {row["skill"]: row["bytes"] for row in payload["descriptions"]["skills"]}
 
-    assert payload["descriptions"]["total_bytes"] == expected
-    assert payload["always_loaded_bytes"] == (
+    compared = 0
+    for path in sorted((ROOT / "skills").glob("*/SKILL.md")) + sorted(
+        (ROOT / "agents").glob("*.md")
+    ):
+        text = path.read_text(encoding="utf-8")
+        match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        if not match:
+            continue
+        try:
+            front = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            continue
+        if front.get("disable-model-invocation") or not front.get("description"):
+            continue
+        label = (
+            path.parent.name
+            if path.name == "SKILL.md"
+            else f"agent:{path.stem}"
+        )
+        expected = len(str(front["description"]).rstrip("\n").encode("utf-8"))
+        assert measured.get(label) == expected, f"{label}: gate says {measured.get(label)}, yaml says {expected}"
+        compared += 1
+
+    # Positive control: the loop above must actually have compared something.
+    assert compared > 25, f"only {compared} files compared; the cross-check is not running"
+
+    assert payload["measured_always_loaded_bytes"] == (
         payload["total_bytes"] + payload["descriptions"]["total_bytes"]
     )
+
+
+def test_malformed_agent_frontmatter_is_known_and_bounded() -> None:
+    """Three agent frontmatters are not valid YAML. Guard against a fourth.
+
+    `agents/verifier.md` shows the cost: its description spans lines unquoted,
+    so a strict parser gets nothing and the harness falls back to a generic
+    label. The pointer never reaches the agent. Fixing them is its own change;
+    this test stops the set from growing quietly in the meantime.
+    """
+    unparseable = []
+    for path in sorted((ROOT / "agents").glob("*.md")):
+        match = re.match(r"^---\n(.*?)\n---\n", path.read_text(encoding="utf-8"), re.S)
+        if not match:
+            continue
+        try:
+            yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            unparseable.append(path.name)
+
+    assert unparseable == [
+        "code-reviewer.md",
+        "type-design-analyzer.md",
+        "verifier.md",
+    ], f"the malformed-frontmatter set changed: {unparseable}"
 
 
 def test_user_invoked_skill_costs_nothing(tmp_path: Path) -> None:
@@ -602,7 +642,7 @@ def test_description_growth_past_the_ceiling_fails(tmp_path: Path) -> None:
     result = _run_at(repo)
 
     assert result.returncode == 1
-    assert "skill descriptions are" in result.stderr
+    assert "descriptions are" in result.stderr
     assert "over the" in result.stderr
 
 
@@ -616,16 +656,33 @@ def test_unbanked_description_cut_fails_and_names_the_value(tmp_path: Path) -> N
     result = _run_at(repo, force_band=True)
 
     assert result.returncode == 1
-    assert f"DESCRIPTIONS_CEILING_BYTES={tiny + band}" in result.stderr
+    # The suggestion parks the ceiling mid-band, so a later cut has room too.
+    assert f"DESCRIPTIONS_CEILING_BYTES={tiny + band // 2}" in result.stderr
+
+
+def test_readers_that_disagree_fail_rather_than_pick_one(tmp_path: Path) -> None:
+    """Equality, not a zero check: a partial reader failure must not pass.
+
+    The two instruments enumerate differently on purpose (find at any depth
+    versus a depth-1 glob), so a description either reaches both or fails the
+    gate. A zero-only check would pass while silently dropping bytes.
+    """
+    repo = _measured_tree(tmp_path)
+    nested = repo / "skills" / "group" / "inner" / "SKILL.md"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_text(
+        '---\nname: inner\ndescription: "nested and unmeasured"\n---\n\nbody\n',
+        encoding="utf-8",
+    )
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "the two readers disagree" in result.stderr
 
 
 def test_broken_reader_cannot_pass_as_zero(tmp_path: Path) -> None:
-    """A zero must never read as 'the skills are free'.
-
-    The grep cross-check exists because the reader and the budget would
-    otherwise fail the same way: a parser that stops matching returns 0 bytes,
-    indistinguishable from a repo that genuinely has no model-invoked skills.
-    """
+    """A zero must never read as 'the skills are free'."""
     repo = _measured_tree(tmp_path)
     broken = repo / "skills" / "broken" / "SKILL.md"
     broken.parent.mkdir(parents=True, exist_ok=True)
@@ -636,7 +693,7 @@ def test_broken_reader_cannot_pass_as_zero(tmp_path: Path) -> None:
     result = _run_at(repo)
 
     assert result.returncode == 1
-    assert "the frontmatter reader broke" in result.stderr
+    assert "the two readers disagree" in result.stderr
 
 
 def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
@@ -649,20 +706,33 @@ def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
     assert "descriptions (always-loaded skill pointers):" not in result.stdout
 
 
-def test_multiline_description_is_refused_not_undercounted(tmp_path: Path) -> None:
-    """A folded scalar would measure as its marker, a silent undercount."""
-    repo = _measured_tree(tmp_path)
+def test_block_scalar_description_is_measured_at_its_content(tmp_path: Path) -> None:
+    """Measuring the `>` marker would score a 700-byte pointer at 1 byte.
+
+    Four agents in this repo write their description this way, so the reader
+    has to follow the indented body rather than refuse it.
+    """
+    repo = _measured_tree(tmp_path, descriptions={"plain": "p" * 40})
     folded = repo / "skills" / "folded" / "SKILL.md"
     folded.parent.mkdir(parents=True, exist_ok=True)
     folded.write_text(
-        "---\nname: folded\ndescription: >\n  folded across lines\n---\n\nbody\n",
+        "---\nname: folded\ndescription: >\n  first line here\n  second line here\n"
+        "---\n\nbody\n",
         encoding="utf-8",
     )
 
-    result = _run_at(repo)
+    payload = json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json", str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+    measured = {row["skill"]: row["bytes"] for row in payload["descriptions"]["skills"]}
 
-    assert result.returncode == 1
-    assert "multi-line description scalar" in result.stderr
+    assert measured["folded"] == len("first line here second line here")
+    assert measured["plain"] == 40
 
 
 # --- The two-sided file ceiling ----------------------------------------------
@@ -693,7 +763,38 @@ def test_unbanked_file_cut_fails_and_names_the_value(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "more than the" in result.stderr
     total = int(re.search(r"check-preamble-budget: (\d+) /", result.stderr).group(1))
-    assert f"CEILING_BYTES={total + band}" in result.stderr
+    assert f"CEILING_BYTES={total + band // 2}" in result.stderr
+
+
+def test_fix_line_survives_quiet_and_json(tmp_path: Path) -> None:
+    """A caller that gets exit 1 with no reason has to go read the script.
+
+    --quiet and --json shape stdout. The named value is the whole point of a
+    two-sided band, so it goes to stderr in every mode, where it cannot corrupt
+    the JSON document on stdout.
+    """
+    repo = _measured_tree(tmp_path)
+
+    for mode in ("--quiet", "--json"):
+        result = subprocess.run(
+            ["bash", str(GATE), mode, str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "PREAMBLE_BAND_FORCE": "1"},
+        )
+
+        assert result.returncode == 1, mode
+        assert "CEILING_BYTES=" in result.stderr, mode
+
+    json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json", str(ROOT)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
 
 
 def test_band_is_scoped_to_the_gates_own_repo(tmp_path: Path) -> None:

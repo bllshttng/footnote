@@ -38,18 +38,29 @@ set -euo pipefail
 # banks that cut instead of leaving it as headroom for the next five edits.
 # The gate is now two-sided (see RATCHET_NUDGE_BYTES below): a cut large enough
 # to push spare past the band fails until the ceiling follows it down.
-CEILING_BYTES=37400
+CEILING_BYTES=36726
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
-# than becoming headroom. Ordinary edits move far less than this and pass.
+# than becoming headroom.
+#
+# Set the ceiling at measured + band/2, so both directions get the same room.
+# Sitting just under the band instead leaves almost no slack for a cut, and the
+# gate then fires on the very edits it wants to encourage; sitting at
+# measured + band leaves none at all, since any cut at all trips it.
 RATCHET_NUDGE_BYTES=2000
 
-# Second budget: the `description` of every model-invoked skill. Measured 6750 B
-# across 22 skills when this was added, against Matt Pocock's 3114 B across 15.
-# Two-sided from the start on the same reasoning as the file ceiling above; a
+# Second budget: the `description` of every model-invoked skill and agent. These
+# are context pointers the harness holds on every turn to decide what to fire.
+# Measured 14100 B when this was added: 6750 across 22 skills and 7350 across 17
+# agents, against Matt Pocock's 3114 B across 15 skills.
+# The agent half was nearly missed twice. It sat outside the file set entirely,
+# and four agents write their description as a YAML block scalar, so a reader
+# that measured the `>` marker would have scored those four at 1 byte each
+# instead of ~490.
+# Two-sided from the start on the same reasoning as the file ceiling above: a
 # one-sided ceiling is the thing that only ever ratchets up.
-DESCRIPTIONS_CEILING_BYTES=7400
-DESCRIPTIONS_BAND_BYTES=750
+DESCRIPTIONS_CEILING_BYTES=14850
+DESCRIPTIONS_BAND_BYTES=1500
 QUIET=0
 JSON_MODE=0
 REPO_ROOT="."
@@ -193,8 +204,9 @@ import re
 import sys
 
 root = pathlib.Path(sys.argv[1])
+sources = sorted(root.glob("skills/*/SKILL.md")) + sorted(root.glob("agents/*.md"))
 rows = []
-for path in sorted(root.glob("skills/*/SKILL.md")):
+for path in sources:
     text = path.read_text(encoding="utf-8")
     m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
     if not m:
@@ -202,22 +214,34 @@ for path in sorted(root.glob("skills/*/SKILL.md")):
     block = m.group(1)
     if re.search(r"^disable-model-invocation:\s*true\s*$", block, re.M):
         continue
-    d = re.search(r"^description:[ \t]*(.*)$", block, re.M)
-    if not d:
+    lines = block.split("\n")
+    idx = next(
+        (i for i, line in enumerate(lines) if re.match(r"^description:", line)), None
+    )
+    if idx is None:
         continue
-    raw = d.group(1).strip()
-    # Fail loudly on a folded/literal scalar rather than measuring the marker
-    # and under-counting: a silent zero here would read as "no description".
-    if raw in ("|", ">") or raw.startswith(("|", ">")):
-        sys.stderr.write(
-            f"check-preamble-budget: {path} uses a multi-line description scalar, "
-            "which this reader does not measure. Put it on one line.\n"
-        )
-        raise SystemExit(2)
-    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+    raw = lines[idx].split(":", 1)[1].strip()
+    # A block scalar (| or >) carries its text on the following indented lines.
+    # Measuring the marker instead would count 1 byte for a 700-byte pointer,
+    # which is the silent undercount this budget exists to prevent. Four agents
+    # in this repo are written that way, so refusing them is not an option.
+    if raw.startswith(("|", ">")):
+        folded = raw.startswith(">")
+        body = []
+        for line in lines[idx + 1:]:
+            if line.strip() and not line.startswith((" ", "\t")):
+                break
+            body.append(line.strip())
+        while body and not body[-1]:
+            body.pop()
+        raw = (" " if folded else "\n").join(body)
+    elif len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        quote = raw[0]
         raw = raw[1:-1]
-        raw = raw.replace('\\"', '"') if d.group(1).strip()[0] == '"' else raw
-    rows.append((len(raw.encode("utf-8")), path.parent.name))
+        if quote == '"':
+            raw = raw.replace('\\"', '"')
+    label = path.parent.name if path.name == "SKILL.md" else f"agent:{path.stem}"
+    rows.append((len(raw.encode("utf-8")), label))
 for size, name in sorted(rows, reverse=True):
     print(f"{size}\t{name}")
 PY
@@ -231,25 +255,42 @@ while IFS=$'\t' read -r bytes name; do
   DESC_COUNT=$((DESC_COUNT + 1))
 done <<< "$DESC_RECORDS"
 DESC_SPARE=$((DESCRIPTIONS_CEILING_BYTES - DESC_TOTAL))
-ALWAYS_LOADED_BYTES=$((TOTAL_BYTES + DESC_TOTAL))
+# Sums the two budgets. skills/using-fno/SKILL.md contributes to both, and that
+# is not a double count: the harness injects that file's whole body (frontmatter
+# included) at SessionStart AND lists its description in the skill registry, so
+# those bytes really are in context twice. Verified by reading both in a live
+# session's context. This figure covers what the gate measures, which is not a
+# claim to cover everything a harness injects.
+MEASURED_ALWAYS_LOADED=$((TOTAL_BYTES + DESC_TOTAL))
 
-# Independent cross-check on the reader, by grep rather than by frontmatter
-# parsing, so the two instruments cannot fail the same way. A file carrying a
-# description line while opting into model invocation MUST be counted above.
-# Without this, a broken reader returns 0 and the gate reads that absence as
-# "the skills are free" - which is the failure this whole budget exists to stop.
+# Independent cross-check on the reader. Two properties make it independent
+# rather than a second copy of the same mistake:
+#   - it enumerates by find at ANY depth, where the reader globs depth-1 only,
+#     so a skill nested at skills/<group>/<name>/SKILL.md makes the two DISAGREE
+#     instead of both silently missing it;
+#   - it matches by grep, not by frontmatter parsing, so a fence the reader's
+#     regex cannot open (a BOM, a reordered block) still shows up here.
+# The comparison is equality, not "is it zero". A partial reader failure leaves
+# a non-zero count, so a zero-only check would pass while dropping bytes - the
+# absence-shaped condition this budget exists to refuse.
 EXPECT_DESC=0
-shopt -s nullglob
-for skill in "$REPO_ROOT"/skills/*/SKILL.md; do
-  grep -qE '^description:' "$skill" || continue
-  grep -qE '^disable-model-invocation:[[:space:]]*true' "$skill" && continue
+while IFS= read -r candidate; do
+  [[ -z "$candidate" ]] && continue
+  grep -qE '^description:' "$candidate" || continue
+  grep -qE '^disable-model-invocation:[[:space:]]*true' "$candidate" && continue
   EXPECT_DESC=$((EXPECT_DESC + 1))
-done
-shopt -u nullglob
+done < <(
+  { find "$REPO_ROOT/skills" -name 'SKILL.md' -type f 2>/dev/null || true; } \
+  ; { find "$REPO_ROOT/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null || true; }
+)
 
-if (( EXPECT_DESC > 0 && DESC_COUNT == 0 )); then
-  echo "check-preamble-budget: grep sees ${EXPECT_DESC} model-invoked descriptions but the reader parsed 0." >&2
-  echo "  A zero here means the frontmatter reader broke, not that the skills are free." >&2
+if (( EXPECT_DESC != DESC_COUNT )); then
+  {
+    echo "check-preamble-budget: the two readers disagree - grep sees ${EXPECT_DESC} model-invoked descriptions, the frontmatter reader parsed ${DESC_COUNT}."
+    echo "  Neither number is trustworthy while they differ. Likely causes: a skill"
+    echo "  nested below skills/<name>/SKILL.md (the reader globs depth-1 only), or"
+    echo "  a frontmatter block the reader's regex cannot open."
+  } >&2
   exit 1
 fi
 
@@ -290,7 +331,7 @@ print(json.dumps({
         "count": len(descriptions),
         "skills": descriptions,
     },
-    "always_loaded_bytes": total + int(sys.argv[3]),
+    "measured_always_loaded_bytes": total + int(sys.argv[3]),
 }, separators=(",", ":")))
 ' "$TOTAL_BYTES" "$CEILING_BYTES" "$DESC_TOTAL" "$DESCRIPTIONS_CEILING_BYTES" "$DESC_RECORDS"
 elif (( QUIET )); then
@@ -311,12 +352,12 @@ else
 
   if (( DESC_COUNT > 0 )); then
     echo
-    echo "  descriptions (always-loaded skill pointers): ${DESC_TOTAL} / ${DESCRIPTIONS_CEILING_BYTES} bytes across ${DESC_COUNT} model-invoked skills, ${DESC_SPARE} to spare"
+    echo "  descriptions (always-loaded skill + agent pointers): ${DESC_TOTAL} / ${DESCRIPTIONS_CEILING_BYTES} bytes across ${DESC_COUNT} model-invoked skills and agents, ${DESC_SPARE} to spare"
     while IFS=$'\t' read -r bytes name; do
       [[ -z "$name" ]] && continue
       printf '  %8d  %s\n' "$bytes" "$name"
     done <<< "$DESC_RECORDS"
-    echo "  always loaded, both budgets: ${ALWAYS_LOADED_BYTES} bytes (~$((ALWAYS_LOADED_BYTES / 4)) tok/turn)"
+    echo "  measured always-loaded (these two budgets): ${MEASURED_ALWAYS_LOADED} bytes (~$((MEASURED_ALWAYS_LOADED / 4)) tok/turn)"
   fi
 
   if (( INJECTIONS > 1 )); then
@@ -340,24 +381,24 @@ if (( DESC_COUNT == 0 )); then
   # case is already refused above, so this branch cannot hide a failure.
   :
 elif (( DESC_TOTAL > DESCRIPTIONS_CEILING_BYTES )); then
+  # Every failure below writes its fix line in EVERY mode. --quiet and --json
+  # shape stdout; a caller that gets exit 1 with no reason has to go read the
+  # script to learn what to change, and the named value is the whole point of a
+  # two-sided band. Stderr does not corrupt the JSON document on stdout.
   DESC_FAILED=1
-  if (( ! QUIET && ! JSON_MODE )); then
-    {
-      echo "check-preamble-budget: skill descriptions are ${DESC_TOTAL} bytes, $((DESC_TOTAL - DESCRIPTIONS_CEILING_BYTES)) over the ${DESCRIPTIONS_CEILING_BYTES}-byte ceiling."
-      echo "  A description is a context pointer held in every session's context."
-      echo "  Fix: sharpen the wording (front-load the leading word, one trigger per"
-      echo "  branch, cut identity the skill body already carries), or set"
-      echo "  DESCRIPTIONS_CEILING_BYTES in this script with the reason in the PR body."
-    } >&2
-  fi
+  {
+    echo "check-preamble-budget: descriptions are ${DESC_TOTAL} bytes, $((DESC_TOTAL - DESCRIPTIONS_CEILING_BYTES)) over the ${DESCRIPTIONS_CEILING_BYTES}-byte ceiling."
+    echo "  A description is a context pointer held in context on every turn."
+    echo "  Fix: sharpen the wording (front-load the leading word, one trigger per"
+    echo "  branch, cut identity the body already carries), or set"
+    echo "  DESCRIPTIONS_CEILING_BYTES in this script with the reason in the PR body."
+  } >&2
 elif (( BAND_APPLIES && DESC_SPARE > DESCRIPTIONS_BAND_BYTES )); then
   DESC_FAILED=1
-  if (( ! QUIET && ! JSON_MODE )); then
-    {
-      echo "check-preamble-budget: skill descriptions are ${DESC_TOTAL} bytes, leaving ${DESC_SPARE} spare, more than the ${DESCRIPTIONS_BAND_BYTES}-byte band."
-      echo "  Fix: set DESCRIPTIONS_CEILING_BYTES=$((DESC_TOTAL + DESCRIPTIONS_BAND_BYTES)) in this script, in this PR."
-    } >&2
-  fi
+  {
+    echo "check-preamble-budget: descriptions are ${DESC_TOTAL} bytes, leaving ${DESC_SPARE} spare, more than the ${DESCRIPTIONS_BAND_BYTES}-byte band."
+    echo "  Fix: set DESCRIPTIONS_CEILING_BYTES=$((DESC_TOTAL + DESCRIPTIONS_BAND_BYTES / 2)) in this script, in this PR."
+  } >&2
 fi
 
 if (( DESC_FAILED )); then
@@ -371,15 +412,13 @@ if (( TOTAL_BYTES <= CEILING_BYTES )); then
   # became room for the next growth. The message names the value to write so
   # the fix is a paste, not arithmetic.
   if (( BAND_APPLIES && SPARE_BYTES > RATCHET_NUDGE_BYTES )); then
-    SUGGESTED=$((TOTAL_BYTES + RATCHET_NUDGE_BYTES))
-    if (( ! QUIET && ! JSON_MODE )); then
-      {
-        echo "check-preamble-budget: ${TOTAL_BYTES} / ${CEILING_BYTES} bytes leaves ${SPARE_BYTES} spare, more than the ${RATCHET_NUDGE_BYTES}-byte band."
-        echo "  The preamble shrank and the ceiling did not follow it down, so the cut"
-        echo "  is unbanked: it stays available as headroom for the next growth."
-        echo "  Fix: set CEILING_BYTES=${SUGGESTED} in this script, in this PR."
-      } >&2
-    fi
+    SUGGESTED=$((TOTAL_BYTES + RATCHET_NUDGE_BYTES / 2))
+    {
+      echo "check-preamble-budget: ${TOTAL_BYTES} / ${CEILING_BYTES} bytes leaves ${SPARE_BYTES} spare, more than the ${RATCHET_NUDGE_BYTES}-byte band."
+      echo "  The preamble shrank and the ceiling did not follow it down, so the cut"
+      echo "  is unbanked: it stays available as headroom for the next growth."
+      echo "  Fix: set CEILING_BYTES=${SUGGESTED} in this script, in this PR."
+    } >&2
     exit 1
   fi
   exit 0
