@@ -19,8 +19,13 @@ import typer
 #
 # The per-check options survive as options on the one verb, dispatched by
 # signature rather than by name: a check is called with only the parameters it
-# declares, so `--update` reaches `verb-ratchet` and nothing else, and adding a
-# check with a new option needs no change here.
+# declares, so `--update` reaches `verb-ratchet` and nothing else.
+#
+# A check's option must still be DECLARED on `lint` below, and forgetting one is
+# silent here and loud four jobs later in CI - `--surface` was missed on the
+# first pass and only `check-markdown-style` said so.
+# `test_every_check_parameter_is_declared_on_the_dispatcher` closes that gap by
+# comparing the two sets directly.
 CHECKS: dict[str, str] = {
     "spawn-paths": "spawn_paths",
     "flock-pattern": "flock_pattern",
@@ -838,6 +843,19 @@ def lint(
     providers_dir: Optional[Path] = typer.Option(
         None, "--providers-dir", help="provider-stderr-merge: scan this dir instead of the default."
     ),
+    surface: str = typer.Option(
+        "mail", "--surface",
+        help="style: where the text is read - mail, pr-body, or markdown.",
+    ),
+    stdin: bool = typer.Option(False, "--stdin", help="style: read the body from standard input."),
+    files: Optional[list[Path]] = typer.Option(
+        None, "--files",
+        help="style: files to check whole; with --diff-base, scopes the added-lines scan.",
+    ),
+    diff_base: Optional[str] = typer.Option(
+        None, "--diff-base",
+        help="style: check ADDED lines only since this ref (e.g. origin/main).",
+    ),
 ) -> None:
     """Run a repository lint check by name.
 
@@ -859,6 +877,10 @@ def lint(
         "no_degrade": no_degrade,
         "dispatch_path": dispatch_path,
         "providers_dir": providers_dir,
+        "surface": surface,
+        "stdin": stdin,
+        "files": files,
+        "diff_base": diff_base,
     }
     accepted = set(inspect.signature(fn).parameters)
     fn(**{k: v for k, v in supplied.items() if k in accepted})

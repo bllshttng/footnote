@@ -4,8 +4,9 @@ Mirrors ``test_config_schema_drift.py``: ``fno.plan.schema.PlanFrontmatter`` is
 the single source of truth for plan frontmatter, and these tests fail CI the
 moment the model drifts from its three upstream sources - ``status.py`` (the
 status vocabulary the enum is derived from), ``_stamp.py`` (the ship-time
-writer whose keys the model must cover), and ``skills/think/references/
-think.md`` (the template every design document is written from).
+writer whose keys the model must cover), and ``skills/blueprint/references/
+single-doc-spec.md`` (the design-doc template blueprint mutates every plan
+from).
 
 This is the one git-CI piece of the plan-schema feature (Locked Decision 4):
 plans themselves live in the untracked vault, so the model - which lives in the
@@ -81,36 +82,37 @@ def test_retired_status_spellings_still_validate() -> None:
     ).status.value == "superseded"
 
 
-# -- think.md, the third upstream source (x-b9d7 US4) --
+# -- single-doc-spec.md, the third upstream source (x-b9d7 US4) --
 
-THINK_MD = (
-    Path(__file__).resolve().parents[2] / "skills/think/references/think.md"
+DESIGN_SPEC = (
+    Path(__file__).resolve().parents[2]
+    / "skills/blueprint/references/single-doc-spec.md"
 )
 
 
-def _think_output_contract() -> str:
-    """The ```markdown output-contract block from think.md's save step.
+def _design_template() -> str:
+    """The ```markdown design-doc block from single-doc-spec.md.
 
-    think.md carries several fenced markdown blocks; the contract block is the
-    one holding the frontmatter template, identified by its `status: design`.
+    The spec carries the design-doc shape blueprint mutates; the template block
+    is the one holding the frontmatter, identified by its `status: design`.
     """
-    blocks = re.findall(r"```markdown\n(.*?)```", THINK_MD.read_text(encoding="utf-8"), re.S)
+    blocks = re.findall(r"```markdown\n(.*?)```", DESIGN_SPEC.read_text(encoding="utf-8"), re.S)
     contract = [b for b in blocks if "status: design" in b]
     assert len(contract) == 1, (
-        f"expected exactly one output-contract block in {THINK_MD.name}, "
+        f"expected exactly one design-doc block in {DESIGN_SPEC.name}, "
         f"found {len(contract)} - the extractor has gone inert or the doc grew a twin"
     )
     return contract[0]
 
 
-def test_think_template_carries_every_required_plan_field() -> None:
-    """AC8: a design written to think's template validates with zero violations.
+def test_design_template_carries_every_required_plan_field() -> None:
+    """AC8: a design written to blueprint's template validates with zero violations.
 
     Fails the build the moment PlanFrontmatter gains a required field the
-    template does not show - the drift that made every think-authored design
-    report `Field required` from `fno plan validate`.
+    template does not show - the drift that made every authored design report
+    `Field required` from `fno plan validate`.
     """
-    frontmatter = _think_output_contract().split("---")[1]
+    frontmatter = _design_template().split("---")[1]
     shown = set(re.findall(r"^([A-Za-z_][\w-]*):", frontmatter, re.M))
     required = {
         name for name, f in PlanFrontmatter.model_fields.items() if f.is_required()
@@ -123,12 +125,12 @@ def test_think_template_carries_every_required_plan_field() -> None:
         f"PlanFrontmatter lost a required identity field: {sorted(required)}"
     )
     assert required <= shown, (
-        f"{THINK_MD.name}'s frontmatter template omits required PlanFrontmatter "
+        f"{DESIGN_SPEC.name}'s frontmatter template omits required PlanFrontmatter "
         f"field(s): {sorted(required - shown)}"
     )
 
 
-def test_think_template_actually_validates() -> None:
+def test_design_template_actually_validates() -> None:
     """AC8, the real check: the template's own VALUES must satisfy the model.
 
     The name-subset test above cannot see a type error - a template writing
@@ -140,7 +142,7 @@ def test_think_template_actually_validates() -> None:
     """
     import yaml
 
-    frontmatter = _think_output_contract().split("---")[1]
+    frontmatter = _design_template().split("---")[1]
     # Fill the angle-bracket placeholders the way the doc tells an author to.
     filled = (
         frontmatter.replace("<title>", "Probe")
@@ -157,13 +159,13 @@ def test_think_template_actually_validates() -> None:
     PlanFrontmatter(**yaml.safe_load(filled))  # raises ValidationError on drift
 
 
-def test_think_contract_carries_the_section_blueprint_builds_tasks_from() -> None:
+def test_design_template_carries_the_section_blueprint_builds_tasks_from() -> None:
     """AC9: `/blueprint` compiles `## User Stories` into the task skeleton.
 
-    docs/architecture/lean-blueprint.md assigns the section to /think, so a
-    contract that omits it hands mutate_doc.py nothing to build tasks from.
+    A design-doc template that omits it hands mutate_doc.py nothing to build
+    tasks from.
     """
-    assert "## User Stories" in _think_output_contract(), (
-        f"{THINK_MD.name}'s output contract omits `## User Stories`, the section "
-        "mutate_doc.py builds its wave and task skeleton from"
+    assert "## User Stories" in _design_template(), (
+        f"{DESIGN_SPEC.name}'s design-doc template omits `## User Stories`, the "
+        "section mutate_doc.py builds its wave and task skeleton from"
     )

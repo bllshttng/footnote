@@ -777,3 +777,31 @@ def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> No
     # gets back in beside the config pin.
     by_flag = [c for c in diffs if "--find-renames" in c or "-M" in c]
     assert not by_flag, f"rename detection respelled as a flag: {by_flag}"
+
+
+def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
+    """Every option a check accepts must exist on `fno lint`.
+
+    The eight subcommands each carried their own options; the collapse turned
+    those into options on one verb, dispatched by signature. A check parameter
+    with no matching option on the dispatcher is UNREACHABLE - the flag is
+    rejected as unknown before any check runs.
+
+    That is exactly what shipped: `style` declares `--surface/--stdin/--files/
+    --diff-base` and the first pass wired none of them, so `fno lint style
+    --surface markdown` died with "No such option" in a CI job four steps
+    removed from the change. This compares the two sets directly, so the next
+    check with a new option fails here instead.
+    """
+    import inspect
+
+    import fno.lint_cli as L
+
+    declared = set(inspect.signature(L.lint).parameters) - {"check"}
+    for name, fn_name in L.CHECKS.items():
+        accepted = set(inspect.signature(getattr(L, fn_name)).parameters)
+        missing = accepted - declared
+        assert not missing, (
+            f"`fno lint {name}` accepts {sorted(missing)}, which `fno lint` does "
+            f"not declare, so those flags are unreachable. Add them to lint()."
+        )

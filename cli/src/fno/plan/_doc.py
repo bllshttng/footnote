@@ -189,6 +189,19 @@ def _extract_sections(body: str) -> OrderedDict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def load_plan_text(text: str) -> PlanDoc:
+    """Parse plan *text* into a PlanDoc without touching disk.
+
+    Lets a caller first-fill frontmatter in memory (e.g. a research doc that
+    carries none) before parsing, so a dry-run mutation never has to write the
+    file just to read it back. Raises match ``load_plan``.
+    """
+    frontmatter_yaml, body = _split_frontmatter(text)
+    frontmatter = _parse_frontmatter(frontmatter_yaml)
+    sections = _extract_sections(body)
+    return PlanDoc(frontmatter=frontmatter, sections=sections)
+
+
 def load_plan(path: Path) -> PlanDoc:
     """Parse a plan file at *path* and return a PlanDoc.
 
@@ -205,8 +218,4 @@ def load_plan(path: Path) -> PlanDoc:
         ParseError: on a structural markdown parse failure.
         OSError: propagated unchanged if the file cannot be read.
     """
-    text = path.read_text(encoding="utf-8")
-    frontmatter_yaml, body = _split_frontmatter(text)
-    frontmatter = _parse_frontmatter(frontmatter_yaml)
-    sections = _extract_sections(body)
-    return PlanDoc(frontmatter=frontmatter, sections=sections)
+    return load_plan_text(path.read_text(encoding="utf-8"))

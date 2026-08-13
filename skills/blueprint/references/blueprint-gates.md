@@ -64,84 +64,11 @@ about the claim - `fno backlog intake` reads the frontmatter directly. When you
 want to override the frontmatter at intake time (e.g. repairing a past
 mistake), use `fno backlog intake <plan>.md --claims ab-XXX`.
 
-## Failure Mode Ingestion (MANDATORY when a design doc is supplied)
-
-`/think` is now contractually obligated to produce a `## Failure Modes`
-section in every design doc (see `skills/think/SKILL.md` Step 6b). `/blueprint`
-reflects the other side of that contract: when the input points to a design
-doc, `/blueprint` MUST read the Failure Modes section before writing any plan
-artifact and MUST refuse to proceed when the section is missing.
-
-**Detection.** Classify the argument (after stripping mode modifiers) in
-this order so a typo never bypasses the gate by silently degrading to
-"raw feature description":
-
-1. If the argument LOOKS like a file path - it contains `/`, or it ends
-   in `.md`, or it starts with `~`, `./`, `../`, or `/` - treat it as a
-   design-doc path. Resolve it (expand `~`, make absolute). If the file
-   does not exist or is not readable, refuse with a missing-file message
-   (see below). Do NOT fall through to raw-description mode.
-2. Otherwise, treat the argument as a raw feature description and skip
-   the grep check (there is nothing to read).
-
-This is deliberately strict: a user who types `path/to/desgin.md` (typo)
-gets a loud "file not found" rather than a silently-missed contract.
-
-**Check.** For a path that resolved to a readable file, grep for a literal
-level-2 heading `## Failure Modes`. Case-sensitive. A level-3 or deeper
-heading does NOT satisfy the check; neither does an in-prose mention. In
-the snippet below, `$DESIGN_DOC_PATH` is the resolved design-doc argument:
-
-```bash
-# $DESIGN_DOC_PATH is the absolute path resolved from the /blueprint argument.
-# $ARG is the raw argument text (before resolution) used for the path-shape
-# classifier below.
-if [[ "$ARG" == *"/"* || "$ARG" == *.md || "$ARG" == ~* || "$ARG" == ./* || "$ARG" == ../* ]]; then
-  if [[ ! -r "$DESIGN_DOC_PATH" ]]; then
-    echo "Design doc at $DESIGN_DOC_PATH is missing or unreadable. Check the path and retry." >&2
-    exit 1
-  fi
-  grep -q '^## Failure Modes$' "$DESIGN_DOC_PATH" || {
-    echo "Design doc at $DESIGN_DOC_PATH is missing ## Failure Modes section. Run /think first." >&2
-    exit 1
-  }
-fi
-```
-
-**Refusal message (verbatim template, where `{path}` stands for the
-resolved design-doc path):**
-
-```
-Design doc at {path} is missing ## Failure Modes section. Run /think first.
-```
-
-Print the message to stderr, halt before any write, and surface the halt as
-a non-zero status to the caller (target, operator, or the user shell). Do
-NOT attempt to auto-generate the missing section: the whole point of the
-gate is to force failure-mode thinking into `/think`, not to paper over a
-skipped step here.
-
-**Parse.** On success, extract the bullets under each of the four required
-sub-sections (Boundaries, Errors, Invariants, Concurrency). The expected
-structure is a bold label on its own line (`**Boundaries**`) followed by a
-dash-bullet list; match the label exactly and collect the bullets until the
-next bold label or the next `##` heading. Preserve the original bullet
-wording so the AC4-EDGE seeds can cite the source by name.
-
-**Seed AC4-EDGE criteria.** Emit seeds inline under the relevant
-`### N. [Change]` in the Changes section (or against the design doc's Execution
-Strategy waves on the mutation path), one `AC4-EDGE` per failure-mode bullet
-with a code touchpoint. Each seed MUST cite the source bullet by a short name
-taken from the design doc (e.g. `Cites "Double-submit" from design doc`).
-Irrelevant bullets (no code surface changes this plan) are skipped rather
-than padded: AC4-EDGE citations should map to actual implementation
-touchpoints, not decorate the plan with unrelated concerns.
-
 ## Schema Citation Gate (graduated; DB-touching plans)
 
 A plan that changes the database without ever naming a real table, enum, or
 constraint is planning blind. This gate makes a DB-touching plan cite the
-schema, the same way Failure Mode Ingestion makes a plan carry failure modes.
+schema.
 It is graduated: full / large plans fail closed, quick / small plans warn.
 
 **When the gate fires (AC3-FR).** Only when the codemap has a
@@ -166,9 +93,9 @@ accepted), but a partial token like `account` does not match.
 
 **Enforcement, graduated by size:**
 
-- **Full / L plans -> fail closed.** Refuse, in the same style as the missing
-  `## Failure Modes` refusal: print the message to stderr, halt before any
-  write, and surface a non-zero status. The refusal MUST name the uncited task
+- **Full / L plans -> fail closed.** Refuse: print the message to stderr, halt
+  before any write, and surface a non-zero status. The refusal MUST name the
+  uncited task
   and list candidate identifiers from the schema section (AC3-ERR / AC3-UI):
 
   ```
@@ -187,11 +114,12 @@ over its absence.
 
 ## Executor Lock Transcription (when a design doc supplies a Locked Decision)
 
-When `/think` runs against a frontend or mixed-surface design, it captures
-the executor decision as a Locked Decisions entry (see
-`skills/think/references/executor-routing-prompt.md`). `/blueprint` transcribes
-that lock into the plan's frontmatter so the operator's three-tier resolver
-honors it without a runtime surface-inference fallback.
+When a design doc carries a frontend or mixed surface, `/blueprint` runs the
+structural surface detector (`references/detect-surface.sh`) and captures the
+executor decision as a Locked Decisions entry (see
+`references/executor-routing-prompt.md`). `/blueprint` transcribes that lock
+into the plan's frontmatter so the operator's three-tier resolver honors it
+without a runtime surface-inference fallback.
 
 Transcription is purely mechanical: same Locked Decisions input yields the
 same frontmatter output. No LLM judgment in this step.

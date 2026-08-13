@@ -2,6 +2,38 @@
 
 Reference for the `/blueprint` mutation behavior introduced in PR1 (2026-05-18, `ab-69f7ee8f`). The architectural overview lives at [docs/architecture/lean-blueprint.md](../../../docs/architecture/lean-blueprint.md).
 
+## Design doc shape
+
+The frontmatter is the one locked part of the plan.
+When a doc carries no frontmatter, blueprint first-fills it.
+The Claims-Ingestion gate then refuses to adopt a plan whose node never bound.
+The locked fields, with the design-stage placeholders an author fills:
+
+```markdown
+---
+status: design
+created: <YYYY-MM-DD>
+type: blueprint
+node: <node id>
+claims: <node id>
+sources: [<artifacts actually read>]
+---
+
+# <Title>
+
+## User Stories
+
+**US1:** As a <role>, I can <capability>, so that <outcome>.
+
+## Acceptance Criteria
+```
+
+The body is a contract for the implementer, not a rigid template.
+`## User Stories` seeds the task skeleton.
+When that section is absent, blueprint emits a single default task.
+The BDD acceptance criteria carry the test contract the implementer must satisfy.
+Every other section (problem, design rationale, open questions) is optional context, authored as the plan needs it.
+
 ## Status progression
 
 ```
@@ -25,7 +57,6 @@ Enforced by `fno.plan._status.validate_transition(old, new)`. Backward transitio
 | Scenario | Exit code | Stderr |
 |----------|-----------|--------|
 | `/blueprint` on `status: ready` without `rewrite` | 1 | "doc already in `ready` status; pass `rewrite` to regenerate execution sections." |
-| `/blueprint` on doc missing `## Failure Modes` | 2 | "design doc missing required ## Failure Modes section; run /think first." |
 | `/blueprint` writes to section outside allowlist | 2 | "section ownership violation: '<section>' is not in BLUEPRINT_WRITE_ALLOWLIST" |
 
 ## Section ownership allowlist
@@ -84,12 +115,10 @@ Example composing multiple modifiers:
 /blueprint quick greenfield rewrite internal/fno/plans/2026-05-18-foo.md
 ```
 
-## Redirect to /think
+## Blueprint owns the whole plan
 
-When `/blueprint` receives input that is not a path to an existing file (a feature description string, a nonexistent path, or an `ab-ID` with no `plan_path` set), it exits with code 1 and prints:
-
-```
-No design doc found. Run `/think "..."` first, then `/blueprint <resulting-doc-path>`. Or invoke `/target` for the full chain.
-```
-
-`/target` chains `/think` → `/blueprint` → `/do` automatically, so the redirect is only relevant when invoking `/blueprint` directly without a prior `/think` session.
+Blueprint takes any input and produces the plan.
+A feature description, a node id, or a cited-findings doc all work.
+The skill resolves a save path via `fno plan path`, seeds the body, and mutates.
+A prior `/think` run is optional research, never a prerequisite.
+`/target` chains blueprint into do and ship whether or not think ran.

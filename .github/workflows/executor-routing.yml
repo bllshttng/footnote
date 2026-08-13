@@ -1,0 +1,32 @@
+name: executor-routing
+
+# Runs the executor surface-detection contract test. detect-surface.sh is the
+# structural fallback behind executor: impeccable vs archer, relocated to
+# blueprint when think became a research skill. Before this workflow the test
+# had no runner, so it failed for nobody - a guard on zero reachable paths.
+on:
+  pull_request:
+    paths:
+      - 'skills/blueprint/references/detect-surface.sh'
+      - 'skills/blueprint/references/executor-routing-prompt.md'
+      - 'skills/blueprint/SKILL.md'
+      - 'tests/blueprint/test_executor_prompt.sh'
+      - '.github/workflows/executor-routing.yml'
+
+concurrency:
+  group: executor-routing-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  surface-detection-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Executor surface-detection contract
+        run: bash tests/blueprint/test_executor_prompt.sh

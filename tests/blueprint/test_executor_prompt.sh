@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_executor_prompt.sh - Surface-detection rules for /think executor routing.
+# test_executor_prompt.sh - Surface-detection rules for /blueprint executor routing.
 #
 # Acceptance criteria covered (from plan 2026-05-04-think-spec-executor-routing-prompts):
 #   AC1.1-HP   Frontend signals trigger the prompt (frontend-touching detection)
@@ -8,7 +8,7 @@
 #   AC1.4-FR   Target autonomous never blocks on the prompt (mode detection)
 #   AC1.5-FR   CLI flag short-circuits detection (env override)
 #
-# The detection helper is `skills/think/references/detect-surface.sh`; it reads
+# The detection helper is `skills/blueprint/references/detect-surface.sh`; it reads
 # design-doc text on stdin and emits one of:
 #   frontend-touching | backend-only | mixed | unknown
 #
@@ -19,9 +19,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-HELPER="$REPO_ROOT/skills/think/references/detect-surface.sh"
-RULES_DOC="$REPO_ROOT/skills/think/references/executor-routing-prompt.md"
-THINK_SKILL="$REPO_ROOT/skills/think/SKILL.md"
+HELPER="$REPO_ROOT/skills/blueprint/references/detect-surface.sh"
+RULES_DOC="$REPO_ROOT/skills/blueprint/references/executor-routing-prompt.md"
+BLUEPRINT_SKILL="$REPO_ROOT/skills/blueprint/SKILL.md"
 
 PASS=0
 FAIL=0
@@ -95,18 +95,18 @@ assert "no false-positive: inform" "unknown"           "$(detect 'We must inform
 assert "no false-positive: queue inside conquered" "unknown" "$(detect 'A reorganization conquered scaling concerns.')"
 
 echo ""
-echo "AC1.4-FR / AC1.5-FR: SKILL.md references the env contract"
-# These are lightweight structural assertions: the SKILL.md must mention the
-# detection step, the prompt template location, and the env var contract for
-# CLI-flag plumbing. They guard against the SKILL silently dropping the new
-# step in a future edit without also updating the test.
-grep -q 'detect-surface.sh' "$THINK_SKILL" \
+echo "AC1.4-FR / AC1.5-FR: blueprint SKILL.md references the env contract"
+# These are lightweight structural assertions: blueprint's SKILL.md must mention
+# the detection step, the prompt template location, and the env var contract for
+# CLI-flag plumbing. They guard against the skill silently dropping the
+# surface-detection step in a future edit without also updating the test.
+grep -q 'detect-surface.sh' "$BLUEPRINT_SKILL" \
     && { echo "  PASS: SKILL.md references detect-surface.sh"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: SKILL.md does not reference detect-surface.sh"; FAIL=$((FAIL+1)); }
-grep -q 'executor-routing-prompt' "$THINK_SKILL" \
+grep -q 'executor-routing-prompt' "$BLUEPRINT_SKILL" \
     && { echo "  PASS: SKILL.md links to prompt reference"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: SKILL.md does not link to prompt reference"; FAIL=$((FAIL+1)); }
-grep -q 'FNO_EXECUTOR_OVERRIDE\|FNO_EXECUTOR' "$THINK_SKILL" \
+grep -q 'FNO_EXECUTOR_OVERRIDE\|FNO_EXECUTOR' "$BLUEPRINT_SKILL" \
     && { echo "  PASS: SKILL.md documents env-var contract"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: SKILL.md does not document env-var contract"; FAIL=$((FAIL+1)); }
 grep -qi 'auto-detected\|auto_detected' "$RULES_DOC" \

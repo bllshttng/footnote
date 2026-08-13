@@ -119,7 +119,7 @@ else
   fail "check-sections: complete doc rejected (should pass)"
 fi
 
-# --- check-sections: missing a sub-label and an AC type -> named, exit 1 ---
+# --- check-sections: missing an AC type -> named, exit 1 ---
 PARTIAL="$TMP/partial.md"
 cat > "$PARTIAL" <<'EOF'
 ---
@@ -146,7 +146,6 @@ status: design
 EOF
 OUT_PARTIAL="$(bash "$BF" check-sections "$PARTIAL")"; rc=$?
 [[ $rc -eq 1 ]] && pass "check-sections: incomplete doc exits 1" || fail "check-sections: incomplete doc exit $rc (expected 1)"
-echo "$OUT_PARTIAL" | grep -q 'missing: failure-modes-sublabel:Concurrency' && pass "check-sections: names missing Concurrency sub-label" || fail "check-sections: did not name Concurrency"
 echo "$OUT_PARTIAL" | grep -q 'missing: ac-type:FR' && pass "check-sections: names missing AC-FR" || fail "check-sections: did not name AC-FR"
 # It should NOT report the present ones as missing (targeted retry).
 echo "$OUT_PARTIAL" | grep -q 'ac-type:HP' && fail "check-sections: falsely reported present AC-HP missing" || pass "check-sections: present sections not flagged"

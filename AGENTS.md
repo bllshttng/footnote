@@ -98,7 +98,7 @@ footnote/
 
 ## Commands
 
-Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (`/fno:review sigma|peer`, `/fno:think what-if|panel`, `/fno:pr create|check|merged`, `/fno:do flat|waves`). Everything else stays invocable by full name; the advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
+Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (table below). Everything else stays invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
 
 | Command | Purpose |
 |---------|---------|
@@ -108,7 +108,7 @@ Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/
 | `/fno:target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
 | `/fno:blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
 | `/fno:do` | Execute a plan: `flat` (default) or `waves` |
-| `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Design / review / fix-loop / TDD / spec-ordering / config wizard |
+| `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
 | `/fno:pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
 | `/fno:growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
