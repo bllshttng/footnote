@@ -71,6 +71,8 @@ The rename requirement is not decoration either. `fno-agents-daemon` runs at PPI
 
 A clean machine here still reports third-party daemons at PPID 1 whose cwd is the repo. `--quiet-unless-new` reports each once and then stays silent. That is what the SessionStart hook uses. The bare verb always prints everything.
 
+The quiet gate keys on pid, name and start time, so it mutes a process, never a kind of process. A harness that starts a fresh `node` or `bash` per session mints a new key each time, and the sweep speaks again. That is correct and it is also the noisiest thing here. Read a repeat as a new process, not as a broken gate.
+
 **Footnote's own daemons are counted, never listed.** `fno-agents-daemon` and `fno-agents-worker` run detached at PPID 1 by design. So PPID 1 says nothing about whether one leaked. Each restart also mints a fresh seen-key that speaks again. An hourly report nobody can act on is how a sweep gets ignored. The scan line names the count (`3 own-daemon`), because a silent exclusion is the same absence trap the rest of this module refuses. The match is on argv[0] exactly, so `fno-agents-daemon-load` is still a finding. A prefix test hands anyone an opt-out.
 
 A broken scan records nothing in the seen-file. It withheld its findings, so marking them reported lets one census failure silence a real orphan on every healthy sweep after it.

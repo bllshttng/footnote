@@ -56,6 +56,11 @@ def _is_separator(tok):
     # refusing a legitimately bounded command.
     if ">" in tok or "<" in tok:
         return False
+    # `|&` is bash's pipe-including-stderr, a PIPE and not a control operator.
+    # Split here it stranded the reader in a later segment, so `yes |& head -c 1M`
+    # read as a last-stage `yes` and was refused. Same carveout as `2>&1` above.
+    if tok == "|&":
+        return False
     return bool(CONTROL_CHARS & set(tok)) or "||" in tok
 
 # Wrappers that are transparent to command position: `nohup yes` still runs
@@ -124,6 +129,10 @@ _HEREDOC = re.compile(r"<<-?\s*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1")
 #: Words that leave a loop when they are the COMMAND, not an argument.
 _ESCAPES = {"break", "exit", "return"}
 
+#: Loop conditions that never let the loop end, per keyword. Inverted between
+#: the two: `while` repeats on success, `until` repeats on failure.
+_NEVER_ENDS = {"while": {"true", ":"}, "until": {"false"}}
+
 
 def _strip_heredocs(text):
     """Drop heredoc BODIES. They are data written to a file, not commands.
@@ -164,7 +173,9 @@ def _pipe_parts(segment):
     """
     parts, current = [], []
     for tok in segment:
-        if tok == "|":
+        # `|&` pipes stdout AND stderr. It is a pipe, so it resets command
+        # position exactly as `|` does.
+        if tok in ("|", "|&"):
             parts.append(current)
             current = []
         else:
@@ -257,7 +268,12 @@ def _generator_reason(head, argv):
         return ("`yes` never ends. Writing to /dev/null it never even receives "
                 "SIGPIPE, because there is no reader to go away and the sink "
                 "always accepts.")
-    if head in {"while", "until"} and argv and argv[0] in {"true", ":", "false"}:
+    # The truth table INVERTS between the two keywords: `while` repeats while the
+    # test succeeds, `until` repeats while it fails. One shared condition set
+    # refused `while false` and `until true`, both of which exit immediately,
+    # and a user disabling a loop with `while false` got a refusal citing a
+    # 71-core-hour incident.
+    if argv and argv[0] in _NEVER_ENDS.get(head, ()):
         return "`%s %s` is an unbounded loop header." % (head, argv[0])
     if head == "sleep" and argv and argv[0] in {"infinity", "inf"}:
         return "`sleep infinity` never returns."
@@ -334,7 +350,6 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     ):
         return "`for ((;;))` is an unbounded loop header.", text.strip()
     for segment in all_segments:
-        seg_bound = inherited_bound or _has_bound(segment)
         parts = _pipe_parts(segment)
         for idx, part in enumerate(parts):
             # A downstream reader bounds the stage feeding it: `yes | head -c 1M`
@@ -344,7 +359,14 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
             # ponytail: a reader that never exits (`yes | wc -l`) still hangs.
             # Deciding that statically needs a model of every consumer, so this
             # accepts the false negative rather than break the common case.
-            bounded = seg_bound or idx < len(parts) - 1
+            #
+            # The bound is read PER STAGE. Read per segment, a `timeout` on one
+            # stage licensed every other: `timeout 1 true | yes > /dev/null` was
+            # allowed and leaves specimen 1 behind after one second. `timeout`
+            # bounds the process it wraps, never its pipeline siblings.
+            bounded = (
+                inherited_bound or _has_bound(part) or idx < len(parts) - 1
+            )
             head, argv = _head_of(part)
             if head is None:
                 continue

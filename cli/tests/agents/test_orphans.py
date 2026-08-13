@@ -69,7 +69,8 @@ def table(monkeypatch):
     # seconds later. A test suite that kills the developer's own processes is a
     # worse bug than anything it is testing. Individual tests re-stub `_kill`
     # to record calls; the default here is that nothing escapes.
-    monkeypatch.setattr(orphans, "_kill", lambda pid: None)
+    # True = our signal reached it, which is the ordinary case these tests mean.
+    monkeypatch.setattr(orphans, "_kill", lambda pid: True)
     monkeypatch.setattr(orphans, "_pid_alive", lambda pid: False)
     return rows
 
@@ -123,6 +124,31 @@ def test_a_real_fno_binary_is_not_claimed_by_the_name_arm() -> None:
     )
     assert orphans.was_renamed(daemon) is False
     assert orphans._attribute(daemon, ["/repo"]) is None
+
+
+def test_a_process_that_died_on_its_own_is_not_credited_as_reaped(
+    monkeypatch, table
+) -> None:
+    """`reaped:` counts signals WE sent, not processes that happen to be gone.
+
+    A pid that exits between the scan and the reap makes `os.kill` raise, and
+    the liveness re-check then sees a dead process. Crediting that prints a
+    receipt for a signal nobody sent, which is the lie this module refuses.
+    """
+    table.append(
+        _proc(
+            77,
+            name="sleep",
+            argv0="fno-load-gone",
+            cwd="/repo",
+            age=orphans.REAP_MIN_AGE_S + 60,
+        )
+    )
+    monkeypatch.setattr(orphans, "_kill", lambda pid: False)  # ESRCH: already gone
+
+    result = _scan_with_working_control(monkeypatch, table, reap=True)
+    assert [f.pid for f in result.findings] == [77], "still a finding"
+    assert result.reaped == [], "no signal landed, so no reap to claim"
 
 
 def test_our_own_daemon_is_counted_not_listed(monkeypatch, table) -> None:
@@ -259,7 +285,7 @@ def test_a_dead_kill_path_withholds_the_verdict(monkeypatch, table) -> None:
 def test_a_broken_scan_reaps_nothing(monkeypatch, table) -> None:
     table.append(_proc(61, name="sleep", argv0="fno-load-x1", age=3600))
     killed: list[int] = []
-    monkeypatch.setattr(orphans, "_kill", killed.append)
+    monkeypatch.setattr(orphans, "_kill", _recording_kill(killed))
     result = orphans.scan(reap=True)
     assert result.broken
     assert killed == []
@@ -276,12 +302,27 @@ def test_clean_scan_prints_the_control_above_the_count(monkeypatch, table) -> No
 
 
 # ─── reap narrowness ────────────────────────────────────────────────────────
+def _recording_kill(killed: list[int]):
+    """Record the pid AND report that the signal landed.
+
+    `list.append` returns None, and the reap now credits only a kill it
+    actually delivered, so a bare `killed.append` stub silently meant "the
+    signal never landed" and every reap assertion went empty.
+    """
+
+    def _kill(pid: int) -> bool:
+        killed.append(pid)
+        return True
+
+    return _kill
+
+
 
 
 def test_reap_kills_an_old_renamed_fno_process(monkeypatch, table) -> None:
     table.append(_proc(70, name="sleep", argv0="fno-load-x1", age=1800))
     killed: list[int] = []
-    monkeypatch.setattr(orphans, "_kill", killed.append)
+    monkeypatch.setattr(orphans, "_kill", _recording_kill(killed))
     result = _scan_with_working_control(monkeypatch, table, reap=True)
     # The probes are killed too, on every run; that IS the live kill-path
     # control. Only non-probe kills are the reap under test here.
@@ -292,7 +333,7 @@ def test_reap_kills_an_old_renamed_fno_process(monkeypatch, table) -> None:
 def test_reap_spares_a_young_one(monkeypatch, table) -> None:
     table.append(_proc(71, name="sleep", argv0="fno-load-x1", age=60))
     killed: list[int] = []
-    monkeypatch.setattr(orphans, "_kill", killed.append)
+    monkeypatch.setattr(orphans, "_kill", _recording_kill(killed))
     result = _scan_with_working_control(monkeypatch, table, reap=True)
     assert _reaped_pids(killed) == []
     assert [f.pid for f in result.findings] == [71]
@@ -303,7 +344,7 @@ def test_reap_spares_an_unnamed_orphan(monkeypatch, table) -> None:
     guard is unnamed, so the reap can never touch it, and that is correct."""
     table.append(_proc(72, name="yes", cwd="/repo/.claude/worktrees/x-01ae", age=27000))
     killed: list[int] = []
-    monkeypatch.setattr(orphans, "_kill", killed.append)
+    monkeypatch.setattr(orphans, "_kill", _recording_kill(killed))
     result = _scan_with_working_control(monkeypatch, table, reap=True)
     assert _reaped_pids(killed) == []
     assert [f.pid for f in result.findings] == [72]

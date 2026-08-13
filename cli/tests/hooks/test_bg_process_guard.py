@@ -80,6 +80,14 @@ DENIED = [
     "while true; do echo break; done",
     "while true; do rg break src; done",
     "for ((;;)); do echo break; done",
+    # An escape BEFORE the loop cannot leave it. Read over the whole command,
+    # a `|| exit 1` precondition cleared the keepalive that follows it.
+    "cd /tmp || exit 1; while true; do sleep 60; done &",
+    "[ -f x ] || exit 1\nwhile true; do sleep 1; done",
+    # A bound belongs to the stage it wraps, never to its pipeline siblings.
+    # Read per segment, this was allowed and leaves specimen 1 behind after
+    # one second.
+    "timeout 1 true | yes > /dev/null",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -128,6 +136,13 @@ ALLOWED = [
     "cat > f.txt <<EOF\nyes > /dev/null\nEOF",
     # A capability probe runs nothing.
     "command -v yes",
+    # `|&` is bash's pipe-including-stderr. Split as a control operator it
+    # stranded the reader in a later segment and refused a bounded pipeline.
+    "yes |& head -c 1M",
+    # The truth table inverts between the keywords. Both of these exit at once,
+    # and one shared condition set refused a loop deliberately disabled.
+    "while false; do echo hi; done",
+    "until true; do echo hi; done",
 ]
 
 

@@ -332,28 +332,37 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _kill(pid: int) -> None:
+def _kill(pid: int) -> bool:
     """SIGTERM, then SIGKILL if it is still there. Shared by the reap and by
-    probe cleanup, so every run exercises the kill path that `--reap` uses."""
+    probe cleanup, so every run exercises the kill path that `--reap` uses.
+
+    Returns whether OUR signal reached the process. A pid that exited on its
+    own between the scan and the reap raises ProcessLookupError here, and the
+    caller's liveness re-check then sees a dead process and credits a kill this
+    sweep never made. "reaped: 1" for a process that died by itself is the same
+    receipt-that-lies this module exists to refuse, so the caller needs both
+    halves: we signalled it, AND it is gone.
+    """
     try:
         os.kill(pid, signal.SIGTERM)
     except Exception:  # noqa: BLE001
-        return
+        return False
     for _ in range(20):
         time.sleep(0.1)
         if not _pid_alive(pid):
-            return
+            return True
     try:
         os.kill(pid, signal.SIGKILL)
     except Exception:  # noqa: BLE001
-        return
+        return True  # our SIGTERM landed; only the follow-up failed
     # SIGKILL is not instantaneous. Returning here with no grace made the
     # caller's liveness re-check race it, and a probe that ignored SIGTERM for
     # the full window reported `kill arm FAILED` microseconds before it died.
     for _ in range(20):
         if not _pid_alive(pid):
-            return
+            return True
         time.sleep(0.05)
+    return True
 
 
 # ─── the scan ───────────────────────────────────────────────────────────────
@@ -519,13 +528,15 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
         for finding in result.findings:
             if not finding.reapable():
                 continue
-            _kill(finding.pid)
-            # Re-checked, never assumed. `_kill` swallows every exception and
-            # returns early when the first SIGTERM raises, so an unconditional
-            # append printed `reaped: N` for a process still running. The kill
-            # control proves the path works against a probe we own; it says
-            # nothing about this particular signal.
-            if not _pid_alive(finding.pid):
+            signalled = _kill(finding.pid)
+            # BOTH halves, never assumed. An unconditional append printed
+            # `reaped: N` for a process still running, so the liveness re-check
+            # went in. That closed the still-running direction and left the
+            # already-dead one: a pid that exited on its own between the scan
+            # and the reap reads as dead, and crediting that is a receipt for a
+            # signal nobody sent. The kill control proves the PATH works against
+            # a probe we own; it says nothing about this particular signal.
+            if signalled and not _pid_alive(finding.pid):
                 result.reaped.append(finding)
 
     result.findings.sort(key=lambda f: f.cpu_seconds, reverse=True)
