@@ -48,7 +48,7 @@ pub struct GcRow {
     /// own no worktree. That was one instance of the real predicate, and the
     /// narrow version pinned 17 of 21 reapable rows on this machine: their `cwd`
     /// is the CANONICAL CHECKOUT, which the row does not own and which is never
-    /// clean (one untracked `.claude/settings.json` was enough). The guard
+    /// clean (a single untracked editor-settings file was enough). The guard
     /// protected nothing there and blocked everything.
     ///
     /// False for a one-shot ask, for a row whose cwd is the canonical checkout,
@@ -375,9 +375,9 @@ mod tests {
     #[test]
     fn row_in_the_canonical_checkout_is_not_pinned_by_its_dirt() {
         // THE MEASURED CASE. 17 of 21 past-grace rows on this machine had `cwd`
-        // = the canonical checkout, kept by a single untracked
-        // `.claude/settings.json`. The row does not own that checkout and cannot
-        // remove it, so its dirt says nothing about whether the ROW may go.
+        // = the canonical checkout, kept by a single untracked editor-settings
+        // file. The row does not own that checkout and cannot remove it, so its
+        // dirt says nothing about whether the ROW may go.
         let row = GcRow {
             owns_worktree: false,
             worktree_clean: Some(false),

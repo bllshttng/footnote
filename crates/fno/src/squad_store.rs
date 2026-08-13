@@ -1975,7 +1975,13 @@ mod tests {
         {
             let cwds = vec!["/gone/child".to_string()];
             assert_eq!(
-                prune_decision(&squad("", "k1", &["/gone"], &[]), false, live_some, &cwds, &gone),
+                prune_decision(
+                    &squad("", "k1", &["/gone"], &[]),
+                    false,
+                    live_some,
+                    &cwds,
+                    &gone
+                ),
                 PruneDecision::Keep
             );
         }
@@ -2012,13 +2018,22 @@ mod tests {
         assert_eq!(parse_stamp_epoch("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_stamp_epoch("2000-03-01T00:00:00Z"), Some(951_868_800));
         // Leap day, the case a naive month table gets wrong.
-        assert_eq!(parse_stamp_epoch("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(
+            parse_stamp_epoch("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800)
+        );
     }
 
     #[test]
     fn unparseable_stamp_keeps_the_squad() {
         // Cannot age it -> cannot claim it is finished.
-        for bad in ["", "not-a-date", "2026-08-13", "20260813T120000Z", "xxxx-08-13T12:00:00Z"] {
+        for bad in [
+            "",
+            "not-a-date",
+            "2026-08-13",
+            "20260813T120000Z",
+            "xxxx-08-13T12:00:00Z",
+        ] {
             assert_eq!(parse_stamp_epoch(bad), None, "{bad:?} must not parse");
             assert_eq!(
                 prune_decision_at(
@@ -2056,7 +2071,14 @@ mod tests {
     fn the_grace_boundary_keeps_until_strictly_past() {
         let live = std::collections::HashSet::new();
         let decide = |created: &str, now: i64| {
-            prune_decision_at(&empty_squad(created), false, Some(&live), &[], &|_| true, Some(now))
+            prune_decision_at(
+                &empty_squad(created),
+                false,
+                Some(&live),
+                &[],
+                &|_| true,
+                Some(now),
+            )
         };
         // Exactly at the window: still kept.
         assert_eq!(
@@ -2207,8 +2229,7 @@ mod tests {
             2,
             "a surviving origin no longer keeps a squad whose members are all dead"
         );
-        let mut removed_keys: Vec<&str> =
-            outcome.removed.iter().map(|r| r.key.as_str()).collect();
+        let mut removed_keys: Vec<&str> = outcome.removed.iter().map(|r| r.key.as_str()).collect();
         removed_keys.sort_unstable();
         assert_eq!(
             removed_keys,

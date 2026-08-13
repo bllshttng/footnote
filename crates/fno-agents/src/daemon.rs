@@ -442,7 +442,9 @@ pub struct WorktreeSweepReport {
 /// which is indistinguishable from a clean machine: an absence has two
 /// explanations and a count must only ever come from a real reading.
 pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
-    let line = stdout.lines().find(|l| l.trim_start().starts_with("Summary:"))?;
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("Summary:"))?;
     let num_before = |needle: &str| -> Option<usize> {
         let idx = line.find(needle)?;
         line[..idx].split_whitespace().last()?.parse().ok()
@@ -5285,10 +5287,13 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn sweep_reports_every_repo_including_the_quiet_ones() {
         let home = tmp_home("wt-sweep-quiet");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let quiet = "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
+        let quiet =
+            "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
 
         let swept = worktree_sweep(
-            &home, &emitter, 1_000_000,
+            &home,
+            &emitter,
+            1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
             &|_| Some(quiet.to_string()),
         );
@@ -5306,9 +5311,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let out = |_: &str| Some(REAL_SUMMARY.to_string());
         let now = 1_000_000;
 
-        assert_eq!(worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &out), 1);
+        assert_eq!(
+            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &out),
+            1
+        );
         // Same day: skipped entirely, no second reading.
-        assert_eq!(worktree_sweep(&home, &emitter, now + 60, &["/repo/a".into()], &out), 0);
+        assert_eq!(
+            worktree_sweep(&home, &emitter, now + 60, &["/repo/a".into()], &out),
+            0
+        );
         // A day later: fires again.
         assert_eq!(
             worktree_sweep(&home, &emitter, now + 86_401, &["/repo/a".into()], &out),
