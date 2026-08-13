@@ -8950,6 +8950,15 @@ async fn handle_stdin(
     // AC3-UI); a Shift-modified event is dropped (native-selection, AC3-EDGE).
     let (reports, passthrough) = crate::mouse::extract_mouse(mouse_carry, bytes);
     for rep in reports {
+        // DIAGNOSTIC (header right-click toggle): log every mouse event one stdin
+        // chunk produces, so a single operator right-click can be COUNTED. Inert
+        // unless FNO_MUX_MOUSE_TRACE is set; drop once the event pair is read.
+        if std::env::var_os("FNO_MUX_MOUSE_TRACE").is_some() {
+            eprintln!(
+                "mux-mouse kind={:?} row={} col={} shift={}",
+                rep.kind, rep.row, rep.col, rep.shift
+            );
+        }
         // Shift-modified reports are dropped so the terminal's own native
         // selection keeps working. A RELEASE while a drag is in flight is the
         // exception: some terminals report Shift on the release, and dropping it
