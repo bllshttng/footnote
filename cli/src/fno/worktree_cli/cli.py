@@ -284,6 +284,28 @@ def _worktree_ensure(
 
 
 @app.command()
+def reapable(
+    path: str = typer.Argument(..., help="Worktree path to classify."),
+) -> None:
+    """Say whether removing <path> can destroy anything. Read-only.
+
+    Prints one line, e.g. `reapable=yes reason=clean recoverable_deletions=76`.
+    Exit 0 when reapable, 1 when something blocks. The three removal call sites
+    (the --merged sweep, archive-worktree.sh, the Rust row-GC probe) read this
+    instead of each deciding for itself.
+
+    A missing tracked file never blocks: HEAD holds its content, so removal
+    loses nothing. Modified tracked content, untracked files, and unmerged
+    conflicts do block, and a probe that cannot answer blocks too.
+    """
+    from fno.worktree_reapable import reapable as _classify
+
+    verdict = _classify(path)
+    typer.echo(verdict.line())
+    raise typer.Exit(code=0 if verdict.reapable else 1)
+
+
+@app.command()
 def ensure(
     repo: str = typer.Option(..., "--repo", help="Repo MAIN checkout to spawn a worktree from."),
     name: str = typer.Option(..., "--name", help="Worktree name (dir + default branch suffix)."),
