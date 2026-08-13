@@ -371,6 +371,7 @@ def _mask(text: str) -> str:
     fence_char = ""
     in_comment = False
     in_frontmatter = False
+    in_table = False
     lines = text.split("\n")
     for index, raw_line in enumerate(lines):
         lead = raw_line.lstrip()
@@ -415,16 +416,23 @@ def _mask(text: str) -> str:
                 continue
             # A same-line comment falls through: _mask_inline strips just the
             # span, so prose trailing the comment is still checked.
-        # A table row. GFM allows a row with no leading pipe, and only the
-        # DELIMITER row is matched here, never a body row. A body row is
-        # `a | b`, which is also an ordinary sentence carrying a pipe, and
-        # blanking that shape would let any prose escape all six rules. Blanking
-        # the delimiter row alone is enough: it is not continuable, so the body
-        # row under it is never charged, and the header above it follows a blank
-        # line. A dash-and-colon cell grid cannot be prose.
+        # A table row. GFM allows a row with no leading pipe, and a body row is
+        # then `a | b`, which is also an ordinary sentence carrying a pipe.
+        # POSITION tells them apart, never shape: a pipeless body row is one
+        # that FOLLOWS a delimiter row. Matching on shape alone would let any
+        # sentence with a pipe escape all six rules, and blanking only the
+        # delimiter row cleared a one-row table while a realistic multi-row one
+        # still charged rule 6 from its second row on.
         if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead):
+            if _DELIMITER_ROW_RE.match(lead):
+                in_table = True
             out.append("")
             continue
+        if in_table:
+            if lead and "|" in raw_line:
+                out.append("")
+                continue
+            in_table = False
         if _LOG_RE.match(lead):
             out.append("")
             continue

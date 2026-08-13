@@ -211,8 +211,18 @@ def test_paren_ordered_item_gets_the_list_cap():
 
 
 def test_a_pipeless_table_is_not_charged():
-    body = "intro.\n\na | b\n--- | ---\n1 | 2\n\nafter."
+    # THREE body rows on purpose. A one-row table passes even when only the
+    # delimiter row is blanked, so a single-row fixture pinned nothing and let
+    # a real multi-row table keep failing from its second row on.
+    body = "intro.\n\na | b\n--- | ---\n1 | 2\n3 | 4\n5 | 6\n\nafter."
     assert 6 not in rule_set(body)
+
+
+def test_a_table_stops_exempting_once_it_ends():
+    # Position is what exempts a body row, so the exemption must end with the
+    # table. Otherwise every pipe-free wrap after one would go unchecked.
+    body = "a | b\n--- | ---\n1 | 2\n\nprose that wraps\nonto a second line."
+    assert 6 in rule_set(body)
 
 
 def test_prose_carrying_a_pipe_is_still_checked():
