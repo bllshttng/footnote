@@ -144,7 +144,13 @@ def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
         ["gh", "pr", "view", pr, "--json", "state,statusCheckRollup"],
         cwd=cwd,
     )
-    if not res.ok or not res.stdout.strip():
+    if res.ok and not res.stdout.strip():
+        # gh did not fail here, so `_fetch_reason` would read an empty stderr and
+        # answer "gh pr view failed with no message", which is the opposite of
+        # what happened. This whole function exists to make `verdict: error`
+        # actionable, and a wrong cause is worse than a vague one.
+        return None, "gh pr view succeeded but returned empty output"
+    if not res.ok:
         return None, _fetch_reason(res)
     try:
         return json.loads(res.stdout), ""

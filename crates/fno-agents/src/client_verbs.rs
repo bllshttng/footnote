@@ -2953,6 +2953,13 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
     // handler and killed the process at 130, while the Python twin exits clean.
     // A guard on one of two reachable paths for one verb is decorative, so the
     // receiver is armed here and threaded in.
+    //
+    // Arming replaces the default disposition, so a Ctrl-C during the tail read
+    // is DEFERRED rather than lost: it fires the moment `follow`'s select! runs,
+    // which is the clean exit this wants. It is dropped only when the tail read
+    // itself fails and we return 1 below. Reading a queued signal on that branch
+    // needs a manual poll of the Signal stream, which is more machinery than an
+    // error path already printing its cause deserves.
     let sigint = if args.follow {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok()
     } else {

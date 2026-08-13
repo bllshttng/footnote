@@ -64,6 +64,8 @@ The field-line escape exists because mail carries receipts and the worker return
 
 A table row written WITH leading pipes is removed entirely, so it costs zero words and no rule reads it. A row written without them is waived from rule 6 alone, and rules 1 to 5 still read it.
 
+A pipeless table run ends at the first blank line, or at the first line carrying no pipe. Prose that carries a pipe and sits directly under such a table is read as another row. Rule 6 then skips that line and the line below it. No rule can tell those two apart, because a pipeless row is shaped exactly like a sentence carrying a pipe. A blank line after the table ends the run and rule 6 reads normally again.
+
 That difference is deliberate. A leading pipe is the author saying "this is a table", and a row without one is shaped exactly like a sentence carrying a pipe. Waiving every rule on that shape let a long sentence carrying a semicolon sit under a table and pass the whole gate. The narrow waiver is the safe one, and adding leading pipes is how to ask for the full exemption.
 
 ## Rule 6 accepts one blind spot on purpose
