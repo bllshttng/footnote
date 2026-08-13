@@ -255,14 +255,21 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
-    """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
+def test_ac4_err_future_schema_version_reads_forward(tmp_path: Path, monkeypatch) -> None:
+    """AC4-ERR inverted: a future schema_version now READS instead of raising.
 
-    SCHEMA_VERSION is now 13 (fno_id); v14 is the future-drift case.
+    The original contract refused a future version so a stale reader could not
+    silently drop a field. That refusal turned out to cost more than the thing
+    it prevented: registry.json is global to every agent on this machine, so one
+    process ahead of the deployment took every deployed reader down at once, and
+    mail died fleet-wide with a symptom that surfaced far from the cause.
+
+    Dropping a field is now made safe by refusing to WRITE over a newer store and
+    by announcing every degraded read, not by refusing to look.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.registry import RegistryVersionError, load_registry
+    from fno.agents.registry import load_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,19 +277,41 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
         json.dumps({"schema_version": 14, "agents": []}), encoding="utf-8"
     )
 
-    with pytest.raises(RegistryVersionError) as exc_info:
-        load_registry(path=registry_path)
-
-    msg = str(exc_info.value)
-    assert "14" in msg  # read version present
-    assert "13" in msg  # expected version present
+    assert load_registry(path=registry_path) == []
 
 
-def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
-    """AC4-ERR: error message explicitly names both the read and expected schema_version."""
+def test_ac4_err_degraded_read_names_both_versions(tmp_path: Path, monkeypatch, capsys) -> None:
+    """AC4-ERR kept, moved from the exception to the announcement.
+
+    Both versions must still be named where a reader will see them. The refusal
+    became a warning, so the requirement moved with it rather than being dropped:
+    a silent read-forward makes a partial row indistinguishable from a complete
+    one, and a decision taken on one leaves no trace.
+    """
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.registry import RegistryVersionError, load_registry
+    from fno.agents.registry import SCHEMA_VERSION, load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps({"schema_version": 99, "agents": []}), encoding="utf-8"
+    )
+
+    load_registry(path=registry_path)
+
+    err = capsys.readouterr().err
+    assert "99" in err
+    assert f"schema_version={SCHEMA_VERSION}" in err
+
+
+def test_ac4_err_write_over_a_newer_store_still_raises_naming_versions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The refusal survives on the WRITE path, which is where it now belongs."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import SCHEMA_VERSION, RegistryVersionError, write_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -291,9 +320,7 @@ def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatc
     )
 
     with pytest.raises(RegistryVersionError, match=r"99") as exc_info:
-        load_registry(path=registry_path)
-
-    from fno.agents.registry import SCHEMA_VERSION
+        write_registry([], path=registry_path)
 
     assert f"schema_version={SCHEMA_VERSION}" in str(exc_info.value)
 

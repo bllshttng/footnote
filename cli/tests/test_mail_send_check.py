@@ -151,11 +151,15 @@ def test_malformed_payload_is_a_usage_error_not_a_verdict(tmp_path):
 
 
 def test_unreadable_registry_is_unmeasurable_not_a_no_path(tmp_path):
-    """"I could not read the evidence" is the third answer, never a measured no."""
+    """"I could not read the evidence" is the third answer, never a measured no.
+
+    The fixture used to be a future schema_version. That is no longer unreadable:
+    a newer store now reads forward, precisely so one source-ahead writer cannot
+    brick every reader on the machine. A torn file is what stays unreadable by
+    design, so it is what this property is measured against now.
+    """
     (tmp_path / ".fno" / "agents").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".fno" / "agents" / "registry.json").write_text(
-        json.dumps({"schema_version": 99999, "agents": []})
-    )
+    (tmp_path / ".fno" / "agents" / "registry.json").write_text("{ not json")
     out, code = _run(
         ["/compact", "--to-self", "--raw", "--check"],
         {"CLAUDE_CODE_SESSION_ID": SELF_SID},
