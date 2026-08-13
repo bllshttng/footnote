@@ -125,7 +125,13 @@ def test_a_real_fno_binary_is_not_claimed_by_the_name_arm() -> None:
     assert orphans._attribute(daemon, ["/repo"]) is None
 
 
-def test_daemon_found_by_cwd_is_reported_but_never_reaped(monkeypatch, table) -> None:
+def test_our_own_daemon_is_counted_not_listed(monkeypatch, table) -> None:
+    """PPID 1 is this daemon's normal state, so its presence carries no signal.
+
+    Reported hourly it is noise nobody can act on, and every restart mints a
+    fresh seen-key that speaks again. Counted instead, never dropped in
+    silence, and never reaped either way.
+    """
     table.append(
         _proc(
             42,
@@ -136,7 +142,30 @@ def test_daemon_found_by_cwd_is_reported_but_never_reaped(monkeypatch, table) ->
         )
     )
     result = _scan_with_working_control(monkeypatch, table, reap=True)
-    assert [f.pid for f in result.findings] == [42]
+    assert [f.pid for f in result.findings] == []
+    assert result.daemons_excluded == 1
+    assert "1 own-daemon" in orphans.render(result)
+    assert result.reaped == []
+
+
+def test_a_daemon_lookalike_is_still_reported(monkeypatch, table) -> None:
+    """The exclusion matches argv[0] exactly, so a near-name stays a finding.
+
+    A prefix test here would hand anyone a way to opt out of the sweep by
+    naming their process `fno-agents-daemon-<anything>`.
+    """
+    table.append(
+        _proc(
+            43,
+            name="fno-agents-daemon-load",
+            argv0="/Users/x/.cargo/bin/fno-agents-daemon-load",
+            cwd="/repo",
+            age=90000,
+        )
+    )
+    result = _scan_with_working_control(monkeypatch, table, reap=True)
+    assert [f.pid for f in result.findings] == [43]
+    assert result.daemons_excluded == 0
     assert result.reaped == []
 
 
@@ -326,6 +355,12 @@ def test_a_concurrent_sweeps_probe_is_not_an_orphan(monkeypatch, table) -> None:
     one repo share the hourly stamp. Neither may report the other's control."""
     table.append(
         _proc(91, name="sleep", argv0="fno-orphan-probe-beef", cwd="/tmp/other")
+    )
+    # Both arms, not just the NAME one. The other sweep's CWD probe is the one
+    # that leaks: it sits in the repo root at PPID 1, which is exactly the shape
+    # the CWD arm reports, so an unmarked one was listed as an orphan.
+    table.append(
+        _proc(92, name="sleep", argv0="orphan-probe-cwd-beef", cwd="/repo")
     )
     result = _scan_with_working_control(monkeypatch, table)
     assert result.findings == []

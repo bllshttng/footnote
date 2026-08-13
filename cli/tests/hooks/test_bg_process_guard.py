@@ -68,6 +68,18 @@ DENIED = [
     # An unquoted `#` is ordinary shell text far more often than it opens a
     # comment. shlex swallowed from it to end of line and lost the generator.
     "echo ${#PATH}; yes > /dev/null",
+    # A heredoc is stripped only as far as its terminator. Everything after the
+    # terminator is still command text, so a generator cannot hide behind one.
+    "cat > f.txt <<'EOF'\nhello\nEOF\nyes > /dev/null",
+    # An unterminated `<<` is not a heredoc opener; nothing may be dropped, or
+    # the strip itself becomes the hiding place.
+    "echo 'a << b'\nyes > /dev/null",
+    # A loop escape counts only in COMMAND position. `break` as an argument
+    # leaves the loop exactly as unbounded as it was, and a text match for the
+    # word read both of these as escapes.
+    "while true; do echo break; done",
+    "while true; do rg break src; done",
+    "for ((;;)); do echo break; done",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -105,6 +117,17 @@ ALLOWED = [
     # while the refusal text advertised it as one of the remedies.
     "ulimit -t 60; yes > /dev/null",
     "ls  # yes > /dev/null",
+    # A loop the body can leave. `while true` with a `break` is the standard
+    # poll and it ends; refusing it blocked an ordinary shape at the Bash
+    # boundary.
+    "while true; do sleep 5; if gh pr checks; then break; fi; done",
+    "until false; do sleep 1; ls && break; done",
+    # A heredoc BODY is data written to a file, not commands. Writing a script
+    # that merely contains a poll loop is not running one.
+    "cat > poll.sh <<'EOF'\nwhile true; do :; done\nEOF",
+    "cat > f.txt <<EOF\nyes > /dev/null\nEOF",
+    # A capability probe runs nothing.
+    "command -v yes",
 ]
 
 

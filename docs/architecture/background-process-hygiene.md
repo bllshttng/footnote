@@ -30,7 +30,9 @@ A PreToolUse hook on Bash, wired on both the claude and codex lanes. It denies a
 
 Refused shapes: `yes`, `while true`, `while :`, `until false`, `for ((;;))`, `sleep infinity`. Also `stress` and `stress-ng` with no `-t`, `dd` from an endless device with no `count=`, and a checksum reading one.
 
-Any of these makes it legal: `timeout`, `gtimeout`, `head` in the pipeline, `count=`, `ulimit -t`, `-t <seconds>`.
+Any of these makes it legal: `timeout`, `gtimeout`, `head` in the pipeline, `count=`, `ulimit -t`, `-t <seconds>`. A `break`, `exit`, or `return` in COMMAND position also clears a loop header. `while true; do sleep 5; gh pr view && break; done` is the standard poll and it ends. Command position is the discriminator, not the word. `while true; do echo break; done` still runs forever, and so does `while true; do rg break src; done`. A text match read both as escapes.
+
+Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
 It denies whether or not the call sets `run_in_background`. A foreground unbounded `yes` is orphaned just as surely at session exit.
 
@@ -46,7 +48,7 @@ Enumerates with `psutil`, never `ps ... | awk`. That pipeline returned `count=0`
 
 **There is no CPU floor.** CPU is printed on every finding and gates none of them. One specimen burned no CPU at all.
 
-**It plants its own orphans before it counts anything.** A count of zero has two explanations. A clean machine looks exactly like a dead instrument. So each arm gets a probe that cannot satisfy the other arm. The NAME probe is renamed and parked outside any repo. The CWD probe keeps its own name inside it. The kill path is a third arm, and it is measured after the kill, never before. `_kill` swallows every exception, so reading it off "a probe was spawned" asserts an easier thing than a real kill does. Any missing arm prints `verdict withheld (scan-broken)` and exits 2 with no orphan count at all. Break an arm on purpose to watch it work:
+**It plants its own orphans before it counts anything.** A count of zero has two explanations. A clean machine looks exactly like a dead instrument. So each arm gets a probe that cannot satisfy the other arm. The NAME probe is renamed to an `fno-orphan-probe-` name and parked outside any repo. The CWD probe sits inside it under an `orphan-probe-cwd-` name. That name carries no `fno-` prefix, so the NAME arm cannot claim it and `--reap` cannot kill it. Both markers exist so two sweeps inside one 30-second probe lifetime do not report each other's controls. An unmarked CWD probe is a plain `sleep` in the repo root at PPID 1. That is exactly what the CWD arm reports. The kill path is a third arm, and it is measured after the kill, never before. `_kill` swallows every exception, so reading it off "a probe was spawned" asserts an easier thing than a real kill does. Any missing arm prints `verdict withheld (scan-broken)` and exits 2 with no orphan count at all. Break an arm on purpose to watch it work:
 
 ```bash
 FNO_ORPHANS_SKIP_PROBE=name fno agents orphans; echo "exit=$?"
@@ -67,7 +69,9 @@ The rename requirement is not decoration either. `fno-agents-daemon` runs at PPI
 
 **Expect the sweep to report far more than it kills.** Every orphan that predates the guard carries whatever name it was born with. A name-gated reap can never touch it. Those are exactly the processes nobody has license to kill unattended. Read the gap as the guard's install date, not as a broken reap.
 
-A clean machine here still reports long-lived daemons at PPID 1 whose cwd is the repo, including third-party ones. `--quiet-unless-new` reports each once and then stays silent. That is what the SessionStart hook uses. The bare verb always prints everything.
+A clean machine here still reports third-party daemons at PPID 1 whose cwd is the repo. `--quiet-unless-new` reports each once and then stays silent. That is what the SessionStart hook uses. The bare verb always prints everything.
+
+**Footnote's own daemons are counted, never listed.** `fno-agents-daemon` and `fno-agents-worker` run detached at PPID 1 by design. So PPID 1 says nothing about whether one leaked. Each restart also mints a fresh seen-key that speaks again. An hourly report nobody can act on is how a sweep gets ignored. The scan line names the count (`3 own-daemon`), because a silent exclusion is the same absence trap the rest of this module refuses. The match is on argv[0] exactly, so `fno-agents-daemon-load` is still a finding. A prefix test hands anyone an opt-out.
 
 A broken scan records nothing in the seen-file. It withheld its findings, so marking them reported lets one census failure silence a real orphan on every healthy sweep after it.
 

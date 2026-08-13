@@ -107,6 +107,43 @@ def _tokens(text):
     return list(lex)
 
 
+#: `<<EOF`, `<<-'EOF'`, `<< "EOF"`. The delimiter word is what ends the body.
+_HEREDOC = re.compile(r"<<-?\s*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+#: Words that leave a loop when they are the COMMAND, not an argument.
+_ESCAPES = {"break", "exit", "return"}
+
+
+def _strip_heredocs(text):
+    """Drop heredoc BODIES. They are data written to a file, not commands.
+
+    `cat > poll.sh <<'EOF' ... while true; do ...; done ... EOF` writes a
+    script; it does not run one. Read as commands the body was refused, so
+    writing a file that merely CONTAINS a poll loop was blocked. The sibling
+    hook git-protection.py strips them for the same reason.
+
+    Only strips when the terminator is actually found, so a `<<` that was really
+    a quoted string or an arithmetic shift cannot swallow the rest of the
+    command and hide a generator behind it.
+    """
+    lines = text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        match = _HEREDOC.search(line)
+        if not match:
+            continue
+        delim = match.group(2)
+        end = i
+        while end < len(lines) and lines[end].strip() != delim:
+            end += 1
+        if end < len(lines):
+            i = end + 1
+    return "\n".join(out)
+
+
 def _pipe_parts(segment):
     """The commands of one pipeline, split on `|`.
 
@@ -159,6 +196,12 @@ def _head_of(segment):
             # `env FOO=1 yes` both still run `yes`.
             i += 1
             continue
+        if saw_wrapper and tok in {"-v", "-V"}:
+            # `command -v yes` / `type -V yes` PRINT a path, they run nothing.
+            # The generic flag skip below walked past the `-v` and resolved the
+            # lookup target as the command, so an ordinary capability probe was
+            # refused.
+            return None, []
         if saw_wrapper and tok.startswith("-"):
             # A wrapper's own options, not the command. Skipping only a fixed
             # trio left `sudo -u me yes` resolving to a command called `-u`,
@@ -227,12 +270,26 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     """
     if depth > 2:
         return None
+    text = _strip_heredocs(text)
+    # A loop header runs forever only if nothing inside leaves the loop.
+    # `while true; do sleep 5; gh pr view && break; done` is the standard poll
+    # and it ends; refusing it blocked an ordinary shape at the Bash boundary.
+    # Read in COMMAND POSITION, through the same walk the rest of this function
+    # uses. A text match here read `echo break` and `rg break src` as escapes,
+    # which is a hole with no shell in it at all.
+    # ponytail: a `break` in a NESTED loop still reads as one for the outer.
+    # That is the fail-open direction this guard takes everywhere else.
+    escapes = any(
+        _head_of(part)[0] in _ESCAPES
+        for segment in _segments(_tokens(text))
+        for part in _pipe_parts(segment)
+    )
     # `for ((;;))` cannot be found per segment: `((;;))` is all punctuation, so
     # the lexer emits it as one operator token and _is_separator splits there,
     # leaving a `for` segment with empty argv. Matched on the raw text instead,
     # and only when the whole command carries no bound at all, so
     # `for ((;;)); do timeout 5 x; done` still passes.
-    if re.search(r"for\s*\(\(\s*;\s*;\s*\)\)", text) and not any(
+    if re.search(r"for\s*\(\(\s*;\s*;\s*\)\)", text) and not escapes and not any(
         _has_bound(seg) for seg in _segments(_tokens(text))
     ):
         return "`for ((;;))` is an unbounded loop header.", text.strip()
@@ -258,6 +315,8 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
                 # advertises it as a remedy: `ulimit -t 60; yes` was refused.
                 if "-t" in argv:
                     inherited_bound = True
+                continue
+            if escapes and head in {"while", "until"}:
                 continue
             reason = _generator_reason(head, argv)
             if reason and not bounded:

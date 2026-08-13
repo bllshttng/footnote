@@ -52,6 +52,20 @@ PROBE_LIFETIME_S = 30
 #: the shared hourly stamp across worktrees makes likely.
 PROBE_PREFIX = FNO_PREFIX + "orphan-probe-"
 
+#: The same marker for the CWD probe, deliberately WITHOUT the `fno-` prefix so
+#: the NAME arm still cannot claim it and `--reap` still cannot kill it. An
+#: unmarked CWD probe is a plain `sleep` sitting in the repo root at PPID 1,
+#: which is precisely what the CWD arm reports, so a concurrent sweep listed the
+#: other one's control as an orphan - the leak the NAME marker above was added
+#: to close, left open on the arm that needed it more.
+CWD_PROBE_PREFIX = "orphan-probe-cwd-"
+
+#: Footnote's own daemons. Each runs detached at PPID 1 by design, so PPID 1
+#: says nothing about whether one leaked, and `was_renamed` is already False for
+#: them so `--reap` could never touch one. Matched on argv[0] exactly, never by
+#: prefix, so a renamed `fno-agents-daemon-load` is still a finding.
+OWN_DAEMONS = frozenset({"fno-agents-daemon", "fno-agents-worker"})
+
 
 def display_name(info: dict) -> str:
     """What an operator sees in `top`: argv[0], not the executable.
@@ -124,6 +138,10 @@ class ScanResult:
     ppid1: int = 0
     same_uid: int = 0
     census_excluded: int = 0
+    #: Footnote's own long-lived daemons, counted rather than listed. Never
+    #: silently dropped: an unnamed exclusion is the absence trap this module
+    #: exists to refuse.
+    daemons_excluded: int = 0
     findings: list[Finding] = field(default_factory=list)
     reaped: list[Finding] = field(default_factory=list)
     control: dict[str, bool] = field(default_factory=dict)
@@ -376,9 +394,13 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
         None if skip_probe == "name"
         else _spawn_probe(f"{PROBE_PREFIX}{nonce}", str(scratch))
     )
-    # CWD probe: its own ordinary name, in the repo. Only the CWD arm can claim
-    # it.
-    cwd_pid = None if skip_probe == "cwd" else _spawn_probe(None, repo_root)
+    # CWD probe: in the repo, and marked with a prefix that carries no `fno-`,
+    # so only the CWD arm can still claim it while a concurrent sweep can tell
+    # it apart from a real orphan.
+    cwd_pid = (
+        None if skip_probe == "cwd"
+        else _spawn_probe(f"{CWD_PROBE_PREFIX}{nonce}", repo_root)
+    )
 
     census_pids = _census_pids()
     if census_pids is None:
@@ -423,10 +445,18 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
             arm = _attribute(info, roots)
             if arm is None:
                 continue
-            if display_name(info).startswith(PROBE_PREFIX) and pid not in (
-                name_pid, cwd_pid
-            ):
+            if display_name(info).startswith(
+                (PROBE_PREFIX, CWD_PROBE_PREFIX)
+            ) and pid not in (name_pid, cwd_pid):
                 continue  # another sweep's live probe, not an orphan
+            if display_name(info) in OWN_DAEMONS:
+                # PPID 1 is these daemons' NORMAL state, so their presence
+                # carries no signal at all, and every restart mints a fresh
+                # seen-key that speaks again through --quiet-unless-new. An
+                # hourly report nobody can act on is how a sweep gets ignored.
+                # Counted, never dropped in silence.
+                result.daemons_excluded += 1
+                continue
 
             create = info.get("create_time") or now
             times = info.get("cpu_times")
@@ -506,7 +536,8 @@ def render(result: ScanResult) -> str:
     """Findings first, count last, and no count at all when the scan is broken."""
     lines = [
         f"scan: {result.total} processes, {result.ppid1} ppid=1, "
-        f"{result.same_uid} same-uid, {result.census_excluded} census-excluded"
+        f"{result.same_uid} same-uid, {result.census_excluded} census-excluded, "
+        f"{result.daemons_excluded} own-daemon"
     ]
     if result.broken:
         lines.append(f"control: {result.broken_reason}")
@@ -599,6 +630,7 @@ def to_json(result: ScanResult) -> dict:
             "ppid1": result.ppid1,
             "same_uid": result.same_uid,
             "census_excluded": result.census_excluded,
+            "daemons_excluded": result.daemons_excluded,
         },
         "control": result.control,
         "broken": result.broken,
