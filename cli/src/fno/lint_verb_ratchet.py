@@ -43,6 +43,7 @@ class VerbRatchetError(Exception):
 
 BASELINE_REL = Path("scripts") / "ci" / "verb-baseline.txt"
 COLLAPSE_MAP_REL = Path("scripts") / "ci" / "verb-collapse-map.tsv"
+COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 
 # The Rust front's leaf tree is READ FROM ITS DISPATCHERS, not listed here.
 #
@@ -254,6 +255,7 @@ def iter_python_leaves():
         if action.split()[0] in collapsed_groups
     }
     live_actions: set[str] = set()
+    live_action_flags: set[str] = set()
 
     # Eager inline commands (help, cost, review) are seeded on the main app, not
     # LAZY_SUBCOMMANDS, so resolve each from the root Click tree rather than emit
@@ -293,8 +295,11 @@ def iter_python_leaves():
             collapse_keep = options.get("collapse_keep")
             if collapse_keep is not None:
                 uncollapsed_ctx = click.Context(cmd, info_name=name)
-                for path, _sub in _iter_group_leaves(cmd, uncollapsed_ctx, name):
+                for path, sub in _iter_group_leaves(cmd, uncollapsed_ctx, name):
                     live_actions.add(path)
+                    live_action_flags.update(
+                        f"{path} {flag}" for flag in _hidden_option_tokens(sub)
+                    )
                 cmd = collapse_click_group(cmd, keep=set(collapse_keep))
             if hasattr(cmd, "list_commands"):
                 ctx = click.Context(cmd, info_name=name)
@@ -324,6 +329,18 @@ def iter_python_leaves():
             f"code-only={sorted(live_actions - mapped_actions)}, "
             f"map-only={sorted(mapped_actions - live_actions)}. Allocate every new "
             "action in the map before regenerating the registered-leaf baseline."
+        )
+    mapped_action_flags = {
+        line.strip()
+        for line in (_repo_root() / COLLAPSE_FLAGS_REL).read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if live_action_flags != mapped_action_flags:
+        raise VerbRatchetError(
+            "verb-ratchet: collapsed action hidden-option inventory drifted from "
+            "scripts/ci/verb-collapse-flags.txt; "
+            f"code-only={sorted(live_action_flags - mapped_action_flags)}, "
+            f"file-only={sorted(mapped_action_flags - live_action_flags)}"
         )
 
 
