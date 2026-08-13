@@ -80,10 +80,14 @@ internal
 cli/dist/
 cli/.venv/
 
-# managed by link-skills.py
-.claude/skills/
-.claude/commands/
-.claude/agents/
+# managed by link-skills.py. NO trailing slash: setup-worktree.sh links these
+# as SYMLINKS into the canonical checkout, and a trailing-slash pattern matches
+# directories only - so a `foo/` rule leaves the symlink untracked, every linked
+# worktree reads dirty, and scripts/ci/preflight.sh refuses to run (it validates
+# a committed HEAD). Without the slash the rule matches both shapes.
+.claude/skills
+.claude/commands
+.claude/agents
 .claude/.skill-scoping-state.json
 # local runtime hook logs (never commit)
 .claude/hooks/
