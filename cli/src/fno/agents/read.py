@@ -374,20 +374,20 @@ def read_logs(
 
     # Codex/gemini logs are JSON-Lines; emit raw text by default.
     # `--tail N` slices the last N records, `--follow` polls.
+    # The KeyboardInterrupt guard opens BEFORE the tail READ, not after it and
+    # not after the write. Two earlier placements each closed only part of the
+    # window: at the follow branch it missed the write, and above the write it
+    # still missed the read, which is the slowest step of the three on a large
+    # log and so the likeliest place for a Ctrl-C to land. The Rust twin arms
+    # SIGINT before its own read, so this is also what keeps the two paths
+    # describing the same protected region.
     try:
-        records = _read_jsonl_tail(log_path, tail=tail)
-    except OSError as exc:
-        err.write(f"failed to read {log_path}: {exc}\n")
-        return LogsResult(exit_code=1)
+        try:
+            records = _read_jsonl_tail(log_path, tail=tail)
+        except OSError as exc:
+            err.write(f"failed to read {log_path}: {exc}\n")
+            return LogsResult(exit_code=1)
 
-    # The KeyboardInterrupt guard opens BEFORE the tail write, not after it.
-    # That write is the readiness marker a follower waits on, so a guard that
-    # started at the follow branch below left a window where the process looked
-    # ready and was not yet protected. A SIGINT landing there took the default
-    # handler and killed the process with 130, which reads as broken SIGINT
-    # handling when the process was merely slow to start. Widening the guard
-    # closes the window instead of widening the wait that races it.
-    try:
         for line in records:
             out.write(line)
             if not line.endswith("\n"):

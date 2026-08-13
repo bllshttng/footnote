@@ -218,6 +218,33 @@ def test_a_pipeless_table_is_not_charged():
     assert 6 not in rule_set(body)
 
 
+def test_a_pipeless_table_header_is_not_charged():
+    # The header is proven a table row by the delimiter row BELOW it, so it
+    # needs a lookahead. Without one it was checked as prose while every body
+    # row was exempt, which applies the rules to one row of a table.
+    body = "Intro paragraph.\n\nflag | what it does when unset\n--- | ---\nx | y\n"
+    assert rule_set(body) == set()
+
+
+def test_table_state_does_not_leak_past_a_fence():
+    # The severe one. The table flag was cleared only on the fall-through path,
+    # so a fence straight after a table carried it onward and blanked the next
+    # prose line holding a pipe. That line escaped ALL six rules, not just 6.
+    body = "a | b\n--- | ---\nc | d\n```\ncode\n```\nUse a | b; you should stop.\n"
+    assert {2, 3} <= rule_set(body)
+
+
+def test_table_state_does_not_leak_past_indented_code():
+    body = "a | b\n--- | ---\nc | d\n    indented\nUse a | b; you should stop.\n"
+    assert {2, 3} <= rule_set(body)
+
+
+def test_a_paragraph_above_a_setext_underline_is_not_a_table_header():
+    # The lookahead must not swallow this: a delimiter row needs pipes, and
+    # `---` alone is a setext underline.
+    assert 6 not in rule_set("The heading\n---\nthe paragraph under it.")
+
+
 def test_a_table_stops_exempting_once_it_ends():
     # Position is what exempts a body row, so the exemption must end with the
     # table. Otherwise every pipe-free wrap after one would go unchecked.

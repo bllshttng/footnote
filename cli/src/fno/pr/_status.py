@@ -162,9 +162,13 @@ def _fetch_reason(res) -> str:
     loop exhausts GraphQL first, then reads a clean bill of health and keeps
     polling. Naming the bucket is what makes the wait end.
     """
-    lines = [ln for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
-    detail = lines[-1].strip() if lines else "gh pr view failed with no message"
-    if "rate limit" in detail.lower():
+    lines = [ln.strip() for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
+    # The WHOLE stderr is scanned for the quota line, never just the last one.
+    # gh often appends a hint after the error, and reading only the final line
+    # handed the caller the hint and dropped the clause that names the bucket.
+    quota = next((ln for ln in lines if "rate limit" in ln.lower()), "")
+    detail = quota or (lines[-1] if lines else "gh pr view failed with no message")
+    if quota:
         return (
             detail
             + " | this is the GraphQL quota. `gh api rate_limit` reports the CORE"

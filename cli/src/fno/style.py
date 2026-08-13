@@ -376,6 +376,16 @@ def _mask(text: str) -> str:
     for index, raw_line in enumerate(lines):
         lead = raw_line.lstrip()
 
+        # A table run ends at the first line that is not one of its rows, and
+        # that verdict is reached HERE, before any branch below can `continue`
+        # past it. Resetting further down covered only the fall-through path,
+        # so a fence, an indented block, or a comment opening straight after a
+        # table carried the flag onward and blanked the next prose line that
+        # happened to contain a pipe. That is a rule-evasion hole rather than a
+        # cosmetic miss: the line escaped all six rules, not just rule 6.
+        if in_table and not (lead and "|" in raw_line):
+            in_table = False
+
         # Frontmatter: a leading `--- ... ---` block. Blank it line-for-line so
         # the masked text keeps the same line count as the raw text.
         if index == 0 and lead == "---":
@@ -418,26 +428,44 @@ def _mask(text: str) -> str:
             # span, so prose trailing the comment is still checked.
         # A table row. GFM allows a row with no leading pipe, and a body row is
         # then `a | b`, which is also an ordinary sentence carrying a pipe.
-        # POSITION tells them apart, never shape: a pipeless body row is one
-        # that FOLLOWS a delimiter row. Matching on shape alone would let any
-        # sentence with a pipe escape all six rules, and blanking only the
-        # delimiter row cleared a one-row table while a realistic multi-row one
-        # still charged rule 6 from its second row on.
-        if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead):
-            if _DELIMITER_ROW_RE.match(lead):
+        # POSITION tells them apart, never shape: a pipeless row is one that
+        # touches a delimiter row, the header above it or a body row below.
+        # Matching on shape alone would let any sentence with a pipe escape all
+        # six rules.
+        #
+        # The header needs a one-line lookahead because the delimiter row that
+        # proves it is a table has not been read yet. Without it the header was
+        # checked as prose while every body row was exempt, which is a rule
+        # applied to one row of a table and not the rest.
+        if in_table and lead and "|" in raw_line:
+            out.append("")
+            continue
+        if lead.startswith("|") or _DELIMITER_ROW_RE.match(lead) or _opens_table(
+            raw_line, lines, index
+        ):
+            if _DELIMITER_ROW_RE.match(lead) or _opens_table(raw_line, lines, index):
                 in_table = True
             out.append("")
             continue
-        if in_table:
-            if lead and "|" in raw_line:
-                out.append("")
-                continue
-            in_table = False
         if _LOG_RE.match(lead):
             out.append("")
             continue
         out.append(_mask_inline(raw_line))
     return "\n".join(out)
+
+
+def _opens_table(raw_line: str, lines: "list[str]", index: int) -> bool:
+    """True when this line is the HEADER of a table written without pipes.
+
+    Proven by the next line, because a header is indistinguishable from prose
+    until the delimiter row under it is read. The current line must carry a pipe
+    of its own, so a paragraph sitting above a setext underline is untouched:
+    the delimiter pattern needs pipes, and `---` alone never matches it.
+    """
+    if "|" not in raw_line:
+        return False
+    nxt = lines[index + 1].lstrip() if index + 1 < len(lines) else ""
+    return bool(_DELIMITER_ROW_RE.match(nxt))
 
 
 def _mask_inline(line: str) -> str:
