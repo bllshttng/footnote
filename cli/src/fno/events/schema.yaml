@@ -1988,6 +1988,46 @@ event_types:
           description: "Optional. The mail message id (msg-<id>) when the escalation site has it, for overlay-to-thread correlation."
     consumers: [operator]
 
+  - name: operator_question
+    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno outstanding` and rendered in the SessionStart block; the field names match what a future needs.rs fold arm (NeedKind::Decision) would read unchanged."
+    sources: [target, hook, subagent, daemon, test]
+    data:
+      required: [question_id, question]
+      properties:
+        question_id:
+          type: string
+          description: "Stable id for this question (q-<hex>), the handle `fno outstanding clear` takes."
+        question:
+          type: string
+          description: "The question text as asked, truncated at emit so the render stays bounded."
+        session_id:
+          type: string
+          description: "Optional. The asking session, so the SessionStart block can separate 'yours' from 'everyone's'."
+        cwd:
+          type: string
+          description: "Optional. The asking session's working dir, so a cross-project question names its project."
+        node:
+          type: string
+          description: "Optional. The backlog node the question is about, when the asking session has one bound."
+    consumers: [operator]
+
+  - name: operator_question_closed
+    description: "An operator_question was answered or withdrawn. Explicit close only: there is no auto-expiry and no transcript-derived auto-resolution, because peek.Record carries role and text but no timestamp, so answering 'is there a user turn newer than this question' would need a new timestamped reader in every harness arm. An explicit clear costs nothing and never lies about whether an answer actually arrived. A question going quiet with age is the exact failure being fixed, so age never closes one. Append-only with a last-writer-wins fold: a double close is a no-op, not an error."
+    sources: [target, hook, subagent, daemon, test]
+    data:
+      required: [question_id]
+      properties:
+        question_id:
+          type: string
+          description: "The operator_question this closes."
+        answer:
+          type: string
+          description: "Optional. The answer text, recorded so the decision survives the session that made it."
+        closed_by:
+          type: string
+          description: "Optional. Session id that closed it, which need not be the session that asked."
+    consumers: [operator]
+
   - name: agent_raw_inject
     description: "Provenance record for an UNWRAPPED injection: a payload delivered to a live session without the <fno_mail> envelope, so the transcript no longer carries the agent-authored marker. Emitted at the transport (the mail-inject binary and the mux pane send), keyed on 'payload does not start with <fno_mail', so it covers fno mail send --raw, a direct fno-agents mail-inject, and any future caller. Moves x-f26c's greppability property from the transcript to the ledger: an unwrapped injection has no envelope to grep, so this event is the audit trail. Best-effort; an events-write failure never breaks an injection."
     sources: [daemon]

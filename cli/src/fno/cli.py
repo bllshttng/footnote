@@ -114,6 +114,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Capture left-out work (deferred decisions, out-of-scope bugs) for retro-triage.",
         {"hidden": True},
     ),
+    "outstanding": (
+        "fno.outstanding:outstanding_app",
+        "What is waiting on a human: unharvested carve-outs and open questions.",
+        {"hidden": True},
+    ),
     "annotate": (
         "fno.annotate:annotate_app",
         "Record an operator review finding against a node (add/list/resolve); gates loop-check.",
@@ -241,6 +246,52 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
 }
+
+# T1 actions are parsed by the group dispatcher and keep their existing typing.
+# These selected actions remain registered leaves as deliberate readability
+# slack; the checked-in allocation and its reference costs live in
+# scripts/ci/verb-collapse-map.tsv.
+COLLAPSE_KEEP: dict[str, set[str]] = {
+    "agents": {"ask", "list", "logs", "loop", "loop-check", "needs", "resume", "rm", "spawn"},
+    "annotate": {"list"},
+    "approvals": set(),
+    "backlog": {"advance", "done", "get", "next", "queued", "reconcile", "update"},
+    "bundle": set(),
+    "carveout": set(),
+    "claim": {"release"},
+    "config": {"accounts", "get", "set"},
+    "dispatch": set(),
+    "evals": set(),
+    "event": {"emit"},
+    "loops": {"resume-all"},
+    "mail": {"send"},
+    "observer": set(),
+    "paths": set(),
+    "plan": set(),
+    "plugins": set(),
+    "pr": {"merge"},
+    "pr-watch": set(),
+    "resume": set(),
+    "retro": set(),
+    "roles": set(),
+    "route": set(),
+    "runtime": set(),
+    "setup": set(),
+    "skill-diff": set(),
+    "state": set(),
+    "stub-manifest": set(),
+    "target": {"init"},
+    "think": set(),
+    "worker": set(),
+    "worktree": set(),
+}
+
+for _group_name, _keep in COLLAPSE_KEEP.items():
+    _entry = LAZY_SUBCOMMANDS[_group_name]
+    _import_path, _short_help = _entry[:2]
+    _options = dict(_entry[2]) if len(_entry) == 3 else {}
+    _options["collapse_keep"] = sorted(_keep)
+    LAZY_SUBCOMMANDS[_group_name] = (_import_path, _short_help, _options)
 
 
 # ---------------------------------------------------------------------------
@@ -514,8 +565,10 @@ def _render_group_full_menu(path: list[str]) -> Optional[str]:
         return None  # a leaf command, not a group
 
     rows: dict[str, str] = {}
-    for name in cmd.list_commands(cur):
-        sub = cmd.get_command(cur, name)
+    list_all = getattr(cmd, "_fno_collapsed_original_list_commands", cmd.list_commands)
+    get_all = getattr(cmd, "_fno_collapsed_original_get_command", cmd.get_command)
+    for name in list_all(cur):
+        sub = get_all(cur, name)
         if sub is None:
             continue
         rows[name] = sub.get_short_help_str() if hasattr(sub, "get_short_help_str") else ""

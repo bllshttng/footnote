@@ -26,326 +26,90 @@
 # read from its dispatchers and cross-checked against the live binary, but its
 # FLAGS are not enumerated, so a hidden flag on a mux verb is invisible to this
 # gate. The lint output names that boundary on every green run.
-agents adopt
+agents
 agents ask !--provider
-agents attach
-agents digest
-agents discovered-json !--provider
-agents drive-authority
-agents finalize
-agents gate !--notes !--probe !--record
-agents heal-token !--all-sources
-agents kill-check
 agents list !--provider
 agents logs
 agents loop
 agents loop-check
-agents name
 agents needs
-agents nudge-peek
-agents peek
-agents ping
-agents probe-run
-agents reap
-agents reconcile
-agents register
-agents registry-json
-agents report
-agents restart
 agents resume
 agents rm
 agents spawn !--output-format !--squad
-agents spawn-guard
-agents status
-agents stop
-agents subscribe
-agents top
-agents trace
-agents truth
-agents verify-evidence
-agents wait
-agents watch
-agents whoami
-annotate add
+annotate
 annotate list
-annotate resolve
-approvals decide !--db
-approvals ls !--db
-approvals show !--db
-backlog add !--tag
+approvals
+backlog
 backlog advance !--continuation
-backlog archive
-backlog bases
-backlog batch join
-backlog batch metrics
-backlog batch open
-backlog batch prepare
-backlog batch ship
-backlog batch ship-closeable
-backlog batch status
-backlog capture add
-backlog capture archive
-backlog capture capture-pass
-backlog capture dismiss
-backlog capture empty-pass
-backlog capture list
-backlog capture promote
-backlog capture scan
-backlog capture tidy
-backlog collisions check
-backlog cost !--session
-backlog decompose
-backlog defer
-backlog dispatch-lanes
 backlog done
-backlog epic status
-backlog find
 backlog get
-backlog groom
-backlog idea !--tag
-backlog intake !--batch
-backlog lane-fill
-backlog lanes
-backlog maintain
-backlog new
 backlog next
-backlog note
-backlog pick
-backlog project-root
-backlog provenance
-backlog queue
 backlog queued
-backlog rank
-backlog ready
 backlog reconcile
-backlog reconcile-findings
-backlog rehash
-backlog relatedness build
-backlog relatedness get
-backlog remove
-backlog reopen
-backlog reprioritize
-backlog roadmap
-backlog session add
-backlog status
-backlog supersede
-backlog triage apply
-backlog triage consistency
-backlog triage context
-backlog triage health
-backlog triage projects
-backlog triage propose
-backlog triage rank
-backlog triage trend
-backlog triage validate
-backlog unarchive
-backlog unclaim
-backlog undefer
-backlog unqueue
-backlog unsupersede
 backlog update !--tag !--untag
-backlog view
-bundle check
-bundle lint
-carveout add
-carveout list
-carveout resolve
-carveout update
-claim acquire
-claim list
-claim refresh
+bundle
+carveout
+claim
 claim release
-claim session-pid
-claim status
 codemap
+config
 config accounts
-config active-backlog
-config doctor
 config get
-config rm
-config schema
 config set
-config status-sinks
-config unset
 context
 cost
 delivery
-dispatch one
-dispatch resolve
+dispatch
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
 done
-evals grade
-evals graduate
-evals report
-evals run
-event audit
+evals
+event
 event emit
-event gate-escape
-event push-parent
 executor
+fno-agents
 help
 lint
-loops ls
-loops pause-all
+loops
 loops resume-all
-loops status
-mail ack
-mail drain
-mail drain-self
-mail lint
-mail list
-mail migrate-bus
-mail notify-self
-mail rebuild-render
-mail reply
+mail
 mail send !--provider
-mail sent
-mail status
-mail triage
-mail unread
-mail view
-mail withdraw
 mcp send
-mux attach
-mux block annotate
-mux block pipe
-mux doctor
-mux kill-server
-mux layout apply
-mux layout get
-mux layout graft
-mux ls
-mux pane break
-mux pane claim
-mux pane focus
-mux pane kill
-mux pane ls
-mux pane read
-mux pane release
-mux pane run
-mux pane send
-mux pane split
-mux pane wait
-mux serve
-mux server
-mux shell-init
-mux tab create
-mux tab join
-mux tab ls
-mux tab rename
-mux where
-mux workspace prune
+mux
 notify
-observer replay
-observer sweep
-paths emit-shell
-paths handoff !--session
-paths shell-stub
-paths verify
+observer
+outstanding ask
+outstanding clear
+paths
 phase
-plan brief
-plan fidelity
-plan folder-audit
-plan graduate
-plan migrate-keys
-plan path
-plan reconcile-status
-plan rung
-plan set-expected
-plan stamp
-plan sync
-plan validate
-plugins activate
-plugins deactivate
-plugins inspect
-plugins ls
-plugins verify
+plan
+plugins
 posture apply
-pr base-check
-pr base-lineage-check
-pr evidence-check
-pr evidence-required
-pr global-receipt-events-path
-pr logs
+pr
 pr merge
-pr next-receipt-generation
-pr rebase
-pr ritual
-pr status
-pr sync-canonical
-pr verify
-pr-watch heal
-pr-watch install
-pr-watch refresh
-pr-watch status
-pr-watch tick
-pr-watch uninstall
+pr-watch
 research
 restart
-resume receipt show
-resume receipt validate !--session
-resume receipt write !--session
-retro drain-postmortems
-retro run !--pr !--session
-retro sweep-carveouts
+resume
+retro
 review !--session !--sigma-current-head !--sigma-head !--sigma-node !--sigma-pr !--sigma-project !--sigma-reviews-root !--sigma-round
-roles context
-roles ls
-roles resolve
-roles show
-route env
-route ls
-route set
-route unset
-runtime register-worker
-runtime worktree
+roles
+route
+runtime
 scoreboard
-setup cli-hooks
-setup cli-hooks-codex
-setup codex-plugin
-setup migrate-config
-setup migrate-paths
-setup plan
-setup post-merge
-setup wizard
-skill-diff reconcile
-skill-diff tick
-state archive
-state init !--allow-stub
-state set
-state show
+setup
+skill-diff
+state
 status
 status-fanout
-stub-manifest reconcile-finalize
-stub-manifest reconcile-validate
-stub-manifest write
-target blast-check
-target check-contained
-target check-review-gate
-target denominator-ratio
+stub-manifest
+target
 target init !--provider
-target resolve-model !--provider
-target resolve-owned-identity
-target start !--provider
-target status
 test
-think dispatch
-think inspect
+think
 tokens
 update
 upgrade
 version
 whoami
-worker blueprint
-worker external !--pr
-worker reconcile
-worker review !--session
-worker ship
-worktree archive
-worktree cleanup
-worktree ensure
-worktree overlap-record
-worktree overlaps
-worktree policy
-worktree reapable
-worktree status
+worker
+worktree

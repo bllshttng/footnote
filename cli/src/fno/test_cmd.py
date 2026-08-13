@@ -413,6 +413,14 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Company module boundary check", ".", "bash scripts/ci/check-company-boundaries.sh --baseline"),
     ("Skill snippet hazard lint", ".", "bash scripts/ci/check-skill-snippets.sh"),
     ("Skill snippet lint self-test", ".", "bash tests/ci/test_check_skill_snippets.sh"),
+    # Both gates measure the always-loaded SessionStart preamble. Neither could
+    # FAIL anywhere but CI before this entry: `fno doctor` prints the number,
+    # but advisorily, and never changes its own exit code. So the only local
+    # signal was a line nobody had to act on, and an AGENTS.md edit went green
+    # locally and red on push - which is how the preamble reached 55 bytes of
+    # headroom with nobody watching the slope.
+    ("SessionStart preamble byte budget", ".", "bash scripts/ci/check-preamble-budget.sh"),
+    ("Pitfalls corpus cap", ".", "bash scripts/ci/check-pitfalls.sh"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
     ("Skill bundles freshness check", ".", "bash scripts/lint/check-skill-bundles-fresh.sh"),

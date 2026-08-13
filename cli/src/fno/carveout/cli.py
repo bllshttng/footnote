@@ -24,11 +24,15 @@ from fno.carveout.core import (
 carveout_app = typer.Typer(
     no_args_is_help=True,
     help=(
-        "Capture left-out work (deferred decisions, out-of-scope bugs, data "
-        "backfills the merged PR enables) to .fno/carveouts.jsonl. "
-        "Advisory: call it the moment you leave work undone; the retro-triage "
-        "harvest at merge turns deferred/oos-bug into backlog nodes (deduped, "
-        "classified), while `backfill` is handled by /fno:pr merged."
+        "LAST RESORT for work too big to land in this PR. Fix what you find "
+        "instead: a problem you can fix here gets fixed here, in this PR, as "
+        "its own commit - SIZE is the only justification for filing instead. "
+        "Records to .fno/carveouts.jsonl; the retro-triage harvest at merge "
+        "turns deferred/oos-bug into backlog nodes (deduped, classified), "
+        "while `backfill` is handled by /fno:pr merged. That harvest is "
+        "manual: `fno retro sweep-carveouts --apply` is the only thing that "
+        "clears the ledger, so every row you file is a chore for a human. "
+        "See `fno outstanding` for what has piled up."
     ),
 )
 
@@ -81,7 +85,7 @@ def add(
         "provenance, not chosen here.",
     ),
 ) -> None:
-    """Record one deferred decision, out-of-scope bug, or data backfill for later triage."""
+    """Last resort: record work too big for this PR. Anything smaller, fix here instead."""
     if kind not in VALID_KINDS:
         typer.echo(
             f"carveout: invalid --kind '{kind}' "
@@ -134,6 +138,15 @@ def add(
             "carveout: no active session; carve-out recorded unscoped", err=True
         )
 
+    # The size test on stderr, never stdout: machine consumers read the id.
+    typer.echo(
+        "carveout: filed as a last resort - SIZE is the only justification. "
+        "If this was small enough to fix in this PR, fix it here and "
+        "`fno carveout resolve` this row. Clears only via "
+        "`fno retro sweep-carveouts --apply`, which nobody runs unprompted.",
+        err=True,
+    )
+
     # stdout carries the value: the new carve-out id.
     typer.echo(cv.id)
 
@@ -159,6 +172,14 @@ def list_carveouts(
         help="Resolve the merged PR's owning session(s) from ledger.json and "
         "filter to them (replaces the ritual's jq+grep pipeline). Mutually "
         "exclusive with --session-id.",
+    ),
+    all_sessions: bool = typer.Option(
+        False,
+        "--all",
+        "-A",
+        help="Read the WHOLE ledger instead of just this session's rows. Needed "
+        "by any consumer that folds across sessions (the king orphan check "
+        "does; it filters by .scope over every row).",
     ),
     as_json: bool = typer.Option(
         False,
@@ -209,12 +230,43 @@ def list_carveouts(
     # Typer gives [] for an unset repeatable option; pass None so "no filter"
     # is distinct from "filter to the empty set".
     sessions = session_id or None
+
+    # Default scope is THIS session. The unscoped read was the default while
+    # the safe path was opt-in, so an agent pointed at `carveout list` saw a
+    # month of every other session's rows and could not tell which were its
+    # own. --all restores the global read for the consumers that need it.
+    unscoped_reason = None
+    include_unscoped = False
+    scoped_to = None
+    if pr_number is None and not sessions and not all_sessions:
+        from fno.carveout.core import resolve_session_id
+        from fno.paths import resolve_repo_root
+
+        current = resolve_session_id(resolve_repo_root())
+        if current:
+            sessions = [current]
+            scoped_to = current
+            # Ownerless rows ride along: `add` mints them whenever no session
+            # resolves, and dropping them here would hide them from every
+            # session forever (13 of 39 rows on this repo's ledger).
+            include_unscoped = True
+        else:
+            # Never a silent empty: a scoped read that returns nothing when no
+            # session resolves cannot be told apart from a genuinely clear
+            # ledger. Print every row AND say why.
+            unscoped_reason = "no active session"
+
     if pr_number is not None and not sessions:
         # Unresolved ownership is NOT "filter to nothing": the caller must see
         # every carve-out read-only plus the reason, and consume none.
         sessions = None
     try:
-        rows = read_carveouts(resolve_carveout_root(), kind=kind, session_ids=sessions)
+        rows = read_carveouts(
+            resolve_carveout_root(),
+            kind=kind,
+            session_ids=sessions,
+            include_unscoped=include_unscoped,
+        )
     except CarveoutError as exc:
         # A present-but-unreadable ledger is a FAILED read, not "no carve-outs":
         # surface it loud (exit 1) like `add`, so /pr merged never treats an
@@ -236,6 +288,28 @@ def list_carveouts(
         if reason:
             # Never silent: the read-only branch must be able to state WHY.
             typer.echo(f"carveout: {reason}; listing read-only, not consumable", err=True)
+
+    if unscoped_reason is not None:
+        # A positive banner naming the count and the reason, so the reader can
+        # tell "everyone's rows" from "mine, and there are none".
+        typer.echo(
+            f"carveout: {unscoped_reason}; listing all {len(rows)} row(s) "
+            f"across every session. Pass --all to ask for this explicitly.",
+            err=True,
+        )
+    elif scoped_to:
+        # ALWAYS banner a scoped read, including (especially) when it is empty.
+        # A scoped default that prints nothing at all is indistinguishable from
+        # a clear ledger, which is the same absence-as-success trap the
+        # no-session branch above exists to close. Naming the total is what
+        # makes "0 of 39" readable as scoping rather than as emptiness.
+        total = len(read_carveouts(resolve_carveout_root(), kind=kind))
+        typer.echo(
+            f"carveout: scoped to session {scoped_to}; showing {len(rows)} of "
+            f"{total} row(s). Pass --all for every session.",
+            err=True,
+        )
+
     for r in rows:
         if as_json:
             typer.echo(json.dumps(r, separators=(",", ":")))

@@ -263,6 +263,15 @@ if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then
     mail_content=$(bash "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" 2>/dev/null || echo "")
 fi
 
+# 7. outstanding — unharvested carve-outs + open operator questions. Delegates
+#    to the same hook Claude registers directly in hooks.json, so both harnesses
+#    run ONE implementation. `|| true` guards the assignment because this script
+#    runs under `set -e` and an unguarded non-zero would abort every block.
+outstanding_content=""
+if [[ -f "${SCRIPT_DIR}/outstanding-session-start.sh" ]]; then
+    outstanding_content=$(bash "${SCRIPT_DIR}/outstanding-session-start.sh" 2>/dev/null || true)
+fi
+
 # ── Combine context ───────────────────────────────────────────────────
 # Newline-separate non-empty blocks so the agent sees each preamble as
 # its own section rather than one wall of text.
@@ -282,6 +291,7 @@ append_section "$whoami_content"
 append_section "$hygiene_content"
 append_section "$nudge_content"
 append_section "$mail_content"
+append_section "$outstanding_content"
 
 # Self-heal a defunct target manifest (x-4af4) before anything reads it, so a
 # dead target-state.md can no longer auto-lock an attended /think. Advisory.

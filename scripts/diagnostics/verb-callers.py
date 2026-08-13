@@ -92,9 +92,10 @@ CORPUS_FILES = ["AGENTS.md", "README.md"]
 # on purpose; they are the one bucket a deletion is allowed to take with it.
 BUCKETS: dict[str, tuple[str, ...]] = {
     "user": ("skills", "docs", "agents", "commands", "AGENTS.md", "README.md"),
-    "runtime": ("scripts", "hooks", "crates"),
+    "runtime": ("scripts", "hooks"),
     "tests": ("cli/tests", "tests"),
 }
+CRATES_ROOT = "crates"
 INTERNAL_ROOT = "cli/src"
 
 # Skip dirs reachable from the corpus that hold no contributor-readable text:
@@ -146,9 +147,9 @@ INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "target init": 20, "backlog update
 #   scripts/lib/eval-sweep-throttle.sh   status="$("$fno_cmd" loops status
 # is the third shape: the binary lives in a VARIABLE, resolved at runtime.
 SUBSTITUTION_CONTROLS = {
-    "target resolve-owned-identity": 1,
-    "pr evidence-required": 1,
-    "loops status": 1,
+    "target": 1,
+    "pr": 1,
+    "loops": 1,
 }
 
 # The FOURTH shape: a Rust argv ARRAY. `Command::new(fno_bin()).args(["claim",
@@ -181,15 +182,21 @@ FOREIGN_BINARIES = {
 # baselined leaf at a real call site:
 #   agents needs           the fno-agents prefix case (array is ["needs"])
 #   notify                 single-token leaf
-#   plan fidelity          two-token leaf
-#   pr base-lineage-check  hyphenated leaf, and proof that `pr` traffic is
-#                          separable from the `gh pr view` arrays next to it
+#   plan                   collapsed dispatcher credited from `plan fidelity`
+#   pr                     collapsed dispatcher credited from the hyphenated
+#                          `pr base-lineage-check` action, separately from the
+#                          `gh pr view` arrays next to it
 RUST_ARGV_CONTROLS = {
     "agents needs": 1,
     "notify": 1,
-    "plan fidelity": 1,
-    "pr base-lineage-check": 1,
+    "plan": 1,
+    "pr": 1,
 }
+
+# A Rust integration-test reference must prove the test sweep ran, never keep a
+# runtime capability alive. `test` is named by a crates/**/tests/** fixture in
+# the real corpus, so this marker fails if those paths fall back into runtime.
+CRATES_TEST_CONTROLS = {"test": 1}
 
 ORIGINAL_ZERO_BOUND = 92  # the uncorrected sweep's zero count; the delta baseline
 
@@ -227,8 +234,33 @@ def load_curriculum(path: Path, leaves: set[str]) -> tuple[set[str], list[str]]:
         line = line.split("#", 1)[0].strip()
         if line:
             raw.append(line)
-    taught = set(raw) & leaves
-    unknown = sorted(set(raw) - leaves)
+    typing_surface: set[str] = set()
+    allocation = path.with_name("verb-collapse-map.tsv")
+    if allocation.is_file():
+        for row in allocation.read_text().splitlines()[1:]:
+            current_leaf, *_ = row.split("\t")
+            typing_surface.add(current_leaf)
+
+    taught: set[str] = set()
+    unknown: list[str] = []
+    for entry in sorted(set(raw)):
+        if entry in leaves:
+            taught.add(entry)
+            continue
+        if entry in typing_surface:
+            tokens = entry.split()
+            dispatcher = next(
+                (
+                    " ".join(tokens[:size])
+                    for size in range(len(tokens) - 1, 0, -1)
+                    if " ".join(tokens[:size]) in leaves
+                ),
+                None,
+            )
+            if dispatcher is not None:
+                taught.add(dispatcher)
+                continue
+        unknown.append(entry)
     return taught, unknown
 
 
@@ -255,6 +287,29 @@ def iter_paths(root: Path, entries):
 
 def iter_corpus(root: Path):
     yield from iter_paths(root, CORPUS_DIRS + CORPUS_FILES)
+
+
+def iter_cull_corpus(root: Path):
+    """Contributor corpus with Rust integration tests removed from cull counts."""
+    for path in iter_corpus(root):
+        if not _is_crates_test_path(root, path):
+            yield path
+
+
+def _is_crates_test_path(root: Path, path: Path) -> bool:
+    """Whether a path below crates/ is in a Rust integration-test tree."""
+    try:
+        rel = path.relative_to(root / CRATES_ROOT)
+    except ValueError:
+        return False
+    return "tests" in rel.parts
+
+
+def iter_crates_paths(root: Path, *, tests: bool):
+    """Split crates source between runtime and tests without double-crediting."""
+    for path in iter_paths(root, (CRATES_ROOT,)):
+        if _is_crates_test_path(root, path) is tests:
+            yield path
 
 
 def _clean(tok: str) -> str:
@@ -574,7 +629,9 @@ def _foreign_command(text: str, pos: int) -> bool:
     return bool(m) and m.group(1).rsplit("/", 1)[-1] in FOREIGN_BINARIES
 
 
-def sweep_rust_argv(root: Path, leaves: set[str]) -> Counter:
+def sweep_rust_argv(
+    root: Path, leaves: set[str], *, tests: bool | None = None,
+) -> Counter:
     """Count leaves named by a Rust argv array under ``crates/``."""
     counts: Counter = Counter()
     crates = root / "crates"
@@ -585,8 +642,11 @@ def sweep_rust_argv(root: Path, leaves: set[str]) -> Counter:
         for name in fn:
             if not name.endswith(".rs"):
                 continue
+            path = Path(dp) / name
+            if tests is not None and _is_crates_test_path(root, path) is not tests:
+                continue
             try:
-                text = (Path(dp) / name).read_text(encoding="utf-8", errors="ignore")
+                text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             for m in _RUST_ARGS_RE.finditer(text):
@@ -616,6 +676,14 @@ def sweep_buckets(root: Path, leaves: set[str], extra_prefixes=()) -> dict[str, 
             root, leaves, binary_form=True, pipe_fan=True,
             paths=iter_paths(root, entries), extra_prefixes=extra_prefixes,
         )
+    out["runtime"].update(sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=False), extra_prefixes=extra_prefixes,
+    ))
+    out["tests"].update(sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=True), extra_prefixes=extra_prefixes,
+    ))
     return out
 
 
@@ -702,8 +770,13 @@ def dead_set(root: Path, leaves_list: list[str]):
     ast_counts, itext_counts, dynamic = sweep_internal(root, leaves)
     # `crates` already sits in the runtime bucket, so an argv-array credit is a
     # runtime reference like any other shell-out from that tree.
-    rust_counts = sweep_rust_argv(root, leaves)
+    rust_counts = sweep_rust_argv(root, leaves, tests=False)
     buckets["runtime"].update(rust_counts)
+    buckets["tests"].update(sweep_rust_argv(root, leaves, tests=True))
+    crates_test_counts = sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=True), extra_prefixes=wrappers,
+    )
 
     failures: list[str] = []
     ext_total: Counter = Counter()
@@ -714,6 +787,10 @@ def dead_set(root: Path, leaves_list: list[str]):
         f"substitution/{f}" for f in check_controls(ext_total, SUBSTITUTION_CONTROLS)
     ]
     failures += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
+    failures += [
+        f"crates-tests/{f}"
+        for f in check_controls(crates_test_counts, CRATES_TEST_CONTROLS)
+    ]
     failures += [f"ast/{f}" for f in check_controls(ast_counts, AST_CONTROLS)]
     failures += [f"internal-text/{f}" for f in check_controls(itext_counts, INTERNAL_TEXT_CONTROLS)]
 
@@ -813,27 +890,37 @@ def main(argv: list[str] | None = None) -> int:
     # uncorrected one reproduces the original 92 bound and backs the
     # monotonicity invariant below, which guards every output mode
     # (corrected_zero must be a subset of uncorrected_zero).
-    counts_corr = sweep(root, leaves, binary_form=True, pipe_fan=True)
+    counts_corr = sweep(
+        root, leaves, binary_form=True, pipe_fan=True, paths=iter_cull_corpus(root)
+    )
     # The Rust argv arrays are references the token sweep structurally cannot
     # see, so they belong in EVERY mode, not just --dead. --curriculum's cull
     # list is the deletion-decision path; leaving it blind to this shape is the
     # exact failure the shape was added to fix. Folding them in only ADDS
     # references, so the subset invariant below still holds.
-    rust_counts = sweep_rust_argv(root, leaves)
+    rust_counts = sweep_rust_argv(root, leaves, tests=False)
     counts_corr.update(rust_counts)
+    crates_test_counts = sweep(
+        root, leaves, binary_form=True, pipe_fan=True,
+        paths=iter_crates_paths(root, tests=True),
+    )
 
     # Checked against the rust counter alone, never the merged one: a floor a
     # working text sweep could satisfy on its own is not a control on this sweep.
     failed = check_controls(counts_corr)
     failed += [f"rust-argv/{f}" for f in check_controls(rust_counts, RUST_ARGV_CONTROLS)]
-    # A broken sweep emits no candidate list, even in self-check.
-    if failed and not args.self_check:
-        print("verb-callers: positive control(s) failed - sweep is broken, no list:", file=sys.stderr)
+    failed += [
+        f"crates-tests/{f}"
+        for f in check_controls(crates_test_counts, CRATES_TEST_CONTROLS)
+    ]
+    # A broken sweep emits no candidate list, including from self-check.
+    if failed:
+        print("verb-callers: positive control(s) failed - sweep is broken, no list emitted:", file=sys.stderr)
         for f in failed:
             print(f"  {f}", file=sys.stderr)
         return 2
 
-    zero_corr = [l for l in leaves_list if counts_corr.get(l, 0) == 0]
+    zero_corr = [leaf for leaf in leaves_list if counts_corr.get(leaf, 0) == 0]
 
     # Monotonicity invariant: the two false-positive fixes can only ADD
     # references, so the corrected zero set must be a subset of the uncorrected
@@ -841,23 +928,37 @@ def main(argv: list[str] | None = None) -> int:
     # list is the deletion-decision path and the most consequential output here.
     # A regression that invents false zero-callers fails loudly before any cull
     # list is emitted, not after.
-    counts_unc = sweep(root, leaves, binary_form=False, pipe_fan=False)
-    zero_unc = {l for l in leaves_list if counts_unc.get(l, 0) == 0}
-    not_subset = [l for l in zero_corr if l not in zero_unc]
+    counts_unc = sweep(
+        root, leaves, binary_form=False, pipe_fan=False, paths=iter_cull_corpus(root)
+    )
+    zero_unc = {leaf for leaf in leaves_list if counts_unc.get(leaf, 0) == 0}
+    not_subset = [leaf for leaf in zero_corr if leaf not in zero_unc]
     if not_subset:
         print("verb-callers: corrected zero set is NOT a subset of uncorrected - "
               "a fix removed references, which is impossible:", file=sys.stderr)
-        for l in not_subset[:10]:
-            print(f"  {l}", file=sys.stderr)
+        for leaf in not_subset[:10]:
+            print(f"  {leaf}", file=sys.stderr)
         return 2
 
     # --self-check is an instrument-health mode that takes precedence over every
     # output mode (--curriculum, --summary, --zero, default), matching the
     # return-early ordering the other modes already share.
     if args.self_check:
-        ok = not failed and not not_subset
-        print("controls:", "PASS" if not failed else "FAIL",
-              {k: counts_corr.get(k, 0) for k in CONTROLS})
+        _, _, _, _, health_failures, _ = dead_set(root, leaves_list)
+        if health_failures:
+            print(
+                "verb-callers: positive control(s) failed - no list emitted:",
+                file=sys.stderr,
+            )
+            for failure in health_failures:
+                print(f"  {failure}", file=sys.stderr)
+            return 2
+        ok = not not_subset
+        print(
+            "controls: PASS "
+            "(substitution, rust-argv, crates-tests, ast, internal-text)",
+            {k: counts_corr.get(k, 0) for k in CONTROLS},
+        )
         print(f"uncorrected zero: {len(zero_unc)}  corrected zero: {len(zero_corr)}  "
               f"rescued by fixes: {len(zero_unc) - len(zero_corr)}")
         print(f"vs the original {ORIGINAL_ZERO_BOUND} bound: {len(zero_corr)} now "
@@ -876,7 +977,9 @@ def main(argv: list[str] | None = None) -> int:
         # agree.
         try:
             from fno.lint_verb_ratchet import enumerate_all_leaves
-            registry = {l.split(' !')[0].strip() for l in enumerate_all_leaves()}
+            registry = {
+                leaf.split(' !')[0].strip() for leaf in enumerate_all_leaves()
+            }
             baseline_set = set(leaves_list)
             print(f"baseline freshness (file vs its own generator, NOT an "
                   f"independent check): baseline={len(baseline_set)} "
@@ -909,8 +1012,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {u}", file=sys.stderr)
             return 2
         zero_set = set(zero_corr)
-        complement = [l for l in leaves_list if l not in taught]
-        cull = sorted(l for l in complement if l in zero_set)
+        complement = [leaf for leaf in leaves_list if leaf not in taught]
+        cull = sorted(leaf for leaf in complement if leaf in zero_set)
         print(f"baseline leaves: {len(leaves_list)}")
         print(f"taught (curriculum): {len(taught)}")
         print(f"complement (untaught): {len(complement)}")
@@ -918,8 +1021,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"complement kept (has external caller): {len(complement) - len(cull)}")
         if cull:
             print("cull candidates:")
-            for l in cull:
-                print(f"  {l}")
+            for leaf in cull:
+                print(f"  {leaf}")
         return 0
 
     enrichment = load_enrichment(root)
@@ -944,7 +1047,7 @@ def main(argv: list[str] | None = None) -> int:
     header = f"{'leaf':34} {'refs':>5}  {'file:line':28}  help"
     lines.append(header)
     lines.append("-" * len(header))
-    for leaf in sorted(rows, key=lambda l: (counts_corr.get(l, 0), l)):
+    for leaf in sorted(rows, key=lambda item: (counts_corr.get(item, 0), item)):
         fl, hl = enrichment.get(leaf, ("", ""))
         if not enrichment_live:
             fl = fl or "(needs fno env)"

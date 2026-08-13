@@ -24,33 +24,33 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 ## Pitfalls corpus (capped)
 
-Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked rule file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this body but not linked rule bodies, which auto-discover on Claude only.
+Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined rather than linked because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this body, not linked rule bodies.
 
 **Cap: bytes, not the count.** Every entry is paid on every session start, every lane. `check-pitfalls.sh` fails on an 11th entry, a missing field, or one over 60 days, but the byte budget binds first, near 5: fund one by trading bytes here, never by raising the ceiling.
 
-**Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line / PR refs, `graduates-to:` the guard that lets it leave, `added:` YYYY-MM-DD. When that guard lands, remove the entry in the same PR.
+**Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line refs, `graduates-to:` the guard that retires it, `added:` YYYY-MM-DD. Remove the entry in the PR where that guard lands.
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to prove this corpus reached its harness; a unit test asserts it: `kdc-delivery-sentinel-1932`.
 
 ### A guard placed on one of N reachable paths is decorative
 
-Before trusting a guard, enumerate every path a caller can reach (in-process test, exec'd binary, skill layer, direct CLI, spawned worker); a guard on only one reads as protection and ships green while the other paths stay broken. Behavior that lives only in skill prose is the same defect, since a direct CLI call or a non-Claude worker skips the skill layer and the rule never runs. A test can be one too: asserting two paths emit the same enum variant pins the tag, not the destination.
+Before trusting a guard, enumerate every path a caller can reach (in-process test, exec'd binary, skill layer, direct CLI, spawned worker); a guard on only one reads as protection and ships green while the others stay broken. Behavior living only in skill prose is the same defect: a direct CLI call or a non-Claude worker skips that layer. A test can be one too: asserting two paths emit the same enum variant pins the tag, not the destination.
 
-- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid a path only the exec'd binary took), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`; PR #575/#577), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity test pinned the tag, not the target), `hooks/arm-handoff-precompact.sh` (gated on a pid dead ~1s after init; its test fabricated `owner_pid: $$`).
-- graduates-to: the path-uniqueness lint that treats N reachable implementations of one operation as a CI failure, not a review catch; and one failing an equivalence assertion that ignores the payload.
+- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid a path only the exec'd binary took), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity test pinned the tag, not the target).
+- graduates-to: the path-uniqueness lint treating N reachable implementations of one operation as a CI failure, not a review catch; plus one failing an equivalence assertion that ignores the payload.
 - added: 2026-07-23
 
 ### Orienter output, claim snapshots, and liveness probes have all lied
 
-Receipt lines, manifest snapshots, process argv, and liveness probes have each lied about a live session; only the live lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` while a plan is bound or `base=origin/main` while the branch is stale. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base - skip the fetch and a stale ref answers 0), transcript mtime (liveness).
+Receipt lines, manifest snapshots, process argv, and liveness probes have each lied about a live session; only the live lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` while a plan is bound, or `base=origin/main` while the branch is stale. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base - skip the fetch and a stale ref answers 0).
 
 - specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
-- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live claim holder, verifies the base) and transcript-keyed liveness.
+- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base) plus transcript-keyed liveness.
 - added: 2026-07-23
 
 ### Judgment delegated to a subprocess on a truncated context produces junk
 
-A subprocess seeing only a tail of structured signals makes wrong calls with full confidence; the deprecated distill path saw a 50-line tail and produced junk, which is why it was removed for cause. Keep all judgment (candidate selection, promotion, review) on full-context main threads; delegate only mechanical work to subprocesses.
+A subprocess seeing only a tail of structured signals makes wrong calls with full confidence; the deprecated distill path saw a 50-line tail and produced junk. Keep all judgment (candidate selection, promotion, review) on full-context main threads; delegate only mechanical work.
 
 - specimens: `docs/architecture/memory-system.md:77` (why Haiku distillation was deprecated for cause).
 - graduates-to: a check that refuses to route a judgment call to a headless or bg subprocess.
@@ -61,8 +61,9 @@ A subprocess seeing only a tail of structured signals makes wrong calls with ful
 An absence has two explanations, the real outcome and "the instrument never ran", and a condition built on one cannot tell them apart.
 Require a string only the real outcome produces, pinned to the thing measured rather than any line carrying the word.
 `until ! grep -q pending out` called CI settled when `gh` died on a TLS error, since an error carries no "pending"; `grep -q '"settled": true'` is one line apart and fails safe.
+A positive control does not close this: it validates the TOOL, never the TARGET, so a green control on a search aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the symbol the behavior would wear if it existed - for a Python capability the function name, not the CLI spelling.
 
-- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; `git worktree list | head -20` truncated a present worktree into absence; an unanchored `rg --glob=!target` also hides `skills/target/`, so live callers survived every sweep of a rename; a bare `target` in a gate's exclude set hid 78 files from it; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
+- specimens: `gate.sh | tail; echo $?` reads tail's 0 and hid a failing `check-preamble-budget` for a whole PR; an unanchored `rg --glob=!target` hides `skills/target/`, so live callers survived every sweep of a rename; searching the verb `carveout resolve` returned zero and a green positive control certified it, while the clearing path was a FUNCTION wired twice; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
 - graduates-to: an assert helper refusing an absence-only success condition and failing a zero-hit probe with no positive control; it cannot catch an honest exit code answering a different question, which needs the verdict verb.
 - added: 2026-07-27
 
@@ -188,7 +189,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno doctor`** - detects stale deployed `fno` vs source; `--fix` delegates to `fno update`. Compares against merged source only. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
 - **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Four axes share one neighbourhood and must not be confused: harness (the binary, `-H`), provider (the model vendor, `-P`), model (`-m`), account (`--account`). `opencode` is legally both a harness and a provider, so never infer the axis from a value. Definitions and the allowlist procedure live in [docs/architecture/four-axis-vocabulary.md](docs/architecture/four-axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`.
 - **Stage table (per-stage axis)** - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch; `route`=vendor/model (`--route`, fail-closed) sits beside `provider`=harness. [stage table](docs/architecture/role-based-model-routing.md).
-- **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` / `fno help <group> --all` list everything. New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app).
+- **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` / `fno help <group> --all` list everything. New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
 - **Control-plane LOC ratchet** - positive line-count delta across control-plane paths fails CI unless the PR body has a `loc-exception:` line. [loc-ratchet](docs/architecture/loc-ratchet.md).
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro, writes follow-ups to `config.post_merge.parking_lot_path`.
 - **Target self-handoff** - a `/target` session can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).

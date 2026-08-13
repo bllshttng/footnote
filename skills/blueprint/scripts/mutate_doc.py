@@ -505,7 +505,9 @@ def _build_execution_strategy(sections: OrderedDict[str, str]) -> str:
         "tasks": tasks,
     }
 
-    yaml_block = yaml.dump(waves_yaml, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    # width=inf: PyYAML otherwise folds at best_width=80, hard-wrapping every prose
+    # `notes:`/`title:` mid-sentence, which the repo's one-sentence-per-line rule forbids.
+    yaml_block = yaml.dump(waves_yaml, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True, width=float("inf"))
     return f"```yaml\n{yaml_block}```"
 
 
@@ -540,7 +542,7 @@ def _build_patterns_to_reuse() -> str:
 
 def _serialize_frontmatter(fm: dict[str, Any]) -> str:
     """Serialize frontmatter dict back to YAML string (without delimiters)."""
-    return yaml.dump(fm, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True).rstrip("\n")
+    return yaml.dump(fm, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True, width=float("inf")).rstrip("\n")
 
 
 def _reconstruct_doc(

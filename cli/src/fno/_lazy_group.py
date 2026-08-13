@@ -29,9 +29,11 @@ Usage (via the factory)
 
     app = typer.Typer(cls=make_lazy_group_cls(LAZY), ...)
 """
+
 from __future__ import annotations
 
 import importlib
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Mapping
 
 import click
@@ -41,6 +43,95 @@ import typer.main
 
 if TYPE_CHECKING:
     pass
+
+
+class _CollapsedForward(click.Command):
+    """Unregistered action adapter that preserves the original Click command."""
+
+    def __init__(self, action: click.Command) -> None:
+        super().__init__(name=action.name, hidden=True)
+        self._action = action
+
+    def make_context(
+        self,
+        info_name: str | None,
+        args: list[str],
+        parent: click.Context | None = None,
+        **extra: Any,
+    ) -> click.Context:
+        return self._action.make_context(info_name, args, parent=parent, **extra)
+
+    def invoke(self, ctx: click.Context) -> Any:
+        return self._action.invoke(ctx)
+
+
+def collapse_click_group(group: click.Group, *, keep: set[str]) -> click.Group:
+    """Collapse non-KEEP children into one argument-dispatching group verb.
+
+    KEEP children remain registered leaves. Every other first token is resolved
+    against the original group and forwarded to that command's own parser, so
+    its options, validation, help, callback, and nested actions stay unchanged.
+    The marker is consumed by the verb-ratchet walker, which counts the group
+    dispatcher once plus the deliberately retained children.
+    """
+    if getattr(group, "_fno_collapsed_dispatcher", False):
+        return group
+
+    original_list_commands = group.list_commands
+    original_get_command = group.get_command
+    original_resolve_command = group.resolve_command
+    original_format_commands = group.format_commands
+    original_shell_complete = group.shell_complete
+    forward: dict[str, _CollapsedForward] = {}
+
+    def list_commands(self: click.Group, ctx: click.Context) -> list[str]:
+        return [name for name in original_list_commands(ctx) if name in keep]
+
+    def resolve_command(
+        self: click.Group, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        if args and args[0] not in keep:
+            action = original_get_command(ctx, args[0])
+            if action is not None:
+                adapter = forward.setdefault(args[0], _CollapsedForward(action))
+                return args[0], adapter, args[1:]
+        return original_resolve_command(ctx, args)
+
+    def format_commands(
+        self: click.Group,
+        ctx: click.Context,
+        formatter: click.HelpFormatter,
+    ) -> None:
+        # Help is a user-facing catalog of ACTION arguments, so keep showing the
+        # full original set even though only the selected children are leaves.
+        saved = self.list_commands
+        self.list_commands = original_list_commands  # type: ignore[method-assign]
+        try:
+            original_format_commands(ctx, formatter)
+        finally:
+            self.list_commands = saved  # type: ignore[method-assign]
+
+    def shell_complete(
+        self: click.Group,
+        ctx: click.Context,
+        incomplete: str,
+    ) -> list[click.shell_completion.CompletionItem]:
+        saved = self.list_commands
+        self.list_commands = original_list_commands  # type: ignore[method-assign]
+        try:
+            return original_shell_complete(ctx, incomplete)
+        finally:
+            self.list_commands = saved  # type: ignore[method-assign]
+
+    group.list_commands = MethodType(list_commands, group)  # type: ignore[method-assign]
+    group.resolve_command = MethodType(resolve_command, group)  # type: ignore[method-assign]
+    group.format_commands = MethodType(format_commands, group)  # type: ignore[method-assign]
+    group.shell_complete = MethodType(shell_complete, group)  # type: ignore[method-assign]
+    group._fno_collapsed_dispatcher = True  # type: ignore[attr-defined]
+    group._fno_collapsed_keep = frozenset(keep)  # type: ignore[attr-defined]
+    group._fno_collapsed_original_list_commands = original_list_commands  # type: ignore[attr-defined]
+    group._fno_collapsed_original_get_command = original_get_command  # type: ignore[attr-defined]
+    return group
 
 
 def _is_fno_module(name: str) -> bool:
@@ -114,6 +205,7 @@ def _import_failure_hint(exc: ImportError) -> str:
 # _LazyStub
 # ---------------------------------------------------------------------------
 
+
 class _LazyStub(click.Group):
     """Placeholder returned by LazyTypeGroup.get_command() for lazy entries.
 
@@ -135,6 +227,7 @@ class _LazyStub(click.Group):
         import_path: str,
         hidden: bool = False,
         info_overrides: dict[str, Any] | None = None,
+        collapse_keep: set[str] | None = None,
     ) -> None:
         super().__init__(name=name, help=help, hidden=hidden)
         self._import_path = import_path
@@ -145,6 +238,7 @@ class _LazyStub(click.Group):
         # help / behavior reverts to whatever the Typer instance itself
         # defines and the parent-side override is lost.
         self._info_overrides: dict[str, Any] = dict(info_overrides or {})
+        self._collapse_keep = collapse_keep
         self._real: click.Command | None = None
 
     def _load_real(self) -> click.Command:
@@ -215,6 +309,7 @@ class _LazyStub(click.Group):
             # ``get_group_from_info`` keeps the group + subcommand shape that
             # ``app.add_typer`` produced under the eager-load model.
             from typer.models import TyperInfo
+
             info = TyperInfo(attr, **self._info_overrides)
             self._real = typer.main.get_group_from_info(
                 info,
@@ -222,6 +317,11 @@ class _LazyStub(click.Group):
                 rich_markup_mode=None,
                 suggest_commands=True,
             )
+            if self._collapse_keep is not None:
+                self._real = collapse_click_group(
+                    self._real,
+                    keep=self._collapse_keep,
+                )
         elif isinstance(attr, click.Command):
             self._real = attr
         else:
@@ -263,6 +363,7 @@ class _LazyStub(click.Group):
 # LazyTypeGroup
 # ---------------------------------------------------------------------------
 
+
 class LazyTypeGroup(typer.core.TyperGroup):
     """TyperGroup subclass that defers sub-app imports until invocation.
 
@@ -283,7 +384,8 @@ class LazyTypeGroup(typer.core.TyperGroup):
     def __init__(
         self,
         *args: Any,
-        lazy_subcommands: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] | None = None,
+        lazy_subcommands: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]]
+        | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -340,12 +442,14 @@ class LazyTypeGroup(typer.core.TyperGroup):
         #   takes effect when the real Typer instance is converted to a Click
         #   group at invocation time.
         stub_options = {"hidden": bool(options.get("hidden", False))}
-        info_overrides = {k: v for k, v in options.items() if k != "hidden"}
+        info_overrides = {k: v for k, v in options.items() if k not in {"hidden", "collapse_keep"}}
+        collapse_keep = options.get("collapse_keep")
         return _LazyStub(
             name=name,
             help=short_help,
             import_path=import_path,
             info_overrides=info_overrides,
+            collapse_keep=set(collapse_keep) if collapse_keep is not None else None,
             **stub_options,
         )
 
@@ -373,6 +477,7 @@ class LazyTypeGroup(typer.core.TyperGroup):
                 # suggestion pool, so restrict the candidate list to those.
                 if self._lazy and args:
                     from difflib import get_close_matches
+
                     matches = get_close_matches(args[0], list(self._lazy))
                     if matches:
                         suggestions = ", ".join(f"{m!r}" for m in matches)
@@ -384,6 +489,7 @@ class LazyTypeGroup(typer.core.TyperGroup):
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
 
 def make_lazy_group_cls(
     # Mapping, not dict: dict is invariant in its value type, so a caller whose

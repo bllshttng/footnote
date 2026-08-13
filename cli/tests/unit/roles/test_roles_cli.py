@@ -465,7 +465,7 @@ def test_ac_r7_ui_roles_is_hidden_lazy_and_discoverable() -> None:
     assert LAZY_SUBCOMMANDS["roles"] == (
         "fno.roles.cli:roles_app",
         "Inspect bounded business-role definitions and resolutions.",
-        {"hidden": True},
+        {"hidden": True, "collapse_keep": []},
     )
 
 

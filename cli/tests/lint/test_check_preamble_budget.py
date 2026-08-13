@@ -20,6 +20,9 @@ from typer.testing import CliRunner
 ROOT = Path(__file__).resolve().parents[3]
 GATE = ROOT / "scripts" / "ci" / "check-preamble-budget.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "preamble-budget.yml"
+# One spelling of the heading. Two tests assert on its ABSENCE, and an
+# absence assertion against a string the script never emits cannot fail.
+DESCRIPTIONS_HEADING = "descriptions (always-loaded skill + agent pointers):"
 
 
 def _ceiling_bytes_from_script() -> int:
@@ -249,26 +252,53 @@ def test_two_positional_roots_are_rejected(tmp_path: Path) -> None:
     assert "expected at most one repo root" in result.stderr
 
 
-def test_workflow_filter_covers_discovery_rule() -> None:
-    """AC9-EDGE: no measured path can change without making the job reachable."""
+def _covered_by(path: str, filters: list[str]) -> bool:
+    """True when a GitHub paths filter would make `path` fire the job."""
+    for entry in filters:
+        if entry == path:
+            return True
+        if entry.endswith("/**") and path.startswith(entry[:-2]):
+            return True
+    return False
+
+
+def test_workflow_filter_covers_every_measured_path() -> None:
+    """AC9-EDGE: no measured path can change without making the job reachable.
+
+    Coverage, not literal membership: `skills/**` subsumes the individual
+    `skills/using-fno/SKILL.md` entry it replaced, and it has to, because the
+    gate now measures every `skills/*/SKILL.md` description. A filter that named
+    only using-fno would leave the descriptions ceiling unreachable from CI.
+    """
     raw = WORKFLOW.read_text(encoding="utf-8")
     workflow = yaml.safe_load(raw)
     triggers = workflow[True]
     push_paths = triggers["push"]["paths"]
     pull_request_paths = triggers["pull_request"]["paths"]
-    required = {
+    measured = [
         "AGENTS.md",
         "CLAUDE.md",
-        ".claude/rules/**",
+        ".claude/rules/worktrees.md",
         "skills/using-fno/SKILL.md",
+        "skills/mail/SKILL.md",
+        "skills/target/SKILL.md",
         "scripts/ci/check-preamble-budget.sh",
         ".github/workflows/preamble-budget.yml",
-    }
+    ]
 
-    assert required <= set(push_paths)
+    uncovered = [p for p in measured if not _covered_by(p, push_paths)]
+    assert not uncovered, f"paths the workflow would not fire on: {uncovered}"
     assert push_paths == pull_request_paths
     assert "&preamble_budget_paths" in raw
     assert "*preamble_budget_paths" in raw
+
+
+def test_workflow_filter_would_miss_an_unlisted_path() -> None:
+    """Negative control: the coverage helper can actually return False."""
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    push_paths = workflow[True]["push"]["paths"]
+
+    assert not _covered_by("cli/src/fno/doctor.py", push_paths)
 
 
 def test_doctor_report_is_silent_when_gate_is_absent(tmp_path: Path) -> None:
@@ -454,3 +484,402 @@ def test_doctor_resolves_the_worktree_from_a_subdirectory() -> None:
     assert line is not None
     assert line.startswith("preamble: ")
     assert f" / {CEILING_BYTES} B (" in line
+
+
+# --- The second budget: always-loaded skill descriptions ---------------------
+
+
+def _gate_constant(name: str) -> int:
+    match = re.search(rf"^{name}=(\d+)", GATE.read_text(), re.MULTILINE)
+    assert match is not None, f"{name} assignment not found in {GATE}"
+    return int(match.group(1))
+
+
+def _add_skill(
+    repo_root: Path, name: str, description: str, *, model_invoked: bool = True
+) -> None:
+    skill = repo_root / "skills" / name / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["---", f"name: {name}", f'description: "{description}"']
+    if not model_invoked:
+        lines.append("disable-model-invocation: true")
+    lines += ["---", "", "body", ""]
+    skill.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _measured_tree(
+    tmp_path: Path, *, descriptions: dict[str, str] | None = None
+) -> Path:
+    """A fixture repo the gate can measure, with real skill frontmatter."""
+    _write_fixed_roots(tmp_path, agents_bytes=500)
+    for name, description in (descriptions or {"alpha": "a" * 100}).items():
+        _add_skill(tmp_path, name, description)
+    return tmp_path
+
+
+def _run_at(
+    repo_root: Path, *, force_band: bool = False
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    if force_band:
+        env["PREAMBLE_BAND_FORCE"] = "1"
+    return subprocess.run(
+        ["bash", str(GATE), str(repo_root)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
+def test_descriptions_are_measured_and_reported() -> None:
+    """The gate measured ~85% of the always-loaded text before this budget."""
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert DESCRIPTIONS_HEADING in result.stdout
+    assert "measured always-loaded (these two budgets):" in result.stdout
+    # Agents are in the budget, not just skills.
+    assert "agent:" in result.stdout
+
+
+def test_descriptions_match_an_independent_reader_per_file() -> None:
+    """Cross-check the gate's regex reader against PyYAML, file by file.
+
+    Per-file rather than on the total, so two errors cannot cancel out. Files
+    PyYAML rejects are skipped and asserted separately below: three agent
+    frontmatters in this repo are not valid YAML today.
+    """
+    payload = json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+    measured = {row["skill"]: row["bytes"] for row in payload["descriptions"]["skills"]}
+
+    compared = 0
+    for path in sorted((ROOT / "skills").glob("*/SKILL.md")) + sorted(
+        (ROOT / "agents").glob("*.md")
+    ):
+        text = path.read_text(encoding="utf-8")
+        match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        if not match:
+            continue
+        try:
+            front = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            continue
+        if front.get("disable-model-invocation") or not front.get("description"):
+            continue
+        label = (
+            path.parent.name
+            if path.name == "SKILL.md"
+            else f"agent:{path.stem}"
+        )
+        expected = len(str(front["description"]).rstrip("\n").encode("utf-8"))
+        assert measured.get(label) == expected, f"{label}: gate says {measured.get(label)}, yaml says {expected}"
+        compared += 1
+
+    # Positive control: the loop above must actually have compared something.
+    assert compared > 25, f"only {compared} files compared; the cross-check is not running"
+
+    assert payload["measured_always_loaded_bytes"] == (
+        payload["total_bytes"] + payload["descriptions"]["total_bytes"]
+    )
+
+
+def test_every_frontmatter_parses_strictly() -> None:
+    """No skill or agent frontmatter may fail a strict YAML parse.
+
+    The reader that ships is line-based, which is why this went unnoticed: a
+    colon mid-line survives, because the reader takes the rest of the line. A
+    value that spans lines does not. `agents/verifier.md` wrote 18 unquoted
+    lines, so a strict parser got nothing and the harness rendered the literal
+    string "Agent from fno plugin" in place of its description.
+
+    Same root cause as the wrapped-scalar defect in the plan stamper: one
+    line-based frontmatter reader, two independent symptoms.
+    """
+    unparseable = []
+    for path in sorted((ROOT / "agents").glob("*.md")) + sorted(
+        (ROOT / "skills").glob("*/SKILL.md")
+    ):
+        match = re.match(r"^---\n(.*?)\n---\n", path.read_text(encoding="utf-8"), re.S)
+        if not match:
+            continue
+        try:
+            yaml.safe_load(match.group(1))
+        except yaml.YAMLError as exc:
+            unparseable.append(f"{path.name}: {str(exc).splitlines()[0]}")
+
+    assert unparseable == [], f"frontmatter a strict parser rejects: {unparseable}"
+
+
+def test_repaired_descriptions_kept_their_whole_text() -> None:
+    """Parse success alone is not the bar: a truncation also parses.
+
+    The first repair attempt bounded the value with a bare `^word:` regex,
+    which matched a prose line reading "Examples:" and cut the description
+    there. That result is valid YAML and still loses most of the pointer, so
+    the assertion has to be on content, not on parseability.
+    """
+    expected_openings = {
+        "verifier.md": "Use this agent to verify task completion against requirements.",
+        "code-reviewer.md": "Use this agent when you need to review code for adherence",
+        "type-design-analyzer.md": "Use this agent when you need expert analysis of type design",
+    }
+
+    for name, opening in expected_openings.items():
+        path = ROOT / "agents" / name
+        match = re.match(r"^---\n(.*?)\n---\n", path.read_text(encoding="utf-8"), re.S)
+        front = yaml.safe_load(match.group(1))
+        description = front["description"]
+
+        assert description.startswith(opening), f"{name}: description was truncated at the front"
+        # The two that carry worked examples must still carry them: the
+        # truncation this guards against cuts exactly there.
+        if name in {"verifier.md", "code-reviewer.md"}:
+            assert "<example>" in description, f"{name}: examples lost"
+            assert description.rstrip().endswith("</example>"), f"{name}: tail lost"
+
+    # verifier.md is the one with an observed cost, so pin its size directly.
+    match = re.match(
+        r"^---\n(.*?)\n---\n",
+        (ROOT / "agents" / "verifier.md").read_text(encoding="utf-8"),
+        re.S,
+    )
+    verifier = yaml.safe_load(match.group(1))["description"]
+    assert len(verifier.encode("utf-8")) > 600, (
+        f"verifier description is {len(verifier.encode())} B; a line-based read of the "
+        "old form scored it at 114"
+    )
+
+
+def test_user_invoked_skill_costs_nothing(tmp_path: Path) -> None:
+    """disable-model-invocation strips the pointer, so it leaves the budget."""
+    repo = _measured_tree(tmp_path, descriptions={"counted": "c" * 50})
+    _add_skill(repo, "hidden", "h" * 500, model_invoked=False)
+
+    payload = json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json", str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+
+    assert payload["descriptions"]["count"] == 1
+    assert payload["descriptions"]["total_bytes"] == 50
+
+
+def test_description_growth_past_the_ceiling_fails(tmp_path: Path) -> None:
+    """A fatter pointer is a real per-turn cost and has to be paid for."""
+    ceiling = _gate_constant("DESCRIPTIONS_CEILING_BYTES")
+    repo = _measured_tree(tmp_path, descriptions={"padding": "x" * (ceiling + 1)})
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "descriptions are" in result.stderr
+    assert "over the" in result.stderr
+
+
+def test_unbanked_description_cut_fails_and_names_the_value(tmp_path: Path) -> None:
+    """The band is two-sided here too: a cut is banked or it is not a cut."""
+    band = _gate_constant("DESCRIPTIONS_BAND_BYTES")
+    ceiling = _gate_constant("DESCRIPTIONS_CEILING_BYTES")
+    tiny = ceiling - band - 100
+    repo = _measured_tree(tmp_path, descriptions={"small": "s" * tiny})
+
+    result = _run_at(repo, force_band=True)
+
+    assert result.returncode == 1
+    # The suggestion parks the ceiling mid-band, so a later cut has room too.
+    assert f"DESCRIPTIONS_CEILING_BYTES={tiny + band // 2}" in result.stderr
+
+
+def test_readers_that_disagree_fail_rather_than_pick_one(tmp_path: Path) -> None:
+    """Equality, not a zero check: a partial reader failure must not pass.
+
+    The two instruments enumerate differently on purpose (find at any depth
+    versus a depth-1 glob), so a description either reaches both or fails the
+    gate. A zero-only check would pass while silently dropping bytes.
+    """
+    repo = _measured_tree(tmp_path)
+    nested = repo / "skills" / "group" / "inner" / "SKILL.md"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_text(
+        '---\nname: inner\ndescription: "nested and unmeasured"\n---\n\nbody\n',
+        encoding="utf-8",
+    )
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "the two readers disagree" in result.stderr
+
+
+def test_a_fence_the_reader_cannot_open_is_caught(tmp_path: Path) -> None:
+    """A description the measuring reader skips must not pass as measured.
+
+    The Python reader needs a newline after the closing fence, because its
+    regex ends `\\n---\\n`. A file whose frontmatter closes at EOF satisfies the
+    cross-check's scan and not the reader's, so its description would go
+    unmeasured while the file looks ordinary. That is the live shape of "the
+    reader broke": not a total failure, one file silently dropped.
+
+    An earlier version of this test wrote a bare `description:` line with no
+    fence at all. Anchoring both scans to the frontmatter slice made that file
+    invisible to BOTH, correctly, and the test then passed for the wrong
+    reason.
+    """
+    repo = _measured_tree(tmp_path)
+    skipped = repo / "skills" / "unterminated" / "SKILL.md"
+    skipped.parent.mkdir(parents=True, exist_ok=True)
+    skipped.write_text(
+        '---\nname: unterminated\ndescription: "real, and unmeasured"\n---',
+        encoding="utf-8",
+    )
+
+    result = _run_at(repo)
+
+    assert result.returncode == 1
+    assert "the two readers disagree" in result.stderr
+
+
+def test_descriptions_heading_is_the_string_this_file_asserts_on() -> None:
+    """Pin the heading, because two tests below assert on its ABSENCE.
+
+    An absence assertion against a string the script never emits cannot fail.
+    This file shipped exactly that: the heading gained "+ agent" and the
+    negative assertion kept naming the old wording, so a descriptions block
+    printing on a zero-description tree would have stayed green. Asserting the
+    live heading exists somewhere is what makes the absence checks mean
+    something.
+    """
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert DESCRIPTIONS_HEADING in result.stdout, (
+        "the heading moved; every absence assertion in this file is now vacuous"
+    )
+
+
+def test_no_skills_at_all_is_not_a_failure(tmp_path: Path) -> None:
+    """A consumer checkout that vendors the rules without the skills is normal."""
+    _write_fixed_roots(tmp_path, agents_bytes=500)
+
+    result = _run_at(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert DESCRIPTIONS_HEADING not in result.stdout
+
+
+def test_block_scalar_description_is_measured_at_its_content(tmp_path: Path) -> None:
+    """Measuring the `>` marker would score a 700-byte pointer at 1 byte.
+
+    Four agents in this repo write their description this way, so the reader
+    has to follow the indented body rather than refuse it.
+    """
+    repo = _measured_tree(tmp_path, descriptions={"plain": "p" * 40})
+    folded = repo / "skills" / "folded" / "SKILL.md"
+    folded.parent.mkdir(parents=True, exist_ok=True)
+    folded.write_text(
+        "---\nname: folded\ndescription: >\n  first line here\n  second line here\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    payload = json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json", str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+    measured = {row["skill"]: row["bytes"] for row in payload["descriptions"]["skills"]}
+
+    assert measured["folded"] == len("first line here second line here")
+    assert measured["plain"] == 40
+
+
+# --- The two-sided file ceiling ----------------------------------------------
+
+
+def test_live_repo_sits_inside_the_band() -> None:
+    """The ceiling tracks the floor: this is what a banked cut looks like."""
+    band = _gate_constant("RATCHET_NUDGE_BYTES")
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    spare = int(re.search(r"tok at 4 B/tok\), (\d+) to spare", result.stdout).group(1))
+    assert spare <= band, f"{spare} B spare exceeds the {band} B band"
+
+
+def test_unbanked_file_cut_fails_and_names_the_value(tmp_path: Path) -> None:
+    """This path used to print an advisory and exit 0, so no cut was banked."""
+    band = _gate_constant("RATCHET_NUDGE_BYTES")
+    # Park the descriptions budget inside its own band, or it fails first and
+    # this test reads the wrong gate's message.
+    in_band = _gate_constant("DESCRIPTIONS_CEILING_BYTES") - 100
+    repo = _measured_tree(tmp_path, descriptions={"alpha": "a" * in_band})
+
+    result = _run_at(repo, force_band=True)
+
+    assert result.returncode == 1
+    assert "more than the" in result.stderr
+    total = int(re.search(r"check-preamble-budget: (\d+) /", result.stderr).group(1))
+    assert f"CEILING_BYTES={total + band // 2}" in result.stderr
+
+
+def test_fix_line_survives_quiet_and_json(tmp_path: Path) -> None:
+    """A caller that gets exit 1 with no reason has to go read the script.
+
+    --quiet and --json shape stdout. The named value is the whole point of a
+    two-sided band, so it goes to stderr in every mode, where it cannot corrupt
+    the JSON document on stdout.
+    """
+    repo = _measured_tree(tmp_path)
+
+    for mode in ("--quiet", "--json"):
+        result = subprocess.run(
+            ["bash", str(GATE), mode, str(repo)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "PREAMBLE_BAND_FORCE": "1"},
+        )
+
+        assert result.returncode == 1, mode
+        assert "CEILING_BYTES=" in result.stderr, mode
+
+    json.loads(
+        subprocess.run(
+            ["bash", str(GATE), "--json", str(ROOT)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    )
+
+
+def test_band_is_scoped_to_the_gates_own_repo(tmp_path: Path) -> None:
+    """A fixture root is not what the constants budget, so the band stays off."""
+    repo = _measured_tree(tmp_path)
+
+    result = _run_at(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "more than the" not in result.stderr
+

@@ -7,7 +7,13 @@ on:
       - AGENTS.md
       - CLAUDE.md
       - .claude/rules/**
-      - skills/using-fno/SKILL.md
+      # skills/*/SKILL.md and agents/*.md frontmatter both carry model-invoked
+      # descriptions, which the gate now measures. Filtering on using-fno alone
+      # would leave the descriptions ceiling unreachable from CI: a gate on one
+      # of N reachable paths is decorative, and a description edit is the path
+      # that matters.
+      - skills/**
+      - agents/**
       - scripts/ci/check-preamble-budget.sh
       - .github/workflows/preamble-budget.yml
   pull_request:
