@@ -34,7 +34,7 @@ def _no_real_mail_inject(monkeypatch):
     from fno.agents import dispatch as dispatch_mod
 
     monkeypatch.setattr(
-        dispatch_mod, "_mail_inject_claude", lambda recipient, text: False
+        dispatch_mod, "_mail_inject_claude", lambda recipient, text, **_k: False
     )
     monkeypatch.setattr(
         dispatch_mod, "_registered_family1_state", lambda _entry: "working"
@@ -135,7 +135,7 @@ def test_dispatch_send_happy_path_live_claude(
     # The live-inject seam succeeds; capture what it was asked to inject.
     inject_calls: list[dict] = []
 
-    def _ok_inject(recipient: str, text: str) -> bool:
+    def _ok_inject(recipient: str, text: str, **_k) -> bool:
         inject_calls.append({"recipient": recipient, "text": text})
         return True
 
@@ -188,7 +188,7 @@ def test_cmd_send_happy_path_stdout_format(
 
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
     # Live-inject succeeds -> hosted.
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text: True)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text, **_k: True)
 
     from fno.mail.cli import mail_app
 
@@ -274,7 +274,7 @@ def test_dispatch_send_locks_canonical_registry_name(
         yield object()
 
     monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _record_lock)
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *_args: True)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *_args, **_k: True)
 
     result = dispatch_mod.dispatch_send(
         name=address,
@@ -802,7 +802,7 @@ def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) 
 
     inject_attempt_count = [0]
 
-    def _fail_inject(recipient: str, text: str) -> bool:
+    def _fail_inject(recipient: str, text: str, **_k) -> bool:
         inject_attempt_count[0] += 1
         return False
 
@@ -1571,7 +1571,7 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
     )
     monkeypatch.setattr(discover_mod, "resolve_or_suggest", lambda h, **kw: (fake, []))
     # Force the live-inject miss so the send deterministically writes the floor.
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda *_a, **_k: False)
 
     # The removed re-route must NOT fire: a project send is now a hard failure.
     def _boom(*_a, **_kw):  # pragma: no cover - asserts the path is dead

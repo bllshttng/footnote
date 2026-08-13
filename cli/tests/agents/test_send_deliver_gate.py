@@ -415,7 +415,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
     # succeeds here so the demote falls through to it.
     inject_calls: list = []
 
-    def _ok_inject(recipient: str, text: str) -> bool:
+    def _ok_inject(recipient: str, text: str, **_k) -> bool:
         inject_calls.append({"recipient": recipient, "text": text})
         return True
 
@@ -870,7 +870,7 @@ dispatch._daemon_rpc = lambda *_args, **_kwargs: {
     "reply": "continue",
 }
 
-def deliver(entry, body, from_name, mail=None, sender_entry=None):
+def deliver(entry, body, from_name, mail=None, sender_entry=None, reason_out=None):
     return dispatch._switchboard_exchange(
         entry.name,
         from_name,
@@ -1557,7 +1557,7 @@ def test_deliver_live_mcp_row_delivers_via_control_sock(
     from fno.agents import dispatch as dispatch_mod
     inject_calls: list = []
 
-    def _ok_inject(recipient: str, text: str) -> bool:
+    def _ok_inject(recipient: str, text: str, **_k) -> bool:
         inject_calls.append(recipient)
         return True
 
@@ -1602,7 +1602,7 @@ def test_deliver_live_mcp_channel_id_is_the_recipient_fallback(
     from fno.agents import dispatch as dispatch_mod
     inject_calls: list = []
 
-    def _ok_inject(recipient: str, text: str) -> bool:
+    def _ok_inject(recipient: str, text: str, **_k) -> bool:
         inject_calls.append(recipient)
         return True
 
@@ -1705,7 +1705,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
 
     inject_calls: list = []
 
-    def _ok_inject(recipient: str, text: str) -> bool:
+    def _ok_inject(recipient: str, text: str, **_k) -> bool:
         inject_calls.append({"recipient": recipient, "text": text})
         return True
 

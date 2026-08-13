@@ -30,7 +30,7 @@ def test_roster_exited_revives_in_place(monkeypatch):
     _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
-    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t: True)
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **_k: True)
     spawned = []
     monkeypatch.setattr(
         dispatch,
@@ -75,7 +75,7 @@ def test_respawn_ok_inject_miss_falls_through(monkeypatch):
     _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
-    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t: False)
+    monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **_k: False)
     monkeypatch.setattr(dispatch.time, "sleep", lambda s: None)  # no real waits
     spawned = []
     monkeypatch.setattr(

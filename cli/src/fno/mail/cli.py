@@ -1087,7 +1087,17 @@ def _print_thread_summary(h: ThreadHandle) -> None:
 # send/inbox/ack and inbox unread/ack verbs (the one messaging namespace).
 
 
-def _warn_deferred(target: str, *, project: bool = False) -> None:
+# Live-lane failures where the recipient WAS live and reachable but the inject
+# did not confirm (node x-1904). For these the durable preamble must NOT say
+# "is not live" -- the recipient was live, so that wording read as a liveness
+# lie and cost a wrong hypothesis on measured evidence. The receipt names the
+# real cause instead.
+_LIVE_LANE_FAILURE_REASONS = frozenset(
+    {"not-confirmed", "attach-failed", "io-error", "mux-send-failed", "unsafe-text"}
+)
+
+
+def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] = None) -> None:
     """Fail loud on a dead-letter miss: the envelope hit only the durable floor
     with no live inject path, so the sender learns delivery deferred instead of
     the message vanishing silently until the recipient's next SessionStart drain.
@@ -1102,6 +1112,13 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
     the injected turn past the confirm budget and receive it anyway, so a blind
     re-send is the documented double-delivery edge rather than a fix.
 
+    ``reason`` is the live lane's own cause (node x-1904). When it names a
+    live-lane failure (see :data:`_LIVE_LANE_FAILURE_REASONS`) the recipient WAS
+    live and reachable, so the preamble says so and names the cause rather than
+    claiming "is not live" -- a receipt naming the wrong cause is worse than one
+    naming none, because it sends the reader to diagnose a recipient that was
+    never the problem. A None/unreachable reason keeps the honest not-live line.
+
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     if project:
         msg = (
@@ -1110,6 +1127,21 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
             "and may never do so\n"
             "  this is NOT delivery. Address a live session instead: "
             "`fno agents top` to find one, then `fno mail send <short-id>`"
+        )
+    elif reason in _LIVE_LANE_FAILURE_REASONS:
+        msg = (
+            f"mail: live delivery to {target} not confirmed ({reason}); queued "
+            "durably as recovery only - the recipient was live and reachable, so "
+            "the message may still land past the confirm window or sit until the "
+            "recipient drains its inbox\n"
+            "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
+            f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
+            f"    fno agents resume {target}   # idle session -> live, then re-send\n"
+            f"    fno agents attach {target}   # drive it yourself (claude)\n"
+            # The rung that was missing. Every option above tries to reach the
+            # recipient; when none of them can, the sender was left holding a
+            # message that nagged every turn and could not be taken back.
+            "    fno mail withdraw <id>      # none of the above? retract it"
         )
     else:
         msg = (
@@ -1399,6 +1431,9 @@ def _name_lane_send(
     injected = False
     woken_as: Optional[str] = None
     lanes: list[str] = []
+    # node x-1904: the live lane's own cause when a claude inject misses, so the
+    # durable receipt names it (e.g. not-confirmed) instead of a bare live-miss.
+    live_reason: Optional[str] = None
 
     if resolved is None and token is not None:
         # The ladder below the discovery miss. Discovery is a liveness-gated
@@ -1428,7 +1463,10 @@ def _name_lane_send(
             if probe_agent == "codex":
                 injected = _mail_inject_codex(probe_target, wrapped)
             else:
-                injected = _mail_inject_claude(probe_target, wrapped)
+                _probe_reason: list = []
+                injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
+                if not injected:
+                    live_reason = _probe_reason[0] if _probe_reason else None
                 if not injected and probe_agent is None:
                     injected = _mail_inject_codex(probe_target, wrapped)
             if not injected:
@@ -1455,7 +1493,12 @@ def _name_lane_send(
         lanes.append("self-send")
     elif resolved is not None:
         if provider == "claude":
-            injected = _mail_inject_claude(resolved.session_id, wrapped)
+            _resolved_reason: list = []
+            injected = _mail_inject_claude(
+                resolved.session_id, wrapped, reason_out=_resolved_reason
+            )
+            if not injected:
+                live_reason = _resolved_reason[0] if _resolved_reason else None
         elif provider == "codex":
             injected = _mail_inject_codex(resolved.session_id, wrapped)
         if not injected:
@@ -1539,11 +1582,14 @@ def _name_lane_send(
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
-    _warn_deferred(recipient)
+    _warn_deferred(recipient, reason=live_reason)
     # Routing-reason disclosure (US10): name WHY this is durable so a delivery
     # bug is diagnosable from the sender's own terminal. A self-send can never
-    # inject itself; everything else here is a live miss.
-    reason = "self-send" if self_send else "live-miss"
+    # inject itself; everything else here is a live miss. When the live lane
+    # named its own cause (node x-1904), carry that token so a miss to a LIVE
+    # recipient reads as its real cause (e.g. not-confirmed), not a bare
+    # live-miss that reads as a dead recipient.
+    reason = "self-send" if self_send else (live_reason or "live-miss")
     hint = ""
     if not self_send and provider == "codex" and _codex_daemon_socket_absent():
         hint = (
@@ -1552,19 +1598,27 @@ def _name_lane_send(
             "(the socket must exist before the codex TUI starts)"
         )
     print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}")
-    # Attended live-miss lane: a send to an operator-attended session that missed
-    # live delivery is the stranded case (the human is not watching the drain, so
-    # nothing else surfaces it). Fires on live-miss only; worker rows (no origin)
-    # never escalate. Best-effort, same as the question lane: never affects the
-    # send's exit code or receipt.
-    if live_attempted and _recipient_is_attended(recipient):
+    # Live-miss escalation lane (node x-1904 widened this from attended-only). A
+    # miss to an operator-attended session is the stranded case: the human is not
+    # watching the drain, so nothing else surfaces it. A miss to a worker the
+    # resolver reports reachable is the same case from the other side: worker
+    # rows (origin=None) never matched the attended lane, so a live miss to a
+    # busy worker sat silently until a 30-min unclaimed hook surfaced it
+    # (msg-133d96). Both escalate through the existing _escalate_to_human ->
+    # _sent_unclaimed / `fno mail status` path; no new pending indicator. The
+    # change is which misses reach the send-time nudge, not a second mechanism.
+    # Best-effort, never affects the send's exit code or receipt.
+    attended = _recipient_is_attended(recipient)
+    resolved_reachable = resolved is not None and bool(getattr(resolved, "is_reachable", False))
+    if live_attempted and (attended or resolved_reachable):
+        esc_reason = "attended-miss" if attended else "reachable-miss"
         if (
             _escalate_to_human(
-                stamp_from(from_name), recipient, message, reason="attended-miss", msg_id=msg_id
+                stamp_from(from_name), recipient, message, reason=esc_reason, msg_id=msg_id
             )
             == "escalated"
         ):
-            print(f"escalated to human ({recipient}) [attended-miss]", file=sys.stderr)
+            print(f"escalated to human ({recipient}) [{esc_reason}]", file=sys.stderr)
 
 
 def _job_lane_send(
@@ -1799,7 +1853,7 @@ def _escalate_to_human(
         from fno.notify._impl import send_notification
 
         one_line = summary.split("\n", 1)[0][:120]
-        label = "missed you" if reason == "attended-miss" else "question"
+        label = "missed you" if reason in ("attended-miss", "reachable-miss") else "question"
         code, _err = send_notification(
             f"fno mail: {label} from {sender}",
             f"{one_line} - run `fno mail drain-self`",
@@ -2703,13 +2757,18 @@ def cmd_send(
             raise typer.Exit(code=2) from unavailable
         return
 
-    # AC3-UI: distinguish delivered vs queued on stdout.
+    # AC3-UI: distinguish delivered vs queued on stdout. A durable demotion
+    # carries the live lane's own reason (node x-1904), so a miss to a LIVE
+    # recipient names its cause (e.g. not-confirmed) instead of reading as a
+    # dead recipient. A receipt naming the wrong cause is worse than one naming
+    # none: it sends the reader to diagnose a recipient that was never the
+    # problem.
     if result.delivery == "hosted":
-        label = "delivered (hosted)"
+        print(f"{result.msg_id} delivered (hosted)")
     else:
-        _warn_deferred(name)
-        label = "queued (durable)"
-    print(f"{result.msg_id} {label}")
+        reason_tok = result.reason or "live-miss"
+        _warn_deferred(name, reason=result.reason)
+        print(f"{result.msg_id} queued (durable) [{reason_tok}]")
 
 
 @mail_app.command("unread")

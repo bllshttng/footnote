@@ -584,7 +584,7 @@ def test_us7b_working_socket_inject_preempts_pane_rung(
     TUI, so a working control.sock means the pane is never touched."""
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=True, pane_sends=True, expect_token=sid
     )
@@ -714,7 +714,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
     # Force the claude live-inject miss so the send writes the durable floor.
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
 
     sent = runner.invoke(
         app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
@@ -737,7 +737,7 @@ def test_us3_rostered_claude_hosted_short_circuits_durable(
 ):
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
 
     sent = runner.invoke(
         app, ["mail", "send", "9a063cd3", "hi", "--from-name", "web"]
@@ -758,7 +758,7 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
 ):
     recipient_sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=recipient_sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
 
     # The SENDER is a claude session with its own transcript carrying a model.
     from fno.agents import discover
@@ -823,7 +823,7 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     # And the send→drain round-trip works on the tmp bus, not the ambient one.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     sent = runner.invoke(
         app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )

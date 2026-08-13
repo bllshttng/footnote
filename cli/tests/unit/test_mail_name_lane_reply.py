@@ -101,7 +101,7 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     # AC2-HP: the reply is queryable on the bus by in_reply_to.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     # THIS session's identity: the reply must stamp its canonical handle as `from`,
     # not a project name, so the sender can reply back and drain-self finds it.
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
@@ -292,7 +292,7 @@ def test_ac2edge_two_replies_to_one_message_both_thread(
     # carrying the same in_reply_to.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
 
     msg = _seed_name_lane_inbound(
         to="claude-meeeeeee", from_="9a063cd3", body="ping"
@@ -373,7 +373,7 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     code can do, and a live peer treated as unreachable."""
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
 
     msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-9a063cd3", body="ping")
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
@@ -460,7 +460,7 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
     # message hits only the durable floor, so stderr carries the deferral line.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
@@ -477,7 +477,7 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     # The inject succeeds -> hosted delivery, no deferral warning on stderr.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: True)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
@@ -504,7 +504,7 @@ def _seeded_reply(runner, monkeypatch, tmp_path, argv_tail):
     # Force the DURABLE path. A hosted delivery deliberately writes no bus
     # record, so asserting the body on the bus after a successful inject reads
     # as "nothing was sent" when in fact everything worked.
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
     msg = _seed_name_lane_inbound(to="claude-meeeeeee", from_="9a063cd3", body="ping")
     return msg, runner.invoke(app, ["mail", "reply", "--to", msg] + argv_tail)

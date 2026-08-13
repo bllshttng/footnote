@@ -4595,6 +4595,11 @@ class DispatchSendResult:
 
     msg_id: str
     delivery: str  # "hosted" | "durable"
+    # The live lane's own cause when delivery demoted to durable (node x-1904):
+    # the claude control.sock vocabulary (not-confirmed / attach-failed / ...),
+    # a codex RPC reason, or a mux token. None when no live attempt ran (the
+    # recipient was asleep, so durable was written upfront with no live miss).
+    reason: Optional[str] = None
     # Set by the --to-project anycast path (resolve_to_project): the registry
     # name the project resolved to (when one live peer), and the destination
     # project (for the durable-queue and resolved-recipient stdout lines).
@@ -5489,7 +5494,13 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
         return False, "probe-unavailable"
 
 
-def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = None) -> bool:
+def _mail_inject_claude(
+    recipient: str,
+    text: str,
+    *,
+    sender: Optional[str] = None,
+    reason_out: Optional[list] = None,
+) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
 
@@ -5497,6 +5508,15 @@ def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = No
     transcript; any miss (binary absent, recipient not on the roster, not
     confirmed within the poll budget) returns False so the caller writes the
     durable fallback.
+
+    ``reason_out`` (node x-1904), when a non-empty list, receives the verb's own
+    reason token (not-confirmed / attach-failed / io-error / no-transcript /
+    not-injectable / unsafe-text) so a durable demotion receipt can name WHY the
+    live lane missed instead of a generic live-miss. It is a side-channel rather
+    than a second return value so the many callers and test mocks that read this
+    as a plain bool are unaffected. A missing binary, subprocess failure, or
+    unparseable stdout names that boundary too, so the receipt never silently
+    reverts to a bare live-miss at the Python edge.
 
     ``sender`` is the invoking session's mail handle, forwarded to the binary's
     audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
@@ -5506,8 +5526,13 @@ def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = No
 
     from fno import rust_binary
 
+    def _record(reason: str) -> None:
+        if reason_out is not None:
+            reason_out.append(reason)
+
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
+        _record("no-binary")
         return False
     argv = [str(binary), "mail-inject", "--session", recipient]
     if sender:
@@ -5521,10 +5546,15 @@ def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = No
             timeout=_MAIL_INJECT_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
+        _record("probe-unavailable")
         return False
     try:
-        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+        out = json.loads(proc.stdout.strip())
+        delivered = bool(out.get("delivered"))
+        _record(str(out.get("reason") or "unknown"))
+        return delivered
     except (ValueError, AttributeError):
+        _record("unreadable")
         return False
 
 
@@ -5855,12 +5885,17 @@ def _deliver_live(
     from_name: str,
     mail: "Optional[_MailCtx]" = None,
     sender_entry: "Optional[AgentEntry]" = None,
+    reason_out: "Optional[list]" = None,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node x-1f23).
 
-    Returns True on success, False when live delivery is not possible or fails
-    (not live-reachable, socket error, daemon unreachable, etc.).
+    ``reason_out`` (node x-1904), when a non-empty list, receives the live
+    lane's own cause (the claude control.sock vocabulary from
+    :func:`_mail_inject_claude`, the codex daemon RPC reason, or a mux token) so
+    a durable demotion receipt can name WHY the live lane missed instead of a
+    generic live-miss. A side-channel, not a second return value, so callers
+    and test mocks that read this as a plain bool are unaffected.
 
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
@@ -5893,8 +5928,15 @@ def _deliver_live(
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
     # PaneSend; worker/bg rows keep the legacy lanes below until G4.
+    def _record(reason: str) -> None:
+        if reason_out is not None:
+            reason_out.append(reason)
+
     if entry.mux:
-        return _mux_pane_send(entry, wrapped)
+        mux_delivered = _mux_pane_send(entry, wrapped)
+        if not mux_delivered:
+            _record("mux-send-failed")
+        return mux_delivered
 
     # Route key is the canonical harness, legacy provider as fallback (x-ec59):
     # an unknown harness with no inject lane (e.g. opencode) falls through to the
@@ -5916,11 +5958,12 @@ def _deliver_live(
         if result.get("delivered") is True:
             return True
         # delivered=false: print the demotion reason to stderr.
-        reason = result.get("reason", "unknown")
+        reason = str(result.get("reason") or "unknown")
         print(
             f"fno-agents deliver demoted: {reason}; message queued durable",
             file=sys.stderr,
         )
+        _record(reason)
         return False
 
     # Group 2 (Task 3.1): both-endpoints-live switchboard fast lane. When B is a
@@ -5983,8 +6026,9 @@ def _deliver_live(
     # fallback for an MCP-registered row whose short_id field was since cleared.
     recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
     if not recipient:
+        _record("no-recipient")
         return False
-    return _mail_inject_claude(recipient, wrapped)
+    return _mail_inject_claude(recipient, wrapped, reason_out=reason_out)
 
 
 def _registered_family1_state(entry: "AgentEntry") -> str:
@@ -6369,24 +6413,33 @@ def dispatch_send(
                     _write_durable()
                 delivery = "durable"
                 demotion_notice: Optional[str] = None
+                live_miss_reason: Optional[str] = None
 
-                if family1_attemptable and _deliver_live(
-                    existing,
-                    message,
-                    from_name,
-                    mail_ctx,
-                    sender_entry=sender_entry,
-                ):
-                    delivery = "hosted"
-                elif durable_recipient is None or family1_attemptable:
+                _live_delivered = False
+                _live_reason: list = []
+                if family1_attemptable:
+                    _live_delivered = _deliver_live(
+                        existing,
+                        message,
+                        from_name,
+                        mail_ctx,
+                        sender_entry=sender_entry,
+                        reason_out=_live_reason,
+                    )
+                    if _live_delivered:
+                        delivery = "hosted"
+                    else:
+                        live_miss_reason = _live_reason[0] if _live_reason else None
+                if not _live_delivered and (durable_recipient is None or family1_attemptable):
                     # Live-first fallback: an attemptable recipient whose live
                     # attempt missed, or a recipient with no durable address
                     # (which raises durable-address exit 12 inside _write_durable).
                     _write_durable()
 
                 if delivery == "durable" and family1_live:
+                    why = f" ({live_miss_reason})" if live_miss_reason else ""
                     demotion_notice = (
-                        f"live delivery failed for {name!r}; message queued durable ({msg_id})"
+                        f"live delivery failed for {name!r}{why}; message queued durable ({msg_id})"
                     )
 
                 _emit_ev(
@@ -6466,7 +6519,7 @@ def dispatch_send(
                 except (OSError, ValueError):
                     pass  # stderr already carries the non-retryable degradation
 
-            return DispatchSendResult(msg_id=msg_id, delivery=delivery)
+            return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
     except AgentLockTimeout as exc:
         events.emit(

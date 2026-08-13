@@ -48,7 +48,7 @@ def _no_real_mail_inject(monkeypatch):
     the live path is attempted (and fails) before the durable fallback."""
     from fno.agents import dispatch as dispatch_mod
 
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text: False)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda recipient, text, **_k: False)
     monkeypatch.setattr(dispatch_mod, "_registered_family1_state", lambda _entry: "working")
 
 
