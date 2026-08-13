@@ -3,9 +3,10 @@
 A ``mkdir``-style mutex is atomic to acquire but a killed holder leaves a dir
 byte-identical to one a live worker is inside. On 2026-07-13 that starved every
 ``events.jsonl`` append for 8 days and made one claim key permanently
-unrecoverable, so the lock carries an age signal: the dir's own mtime IS its
-acquisition timestamp, and a dir older than ``STALE_MUTEX_STEAL_S`` is a corpse
-any contender may rename-steal.
+unrecoverable, so the lock carries an age signal: the dir's own mtime is the
+time it last earned steal protection (its acquisition time, ordinarily - see
+``RESTORE_GRACE_S`` for the one case where it is backdated instead), and a dir
+older than ``STALE_MUTEX_STEAL_S`` is a corpse any contender may rename-steal.
 
 Stealing is unilateral, so a holder suspended past the threshold (laptop sleep,
 SIGSTOP) can resume inside its critical section while a stealer is also in one.
@@ -45,6 +46,18 @@ log = logging.getLogger(__name__)
 # hold time. Never do slow work (network, subprocess) inside one of these locks
 # or this threshold stops being a corpse detector.
 STALE_MUTEX_STEAL_S = 120
+
+# A dir a steal disturbed and then put back (owner-token mismatch: a live
+# lock, not the corpse we aged) is granted only this much fresh protection,
+# not a full STALE_MUTEX_STEAL_S. A disturbed holder is either mid-critical-
+# section and about to release within milliseconds, or it already released
+# into the gap while its dir was away and nobody is left to remove it - a
+# zombie. Handing either case the full threshold costs nothing for the first
+# and 120s of unreleasable, un-stealable stall for the second (x-474a:
+# reproduced live in test_AC3_FR_concurrent_stealers_both_land - the failure
+# is a zombie lock, not xdist load). Wire protocol with claims.rs; change
+# both in lockstep, see test_threshold_matches_the_rust_constant.
+RESTORE_GRACE_S = 0.5
 
 _HOST = socket.gethostname()
 
@@ -173,6 +186,18 @@ def steal_if_stale(lock_dir: Path) -> bool:
     if not _same_owner(reaped, before_token):
         # A live lock was swapped in between the age check and the rename: put
         # it back and lose the race properly.
+        #
+        # A restored dir was disturbed once already: its holder may have
+        # released into the gap, leaving a lock nobody will remove. A fresh
+        # mtime would shield that orphan for the full steal threshold, so
+        # hand back only an honest-hold grace window instead - a live holder
+        # releases inside it; an orphan becomes stealable in RESTORE_GRACE_S
+        # rather than STALE_MUTEX_STEAL_S (x-474a).
+        backdate = time.time() - (STALE_MUTEX_STEAL_S - RESTORE_GRACE_S)
+        try:
+            os.utime(reaped, (backdate, backdate))
+        except OSError:
+            pass  # best-effort; the restore below still proceeds either way
         try:
             os.rename(reaped, lock_dir)
         except OSError:

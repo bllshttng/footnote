@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -80,6 +81,12 @@ def test_threshold_matches_the_rust_constant():
     )
     assert m, "STALE_MUTEX_STEAL not found in claims.rs (renamed or reshaped?)"
     assert int(m.group(1)) == STALE_MUTEX_STEAL_S
+
+    g = re.search(
+        r"const RESTORE_GRACE: Duration = Duration::from_millis\((\d+)\)", src
+    )
+    assert g, "RESTORE_GRACE not found in claims.rs (renamed or reshaped?)"
+    assert int(g.group(1)) == round(mutex.RESTORE_GRACE_S * 1000)
 
 
 class TestStealHelper:
@@ -199,6 +206,12 @@ class TestStealHelper:
         (stamping its own owner token). Renaming then moves a LIVE lock using
         the corpse's age; the owner-token mismatch is what detects it and puts
         the live lock back.
+
+        The swap must clear the corpse's ``owner`` file with ``rmtree``, not
+        ``rmdir``: a bare ``rmdir`` on the non-empty aged dir raised ENOTEMPTY,
+        which ``steal_if_stale``'s own exception handler swallowed as "could
+        not steal" - this test passed for years without ever reaching the
+        owner-token mismatch it claims to cover (x-474a).
         """
         lock = tmp_path / "a.lock.d"
         lock.mkdir()
@@ -210,7 +223,7 @@ class TestStealHelper:
         def swap_then_rename(src, dst):
             # Stand in for the race: the corpse is replaced by a fresh holder
             # (with its own owner token) between our age read and our rename.
-            os.rmdir(src)
+            shutil.rmtree(src)
             os.mkdir(src)
             (src / "owner").write_text("fresh-token")
             return real_rename(src, dst)
@@ -219,6 +232,67 @@ class TestStealHelper:
 
         assert steal_if_stale(lock) is False, "stole a freshly acquired lock"
         assert lock.is_dir(), "the live lock was not restored"
+        assert (lock / "owner").read_text() == "fresh-token", (
+            "the swap never reached the owner-token mismatch path"
+        )
+
+    def test_AC2_HP_restored_dir_earns_a_grace_window_not_a_fresh_reprieve(
+        self, tmp_path, monkeypatch
+    ):
+        """A restored dir is a zombie unless it is backdated on the way back.
+
+        The put-back preserves whatever mtime the disturbed dir already had -
+        fresh, for a live lock. If its real holder released into the gap while
+        the dir was away (the interleaving this reconstructs), nobody is left
+        to remove it, and a fresh mtime would shield that orphan for the full
+        ``STALE_MUTEX_STEAL_S`` instead of the short ``RESTORE_GRACE_S`` window
+        a disturbed-but-still-live holder actually needs (x-474a).
+        """
+        lock = tmp_path / "a.lock.d"
+        lock.mkdir()
+        (lock / "owner").write_text("corpse-token")
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+
+        real_rename = os.rename
+        swapped = False
+
+        def swap_once_then_rename(src, dst):
+            nonlocal swapped
+            if not swapped:
+                # Fire only on the steal's own rename: the holder released and
+                # a fresh one acquired between our age read and this call. A
+                # second interception here would also swap the RESTORE's own
+                # rename, which is a different race this test isn't reconstructing.
+                swapped = True
+                shutil.rmtree(src)
+                os.mkdir(src)
+                (src / "owner").write_text("fresh-token")
+            return real_rename(src, dst)
+
+        monkeypatch.setattr(mutex.os, "rename", swap_once_then_rename)
+
+        assert steal_if_stale(lock) is False, "stole a freshly acquired lock"
+        assert lock.is_dir(), "the live lock was not restored"
+
+        restored_mtime = lock.stat().st_mtime
+        expected = time.time() - (STALE_MUTEX_STEAL_S - mutex.RESTORE_GRACE_S)
+        assert abs(restored_mtime - expected) < 2.0, (
+            f"restored dir kept a fresh mtime instead of a grace-window backdate: "
+            f"{restored_mtime} vs expected ~{expected}"
+        )
+
+        monkeypatch.setattr(mutex.os, "rename", real_rename)
+
+        monkeypatch.setattr(mutex, "time", _FrozenClock(lock, STALE_MUTEX_STEAL_S - 1))
+        assert steal_if_stale(lock) is False, "stolen before its grace window elapsed"
+        assert lock.is_dir()
+
+        monkeypatch.setattr(mutex, "time", _FrozenClock(lock, STALE_MUTEX_STEAL_S + 1))
+        assert steal_if_stale(lock) is True, "not stealable once its grace window elapsed"
+
+    def test_AC7_EDGE_grace_window_never_exceeds_the_steal_threshold(self):
+        """A grace >= the threshold backdates into the future: permanently un-stealable."""
+        assert 0 < mutex.RESTORE_GRACE_S < STALE_MUTEX_STEAL_S
 
     def test_AC3_EDGE_identity_survives_inode_reuse(self, tmp_path):
         """Identity is by owner token, independent of inode.
@@ -287,10 +361,14 @@ class TestEventsMutex:
             gate.wait()
             # The budget is incidental scaffolding, not an assertion: the test
             # checks that exactly one rename wins and all four events land as
-            # whole lines, nothing about latency. Under pytest-xdist load a 10s
-            # budget blows past on a busy host, so raise it rather than pin the
-            # test to a single worker.
-            append_event(_event(), events_path=events, lock_timeout_seconds=60)
+            # whole lines, nothing about latency. This was 60s on the theory
+            # that pytest-xdist load needed the headroom; it did not - the
+            # failure mode is a zombie lock dir pinned at STALE_MUTEX_STEAL_S
+            # (120s) by a mis-steal that restores with a fresh mtime, so any
+            # budget under 120s fails 100% of the time once one forms and any
+            # budget above it always "passes" by waiting out the whole stall.
+            # RESTORE_GRACE_S (0.5s) fixes the zombie; 5s is 10x that grace.
+            append_event(_event(), events_path=events, lock_timeout_seconds=5)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for fut in [pool.submit(emit) for _ in range(workers)]:
