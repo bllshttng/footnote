@@ -49,11 +49,11 @@ def test_consolidate_routes_to_zai_anthropic_endpoint() -> None:
     assert route["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert route["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
     # opus/sonnet/default stay on the role model; the background haiku tier
-    # drops to the provider's cheaper glm-4.5-air (still the same zai provider).
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
+    # drops to the provider's cheaper glm-4.7 (still the same zai provider).
+    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
 
 
 @pytest.mark.parametrize(
@@ -62,7 +62,7 @@ def test_consolidate_routes_to_zai_anthropic_endpoint() -> None:
 def test_all_default_routed_roles_route_when_keyed(role: str) -> None:
     route = mr.resolve_route(role, settings=_settings(), env={"ZAI_API_KEY": "k"})
     assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
 
 
 def test_post_merge_is_routable_not_protected() -> None:
@@ -163,7 +163,7 @@ def test_extra_env_is_merged_and_can_override_a_tier() -> None:
         settings=_settings(
             extra_env={
                 "API_TIMEOUT_MS": "3000000",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7-flash",
             }
         ),
         env={"ZAI_API_KEY": "k"},
@@ -171,8 +171,8 @@ def test_extra_env_is_merged_and_can_override_a_tier() -> None:
     assert route is not None
     assert route["API_TIMEOUT_MS"] == "3000000"
     # extra_env is merged last, so it wins over the per-role model for that tier.
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7-flash"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
 
 
 # ---------------------------------------------------------------------------
@@ -534,9 +534,9 @@ def test_config_defaults_match_module_constants() -> None:
     # module fallback constants.
     assert mr._DEFAULT_PROVIDERS["zai"]["base_url"] == mr.DEFAULT_ZAI_BASE_URL
     assert mr.DEFAULT_ZAI_BASE_URL == "https://api.z.ai/api/anthropic"
-    assert mr.DEFAULT_SECONDARY_MODEL == "glm-5.2"
+    assert mr.DEFAULT_SECONDARY_MODEL == "glm-5.3"
     assert mr._DEFAULT_PROVIDERS["zai"]["haiku_model"] == mr.DEFAULT_ZAI_HAIKU_MODEL
-    assert mr.DEFAULT_ZAI_HAIKU_MODEL == "glm-4.5-air"
+    assert mr.DEFAULT_ZAI_HAIKU_MODEL == "glm-4.7"
     assert mr._DEFAULT_PROVIDERS["zai"]["api_key_file"] == mr.DEFAULT_API_KEY_FILE
     assert mr.DEFAULT_API_KEY_FILE == "~/.fno/.env"
 
@@ -554,7 +554,7 @@ def test_builtin_zai_key_falls_back_to_env_file(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Item 1: per-tier routed model (background haiku -> cheaper glm-4.5-air)
+# Item 1: per-tier routed model (background haiku -> cheaper glm-4.7)
 # ---------------------------------------------------------------------------
 
 
@@ -563,10 +563,10 @@ def test_zai_haiku_tier_defaults_to_cheaper_model() -> None:
         "consolidate", settings=_settings(), env={"ZAI_API_KEY": "k"}
     )
     assert route is not None
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2"
-    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
 
 
 def test_per_provider_haiku_override_wins_over_builtin_default() -> None:
@@ -578,7 +578,7 @@ def test_per_provider_haiku_override_wins_over_builtin_default() -> None:
     assert route is not None
     assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-tiny"
     # opus/sonnet/default unaffected by the haiku override.
-    assert route["ANTHROPIC_MODEL"] == "glm-5.2"
+    assert route["ANTHROPIC_MODEL"] == "glm-5.3"
 
 
 def test_provider_without_haiku_override_keeps_role_model_on_haiku() -> None:
@@ -730,4 +730,4 @@ def test_build_lane_routes_when_configured_with_slash() -> None:
 def test_route_table_target_uses_slash() -> None:
     rows = mr.build_route_table(settings=_settings(), env={"ZAI_API_KEY": "k"})
     by_role = {r["role"]: r for r in rows}
-    assert by_role["coordinate"]["provider_model"] == "zai/glm-5.2"
+    assert by_role["coordinate"]["provider_model"] == "zai/glm-5.3"

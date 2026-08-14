@@ -2611,7 +2611,7 @@ class ModelProvider(BaseModel):
     # Cheaper model for the background (haiku) tier so judgment-light background
     # traffic runs cheap while opus/sonnet stay on the role model. Unset (None)
     # keeps the role model on every tier. The built-in zai provider defaults it
-    # to glm-4.5-air; set it here to override or to give another provider a
+    # to glm-4.7; set it here to override or to give another provider a
     # cheap background model.
     haiku_model: Optional[str] = None
     # Codex/OpenAI-lane only (protocol == "openai"): the codex wire protocol for

@@ -47,7 +47,7 @@ def test_route_table_shows_builtins_config_build_and_protected() -> None:
     by_role = {r["role"]: r for r in rows}
 
     for r in ("coordinate", "tidy", "orient", "consolidate", "post-merge"):
-        assert by_role[r]["provider_model"] == "zai/glm-5.2"
+        assert by_role[r]["provider_model"] == "zai/glm-5.3"
     assert by_role["codex-verify"]["provider_model"] == "zai-openai/glm-4.6"
     assert by_role["codex-verify"]["protocol"] == "openai"
     assert by_role["build"]["provider_model"] == "unconfigured"

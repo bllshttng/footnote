@@ -17,10 +17,10 @@ Routing stamps these env vars into the worker at spawn time:
 ```
 ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic   # the provider's Anthropic endpoint
 ANTHROPIC_AUTH_TOKEN=<provider key>                  # Bearer auth
-ANTHROPIC_MODEL=glm-5.2                              # the routed model
-ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2                 # all tiers set to the routed
-ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2               #   model so the WHOLE worker
-ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.2                #   (incl. background haiku) routes
+ANTHROPIC_MODEL=glm-5.3                              # the routed model
+ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3                 # all tiers set to the routed
+ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3               #   model so the WHOLE worker
+ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3                #   (incl. background haiku) routes
 ```
 
 Claude Code internally requests opus/sonnet/haiku tiers (background tasks use haiku). Setting all four model vars to the routed model sends the entire worker to the secondary provider, so no Anthropic usage is recorded. Switching `base_url` per spawn is safe because each worker is its own process; the base_url is never switched mid-session. A stale `ANTHROPIC_API_KEY` inherited from the parent env is cleared on a routed spawn so the provider token wins.
@@ -64,7 +64,7 @@ The guard covers two role *names*. It does not cover the two things a reader rea
 |-----|---------|---------|
 | `enabled` | `true` | Master on/off. |
 | `providers` | _(built-in `zai`)_ | Name → `{protocol, base_url, api_key_env, api_key_file}`. Add `deepseek` etc.; override `zai` per field. |
-| `roles` | _(built-in → `zai/glm-5.2`)_ | Role → `"provider/model"` (e.g. `tidy: "zai/glm-4.7"`; legacy comma `zai,glm-4.7` also accepted). |
+| `roles` | _(built-in → `zai/glm-5.3`)_ | Role → `"provider/model"` (e.g. `tidy: "zai/glm-4.7"`; legacy comma `zai,glm-4.7` also accepted). |
 | `extra_env` | `{}` | Extra env merged into routed spawns (e.g. `API_TIMEOUT_MS`, a cheaper per-tier model). |
 
 A worked example:
@@ -83,7 +83,7 @@ config:
       coordinate: "zai/glm-4.7"
       tidy: "zai/glm-4.7"
       orient: "zai/glm-4.7"
-      consolidate: "zai/glm-5.2"
+      consolidate: "zai/glm-5.3"
     extra_env:
       API_TIMEOUT_MS: "3000000"
 ```
@@ -97,10 +97,10 @@ The auxiliary roles above are coordination work. `build` extends the same mechan
 `build` is **opt-in by config presence**: it ships unconfigured and routes nothing (fail-safe `None`, byte-identical to today). Writing the roles line IS the consent:
 
 ```bash
-fno route set build zai/glm-5.2[1m]        # atomic config write; effect: next spawn
+fno route set build zai/glm-5.3[1m]        # atomic config write; effect: next spawn
 ```
 
-`dispatch-node.sh` passes `--role build` on every worker spawn unconditionally; the fail-safe makes that a no-op until the lane is configured, so there is no conditional plumbing. Each dispatch receipt carries a `route=` token (`route=zai/glm-5.2` when the lane resolved, `route=primary` when it fell back), so a build that silently reverted to Anthropic - a keyless lane - is visible at the call site, not just in a buried stderr notice.
+`dispatch-node.sh` passes `--role build` on every worker spawn unconditionally; the fail-safe makes that a no-op until the lane is configured, so there is no conditional plumbing. Each dispatch receipt carries a `route=` token (`route=zai/glm-5.3` when the lane resolved, `route=primary` when it fell back), so a build that silently reverted to Anthropic - a keyless lane - is visible at the call site, not just in a buried stderr notice.
 
 For a one-off "just this node on GLM" without flipping the lane default, `dispatch-node.sh <node> --route provider/model` (or `fno agents spawn --route ...`) forwards an explicit route. Unlike the role lane, an explicit `--route` **fails closed**: an unknown provider, non-anthropic protocol, or missing key refuses the spawn (you asked for GLM by name; billing Anthropic instead would violate intent). `--route` wins over a configured `build` lane on the same spawn.
 
@@ -111,7 +111,7 @@ For a one-off "just this node on GLM" without flipping the lane default, `dispat
 `pr-create` is **opt-in by config presence**, exactly like `build`: it ships unconfigured and routes nothing (fail-safe `None`, so the worker runs on the invoking harness's primary model - no model literal in the skill). Writing the roles line IS the consent:
 
 ```bash
-fno route set pr-create zai/glm-4.5-air      # atomic config write; effect: next /pr create
+fno route set pr-create zai/glm-4.7      # atomic config write; effect: next /pr create
 ```
 
 The `/pr create` dispatch declares `--role pr-create` (or omits any `model:` override) at the spawn boundary, so the fail-safe makes the role a no-op until the lane is configured. The worker keeps its fresh, minimal context - branch, base, a one-line summary, and merge posture only - regardless of which model the role resolved to, because the small-context property is what makes the worker cheap, not the tier name.
@@ -131,7 +131,7 @@ config:
       blueprint:
         model: opus               # the think/blueprint stage on the primary model
       target:
-        route: "zai/glm-5.2[1m]"  # the delivery stage on the routed vendor
+        route: "zai/glm-5.3[1m]"  # the delivery stage on the routed vendor
         effort: high
 ```
 
@@ -158,14 +158,14 @@ A routed GLM worker wants a couple of env tweaks, carried by `extra_env` (config
 config:
   model_routing:
     roles:
-      build: "zai/glm-5.2[1m]"          # [1m] = 1M-context; auto-injects the 800k auto-compact backstop
+      build: "zai/glm-5.3[1m]"          # [1m] = 1M-context; auto-injects the 800k auto-compact backstop
     extra_env:
       API_TIMEOUT_MS: "3000000"
 ```
 
 A `[1m]` worker auto-injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000` as the compaction backstop. The `[1m]` variant already selects the 1M context; this var is the compaction threshold (how full the window gets before compaction), capped at the model window, so a value of `1000000` is a no-op (no compaction before the ceiling). The king handoff nudge fires at ~40%; 800000 (~80%) is the backstop above it. Override it via `extra_env` only to tune the backstop - setting `1000000` re-removes it.
 
-The built-in `zai` provider already routes the background (haiku) tier to the cheaper `glm-4.5-air`, so opus/sonnet run `glm-5.2` while judgment-light background traffic stays cheap on the same provider.
+The built-in `zai` provider already routes the background (haiku) tier to the cheaper `glm-4.7`, so opus/sonnet run `glm-5.3` while judgment-light background traffic stays cheap on the same provider.
 
 **`/effort` mapping.** GLM collapses `low`/`medium`/`high` to a single high setting; only `xhigh`/`max` reach its maximum reasoning. Pin a routed build lane to `high` or above (`--effort high`); a lower effort buys nothing on GLM.
 
@@ -186,5 +186,5 @@ config:
       code_reviewer:
         harness: claude
         provider: zai
-        model: glm-5.2
+        model: glm-5.3
 ```
