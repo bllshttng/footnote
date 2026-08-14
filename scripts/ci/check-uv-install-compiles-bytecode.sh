@@ -50,6 +50,13 @@ RE_PY = re.compile(r'"uv"\s*,\s*"tool"\s*,\s*"install"')
 # token ("$FNO_UV", `uv`) right before the command words.
 RE_CMDPOS = re.compile(r'^\s*(?:if\s+!?\s*)?(?:"[^"]*"|uv)\s+tool\s+install')
 SKIP_SUFFIXES = {".md", ".lock", ".json", ".toml"}
+# Self-reference: this checker's own --self-test fixtures quote unflagged
+# invocations on purpose, and the baseline's entries ARE the quoted lines.
+# Scanning either would flag the gate against itself.
+SKIP_FILES = {
+    "scripts/ci/check-uv-install-compiles-bytecode.sh",
+    "scripts/ci/uv-install-bytecode-baseline.txt",
+}
 WINDOW_MAX = 10
 
 
@@ -84,7 +91,7 @@ def collect(root_dir, file_list):
     out = []
     for rel in file_list:
         p = root_dir / rel
-        if p.suffix in SKIP_SUFFIXES or not p.is_file():
+        if p.suffix in SKIP_SUFFIXES or rel in SKIP_FILES or not p.is_file():
             continue
         try:
             lines = p.read_text(encoding="utf-8").splitlines()

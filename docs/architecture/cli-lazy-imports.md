@@ -218,12 +218,19 @@ lands in a quiet window. This is the mechanism behind node x-46b5, measured at
 
 Every provisioning site therefore passes `--compile-bytecode`: the venv ships
 its own bytecode up front, a matching `.pyc` gives no process a reason to
-write, and the write side of the race is gone for every caller at once
+write, and the steady-state writer is gone for every caller at once
 (`PYTHONDONTWRITEBYTECODE` was rejected as the fix because it protects only
 the processes that remember to set it). `scripts/ci/check-uv-install-compiles-bytecode.sh`
 keeps this true: it fails CI on any `uv tool install` run site without the
 flag, and its `--self-test` proves the search matches a real invocation rather
-than certifying an empty result.
+than certifying an empty result. One residual window remains and is measured,
+not assumed: during the removal phase of a `--force` install, an import that
+lands after uv has deleted a module's `.pyc` but before its `.py` recompiles
+and rewrites that `.pyc` behind the walk, so ENOTEMPTY is still reachable.
+Under five concurrent import loops it fired 3 of 6 installs; under the
+daemon's own shape (one CLI loop) it fired 0 of 10, with the shipped count
+stable across every run. Precompile shrinks the race from continuous writes
+to that sub-second removal window; it does not delete the OS behavior.
 
 ## Contracts (do not break)
 
