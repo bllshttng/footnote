@@ -68,18 +68,12 @@ def read_row(key: str) -> Optional[dict]:
         return None
 
 
-def _write_row(key: str, row: dict) -> None:
-    p = cache_dir() / (key + ".json")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # One lock per key so N racing pollers produce one network read, not N.
-    with open(p.with_suffix(".lock"), "a+") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(row), encoding="utf-8")
-            os.replace(tmp, p)
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+def _write_row_locked(p: Path, row: dict) -> None:
+    # Caller holds the per-key flock around read + write (flock is per-fd, so
+    # re-acquiring through a helper here would self-deadlock - write inline).
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(row), encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def _serve(row: dict, *, stale: bool) -> int:
@@ -115,66 +109,93 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         return run_status(pr, cwd)
     key = f"{slug.replace('/', '--')}-{pr}"
 
+    def _servable(row: Optional[dict], at: float) -> int:
+        """Fast-path serve: fresh row, else a row inside its backoff window.
+        -1 when the caller must do (or wait on) a live read."""
+        if not row:
+            return -1
+        if at - float(row.get("ts") or 0) < _ttl():
+            return _serve(row, stale=False)
+        if float(row.get("backoff_until") or 0) > at:
+            return _serve(row, stale=True)
+        return -1
+
     now = time.time()
-    row = read_row(key)
-    if row:
-        fresh = now - float(row.get("ts") or 0) < _ttl()
-        if fresh:
-            code = _serve(row, stale=False)
-            if code >= 0:
-                return code
-        elif float(row.get("backoff_until") or 0) > now:
-            code = _serve(row, stale=True)
-            if code >= 0:
-                return code
-
-    # Miss: run the verb once, capturing the one JSON line it prints so the
-    # row holds exactly what a caller saw (verdict, checks, coverage - all of
-    # it; partial caching would let a hit serve a mixed row).
-    buf = io.StringIO()
-    real_stdout = sys.stdout
-    sys.stdout = buf
-    try:
-        code = run_status(pr, cwd)
-    finally:
-        sys.stdout = real_stdout
-    line = buf.getvalue()
-    sys.stdout.write(line)
-    try:
-        output = json.loads(line) if line.strip() else None
-    except json.JSONDecodeError:
-        output = None
-
-    reason = str((output or {}).get("reason", "")).lower()
-    if code == 4 and output is not None and "secondary rate limit" in reason:
-        fails = int((row or {}).get("fail_count") or 0) + 1
-        backoff = min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
-        # Keep the last GOOD verdict for stale serving - its exit code too, so
-        # the served JSON and the process exit never disagree; with none, keep
-        # the error row itself (loud: verdict error, settled false).
-        had_prior = (row or {}).get("exit") not in (4, None) and (row or {}).get("output")
-        _write_row(
-            key,
-            {
-                # ts stays the LAST SUCCESSFUL read's stamp: a failed read must
-                # not make an old verdict look freshly verified, or the stale
-                # marker below never fires inside the backoff window.
-                "ts": (row or {}).get("ts") if had_prior else now,
-                "exit": (row or {}).get("exit") if had_prior else 4,
-                "output": (row or {}).get("output") if had_prior else output,
-                "fail_count": fails,
-                "backoff_until": now + backoff,
-            },
-        )
+    code = _servable(read_row(key), now)
+    if code >= 0:
         return code
 
-    if code != 4 and output is not None:
-        # Success only: the row is replaced wholesale - a new head sha never
-        # merges into an old verdict - and any backoff clears. A TRANSIENT
-        # failure writes nothing, so the next caller re-reads immediately
-        # instead of replaying an error from disk.
-        _write_row(
-            key,
-            {"ts": now, "exit": code, "output": output, "fail_count": 0, "backoff_until": 0},
-        )
-    return code
+    # Miss: run the verb ONCE under the per-key lock. Synchronized pollers
+    # (the watcher fleet sleeps 60s in near-lockstep, TTL is 60s, so they all
+    # miss together) queue here: the winner refreshes while the losers wait,
+    # then re-read the now-fresh row and serve it - the collapse the module
+    # exists to deliver. Without the lock every one of them would run the
+    # full read (REST + the GraphQL review reads inside run_status).
+    lock_path = cache_dir() / (key + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    p = cache_dir() / (key + ".json")
+    with open(lock_path, "a+") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            row = read_row(key)
+            code = _servable(row, time.time())
+            if code >= 0:
+                return code
+
+            # Capture the one JSON line the verb prints so the row holds
+            # exactly what a caller saw (verdict, checks, coverage - all of
+            # it; partial caching would let a hit serve a mixed row).
+            buf = io.StringIO()
+            real_stdout = sys.stdout
+            sys.stdout = buf
+            try:
+                code = run_status(pr, cwd)
+            finally:
+                sys.stdout = real_stdout
+            line = buf.getvalue()
+            sys.stdout.write(line)
+            try:
+                output = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                output = None
+
+            now = time.time()
+            reason = str((output or {}).get("reason", "")).lower()
+            if code == 4 and output is not None and "secondary rate limit" in reason:
+                fails = int((row or {}).get("fail_count") or 0) + 1
+                backoff = min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                # Keep the last GOOD verdict for stale serving - its exit code
+                # too, so the served JSON and the process exit never disagree;
+                # with none, keep the error row itself (loud: verdict error).
+                had_prior = (
+                    (row or {}).get("exit") not in (4, None) and (row or {}).get("output")
+                )
+                _write_row_locked(
+                    p,
+                    {
+                        # ts stays the LAST SUCCESSFUL read's stamp: a failed
+                        # read must not make an old verdict look freshly
+                        # verified, or the stale marker never fires inside
+                        # the backoff window.
+                        "ts": (row or {}).get("ts") if had_prior else now,
+                        "exit": (row or {}).get("exit") if had_prior else 4,
+                        "output": (row or {}).get("output") if had_prior else output,
+                        "fail_count": fails,
+                        "backoff_until": now + backoff,
+                    },
+                )
+                return code
+
+            if code != 4 and output is not None:
+                # Success only: the row is replaced wholesale - a new head sha
+                # never merges into an old verdict - and any backoff clears. A
+                # TRANSIENT failure writes nothing, so the next caller re-reads
+                # immediately instead of replaying an error from disk.
+                _write_row_locked(
+                    p,
+                    {"ts": now, "exit": code, "output": output,
+                     "fail_count": 0, "backoff_until": 0},
+                )
+            return code
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)

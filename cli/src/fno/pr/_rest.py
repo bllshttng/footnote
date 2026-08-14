@@ -104,15 +104,29 @@ def fetch_pr_rest(
         return None, "gh api pulls/<n> carried no head sha"
 
     rollup: list[dict[str, Any]] = []
-    checks = runner(
-        ["gh", "api", f"repos/{slug}/commits/{sha}/check-runs?per_page=100"], cwd=cwd
-    )
-    if not checks.ok:
-        return None, _rest_reason(checks)
-    try:
-        check_runs = json.loads(checks.stdout).get("check_runs") or []
-    except json.JSONDecodeError:
-        return None, "gh api check-runs returned output that is not JSON"
+    # Paginate past the first 100: a commit with more check runs than one page
+    # would silently drop the tail, and a failing check on page 2 then reads
+    # as green. total_count (the endpoint's own count) bounds the loop; a
+    # runner that omits it (fakes, older payloads) stops after page 1.
+    page = 1
+    check_runs: list[dict[str, Any]] = []
+    while True:
+        checks = runner(
+            ["gh", "api",
+             f"repos/{slug}/commits/{sha}/check-runs?per_page=100&page={page}"],
+            cwd=cwd,
+        )
+        if not checks.ok:
+            return None, _rest_reason(checks)
+        try:
+            payload = json.loads(checks.stdout)
+            check_runs.extend(payload.get("check_runs") or [])
+            total = payload.get("total_count")
+        except json.JSONDecodeError:
+            return None, "gh api check-runs returned output that is not JSON"
+        if not isinstance(total, int) or len(check_runs) >= total or not page < 10:
+            break
+        page += 1
     for cr in check_runs:
         # `_classify`/`_entry_ts` uppercase and alt-chain internally, so the
         # lowercase REST enum values and the started_at mapping need no case
@@ -129,8 +143,13 @@ def fetch_pr_rest(
     # Legacy StatusContexts ride the combined-status endpoint. Failure here is
     # tolerated the same way an empty rollup section was on GraphQL: no
     # contexts reported rather than a loud error for a check-set the repo does
-    # not use. CheckRuns above stay authoritative for CI settledness.
+    # not use. CheckRuns above stay authoritative for CI settledness. The one
+    # exception: zero CheckRuns AND a failed statuses read is NOT "no checks"
+    # - a legacy-status-only repo would read verdict `unknown` while its real
+    # verdict went unread, so that combination stays loud.
     statuses = runner(["gh", "api", f"repos/{slug}/commits/{sha}/status"], cwd=cwd)
+    if not statuses.ok and not check_runs:
+        return None, _rest_reason(statuses)
     if statuses.ok:
         try:
             for sc in json.loads(statuses.stdout).get("statuses") or []:

@@ -5521,7 +5521,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 serde_json::json!({
                     "session_id": session_id,
                     "decision": "block",
-                    "intent": "none",
+                    "intent": match &intent {
+                        Intent::Promise => "promise",
+                        Intent::Aborted { .. } => "aborted",
+                        Intent::Watching { .. } => "watching",
+                        Intent::None => "none",
+                    },
                     "intent_source": intent_source,
                     "pr_state": "unknown",
                     "ci": "unknown",
@@ -6860,7 +6865,7 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // instead of reading as "nothing pending".
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api repos/$r/pulls/{pr_number}/reviews --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api repos/$r/pulls/{pr_number}/reviews --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m)"
+            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api 'repos/$r/pulls/{pr_number}/reviews?per_page=100' --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api 'repos/$r/pulls/{pr_number}/reviews?per_page=100' --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m; per_page=100 because gh api fetches ONE page - at the default 30 the count saturates and a 31st review never wakes it)"
         )
     } else {
         format!(

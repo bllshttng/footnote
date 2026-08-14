@@ -96,12 +96,16 @@ def list_providers(
         # slot, falling back to routing-active otherwise.
         return is_effective_active(record, config)
 
+    # One quota read for the whole listing: the per-record usage age and the
+    # DISARMED footer below all read the same config, never a parse per row.
+    quota = load_quota_config()
+
     if json_output:
         import json as _json
 
         rows = []
         for record in config.records:
-            usage_reading = _usage_age(record.id)
+            usage_reading = _usage_age(record.id, ttl=quota.probe_ttl_seconds)
             rows.append({
                 "id": record.id,
                 "name": record.name,
@@ -136,10 +140,10 @@ def list_providers(
         )
         if record.auth == "managed":
             line += f"  snapshot={managed.snapshot_age_label(record.id)}"
-        line += f"  {_usage_age_col(record.id)}"
+        line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
         typer.echo(line)
 
-    if not load_quota_config().defer_dispatch:
+    if not quota.defer_dispatch:
         typer.echo(
             "\nrotation is DISARMED: accounts.quota.defer_dispatch = false, so "
             "nothing probes and headroom stays unknown. Arm it in "
@@ -172,14 +176,17 @@ class _UsageAge(NamedTuple):
     stale: bool
 
 
-def _usage_age(record_id: str) -> _UsageAge:
+def _usage_age(record_id: str, *, ttl: Optional[int] = None) -> _UsageAge:
     """Read the cached usage snapshot's age regardless of TTL (a stale
     snapshot must still report its age, never vanish - `read_usage`'s
-    default TTL treats stale as absent, so bypass it with a large one)."""
+    default TTL treats stale as absent, so bypass it with a large one).
+    ``ttl`` is passed by callers that already read the quota config; the
+    per-record default re-reads it so standalone calls stay correct."""
     try:
         from fno.adapters.providers.runtime_state import read_usage
 
-        ttl = load_quota_config().probe_ttl_seconds
+        if ttl is None:
+            ttl = load_quota_config().probe_ttl_seconds
         snap = read_usage(record_id, ttl_seconds=float("inf"))
         if snap is None:
             return _UsageAge(age_seconds=None, ttl_seconds=ttl, stale=False)
@@ -189,9 +196,9 @@ def _usage_age(record_id: str) -> _UsageAge:
         return _UsageAge(age_seconds=None, ttl_seconds=300, stale=False)
 
 
-def _usage_age_col(record_id: str) -> str:
+def _usage_age_col(record_id: str, *, ttl: Optional[int] = None) -> str:
     """The `usage=<age>` column text: `never`, `<age>`, or `<age> (STALE, ttl=<ttl>)`."""
-    reading = _usage_age(record_id)
+    reading = _usage_age(record_id, ttl=ttl)
     if reading.age_seconds is None:
         return "usage=never"
     label = managed.age_label_from_seconds(reading.age_seconds)
