@@ -98,6 +98,14 @@ def _compact_drops(dropped: list[dict[str, Any]]) -> dict[str, dict[str, list[An
     return {reason: _compact_keys(keys) for reason, keys in sorted(by_reason.items())}
 
 
+def _drop_cached_terminal(
+    state: dict[str, dict], dropped: list[dict[str, Any]], key: str, current: str
+) -> None:
+    """Receipt a terminal removal only when this tick actually removed a row."""
+    if state.pop(key, None) is not None:
+        dropped.append({"key": key, "reason": current.lower(), "state": current})
+
+
 def _receipt_detail_items(receipt: dict[str, Any]) -> list[dict[str, str]]:
     """Flatten an oversized receipt into exact, independently chunkable facts."""
     items: list[dict[str, str]] = []
@@ -556,9 +564,8 @@ def _run_tick(
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
             if current in ("MERGED", "CLOSED"):
-                state.pop(key, None)
+                _drop_cached_terminal(state, dropped, key, current)
                 batch_terminal.add(key)
-                dropped.append({"key": key, "reason": current.lower(), "state": current})
             else:
                 entry["last_seen_state"] = current
                 if current == "UNKNOWN":
@@ -647,10 +654,7 @@ def _run_tick(
                 if entry is not None:
                     entry["last_seen_state"] = obs.state
                     if obs.state in ("MERGED", "CLOSED"):
-                        state.pop(key, None)
-                        dropped.append(
-                            {"key": key, "reason": obs.state.lower(), "state": obs.state}
-                        )
+                        _drop_cached_terminal(state, dropped, key, obs.state)
                 continue
 
             # First-seen baseline: record state without firing
@@ -685,8 +689,7 @@ def _run_tick(
             if entry.get("parked"):
                 entry["last_seen_state"] = obs.state
                 if obs.state in ("MERGED", "CLOSED"):
-                    state.pop(key, None)
-                    dropped.append({"key": key, "reason": obs.state.lower(), "state": obs.state})
+                    _drop_cached_terminal(state, dropped, key, obs.state)
                 continue
 
             # Compute merge-readiness only when needed
@@ -745,8 +748,7 @@ def _run_tick(
                             delivery_state.pop(key, None)
                             emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
-                        state.pop(key, None)
-                        dropped.append({"key": key, "reason": "merged", "state": "MERGED"})
+                        _drop_cached_terminal(state, dropped, key, "MERGED")
                         continue
                     if pm is not None and pm.outcome == "disabled":
                         # auto_run opt-in is off: a deliberate no-op, NOT a
@@ -761,8 +763,7 @@ def _run_tick(
                         }
                         emit("pr_watch_skipped", {"pr": pr, "reason": "auto-run-disabled"})
                         skipped += 1
-                        state.pop(key, None)
-                        dropped.append({"key": key, "reason": "merged", "state": "MERGED"})
+                        _drop_cached_terminal(state, dropped, key, "MERGED")
                         continue
                     dispatch_ok = pm is not None and pm.outcome in (
                         "dispatched",
@@ -827,8 +828,7 @@ def _run_tick(
 
             entry["last_seen_state"] = obs.state
             if obs.state in ("MERGED", "CLOSED"):
-                state.pop(key, None)
-                dropped.append({"key": key, "reason": obs.state.lower(), "state": obs.state})
+                _drop_cached_terminal(state, dropped, key, obs.state)
 
         finally:
             try:

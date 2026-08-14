@@ -648,7 +648,7 @@ def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
 
 
 def _parked_prs(state_path: Optional[Path]) -> dict:
-    """Return a dict of {key: park_reason} for all parked PRs."""
+    """Return observed-cache and pending-delivery parked outcomes."""
     if state_path is None:
         try:
             from fno.pr_watch._state import pr_watcher_state_path
@@ -657,21 +657,25 @@ def _parked_prs(state_path: Optional[Path]) -> dict:
         except Exception:
             return {}
 
-    if not state_path.exists():
-        return {}
-
-    try:
-        data = json.loads(state_path.read_text(encoding="utf-8"))
+    delivery_path = state_path.with_name(f"{state_path.stem}-delivery{state_path.suffix}")
+    parked = {}
+    for path, label in ((state_path, ""), (delivery_path, " [delivery]")):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
         if not isinstance(data, dict):
-            return {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-    return {
-        key: entry.get("parked")
-        for key, entry in data.items()
-        if isinstance(entry, dict) and entry.get("parked")
-    }
+            continue
+        parked.update(
+            {
+                f"{key}{label}": entry.get("parked")
+                for key, entry in data.items()
+                if isinstance(entry, dict) and entry.get("parked")
+            }
+        )
+    return parked
 
 
 # ---------------------------------------------------------------------------

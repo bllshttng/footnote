@@ -1933,3 +1933,5 @@ class TestWarmMergeRouting:
         parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
         assert len(parked) == 1
         assert parked[0]["data"]["reason"] == "retries-exhausted"
+        receipts = [e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick"]
+        assert [receipt["dropped_count"] for receipt in receipts] == [1, 0, 0, 0]

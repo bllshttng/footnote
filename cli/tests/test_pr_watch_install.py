@@ -328,6 +328,21 @@ def test_status_open_count_reads_observed_state_not_graph(tmp_path):
     assert _observed_open_pr_count(state_file) == 1
 
 
+def test_parked_prs_includes_pending_delivery_failures(tmp_path):
+    from fno.pr_watch._install import _parked_prs
+
+    state_file = tmp_path / "pr-watcher-state.json"
+    state_file.write_text("{}")
+    delivery_file = tmp_path / "pr-watcher-state-delivery.json"
+    delivery_file.write_text(json.dumps({
+        "owner/repo#7": {"retries": 3, "parked": "retries-exhausted"}
+    }))
+
+    assert _parked_prs(state_file) == {
+        "owner/repo#7 [delivery]": "retries-exhausted"
+    }
+
+
 def test_status_json_emits_liveness_verdict(monkeypatch):
     """`pr-watch status --json` emits the liveness verdict for hooks to parse."""
     from typer.testing import CliRunner
