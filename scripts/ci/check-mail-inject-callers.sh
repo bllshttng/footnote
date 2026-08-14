@@ -40,12 +40,18 @@ out = []
 for path in sorted((root / "cli" / "src").rglob("*.py")):
     rel = path.relative_to(root).as_posix()
     fn = ""
+    fn_indent = None
     for line in path.read_text(encoding="utf-8").splitlines():
-        # Top-level defs only: a nested helper closure (e.g. a local `_record`)
-        # must not steal attribution from its enclosing caller.
-        m = re.match(r"^def ([A-Za-z_]\w*)\b", line)
-        if m:
-            fn = m.group(1)
+        # A class body opens a fresh def scope, so its methods are attributable.
+        if re.match(r"^class [A-Za-z_]", line):
+            fn, fn_indent = "", None
+            continue
+        # Outermost defs only: a nested helper closure (e.g. a local `_record`)
+        # is indented deeper than its enclosing def and must not steal that
+        # def's attribution.
+        m = re.match(r"^([ \t]*)def ([A-Za-z_]\w*)\b", line)
+        if m and (fn_indent is None or len(m.group(1)) <= fn_indent):
+            fn, fn_indent = m.group(2), len(m.group(1))
         if '"mail-inject"' in line or "'mail-inject'" in line:
             out.append(f"{rel}::{fn}")
 print("\n".join(out))
