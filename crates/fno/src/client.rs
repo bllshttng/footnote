@@ -621,11 +621,13 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
         let state = if a.exited {
             "exited"
         } else {
-            match a.badge {
-                Some(AgentBadge::Blocked) => "blocked",
-                Some(AgentBadge::Working) => "working",
-                Some(AgentBadge::Done) if a.seen => "idle",
-                Some(AgentBadge::Done) | None => "idle",
+            // The one state vocabulary (pane_state + the nav filter words): a
+            // finished-but-unseen member is `done`, not `idle`.
+            match pane_state(a.badge, a.seen) {
+                PaneState::Blocked => "blocked",
+                PaneState::Working => "working",
+                PaneState::DoneUnseen => "done",
+                PaneState::Idle => "idle",
             }
         };
         let pane = a
@@ -2276,9 +2278,13 @@ impl View {
         let li = (row as usize).checked_sub(r0)?;
         let line = r.lines.get(li)?;
         let cc = (col as usize).checked_sub(c0)?;
+        // The footer's close target is not a row index; returning it here would
+        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
         line.hits
             .iter()
-            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .find(|(t, off, len)| {
+                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
             .map(|(t, _, _)| *t)
     }
 
@@ -2527,9 +2533,13 @@ impl View {
         let li = (row as usize).checked_sub(r0)?;
         let line = r.lines.get(li)?;
         let cc = (col as usize).checked_sub(c0)?;
+        // The footer's close target is not a row index; returning it here would
+        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
         line.hits
             .iter()
-            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .find(|(t, off, len)| {
+                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
             .map(|(t, _, _)| *t)
     }
 
@@ -2609,9 +2619,13 @@ impl View {
         let li = (row as usize).checked_sub(r0)?;
         let line = r.lines.get(li)?;
         let cc = (col as usize).checked_sub(c0)?;
+        // The footer's close target is not a row index; returning it here would
+        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
         line.hits
             .iter()
-            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .find(|(t, off, len)| {
+                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
             .map(|(t, _, _)| *t)
     }
 
@@ -11209,7 +11223,8 @@ async fn peek_input_keys(
 }
 
 /// Selector-mode keys: j/k (and arrows) move over the unified display rows,
-/// skipping inert Headers; h/l (and left/right) collapse/expand squad rows;
+/// skipping inert Headers; h (and left) collapse, `l` explicitly expands a
+/// squad row, Right toggles a workspace row's idle caret;
 /// Enter acts on the row through [`View::row_action`] + [`apply_hit`] - the
 /// same resolver a mouse click uses (x-260a), so squad/tab switch, agent
 /// focus/attach, card dispatch-confirm, and workspace-create are all keyboard
@@ -11246,9 +11261,11 @@ async fn selector_keys(
     let keys = fold_selector_keys(&mut esc, &cleaned);
     view.sel_esc = esc;
     for _ in 0..rights {
-        // The hovered row wins over the cursor when the pointer rests on one
-        // (x-f331's pointer-follow); otherwise the selected row.
-        let Some(cur) = view.hover_row.or(view.selector) else {
+        // Same cursor as every other selector verb: pointer-follow works
+        // through the hover-ARMED selector (x-f331), and an explicit prefix+w
+        // selector keeps keyboard control even with the pointer parked on an
+        // inert sideline cell.
+        let Some(cur) = view.selector else {
             break;
         };
         let squad = match view.display_rows().get(cur) {
@@ -17150,6 +17167,53 @@ mod tests {
         v.aux_esc = vec![0x1b];
         aux_keys(&mut v, b"z", &mut buf).await.unwrap();
         assert!(v.aux.is_none(), "Esc still closes the modal");
+    }
+
+    #[tokio::test]
+    async fn hovering_the_footer_esc_close_keeps_the_selection() {
+        // The footer's close target must never surface through `aux_hit` as a
+        // row index: ESC_CLOSE_HIT clamps in `Popup::select` to the LAST entry,
+        // so a hover sweep over the words would silently re-target Enter.
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.aux = Some(v.build_settings_modal());
+        let n = v.aux.as_ref().unwrap().popup.targets().len();
+        v.aux.as_mut().unwrap().popup.select(0);
+        let sel_before = v.aux.as_ref().unwrap().popup.sel;
+        let (fr, fc) = {
+            let r = v.aux.as_ref().unwrap().popup.render(v.term);
+            let (li, row) = r
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, l)| {
+                    l.hits
+                        .iter()
+                        .any(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                })
+                .expect("the modal footer carries the close target");
+            let (off, len) = row
+                .hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, o, l)| (*o, *l))
+                .unwrap();
+            (r.origin.0 + li, r.origin.1 + off + len / 2)
+        };
+        let hover = MouseReport {
+            row: fr as u16,
+            col: fc as u16,
+            kind: MouseKind::Move,
+            shift: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        aux_mouse(&mut v, hover, &mut buf).await.unwrap();
+        assert!(
+            n < 2 || v.aux.as_ref().unwrap().popup.sel == sel_before,
+            "hover over the close words keeps the selection put ({} targets)",
+            n
+        );
     }
 
     #[test]
