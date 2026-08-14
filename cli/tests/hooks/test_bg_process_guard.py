@@ -148,6 +148,14 @@ DENIED = [
     # The command that caused the incident, verbatim from the transcript.
     "for i in $(seq 1 24); do yes > /dev/null & done",
     "for j in 1 2 3 4 5 6; do ( while :; do :; done ) & done",
+    # A pipe RESETS command position, which is the premise of `_pipe_parts`.
+    # It is punctuation and not a separator, so the backward walk stepped over
+    # it to whatever ran upstream. Both of these exit 124 under `timeout 3`.
+    "true | for ((;;)); do :; done",
+    # `_head_of` skips an assignment prefix and the backward walk did not, so
+    # the arithmetic flag was charged to the first loop and its `break` cleared
+    # it. This is the mis-attribution `_opens_command` exists to close.
+    "x=$(for f in a b; do break; done); for ((;;)); do :; done",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -248,6 +256,12 @@ ALLOWED = [
     "grep case notes.txt; yes | head -c 1M",
     # An `esac` in a comment must not close a real region early.
     "case $a in # y|yes esac\n y|yes) echo go;; esac",
+    # A pipe and an assignment prefix both reset command position, so an
+    # argument that merely spells `for` must stay ordinary.
+    "echo hi | grep for",
+    "cat f | while read -r l; do echo $l; done",
+    "x=1; for f in a b; do echo $f; done",
+    "x=$(date); for f in a b; do echo $f; done",
 ]
 
 

@@ -52,6 +52,8 @@ The sweep is also the only check that confirms the guard does its job. On the cu
 
 Two rules keep the sweep honest. Read every denial, never a count of them. And run it after any change to the parser, because both regressions found this way were introduced by the round that fixed the previous ones.
 
+`scripts/diagnostics/guard-corpus-sweep.py` runs it. Bare, it prints every denial. With `--against <ref>` it prints every command whose verdict FLIPPED against the guard at that ref, in both directions. Use the differential for a parser change. A denial count that stays at 20 says nothing about whether the same 20 commands are in it. That distinction separates an intended fix from a regression.
+
 Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
 It denies whether or not the call sets `run_in_background`. A foreground unbounded `yes` is orphaned just as surely at session exit.

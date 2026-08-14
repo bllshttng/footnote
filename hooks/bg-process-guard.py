@@ -422,10 +422,26 @@ def _opens_command(tokens, i):
         tok = tokens[j]
         if _is_separator(tok):
             return True
+        # A pipe RESETS command position, which is the whole premise of
+        # `_pipe_parts`. It is punctuation and not a separator, so the walk used
+        # to step over it to whatever ran upstream and answer False:
+        # `true | for ((;;)); do :; done` was allowed, and under
+        # `timeout 3 bash -c` it exits 124, so it really does run forever.
+        if tok in ("|", "|&"):
+            return True
         if tok and all(ch in PUNCT_CHARS for ch in tok):
             j -= 1
             continue
         if tok.rsplit("/", 1)[-1] in TRANSPARENT:
+            j -= 1
+            continue
+        # A leading assignment is a prefix, not the command, exactly as
+        # `_head_of` reads it. Without this the two walks still disagreed, and
+        # the mis-attribution this function exists to close survived in its
+        # assignment spelling:
+        # `x=$(for f in a b; do break; done); for ((;;)); do :; done` charged
+        # the arithmetic flag to the first loop, whose `break` cleared it.
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tok):
             j -= 1
             continue
         return False
