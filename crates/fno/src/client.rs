@@ -5557,14 +5557,16 @@ impl View {
             };
             lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
         }
-        lines.push(pad_to(" hjkl/arrows move · 1-9 jump to first nine", W));
-        // enter/space/t are ONE action listed once. They send byte-identical
-        // messages (split: None -> `place_spawned_pane` new_tab), so advertising
-        // "attach to ›" and "t new tab" as two entries described a distinction
-        // the code does not make - the same overselling this node exists to fix,
-        // one layer up in the footer.
-        lines.push(pad_to(" enter/space/t new tab in › · HJKL split", W));
-        lines.push(pad_to(" . attach here (current view) · esc/q cancel", W));
+        // Two lines, not three (x-3a91): enter/t and space/. are each one
+        // action under two keys, so they collapse to one entry apiece. The
+        // split row spells `shift+HJKL` rather than a bare `HJKL`, naming the
+        // modifier in words so it reads as "hjkl, held with shift" rather than
+        // an unrelated set of four capital-letter bindings.
+        lines.push(pad_to(" hjkl/arrows move · 1-9 jump · shift+HJKL split", W));
+        lines.push(pad_to(
+            " enter/t new tab in › · space/. here · esc/q cancel",
+            W,
+        ));
         lines
     }
 
@@ -11902,32 +11904,25 @@ async fn attach_place_keys(
             continue;
         }
 
-        // Every commit key here acts on the CURSOR, except `.`, which never does.
-        // No key's meaning depends on whether the cursor has moved.
+        // Every commit key here acts on the CURSOR, except Space/`.`, which
+        // never do. No key's meaning depends on whether the cursor has moved.
         //
-        // Enter/Space used to be "attach here" (x-fbb1), which ignored the
-        // cursor and routed to CurrentRoute. That ruling was correct while the
-        // picker had no cursor to contradict it. Adding one removed its premise:
-        // the overlay drew a marker on ws10 and Enter attached somewhere else,
-        // with no notice, in exactly the case the cursor was added for. That is
-        // this node's own defect - a visible selection ignored by the obvious
-        // key - recreated one layer up.
-        //
-        // So Enter commits the cursor, always, and `here` keeps its distinct
-        // swap-viewer semantics under its own binding. Two different actions,
-        // two keys, no hidden mode: one key meaning either thing depending on
-        // cursor history would be the same class of trap.
+        // Enter opens a new tab in the cursor-marked workspace; `t` is a named
+        // alias for the same commit (operator ruling, x-3a91: a mouse-only door
+        // onto workspace actions is unreachable for a Ghostty operator whose
+        // right-click never reaches the mux, so every commit here keeps a
+        // keyboard-only alias). Space attaches HERE instead: repoint the
+        // focused pane, ignoring the cursor by design, and let the server pick
+        // swap-viewer vs take-over-idle-shell. `.` is kept as Space's alias
+        // rather than freed, so the muscle memory from when `.` was the only
+        // "here" binding still works.
         let (split, here) = match key {
             b'H' => (Some(Some(Dir::Left)), false),
             b'J' => (Some(Some(Dir::Down)), false),
             b'K' => (Some(Some(Dir::Up)), false),
             b'L' => (Some(Some(Dir::Right)), false),
-            b'\r' | b'\n' | b' ' => (Some(None), false),
-            // `.` = attach HERE: repoint the focused pane, and let the server
-            // pick swap-viewer vs take-over-idle-shell. Route-anchored, so it
-            // ignores the cursor by design rather than by accident.
-            b'.' => (Some(None), true),
-            b't' => (Some(None), false),
+            b'\r' | b'\n' | b't' => (Some(None), false),
+            b' ' | b'.' => (Some(None), true),
             0x1b | b'q' => {
                 view.attach_place = None;
                 return Ok(StdinFlow::Continue);
@@ -21277,17 +21272,18 @@ mod tests {
         // The footer must let each axis name its OWN keys, and must say which
         // key acts on the `›` marker. The old footer listed the split
         // directions as if they were list navigation, which is the mislabel
-        // half of the reported defect.
+        // half of the reported defect. x-3a91 collapsed it to two lines and
+        // spelled the split row `shift+HJKL` so the shift relationship to
+        // lowercase hjkl reads in words, not just in case.
         let overlay = v.attach_place_lines(picker).join("\n");
         for label in [
             "hjkl/arrows move",
             "1-9 jump",
-            // One entry, not two: enter/space/t send byte-identical messages, so
-            // a footer listing "attach to ›" and "t new tab" separately promised
-            // a placement choice that does not exist.
-            "enter/space/t new tab in ›",
-            "HJKL split",
-            "attach here",
+            // enter/t send byte-identical new-tab messages; space/. send
+            // byte-identical here messages. Each pair is one footer entry.
+            "enter/t new tab in ›",
+            "shift+HJKL split",
+            "space/. here",
             "cancel",
         ] {
             assert!(overlay.contains(label), "missing {label}: {overlay}");
@@ -21671,7 +21667,8 @@ mod tests {
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        // `t` is the secondary new-tab; Enter/Space are now "here" (the primary CTA).
+        // `t` is Enter's named alias (x-3a91): both open a new tab in the
+        // cursor-marked workspace. Space and `.` are the separate "here" pair.
         attach_place_keys(&mut v, b"t", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
         let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
@@ -21701,62 +21698,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_placement_enter_commits_the_cursor_and_dot_attaches_here() {
+    async fn attach_placement_enter_commits_the_cursor_and_space_attaches_here() {
         // SUPERSEDES x-fbb1's Enter-is-here ruling, which was correct while the
         // picker had no cursor to contradict it. Adding a cursor removed its
         // premise: the overlay drew a marker on one workspace and Enter
         // attached to another, which is this node's own defect one layer up.
         //
-        // The rule is now that no key's meaning depends on cursor history.
-        // Enter/Space ALWAYS commit the cursor; `.` NEVER does.
-        for key in [b"\r".as_slice(), b" ".as_slice()] {
-            let mut v = unified_rows_view();
-            widen_to_squads(&mut v, 14);
-            open_attach_by_click(&mut v).await;
-            let mut buf = Vec::new();
-            // Drive the cursor somewhere the digits cannot reach, which is the
-            // case the cursor exists for and the case the old Enter broke.
-            attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
-                .await
-                .unwrap();
-            assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
-            attach_place_keys(&mut v, key, &mut buf).await.unwrap();
-            let mut cur = std::io::Cursor::new(buf);
-            let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
-            assert_eq!(
-                msg,
-                ClientMsg::Command(Command::AttachAgent {
-                    id: "c19cd2c3".into(),
-                    placement: PanePlacement {
-                        tab: None,
-                        at: None,
-                        target: PaneTarget::SquadId(10),
-                        split: None,
-                        here: false,
-                        fallback: PlacementFallback::NewTab,
-                    },
-                }),
-                "key {key:?} must attach to the marked workspace"
-            );
-            assert!(v.attach_place.is_none());
-        }
-
-        // `.` keeps the here semantics under its own binding, and ignores the
-        // cursor BY DESIGN rather than by accident - including after the cursor
-        // has moved, so its meaning is history-independent too.
+        // x-3a91 re-split Enter and Space, which had been merged into one
+        // "new tab in ›" commit: Enter (and its alias `t`) always commits the
+        // cursor; Space (and its alias `.`) always attaches HERE. No key's
+        // meaning depends on cursor history either way.
         let mut v = unified_rows_view();
         widen_to_squads(&mut v, 14);
         open_attach_by_click(&mut v).await;
         let mut buf = Vec::new();
-        attach_place_keys(&mut v, b"jjj", &mut buf).await.unwrap();
-        attach_place_keys(&mut v, b".", &mut buf).await.unwrap();
+        // Drive the cursor somewhere the digits cannot reach, which is the
+        // case the cursor exists for and the case the old Enter broke.
+        attach_place_keys(&mut v, b"jjjjjjjjj", &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.attach_place.as_ref().unwrap().target(), Some(10));
+        attach_place_keys(&mut v, b"\r", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
-        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-            ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
-                assert_eq!(placement.target, PaneTarget::CurrentRoute);
-                assert!(placement.here, "`.` is route-anchored");
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::AttachAgent {
+                id: "c19cd2c3".into(),
+                placement: PanePlacement {
+                    tab: None,
+                    at: None,
+                    target: PaneTarget::SquadId(10),
+                    split: None,
+                    here: false,
+                    fallback: PlacementFallback::NewTab,
+                },
+            }),
+            "Enter must attach to the marked workspace, not here"
+        );
+        assert!(v.attach_place.is_none());
+
+        // Space and `.` both ignore the cursor BY DESIGN rather than by
+        // accident - including after the cursor has moved, so their meaning
+        // is history-independent too.
+        for key in [b" ".as_slice(), b".".as_slice()] {
+            let mut v = unified_rows_view();
+            widen_to_squads(&mut v, 14);
+            open_attach_by_click(&mut v).await;
+            let mut buf = Vec::new();
+            attach_place_keys(&mut v, b"jjj", &mut buf).await.unwrap();
+            attach_place_keys(&mut v, key, &mut buf).await.unwrap();
+            let mut cur = std::io::Cursor::new(buf);
+            match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+                ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+                    assert_eq!(placement.target, PaneTarget::CurrentRoute);
+                    assert!(placement.here, "key {key:?} is route-anchored");
+                }
+                other => panic!("expected AttachAgent, got {other:?}"),
             }
-            other => panic!("expected AttachAgent, got {other:?}"),
         }
     }
 
