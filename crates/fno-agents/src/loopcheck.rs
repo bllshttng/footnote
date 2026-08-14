@@ -245,7 +245,7 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
 // ── settings parsing ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
-struct Settings {
+pub(crate) struct Settings {
     /// config.budget.attended.wall_clock_cap_minutes
     /// None = absent. Some(Ok(v)) = valid. Some(Err(s)) = malformed raw value.
     attended_wall_cap_minutes: Option<Result<u64, String>>,
@@ -1775,12 +1775,24 @@ fn read_pr_info(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
+    pr_selector: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
+    // An explicit PR selector for the branch-resolved gh calls (x-3a3f):
+    // Some(n) inserts the number (`gh pr view <n>`, `gh pr checks <n>`) so the
+    // standalone review-coverage verb can evaluate a PR from a checkout that is
+    // NOT on its branch (`fno pr merge <n>` from canonical); None keeps the
+    // argv byte-identical to the stop hook's branch-resolved form. The one
+    // number-based call (`gh api .../pulls/<n>/comments`) already carries the
+    // number the first read returned.
+    let sel: Vec<&str> = match pr_selector {
+        Some(n) => vec![n],
+        None => vec![],
+    };
     // Read 1: PR state + number + head OID + mergeability
     let pr_view_out = Command::new(gh_bin)
+        .args(["pr", "view"])
+        .args(&sel)
         .args([
-            "pr",
-            "view",
             "--json",
             // baseRefName rides along for the freshness predicate's merge-base
             // (x-5b99). Same call, same round trip, no new API cost.
@@ -1902,7 +1914,9 @@ fn read_pr_info(
         (CiConclusion::Skipped, Vec::new(), false)
     } else {
         let checks_out = Command::new(gh_bin)
-            .args(["pr", "checks", "--json", "name,state,bucket"])
+            .args(["pr", "checks"])
+            .args(&sel)
+            .args(["--json", "name,state,bucket"])
             .current_dir(cwd)
             .output()
             .map_err(|e| ("pr_checks".to_string(), e.to_string()))?;
@@ -1990,7 +2004,9 @@ fn read_pr_info(
     } else {
         // Read 3: top-level reviews + issue comments
         let reviews_out = Command::new(gh_bin)
-            .args(["pr", "view", "--json", "reviews,comments"])
+            .args(["pr", "view"])
+            .args(&sel)
+            .args(["--json", "reviews,comments"])
             .current_dir(cwd)
             .output()
             .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
@@ -2082,7 +2098,9 @@ fn read_pr_info(
         });
         let commit_dates: Vec<String> = if has_blocking_candidate {
             let commits_out = Command::new(gh_bin)
-                .args(["pr", "view", "--json", "commits"])
+                .args(["pr", "view"])
+                .args(&sel)
+                .args(["--json", "commits"])
                 .current_dir(cwd)
                 .output()
                 .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
@@ -2191,7 +2209,7 @@ fn read_pr_info(
             events_path,
             global_events_path,
             "review_coverage",
-            coverage_event_data(number, &coverage, head_sha, repo_slug),
+            coverage_event_data(number, &coverage, head_sha, repo_slug, author_session),
         );
     }
 
@@ -2596,7 +2614,7 @@ const MAX_NUDGE_CEILING: i64 = 1000;
 /// (enabled, non-empty review_handle, not malformed); any other missing bot
 /// classifies `NotNudgeable`.
 #[derive(Debug, Clone)]
-struct NudgeConfig {
+pub(crate) struct NudgeConfig {
     login: String,
     review_handle: String,
     wait_minutes: i64,
@@ -3827,6 +3845,7 @@ fn coverage_event_data(
     rep: &CoverageReport,
     head_sha: &str,
     repo: &str,
+    author_session: Option<&str>,
 ) -> serde_json::Value {
     // Three states, not two. `Covered(0)` is a real known zero and
     // `Coverage::is_covered()` has always returned false for it, but the
@@ -3860,7 +3879,17 @@ fn coverage_event_data(
         // is one predicate rather than a redesign. Deliberately not called
         // `independent_count`: the schema is explicit that `other_session` is
         // not independence, and this must not launder that.
-        data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
+        //
+        // Emitted ONLY when authorship was measured. classify_attestation_origin
+        // labels every verdict Unknown when `author_session` is None, so
+        // `self_attested_count()` would read 0 while the truth is unmeasured -
+        // a measured-zero shape (x-62a1: an aggregate reporting a state its
+        // inputs do not support). The field is omitted instead, never 0, so
+        // the day a gate enforces it, absence reads unmeasured rather than
+        // "no self-attest" and cannot serve as the bypass.
+        if author_session.is_some() {
+            data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
+        }
     }
     if !repo.is_empty() {
         data["repo"] = serde_json::json!(repo);
@@ -4732,6 +4761,201 @@ fn try_flag_value(arg: &str, flag: &str, args: &[String], i: &mut usize) -> Opti
     }
 }
 
+/// The manifest-independent inputs every coverage/review evaluation needs:
+/// event-log paths, repo identity, the merged settings, and the reviewer sets
+/// derived from them. Extracted from `decide()` (x-3a3f) so the standalone
+/// `review-coverage` verb resolves EXACTLY what the stop hook resolves - one
+/// resolver, no second precedence implementation (the N-implementations trap).
+pub(crate) struct ReviewInputs {
+    pub(crate) project_events: PathBuf,
+    pub(crate) global_events: PathBuf,
+    /// Full `host/owner/repo` from the git remote; empty when unresolvable.
+    pub(crate) repo_slug: String,
+    pub(crate) settings: Settings,
+    /// The ambient author harness (env markers, or the explicit override).
+    pub(crate) author_harness: Option<String>,
+    pub(crate) required_bots: Vec<String>,
+    pub(crate) required_reviewers: Vec<String>,
+    pub(crate) optional_bots: Vec<String>,
+    pub(crate) nudge_configs: Vec<NudgeConfig>,
+}
+
+/// Resolve [`ReviewInputs`]: event paths, repo slug, the GLOBAL-then-local
+/// settings overlay, and the bot/reviewer sets derived from it. This is the
+/// block `decide()` ran inline; it moves here unchanged (including the
+/// fail-closed unparseable-settings branch, which is why this cannot be a
+/// naive copy) so `decide()` and `run_review_coverage` share one resolver.
+pub(crate) fn resolve_review_inputs(
+    cwd: &Path,
+    events_path: Option<&Path>,
+    global_events_path: Option<&Path>,
+    settings_path: Option<&Path>,
+    global_settings_path: Option<&Path>,
+    author_harness_override: Option<&str>,
+) -> ReviewInputs {
+    let project_events = events_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let global_events = global_events_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
+
+    // Scopes the review_coverage event written into the cross-project global
+    // log. The git remote is the one identifier canonical and every one of its
+    // worktrees agree on, which is exactly the agreement the coverage reader
+    // needs (x-f43c). It is the FULL `host/owner/repo`, not the last path
+    // segment: this key gates auto-merge, so `org-a/widget` aliasing
+    // `org-b/widget` would let one repo's coverage clear the other's guard.
+    // Empty when there is no remote; the payload then omits `repo` and no
+    // reader will claim the event.
+    let repo_slug = crate::finalize::repo_identity_from_git_remote(cwd).unwrap_or_default();
+
+    // Parse settings: GLOBAL first, then overlay the project-local file's
+    // populated fields (codex P1 on #447: budgets normally live in the
+    // global file; a project-local settings.yaml with unrelated content
+    // must not silently uncap the session). An explicit --settings path
+    // replaces the merge entirely (tests rely on full isolation).
+    //
+    // x-81d9 (c): a genuinely unparseable settings.yaml fails CLOSED (the login
+    // gate is pinned unsatisfiable) and emits loop_check_settings_unparseable,
+    // rather than silently zeroing the required bots and shipping unreviewed.
+    let parse_or_emit = |content: &str, path: &Path| -> Settings {
+        match parse_settings_result(content) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "loop-check: config.toml unparseable ({}): {e} - failing the login gate closed",
+                    path.display()
+                );
+                emit_to_both(
+                    &project_events,
+                    &global_events,
+                    "loop_check_settings_unparseable",
+                    serde_json::json!({"path": path.display().to_string(), "error": e}),
+                );
+                fail_closed_settings()
+            }
+        }
+    };
+    let settings = if let Some(explicit) = settings_path {
+        if let Ok(sc) = std::fs::read_to_string(explicit) {
+            parse_or_emit(&sc, explicit)
+        } else {
+            Settings::default()
+        }
+    } else {
+        let global_path = global_settings_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(&home).join(".fno/config.toml"));
+        let mut merged = std::fs::read_to_string(&global_path)
+            .map(|sc| parse_or_emit(&sc, &global_path))
+            .unwrap_or_default();
+        let local_path = cwd.join(".fno/config.toml");
+        if let Ok(sc) = std::fs::read_to_string(&local_path) {
+            let local = parse_or_emit(&sc, &local_path);
+            if local.attended_wall_cap_minutes.is_some() {
+                merged.attended_wall_cap_minutes = local.attended_wall_cap_minutes;
+            }
+            if local.attended_cost_cap_usd.is_some() {
+                merged.attended_cost_cap_usd = local.attended_cost_cap_usd;
+            }
+            if local.unattended_wall_cap_minutes.is_some() {
+                merged.unattended_wall_cap_minutes = local.unattended_wall_cap_minutes;
+            }
+            if local.unattended_cost_cap_usd.is_some() {
+                merged.unattended_cost_cap_usd = local.unattended_cost_cap_usd;
+            }
+            if local.flat_budget_cap.is_some() {
+                merged.flat_budget_cap = local.flat_budget_cap;
+            }
+            if local.ci_declared_none {
+                merged.ci_declared_none = true;
+            }
+            if !local.external_reviewers.is_empty() {
+                merged.external_reviewers = local.external_reviewers;
+            }
+            if local.required_bots.is_some() {
+                // Some([]) is a meaningful project-local override (declared
+                // no-review-gate), so presence - not non-emptiness - wins.
+                merged.required_bots = local.required_bots;
+            }
+            if local.github_apps.is_some() {
+                merged.github_apps = local.github_apps;
+            }
+            if local.optional_apps.is_some() {
+                merged.optional_apps = local.optional_apps;
+            }
+            if !local.reviewers.is_empty() {
+                merged.reviewers = local.reviewers;
+            }
+            if local.self_review_required.is_some() {
+                // Presence, not value: `self_review_required = false` is the
+                // documented repo opt-out, so a local Some(false) must override
+                // a global Some(true). Same overlay rule as required_bots.
+                merged.self_review_required = local.self_review_required;
+            }
+            if !local.nudge_overrides.is_empty() {
+                // Without this line a project-local `[review.nudge]` (including
+                // `enabled = false`) is read from the GLOBAL file only and the
+                // repo's own overrides vanish - loop-check would post a nudge a
+                // repo explicitly opted out of. Same per-field-overlay trap the
+                // done_probes line below documents.
+                merged.nudge_overrides = local.nudge_overrides;
+            }
+            if !local.peers.is_empty() {
+                merged.peers = local.peers;
+            }
+            if local.peer_identity.is_some() {
+                merged.peer_identity = local.peer_identity;
+            }
+            if local.done_probes.is_some() {
+                // Presence, not non-emptiness: a project-local `done_probes = []`
+                // is a deliberate "this repo declares none", same rule as
+                // required_bots. Omitting this line entirely is the silent
+                // guardrail bypass this list keeps re-inviting - the field would
+                // be read from the GLOBAL file only and the project's own gate
+                // would never run.
+                merged.done_probes = local.done_probes;
+            }
+        }
+        merged
+    };
+
+    // Resolve the must-have-reviewed list once (code default when unset). The
+    // author harness (from the ambient env markers, shared with claims.rs) drives
+    // the same-model peer guard (x-c2e7); None leaves the set unchanged.
+    // `--author-harness none` pins the no-harness case, which an absent flag
+    // cannot express, and an absent flag keeps reading the ambient markers.
+    let author_harness = match author_harness_override {
+        Some("none") | Some("") => None,
+        Some(h) => Some(h.to_string()),
+        None => crate::claims::resolve_harness(),
+    };
+    let required_bots = resolved_required_bots_for_author(&settings, author_harness.as_deref());
+    let mut required_reviewers = settings.reviewers.clone();
+    for reviewer in resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()) {
+        if !required_reviewers.contains(&reviewer) {
+            required_reviewers.push(reviewer);
+        }
+    }
+    let optional_bots = resolved_optional_bots(&settings);
+    let nudge_configs = resolved_nudge_configs(&settings);
+
+    ReviewInputs {
+        project_events,
+        global_events,
+        repo_slug,
+        settings,
+        author_harness,
+        required_bots,
+        required_reviewers,
+        optional_bots,
+        nudge_configs,
+    }
+}
+
 /// Core decision logic. Returns (exit_code, json_output).
 /// Exit 0 always for allow/block; non-zero only for internal/CLI errors.
 pub fn decide(args: &[String]) -> (i32, String) {
@@ -4828,164 +5052,31 @@ pub fn decide(args: &[String]) -> (i32, String) {
         }
     }
 
-    // Resolve paths
-    let project_events = parsed
-        .events_path
-        .clone()
-        .unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
-
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let global_events = parsed
-        .global_events_path
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
-
-    // Scopes the review_coverage event written into the cross-project global
-    // log. The git remote is the one identifier canonical and every one of its
-    // worktrees agree on, which is exactly the agreement the coverage reader
-    // needs (x-f43c). It is the FULL `host/owner/repo`, not the last path
-    // segment: this key gates auto-merge, so `org-a/widget` aliasing
-    // `org-b/widget` would let one repo's coverage clear the other's guard.
-    // Empty when there is no remote; the payload then omits `repo` and no
-    // reader will claim the event.
-    let repo_slug = crate::finalize::repo_identity_from_git_remote(&cwd).unwrap_or_default();
+    // Resolve paths + settings + reviewer sets through the ONE shared resolver
+    // (x-3a3f): the standalone review-coverage verb resolves exactly these,
+    // from the same overlay, so there is no second precedence implementation.
+    let inputs = resolve_review_inputs(
+        &cwd,
+        parsed.events_path.as_deref(),
+        parsed.global_events_path.as_deref(),
+        parsed.settings_path.as_deref(),
+        parsed.global_settings_path.as_deref(),
+        parsed.author_harness_override.as_deref(),
+    );
+    let project_events = inputs.project_events;
+    let global_events = inputs.global_events;
+    let repo_slug = inputs.repo_slug;
+    let settings = inputs.settings;
+    let author_harness = inputs.author_harness;
+    let required_bots = inputs.required_bots;
+    let mut required_reviewers = inputs.required_reviewers;
+    let optional_bots = inputs.optional_bots;
+    let nudge_configs = inputs.nudge_configs;
 
     let ledger_path = parsed
         .ledger_path
         .clone()
         .unwrap_or_else(|| cwd.join(".fno/ledger.json"));
-
-    // Parse settings: GLOBAL first, then overlay the project-local file's
-    // populated fields (codex P1 on #447: budgets normally live in the
-    // global file; a project-local settings.yaml with unrelated content
-    // must not silently uncap the session). An explicit --settings path
-    // replaces the merge entirely (tests rely on full isolation).
-    //
-    // x-81d9 (c): a genuinely unparseable settings.yaml fails CLOSED (the login
-    // gate is pinned unsatisfiable) and emits loop_check_settings_unparseable,
-    // rather than silently zeroing the required bots and shipping unreviewed.
-    let parse_or_emit = |content: &str, path: &Path| -> Settings {
-        match parse_settings_result(content) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "loop-check: config.toml unparseable ({}): {e} - failing the login gate closed",
-                    path.display()
-                );
-                emit_to_both(
-                    &project_events,
-                    &global_events,
-                    "loop_check_settings_unparseable",
-                    serde_json::json!({"path": path.display().to_string(), "error": e}),
-                );
-                fail_closed_settings()
-            }
-        }
-    };
-    let settings = if let Some(ref explicit) = parsed.settings_path {
-        if let Ok(sc) = std::fs::read_to_string(explicit) {
-            parse_or_emit(&sc, explicit)
-        } else {
-            Settings::default()
-        }
-    } else {
-        let global_path = parsed
-            .global_settings_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(&home).join(".fno/config.toml"));
-        let mut merged = std::fs::read_to_string(&global_path)
-            .map(|sc| parse_or_emit(&sc, &global_path))
-            .unwrap_or_default();
-        let local_path = cwd.join(".fno/config.toml");
-        if let Ok(sc) = std::fs::read_to_string(&local_path) {
-            let local = parse_or_emit(&sc, &local_path);
-            if local.attended_wall_cap_minutes.is_some() {
-                merged.attended_wall_cap_minutes = local.attended_wall_cap_minutes;
-            }
-            if local.attended_cost_cap_usd.is_some() {
-                merged.attended_cost_cap_usd = local.attended_cost_cap_usd;
-            }
-            if local.unattended_wall_cap_minutes.is_some() {
-                merged.unattended_wall_cap_minutes = local.unattended_wall_cap_minutes;
-            }
-            if local.unattended_cost_cap_usd.is_some() {
-                merged.unattended_cost_cap_usd = local.unattended_cost_cap_usd;
-            }
-            if local.flat_budget_cap.is_some() {
-                merged.flat_budget_cap = local.flat_budget_cap;
-            }
-            if local.ci_declared_none {
-                merged.ci_declared_none = true;
-            }
-            if !local.external_reviewers.is_empty() {
-                merged.external_reviewers = local.external_reviewers;
-            }
-            if local.required_bots.is_some() {
-                // Some([]) is a meaningful project-local override (declared
-                // no-review-gate), so presence - not non-emptiness - wins.
-                merged.required_bots = local.required_bots;
-            }
-            if local.github_apps.is_some() {
-                merged.github_apps = local.github_apps;
-            }
-            if local.optional_apps.is_some() {
-                merged.optional_apps = local.optional_apps;
-            }
-            if !local.reviewers.is_empty() {
-                merged.reviewers = local.reviewers;
-            }
-            if local.self_review_required.is_some() {
-                // Presence, not value: `self_review_required = false` is the
-                // documented repo opt-out, so a local Some(false) must override
-                // a global Some(true). Same overlay rule as required_bots.
-                merged.self_review_required = local.self_review_required;
-            }
-            if !local.nudge_overrides.is_empty() {
-                // Without this line a project-local `[review.nudge]` (including
-                // `enabled = false`) is read from the GLOBAL file only and the
-                // repo's own overrides vanish - loop-check would post a nudge a
-                // repo explicitly opted out of. Same per-field-overlay trap the
-                // done_probes line below documents.
-                merged.nudge_overrides = local.nudge_overrides;
-            }
-            if !local.peers.is_empty() {
-                merged.peers = local.peers;
-            }
-            if local.peer_identity.is_some() {
-                merged.peer_identity = local.peer_identity;
-            }
-            if local.done_probes.is_some() {
-                // Presence, not non-emptiness: a project-local `done_probes = []`
-                // is a deliberate "this repo declares none", same rule as
-                // required_bots. Omitting this line entirely is the silent
-                // guardrail bypass this list keeps re-inviting - the field would
-                // be read from the GLOBAL file only and the project's own gate
-                // would never run.
-                merged.done_probes = local.done_probes;
-            }
-        }
-        merged
-    };
-
-    // Resolve the must-have-reviewed list once (code default when unset). The
-    // author harness (from the ambient env markers, shared with claims.rs) drives
-    // the same-model peer guard (x-c2e7); None leaves the set unchanged.
-    // `--author-harness none` pins the no-harness case, which an absent flag
-    // cannot express, and an absent flag keeps reading the ambient markers.
-    let author_harness = match parsed.author_harness_override.as_deref() {
-        Some("none") | Some("") => None,
-        Some(h) => Some(h.to_string()),
-        None => crate::claims::resolve_harness(),
-    };
-    let required_bots = resolved_required_bots_for_author(&settings, author_harness.as_deref());
-    let mut required_reviewers = settings.reviewers.clone();
-    for reviewer in resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()) {
-        if !required_reviewers.contains(&reviewer) {
-            required_reviewers.push(reviewer);
-        }
-    }
-    let optional_bots = resolved_optional_bots(&settings);
-    let nudge_configs = resolved_nudge_configs(&settings);
     // A code payload carries its own review obligation on a stock install:
     // when no lane is configured, the harness-resolved self-review reviewer is
     // floored onto `required_reviewers` so the existing unattested_reviewers_scan
@@ -5816,7 +5907,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                                 "reviewed": pr_info.reviewed,
                                 "review_skipped": pr_info.review_skipped,
                                 "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                                "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha, &repo_slug),
+                                "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha, &repo_slug, manifest.harness_session_id.as_deref()),
                                 "done_probes": probe_results,
                                 "fp_read_failed": fp_read_failed,
                             }),
@@ -6400,6 +6491,7 @@ fn run_done(
         global_events_path,
         repo_slug,
         author_session,
+        None,
     )
 }
 
@@ -7435,6 +7527,228 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
     decide(args)
 }
 
+/// `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>] ...`
+/// (x-3a3f). The standalone review_coverage producer.
+///
+/// The only thing that could WRITE a `review_coverage` event used to be
+/// `read_pr_info` under `run_done`, which `decide()` reaches only past a streak
+/// counter - so a session with no target manifest (no stop hook at all) could
+/// never produce the row the merge gate demands, making that gate unsatisfiable
+/// for a shape that can still open a PR. This verb exposes the SAME computation
+/// with the SAME resolver (`resolve_review_inputs`) and the SAME emitter
+/// (`read_pr_info` itself, untouched) to every path that can reach the gate.
+///
+/// Read-only against GitHub (nudge posting lives outside `read_pr_info`),
+/// append-only against the two event logs. It has NO way to assert coverage
+/// without performing the reads: there is no --force, no --assume-covered, and
+/// no config key that skips the coverage guard. A caller wanting a green gate
+/// must cause a review to exist.
+///
+/// Exit contract: 0 = a `review_coverage` row was emitted (covered or
+/// uncovered, the number says which); 3 = no PR for the selector (nothing to
+/// cover); 4 = the gh read failed and the emitted row is `unknown`; 2 = bad
+/// arguments. stdout is always one JSON object.
+pub fn run_review_coverage(args: &[String]) -> i32 {
+    let (code, json) = decide_review_coverage(args);
+    println!("{json}");
+    code
+}
+
+/// Test-friendly variant: (exit_code, json_string) without printing.
+pub fn run_review_coverage_capture(args: &[String]) -> (i32, String) {
+    decide_review_coverage(args)
+}
+
+const REVIEW_COVERAGE_USAGE: &str = "\
+usage: fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>] [--session-id <id>]
+       [--events <p>] [--global-events <p>] [--settings <p>] [--global-settings <p>]
+       [--gh-bin <p>] [--git-bin <p>] [--author-harness <h>]
+
+Computes and emits the review_coverage event for a PR using the exact
+resolver and emitter the stop hook uses (resolve_review_inputs +
+read_pr_info), so any session that can open a PR can also satisfy the
+gate that guards it. Read-only against GitHub, append-only against the
+event logs.
+
+There is no way to assert coverage without performing the reads: no
+--force, no --assume-covered, no skip key. A caller wanting a green gate
+must cause a review to exist.
+
+Manifest-less defaults, both strict: external review reads are ON
+(no_external=false - the manifest field can only relax them, so its
+absence must not), and the author session is --session-id, else the
+harness_session_id scanned from <cwd>/.fno/target-state.md, else none
+(the payload then omits self_attested_count rather than report an
+unmeasured 0).
+
+Exits: 0 emitted a row; 3 no PR for the selector; 4 gh read failed
+(emitted row is unknown); 2 bad arguments.";
+
+fn decide_review_coverage(args: &[String]) -> (i32, String) {
+    let args = if args.first().map(|s| s.as_str()) == Some("review-coverage") {
+        &args[1..]
+    } else {
+        args
+    };
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return (0, serde_json::json!({"usage": REVIEW_COVERAGE_USAGE}).to_string());
+    }
+    let mut cwd: Option<PathBuf> = None;
+    let mut pr: Option<String> = None;
+    let mut head: Option<String> = None;
+    let mut session_id: Option<String> = None;
+    let mut events_path: Option<PathBuf> = None;
+    let mut global_events_path: Option<PathBuf> = None;
+    let mut settings_path: Option<PathBuf> = None;
+    let mut global_settings_path: Option<PathBuf> = None;
+    let mut gh_bin =
+        std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "gh".to_string());
+    let mut git_bin =
+        std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
+    let mut author_harness_override: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(val) = try_flag_value(&args[i], "--cwd", args, &mut i) {
+            cwd = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--pr", args, &mut i) {
+            pr = Some(val);
+        } else if let Some(val) = try_flag_value(&args[i], "--head", args, &mut i) {
+            head = Some(val);
+        } else if let Some(val) = try_flag_value(&args[i], "--session-id", args, &mut i) {
+            session_id = Some(val);
+        } else if let Some(val) = try_flag_value(&args[i], "--events", args, &mut i) {
+            events_path = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--global-events", args, &mut i) {
+            global_events_path = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--settings", args, &mut i) {
+            settings_path = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--global-settings", args, &mut i) {
+            global_settings_path = Some(PathBuf::from(val));
+        } else if let Some(val) = try_flag_value(&args[i], "--gh-bin", args, &mut i) {
+            gh_bin = val;
+        } else if let Some(val) = try_flag_value(&args[i], "--git-bin", args, &mut i) {
+            git_bin = val;
+        } else if let Some(val) = try_flag_value(&args[i], "--author-harness", args, &mut i) {
+            author_harness_override = Some(val);
+        }
+        i += 1;
+    }
+    let cwd = match cwd {
+        Some(c) => c,
+        None => return (2, serde_json::json!({"error": "--cwd is required"}).to_string()),
+    };
+
+    let inputs = resolve_review_inputs(
+        &cwd,
+        events_path.as_deref(),
+        global_events_path.as_deref(),
+        settings_path.as_deref(),
+        global_settings_path.as_deref(),
+        author_harness_override.as_deref(),
+    );
+
+    // head_sha pins the emitted event to what would actually merge. Default
+    // local HEAD; --head overrides with a caller that knows the PR head. A
+    // --head sha the local repository does not contain leaves freshness
+    // unresolvable, which resolves stale and refuses - the safe direction.
+    let head_sha = head.unwrap_or_else(|| git_head_sha(&git_bin, &cwd));
+
+    // Authorship: --session-id, else the manifest's harness_session_id when one
+    // exists, else None. None leaves every local verdict's attestation_origin
+    // Unknown (the documented fail-open-on-authorship behavior) and the payload
+    // OMITS self_attested_count rather than reporting an unmeasured 0.
+    let author_session = session_id.or_else(|| {
+        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
+            .ok()
+            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
+    });
+
+    match read_pr_info(
+        &gh_bin,
+        &git_bin,
+        &cwd,
+        inputs.settings.ci_declared_none,
+        // no_external=false: the manifest field can only RELAX external review,
+        // so its absence here must not.
+        false,
+        &inputs.required_bots,
+        &inputs.optional_bots,
+        &inputs.settings.external_reviewers,
+        &inputs.required_reviewers,
+        &inputs.nudge_configs,
+        &head_sha,
+        &inputs.project_events,
+        &inputs.global_events,
+        &inputs.repo_slug,
+        author_session.as_deref(),
+        pr.as_deref(),
+    ) {
+        Ok(pr_info) => {
+            if pr_info.number == 0 {
+                // PrState::None: no PR for the selector (or the branch). There
+                // is nothing to cover and nothing was emitted.
+                return (
+                    3,
+                    serde_json::json!({
+                        "coverage": "none",
+                        "emitted": false,
+                        "reason": "no PR for the selector",
+                    })
+                    .to_string(),
+                );
+            }
+            // read_pr_info already emitted this exact payload to both logs;
+            // print the same object so stdout and the logs agree.
+            (
+                0,
+                coverage_event_data(
+                    pr_info.number,
+                    &pr_info.coverage,
+                    &head_sha,
+                    &inputs.repo_slug,
+                    author_session.as_deref(),
+                )
+                .to_string(),
+            )
+        }
+        Err((read, tail)) => {
+            // The gh read failed. Emit an unknown row when the PR number is
+            // known (--pr was passed - always true for the merge recompute) so
+            // downstream readers see the failed read rather than nothing; with
+            // no number the row cannot be attributed, so emit nothing.
+            let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
+            if pr_num > 0 {
+                let data = coverage_event_data(
+                    pr_num,
+                    &CoverageReport {
+                        coverage: Coverage::Unknown,
+                        verdicts: Vec::new(),
+                    },
+                    &head_sha,
+                    &inputs.repo_slug,
+                    author_session.as_deref(),
+                );
+                emit_to_both(
+                    &inputs.project_events,
+                    &inputs.global_events,
+                    "review_coverage",
+                    data.clone(),
+                );
+                return (4, data.to_string());
+            }
+            (
+                4,
+                serde_json::json!({
+                    "error": format!("gh read failed: {read}"),
+                    "detail": tail,
+                    "emitted": false,
+                })
+                .to_string(),
+            )
+        }
+    }
+}
+
 /// `fno-agents probe-run --plan <path> --key <name> --cwd <root> --json`.
 ///
 /// Evaluates one named probe list (`done_probes` or `close_probes`) from a plan
@@ -7863,7 +8177,7 @@ mod tests {
         assert_eq!(v.reviewed_sha, "8e557ccdecec07abc7e409ad8d888318016612c1");
         assert_eq!(rep.coverage, Coverage::Covered(0));
         // And the word a human reads now agrees with the number beside it.
-        let data = coverage_event_data(826, &rep, "89bc0b91", "");
+        let data = coverage_event_data(826, &rep, "89bc0b91", "", None);
         assert_eq!(data["coverage"], serde_json::json!("uncovered"));
         assert_eq!(data["reviewed_count"], serde_json::json!(0));
     }
@@ -8055,10 +8369,43 @@ mod tests {
         });
         assert_eq!(rep.coverage, Coverage::Covered(2));
         assert_eq!(rep.self_attested_count(), 1);
-        let data = coverage_event_data(826, &rep, "h", "");
+        let data = coverage_event_data(826, &rep, "h", "", Some("sess-author"));
         assert_eq!(data["coverage"], serde_json::json!("covered"));
         assert_eq!(data["reviewed_count"], serde_json::json!(2));
         assert_eq!(data["self_attested_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn coverage_event_omits_self_attested_count_when_authorship_unmeasured() {
+        // The manifest-less recompute shape: no author session, so every
+        // attestation classifies Unknown and self_attested_count() would read
+        // 0 while the truth is UNMEASURED. A measured zero and an unmeasured
+        // one must not serialize identically - the field is omitted, never 0,
+        // so a future gate on it cannot read absence-of-measurement as
+        // absence-of-self-attestation (the x-62a1 aggregate shape).
+        let events = attestation_line("code-review", "h", "pass");
+        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+        // Every origin is Unknown - the direct statement of "unmeasured".
+        assert!(rep.verdicts.iter().all(|v| v.attestation_origin == AttestationOrigin::Unknown));
+        let data = coverage_event_data(826, &rep, "h", "", None);
+        assert_eq!(data["reviewed_count"], serde_json::json!(1));
+        assert!(
+            data.get("self_attested_count").is_none(),
+            "an unmeasured authorship must omit the field, not report 0: {data}"
+        );
+        // The control: the same events with a measured author emit the field
+        // (attestation_line stamps attester "sess-author"), so the omission
+        // above is the unmeasured marker, not a dropped key. Classification
+        // happens at classify_coverage time, so the measured report is built
+        // with the author - exactly how read_pr_info threads one
+        // author_session into both.
+        let measured_rep =
+            classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
+                Freshness::Fresh
+            });
+        let measured = coverage_event_data(826, &measured_rep, "h", "", Some("sess-author"));
+        assert_eq!(measured["self_attested_count"], serde_json::json!(1));
     }
 
     #[test]
@@ -8109,7 +8456,13 @@ mod tests {
             coverage: Coverage::Covered(1),
             verdicts: vec![],
         };
-        let data = coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote");
+        let data = coverage_event_data(
+            781,
+            &rep,
+            "a3f4b413b",
+            "github.com/bllshttng/footnote",
+            None,
+        );
         assert_eq!(
             data["repo"],
             serde_json::json!("github.com/bllshttng/footnote")
@@ -8127,7 +8480,7 @@ mod tests {
             coverage: Coverage::Unknown,
             verdicts: vec![],
         };
-        let data = coverage_event_data(781, &rep, "a3f4b413b", "");
+        let data = coverage_event_data(781, &rep, "a3f4b413b", "", None);
         assert!(data.get("repo").is_none());
     }
 
@@ -8148,7 +8501,7 @@ mod tests {
             &project,
             &global,
             "review_coverage",
-            coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote"),
+            coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote", None),
         );
         for path in [&project, &global] {
             let text = std::fs::read_to_string(path).unwrap();

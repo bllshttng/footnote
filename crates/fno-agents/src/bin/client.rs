@@ -47,6 +47,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "reap",
     "reconcile",
     "report",
+    "review-coverage",
     "restart",
     "resume",
     "review-start",
@@ -187,6 +188,15 @@ async fn run(args: Vec<String>) -> i32 {
     // loop-check's done_probes. Direct dispatch; no daemon RPC.
     if verb == "probe-run" {
         return fno_agents::loopcheck::run_probe_run(&args[1..]);
+    }
+
+    // `review-coverage` is the standalone review_coverage producer (x-3a3f):
+    // the same resolver + emitter the stop hook uses, callable from any path
+    // that can reach the merge gate (notably `fno pr merge/status` recompute
+    // and a manifest-less session). Read-only against GitHub, append-only
+    // against the event logs. Direct dispatch like loop-check; no daemon RPC.
+    if verb == "review-coverage" {
+        return fno_agents::loopcheck::run_review_coverage(&args[1..]);
     }
 
     // `loop run` is the unified driver loop (step 5, ab-781b6d17). Direct
@@ -2511,6 +2521,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
     "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
     "needs [--since-epoch <secs>] [--fires-floor <n>] [--json]",
+    "review-coverage --cwd <dir> [--pr <n>] [--head <sha>] [--session-id <id>]",
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
@@ -2585,6 +2596,7 @@ mod tests {
             "subscribe",
             "digest",
             "needs",
+            "review-coverage",
         ];
         let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
             .iter()
