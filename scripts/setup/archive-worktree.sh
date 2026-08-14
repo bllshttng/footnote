@@ -147,8 +147,30 @@ echo "    Branch: $BRANCH" >&2
 
 # ---- Strict pre-removal checks (skip with --force) -----------------------
 if [[ "$FORCE" -eq 0 ]]; then
-  # 1. Working tree clean
-  if [[ -n "$(git -C "$TARGET" status --porcelain 2>/dev/null)" ]]; then
+  # 1. Working tree holds nothing removal would destroy. A tracked file MISSING
+  #    from disk is recoverable from HEAD, so it never blocks; see
+  #    scripts/lib/worktree-reapable.sh. Any unknown fails closed to exit 2,
+  #    which is what this check did for every kind of dirt before.
+  # Anchored on THIS SCRIPT, not on $TARGET: the target is routinely a worktree
+  # of another repo and carries no scripts/lib of its own.
+  _REAPABLE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-reapable.sh"
+  if [[ -f "$_REAPABLE_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_REAPABLE_LIB"
+    if ! wt_reapable "$TARGET"; then
+      echo "archive-worktree: $WT_REAPABLE_LINE at $TARGET" >&2
+      git -C "$TARGET" status --short >&2
+      echo "    --force to override, or commit/stash first." >&2
+      exit 2
+    fi
+    # Cleared, but git will still object to the missing tracked files. Record
+    # that so the removal can tell git we already checked (see REMOVE_FLAGS).
+    case "$WT_REAPABLE_LINE" in
+      *recoverable_deletions=0*) : ;;
+      *recoverable_deletions=*) _WT_RECOVERABLE_ONLY=1
+        echo "archive-worktree: $WT_REAPABLE_LINE" >&2 ;;
+    esac
+  elif [[ -n "$(git -C "$TARGET" status --porcelain 2>/dev/null)" ]]; then
     echo "archive-worktree: dirty working tree at $TARGET" >&2
     git -C "$TARGET" status --short >&2
     echo "    --force to override, or commit/stash first." >&2
@@ -400,6 +422,27 @@ fi
 # ---- Remove the worktree -------------------------------------------------
 REMOVE_FLAGS=""
 [[ "$FORCE" -eq 1 ]] && REMOVE_FLAGS="--force"
+# Two DIFFERENT forces share one word, and conflating them is why the strict
+# check alone was not enough. Our `--force` skips OUR checks (dirty, unpushed,
+# live session). `git worktree remove --force` skips GIT's own check, which
+# counts a tracked file missing from disk as "modified" and refuses with exit
+# 4. So a worktree we affirmatively cleared as recoverable-only still failed to
+# remove, and the whole predicate change was inert on exactly the 17 worktrees
+# it targets. Pass git's force only after OUR check said yes on its own terms:
+# the unpushed-commit and live-session guards above have already run.
+# RE-READ AT REMOVAL TIME. The verdict above was taken before the process sweep
+# SIGTERM/SIGKILLed anything rooted here and before salvage ran; an editor or
+# agent killed mid-write can leave a modified tracked file behind. Git's refusal
+# is the last line of defence, so only wave it aside on a verdict that is still
+# true right now (the same rule the liveness re-check follows).
+if [[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]]; then
+  if wt_reapable "$TARGET"; then
+    REMOVE_FLAGS="--force"
+  else
+    echo "archive-worktree: $WT_REAPABLE_LINE at removal time; keeping $TARGET" >&2
+    exit 2
+  fi
+fi
 if ! git worktree remove $REMOVE_FLAGS "$TARGET"; then
   echo "archive-worktree: git worktree remove failed" >&2
   exit 4

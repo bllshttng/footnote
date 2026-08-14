@@ -1606,9 +1606,9 @@ fn slug_from_remote_url(url: &str) -> Option<String> {
 /// the result is lowercased (hosts are case-insensitive and the forge treats
 /// owner/repo that way). Requires at least three segments (host + two path
 /// parts), so a local or degenerate remote returns None rather than a key that
-/// could alias another repo. Mirrored by `_repo_identity_from_remote_url` in
-/// `fno/pr/_reviews.py`; the two MUST agree or the reader stops finding the
-/// writer's events.
+/// could alias another repo. Mirrored by `repo_identity_from_remote_url` in
+/// `fno/paths.py`; the two MUST agree or the reader stops finding the writer's
+/// events.
 pub(crate) fn repo_identity_from_remote_url(url: &str) -> Option<String> {
     let mut s = url.trim().trim_end_matches('/');
     if s.is_empty() {
@@ -3515,7 +3515,7 @@ mod tests {
 
     #[test]
     fn repo_identity_agrees_across_remote_forms() {
-        // Parity with `_repo_identity_from_remote_url` in fno/pr/_reviews.py.
+        // Parity with `repo_identity_from_remote_url` in fno/paths.py.
         // Every clone form of one repo must produce ONE key: the writer is Rust
         // and the reader is Python, so a disagreement means the reader silently
         // stops finding coverage and the merge gate refuses a reviewed PR.

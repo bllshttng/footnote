@@ -1,6 +1,6 @@
 //! `fno mux workspace prune` end-to-end (x-a572 task 1.2): execs the real compiled
 //! binary against a crafted store and asserts the dead-origin residue is reaped
-//! while named and surviving-origin squads stay. Also proves the build-tree
+//! while named and un-ageable squads stay. Also proves the build-tree
 //! write guard (task 1.1, AC2-HP) refuses the prune's OWN write when
 //! FNO_AGENTS_HOME is unset - the exec'd binary is the arm #[cfg(test)] cannot
 //! protect.
@@ -83,15 +83,24 @@ impl Drop for Scratch {
     }
 }
 
-const ORPHAN_NAMED_SURVIVING: &str = r#"{"version":1,"squads":[
+/// Three squads: one prunable orphan, one protected by its name, one protected
+/// because it is MEMBER-LESS and cannot be aged.
+///
+/// The third used to carry a dead member and be kept by its surviving origin.
+/// That rule is gone: a surviving origin no longer outranks member deadness,
+/// because every real origin is a repo root and a repo root never disappears,
+/// which kept 12 of 15 finished squads immortal. It is now kept for a reason
+/// that still exists -- no member records at all, and a blank `created_at` that
+/// cannot be aged, so a squad mid-recruit is never destroyed on a guess.
+const ORPHAN_NAMED_UNAGEABLE: &str = r#"{"version":1,"squads":[
   {"name":"","key":"orphan","origins":["/no/such/prune-e2e"],"members":[{"attach_id":"deadbeef","tombstone":false}],"created_at":""},
   {"name":"work","key":"","origins":["/no/such/prune-e2e"],"members":[{"attach_id":"deadbeef","tombstone":false}],"created_at":""},
-  {"name":"","key":"survives","origins":["__SURVIVES__"],"members":[{"attach_id":"deadbeef","tombstone":false}],"created_at":""}
+  {"name":"","key":"survives","origins":["__SURVIVES__"],"members":[],"created_at":""}
 ]}"#;
 
 #[test]
-fn prune_reaps_orphans_keeps_named_and_surviving_origin() {
-    let s = Scratch::new("reap", ORPHAN_NAMED_SURVIVING);
+fn prune_reaps_orphans_keeps_named_and_unageable() {
+    let s = Scratch::new("reap", ORPHAN_NAMED_UNAGEABLE);
 
     let (ok, stdout, stderr) = s.run(&["prune"], false);
     assert!(
@@ -115,13 +124,13 @@ fn prune_reaps_orphans_keeps_named_and_surviving_origin() {
     );
     assert!(
         after.contains("\"key\": \"survives\""),
-        "surviving-origin squad kept: {after}"
+        "member-less, unageable squad kept: {after}"
     );
 }
 
 #[test]
 fn prune_dry_run_writes_nothing() {
-    let s = Scratch::new("dryrun", ORPHAN_NAMED_SURVIVING);
+    let s = Scratch::new("dryrun", ORPHAN_NAMED_UNAGEABLE);
     let before = s.store();
 
     let (ok, stdout, stderr) = s.run(&["prune", "--dry-run"], false);
@@ -146,7 +155,7 @@ fn prune_dry_run_writes_nothing() {
 /// indistinguishable from an absence.
 #[test]
 fn retired_squad_spelling_is_removed() {
-    let s = Scratch::new("alias", ORPHAN_NAMED_SURVIVING);
+    let s = Scratch::new("alias", ORPHAN_NAMED_UNAGEABLE);
     let before = s.store();
 
     let (ok, _stdout, stderr) = s.run_family("squad", &["prune", "--json"], false);
@@ -261,7 +270,7 @@ fn prune_dry_run_reports_an_unreadable_store() {
 /// tell "nothing to report" from "this build predates the field".
 #[test]
 fn prune_receipt_notice_is_null_on_a_clean_store() {
-    let s = Scratch::new("nonotice", ORPHAN_NAMED_SURVIVING);
+    let s = Scratch::new("nonotice", ORPHAN_NAMED_UNAGEABLE);
     let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
     assert!(ok, "clean dry-run exited non-zero: {stderr}\n{stdout}");
     assert!(
@@ -305,7 +314,7 @@ fn prune_include_named_removes_a_named_orphan() {
 #[test]
 fn prune_json_envelope_names_the_removed_set() {
     // AC1-UI: --json emits the removed set machine-readably.
-    let s = Scratch::new("json", ORPHAN_NAMED_SURVIVING);
+    let s = Scratch::new("json", ORPHAN_NAMED_UNAGEABLE);
     let (ok, stdout, stderr) = s.run(&["prune", "--json"], false);
     assert!(ok, "json prune exited non-zero: {stderr}\n{stdout}");
     assert!(
@@ -327,7 +336,7 @@ fn prune_json_envelope_names_the_removed_set() {
 /// a real prune and every real prune as a rehearsal.
 #[test]
 fn prune_json_dry_run_flag_matches_the_mode() {
-    let s = Scratch::new("json-dryrun", ORPHAN_NAMED_SURVIVING);
+    let s = Scratch::new("json-dryrun", ORPHAN_NAMED_UNAGEABLE);
     let (ok, stdout, stderr) = s.run(&["prune", "--dry-run", "--json"], false);
     assert!(ok, "dry-run json exited non-zero: {stderr}\n{stdout}");
     assert!(
@@ -361,7 +370,7 @@ fn prune_refuses_from_a_build_tree_binary_without_agents_home() {
 fn doctor_reports_orphaned_squads_with_the_prune_remedy() {
     // AC3-UI: doctor's squad-store check renders a warn (exit stays 0) naming the
     // orphan count and the prune remedy. Read-only - it never prunes.
-    let s = Scratch::new("doctor", ORPHAN_NAMED_SURVIVING);
+    let s = Scratch::new("doctor", ORPHAN_NAMED_UNAGEABLE);
     let out = fno()
         .args(["mux", "doctor"])
         .env_clear()

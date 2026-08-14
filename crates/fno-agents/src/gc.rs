@@ -12,12 +12,52 @@
 
 use crate::AgentStatus;
 
+/// How many grace windows a row with nothing to corroborate is kept before the
+/// absolute-age backstop removes it. Large on purpose: the backstop is the
+/// escape hatch for rows a data defect made unjudgeable, not a second normal
+/// path out of the registry.
+pub const BACKSTOP_GRACE_MULTIPLE: i64 = 168;
+
+/// Absolute floor for the backstop horizon, in seconds (7 days).
+///
+/// A horizon derived purely by multiplication collapses with its input: a
+/// configured `agents.dead_row_grace` of 0 (`FNO_AGENTS_DEAD_ROW_GRACE_SECS=0`
+/// or the config scalar, neither clamped) makes the product 0, and then EVERY
+/// uncorroborated row reaps on the next tick - the exact inversion the
+/// corroboration gate exists to prevent. The floor is what the default grace
+/// already multiplies out to (3600 * 168), so a default config sees no change.
+pub const BACKSTOP_MIN_HORIZON_SECS: i64 = 3600 * BACKSTOP_GRACE_MULTIPLE;
+
+/// Seconds a row with nothing to corroborate is kept before the absolute-age
+/// backstop is willing to remove it. Never below [`BACKSTOP_MIN_HORIZON_SECS`].
+pub fn backstop_horizon_secs(grace_secs: i64) -> i64 {
+    grace_secs
+        .saturating_mul(BACKSTOP_GRACE_MULTIPLE)
+        .max(BACKSTOP_MIN_HORIZON_SECS)
+}
+
 /// What the GC sweep should do with one registry row this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcAction {
     /// Remove the row now: terminal/dead, strictly past the grace window, and
     /// (for a worktree-owning row) the worktree is clean.
     Reap,
+    /// Remove the row on absolute age alone, with NO corroborating signal.
+    ///
+    /// The corroboration gate below is fail-closed on purpose, and unbounded
+    /// growth is its honest cost: a row carrying an identity but neither a pid
+    /// nor a transcript offers nothing to corroborate with, so it is kept
+    /// forever. This is the pressure valve, never the answer - the fix is
+    /// upstream, refusing to write a row that cannot be judged by its own
+    /// evidence.
+    ///
+    /// It is a SEPARATE variant so the sweep can report it separately. Folded
+    /// into `Reap`, it silently becomes the main path and turns the
+    /// corroboration into decoration.
+    ///
+    /// It clears the SAME worktree guard `Reap` does. Only the corroboration
+    /// requirement is waived here, never the cleanliness one.
+    ReapBackstop,
     /// First tick we observe this row dead: stamp `exited_at` to start the grace
     /// clock. The row stays visible for the whole grace window after this.
     StampExit,
@@ -41,26 +81,92 @@ pub struct GcRow {
     /// status has not yet been flipped to `Exited`. Lets GC reap a dead row the
     /// reconcile sweep has not visited yet.
     pub pid_confirmed_dead: bool,
-    /// A one-shot `ask` row (empty short_id + no pid): it owns no worktree, so the
-    /// dirty-worktree guard does not apply -- it is reaped on terminal + grace
-    /// alone.
-    pub is_ask: bool,
+    /// Does this row own a REMOVABLE worktree? Only then does the cleanliness
+    /// guard mean anything.
+    ///
+    /// This started life as `is_ask`, exempting one-shot `ask` rows because they
+    /// own no worktree. That was one instance of the real predicate, and the
+    /// narrow version pinned 17 of 21 reapable rows on this machine: their `cwd`
+    /// is the CANONICAL CHECKOUT, which the row does not own and which is never
+    /// clean (a single untracked editor-settings file was enough). The guard
+    /// protected nothing there and blocked everything.
+    ///
+    /// False for a one-shot ask, for a row whose cwd is the canonical checkout,
+    /// and for a cwd that is not a linked worktree at all.
+    pub owns_worktree: bool,
     /// `exited_at` parsed to epoch seconds; `None` when the row is not yet
     /// stamped (never observed dead before).
+    ///
+    /// READ THE NAME SCEPTICALLY. This is not when the process exited. It is
+    /// when a GC sweep FIRST OBSERVED the row as non-live, written by the only
+    /// production writer (`gc_sweep`), which computes one timestamp per pass and
+    /// applies it to every newly-observed row. Rows across unrelated tenants and
+    /// projects therefore share a stamp to the second; processes do not exit in
+    /// synchronised batches, and that batching is the proof the field measures a
+    /// sweep tick rather than an exit.
+    ///
+    /// So a stamp is evidence that a sweep once failed to reach a worker, not
+    /// that the worker died. A claude bg thread that finished a turn is idle and
+    /// resumable, and `fno agents ask` correctly calls it "live but not currently
+    /// routable" while the registry says exited and stamps this clock. Never reap
+    /// on this field alone; see `transcript_fresh`.
     pub exited_at: Option<i64>,
+    /// Does this row have any way of being alive at all? True when it records a
+    /// pid or a short_id; false for a one-shot `ask` row, which carries neither.
+    ///
+    /// A row with no liveness surface needs no corroboration, because there is no
+    /// worker there to protect. This is a POSITIVE fact about the row rather than
+    /// an exemption: nothing can be running behind an identity that was never
+    /// recorded.
+    pub liveness_surface: bool,
+    /// The second, INDEPENDENT liveness signal, required before any reap.
+    ///
+    /// `Some(true)` the worker's transcript was written recently (it is alive, or
+    /// at least idle-and-resumable), `Some(false)` positively stale, `None` we
+    /// could not tell.
+    ///
+    /// Transcript mtime is used because this repo has already paid for the
+    /// lesson: receipts, manifest snapshots, process argv, and liveness probes
+    /// have each lied about a live session, and only the live lockfile and the
+    /// transcript stayed truthful.
+    ///
+    /// Reaping requires `Some(false)` — a POSITIVE reading of staleness. `None`
+    /// keeps the row, because an absence of freshness has two explanations and
+    /// only one of them is a dead worker.
+    pub transcript_fresh: Option<bool>,
     /// Worktree cleanliness for a worktree-owning row: `Some(true)` clean,
     /// `Some(false)` dirty (uncommitted changes -> keep), `None` the probe could
-    /// not determine it (fail closed -> keep). Ignored for `is_ask` rows.
+    /// not determine it (fail closed -> keep). Ignored when `owns_worktree` is
+    /// false, because then there is nothing for it to protect.
     pub worktree_clean: Option<bool>,
+}
+
+/// Whether this row has at least one POSITIVE, independent reading that its
+/// worker is gone. See the corroboration gate in [`gc_action`] for why an
+/// absence never qualifies.
+///
+/// A function rather than an inline expression because the DAEMON must ask the
+/// same question before it decides whether to probe the worktree. Gate that
+/// probe on anything narrower and a row this call says is reapable never gets
+/// its worktree read: `worktree_clean` stays `None`, the fail-closed arm keeps
+/// the row, and the `kept_dirty` line that would have named it is gated on the
+/// same narrow flag - so the row is stuck AND invisible. Two spellings of one
+/// rule is how they drifted apart the first time.
+///
+/// Ignores `worktree_clean` on purpose: this is the corroboration question
+/// alone, asked before any probe has run.
+pub fn removal_is_corroborated(row: &GcRow) -> bool {
+    row.pid_confirmed_dead || row.transcript_fresh == Some(false) || !row.liveness_surface
 }
 
 /// Decide the GC action for one row. Pure: no clock, no I/O.
 ///
 /// The reap condition is all three of: (1) terminal status OR pid confirmed dead
 /// (with liveness re-checked, never trusting a stale `exited`), (2) strictly past
-/// `grace_secs` since `exited_at`, (3) the worktree is clean (or the row owns
-/// none). A row seen dead for the first time is `StampExit`ed rather than reaped,
-/// so a just-finished row stays visible for the whole grace window.
+/// `grace_secs` since `exited_at`, (3) the worktree is clean, OR the row owns no
+/// worktree for the guard to protect. A row seen dead for the first time is
+/// `StampExit`ed rather than reaped, so a just-finished row stays visible for the
+/// whole grace window.
 pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
     // (AC1-FR) A live worker -- re-checked -- is never touched. The caller clears
     // any stale `exited_at` on such a row separately.
@@ -84,12 +190,44 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
             if now.saturating_sub(exited) <= grace_secs {
                 return GcAction::Keep;
             }
-            if row.is_ask {
-                // No worktree to protect.
-                return GcAction::Reap;
+            // CORROBORATION GATE. `status` and `exited_at` both derive from one
+            // sweep's failure to reach a worker, so they are a single signal
+            // wearing two hats and cannot confirm each other. Removal needs at
+            // least one POSITIVE, independent reading that the worker is gone.
+            //
+            // Three qualify. A pid whose start time no longer matches is a
+            // process that provably ended. A transcript untouched for the whole
+            // window is a session that provably stopped writing. A row with no
+            // liveness surface at all never had a worker to lose.
+            //
+            // None of them available means keep. Reaping a live session destroys
+            // work in progress and, worse, the only process able to satisfy its
+            // own PR's review gate.
+            let independently_gone = removal_is_corroborated(row);
+            // Which removal this row has EARNED, before the worktree guard gets
+            // its say. Both removals fall through to that one guard below. An
+            // early `return` here is the decorative-guard shape: the backstop
+            // would skip the dirty-worktree keep AND the fail-closed `None`
+            // arm, so one removal path would honour a protection the other
+            // silently walks past, and the uncommitted work in that worktree
+            // would lose its only pointer.
+            let earned = if independently_gone {
+                GcAction::Reap
+            } else if now.saturating_sub(exited) > backstop_horizon_secs(grace_secs) {
+                // ABSOLUTE-AGE BACKSTOP. At this horizon, no signal for that
+                // long is itself a signal. Deliberately many multiples of the
+                // grace window, so it can never overtake corroboration as the
+                // ordinary route out of the registry.
+                GcAction::ReapBackstop
+            } else {
+                return GcAction::Keep;
+            };
+            if !row.owns_worktree {
+                // No worktree to protect, so nothing for cleanliness to say.
+                return earned;
             }
             match row.worktree_clean {
-                Some(true) => GcAction::Reap,
+                Some(true) => earned,
                 // Dirty worktree kept (AC1-EDGE); probe failure fails closed.
                 Some(false) | None => GcAction::Keep,
             }
@@ -110,8 +248,10 @@ mod tests {
             status: AgentStatus::Exited,
             is_live: false,
             pid_confirmed_dead: false,
-            is_ask: false,
+            owns_worktree: true,
             exited_at: Some(NOW - GRACE - 1),
+            liveness_surface: true,
+            transcript_fresh: Some(false),
             worktree_clean: Some(true),
         }
     }
@@ -193,11 +333,168 @@ mod tests {
         // An ask row owns no worktree: a dirty/unknown cwd (the user's repo) must
         // not pin it forever.
         let row = GcRow {
-            is_ask: true,
+            owns_worktree: false,
             worktree_clean: Some(false),
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- The corroboration gate ---------------------------------------------
+    //
+    // THE SPECIMEN. A worker named `testspawn` (short_id 626ef4a2) answered its
+    // prompt and went idle. Four surfaces gave three verdicts:
+    //
+    //   registry.json     status "exited", exited_at 2026-08-13T18:52:57Z
+    //   fno agents ask    "live but not currently routable"
+    //   fno agents peek   by short_id: not found; by name: renders the transcript
+    //   agent view        Done
+    //
+    // Done is a TURN state, not a process state. A claude bg thread that finished
+    // a turn is idle and resumable, and its transcript is what says so.
+
+    #[test]
+    fn a_stamped_row_whose_transcript_is_fresh_is_never_reaped() {
+        // The specimen. `status` and `exited_at` both say gone; the transcript
+        // says otherwise, and the transcript wins.
+        let row = GcRow {
+            transcript_fresh: Some(true),
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn an_unreadable_transcript_keeps_the_row() {
+        // No positive reading of death -> no removal. An absence of freshness has
+        // two explanations and only one is a dead worker.
+        let row = GcRow {
+            transcript_fresh: None,
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn status_and_exited_at_alone_never_authorise_a_reap() {
+        // They are ONE signal wearing two hats: `gc_sweep` writes the stamp when a
+        // sweep fails to reach a worker, so it cannot corroborate the status that
+        // produced it. Batched stamps shared to the second across unrelated
+        // tenants are the proof.
+        let row = GcRow {
+            status: AgentStatus::Exited,
+            is_live: false,
+            pid_confirmed_dead: false,
+            owns_worktree: false,
+            exited_at: Some(NOW - GRACE - 1),
+            liveness_surface: true,
+            transcript_fresh: None,
+            worktree_clean: Some(true),
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn a_confirmed_dead_pid_is_independent_evidence_on_its_own() {
+        // A pid whose start time no longer matches is a process that provably
+        // ended. That does not come from the sweep, so it corroborates.
+        let row = GcRow {
+            pid_confirmed_dead: true,
+            transcript_fresh: None,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_row_with_no_liveness_surface_needs_no_corroboration() {
+        // A one-shot ask records neither pid nor short_id. Nothing can be running
+        // behind an identity that was never recorded, so there is nobody to
+        // protect. This is a positive fact, not an exemption.
+        let row = GcRow {
+            liveness_surface: false,
+            pid_confirmed_dead: false,
+            transcript_fresh: None,
+            owns_worktree: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn corroboration_never_overrides_the_earlier_guards() {
+        // A positive death signal permits a reap; it must not skip liveness, the
+        // grace window, or terminal status.
+        let live = GcRow {
+            is_live: true,
+            pid_confirmed_dead: true,
+            transcript_fresh: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&live, NOW, GRACE), GcAction::Keep);
+
+        let in_grace = GcRow {
+            exited_at: Some(NOW - GRACE + 10),
+            transcript_fresh: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&in_grace, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn row_in_the_canonical_checkout_is_not_pinned_by_its_dirt() {
+        // THE MEASURED CASE. 17 of 21 past-grace rows on this machine had `cwd`
+        // = the canonical checkout, kept by a single untracked editor-settings
+        // file. The row does not own that checkout and cannot remove it, so its
+        // dirt says nothing about whether the ROW may go.
+        let row = GcRow {
+            owns_worktree: false,
+            worktree_clean: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_row_that_does_own_a_dirty_worktree_is_still_kept() {
+        // The generalisation must not swallow the case the guard exists for.
+        // Two of the 21 were exactly this: a real linked worktree with real
+        // uncommitted edits. Those stay.
+        let row = GcRow {
+            owns_worktree: true,
+            worktree_clean: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn owning_no_worktree_never_shortcuts_liveness_or_grace() {
+        // `owns_worktree: false` skips ONE check. It must not become a fast path
+        // that reaps a live row or one still inside its grace window.
+        let live = GcRow {
+            owns_worktree: false,
+            is_live: true,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&live, NOW, GRACE), GcAction::Keep);
+
+        let in_grace = GcRow {
+            owns_worktree: false,
+            exited_at: Some(NOW - GRACE + 10),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&in_grace, NOW, GRACE), GcAction::Keep);
+
+        let not_terminal = GcRow {
+            owns_worktree: false,
+            status: AgentStatus::Idle,
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&not_terminal, NOW, GRACE), GcAction::Keep);
     }
 
     #[test]
@@ -232,5 +529,165 @@ mod tests {
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- The absolute-age backstop -----------------------------------------
+    //
+    // A row with an identity but no pid and no transcript offers nothing to
+    // corroborate with, so the fail-closed gate keeps it forever and the
+    // registry grows without bound. These three pin the valve: it opens only at
+    // the far horizon, it is a DISTINCT verdict so the sweep can report it
+    // apart from corroborated reaps, and it never front-runs corroboration.
+
+    /// Uncorroborated: identity recorded, pid unknown, transcript unknown.
+    fn uncorroborated(exited_at: i64) -> GcRow {
+        GcRow {
+            pid_confirmed_dead: false,
+            liveness_surface: true,
+            transcript_fresh: None,
+            exited_at: Some(exited_at),
+            ..reapable()
+        }
+    }
+
+    #[test]
+    fn uncorroborated_row_is_kept_before_the_backstop_horizon() {
+        // Just past grace, nowhere near the horizon. This is the case the
+        // corroboration gate exists for, and the backstop must not shorten it.
+        assert_eq!(
+            gc_action(&uncorroborated(NOW - GRACE - 1), NOW, GRACE),
+            GcAction::Keep
+        );
+        // One second short of the horizon: still kept. Without this, an
+        // off-by-a-window backstop would pass the test below unnoticed.
+        let edge = NOW - GRACE * BACKSTOP_GRACE_MULTIPLE;
+        assert_eq!(gc_action(&uncorroborated(edge), NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn uncorroborated_row_past_the_horizon_reaps_as_backstop() {
+        let past = NOW - GRACE * BACKSTOP_GRACE_MULTIPLE - 1;
+        // NOT `Reap`. A backstop folded into the corroborated verdict becomes
+        // the main path silently and turns the gate into decoration.
+        assert_eq!(
+            gc_action(&uncorroborated(past), NOW, GRACE),
+            GcAction::ReapBackstop
+        );
+    }
+
+    #[test]
+    fn a_corroborated_row_never_reports_as_backstop() {
+        // Same far-past age, but with a positive signal. The ordinary verdict
+        // must win, or the two counts stop meaning what they say.
+        let past = NOW - GRACE * BACKSTOP_GRACE_MULTIPLE - 1;
+        let row = GcRow {
+            transcript_fresh: Some(false),
+            exited_at: Some(past),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- The backstop clears the same worktree guard `Reap` does ------------
+    //
+    // The backstop waives CORROBORATION. It waives nothing else. Returning it
+    // above these two arms is the decorative-guard shape: the dirty-worktree
+    // keep and the fail-closed probe arm would protect one removal path and be
+    // skipped by the other, and the uncommitted work in that worktree would be
+    // orphaned with no registry row left pointing at it.
+
+    #[test]
+    fn backstop_does_not_reap_a_dirty_worktree() {
+        let past = NOW - backstop_horizon_secs(GRACE) - 1;
+        let row = GcRow {
+            worktree_clean: Some(false),
+            ..uncorroborated(past)
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn backstop_fails_closed_when_the_cleanliness_probe_cannot_answer() {
+        let past = NOW - backstop_horizon_secs(GRACE) - 1;
+        let row = GcRow {
+            worktree_clean: None,
+            ..uncorroborated(past)
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn backstop_still_reaps_a_row_that_owns_no_worktree() {
+        // The guard above must not become a blanket refusal: a row with no
+        // worktree has nothing for cleanliness to protect, so the valve opens.
+        let past = NOW - backstop_horizon_secs(GRACE) - 1;
+        let row = GcRow {
+            owns_worktree: false,
+            worktree_clean: None,
+            ..uncorroborated(past)
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::ReapBackstop);
+    }
+
+    // -- The probe condition and the removal condition are one rule ---------
+
+    #[test]
+    fn corroboration_agrees_with_the_verdict_on_every_signal_combination() {
+        // The daemon gates its worktree probe on `removal_is_corroborated`. If
+        // the two ever answer differently, a row the policy would reap never
+        // gets probed, `worktree_clean` stays None, the fail-closed arm keeps it
+        // forever, and `kept_dirty` (gated on the same flag) names nothing. So
+        // assert the equivalence directly, across all 12 signal combinations.
+        let past = NOW - GRACE - 1;
+        for &pid_dead in &[true, false] {
+            for &fresh in &[Some(true), Some(false), None] {
+                for &surface in &[true, false] {
+                    let row = GcRow {
+                        pid_confirmed_dead: pid_dead,
+                        transcript_fresh: fresh,
+                        liveness_surface: surface,
+                        exited_at: Some(past),
+                        owns_worktree: false,
+                        worktree_clean: None,
+                        ..reapable()
+                    };
+                    let corroborated = removal_is_corroborated(&row);
+                    // Just past grace, far short of the horizon, so the ONLY
+                    // route to a removal here is corroboration.
+                    let reaped = gc_action(&row, NOW, GRACE) == GcAction::Reap;
+                    assert_eq!(
+                        corroborated, reaped,
+                        "probe and verdict disagree for pid_dead={pid_dead} \
+                         fresh={fresh:?} surface={surface}"
+                    );
+                }
+            }
+        }
+    }
+
+    // -- The horizon has an absolute floor ----------------------------------
+
+    #[test]
+    fn a_zero_grace_does_not_collapse_the_horizon() {
+        // `agents.dead_row_grace = 0` reaches here unclamped. Multiplied alone
+        // the horizon is 0, and every uncorroborated row reaps one tick later -
+        // the gate inverted by a config scalar. A day old is still kept.
+        let row = uncorroborated(NOW - 86_400);
+        assert_eq!(gc_action(&row, NOW, 0), GcAction::Keep);
+        assert_eq!(backstop_horizon_secs(0), BACKSTOP_MIN_HORIZON_SECS);
+    }
+
+    #[test]
+    fn the_floor_never_shortens_a_larger_configured_horizon() {
+        // The floor is a minimum, not a cap. A grace larger than the default
+        // must still multiply out past it.
+        let big = GRACE * 10;
+        assert_eq!(
+            backstop_horizon_secs(big),
+            big * BACKSTOP_GRACE_MULTIPLE,
+            "the floor overrode a horizon that was already longer"
+        );
+        // And the default config lands exactly on the floor, so nothing moved.
+        assert_eq!(backstop_horizon_secs(GRACE), BACKSTOP_MIN_HORIZON_SECS);
     }
 }

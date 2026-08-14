@@ -71,6 +71,10 @@ _JUDGMENT_TIMEOUT_S = 600.0
 _OK = "ok"
 _SKIPPED = "skipped"
 _FAILED = "failed"
+# Distinct from _SKIPPED: the work is still owed, and a later sweep does it. A
+# leg that emitted `skipped` with instructions attached read as "nothing to do
+# here" while quietly handing the operator a command nobody ran.
+_DEFERRED = "deferred"
 
 
 @dataclass
@@ -252,6 +256,15 @@ def _parking_lot_path(canon: Optional[Path], pm) -> Optional[Path]:
 class Ritual:
     """Runs the mechanical legs, emitting one receipt per leg."""
 
+    # Class-level default so an object built without __init__ still has it.
+    # Tests here construct via __new__ (the `_bare()` helper), and a guard that
+    # only works on the constructed path is the decorative kind. False is the
+    # honest default: no number was supplied.
+    pr_supplied: bool = False
+    # Same class-level-default reason: `_bare()`-style tests skip __init__, and
+    # a cache that only exists on the constructed path is the decorative kind.
+    _merge_state: Optional[tuple] = None
+
     def __init__(self, pr: Optional[int], autonomous: bool, cwd: Path,
                  runner: Callable = _run) -> None:
         self.runner = runner
@@ -283,6 +296,11 @@ class Ritual:
             parking_lot=_parking_lot_path(canon, pm),
             holder=_session_holder(),
         )
+        # Where the number came from is part of the receipt. Omit it and
+        # `_resolve_pr` takes the repo's most recent merge, which on a night
+        # with four merges is very likely not the caller's. A silent pick
+        # decides which worktree gets archived.
+        self.pr_supplied = bool(pr)
         resolved = _resolve_pr(pr, runner)
         if resolved:
             self.ctx.pr = resolved
@@ -424,21 +442,64 @@ class Ritual:
         self._leg("sync-canonical", ["pr", "sync-canonical", "--pr-number", str(self.ctx.pr)],
                   timeout=900.0)
 
-    def leg_archive(self) -> None:
-        """Step 4: best-effort worktree archive; defer when run from inside it."""
+    def _merged_state(self) -> tuple[Optional[str], Optional[str]]:
+        """(state, headRefName) from ONE gh call, or (None, None) if unreadable.
+
+        Memoized: two legs ask, and one PR view per ritual is enough. The state
+        can only travel toward MERGED during a run, so a cached OPEN refuses
+        more, never less.
+
+        `state` is the whole point. This call already existed and read only the
+        branch, so an OPEN PR resolved a branch, found its worktree, and handed
+        it to the archive script - whose own checks (clean, pushed, no live
+        session) a worker who finished and now waits on review passes cleanly.
+
+        The merge is not self-evident on every trigger. The pr-watch daemon
+        fires on a gh-backed `state == MERGED`, but `fno pr merged <n>` reaches
+        `_resolve_pr`, which returns a caller-supplied number unchecked. On that
+        path the merge is an ARGUMENT, so the guard belongs here at the leg,
+        where a removal actually happens, not at resolve.
+        """
+        if self._merge_state is None:
+            self._merge_state = self._merged_state_read()
+        return self._merge_state
+
+    def _merged_state_read(self) -> tuple[Optional[str], Optional[str]]:
         try:
-            meta = self._gh(["pr", "view", str(self.ctx.pr), "--json", "headRefName"])
-        except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit("archive", _SKIPPED, f"gh-error: {exc}")
-            return
+            meta = self._gh(["pr", "view", str(self.ctx.pr),
+                             "--json", "state,headRefName"])
+        except (ToolMissing, subprocess.SubprocessError):
+            return (None, None)
         if not meta.ok:
-            self._emit("archive", _SKIPPED, "gh-unavailable")
-            return
+            return (None, None)
         try:
             obj = json.loads(meta.stdout or "{}")
         except json.JSONDecodeError:
-            obj = {}
-        branch = obj.get("headRefName") or ""
+            return (None, None)
+        return (obj.get("state") or None, obj.get("headRefName") or None)
+
+    def _refuse_unless_merged(self, step: str) -> bool:
+        """True when gh confirms MERGED. Emits the refusal itself otherwise.
+
+        Fails CLOSED: an unreadable state refuses too. "I could not check"
+        must never spend the same as "I checked and it is merged".
+        """
+        state, _ = self._merged_state()
+        if state == "MERGED":
+            return True
+        detail = f"not-merged (state={state})" if state else "merge-state unreadable"
+        self._emit(step, _SKIPPED, detail)
+        return False
+
+    def leg_archive(self) -> None:
+        """Step 4: best-effort worktree archive; defer when run from inside it."""
+        state, branch = self._merged_state()
+        if state is None:
+            self._emit("archive", _SKIPPED, "gh-unavailable")
+            return
+        if state != "MERGED":
+            self._emit("archive", _SKIPPED, f"not-merged (state={state})")
+            return
         if not branch:
             self._emit("archive", _SKIPPED, "no-branch")
             return
@@ -447,9 +508,12 @@ class Ritual:
             self._emit("archive", _SKIPPED, f"no worktree for {branch}")
             return
         if Path(wt).resolve() == self.cwd.resolve():
-            # Never self-remove; the standing sweep reaps it from canonical.
-            self._emit("archive", _SKIPPED,
-                       f"inside {wt}; run 'fno worktree cleanup --merged --apply' from canonical")
+            # Never self-remove. This is the DOMINANT path, because the worker
+            # that merged its own PR is standing in its own worktree - which is
+            # why the freshest merged worktrees were the ones that survived.
+            # `deferred` says the work is still owed; `skipped` plus a command
+            # in the detail line read as done and nobody ever ran it.
+            self._emit("archive", _DEFERRED, "sweep-will-reap")
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
         if not script.exists():
@@ -671,6 +735,11 @@ class Ritual:
 
     def leg_reap_rows(self) -> None:
         """Step 8a: reap the merged node's lingering build-worker rows."""
+        # Same guard as leg_archive, for the same reason: this leg works from
+        # node ids and checked merge state nowhere, so an asserted merge on the
+        # attended path reached a removal unverified.
+        if not self._refuse_unless_merged("reap-rows"):
+            return
         if not self.ctx.node_ids:
             # Dominant path: the ship gate already closed the node, so
             # reconcile's .closed[] was empty. Recover it from the graph
@@ -799,6 +868,8 @@ class Ritual:
             # sets it false must not acquire the mutex or run any leg (codex P1).
             self._emit("config", _SKIPPED, "post_merge.enabled is false; ritual disabled")
             return 0
+        self._emit("resolve", _OK, "pr={} source={}".format(
+            self.ctx.pr, "caller" if self.pr_supplied else "most-recent-merge"))
         if not self.acquire_mutex():
             return 0  # another runner owns it
         try:

@@ -48,7 +48,7 @@ def test_map_covers_current_surface_once():
     rows = _rows()
     mapped = [row["current-leaf"] for row in rows]
     assert len(mapped) == len(set(mapped))
-    assert len(mapped) == 322
+    assert len(mapped) == 323
 
 
 def test_map_matches_the_uncollapsed_click_action_inventory():

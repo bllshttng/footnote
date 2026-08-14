@@ -15,6 +15,26 @@ cli = typer.Typer(name="event", help="emit and audit events", no_args_is_help=Tr
 # reason from bloating an events.jsonl line while still landing the event.
 _PROTOCOL_DATA_STR_CAP = 500
 
+# Event types written to the global log as well as the project one, so a reader
+# in ANOTHER checkout of the same repo can see them.
+#
+# NO READER CONSUMES THE MIRRORED `review_attestation` TODAY, AND THAT IS
+# DELIBERATE. Say it plainly here, because dead code that reads as load-bearing
+# is its own trap. The gate chain runs attestation -> loopcheck -> coverage:
+# `unattested_reviewers_scan` (loopcheck.rs) reads attestations from the PROJECT
+# log alone, and `fno pr merge` reads `review_coverage`, never an attestation.
+# This entry was originally added on a misdiagnosis - the block it was meant to
+# fix was coverage never being produced at all, not an attestation missing from
+# canonical. It stays for symmetry with the coverage path, which loopcheck.rs
+# already dual-writes for exactly this reason, and because x-3a3f moves a reader
+# to the global log and will need it. Named intent, not dead code.
+#
+# Small on purpose. Membership is earned by a cross-checkout reader, current or
+# named-and-coming. `review_coverage` needs no entry: loopcheck.rs emits it to
+# both logs itself, and a second writer here would double every row the merge
+# gate counts.
+GLOBAL_MIRROR_TYPES = frozenset({"review_attestation"})
+
 
 @cli.callback()
 def _event_callback(
@@ -342,6 +362,9 @@ def emit(
         default_state = repo_root / ".fno" / "target-state.md"
         default_events = repo_root / ".fno" / "events.jsonl"
     except Exception:
+        # Bound either way: the global-log mirror below reads it, and leaving it
+        # unbound here would turn a discovery failure into a NameError there.
+        repo_root = None
         default_state = Path(".fno/target-state.md")
         default_events = Path(".fno/events.jsonl")
 
@@ -380,6 +403,53 @@ def emit(
     except Exception as exc:
         typer.echo(f"error: failed to append event: {exc}", err=True)
         raise typer.Exit(code=1)
+
+    # CROSS-CHECKOUT TYPES ALSO REACH THE GLOBAL LOG.
+    #
+    # The project log is written wherever the emitter happens to run, which for
+    # a review is a worktree. The global log is the one file every checkout of a
+    # repo stands in, so it is where a cross-checkout reader looks. See
+    # GLOBAL_MIRROR_TYPES for which types earn a place here and for the fact
+    # that the mirrored attestation has no reader yet.
+    #
+    # `global_events_json()`, never `state_dir() / "events.jsonl"`. A RELATIVE
+    # `config.state_dir` resolves into the repo checkout, while the global
+    # journal deliberately falls back to `~/.fno` - which is also the path the
+    # Rust writer hardcodes. Writing via state_dir() on exactly those configs
+    # puts the row in a file nobody opens. `fno/pr/_reviews.py` carries the same
+    # warning on the READ side; the two must name one path or the mirror is a
+    # write with no reader by construction.
+    #
+    # Best-effort: the durable project append above already succeeded, so a
+    # failure here must not fail the emit and lose that record.
+    if type_ in GLOBAL_MIRROR_TYPES:
+        try:
+            from fno.paths import global_events_json, repo_identity
+
+            global_events = global_events_json()
+            if global_events.resolve() != Path(resolved_events).resolve():
+                # Scope the row the way loopcheck scopes every coverage row it
+                # writes here (x-f43c). The global log is cross-project and this
+                # payload carries no repo of its own, so without it a reader can
+                # only match on `head_sha` - and a fork shares those. Stamped on
+                # the MIRRORED copy alone: the project log needs no scoping, and
+                # the row already appended above must not change under it.
+                # Omitted, never null, when no remote resolves.
+                mirrored = dict(event)
+                # `resolve_repo_root()`, the same root this emit already resolved
+                # above - not `Path.cwd()`. It honours FNO_REPO_ROOT, and a
+                # `--events` pointing into another checkout would otherwise stamp
+                # the row with the CWD's identity: a silently mis-scoped row,
+                # which is the one failure the scoping exists to prevent.
+                slug = repo_identity(repo_root) if repo_root else None
+                if slug:
+                    mirrored["data"] = {**event.get("data", {}), "repo": slug}
+                append_event(mirrored, events_path=global_events)
+        except Exception as exc:  # noqa: BLE001 - never lose the project append
+            typer.echo(
+                f"warning: {type_} not mirrored to the global log: {exc}",
+                err=True,
+            )
 
     # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
     # lineage exists. Fired AFTER the durable append so the events.jsonl record

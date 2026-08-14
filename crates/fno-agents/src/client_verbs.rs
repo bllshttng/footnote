@@ -4658,8 +4658,10 @@ mod tests {
             status: crate::AgentStatus::Idle,
             is_live: false,
             pid_confirmed_dead: false,
-            is_ask: false,
+            owns_worktree: true,
             exited_at: None,
+            liveness_surface: true,
+            transcript_fresh: Some(false),
             worktree_clean: None,
         };
         assert_eq!(

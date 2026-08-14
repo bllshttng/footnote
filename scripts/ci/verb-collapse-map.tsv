@@ -320,4 +320,5 @@ worktree ensure	T1	worktree ensure	30
 worktree overlap-record	T1	worktree overlap-record	3
 worktree overlaps	T1	worktree overlaps	5
 worktree policy	T1	worktree policy	9
+worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1

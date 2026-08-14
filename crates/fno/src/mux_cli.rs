@@ -1100,12 +1100,25 @@ fn squad_store_check() -> Check {
         };
     };
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
+    // ONE argument set with the prune that actually runs. This counter used to
+    // pass an empty `live_cwds` and no clock, so the number the operator read
+    // could disagree with what a bare `prune` would do. `include_named: false`
+    // stays hardcoded on purpose: it is what a bare `prune` uses.
+    let live_cwds = live_pane_cwds();
+    let now = crate::squad_store::now_epoch_secs();
     let orphan = loaded
         .squads
         .iter()
         .filter(|sq| {
             matches!(
-                crate::squad_store::prune_decision(sq, false, Some(&live), &[], &origin_exists),
+                crate::squad_store::prune_decision_at(
+                    sq,
+                    false,
+                    Some(&live),
+                    &live_cwds,
+                    &origin_exists,
+                    now,
+                ),
                 crate::squad_store::PruneDecision::Prune
             )
         })
@@ -1285,8 +1298,16 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
     let live_ref = live.as_ref();
 
+    let now = crate::squad_store::now_epoch_secs();
     let decide = |sq: &crate::squad_store::StoredSquad| {
-        crate::squad_store::prune_decision(sq, include_named, live_ref, &live_cwds, &origin_exists)
+        crate::squad_store::prune_decision_at(
+            sq,
+            include_named,
+            live_ref,
+            &live_cwds,
+            &origin_exists,
+            now,
+        )
     };
 
     // Both paths produce the same receipt type. Dry-run builds it from a
@@ -1347,10 +1368,20 @@ fn squad_prune(args: &[OsString]) -> i32 {
         let verb = if applied { "pruned" } else { "would prune" };
         for sq in &removed {
             println!(
-                "{verb} {} origins={} members={}",
+                "{verb} {} origins={} members={} - {}",
                 prune_identity(sq),
                 sq.origins.join(","),
-                sq.members
+                sq.members,
+                crate::squad_store::prune_reason(sq)
+            );
+        }
+        let memberless = removed.iter().filter(|sq| sq.members == 0).count();
+        if memberless > 0 {
+            println!(
+                "{memberless} of {} had no member records at all. Nothing recorded who worked \
+                 there, so the removal rests on directory and age. Recording members is the fix \
+                 that makes this judgeable.",
+                removed.len()
             );
         }
         if applied && removed.is_empty() {
@@ -1419,6 +1450,7 @@ fn render_prune_json(
                 "key": sq.key,
                 "origins": sq.origins,
                 "members": sq.members,
+                "reason": crate::squad_store::prune_reason(sq),
             })
         })
         .collect();

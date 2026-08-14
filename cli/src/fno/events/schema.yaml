@@ -212,6 +212,9 @@ event_types:
         harness:
           type: string
           description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
+        repo:
+          type: string
+          description: "Full repository identity `host/owner/repo`, lowercased, from the git remote. Present ONLY on the copy mirrored into the cross-project global log (`fno.events.cli` GLOBAL_MIRROR_TYPES); the project-log copy needs no scoping and omits it. Same producer and same meaning as `review_coverage.repo`: one parser, `fno.paths.repo_identity_from_remote_url`, in parity with `repo_identity_from_remote_url` in crates/fno-agents/src/finalize.rs. It is the FULL identity, never the last path segment, because `org-a/widget` and `org-b/widget` would otherwise share a key. Without it a global-log reader can match only on `head_sha`, and a fork shares those. Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the row rather than guess."
         attester_session_id:
           type: string
           description: "The harness session of the process that emitted the attestation - the attesting ACTOR. Read from the live process env on the marker precedence CODEX_THREAD_ID > CLAUDE_CODE_SESSION_ID > CODEX_SESSION_ID > GEMINI_SESSION_ID (the same one init resolves). Unlike session_id it varies with who emitted, so it is the field the authorship join keys on: equal to the authoring session's manifest harness_session_id means self-attested. Empty when no marker is set (unobserved, never guessed, never fallen back to the manifest - a fallback restores the tautology session_id carries). Every pre-landed attestation has this empty."
@@ -275,7 +278,7 @@ event_types:
           description: "The HEAD the coverage was computed against (coverage is a snapshot). This is the EVAL head, not the head any reviewer read - that is per-verdict `reviewed_sha`. Conflating the two is x-5b99: the merge gate compared this field against the current head and correctly refused a stale eval, but a FRESH eval carrying a stale bot verdict walked straight through it."
         repo:
           type: string
-          description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/pr/_reviews.py `_repo_identity_from_remote_url`. The two must agree."
+          description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/paths.py `repo_identity_from_remote_url`. The two must agree."
     consumers: [fno-agents loop-check, fno pr, fno backlog reconcile]
 
   - name: review_gate_bot_usage_limited
@@ -1636,6 +1639,25 @@ event_types:
           type: [string, "null"]
         termination_event:
           type: boolean
+
+  - name: worktree_sweep
+    description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        repo:
+          type: string
+        eligible:
+          type: integer
+        kept:
+          type: integer
+        dirty:
+          type: integer
+        mode:
+          type: string
+        error:
+          type: string
 
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever (x-fcbf)."

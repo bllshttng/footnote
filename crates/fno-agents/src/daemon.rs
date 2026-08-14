@@ -385,22 +385,200 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
 pub struct GcSummary {
     pub reaped: Vec<String>,
     pub kept_dirty: Vec<(String, String)>,
+    /// Rows removed on absolute age alone, with nothing to corroborate.
+    ///
+    /// Kept SEPARATE from `reaped` on purpose. A backstop folded into one total
+    /// becomes the main path silently, and the corroboration gate it bypasses
+    /// turns into decoration. Reported at every pass, including zero.
+    pub reaped_backstop: Vec<String>,
 }
 
-/// `git status --porcelain` cleanliness of a worktree-owning row's `cwd`.
-/// `Some(true)` clean, `Some(false)` dirty (uncommitted changes), `None` the
-/// probe could not determine it (git errored / not a repo) -> the caller fails
-/// closed and keeps the row.
+/// Distinct canonical repo roots the registry knows about, deduplicated.
+///
+/// A linked worktree is not its own repo, so its rows fold into the checkout
+/// that owns them and the sweep runs once per repo rather than once per row.
+fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
+    let Ok(loaded) = state::load_registry(&home.registry_json()) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &loaded.entries {
+        let root = if e.project_root.is_empty() {
+            e.cwd.clone()
+        } else {
+            e.project_root.clone()
+        };
+        if !root.is_empty() && std::path::Path::new(&root).is_dir() {
+            seen.insert(root);
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// How long between worktree report sweeps. Long on purpose: this is the
+/// backstop for what the merge-triggered ritual missed, not a control loop.
+const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
+
+/// One repo's worktree-sweep reading, parsed from the verb's `Summary:` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorktreeSweepReport {
+    pub eligible: usize,
+    pub kept: usize,
+    pub dirty: usize,
+}
+
+/// Parse `fno worktree cleanup --merged`'s summary line.
+///
+/// Returns `None` rather than a zeroed report when the line is absent. A sweep
+/// that could not read its own output must not report "0 eligible, 0 dirty",
+/// which is indistinguishable from a clean machine: an absence has two
+/// explanations and a count must only ever come from a real reading.
+pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("Summary:"))?;
+    let num_before = |needle: &str| -> Option<usize> {
+        let idx = line.find(needle)?;
+        line[..idx].split_whitespace().last()?.parse().ok()
+    };
+    Some(WorktreeSweepReport {
+        eligible: num_before(" would archive")?,
+        kept: num_before(" kept (")?,
+        dirty: num_before(" dirty")?,
+    })
+}
+
+/// Report-only worktree sweep, one line per repo, on a 24h floor.
+///
+/// REPORTS, NEVER REMOVES, and that split is deliberate. A merged PR is external
+/// proof the work landed; a timer tick proves nothing. Removal stays on the
+/// merge-triggered path, gated by the existing `post_merge.self_reap`. There is
+/// no second config knob, because two off-switches for one decision strand
+/// whoever flips the wrong one.
+///
+/// `run` is injected so the policy is testable without shelling out.
+pub fn worktree_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    now: i64,
+    roots: &[String],
+    run: &dyn Fn(&str) -> Option<String>,
+) -> usize {
+    let stamp = home.root().join("worktree-sweep.stamp");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
+        return 0;
+    }
+    let mut swept = 0;
+    for root in roots {
+        // Emit for EVERY repo, including the ones that read zero. A tick that
+        // stays silent when it finds nothing cannot be told from a tick that
+        // never ran, and this sweep exists precisely to surface what the
+        // ritual missed.
+        match run(root).as_deref().and_then(parse_worktree_sweep) {
+            Some(r) => {
+                let _ = emitter.emit(
+                    "worktree_sweep",
+                    &json!({
+                        "repo": root,
+                        "eligible": r.eligible,
+                        "kept": r.kept,
+                        "dirty": r.dirty,
+                        "mode": "report-only",
+                    }),
+                );
+                swept += 1;
+            }
+            None => {
+                let _ = emitter.emit(
+                    "worktree_sweep",
+                    &json!({"repo": root, "mode": "report-only", "error": "unreadable-summary"}),
+                );
+            }
+        }
+    }
+    let _ = std::fs::write(&stamp, now.to_string());
+    swept
+}
+
+/// Has this worker's transcript been written recently enough to call it alive?
+///
+/// `Some(true)` touched within `window_secs`, `Some(false)` positively stale,
+/// `None` no path recorded or the file cannot be stat'd.
+///
+/// This is the INDEPENDENT half of the reap decision. `status` and `exited_at`
+/// are one signal wearing two hats: `gc_sweep` sets the stamp when a sweep first
+/// fails to reach a worker, so they cannot corroborate each other. A claude bg
+/// thread that finished a turn is idle and resumable, not gone, and a batched
+/// stamp says nothing about which it is. Its transcript does.
+///
+/// `None` never grants permission. An unreadable transcript has two
+/// explanations and only one of them is a dead worker.
+fn transcript_fresh_probe(log_path: Option<&str>, now: i64, window_secs: i64) -> Option<bool> {
+    let path = log_path.filter(|p| !p.is_empty())?;
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(now.saturating_sub(secs) <= window_secs)
+}
+
+/// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
+/// plain directory?
+///
+/// A linked worktree's `.git` is a FILE containing a `gitdir:` pointer; the
+/// canonical checkout's `.git` is a directory. That difference is the whole
+/// test, it needs no subprocess, and it is what separates a row that owns
+/// something removable from one that merely ran somewhere.
+///
+/// Fails closed in the useful direction: a path we cannot read is "owns
+/// nothing", so its row is judged on terminal status and grace alone rather
+/// than pinned forever by a cleanliness answer that could never arrive.
+fn is_linked_worktree(cwd: &str) -> bool {
+    if cwd.is_empty() {
+        return false;
+    }
+    std::path::Path::new(cwd).join(".git").is_file()
+}
+
+/// Can this worktree-owning row's `cwd` be removed without destroying work?
+/// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
+/// -> the caller fails closed and keeps the row.
+///
+/// Routes through `fno worktree reapable`, the same answer the `--merged` sweep
+/// and `archive-worktree.sh` use, so three call sites cannot drift apart (an
+/// equivalence test pins that they agree). The old rule here was "is
+/// `git status --porcelain` empty", which blocked on a tracked file merely
+/// MISSING from disk - content HEAD still holds, so removal loses nothing.
+///
+/// Permission needs BOTH a clean exit and the literal `reapable=yes` marker. A
+/// stale `fno` predating the verb exits non-zero with no receipt, which is
+/// indistinguishable from any other non-answer, so every unknown degrades to
+/// `None` and the row is kept. That is exactly the prior behaviour.
 fn worktree_clean_probe(cwd: &str) -> Option<bool> {
-    let out = std::process::Command::new("git")
+    let out = std::process::Command::new("fno")
         .current_dir(cwd)
-        .args(["status", "--porcelain"])
+        .args(["worktree", "reapable", cwd])
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() {
+        // Never read a bare exit 0 as permission: an empty stdout (a shim that
+        // swallowed the verb) would otherwise reap a live worktree.
+        return if text.contains("reapable=yes") {
+            Some(true)
+        } else {
+            None
+        };
     }
-    Some(out.stdout.iter().all(u8::is_ascii_whitespace))
+    if text.contains("reapable=no") {
+        return Some(false);
+    }
+    None
 }
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
@@ -584,6 +762,9 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     // `created_at` is the spawn-stamped identity discriminant: a replacement
     // session carries a fresh one.
     let mut to_reap: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    // Rows in `to_reap` that got there on age alone, keyed by registry name.
+    let mut backstop_ids: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     let mut to_stamp: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     let mut to_clear: std::collections::BTreeMap<String, String> =
@@ -598,7 +779,10 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             .pid
             .map(|p| !pid_is_ours(p, e.pid_start_time))
             .unwrap_or(false);
-        let is_ask = e.is_one_shot_ask();
+        // A one-shot ask owns nothing; neither does a row sitting in the
+        // canonical checkout or in a plain directory. Only a LINKED worktree is
+        // removable, and only there does cleanliness decide anything.
+        let owns_worktree = !e.is_one_shot_ask() && is_linked_worktree(&e.cwd);
         let exited_at = e
             .exited_at
             .as_deref()
@@ -611,21 +795,46 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         let terminal_or_dead = matches!(e.status, AgentStatus::Exited | AgentStatus::PermanentDead)
             || pid_confirmed_dead;
         let past_grace = matches!(exited_at, Some(t) if now.saturating_sub(t) > grace_secs);
-        let needs_probe = !is_live && terminal_or_dead && past_grace && !is_ask;
-        let worktree_clean = if needs_probe {
-            worktree_clean_probe(&e.cwd)
+        // The second signal, read whenever a reap is otherwise on the table.
+        // Cheap (one stat), and it is the discrimination `status` cannot make:
+        // an idle-but-resumable bg thread keeps touching its transcript.
+        let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
+            transcript_fresh_probe(e.log_path.as_deref(), now, grace_secs)
         } else {
             None
         };
-
-        let row = crate::gc::GcRow {
+        // Built with `worktree_clean` unset so the probe decision can ask the
+        // policy itself. Filled in below, before any verdict is read from it.
+        let mut row = crate::gc::GcRow {
             status: e.status,
             is_live,
             pid_confirmed_dead,
-            is_ask,
+            owns_worktree,
             exited_at,
-            worktree_clean,
+            // A one-shot ask carries neither pid nor short_id: no worker can be
+            // hiding behind an identity that was never recorded.
+            liveness_surface: e.pid.is_some() || !e.short_id.is_empty(),
+            transcript_fresh,
+            worktree_clean: None,
         };
+        // The probe condition MIRRORS the removal condition, asked through the
+        // one function that defines it. A narrower test here strands any row the
+        // policy would remove: `worktree_clean` stays `None`, the fail-closed arm
+        // keeps it, and the `kept_dirty` line below is gated on this same flag,
+        // so the operator is told nothing either. A backstop row is the other
+        // half - it has no corroboration by definition, and without it the valve
+        // never opens for the worktree-owning rows it was ordered for.
+        let past_backstop = matches!(exited_at,
+            Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
+        let needs_probe = !is_live
+            && terminal_or_dead
+            && past_grace
+            && owns_worktree
+            && (crate::gc::removal_is_corroborated(&row) || past_backstop);
+        if needs_probe {
+            row.worktree_clean = worktree_clean_probe(&e.cwd);
+        }
+        let worktree_clean = row.worktree_clean;
         let id = if e.short_id.is_empty() {
             e.name.clone()
         } else {
@@ -634,6 +843,10 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
                 to_reap.insert(e.name.clone(), e.created_at.clone());
+            }
+            crate::gc::GcAction::ReapBackstop => {
+                to_reap.insert(e.name.clone(), e.created_at.clone());
+                backstop_ids.insert(e.name.clone(), id.clone());
             }
             crate::gc::GcAction::StampExit => {
                 to_stamp.insert(e.name.clone(), e.created_at.clone());
@@ -754,11 +967,19 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
                             ("termination_event", Value::Bool(termination_event)),
                         ]),
                     );
-                    summary.reaped.push(if e.short_id.is_empty() {
+                    let reaped_id = if e.short_id.is_empty() {
                         e.name.clone()
                     } else {
                         e.short_id.clone()
-                    });
+                    };
+                    // A backstop removal is counted ONLY in its own list, never
+                    // in both. Two totals that overlap cannot be compared, and
+                    // comparing them is the point.
+                    if backstop_ids.contains_key(&e.name) {
+                        summary.reaped_backstop.push(reaped_id);
+                    } else {
+                        summary.reaped.push(reaped_id);
+                    }
                 }
             }
         }
@@ -768,7 +989,11 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
                 &json!({"op": "gc_sweep", "error": err.to_string()}),
             );
             // Nothing was removed; report no reaps (no event/disk divergence).
+            // BOTH lists, or the next writer that populates them earlier leaves
+            // this path claiming zero ordinary reaps beside phantom backstop
+            // ones - two counts that disagree about the same failed sweep.
             summary.reaped.clear();
+            summary.reaped_backstop.clear();
         }
     }
     summary
@@ -1129,6 +1354,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // `claude stop` is a subprocess; a large marker set must never serialize
     // inline in the select arm and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -1173,6 +1399,30 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // registry write); the grace window makes exact cadence
                 // non-critical, so running it on the idle tick is fine.
                 let _ = gc_sweep(&ctx.home, &ctx.emitter, ctx.opts.dead_row_grace);
+                // Worktree report sweep: the backstop for what the merge ritual
+                // missed. Its own 24h stamp makes it a near-no-op on this tick,
+                // but the verb shells git across every worktree when it does
+                // fire, so it runs off-loop behind a one-in-flight gate like the
+                // scrape sweep. Report-only by construction.
+                if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&worktree_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        let roots = registry_repo_roots(&home);
+                        let now = now_epoch_secs();
+                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
+                            std::process::Command::new("fno")
+                                .current_dir(root)
+                                .args(["worktree", "cleanup", "--merged"])
+                                .output()
+                                .ok()
+                                .filter(|o| o.status.success())
+                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        });
+                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
                 // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
                 // workers finalize marked terminal, so a shipped bg /target frees
                 // its slot instead of parking at an idle prompt forever. Spawned
@@ -5047,6 +5297,200 @@ mod tests {
         );
     }
 
+    /// The real summary line, copied from this machine's output.
+    const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
+Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
+
+    #[test]
+    fn sweep_summary_parses_the_real_line() {
+        let r = parse_worktree_sweep(REAL_SUMMARY).expect("parses");
+        assert_eq!(r.eligible, 12);
+        assert_eq!(r.kept, 37);
+        assert_eq!(r.dirty, 5);
+    }
+
+    #[test]
+    fn sweep_summary_absent_is_none_not_zero() {
+        // A zeroed report is indistinguishable from a clean machine. An absence
+        // has two explanations and only a real reading may produce a count.
+        assert!(parse_worktree_sweep("").is_none());
+        assert!(parse_worktree_sweep("some other output\n").is_none());
+    }
+
+    #[test]
+    fn sweep_reports_every_repo_including_the_quiet_ones() {
+        let home = tmp_home("wt-sweep-quiet");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let quiet =
+            "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into(), "/repo/b".into()],
+            &|_| Some(quiet.to_string()),
+        );
+
+        assert_eq!(swept, 2, "a tick that finds nothing must still report");
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert_eq!(log.matches("worktree_sweep").count(), 2);
+        assert!(log.contains("report-only"));
+    }
+
+    #[test]
+    fn sweep_honours_its_own_24h_floor() {
+        let home = tmp_home("wt-sweep-floor");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let out = |_: &str| Some(REAL_SUMMARY.to_string());
+        let now = 1_000_000;
+
+        assert_eq!(
+            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &out),
+            1
+        );
+        // Same day: skipped entirely, no second reading.
+        assert_eq!(
+            worktree_sweep(&home, &emitter, now + 60, &["/repo/a".into()], &out),
+            0
+        );
+        // A day later: fires again.
+        assert_eq!(
+            worktree_sweep(&home, &emitter, now + 86_401, &["/repo/a".into()], &out),
+            1
+        );
+    }
+
+    #[test]
+    fn sweep_never_passes_apply() {
+        // Ruling: a merged PR is proof, a timer tick is not. Removal lives on the
+        // merge-triggered path only. Pin that this sweep cannot grow an --apply.
+        let src = include_str!("daemon.rs");
+        let idx = src
+            .find("fn worktree_sweep(")
+            .expect("worktree_sweep exists");
+        let body = &src[idx..idx + 2000.min(src.len() - idx)];
+        assert!(!body.contains("--apply"));
+    }
+
+    #[test]
+    fn sweep_records_an_unreadable_summary_rather_than_inventing_zeros() {
+        let home = tmp_home("wt-sweep-unreadable");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        let swept = worktree_sweep(&home, &emitter, 1_000_000, &["/repo/a".into()], &|_| None);
+
+        assert_eq!(swept, 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("unreadable-summary"));
+        assert!(!log.contains("\"eligible\""));
+    }
+
+    #[test]
+    fn transcript_probe_reads_freshness_and_fails_to_unknown() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let now = now_epoch_secs();
+
+        // No path recorded, and a path that does not exist: UNKNOWN, never a
+        // cheerful "stale". The caller reads None as "keep".
+        assert_eq!(transcript_fresh_probe(None, now, 3600), None);
+        assert_eq!(transcript_fresh_probe(Some(""), now, 3600), None);
+        assert_eq!(
+            transcript_fresh_probe(Some("/nonexistent/transcript.jsonl"), now, 3600),
+            None
+        );
+
+        let fresh = dir.path().join("fresh.jsonl");
+        std::fs::write(&fresh, "{}\n").unwrap();
+        assert_eq!(
+            transcript_fresh_probe(Some(&fresh.to_string_lossy()), now, 3600),
+            Some(true),
+            "a just-written transcript is a worker that is still around"
+        );
+
+        let stale = dir.path().join("stale.jsonl");
+        std::fs::write(&stale, "{}\n").unwrap();
+        assert!(std::process::Command::new("touch")
+            .args(["-t", "200001010000", &stale.to_string_lossy()])
+            .status()
+            .expect("touch runs")
+            .success());
+        assert_eq!(
+            transcript_fresh_probe(Some(&stale.to_string_lossy()), now, 3600),
+            Some(false),
+            "a transcript untouched for the window is a session that stopped"
+        );
+    }
+
+    #[test]
+    fn the_exit_stamp_is_written_per_sweep_not_per_exit() {
+        // NAMING THE BATCH WRITER. `gc_sweep` is the only production writer of
+        // `exited_at`, and it computes ONE timestamp per pass and applies it to
+        // every row it newly observes as dead. That is why rows across unrelated
+        // tenants and projects share a stamp to the second: the field measures a
+        // sweep tick, not an exit.
+        //
+        // This test pins the shape so the field cannot quietly start looking like
+        // real exit evidence and get trusted on its own again.
+        let home = tmp_home("gc-batch-stamp");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            for n in ["ask-a", "ask-b", "ask-c"] {
+                r.entries.push(ask_row(n, None));
+            }
+        })
+        .unwrap();
+
+        gc_sweep(&home, &emitter, Duration::from_secs(3600));
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let stamps: std::collections::BTreeSet<String> = reg
+            .entries
+            .iter()
+            .filter_map(|e| e.exited_at.clone())
+            .collect();
+        assert_eq!(reg.entries.len(), 3, "nothing reaped on the stamping pass");
+        assert_eq!(
+            stamps.len(),
+            1,
+            "three unrelated rows share one stamp: it is a sweep tick, not an exit"
+        );
+    }
+
+    #[test]
+    fn linked_worktree_detection_separates_owners_from_passers_through() {
+        // The whole ownership test is `.git` being a FILE (a `gitdir:` pointer)
+        // rather than a directory. Getting it backwards would either pin every
+        // row again or reap rows that DO own a dirty worktree.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let base = dir.path();
+
+        let canonical = base.join("canonical");
+        std::fs::create_dir_all(canonical.join(".git")).unwrap();
+        assert!(
+            !is_linked_worktree(canonical.to_str().unwrap()),
+            "a .git DIRECTORY is the canonical checkout; the row owns nothing removable"
+        );
+
+        let linked = base.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: /somewhere/.git/worktrees/x\n").unwrap();
+        assert!(
+            is_linked_worktree(linked.to_str().unwrap()),
+            "a .git FILE is a linked worktree; cleanliness decides its row"
+        );
+
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!is_linked_worktree(plain.to_str().unwrap()));
+
+        // Unreadable and empty both fail closed toward "owns nothing", so the row
+        // is judged on terminal status and grace instead of waiting forever on a
+        // cleanliness answer that can never arrive.
+        assert!(!is_linked_worktree(""));
+        assert!(!is_linked_worktree("/nonexistent/path/that/cannot/be/read"));
+    }
+
     #[test]
     fn gc_sweep_empty_registry_is_noop() {
         let home = tmp_home("gc-empty");
@@ -5091,6 +5535,7 @@ mod tests {
             dead.status = AgentStatus::Exited;
             dead.cwd = dead_repo.to_string_lossy().into_owned();
             dead.exited_at = Some("2020-01-01T00:00:00Z".into());
+            dead.log_path = Some(stale_log(&dead_repo));
             dead.harness_session_id = Some("dead-harness-uuid".into());
             r.entries.push(dead);
 
@@ -5098,6 +5543,7 @@ mod tests {
             done.status = AgentStatus::Exited;
             done.cwd = done_repo.to_string_lossy().into_owned();
             done.exited_at = Some("2020-01-01T00:00:00Z".into());
+            done.log_path = Some(stale_log(&done_repo));
             done.harness_session_id = Some("done-harness-uuid".into());
             r.entries.push(done);
         })
@@ -5168,6 +5614,7 @@ mod tests {
             row.status = AgentStatus::Exited;
             row.cwd = repo.to_string_lossy().into_owned();
             row.exited_at = Some("2020-01-01T00:00:00Z".into());
+            row.log_path = Some(stale_log(&repo));
             registry.entries.push(row);
         })
         .unwrap();
@@ -5206,6 +5653,7 @@ mod tests {
             row.status = AgentStatus::Exited;
             row.cwd = repo.to_string_lossy().into_owned();
             row.exited_at = Some("2020-01-01T00:00:00Z".into());
+            row.log_path = Some(stale_log(&repo));
             registry.entries.push(row);
         })
         .unwrap();
@@ -5885,6 +6333,27 @@ mod tests {
     // --- find_uuid_backfill_row (x-c393): backfill a null-uuid bg row ---------
 
     /// A `claude --bg` row: jobId in `short_id`, `claude_session_uuid` null.
+    /// A transcript file for a fixture row that is genuinely finished.
+    ///
+    /// The corroboration gate needs a POSITIVE reading that a worker stopped
+    /// writing, and these tests run with a zero grace window, so any file that
+    /// already exists reads as stale. A fixture with no transcript at all reads
+    /// as UNKNOWN and is kept, which is the correct production behaviour and
+    /// would silently hollow out these assertions.
+    fn stale_log(dir: &std::path::Path) -> String {
+        let p = dir.join("transcript.jsonl");
+        std::fs::write(&p, "{}\n").unwrap();
+        // BACKDATE IT. A file written this second reads as fresh even against a
+        // zero-length window, so a fixture that only creates the file proves the
+        // opposite of what it claims.
+        assert!(std::process::Command::new("touch")
+            .args(["-t", "200001010000", &p.to_string_lossy()])
+            .status()
+            .expect("touch runs")
+            .success());
+        p.to_string_lossy().into_owned()
+    }
+
     fn bg_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = rentry(name, AgentStatus::Live, None);
         e.legacy_provider = "claude".into();

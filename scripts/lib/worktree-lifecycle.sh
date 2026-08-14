@@ -7,6 +7,32 @@
 #   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
 set -uo pipefail
 
+# The one "is removing this worktree safe?" answer, shared with
+# archive-worktree.sh and the Rust row-GC probe. Absent (partial deploy) it
+# degrades to the old block-on-any-dirt rule, never to permission.
+_WT_LIFECYCLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-reapable.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/worktree-reapable.sh"
+else
+    WT_REAPABLE_LINE=""
+    wt_reapable() {
+        # The receipt has to match the answer, or the reason printed below lies:
+        # the old shape stamped "probe-failed" even on the path that returned 0.
+        # A git that ERRORS also blocks here; an empty porcelain from a failed
+        # command is not a clean tree.
+        local out rc=0 reason=dirty
+        out="$(git -C "${1:-}" status --porcelain 2>/dev/null)" || rc=$?
+        if [[ "$rc" -eq 0 && -z "$out" ]]; then
+            WT_REAPABLE_LINE="reapable=yes reason=clean recoverable_deletions=0"
+            return 0
+        fi
+        [[ "$rc" -ne 0 ]] && reason=probe-failed
+        WT_REAPABLE_LINE="reapable=no reason=${reason} detail=helper-missing"
+        return 1
+    }
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? Legacy manifests carried status: IN_PROGRESS; the modern
@@ -233,9 +259,18 @@ case "${1:-status}" in
                     printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)); continue
                 fi
 
-                # 1. dirty (tracked only; no --ignored so the .fno symlink family is not "dirty")
-                if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
-                    printf '%-18s %-34s %s\n' "kept (dirty)" "$branch" "$wt"; N_DIRTY=$((N_DIRTY + 1)); continue
+                # 1. holds content removal would destroy (tracked only; no
+                #    --ignored so the .fno symlink family is not "dirty"). A
+                #    tracked file MISSING from disk is recoverable from HEAD, so
+                #    it never blocks - see scripts/lib/worktree-reapable.sh. The
+                #    receipt names the recoverable-deletion count so a
+                #    systematic cause is visible instead of the word "dirty".
+                if ! wt_reapable "$wt"; then
+                    # Print the reason, or the promise above is empty: "dirty"
+                    # alone cannot tell an untracked scratch file from a probe
+                    # that never answered.
+                    reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                    printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
                 # 2. merged into origin/main? Detached HEAD (deleted branch) is always kept.
                 if [[ "$branch" == "HEAD" || -z "$head" ]]; then

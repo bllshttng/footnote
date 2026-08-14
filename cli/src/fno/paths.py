@@ -504,6 +504,81 @@ def global_events_json() -> Path:
     return ledger_json().parent / "events.jsonl"
 
 
+def repo_identity_from_remote_url(url: str) -> Optional[str]:
+    """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
+
+    Deliberately NOT :func:`_remote_url_to_slug`, which yields only the last path
+    segment. That is fine for a path token, but this keys events in the
+    cross-project global log, and there a collision is a correctness hole:
+    ``org-a/widget`` and ``org-b/widget`` both reduce to ``widget``, so with a
+    shared PR number one repo's coverage could satisfy the other's auto-merge
+    review guard - and a fork shares head SHAs, so the staleness check that would
+    otherwise catch it does not fire.
+
+    Lives HERE, at the platform layer, because both writers of a global-log event
+    need it and they sit on opposite sides of the runtime boundary:
+    ``fno.pr._reviews`` reads coverage, and ``fno.events.cli`` stamps the mirrored
+    attestation. A copy in each is two parsers to keep in parity with Rust
+    instead of one.
+
+    Mirrors ``repo_identity_from_remote_url`` in ``crates/fno-agents/src/finalize.rs``.
+    The two MUST agree or the reader stops finding the writer's events; the
+    parity cases are covered by tests on both sides.
+    """
+    s = (url or "").strip().rstrip("/")
+    if not s:
+        return None
+    idx = s.find("://")
+    if idx != -1:
+        s = s[idx + 3:]
+    idx = s.find("@")
+    if idx != -1:
+        s = s[idx + 1:]
+    m = re.search(r"[/:]", s)
+    if not m:
+        return None
+    host_port, path = s[: m.start()], s[m.start() + 1:]
+    # `ssh://host:22/o/r` glues a numeric port to the host; a non-numeric suffix
+    # is part of the host and must survive.
+    host = host_port
+    if ":" in host_port:
+        h, _, p = host_port.partition(":")
+        # `isascii()` guard: Rust uses `is_ascii_digit`, and `str.isdigit()` is
+        # true for non-ASCII digits ("²", "٣"). Without it the two sides
+        # disagree on a remote nobody sane writes, and the reader silently
+        # stops finding the writer's events - the one failure this parity
+        # exists to prevent.
+        if p.isascii() and p.isdigit():
+            host = h
+    path = path.lstrip("/")
+    first, _, rest = path.partition("/")
+    if first.isascii() and first.isdigit() and rest:
+        path = rest
+    path = path.rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not host or "\\" in path:
+        return None
+    segments = [p for p in path.split("/") if p]
+    if len(segments) < 2 or any(p in (".", "..") for p in segments):
+        return None
+    return f"{host}/{'/'.join(segments)}".lower()
+
+
+def repo_identity(root: Path) -> Optional[str]:
+    """``host/owner/repo`` for the checkout at ``root``, or None."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001 - no git -> no identity -> no global read
+        return None
+    if getattr(out, "returncode", 1) != 0:
+        return None
+    return repo_identity_from_remote_url(out.stdout or "")
+
+
 def evals_history() -> Path:
     """Return the path to evals-history.jsonl (one row per bank task-run).
 
