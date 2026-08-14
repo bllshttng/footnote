@@ -3023,10 +3023,7 @@ impl Core {
         // The source squad's store identity (name when named, else the durable
         // key), so a move that empties it can depersist the right entry - an
         // unnamed lane persists too now, not only named workspaces.
-        let src_identity = self
-            .session
-            .squad(src_sid)
-            .map(|s| (s.name.clone().unwrap_or_default(), s.key.clone()));
+        let src_identity = self.squad_identity(src_sid);
 
         // Graft into the destination first, and focus the moved pane there while
         // the dst index is still valid (removing the source tab below can shift
@@ -4068,6 +4065,14 @@ impl Core {
         if let Err(e) = crate::squad_store::upsert(name, key, origins, members) {
             self.persist_degraded(&e);
         }
+    }
+
+    /// The store identity of a live squad: `(name, key)`, `name` empty for an
+    /// unnamed one. Captured BEFORE a mutation that may remove the squad, so the
+    /// de-persist has something to key on afterwards.
+    fn squad_identity(&self, sid: u64) -> Option<(String, String)> {
+        let sq = self.session.squad(sid)?;
+        Some((sq.name.clone().unwrap_or_default(), sq.key.clone()))
     }
 
     /// Write-through a delete of a squad's store entry, keyed by `name` when
@@ -6305,6 +6310,7 @@ impl Core {
             return Flow::Continue;
         };
         self.reap_pane(pid);
+        let ident = self.squad_identity(sid);
         let tid = self
             .session
             .squad(sid)
@@ -6322,25 +6328,44 @@ impl Core {
             return Flow::Continue;
         }
         match self.session.remove_tab(sid, ti) {
-            RemoveOutcome::SessionEmpty => Flow::Shutdown,
-            _ => {
-                // The tab (and possibly its squad) died: every client whose
-                // view named it re-anchors in this same mutation, then the
-                // push delivers ModeSync -> Layout -> frames in order
-                // (AC2-ERR).
-                self.tab_areas.remove(&tid);
-                // (x-cde1) Closing the last pane removes the tab too, so it must
-                // honor the same de-persist contract as Command::CloseTab: a
-                // template tab drops its stored spec or restore resurrects the
-                // closed tab (persist rewrites the squad's list from live tabs).
-                if self.template_specs.remove(&tid).is_some() {
-                    self.persist_template_specs(sid);
+            RemoveOutcome::SessionEmpty => {
+                self.squad_members.remove(&sid);
+                if let Some((name, key)) = ident {
+                    self.persist_remove(&name, &key);
                 }
-                self.reanchor_views();
-                self.push_layout(true);
-                Flow::Continue
+                Flow::Shutdown
             }
+            RemoveOutcome::SquadRemoved => {
+                // The last pane's close removed the whole workspace - it must
+                // honor the same de-persist contract as Command::CloseTab or
+                // its row returns at restart (same shape as the x-cde1 spec
+                // drop below).
+                self.squad_members.remove(&sid);
+                if let Some((name, key)) = ident {
+                    self.persist_remove(&name, &key);
+                }
+                self.close_pane_reanchor(tid, sid)
+            }
+            _ => self.close_pane_reanchor(tid, sid),
         }
+    }
+
+    /// Shared re-anchor tail of `close_pane`'s surviving-session arms.
+    fn close_pane_reanchor(&mut self, tid: TabId, sid: u64) -> Flow {
+        // The tab (and possibly its squad) died: every client whose view named
+        // it re-anchors in this same mutation, then the push delivers
+        // ModeSync -> Layout -> frames in order (AC2-ERR).
+        self.tab_areas.remove(&tid);
+        // (x-cde1) Closing the last pane removes the tab too, so it must
+        // honor the same de-persist contract as Command::CloseTab: a
+        // template tab drops its stored spec or restore resurrects the
+        // closed tab (persist rewrites the squad's list from live tabs).
+        if self.template_specs.remove(&tid).is_some() {
+            self.persist_template_specs(sid);
+        }
+        self.reanchor_views();
+        self.push_layout(true);
+        Flow::Continue
     }
 
     /// Point `client_id`'s view at `(squad, tab)` and record the tab as its
@@ -6764,12 +6789,29 @@ impl Core {
                     .iter()
                     .filter_map(|&pid| self.member_ctx(pid))
                     .collect();
+                // The squad's store identity before the reap, for the
+                // de-persist below: a memberless workspace yields no ctxs, so
+                // reconcile_member_close alone cannot clear its row.
+                let ident = self.squad_identity(sid);
                 for pid in pids {
                     self.reap_pane(pid);
                 }
                 let outcome = self.session.remove_tab(sid, ti);
                 for ctx in ctxs {
                     self.reconcile_member_close(Some(ctx), false);
+                }
+                if matches!(
+                    outcome,
+                    RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
+                ) {
+                    // The whole workspace left the session - de-persist it on
+                    // EVERY path, not only the member one. SessionEmpty counts:
+                    // closing the last tab of the last workspace still dismissed
+                    // it. `persist_remove` no-ops when reconcile already ran.
+                    self.squad_members.remove(&sid);
+                    if let Some((name, key)) = ident {
+                        self.persist_remove(&name, &key);
+                    }
                 }
                 match outcome {
                     RemoveOutcome::SessionEmpty => Flow::Shutdown,
