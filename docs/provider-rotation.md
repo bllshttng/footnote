@@ -1467,8 +1467,10 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
   carries `"persisted": false` when the reading is good but its cache write lost the
   update-lock race; the reading is still displayed, because persistence and
   displayability are separate outcomes.
-- `fno config accounts list` gains a compact `headroom=` column, plus a `usage=<age>` column: the age of the cached usage snapshot, distinct from `snapshot=<age>` (a `managed` record's credential blob age, unrelated and not governed by the same TTL).
+- `fno config accounts list` gains a compact `headroom=` column, plus a `usage=<age>` column.
 - `fno config accounts required-bot-check [--json]` - the pre-promise early warning.
+
+`usage=<age>` is the age of the cached usage snapshot. It is distinct from `snapshot=<age>`, a `managed` record's credential blob age, unrelated and not governed by the same TTL.
 
 `usage=never` names a record with no landed probe. `usage=<age> (STALE, ttl=<ttl>)` names a cached reading older than `probe_ttl_seconds`.
 
