@@ -255,8 +255,8 @@ def mint_node_id(existing_ids) -> str:
             data = _json.loads(archive_path.read_text())
             raw_entries = data.get("entries", []) if isinstance(data, dict) else []
             archive_ids = {
-                e.get("id") for e in raw_entries
-                if isinstance(e, dict) and e.get("id")
+                nid for e in raw_entries
+                if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
             }
     except Exception:  # noqa: BLE001 - archive is advisory; a bad read must not block minting
         pass

@@ -756,12 +756,12 @@ def _archive_id_collisions() -> dict[str, Any]:
         if not archive_path.exists():
             return {"count": 0, "ids": []}
         working_ids = {
-            e.get("id") for e in read_graph(graph_json())
-            if isinstance(e, dict) and e.get("id")
+            nid for e in read_graph(graph_json())
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         archive_ids = {
-            e.get("id") for e in read_graph(archive_path)
-            if isinstance(e, dict) and e.get("id")
+            nid for e in read_graph(archive_path)
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         collisions = sorted(working_ids & archive_ids)
         return {"count": len(collisions), "ids": collisions}

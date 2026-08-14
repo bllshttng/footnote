@@ -188,7 +188,8 @@ def remint_archive_collisions(
     from fno.graph._constants import mint_node_id
 
     reserved = set(working_ids) | {
-        e.get("id") for e in archive_entries if isinstance(e, dict) and e.get("id")
+        nid for e in archive_entries
+        if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
     }
     remap: dict[str, str] = {}
     patched: list[Entry] = []

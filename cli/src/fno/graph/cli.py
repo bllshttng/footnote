@@ -9834,8 +9834,8 @@ def cmd_archive_dedupe_ids(
 
     if not apply:
         working_ids = {
-            e.get("id") for e in read_graph(_graph_path())
-            if isinstance(e, dict) and e.get("id")
+            nid for e in read_graph(_graph_path())
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
         typer.echo(f"[dry-run] would remint {len(remap)} archive id(s):")
@@ -9854,7 +9854,10 @@ def cmd_archive_dedupe_ids(
         # lock. Reading the archive HERE (not before the lock) is load-bearing:
         # a pre-lock read would go stale under that race and the write below
         # would clobber whatever the concurrent sweep just archived.
-        working_ids = {e.get("id") for e in entries if isinstance(e, dict) and e.get("id")}
+        working_ids = {
+            nid for e in entries
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+        }
         patched, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
         remap_holder.update(remap)
         if remap:
