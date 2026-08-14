@@ -46,9 +46,20 @@ NOW_INDEX=$(stat -f '%m %z' "$WORK/MEMORY.md" 2>/dev/null || stat -c '%Y %s' "$W
 [[ "$NOW_INDEX" == "$SNAP_INDEX" ]] || fail "case2 MEMORY.md was modified by dedup hit"
 pass "case2 identical no-op"
 
-# Case 3: update with different body
+# Case 3: update with different body. Requires --source-sha256 of the file
+# as it stands on disk right now (read-before-write, x-8fc0) - the writer
+# refuses (stages instead) an update without it.
 CAND_B='{"type":"project","name":"dedup_test_one","description":"dedup test updated","body":"Body B.\n**Why:** revised.\n**How to apply:** new path.\n"}'
+# A pipeline's exit status is the LAST command's (awk succeeds on empty
+# input), so `A | awk || B | awk` never falls through when A is missing.
+# Check which binary exists first instead.
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_BEFORE=$(sha256sum "$ENTRY" | awk '{print $1}')
+else
+    SHA_BEFORE=$(shasum -a 256 "$ENTRY" | awk '{print $1}')
+fi
 bash "$WRITE" --memory-dir "$WORK" --session-id sid-003 --candidate "$CAND_B" \
+    --source-sha256 "$SHA_BEFORE" \
     >/dev/null 2>&1 || fail "case3 update failed"
 grep -q '^Body A\.' "$ENTRY" || fail "case3 original body not preserved"
 grep -q '^## Session sid-003 update$' "$ENTRY" || fail "case3 stanza missing"
@@ -57,6 +68,18 @@ grep -q '^Body B\.' "$ENTRY" || fail "case3 updated body not appended"
 LINE_COUNT=$(grep -c '^- \[dedup_test_one\]' "$WORK/MEMORY.md")
 [[ "$LINE_COUNT" == "1" ]] || fail "case3 MEMORY.md duplicated: $LINE_COUNT lines"
 pass "case3 update preserves original + appends stanza"
+
+# Case 4: update WITHOUT --source-sha256 is staged, not written (x-8fc0
+# read-before-write guard) - the live entry from case 3 must be untouched.
+CAND_C='{"type":"project","name":"dedup_test_one","description":"dedup test updated again","body":"Body C.\n**Why:** no proof of read.\n**How to apply:** should be staged.\n"}'
+PRE_CASE4=$(cat "$ENTRY")
+RC=0
+bash "$WRITE" --memory-dir "$WORK" --session-id sid-004 --candidate "$CAND_C" \
+    >/dev/null 2>&1 || RC=$?
+[[ "$RC" == "3" ]] || fail "case4 expected rc=3 (staged), got rc=$RC"
+[[ "$(cat "$ENTRY")" == "$PRE_CASE4" ]] || fail "case4 live entry mutated despite missing --source-sha256"
+[[ -f "$WORK/.staged/project_dedup_test_one.md" ]] || fail "case4 staged file not written"
+pass "case4 update without --source-sha256 is staged, not written"
 
 rm -rf "$WORK"
 echo "PASS: dedup three-path coverage"

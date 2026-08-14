@@ -5,6 +5,12 @@
 #   --memory-dir DIR    Memory dir to write into
 #   --session-id SID    Source session
 #   --candidate JSON    Candidate object {type, name, description, body}
+#   --source-sha256 H   sha256 of the EXISTING target file as the caller read
+#                       it this turn. Required whenever the candidate would
+#                       mutate an existing file (not required for a new file
+#                       or a dedup hit). Proves the write is grounded in a
+#                       real read this turn, not a hallucinated memory of the
+#                       file's contents (x-8fc0).
 #   --empty-pass        Declare an explicit empty pass (no candidate). Writes
 #                       only the gate artifact + event. The LLM ran the
 #                       pre-promise pass and concluded nothing was memory-
@@ -15,7 +21,12 @@
 #   - Compute target path: {memory-dir}/{type}_{slug(name)}.md
 #   - If file exists: read existing frontmatter, compare description+body,
 #       same -> skip (logs "deduped")
-#       different -> append "Session {sid} update:" stanza to body
+#       different -> verify --source-sha256 against the file on disk, then
+#         verify the existing entry is auto_generated: true (autonomous
+#         provenance) before appending a "Session {sid} update:" stanza.
+#         A missing/mismatched hash, or an existing entry that is NOT
+#         auto_generated (i.e. hand-written), refuses the live write and
+#         stages the proposed update instead (see exit code 3).
 #   - If file new: write frontmatter + body with auto_generated: true and
 #       source_session: {sid}
 #   - Atomically update MEMORY.md index (tmp+rename)
@@ -29,9 +40,17 @@
 #   1  invalid candidate, missing args, or write failure (real error)
 #   2  dedup hit - intentional no-op; the gate artifact mtime is NOT touched
 #      and entries_written is NOT bumped (provenance must not record dedup as work)
+#   3  staged - an update to an existing file was withheld because the read-
+#      before-write proof was missing/stale, or the existing entry is
+#      hand-written (not auto_generated). The proposed content is written to
+#      {memory-dir}/.staged/{filename} for a human to review and apply by
+#      hand; the live memory file is untouched. This writer has no caller
+#      that is a human editing their own memory by hand - every call is an
+#      autonomous pass (pre-promise / post-merge) - so this refusal is
+#      unconditional, not gated on an attended/unattended flag.
 #
-# Distinct codes for dedup vs error so callers can tell intentional skips
-# from real failures without grepping log lines.
+# Distinct codes for dedup vs error vs staged so callers can tell intentional
+# skips, staged holds, and real failures apart without grepping log lines.
 
 set -euo pipefail
 
@@ -40,14 +59,16 @@ SESSION_ID=""
 CANDIDATE_JSON=""
 EMPTY_PASS=0
 REPO_ROOT_ARG=""
+SOURCE_SHA256=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --memory-dir)  MEMORY_DIR="$2"; shift 2 ;;
-        --session-id)  SESSION_ID="$2"; shift 2 ;;
-        --candidate)   CANDIDATE_JSON="$2"; shift 2 ;;
-        --empty-pass)  EMPTY_PASS=1; shift 1 ;;
-        --repo-root)   REPO_ROOT_ARG="$2"; shift 2 ;;
+        --memory-dir)     MEMORY_DIR="$2"; shift 2 ;;
+        --session-id)     SESSION_ID="$2"; shift 2 ;;
+        --candidate)      CANDIDATE_JSON="$2"; shift 2 ;;
+        --source-sha256)  SOURCE_SHA256="$2"; shift 2 ;;
+        --empty-pass)     EMPTY_PASS=1; shift 1 ;;
+        --repo-root)      REPO_ROOT_ARG="$2"; shift 2 ;;
         *) echo "write-memory-entry: unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -220,6 +241,21 @@ FILENAME=$(basename "$TARGET")
 
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
+# Portable sha256 of a file: macOS ships shasum, not sha256sum; Linux is the
+# reverse. Empty string (never a valid sha256) on a missing file or a
+# machine with neither, so a mismatched/absent proof always refuses cleanly.
+sha256_of() {
+    local f="$1"
+    [[ -f "$f" ]] || { printf ''; return; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$f" | awk '{print $1}'
+    else
+        printf ''
+    fi
+}
+
 write_atomic() {
     local target="$1" content="$2"
     local tmp
@@ -245,6 +281,7 @@ EOF
 if [[ -f "$TARGET" ]]; then
     existing_desc=""
     existing_body=""
+    existing_auto_generated=""
     in_fm=0; fm_seen=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" == "---" ]]; then
@@ -257,6 +294,7 @@ if [[ -f "$TARGET" ]]; then
         if [[ "$in_fm" == "1" ]]; then
             case "$line" in
                 description:*) existing_desc="${line#description:}"; existing_desc="${existing_desc# }" ;;
+                auto_generated:*) existing_auto_generated="${line#auto_generated:}"; existing_auto_generated="${existing_auto_generated# }" ;;
             esac
         else
             existing_body+="$line"$'\n'
@@ -286,6 +324,43 @@ if [[ -f "$TARGET" ]]; then
             log "dedup-on-first-call: emitted zero-entry gate artifact for session $SESSION_ID"
         fi
         exit 2
+    fi
+
+    # ── read-before-write + provenance guards (x-8fc0) ──────────────────
+    # A mutating update to an EXISTING file must prove two things before
+    # this writer touches it:
+    #   1. read-before-write: the caller read the CURRENT on-disk content
+    #      this turn (proven by a matching --source-sha256), not a
+    #      hallucinated memory of what the file says.
+    #   2. provenance: the existing entry was itself written autonomously
+    #      (auto_generated: true). This writer has no caller that is a
+    #      human editing their own memory by hand, so a missing/false tag
+    #      means a human wrote or edited this entry directly - autonomous
+    #      curation must never silently rewrite that.
+    # Either failure withholds the live write and stages the proposed
+    # content instead (exit 3) rather than hard-blocking: the candidate may
+    # still be right, it just needs a human to look before it lands.
+    stage_update() {
+        local why="$1"
+        local staged_dir="$MEMORY_DIR/.staged"
+        mkdir -p "$staged_dir" 2>/dev/null || true
+        local staged_file="$staged_dir/$FILENAME"
+        write_atomic "$staged_file" "$(frontmatter_for_new)
+${ENTRY_BODY}"
+        log "staged (not written): $FILENAME - $why - see $staged_file"
+        EXISTING_ARTIFACT="${ARTIFACTS_DIR}/memory-${SESSION_ID}.md"
+        if [[ ! -f "$EXISTING_ARTIFACT" ]]; then
+            emit_memory_gate 0 true
+        fi
+        exit 3
+    }
+
+    ACTUAL_SHA256=$(sha256_of "$TARGET")
+    if [[ -z "$SOURCE_SHA256" || "$SOURCE_SHA256" != "$ACTUAL_SHA256" ]]; then
+        stage_update "missing or stale --source-sha256; read $TARGET and pass its current sha256"
+    fi
+    if [[ "$existing_auto_generated" != "true" ]]; then
+        stage_update "existing entry is hand-written (auto_generated != true); refusing to rewrite a human-authored entry"
     fi
 
     # Update path: append "Session {sid} update" stanza, preserve original.

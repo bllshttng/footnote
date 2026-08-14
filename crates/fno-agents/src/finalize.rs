@@ -68,16 +68,31 @@ const SHIP_REASONS: &[&str] = &["DonePRGreen", "DoneAdvisory"];
 
 /// Terminal reasons that signal a STUCK session: the loop-check verb saw no
 /// forward progress, or the budget cap tripped, and let the session exit
-/// without shipping. These get a postmortem artifact the autocorrect monthly
-/// review consumes via `~/.fno/corrections.log` (ab-1a92b677: re-homed here
-/// after the control-plane wedge dropped the old stop-hook generator; moved
-/// again from ~/.claude/ to ~/.fno/ per the placement rule, ab-f063 Wave 2).
-/// Interrupted/Aborted join the set: a session that gave up mid-wedge or got
-/// cancelled is stuck-but-differently-terminated and belongs in the corpus.
-/// A ship or a benign NoWork terminal is not "stuck": NoWork is megawalk finding
-/// nothing to do, and ship reasons succeeded. There is no `Blocked` terminal -
-/// a blocked session ends Interrupted/Aborted/NoProgress, all covered here.
-const POSTMORTEM_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted"];
+/// without shipping. `write_postmortem` branches its body on this set - a
+/// stuck session gets the failure-triage prose, everything else gets a
+/// lighter completion-eval prose - but it no longer GATES whether an eval is
+/// written at all (see `eval_should_fire`). Interrupted/Aborted are in the
+/// set: a session that gave up mid-wedge or got cancelled is
+/// stuck-but-differently-terminated and belongs in the failure-shaped corpus.
+const STUCK_REASONS: &[&str] = &["NoProgress", "Budget", "Interrupted", "Aborted"];
+
+/// Whether a completion eval fires for this termination reason (x-8fc0).
+///
+/// Before this, an eval only ran for `STUCK_REASONS` (then named
+/// `POSTMORTEM_REASONS`) - a failure-only sample that the autocorrect monthly
+/// review mined for rules. A failure-only sample writes rules in a
+/// predictable direction: nothing ever confirmed what a clean session did
+/// right, so every lesson skewed toward caution. The operator ruling
+/// (2026-08-14) is that the eval must run on every completion, success and
+/// failure alike, so the corpus stops being biased by construction.
+///
+/// `NoWork` is the sole exclusion: it means megawalk/backlog found nothing
+/// to do, so there is no session to evaluate. Every other terminal - every
+/// ship reason, every stuck reason, `DoneBatched`/`DoneAwaitingMerge`/
+/// `DoneUnreviewed`/`DoneAwaitingReview`/`DonePlanned` alike - gets an eval.
+fn eval_should_fire(reason: &str) -> bool {
+    reason != "NoWork"
+}
 
 // ── arg parsing ─────────────────────────────────────────────────────────────
 
@@ -729,18 +744,21 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
-    // ── STUCK ONLY: postmortem artifact (ab-1a92b677) ──────────────────────
-    // A stuck terminal (NoProgress/Budget/Interrupted/Aborted) means the session
-    // gave up, ran out of budget, or was cancelled mid-wedge without shipping.
-    // Re-home the BLOCKED-postmortem generator the wedge dropped when the stop
-    // hook became a thin shim: write a structured artifact + a corrections.log
-    // pointer so the autocorrect monthly review can mechanically consume what
-    // went wrong. Non-fatal and idempotent (filename keyed by date+session) like
-    // every other sub-step. A ship reason is never in POSTMORTEM_REASONS, so a
-    // session that hit Budget/NoProgress and later shipped writes the postmortem
-    // exactly once (on the stuck fire), never on the ship fire.
+    // ── completion eval artifact, every terminal but NoWork (ab-1a92b677, x-8fc0) ──
+    // Originally re-homed the BLOCKED-postmortem generator the control-plane
+    // wedge dropped, gated to stuck terminals only: NoProgress/Budget/
+    // Interrupted/Aborted. That gate made the autocorrect monthly review's
+    // input a failure-only sample, and a failure-only sample writes rules -
+    // it never confirms what a clean session did right, so every lesson
+    // skewed toward caution nobody asked for (x-8fc0). `eval_should_fire`
+    // now fires this for every terminal reason except NoWork (nothing to
+    // evaluate). `write_postmortem` branches its body on STUCK_REASONS so a
+    // stuck session still gets the failure-triage prose; every other reason
+    // gets a lighter completion-eval prose pointing at the pre-promise
+    // blocklist. Non-fatal and idempotent (filename keyed by date+session)
+    // like every other sub-step.
     let mut postmortem_path: Option<String> = None;
-    if POSTMORTEM_REASONS.contains(&reason.as_str()) {
+    if eval_should_fire(&reason) {
         match write_postmortem(
             &cwd,
             &session_id,
@@ -2284,12 +2302,16 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-// ── postmortem artifact (stuck terminals only, ab-1a92b677) ───────────────────
+// ── completion eval artifact, every terminal but NoWork (ab-1a92b677, x-8fc0) ──
 
-/// Write a structured postmortem for a stuck (NoProgress/Budget) session to the
-/// postmortems dir, then best-effort append a corrections.log pointer so the
-/// autocorrect monthly review consumes it. Filename keyed by date + session-id
-/// prefix so a retry overwrites rather than duplicating (idempotent).
+/// Write a structured completion eval for this session to the postmortems
+/// dir, then best-effort append a corrections.log pointer so the autocorrect
+/// monthly review consumes it. Filename keyed by date + session-id prefix so
+/// a retry overwrites rather than duplicating (idempotent). The body branches
+/// on `STUCK_REASONS`: a stuck session gets failure-triage prose (unchanged
+/// from the original stuck-only artifact); every other reason gets a lighter
+/// eval prose - the corpus this feeds must see both what went wrong and what
+/// went right, not failures only (x-8fc0).
 #[allow(clippy::too_many_arguments)]
 fn write_postmortem(
     cwd: &Path,
@@ -2325,10 +2347,47 @@ fn write_postmortem(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "(clean)".into());
 
+    // Header/commits/tree scaffolding is identical in both branches; only the
+    // heading word, the termination-line suffix, the trailing section name,
+    // and its prose differ. Share the scaffold, branch only what differs
+    // (was two ~20-line near-identical format! blocks).
+    let stuck = STUCK_REASONS.contains(&reason);
+    let (heading, term_suffix, section, prose): (&str, &str, &str, String) = if stuck {
+        (
+            "Postmortem",
+            " (stuck: exited without shipping)",
+            "Triage",
+            format!(
+                "A `{reason}` terminal means `fno-agents loop-check` saw no forward \
+                 progress (or the budget cap tripped) and let the session exit. Review \
+                 the last message and working tree above: was the agent blocked on an \
+                 external dependency, looping without committing, or done but unable to \
+                 emit a promise? Feed recurring patterns back into the rules."
+            ),
+        )
+    } else {
+        (
+            "Completion eval",
+            "",
+            "Eval",
+            format!(
+                "A `{reason}` terminal means this session completed - a clean \
+                 completion still belongs in the corpus the autocorrect monthly \
+                 review reads, not only a stuck one (x-8fc0: a failure-only \
+                 sample writes rules in a predictable, overcautious direction). \
+                 Review the last message above for anything the pre-promise \
+                 memory pass should have captured and check it against the \
+                 blocklist in skills/target/references/pre-promise.md before \
+                 promoting it - do not write an env-dependent finding, a \
+                 negative tool claim, a transient error, or an unresolved \
+                 failure dressed up as a validated workflow."
+            ),
+        )
+    };
     let body = format!(
-        "# Postmortem: {sid_short}\n\n\
+        "# {heading}: {sid_short}\n\n\
          - session: `{session_id}`\n\
-         - termination: **{reason}** (stuck: exited without shipping)\n\
+         - termination: **{reason}**{term_suffix}\n\
          - node: `{node}`\n\
          - plan: `{plan}`\n\
          - feature: {title}\n\
@@ -2336,12 +2395,7 @@ fn write_postmortem(
          ## Last assistant message\n\n```\n{last_msg}\n```\n\n\
          ## Recent commits\n\n```\n{commits}\n```\n\n\
          ## Working tree\n\n```\n{tree}\n```\n\n\
-         ## Triage\n\n\
-         A `{reason}` terminal means `fno-agents loop-check` saw no forward \
-         progress (or the budget cap tripped) and let the session exit. Review \
-         the last message and working tree above: was the agent blocked on an \
-         external dependency, looping without committing, or done but unable to \
-         emit a promise? Feed recurring patterns back into the rules.\n",
+         ## {section}\n\n{prose}\n",
     );
     fs::write(&file, &body).map_err(|e| format!("write {}: {e}", file.display()))?;
 
@@ -2955,9 +3009,11 @@ mod tests {
 
     #[test]
     fn done_planned_is_benign_terminal() {
-        // A plan-only terminal graduates nothing and writes no postmortem.
+        // A plan-only terminal graduates nothing, but (x-8fc0) it DOES still
+        // get a completion eval - only NoWork is exempt from the eval.
         assert!(!SHIP_REASONS.contains(&"DonePlanned"));
-        assert!(!POSTMORTEM_REASONS.contains(&"DonePlanned"));
+        assert!(!STUCK_REASONS.contains(&"DonePlanned"));
+        assert!(eval_should_fire("DonePlanned"));
     }
 
     #[test]
@@ -3281,14 +3337,37 @@ mod tests {
     }
 
     #[test]
-    fn postmortem_reasons_gate() {
-        // Stuck terminals get a postmortem; ships and benign terminals do not.
+    fn stuck_reasons_classify_the_eval_body_not_whether_it_fires() {
         for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
-            assert!(POSTMORTEM_REASONS.contains(&stuck));
+            assert!(STUCK_REASONS.contains(&stuck));
         }
         for not_stuck in ["DonePRGreen", "DoneAdvisory", "DoneDelivery", "NoWork"] {
-            assert!(!POSTMORTEM_REASONS.contains(&not_stuck));
+            assert!(!STUCK_REASONS.contains(&not_stuck));
         }
+    }
+
+    #[test]
+    fn eval_fires_on_every_reason_but_nowork() {
+        // x-8fc0: the trigger used to be STUCK_REASONS-only (a failure-only
+        // sample). Verify by making it fail both ways - a successful
+        // completion DOES get an eval, a stuck one still does too, and the
+        // sole exclusion is NoWork (nothing happened, nothing to evaluate).
+        for shipped in [
+            "DonePRGreen",
+            "DoneAdvisory",
+            "DoneDelivery",
+            "DoneBatched",
+            "DoneAwaitingMerge",
+            "DoneUnreviewed",
+            "DoneAwaitingReview",
+            "DonePlanned",
+        ] {
+            assert!(eval_should_fire(shipped), "expected eval for {shipped}");
+        }
+        for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
+            assert!(eval_should_fire(stuck), "expected eval for {stuck}");
+        }
+        assert!(!eval_should_fire("NoWork"));
     }
 
     #[test]

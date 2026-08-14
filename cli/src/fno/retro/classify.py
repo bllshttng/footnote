@@ -189,6 +189,22 @@ _PM_WEDGE_RE = re.compile(
     r"stale\W+(\w+\W+){0,3}claim|claim\W+(\w+\W+){0,3}stale|budget\s+blowout",
     re.IGNORECASE,
 )
+# Deterministic backstop for two of the four blocklisted lesson classes from
+# skills/target/references/pre-promise.md (x-8fc0): a negative claim about a
+# tool ("X is absent/missing/not installed", "X is broken/doesn't work") and
+# a transient/one-off error signature. The other two classes (env-dependent
+# findings stated as durable fact, unresolved-failure-as-validated-workflow)
+# are judgment calls the prompt-text blocklist governs; they resist a regex
+# that would not also swallow a genuine, source-verified finding. This is a
+# backstop, not the primary mechanism - most of the blocklist's work happens
+# before a candidate ever reaches this function.
+_PM_BLOCKLIST_RE = re.compile(
+    r"\bis\s+(?:absent|missing|not\s+installed)\b|"
+    r"\b(?:doesn'?t|does\s+not)\s+(?:exist|work)\b|"
+    r"\bis\s+broken\b|"
+    r"\b(?:rate[\s-]?limit(?:ed)?|connection\s+reset|network\s+(?:error|timeout)|transient\s+(?:error|failure))\b",
+    re.IGNORECASE,
+)
 
 
 def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[str, Candidate | None]":
@@ -209,6 +225,13 @@ def classify_postmortem(item: RawItem, *, body_cap: int = BODY_CAP) -> "tuple[st
         return DISPOSITION_ARCHIVE, None
 
     wedge = bool(_PM_WEDGE_RE.search(item.text or ""))
+    # A genuine wedge always surfaces, even if its text happens to also match
+    # the blocklist (a real repeatable failure that also mentions a broken
+    # tool is still worth a node). Only a NON-wedge candidate gets archived
+    # by the blocklist - nothing to lose by discarding "X is absent" noise
+    # that was never going to become a rule anyway.
+    if not wedge and _PM_BLOCKLIST_RE.search(item.text or ""):
+        return DISPOSITION_ARCHIVE, None
     tier = TIER_NODE if wedge else TIER_INBOX
     title = (item.title_hint or "").strip() or _clean_line(item.text)
     title = title or "(untitled postmortem)"

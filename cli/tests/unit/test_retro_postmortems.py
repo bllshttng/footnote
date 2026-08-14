@@ -201,6 +201,36 @@ def test_classify_interrupted_benign_is_inbox_not_archived() -> None:
         assert cand is not None and cand.tier == "inbox"
 
 
+def test_classify_transient_environment_failure_is_archived() -> None:
+    """x-8fc0 verify-by-failure #1: feed a transient environment failure and
+    assert nothing is captured. A negative tool claim or a transient error
+    signature, with no wedge language, must archive - never surface as a
+    rule-worthy candidate. This is the deterministic backstop for the
+    blocklist documented in skills/target/references/pre-promise.md."""
+    for gist in (
+        "the timeout binary is absent on this machine, watchers no-op",
+        "gtimeout does not exist here either",
+        "gh api call hit a rate limit and the session gave up",
+        "connection reset while polling; nothing else went wrong",
+    ):
+        disposition, cand = classify_postmortem(_item(gist, subkind="NoProgress"))
+        assert disposition == DISPOSITION_ARCHIVE and cand is None, gist
+
+
+def test_classify_wedge_survives_blocklist_language() -> None:
+    """A genuine wedge is never suppressed by the blocklist backstop, even
+    when its text also happens to mention a broken tool - the failure mode
+    is still real and repeatable."""
+    disposition, cand = classify_postmortem(
+        _item(
+            "worker hit a split-brain after respawn; gh is broken and rate limited too",
+            subkind="NoProgress",
+        )
+    )
+    assert disposition == DISPOSITION_NODE
+    assert cand is not None and cand.tier == "node"
+
+
 def test_classify_reasonless_cancel_wording_is_not_archived() -> None:
     """Archive requires an EXPLICIT one-off reason kind: a reason-less gist
     merely quoting cancel-ish words (.target-cancelled sentinel) is ambiguous

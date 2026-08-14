@@ -497,11 +497,7 @@ The script emits a single JSON object with keys `pr`, `merged_at`, `late_comment
 `late_reviews`, and `done_with_concerns`. It removes the sentinel on success, making
 it a one-shot operation.
 
-For each entry in `late_comments` and `late_reviews`, and for each path listed in
-`done_with_concerns`, decide whether the signal is memory-worthy. Apply the same bar
-as the pre-promise pass: "would removing this cause future-me to repeat the mistake
-or miss the context?" Comments that are purely operational ("thanks, merged!") are not
-memory-worthy. Reviewer concerns that flag a pattern not caught by existing rules are.
+For each entry in `late_comments` and `late_reviews`, and each path in `done_with_concerns`, judge memory-worthiness. Use the pre-promise pass's bar and blocklist: see "What to skip" and "Blocklist" in `skills/target/references/pre-promise.md`. Skip purely operational comments ("thanks, merged!"). Capture a reviewer concern that flags a pattern existing rules miss.
 
 For each candidate that passes the bar, call `write-memory-entry.sh`:
 
@@ -521,10 +517,35 @@ _CANON_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 
 MEMORY_DIR="${HOME}/.claude/projects/$(printf '%s' "$_CANON_ROOT" | sed 's|/|-|g')/memory"
 
 CANDIDATE='<JSON for this candidate>'
+
+# Read-before-write (x-8fc0), same guard as the pre-promise recipe. A memory
+# file with this name may already exist. If it does, the writer refuses the
+# update without proof you read the CURRENT content this turn. Read
+# "$TARGET" with the Read tool first, THEN hash it - the hash is proof of
+# the read, not a substitute for it.
+TYPE=$(jq -r '.type' <<<"$CANDIDATE")
+SLUG=$(jq -r '.name' <<<"$CANDIDATE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_]+/_/g; s/^_+//; s/_+$//')
+TARGET="$MEMORY_DIR/${TYPE}_${SLUG}.md"
+SOURCE_SHA256=""
+if [[ -f "$TARGET" ]]; then
+  # `A | awk || B | awk` is a trap: a pipeline's exit status is the LAST
+  # command's (awk succeeds on empty input), so a missing shasum never falls
+  # through to sha256sum. Check which binary exists first, like the writer's
+  # own sha256_of() does.
+  if command -v sha256sum >/dev/null 2>&1; then
+    SOURCE_SHA256=$(sha256sum "$TARGET" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    SOURCE_SHA256=$(shasum -a 256 "$TARGET" | awk '{print $1}')
+  fi
+fi
+
 bash "${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/scripts/memory/write-memory-entry.sh" \
     --memory-dir "$MEMORY_DIR" \
     --session-id "$SESSION_ID" \
-    --candidate "$CANDIDATE"
+    --candidate "$CANDIDATE" \
+    --source-sha256 "$SOURCE_SHA256"
+# exit 3 = staged, not written (hand-written existing entry, or a stale/
+# missing hash) - the proposal lands in $MEMORY_DIR/.staged/ for a human.
 
 # Dual-emit ONLY for project-lesson candidates (type: project - a load-bearing
 # lesson a stranger cloning the repo would need, not session continuity). Warns +
