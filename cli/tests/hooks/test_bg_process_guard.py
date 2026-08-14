@@ -116,6 +116,21 @@ DENIED = [
     # An empty middle expression is what makes a C-style `for` endless.
     "for ((i=0;;)); do sleep 1; done",
     "for (( ; ; )); do sleep 1; done",
+    # An escape belongs to the loop it sits inside. One shared boolean let an
+    # escape in an EARLIER loop license every later one, and specimen 1 is
+    # sitting in the second half of each of these.
+    "for f in *; do [ -e $f ] && break; done; while true; do sleep 60; done &",
+    "while true; do gh pr view && break; done; while true; do sleep 60; done &",
+    "while true; do break; done; for ((i=0;;)); do sleep 1; done &",
+    # `VALUE_FLAGS` is hand-written, so an unlisted wrapper flag handed command
+    # position to its own value. Measured, not inferred: under `timeout 3` each
+    # of these exits 124, so the `yes` really does run forever.
+    "/usr/bin/time -o /tmp/t.log yes > /dev/null",
+    "caffeinate -t 3600 yes > /dev/null",
+    "env -P /usr/bin yes > /dev/null",
+    # The non-greedy reading has to survive too: `-E` is a real boolean, and
+    # reading it as value-taking eats the generator behind it.
+    "sudo -E yes > /dev/null",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -185,6 +200,28 @@ ALLOWED = [
     'echo "for ((;;))"',
     "rg 'for ((;;))' hooks/",
     "git commit -m 'guard: refuse for ((;;)) loops'",
+    # A quoted argument is one token, and its TEXT still landed in the joined
+    # arithmetic header. Moving the read off raw text onto tokens did not fix
+    # this on its own. Both are real commands from the transcript corpus.
+    'for f in "for ((;;))"; do echo "$f"; done',
+    "for pat in 'while true' 'for ((;;))'; do rg \"$pat\" hooks/; done",
+    # `|` between `case` patterns is alternation, not a pipe. Split as a pipe,
+    # the last alternative became a stage with no reader, and the refusal was
+    # order-dependent: `yes|y)` allowed while `y|yes)` denied.
+    "case $a in y|yes) echo go;; esac",
+    "case $t in cpu|stress) echo load;; esac",
+    "case $x in a) foo;; y|yes) bar;; esac",
+    # A nested or preceding `done` must not truncate the escape scan. Both of
+    # these are ordinary poll loops taken verbatim from the corpus.
+    "while true; do for n in 1 2; do echo $n; done; gh pr view && break; sleep 30; done",
+    "until gh pr view; do sleep 5; done; while true; do gh pr checks && break; sleep 30; done",
+    # The spellings these tools' own manuals use. The refusal text advertises
+    # `-t <seconds>` as a remedy, so refusing a real spelling of it is the guard
+    # naming a fix it will not accept.
+    "stress --timeout 60",
+    "stress-ng --cpu 4 --timeout 60s",
+    "stress-ng --cpu 1 -t 30s",
+    "stress --timeout=60 --cpu 1",
 ]
 
 

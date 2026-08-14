@@ -135,7 +135,11 @@ class Finding:
 @dataclass
 class ScanResult:
     total: int = 0
-    ppid1: int = 0
+    #: Processes whose ppid is a reaper. Named for the CONDITION, not for pid 1:
+    #: the label `ppid=1` was hardcoded inside a design whose whole point is that
+    #: the reaper is measured, so on a subreaper host it printed `ppid=1` over a
+    #: count of something else.
+    orphaned: int = 0
     same_uid: int = 0
     census_excluded: int = 0
     #: Footnote's own long-lived daemons, counted rather than listed. Never
@@ -159,6 +163,19 @@ class ScanResult:
 # ─── enumeration ────────────────────────────────────────────────────────────
 
 
+def reaper_set(reaper: int) -> set[int]:
+    """The ppids that mean "this process lost its parent".
+
+    A subreaper claims only its OWN descendants. PID 1 stays the reaper of last
+    resort for everything else, so a host with `systemd --user` has TWO such
+    ppids live at once. Measuring one reaper and filtering `ppid != reaper`
+    dropped every orphan under the other, and the sweep still printed a green
+    control and a positive count. That is this module's own thesis failing in
+    its own terms: a count that is wrong is worse than a withheld one.
+    """
+    return {reaper, 1}
+
+
 def _iter_processes(reaper: int = 1) -> Iterator[dict]:
     """Every process this uid can read, as plain dicts.
 
@@ -168,6 +185,7 @@ def _iter_processes(reaper: int = 1) -> Iterator[dict]:
     """
     import psutil
 
+    reapers = reaper_set(reaper)
     attrs = ["pid", "ppid", "name", "cmdline", "uids", "create_time", "cpu_times"]
     for proc in psutil.process_iter(attrs):
         info = dict(proc.info)
@@ -176,7 +194,7 @@ def _iter_processes(reaper: int = 1) -> Iterator[dict]:
         # process this uid cannot inspect) must not drop the row: a process
         # with no readable cwd can still match the NAME arm.
         try:
-            if info.get("ppid") == reaper:
+            if info.get("ppid") in reapers:
                 info["cwd"] = proc.cwd()
         except Exception:  # noqa: BLE001 -- unreadable cwd is not a verdict
             pass
@@ -475,11 +493,12 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
             # still withheld, and `control` now names which arms failed instead
             # of reporting nothing at all.
             result.broken_reason = "no probe reparented, so the reaper is unknown"
+        reapers = reaper_set(reaper) if reaper is not None else set()
         for info in _iter_processes(reaper) if reaper is not None else ():
             result.total += 1
-            if info.get("ppid") != reaper:
+            if info.get("ppid") not in reapers:
                 continue
-            result.ppid1 += 1
+            result.orphaned += 1
             uids = info.get("uids")
             proc_uid = uids[0] if uids else None
             if proc_uid != uid:
@@ -598,7 +617,7 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
 def render(result: ScanResult) -> str:
     """Findings first, count last, and no count at all when the scan is broken."""
     lines = [
-        f"scan: {result.total} processes, {result.ppid1} ppid=1, "
+        f"scan: {result.total} processes, {result.orphaned} reparented, "
         f"{result.same_uid} same-uid, {result.census_excluded} census-excluded, "
         f"{result.daemons_excluded} own-daemon"
     ]
@@ -695,7 +714,7 @@ def to_json(result: ScanResult) -> dict:
     return {
         "scan": {
             "total": result.total,
-            "ppid1": result.ppid1,
+            "orphaned": result.orphaned,
             "same_uid": result.same_uid,
             "census_excluded": result.census_excluded,
             "daemons_excluded": result.daemons_excluded,

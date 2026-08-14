@@ -174,13 +174,37 @@ def _strip_heredocs(text):
     return "\n".join(out)
 
 
-def _pipe_parts(segment):
+def _case_regions(segments):
+    """One bool per segment: is it inside a `case ... esac`?
+
+    A `|` between `case` patterns is ALTERNATION, not a pipe. Split as a pipe,
+    the last alternative became a pipeline stage with no reader, so the ordinary
+    confirm idiom `case $a in y|yes) echo go;; esac` was refused. Worse, it was
+    order-dependent: `yes|y)` allowed and `y|yes)` denied.
+    """
+    out, depth = [], 0
+    for segment in segments:
+        opens = sum(1 for tok in segment if tok == "case")
+        closes = sum(1 for tok in segment if tok == "esac")
+        out.append(depth > 0 or opens > 0)
+        depth = max(0, depth + opens - closes)
+    return out
+
+
+def _pipe_parts(segment, split=True):
     """The commands of one pipeline, split on `|`.
 
     Command position resets at every pipe. `_head_of` alone reads only the
     FIRST command of a segment, so a generator downstream of a pipe was never
     examined at all: `: | yes > /dev/null` was allowed.
+
+    `split=False` inside a `case` region, where `|` separates patterns. A real
+    pipeline in a case ARM is then read as one part, which is a miss in the
+    same fail-open direction as the rest of this file, and a refusal of the
+    plain `y|yes)` idiom is the more expensive error.
     """
+    if not split:
+        return [segment]
     parts, current = [], []
     for tok in segment:
         # `|&` pipes stdout AND stderr. It is a pipe, so it resets command
@@ -208,11 +232,19 @@ def _segments(tokens):
     return [seg for seg in out if seg]
 
 
-def _head_of(segment):
+def _head_of(segment, greedy=False):
     """The command-position token of `segment`, plus its remaining argv.
 
     Walks past transparent wrappers and their flag values so the real command
     surfaces. Returns (None, []) for a segment with no command.
+
+    `greedy` reads an UNLISTED wrapper flag as value-taking. `VALUE_FLAGS` is
+    hand-written, so any flag missing from it consumed one token and handed
+    command position to its own value: `caffeinate -t 3600 yes > /dev/null`
+    resolved to a command called `3600` and was allowed, and `timeout 3` on it
+    exits 124, so the `yes` really does run forever. Both readings are tested,
+    because neither is safe alone. Greedy alone loses `sudo -E yes > /dev/null`,
+    where `-E` is a real boolean and the greedy skip eats the generator.
     """
     i = 0
     saw_wrapper = False
@@ -248,7 +280,7 @@ def _head_of(segment):
             # A wrapper's own options, not the command. Skipping only a fixed
             # trio left `sudo -u me yes` resolving to a command called `-u`,
             # which defeated the `sudo` and `env` entries above.
-            takes_value = tok in VALUE_FLAGS.get(wrapper, ())
+            takes_value = greedy or tok in VALUE_FLAGS.get(wrapper, ())
             i += 2 if (takes_value and i + 1 < len(segment)) else 1
             continue
         return base, segment[i + 1:]
@@ -275,12 +307,20 @@ def _has_bound(segment):
         return False
     if head in {"timeout", "gtimeout"}:
         return True
-    # `-t <seconds>` bounds `stress`, and means nothing to anything else.
+    # `-t <seconds>` bounds `stress`, and means nothing to anything else. Both
+    # tools also spell it `--timeout`, and both accept a unit suffix. Reading
+    # only bare digits after `-t` refused `stress --timeout 60` and
+    # `stress-ng --cpu 1 -t 30s`, which are the spellings their own manuals use.
+    # The refusal text advertises this remedy, so a rejected spelling of it is
+    # the worst kind of refusal: the guard naming a fix it will not accept.
     if head in {"stress", "stress-ng"}:
         for i, tok in enumerate(argv):
-            if tok == "-t" and i + 1 < len(argv) and argv[i + 1].isdigit():
+            if tok in {"-t", "--timeout"} and i + 1 < len(argv):
+                if re.fullmatch(r"\d+[smhdSMHD]?", argv[i + 1]):
+                    return True
+            if re.fullmatch(r"-t\d+[smhdSMHD]?", tok):
                 return True
-            if re.fullmatch(r"-t\d+", tok):
+            if re.fullmatch(r"--timeout=\d+[smhdSMHD]?", tok):
                 return True
     # `count=` is dd's own operand, so it is safe to read positionally: it
     # cannot be a redirect target and it names no other command.
@@ -354,8 +394,8 @@ def _payload_of(head, argv):
     return None
 
 
-def _infinite_arith_for(tokens):
-    """True when a C-style `for ((...))` header can never end.
+def _arith_for_flags(tokens):
+    """One bool per command-position `for`, in order: can its header never end?
 
     Bash reads three `;`-separated arithmetic expressions and the MIDDLE one is
     the condition. An empty condition is what never ends: `for ((i=0;i<10;i++))`
@@ -373,24 +413,40 @@ def _infinite_arith_for(tokens):
     `((;;));` is all punctuation, so the lexer emits it as one operator token
     and `_segments` drops it as a separator; by the time there are segments the
     condition is gone.
+
+    Two rules keep that join from reaching past the header. The arithmetic must
+    start IMMEDIATELY after `for`, and a token carrying whitespace ends it. A
+    plain join over every following token read the CONTENT of a quoted argument:
+    `for f in "for ((;;))"` is one word list and one quoted string, and it was
+    denied. Moving the read off raw text onto tokens did not fix that on its
+    own, because the quoted text is still inside a token.
+
+    A flag per `for` rather than one answer for the command, so an escape can be
+    charged to the loop it actually leaves.
     """
+    flags = []
     for i, tok in enumerate(tokens):
         if tok != "for" or (i and not _is_separator(tokens[i - 1])):
             continue
+        rest = tokens[i + 1:]
+        if not rest or not rest[0].startswith("(("):
+            flags.append(False)  # `for f in *`, a word list and not arithmetic
+            continue
         header = []
-        for nxt in tokens[i + 1:]:
-            if nxt == "do":
+        for nxt in rest:
+            if nxt == "do" or any(ch.isspace() for ch in nxt):
                 break
             header.append(nxt)
+            if "))" in nxt:
+                break
         joined = "".join(header)
-        start = joined.find("((")
-        end = joined.find("))", start + 2)
-        if start == -1 or end == -1:
-            continue  # `for f in *`, or a header this walk cannot read
-        parts = joined[start + 2:end].split(";")
-        if len(parts) == 3 and not parts[1].strip():
-            return True
-    return False
+        end = joined.find("))", 2)
+        if end == -1:
+            flags.append(False)  # a header this walk cannot read; fail open
+            continue
+        parts = joined[2:end].split(";")
+        flags.append(len(parts) == 3 and not parts[1].strip())
+    return flags
 
 
 def _find_unbounded(text, inherited_bound=False, depth=0):
@@ -417,41 +473,61 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     # command, `cd /tmp || exit 1; while true; do sleep 60; done &` cleared its
     # own loop from a line that had already run, and that is an ordinary way to
     # write the keepalive this guard exists to refuse.
-    # The scan also STOPS at the loop's `done`. An escape can only leave a loop
-    # it sits inside, and `done` is where that loop ends: `while true; do sleep
-    # 60; done; exit 0` and `while true; do sleep 60; done & exit` are both
-    # specimen 1 exactly, and the `exit` can never run. Read to the end of the
-    # command, both cleared themselves, which is the mirror image of the
-    # precondition hole and the canonical way to write a detached keepalive.
-    # ponytail: one escape clears every loop between that header and that
-    # `done`, so a `break` in a NESTED loop reads as one for the outer too.
-    # Telling those apart needs loop-scope tracking, and this walk has already
-    # been rewritten four times; the sweep covers what the guard misses.
-    # Fail-open, in the same direction as the rest of this file.
+    # An escape belongs to the loop it sits INSIDE, which needs a stack, not a
+    # window. Three cheaper rules were each tried and each was wrong. Reading
+    # the whole command let `cd /tmp || exit 1; while true; do sleep 60; done &`
+    # clear its own loop from a line that had already run. Stopping at the first
+    # `done` broke on a NESTED loop, so the ordinary poll
+    # `while true; do for n in 1 2; do echo $n; done; gh pr view && break; done`
+    # was refused: the inner `done` truncated the scan before the real `break`.
+    # And one shared boolean let an escape in an EARLIER loop license every
+    # later one, so `while true; do break; done; while true; do sleep 60; done &`
+    # was allowed with specimen 1 sitting in the second half.
+    #
+    # ponytail: `break` leaves one loop and `exit` leaves the shell, but both
+    # mark every open loop here. Distinguishing them costs another rule and
+    # buys a refusal, and this file fails open on purpose.
+    in_case = _case_regions(all_segments)
     heads = [
-        [_head_of(part)[0] for part in _pipe_parts(segment)]
-        for segment in all_segments
+        [_head_of(part)[0] for part in _pipe_parts(segment, split=not cased)]
+        for segment, cased in zip(all_segments, in_case)
     ]
-    first_loop = next(
-        (i for i, hs in enumerate(heads) if {"while", "until", "for"} & set(hs)),
-        None,
-    )
-    escapes = False
-    if first_loop is not None:
-        for hs in heads[first_loop + 1:]:
-            if "done" in hs:
-                break
-            if any(head in _ESCAPES for head in hs):
-                escapes = True
-                break
-    # Denied only when the whole command carries no bound at all, so
+    arith = _arith_for_flags(all_tokens)
+    escaped_at = {}
+    endless_for = []
+    stack = []
+    seen_for = 0
+    for idx, hs in enumerate(heads):
+        for head in hs:
+            if head in {"while", "until", "for"}:
+                arith_endless = False
+                if head == "for":
+                    arith_endless = arith[seen_for] if seen_for < len(arith) else False
+                    seen_for += 1
+                stack.append({"idx": idx, "endless": arith_endless, "escaped": False})
+            elif head == "done" and stack:
+                closed = stack.pop()
+                escaped_at[closed["idx"]] = closed["escaped"]
+                if closed["endless"] and not closed["escaped"]:
+                    endless_for.append(closed["idx"])
+            elif head in _ESCAPES:
+                for open_loop in stack:
+                    open_loop["escaped"] = True
+    # A loop with no `done` is malformed; read it as escaped rather than refuse.
+    for open_loop in stack:
+        escaped_at[open_loop["idx"]] = True
+    # A bound anywhere in the command clears an endless `for` header, so
     # `for ((;;)); do timeout 5 x; done` still passes.
-    if _infinite_arith_for(all_tokens) and not escapes and not any(
+    command_bounded = inherited_bound or any(
         _has_bound(seg) for seg in all_segments
-    ):
-        return "`for ((;;))` is an unbounded loop header.", text.strip()
-    for segment in all_segments:
-        parts = _pipe_parts(segment)
+    )
+    if endless_for and not command_bounded:
+        return (
+            "`for ((;;))` is an unbounded loop header.",
+            " ".join(all_segments[endless_for[0]]),
+        )
+    for seg_index, segment in enumerate(all_segments):
+        parts = _pipe_parts(segment, split=not in_case[seg_index])
         for idx, part in enumerate(parts):
             # A downstream reader bounds the stage feeding it: `yes | head -c 1M`
             # dies of SIGPIPE when head exits, and `yes | apt-get install foo` is
@@ -479,11 +555,19 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
                 if "-t" in argv:
                     inherited_bound = True
                 continue
-            if escapes and head in {"while", "until"}:
+            if head in {"while", "until"} and escaped_at.get(seg_index):
                 continue
             reason = _generator_reason(head, argv)
             if reason and not bounded:
                 return reason, " ".join(segment)
+            # The same part read with an unlisted wrapper flag consuming its
+            # value. Neither reading is safe alone, so a generator under either
+            # one is a refusal. See `_head_of`.
+            greedy_head, greedy_argv = _head_of(part, greedy=True)
+            if greedy_head is not None and greedy_head != head:
+                greedy_reason = _generator_reason(greedy_head, greedy_argv)
+                if greedy_reason and not bounded:
+                    return greedy_reason, " ".join(segment)
             payload = _payload_of(head, argv)
             if payload:
                 found = _find_unbounded(

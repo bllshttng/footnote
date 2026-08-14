@@ -138,7 +138,10 @@ def test_the_reaper_is_measured_not_assumed_to_be_pid_1(monkeypatch, table) -> N
     rows.insert(0, _proc(9001, name="sleep", argv0="fno-orphan-probe-t", cwd="/tmp/x", ppid=4242))
     rows.insert(1, _proc(9002, name="sleep", cwd="/repo", ppid=4242))
     rows.append(_proc(88, name="sleep", argv0="fno-load-x", cwd="/repo", ppid=4242))
-    # Still at PID 1, so on this host it is NOT an orphan.
+    # A subreaper claims only its OWN descendants. PID 1 stays the reaper of
+    # last resort, so both ppids are live at once and this is an orphan too.
+    # This test asserted the opposite, in a comment, and that made it the
+    # decorative guard one layer up: it pinned the bug as the contract.
     rows.append(_proc(89, name="sleep", argv0="fno-load-y", cwd="/repo", ppid=1))
     pids = iter([9001, 9002])
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: next(pids))
@@ -146,7 +149,7 @@ def test_the_reaper_is_measured_not_assumed_to_be_pid_1(monkeypatch, table) -> N
 
     result = orphans.scan()
     assert not result.broken, result.broken_reason
-    assert [f.pid for f in result.findings] == [88]
+    assert sorted(f.pid for f in result.findings) == [88, 89]
 
 
 def test_a_probe_that_never_reparents_withholds_the_verdict(monkeypatch, table) -> None:
