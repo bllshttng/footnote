@@ -355,12 +355,25 @@ class FailoverController:
         *,
         current_provider_id: str,
         error: NormalizedError,
+        materialize_managed: bool = True,
     ) -> SwapResult:
         """Decide whether to swap and, if so, perform it.
 
         Args:
             current_provider_id: provider that produced ``error``.
             error: normalized error from ``error_taxonomy.normalize``.
+            materialize_managed: whether a managed candidate's credentials
+                should actually be materialized into the shared slot (x-8183
+                Task 1). Default True so the common case (this call itself IS
+                the operator-authorized swap) never lies about swapping.
+                ``recovery.py``'s exhaustion-sweep caller passes the resolved
+                ``config.accounts.auto_switch`` here instead: that knob is
+                documented (model.py) as gating exactly this materialization
+                for its unattended auto-switch flow, and this call is that
+                flow's only production entry point. False keeps the pre-fix
+                decorative write for a managed candidate (``accounts.active``
+                flips, the slot does not) so `auto_switch`'s opt-in posture -
+                "arming it is the operator's call" - still holds end to end.
 
         Returns:
             ``SwapResult`` with one of:
@@ -371,6 +384,8 @@ class FailoverController:
             - ``QUEUE_EXHAUSTED``: every eligible candidate excluded
               (queue empty after applying no-swap-back).
             - ``NO_SWAP_NEEDED``: error did not trigger swap.
+            - ``BLOCKED_PINNED`` / ``SWAP_FAILED``: a managed candidate's
+              slot materialization was refused (live pin / store error).
         """
         if not error.triggers_swap:
             return SwapResult(decision=SwapDecision.NO_SWAP_NEEDED,
@@ -425,12 +440,18 @@ class FailoverController:
         # decorative until the slot itself is materialized (see the note on
         # `_active_id_for` in loader.py). Do that FIRST, and refuse the swap
         # on a pin or store error rather than write `active` for a credential
-        # no worker will actually have.
+        # no worker will actually have. `materialize_managed=False` (an
+        # unarmed auto_switch, recovery.py's only production caller) instead
+        # keeps the pre-fix decorative write on purpose - see the docstring.
         by_id = _parse_providers_block(
             _extract_accounts_block(_read_parsed(self._settings_path)) or {}
         ).by_id
         candidate_record = by_id.get(candidate)
-        if candidate_record is not None and candidate_record.auth == "managed":
+        if (
+            materialize_managed
+            and candidate_record is not None
+            and candidate_record.auth == "managed"
+        ):
             from fno.adapters.providers.managed import (
                 ManagedStoreError,
                 SwitchDeferred,

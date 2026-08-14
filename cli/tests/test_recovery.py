@@ -622,7 +622,7 @@ class TestDefaultFailover:
     monkeypatched so no real provider rotation / subprocess fires."""
 
     def _patch(self, monkeypatch, decision, new_cli="claude", redispatch_result=None,
-               calls=None, auth=None):
+               calls=None, auth=None, seen_materialize=None):
         from fno.adapters.providers import failover as fo_mod
         from fno.adapters.providers import loader as loader_mod
         from fno.adapters.providers import dispatch as dispatch_mod
@@ -636,7 +636,9 @@ class TestDefaultFailover:
             def __init__(self, **kw):
                 pass
 
-            def attempt_swap(self, *, current_provider_id, error):
+            def attempt_swap(self, *, current_provider_id, error, materialize_managed=True):
+                if seen_materialize is not None:
+                    seen_materialize.append(materialize_managed)
                 return _Result()
 
         class _Snap:
@@ -725,8 +727,10 @@ class TestDefaultFailover:
         from fno.adapters.providers.failover import SwapDecision
 
         calls: list = []
+        seen_materialize: list = []
         self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
-                    redispatch_result=True, calls=calls, auth="managed")
+                    redispatch_result=True, calls=calls, auth="managed",
+                    seen_materialize=seen_materialize)
         monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: True)
         mat: list = []
         monkeypatch.setattr(recovery, "_materialize_managed_switch",
@@ -735,6 +739,12 @@ class TestDefaultFailover:
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "swapped"
         assert mat == ["claude-secondary"]   # materialized the swapped-to record
         assert calls == [_stale_candidate(tmp_path).short_id]  # via _redispatch
+        # x-8183: attempt_swap ITSELF now materializes by default (its own
+        # SWAPPED claim must be true) - this caller must pass the resolved
+        # auto_switch through explicitly, or an unarmed sweep would rotate
+        # credentials the operator never authorized (model.py's auto_switch
+        # docstring). Armed here, so True.
+        assert seen_materialize == [True]
 
     def test_managed_materialize_fails_is_rotated_no_worker(self, monkeypatch, tmp_path):
         # Armed, but a live-pin defer / store error makes materialize (the
@@ -758,8 +768,10 @@ class TestDefaultFailover:
         from fno.adapters.providers.failover import SwapDecision
 
         calls: list = []
+        seen_materialize: list = []
         self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
-                    redispatch_result=True, calls=calls, auth="managed")
+                    redispatch_result=True, calls=calls, auth="managed",
+                    seen_materialize=seen_materialize)
         monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: False)
         mat = {"called": False}
         monkeypatch.setattr(recovery, "_materialize_managed_switch",
@@ -768,24 +780,31 @@ class TestDefaultFailover:
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
         assert calls == []                    # never stopped/redispatched the worker
         assert mat["called"] is False         # never materialized
+        # x-8183: THE assertion this test existed to make and couldn't before -
+        # attempt_swap itself must be told NOT to materialize when auto_switch
+        # is off, or the credential slot moves regardless of this whole gate.
+        assert seen_materialize == [False]
 
     def test_oauth_dir_swap_skips_materialize(self, monkeypatch, tmp_path):
         # An oauth_dir claude record needs no materialization (env-var switch at
-        # spawn); _redispatch runs with no pre_spawn hook.
+        # spawn); _redispatch runs with no pre_spawn hook. x-8183: the
+        # auto_switch gate IS now consulted before the swap even happens (it
+        # has to be - attempt_swap needs materialize_managed up front, before
+        # the candidate's own auth strategy is known to this caller), but it
+        # must have no effect on an oauth_dir candidate: no pre_spawn hook,
+        # no _materialize_managed_switch call.
         from fno.adapters.providers.failover import SwapDecision
 
         calls: list = []
         self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
                     redispatch_result=True, calls=calls, auth="oauth_dir")
-        called = {"mat": False, "gate": False}
-        monkeypatch.setattr(recovery, "_auto_switch_enabled",
-                            lambda repo_root=None: called.__setitem__("gate", True) or True)
+        called = {"mat": False}
+        monkeypatch.setattr(recovery, "_auto_switch_enabled", lambda repo_root=None: True)
         monkeypatch.setattr(recovery, "_materialize_managed_switch",
                             lambda rid, repo_root=None: called.__setitem__("mat", True) or True)
         err = recovery.classify_session_error("rate limit")
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "swapped"
         assert called["mat"] is False         # no materialize for oauth_dir
-        assert called["gate"] is False        # auto_switch gate not consulted either
         assert calls == [_stale_candidate(tmp_path).short_id]
 
     # --- US4: node-bound vs node-less routing ---------------------------------

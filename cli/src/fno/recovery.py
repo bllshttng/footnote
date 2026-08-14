@@ -985,7 +985,19 @@ def _default_failover(candidate: "Candidate", error) -> str:
             settings_path=settings_path, state_path=state_path,
             phase_id=f"{candidate.short_id}:recovery",
         )
-        result = ctrl.attempt_swap(current_provider_id=active, error=error)
+        # auto_switch (default False) is this sweep's own opt-in gate for
+        # materializing a managed candidate's credentials (model.py docstring:
+        # "so single- and multi-account setups keep today's warn/defer/nudge
+        # behavior"). attempt_swap materializes by default (x-8183 Task 1 -
+        # its own SWAPPED claim must be true), so THIS caller passes the
+        # resolved auto_switch through explicitly rather than inheriting the
+        # default, or an unarmed sweep would materialize credentials the
+        # operator never authorized.
+        repo_root = getattr(candidate, "cwd", None)
+        result = ctrl.attempt_swap(
+            current_provider_id=active, error=error,
+            materialize_managed=_auto_switch_enabled(repo_root),
+        )
     except Exception:  # noqa: BLE001 - failover must never break the sweep
         return "no-swap"
 
@@ -1002,7 +1014,9 @@ def _default_failover(candidate: "Candidate", error) -> str:
         # be bg-redispatched (the Rust client rejects --substrate bg for it).
         if snap.harness != "claude":
             return "rotated-no-worker"
-        repo_root = getattr(candidate, "cwd", None)
+        # repo_root was already resolved above, before attempt_swap, so the
+        # materialize_managed gate and every downstream auto_switch check
+        # here read the same value.
         managed = getattr(snap, "auth", None) == "managed"
         # US4: a node-less bg thread (a live worktree with NO target-state
         # manifest) has no /target to redispatch; resume its transcript under the
