@@ -8030,8 +8030,15 @@ impl Core {
                 // reconcile). This is the ONLY writer of `external_lifecycle` on
                 // the core loop, so a stale action's late sync just re-renders
                 // the durable truth it already re-read.
+                //
+                // (x-0f42) Same shape as `AgentRows`/`BacklogCards` below: only
+                // sideline data moved, rects are unchanged, so push without a
+                // frame re-emit. `push_layout(true)` here flushed and reseeded
+                // every visible pane's frame on every sync - a resize-storm-
+                // shaped redraw across every viewed pane on a routine poll,
+                // even when nothing in the record set actually changed.
                 self.external_lifecycle = records;
-                self.push_layout(true);
+                self.push_layout(false);
                 for n in notices {
                     match to {
                         Some(cid) => self.notice(cid, n),
