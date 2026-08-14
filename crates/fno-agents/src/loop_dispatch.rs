@@ -330,13 +330,24 @@ fn drives_claude(driver_lib: &Path) -> bool {
 /// spawn, for the same reason: endpoint, auth and model are one route, and
 /// half-composing it is what bills the wrong account.
 fn pick_would_undo_a_route(picked: &[(String, String)], static_env: &[(String, String)]) -> bool {
+    pick_would_undo_a_route_with(picked, static_env, |k| std::env::var_os(k))
+}
+
+// The ambient lookup is injected so the tests below are deterministic: a shell
+// that exports ANTHROPIC_BASE_URL (any provider-routed lane) would otherwise
+// flip the unrouted-loop case through the real process environment.
+fn pick_would_undo_a_route_with(
+    picked: &[(String, String)],
+    static_env: &[(String, String)],
+    ambient: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> bool {
     picked.iter().filter(|(_, v)| v.is_empty()).any(|(k, _)| {
         // The static passthrough list is only half the picture: a loop started
         // from a shell that already exported ANTHROPIC_BASE_URL inherits it
         // through the process environment without it ever appearing here, and
         // clearing it would move that run to a different provider just the same.
         static_env.iter().any(|(ek, _)| ek == k)
-            || std::env::var_os(k).is_some_and(|v| !v.is_empty())
+            || ambient(k).is_some_and(|v| !v.is_empty())
     })
 }
 
@@ -540,8 +551,8 @@ impl Dispatcher for ShelloutDispatcher {
 #[cfg(test)]
 mod tests {
     use super::{
-        interpret_pick, pick_would_undo_a_route, resolve_driver_binary, retry_etxtbsy,
-        PICKED_ENV_KEY,
+        interpret_pick, pick_would_undo_a_route, pick_would_undo_a_route_with,
+        resolve_driver_binary, retry_etxtbsy, PICKED_ENV_KEY,
     };
 
     fn pair(k: &str, v: &str) -> (String, String) {
@@ -628,7 +639,20 @@ mod tests {
             pair("CLAUDE_CONFIG_DIR", "/alt"),
         ];
         let plain = vec![pair("OUTPUT_FILE", "/tmp/out"), pair("CLI", "claude")];
-        assert!(!pick_would_undo_a_route(&picked, &plain));
+        assert!(!pick_would_undo_a_route_with(&picked, &plain, |_| None));
+    }
+
+    #[test]
+    fn an_ambient_export_blocks_the_pick_the_static_env_never_named() {
+        // The half of the picture the static list cannot see: a shell that
+        // already exported the route var. A provider-routed lane must still
+        // decline the pick even though nothing in static_env names it.
+        let picked = vec![pair("ANTHROPIC_BASE_URL", "")];
+        let plain = vec![pair("OUTPUT_FILE", "/tmp/out")];
+        assert!(pick_would_undo_a_route_with(&picked, &plain, |k| {
+            (k == "ANTHROPIC_BASE_URL")
+                .then(|| std::ffi::OsString::from("https://routed.example"))
+        }));
     }
 
     #[test]
