@@ -623,8 +623,12 @@ mod tests {
 
     #[test]
     fn an_unrouted_loop_still_gets_its_pick() {
+        // The empty-pick key must be a key NO shell exports: the predicate also
+        // consults the live process env, so ANTHROPIC_BASE_URL here made the
+        // test fail on any machine that routes through a gateway (the value is
+        // ambient, not part of the fixture).
         let picked = vec![
-            pair("ANTHROPIC_BASE_URL", ""),
+            pair("FNO_TEST_SYNTHETIC_UNROUTED", ""),
             pair("CLAUDE_CONFIG_DIR", "/alt"),
         ];
         let plain = vec![pair("OUTPUT_FILE", "/tmp/out"), pair("CLI", "claude")];
