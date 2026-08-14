@@ -21,7 +21,7 @@ use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{UnixListener, UnixStream};
@@ -4588,6 +4588,27 @@ fn run_reconcile_sweep(
             "reconcile computed {} change(s) but the registry write failed: {err}",
             changes.len()
         ));
+    }
+
+    // Roster-progress refresh (x-cdc7 SECOND HALF): the same per-tick,
+    // fairly-budgeted set the reconcile sweep just probed, so this pays no
+    // new unbounded cost - only rows with a worktree `cwd` are touched, and
+    // `roster_progress::compute` itself bounds its own `gh` call to branches
+    // with an upstream. Best-effort and non-fatal: an I/O failure here must
+    // never fail the reconcile sweep that already wrote the registry.
+    let progress_path = home.roster_progress_json();
+    for ch in &changes {
+        let Some(e) = entries.iter().find(|e| e.name == ch.name) else {
+            continue;
+        };
+        if e.cwd.is_empty() {
+            continue;
+        }
+        if let Err(err) =
+            crate::roster_progress::refresh_row(&progress_path, &e.name, Path::new(&e.cwd), &now)
+        {
+            eprintln!("reconcile: roster-progress refresh failed for {}: {err}", e.name);
+        }
     }
 
     for (name, reason) in &outcome.inconsistent {
