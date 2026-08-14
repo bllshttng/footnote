@@ -2521,7 +2521,10 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",
     "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
     "needs [--since-epoch <secs>] [--fires-floor <n>] [--json]",
-    "review-coverage --cwd <dir> [--pr <n>] [--head <sha>] [--session-id <id>]",
+    // `review-coverage` deliberately has NO entry here: the per-verb --help
+    // intercept would print a one-line usage and shadow the verb's own
+    // --help, which states the load-bearing contract (no way to assert
+    // coverage without the reads, and the strict manifest-less defaults).
 ];
 
 /// Return the usage line for `verb` (matched on the leading token), or `None`
@@ -2596,7 +2599,6 @@ mod tests {
             "subscribe",
             "digest",
             "needs",
-            "review-coverage",
         ];
         let listed: std::collections::HashSet<&str> = CLIENT_VERB_USAGE
             .iter()
