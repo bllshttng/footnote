@@ -255,7 +255,7 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
     )
     monkeypatch.setattr(
         _status, "read_review_coverage",
-        lambda pr, cwd: {"coverage": "unknown", "reviewed_count": None},
+        lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     _status.run_status("42")
     cap = capsys.readouterr()
@@ -281,7 +281,7 @@ def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         _status, "read_review_coverage",
-        lambda pr, cwd: {"coverage": "unknown", "reviewed_count": None},
+        lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     _status.run_status("42")
     assert capsys.readouterr().err == ""
@@ -305,7 +305,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
     code = _status.run_status("42")
     assert code == 0

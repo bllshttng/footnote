@@ -86,7 +86,7 @@ def enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1},
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
 
@@ -1139,7 +1139,7 @@ def test_a_pending_hold_does_not_mark_the_node_failed(
 
 def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):
     """No review_coverage event -> Unknown -> the sanctioned merge refuses."""
-    monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo: None)
+    monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo, head=None: (None, ""))
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "blocked"
@@ -1150,7 +1150,7 @@ def test_coverage_zero_refuses(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"},
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     assert _last_json(capsys, stream="err")["outcome"] == "blocked"
@@ -1160,7 +1160,7 @@ def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "unknown", "head_sha": "abc"},
+        lambda pr, repo, head=None: ({"coverage": "unknown", "head_sha": "abc"}, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     assert _last_json(capsys, stream="err")["outcome"] == "blocked"
@@ -1173,7 +1173,7 @@ def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"},
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"}, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
@@ -1199,7 +1199,7 @@ def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {
+        lambda pr, repo, head=None: ({
             "coverage": "uncovered",
             "reviewed_count": 0,
             # Fresh eval: this IS the PR's current head, so the staleness check
@@ -1214,7 +1214,7 @@ def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
                     "freshness": "stale",
                 }
             ],
-        },
+        }, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys, stream="err")
@@ -1244,7 +1244,7 @@ def test_carried_local_attestation_still_satisfies_the_code_review_gate(
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {
+        lambda pr, repo, head=None: ({
             "coverage": "covered",
             "reviewed_count": 1,
             "head_sha": "abc",
@@ -1257,7 +1257,7 @@ def test_carried_local_attestation_still_satisfies_the_code_review_gate(
                     "freshness": "carried_base_sync",
                 }
             ],
-        },
+        }, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
@@ -1277,7 +1277,7 @@ def test_code_review_gate_rejects_unrelated_github_app_coverage(
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {
+        lambda pr, repo, head=None: ({
             "coverage": "covered",
             "reviewed_count": 1,
             "head_sha": "abc",
@@ -1288,7 +1288,7 @@ def test_code_review_gate_rejects_unrelated_github_app_coverage(
                     "verdict": "reviewed",
                 }
             ],
-        },
+        }, ""),
     )
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
@@ -1311,7 +1311,7 @@ def test_code_review_gate_accepts_its_head_pinned_local_attestation(
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {
+        lambda pr, repo, head=None: ({
             "coverage": "covered",
             "reviewed_count": 1,
             "head_sha": "abc",
@@ -1322,7 +1322,7 @@ def test_code_review_gate_accepts_its_head_pinned_local_attestation(
                     "verdict": "reviewed",
                 }
             ],
-        },
+        }, ""),
     )
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
@@ -1334,7 +1334,7 @@ def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"},
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"}, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
@@ -1351,7 +1351,7 @@ def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"},
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
     fake = _AutoMergeRejectingRun(
@@ -1515,7 +1515,7 @@ def test_stale_head_blocked_receipt_carries_the_cause(enabled, monkeypatch, caps
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead0"},
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead0"}, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead0")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
@@ -1585,7 +1585,7 @@ def test_worktree_attestation_is_visible_from_canonical(monkeypatch, tmp_path):
     # Canonical's own log never saw it. That absence is the whole specimen.
     assert not (canonical / ".fno" / "events.jsonl").exists()
 
-    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None, "coverage attested in a worktree must be visible from canonical"
     assert cov["coverage"] == "covered"
     assert cov["reviewed_count"] == 1
@@ -1598,7 +1598,7 @@ def test_global_coverage_is_scoped_to_this_repo(monkeypatch, tmp_path):
     global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
     _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/other/repo")
-    assert _merge._review_coverage_for_pr(781, str(canonical)) is None
+    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is None
 
 
 def test_global_coverage_without_repo_field_is_not_matched(monkeypatch, tmp_path):
@@ -1608,7 +1608,7 @@ def test_global_coverage_without_repo_field_is_not_matched(monkeypatch, tmp_path
     global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
     _write_coverage(global_dir / "events.jsonl", 781, repo=None)
-    assert _merge._review_coverage_for_pr(781, str(canonical)) is None
+    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is None
 
 
 def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
@@ -1624,7 +1624,7 @@ def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
         canonical / ".fno" / "events.jsonl", 781, ts="2026-08-08T02:00:00Z", count=5
     )
 
-    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["reviewed_count"] == 5
 
 
@@ -1640,11 +1640,11 @@ def test_same_named_repos_under_different_owners_do_not_share_coverage(monkeypat
     global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
     _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/org-b/widget")
-    assert _merge._review_coverage_for_pr(781, str(canonical)) is None
+    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is None
 
     # The same repo's own identity still resolves.
     _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/org-a/widget")
-    assert _merge._review_coverage_for_pr(781, str(canonical)) is not None
+    assert _merge._review_coverage_for_pr(781, str(canonical))[0] is not None
 
 
 def test_repo_identity_agrees_across_remote_forms():
@@ -1692,7 +1692,7 @@ def test_equal_timestamps_take_the_safer_verdict(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["coverage"] == "unknown"
 
 
@@ -1708,13 +1708,13 @@ def test_repo_rooted_at_the_global_log_still_scopes(monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "global_events_json", lambda: events)
 
     _write_coverage(events, 781, repo="github.com/org-b/widget")
-    assert _merge._review_coverage_for_pr(781, str(root)) is None, (
+    assert _merge._review_coverage_for_pr(781, str(root))[0] is None, (
         "a foreign repo's event must not satisfy the guard even when the two "
         "logs are the same file"
     )
 
     _write_coverage(events, 781, repo="github.com/org-a/widget")
-    assert _merge._review_coverage_for_pr(781, str(root)) is not None
+    assert _merge._review_coverage_for_pr(781, str(root))[0] is not None
 
 
 def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
@@ -1729,7 +1729,7 @@ def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
     events.write_text('{"type": "review_coverage", TRUNCATED\n', encoding="utf-8")
     _write_coverage(events, 781)
 
-    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["coverage"] == "covered"
 
 
