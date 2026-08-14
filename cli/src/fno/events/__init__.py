@@ -783,7 +783,7 @@ def integrity_warning(
     )
 
 
-MAIL_ESCALATION_REASONS = frozenset({"question", "attended-miss"})
+MAIL_ESCALATION_REASONS = frozenset({"question", "attended-miss", "reachable-miss"})
 
 
 def mail_escalation(

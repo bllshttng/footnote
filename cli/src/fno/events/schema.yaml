@@ -1975,8 +1975,8 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [question, attended-miss]
-          description: "'question' = a --kind question send (unconditional escalation, never autonomous-answered); 'attended-miss' = a send to an operator-attended session that fell to the durable floor (live-miss only)."
+          enum: [question, attended-miss, reachable-miss]
+          description: "'question' = a --kind question send (unconditional escalation, never autonomous-answered); 'attended-miss' = a send to an operator-attended session that fell to the durable floor (live-miss only); 'reachable-miss' = the same live-miss to a worker the resolver reports reachable (no operator attends it, so nothing else surfaces the miss)."
         sender:
           type: string
           description: "Sender handle/project of the escalated mail."

@@ -1783,9 +1783,13 @@ def _escalate_to_human(
     ``reason`` is ``"question"`` (a --kind question send; Locked Decision 7: a
     question NEVER autonomous-responds - only the human answers it) or
     ``"attended-miss"`` (a send to an operator-attended session that fell to the
-    durable floor). Both reasons flow through this ONE helper so the overlay
-    event is emitted from a single place; a second emit site would leave one
-    reason un-surfaced (the silent-eat this exists to close).
+    durable floor) or ``"reachable-miss"`` (the same miss to a worker the
+    resolver reports reachable). Every reason flows through this ONE helper so
+    the overlay event is emitted from a single place; a second emit site would
+    leave one reason un-surfaced (the silent-eat this exists to close). A reason
+    added here must also be added to :data:`fno.events.MAIL_ESCALATION_REASONS`
+    and the schema enum, or the overlay emit raises and is swallowed by the
+    best-effort guard below - the nudge then reaches the notifier only.
 
     Debounced per (sender, recipient) so a chatty peer cannot spam the queue, and
     the debounce gates BOTH the notifier and the event (one event per
