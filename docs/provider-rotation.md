@@ -740,22 +740,32 @@ record, the account switch depends on the swapped-to record's `auth` strategy:
 - **`oauth_dir`** (two-dir substrate): nothing extra - the record's own config
   dir rides the respawn's `dispatch_env`, so the new worker reads the other
   account's credentials directly.
-- **`managed`** (single shared slot): the swap only flips the routing pointer;
-  the shared slot still holds the exhausted account's credentials. The sweep
-  materializes the new account into the slot (capture-before-overwrite +
-  live-pin gate, the same path as `fno config accounts use`) before redispatch, and
-  emits `account_switched`. This slot mutation is **opt-in**:
+- **`managed`** (single shared slot): `FailoverController.attempt_swap` itself
+  materializes the candidate into the slot (capture-before-overwrite +
+  live-pin gate, the same path as `fno config accounts use`) before it ever
+  writes the routing pointer, and refuses the swap outright on a pin or store
+  error rather than report one that did not happen (x-8183/x-8665 - the
+  pointer used to flip while the slot stayed on the exhausted account's
+  credentials, so `list`/dispatch would read the new pointer while every
+  worker kept the old creds). This materialization is **opt-in**, gated by
+  `auto_switch` on `attempt_swap`'s only production caller, the recovery
+  sweep:
 
 ```toml
 [accounts]
 auto_switch = true   # default false; arms managed-account materialization on auto-switch
 ```
 
-With `auto_switch` off (default) a swap onto a managed record does not touch the
-slot - the sweep degrades to the bounded nudge rather than redispatching onto
-un-switched (exhausted) credentials. A live-pin defer or any store/keychain
-failure degrades the same way. Single-account and `oauth_dir` setups are
-unaffected by the knob.
+With `auto_switch` off (default) the sweep tells `attempt_swap` not to
+materialize a managed candidate (`materialize_managed=False`) - the pointer
+still flips (today's warn/defer/nudge behavior, unchanged), the slot does
+not, and the sweep degrades to the bounded nudge rather than redispatching
+onto un-switched (exhausted) credentials. A caller that omits the argument
+gets the honest default (materialize), which is correct for every other
+`attempt_swap` caller - the recovery sweep is the one exception, because it
+has its own separate opt-in contract to honor. A live-pin defer or any
+store/keychain failure degrades the same way regardless of the setting.
+Single-account and `oauth_dir` setups are unaffected by the knob.
 
 ### Per-provider Cost Sub-cap
 
@@ -1437,7 +1447,15 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   dispatched here - it either cuts over to another record (below) or leaves a
   `quota-deferred` receipt + one decision event, node left in `ready`, the first
   tick after the reset dispatching it. `p0` and explicit human dispatch verbs
-  always fire. This is the one probe site (refresh-on-stale).
+  always fire. This is the one probe site (refresh-on-stale). Note that the
+  probe only runs at all when `defer_dispatch` is on: `evaluate_quota_signal`
+  short-circuits to `UNKNOWN` (reason `defer-dispatch-off`) before ever calling
+  the probe when it is off, which is `false` by default - see the CLI's
+  DISARMED footer below. When the resolved signal is `UNKNOWN` for any reason
+  and the launch proceeds anyway, one `quota_rotation_declined` event fires
+  (naming the reason and the age of whatever usage snapshot exists), so a
+  launch that went out blind is distinguishable in the journal from a system
+  that never needed to rotate.
 - **Lane routing** (review panel `alternate` selection): a kind whose records
   are all `EXHAUSTED` is stably demoted below kinds with headroom. Explicit
   per-agent pins and role→provider config mappings are never overridden.
@@ -1463,7 +1481,15 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   carries `"persisted": false` when the reading is good but its cache write lost the
   update-lock race; the reading is still displayed, because persistence and
   displayability are separate outcomes.
-- `fno config accounts list` gains a compact `headroom=` column.
+- `fno config accounts list` gains a compact `headroom=` column, plus a
+  `usage=<age>` column - the age of the cached usage snapshot, distinct from
+  `snapshot=<age>` (a `managed` record's credential blob age; unrelated and
+  not governed by the same TTL). `usage=never` when no probe has ever landed
+  for that record; `usage=<age> (STALE, ttl=<ttl>)` when the cached reading is
+  older than `probe_ttl_seconds`. When `defer_dispatch` is `false`, `list`
+  also prints a one-line footer naming the disarmed knob - this is the
+  display gap that let quota-aware dispatch go unobserved for months on a
+  fresh install, where `defer_dispatch` defaults off and nothing ever probed.
 - `fno config accounts required-bot-check [--json]` - the pre-promise early warning.
 
 ### Config (`config.accounts.quota`)
@@ -1513,6 +1539,76 @@ Probing and display are always on; only the autonomous *deferral* is gated,
 matching the opt-in posture of `backlog advance` and auto-merge. Cost-to-finish
 routing is out of scope for v1; the headroom seam is where cost data plugs in
 later.
+
+### The credential-shape discriminator: `managed` vs `api_key`
+
+A rotation onto a `managed` record (one Claude/codex login sharing the CLI's
+one credential slot) needs a human at a login prompt - `managed.switch`
+materializes the *stored* snapshot into the slot, but a slot that only has
+one account registered has nowhere to rotate to without a fresh `/login`. An
+`api_key` record has no such ceiling: its credential rides the env overlay
+(`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`), so `pick_account` and
+`attempt_swap` can select it with nobody watching, and it survives a
+Claude-wide outage that would take every `managed` record down together (they
+share one failure domain - the subscription, not the account row).
+
+So a two-record queue of `readyrule` + `makers`, both `auth: managed`, is not
+really two candidates for an unattended failover: it is one failure domain
+with two names. The fix is not more `managed` records, it is one `api_key`
+record as the last-resort rung. The lane is already wired end to end -
+`resolve_account_overlay` returns the `api-key` lane and `pick_account`
+accepts it - so this needs no code, only registration:
+
+```bash
+fno config accounts add anthropic-key \
+  --harness claude \
+  --auth api_key \
+  --env ANTHROPIC_API_KEY=sk-ant-... \
+  --priority 200 \
+  --name "Anthropic API key" \
+  --scope global
+```
+
+Equivalent hand-edit under the existing `[accounts]` block:
+
+```toml
+[[accounts.records]]
+id = "anthropic-key"
+name = "Anthropic API key"
+harness = "claude"
+auth = "api_key"
+priority = 200
+env = { ANTHROPIC_API_KEY = "sk-ant-..." }
+```
+
+Add it to the active combo (the live key is `accounts.combos.accounts.providers`,
+not `accounts`) and give every record a distinct priority - `(priority, id)` is
+already the tiebreak, so two records sharing a priority resolve by an
+alphabetical accident, not by intent:
+
+```toml
+[accounts.combos.accounts]
+strategy = "fallback"
+sticky_limit = 1
+providers = ["readyrule", "makers", "anthropic-key"]
+
+# readyrule: priority = 100   (first choice, unchanged)
+# makers:    priority = 150   (second)
+# anthropic-key: priority = 200  (last resort, costs per token)
+```
+
+Then arm the feature - it stays disarmed until this line is set, by design
+(see `defer_dispatch`'s default above):
+
+```toml
+[accounts.quota]
+defer_dispatch = true
+pick_on_launch = true
+```
+
+Verify: `fno config accounts list` shows `anthropic-key` with a populated
+`usage=` column and no DISARMED footer; `fno config accounts pick` now names
+more than one launchable candidate.
 
 ## Review policy and assurance
 
