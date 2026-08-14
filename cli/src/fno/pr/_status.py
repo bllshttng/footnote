@@ -326,7 +326,13 @@ def main(argv: Sequence[str]) -> int:
         sys.stderr.write("usage: fno pr status <pr-number>\n")
         return 2
     try:
-        return run_status(str(argv[0]))
+        from fno.pr._cache import cached_status
+
+        # The CLI chokepoint goes through the coalescing cache (x-9715 item
+        # 5): N sessions polling one PR issue one network read per TTL. The
+        # library entry (run_status) stays uncached for programmatic callers
+        # and tests.
+        return cached_status(str(argv[0]))
     except ToolMissing:
         import sys
 

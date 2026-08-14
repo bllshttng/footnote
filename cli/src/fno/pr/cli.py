@@ -83,13 +83,12 @@ def verify(
 )
 def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> None:
     from fno.pr import _status
-    from fno.pr._proc import ToolMissing
 
-    try:
-        rc = _status.run_status(str(pr_number))
-    except ToolMissing as exc:
-        typer.echo(f"fno pr status: {exc.tool} not found on PATH", err=True)
-        rc = 127
+    # main() routes through the coalescing cache (x-9715 item 5): the watcher
+    # recipe polls this verb every 60s per session, and N sessions polling one
+    # PR must collapse to one network read per TTL or they trip the REST
+    # secondary limit (which counts request rate, not budget).
+    rc = _status.main([str(pr_number)])
     raise typer.Exit(code=rc)
 
 
