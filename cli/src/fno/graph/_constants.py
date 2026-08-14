@@ -235,15 +235,27 @@ def mint_node_id(existing_ids) -> str:
     width = node_id_hex_width()
     # Kept separate from `existing_ids` (never converted to a set): callers pass
     # containers that only promise `__contains__`/`__len__`, not iteration.
+    #
+    # A raw parse, not `read_graph` (x-f69b regression): mint_node_id fires on
+    # nearly every node creation, far more often than the other advisory
+    # archive readers. `read_graph`'s corrupt-JSON path prints a stderr
+    # warning AND copies a `.bak` backup as a side effect before raising -
+    # fine for a deliberate `fno doctor`/`archive` invocation, but this call
+    # is an invisible side channel inside a hot path, and that print leaked
+    # into unrelated commands' captured output the first time a corrupt
+    # archive fixture was left behind in a shared test session.
     archive_ids: set[str] = set()
     try:
-        from fno.graph.store import read_graph
+        import json as _json
+
         from fno.paths import graph_archive_json
 
         archive_path = graph_archive_json()
         if archive_path.exists():
+            data = _json.loads(archive_path.read_text())
+            raw_entries = data.get("entries", []) if isinstance(data, dict) else []
             archive_ids = {
-                e.get("id") for e in read_graph(archive_path)
+                e.get("id") for e in raw_entries
                 if isinstance(e, dict) and e.get("id")
             }
     except Exception:  # noqa: BLE001 - archive is advisory; a bad read must not block minting
