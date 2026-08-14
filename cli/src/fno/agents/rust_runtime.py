@@ -152,6 +152,12 @@ RUST_CLIENT_VERBS = frozenset(
         # ALL sessions, emitting review_wedged / budget_stop items. Dispatched in
         # client.rs before build_request (no daemon RPC, no Python impl).
         "needs",
+        # Standalone review_coverage producer (x-3a3f): the same resolver +
+        # emitter the stop hook uses, so any path that can reach the merge gate
+        # (``fno pr merge``/``status`` recompute, a manifest-less session) can
+        # also satisfy it. Dispatched directly in client.rs before
+        # build_request (no daemon RPC, no Python impl).
+        "review-coverage",
     }
 )
 
@@ -288,6 +294,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "digest": "Catch-up 'while you were gone' fold over events + ledger for a session: --session <s> --since <ts> [--json].",
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
+    "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

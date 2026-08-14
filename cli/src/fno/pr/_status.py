@@ -141,7 +141,9 @@ def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
     failure, and an exhausted API quota.
     """
     res = run(
-        ["gh", "pr", "view", pr, "--json", "state,statusCheckRollup"],
+        # headRefOid rides along so the coverage recompute can pin its emitted
+        # row to the PR head, not the local checkout's HEAD.
+        ["gh", "pr", "view", pr, "--json", "state,statusCheckRollup,headRefOid"],
         cwd=cwd,
     )
     if res.ok and not res.stdout.strip():
@@ -247,9 +249,16 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
     # x-0eaf: coverage signal, same additive/fail-open discipline as the optional
     # review read above. Read from the review_coverage event so a human and the
-    # loop see one number (Ownership: Rust computes, Python reads).
+    # loop see one number (Ownership: Rust computes, Python reads). Recomputed
+    # once when no usable row exists (x-3a3f), so a human report and the merge
+    # gate act on the same number instead of status saying "no coverage" for a
+    # PR merge would clear after one recompute. The PR head rides in from
+    # _fetch: without it the verb would pin the emitted row to the LOCAL
+    # checkout's HEAD, planting a wrong-head row both gates then disagree on.
     try:
-        coverage = read_review_coverage(int(pr), cwd)
+        coverage = read_review_coverage(
+            int(pr), cwd, head=pr_json.get("headRefOid"), recompute=True
+        )
     except Exception:
         # The producer's own sentinel, not a copy of it: a second literal here
         # is a shape that drifts the moment a key is added on one side only.

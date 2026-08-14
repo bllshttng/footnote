@@ -266,3 +266,23 @@ def clean_lock_dir(tmp_path: Path) -> Path:
             lock_file.unlink()
         except OSError:
             pass
+
+
+@pytest.fixture(autouse=True)
+def _no_review_coverage_recompute(monkeypatch):
+    """Hermetic default for the coverage recompute (x-3a3f).
+
+    `fno pr merge`/`status` recompute a missing coverage row by shelling out to
+    the `fno-agents review-coverage` verb. In the test environment that
+    resolver can find a real installed binary (PATH or the cargo dev target),
+    so an unstubbbed no-event path would spawn it against real gh. This stub
+    makes the recompute report "unavailable" by default - the fail-closed
+    branch, which is also the pre-recompute behavior, so only tests that
+    explicitly exercise the recompute (they re-monkeypatch
+    `fno.pr._reviews._fire_review_coverage_verb`) see one.
+    """
+    from fno.pr import _reviews
+
+    monkeypatch.setattr(
+        _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "disabled in test")
+    )

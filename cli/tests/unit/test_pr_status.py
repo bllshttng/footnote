@@ -255,7 +255,7 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
     )
     monkeypatch.setattr(
         _status, "read_review_coverage",
-        lambda pr, cwd: {"coverage": "unknown", "reviewed_count": None},
+        lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     _status.run_status("42")
     cap = capsys.readouterr()
@@ -281,7 +281,7 @@ def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         _status, "read_review_coverage",
-        lambda pr, cwd: {"coverage": "unknown", "reviewed_count": None},
+        lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     _status.run_status("42")
     assert capsys.readouterr().err == ""
@@ -305,7 +305,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "read_review_coverage",
-        lambda pr, cwd: {"coverage": "covered", "reviewed_count": 2},
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
     code = _status.run_status("42")
     assert code == 0
@@ -674,3 +674,85 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
     assert out["optional_reviews"] == "unknown"
     assert out["optional_reviews_unresolved"] is None
     assert out["ready"] is False
+
+
+# ---- x-3a3f: status recomputes a missing coverage row ----
+
+
+def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path):
+    """A reviewed PR with no review_coverage event reports the same verdict
+    merge would act on: the read fires the producer once (stubbed here to
+    append the event a real binary would) instead of degrading to unknown."""
+    import json
+
+    from fno.pr import _reviews
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+
+    def fake_verb(pr_number, cwd, head):
+        events.write_text(
+            json.dumps({
+                "ts": "2026-08-14T03:00:00Z",
+                "type": "review_coverage",
+                "data": {"pr": pr_number, "coverage": "covered",
+                         "reviewed_count": 1, "head_sha": "abc"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        return True, ""
+
+    monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
+    # The status read resolves the project log from its cwd; point it at the
+    # fixture.
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    cov = out["review_coverage"]
+    assert cov["coverage"] == "covered", cov
+    assert cov["reviewed_count"] == 1
+    assert cov["recompute"] == "recomputed", cov
+
+
+def test_status_recompute_failure_degrades_to_unknown(monkeypatch, capsys, tmp_path):
+    """The verb unavailable -> the existing unknown sentinel, exit 0: a
+    read-only report never goes non-zero on a coverage read."""
+    import json
+
+    from fno.pr import _reviews
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "fno-agents not found")
+    )
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["review_coverage"]["coverage"] == "unknown"

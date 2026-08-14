@@ -384,3 +384,27 @@ This records WHOSE process rendered a verdict; the role-routing note in
 [role-based-model-routing.md](role-based-model-routing.md) records WHICH model,
 and states the claim this makes measurable: keep the reviewer off the authoring
 worker; a role table cannot enforce it.
+
+## Producer reachability: every path that reaches the gate
+
+`fno pr merge` refuses a PR whose `review_coverage` event says uncovered, unknown, stale, or missing. For most of the gate's life exactly one writer existed: `read_pr_info` under `run_done`, which `decide()` reaches only past a streak counter. A session with no `.fno/target-state.md` runs no stop hook at all, so no row will ever exist. The gate was unsatisfiable for that session shape, not strict. This is the decorative-guard pitfalls entry inverted: a PRODUCER on one of N paths.
+
+The producer is now reachable from every path that can reach the gate.
+
+| Path | Producer reachable | How |
+|---|---|---|
+| target stop hook `decide()` -> `run_done` | yes, unchanged | streak-gated |
+| `fno pr merge <n>` | yes | with no usable row it recomputes once, before the staleness comparison, pinned to the PR head |
+| `fno pr status <n>` | yes | reads through the same recompute-then-read helper |
+| `finalize`'s auto-merge arm | not added, by decision | reached only from a terminal-allow, which implies `run_done` already ran this fire, and a failed arm leaves a green reviewed PR for a human |
+| a human running the verb by hand | yes | `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>]` |
+
+The table is asserted, not trusted. `crates/fno-agents/tests/review_coverage_paths.rs` runs the Rust-drivable rows. It holds the safe-direction row to its reason. When a new call site reads `review_coverage` without joining the table, it fails. The verb's payload is pinned equal to `run_done`'s by `review_coverage_verb.rs`, on the whole data object.
+
+The verb cannot assert coverage without performing the reads. There is no `--force`, no `--assume-covered`, and no skip key. A caller wanting a green gate must cause a review to exist. Its manifest-less defaults are strict: external review reads stay on, because `no_external` can only relax them. An unresolvable author session omits `self_attested_count` from the payload rather than reporting an unmeasured 0.
+
+That pre-empts the aggregate-that-overstates-its-inputs shape at the field that becomes a bypass on the day anything enforces it.
+
+### Zero rows vs a frozen streak: the discriminator
+
+Two symptoms read alike and are different defects. Count `loop_check` rows in the worktree's own `.fno/events.jsonl`. Zero rows means the producer never ran there. A manual `fno-agents review-coverage --cwd <worktree>` settles it. Rows present with `consecutive_unchanged` frozen below `MUTE_PROBE_N` is the streak-gated shape the merge recompute makes moot.
