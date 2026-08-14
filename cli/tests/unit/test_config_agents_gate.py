@@ -64,3 +64,27 @@ def test_spawn_defaults_non_mapping_degrades_to_unset():
     # A scalar/list/null `agents.defaults:` must not raise out of the load.
     for bad in ("banana", ["x"], None, 3):
         assert AgentsBlock(defaults=bad).defaults.provider == ""
+
+
+def test_dead_row_grace_bare_integer_is_the_default_shape():
+    assert AgentsBlock().dead_row_grace == 3600
+    assert AgentsBlock(dead_row_grace=7200).dead_row_grace == 7200
+
+
+def test_dead_row_grace_accepts_a_per_harness_table():
+    # x-9de7 task 6: agents.dead_row_grace.<harness> = <seconds>, mirroring
+    # the Rust resolver (agents_config::dead_row_grace_secs). A harness
+    # absent from the table is not this model's job to fill in -- that
+    # fallback lives in the Rust resolver, which this type just has to admit.
+    b = AgentsBlock(dead_row_grace={"codex": 28800})
+    assert b.dead_row_grace == {"codex": 28800}
+
+
+def test_dead_row_grace_rejects_a_negative_value_in_either_shape():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentsBlock(dead_row_grace=-1)
+    with pytest.raises(ValidationError):
+        AgentsBlock(dead_row_grace={"codex": -1})

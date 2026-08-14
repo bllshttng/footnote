@@ -1586,7 +1586,14 @@ class AgentsBlock(BaseModel):
     # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`
     # read the same `config.agents.dead_row_grace` key (agents_config.rs), so a
     # non-default here changes both the automatic sweep and the manual verb.
-    dead_row_grace: int = 3600
+    #
+    # Also accepts a per-harness table, `agents.dead_row_grace.<harness> =
+    # <seconds>` (x-9de7 task 6): a codex worker's working session runs 6-8h,
+    # so the single global default reads its normal silence as staleness.
+    # A harness absent from the table falls back to this default, not to a
+    # sibling harness's number -- see `agents_config::dead_row_grace_secs`,
+    # the resolver this type mirrors.
+    dead_row_grace: int | dict[str, int] = 3600
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate knobs (x-c5cc). All three coerce invalid values to their
@@ -1610,13 +1617,15 @@ class AgentsBlock(BaseModel):
 
     @field_validator("dead_row_grace")
     @classmethod
-    def dead_row_grace_nonneg(cls, v: int) -> int:
+    def dead_row_grace_nonneg(cls, v: int | dict[str, int]) -> int | dict[str, int]:
         """Grace is a duration; a negative value is a config error (would reap
-        instantly, defeating the visibility window)."""
-        if v < 0:
-            raise ValueError(
-                f"config.agents.dead_row_grace must be >= 0 seconds; got {v}"
-            )
+        instantly, defeating the visibility window). Checks every value when
+        `v` is a per-harness table (x-9de7 task 6), not just the shape."""
+        for secs in v.values() if isinstance(v, dict) else (v,):
+            if secs < 0:
+                raise ValueError(
+                    f"config.agents.dead_row_grace must be >= 0 seconds; got {secs}"
+                )
         return v
 
     @field_validator("profiles", mode="before")

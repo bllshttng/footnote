@@ -64,10 +64,11 @@ pub struct DaemonOptions {
     /// (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's discretion #5) trades a
     /// truthful first `list` for the fastest possible cold start.
     pub reconcile_on_start: bool,
-    /// Grace window before the dead-row GC reaps a finished agent-view row
-    /// (x-b1aa). Default 1h; the daemon entrypoint overrides it from
-    /// `config.agents.dead_row_grace` (via `agents_config::dead_row_grace_secs`).
-    pub dead_row_grace: Duration,
+    /// cwd the idle tick resolves `agents.dead_row_grace.<harness>` against
+    /// (x-9de7 task 6). A `Duration` cannot be pre-resolved here the way
+    /// `idle_exit` is: the grace is per-HARNESS, so the lookup happens once
+    /// per row, at sweep time, not once at startup.
+    pub dead_row_grace_cwd: PathBuf,
     /// Fire an OS notification when a badge ENTERS `blocked` (x-dd84). Default
     /// ON; overridden from `config.mux.notify_on_blocked` at startup.
     pub notify_on_blocked: bool,
@@ -82,7 +83,7 @@ impl Default for DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin: resolve_worker_bin(),
             reconcile_on_start: true,
-            dead_row_grace: Duration::from_secs(crate::agents_config::DEFAULT_DEAD_ROW_GRACE_SECS),
+            dead_row_grace_cwd: PathBuf::from("."),
             notify_on_blocked: true,
             notify_on_done: false,
         }
@@ -754,7 +755,17 @@ fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(
 /// cleared. A registry-write failure is surfaced as `daemon_recovery_error` and
 /// reported as zero reaps, so the event log never claims a removal the disk did
 /// not get (AC1-ERR).
-pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> GcSummary {
+/// `grace_for_harness` resolves `agents.dead_row_grace` PER ROW, keyed on
+/// `e.harness_name()` (x-9de7 task 6) -- defence in depth, not the fix: it
+/// only sets the blast radius of a false `exited` write, since a live row is
+/// re-checked and never touched regardless of grace. Injected so this stays
+/// testable without shelling config reads; production passes
+/// `agents_config::dead_row_grace_secs`.
+pub fn gc_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+) -> GcSummary {
     let mut summary = GcSummary::default();
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
     if registry.entries.is_empty() {
@@ -762,7 +773,6 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     }
     let live_workers = home.scan_worker_sockets();
     let now = now_epoch_secs();
-    let grace_secs = grace.as_secs() as i64;
 
     // Keyed by row name -> the `created_at` we evaluated. Applied under the lock
     // ONLY when the row's current `created_at` still matches, so a same-name
@@ -781,6 +791,7 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         std::collections::BTreeMap::new();
 
     for e in &registry.entries {
+        let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         let is_live = live_workers.contains(&e.short_id)
             || e.pid
                 .map(|p| pid_is_ours(p, e.pid_start_time))
@@ -1408,7 +1419,13 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // ritual. Cheap in steady state (no candidates -> no git, no
                 // registry write); the grace window makes exact cadence
                 // non-critical, so running it on the idle tick is fine.
-                let _ = gc_sweep(&ctx.home, &ctx.emitter, ctx.opts.dead_row_grace);
+                let grace_cwd = &ctx.opts.dead_row_grace_cwd;
+                let grace_for_harness = |harness: &str| {
+                    Duration::from_secs(crate::agents_config::dead_row_grace_secs(
+                        grace_cwd, harness,
+                    ))
+                };
+                let _ = gc_sweep(&ctx.home, &ctx.emitter, &grace_for_harness);
                 // Worktree report sweep: the backstop for what the merge ritual
                 // missed. Its own 24h stamp makes it a near-no-op on this tick,
                 // but the verb shells git across every worktree when it does
@@ -5360,7 +5377,7 @@ mod tests {
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
 
         assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
 
@@ -5542,7 +5559,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
 
-        gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let stamps: std::collections::BTreeSet<String> = reg
@@ -5596,9 +5613,71 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn gc_sweep_empty_registry_is_noop() {
         let home = tmp_home("gc-empty");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
         assert!(summary.reaped.is_empty());
         assert!(summary.kept_dirty.is_empty());
+    }
+
+    /// The long-silence repro (x-9de7 verification #7, the one task 6 exists
+    /// for). A codex row whose transcript went untouched for 90 minutes while
+    /// the pane was alive: under the OLD one-hour-for-every-harness window
+    /// that silence corroborates a reap; under an 8h codex grace it does not.
+    /// Both sweeps run against the SAME fixture (same exited_at, same
+    /// transcript mtime) so the only variable is the grace the resolver hands
+    /// back for "codex".
+    #[test]
+    fn gc_sweep_a_90_minute_codex_silence_reaps_under_1h_grace_not_under_8h() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exited_at_secs = now - 9 * 3600; // well past either grace
+        let (y, mo, d, h, mi, s) = civil(exited_at_secs);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+
+        let seed = |tag: &str| -> (AgentsHome, std::path::PathBuf) {
+            let home = tmp_home(tag);
+            let log_path = home.root().join("transcript.jsonl");
+            std::fs::write(&log_path, "{}\n").unwrap();
+            let mtime = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(now - 90 * 60);
+            std::fs::File::options()
+                .write(true)
+                .open(&log_path)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+            state::update_registry(&home.registry_json(), |r| {
+                let mut e = ask_row("codex-silent", Some(exited_at.as_str()));
+                e.short_id = "codex-silent".into(); // liveness_surface, no live socket
+                e.legacy_provider = "codex".into();
+                e.log_path = Some(log_path.to_string_lossy().into_owned());
+                r.entries.push(e);
+            })
+            .unwrap();
+            (home, log_path)
+        };
+
+        // OLD behaviour: one number for every harness.
+        let (home_old, _) = seed("gc-silence-old");
+        let emitter_old = EventEmitter::new(home_old.events_jsonl(), "daemon");
+        let summary_old = gc_sweep(&home_old, &emitter_old, &|_| Duration::from_secs(3600));
+        assert_eq!(
+            summary_old.reaped,
+            vec!["codex-silent".to_string()],
+            "control: a 1h window reads 90 minutes of silence as corroborated staleness"
+        );
+
+        // FIXED behaviour: codex gets its own 8h grace/freshness window.
+        let (home_new, _) = seed("gc-silence-new");
+        let emitter_new = EventEmitter::new(home_new.events_jsonl(), "daemon");
+        let summary_new = gc_sweep(&home_new, &emitter_new, &|harness| {
+            Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 })
+        });
+        assert!(
+            summary_new.reaped.is_empty(),
+            "an 8h codex grace must not corroborate a worker that was silent for only 90 minutes"
+        );
     }
 
     #[test]
@@ -5659,7 +5738,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         )
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
         assert_eq!(summary.reaped.len(), 2);
 
         let reaps = read_events(&home);
@@ -5720,7 +5799,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
 
         assert!(summary.reaped.is_empty());
         let registry = state::load_registry(&home.registry_json()).unwrap();
@@ -5760,7 +5839,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         .unwrap();
         std::fs::create_dir_all(global_events_path(&home)).unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
 
         assert!(summary.reaped.is_empty());
         let registry = state::load_registry(&home.registry_json()).unwrap();
@@ -7493,7 +7572,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace: Duration::from_secs(3600),
+                dead_row_grace_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
@@ -7516,7 +7595,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace: Duration::from_secs(3600),
+                dead_row_grace_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,

@@ -1334,12 +1334,15 @@ fn run_reap(rest: &[String]) -> i32 {
     }
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let grace =
-        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(&cwd));
+    let grace_for_harness = |harness: &str| {
+        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(
+            &cwd, harness,
+        ))
+    };
     // Source "daemon" matches the event schema's declared source for
     // agent_row_reaped; the manual verb is the same operation as the tick.
     let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
-    let summary = fno_agents::daemon::gc_sweep(&home, &emitter, grace);
+    let summary = fno_agents::daemon::gc_sweep(&home, &emitter, &grace_for_harness);
 
     print!("{}", render_reap(&summary, json_out));
     0
