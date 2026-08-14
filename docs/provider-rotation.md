@@ -742,7 +742,7 @@ record, the account switch depends on the swapped-to record's `auth` strategy:
   account's credentials directly.
 - **`managed`** (single shared slot): `attempt_swap` itself materializes the candidate into the slot before it writes the routing pointer. It uses the same capture-before-overwrite and live-pin gate as `fno config accounts use`. It refuses the swap outright on a pin or store error, instead of reporting one that never happened.
 
-This closes x-8665. The pointer used to flip while the slot kept the exhausted account's credentials. `list` and dispatch read the new pointer, but every worker kept the old creds.
+This closes a long-standing gap. The pointer used to flip while the slot kept the exhausted account's credentials. `list` and dispatch read the new pointer, but every worker kept the old creds.
 
 This materialization is **opt-in**. It is gated by `auto_switch`, on `attempt_swap`'s only production caller, the recovery sweep:
 
