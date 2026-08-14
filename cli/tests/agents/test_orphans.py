@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import collections
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -584,6 +585,39 @@ def test_filter_new_speaks_for_an_unseen_pid(monkeypatch, table, tmp_path: Path)
     table.append(_proc(81, name="grep", cwd="/repo"))
     result = _scan_with_working_control(monkeypatch, table)
     assert orphans.filter_new(result, seen) is True
+
+
+def test_seen_file_lands_in_this_worktree_not_the_canonical_checkout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """State belongs to the tree the sweep ran in, never to `_repo_roots()[0]`.
+
+    Those answer different questions and one list was serving both.
+    `_repo_roots` is deliberately EVERY worktree, because attribution wants
+    them all, and its first entry comes from `--git-common-dir`: the canonical
+    checkout. Anchoring state there made every worktree write its quiet-gate
+    into the canonical checkout, so worktrees silenced each other's findings
+    and the plan's `done_probe` could never pass in a worktree. That is the
+    normal case in a repo whose first working principle is worktree-first.
+    """
+    worktree = tmp_path / "canonical" / ".claude" / "worktrees" / "x-1"
+    worktree.mkdir(parents=True)
+    canonical = tmp_path / "canonical"
+
+    def fake_run(cmd, *args, **kwargs):
+        assert "--show-toplevel" in cmd, f"asked git the wrong question: {cmd}"
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{worktree}\n", stderr="")
+
+    monkeypatch.setattr(orphans.subprocess, "run", fake_run)
+    # Present but WRONG: the bug was reading this instead of the toplevel.
+    monkeypatch.setattr(orphans, "_repo_roots", lambda: [str(canonical), str(worktree)])
+
+    resolved = orphans.seen_path()
+    assert resolved == worktree / ".fno" / ".orphan-sweep-seen"
+    # A harness-native worktree lives INSIDE the canonical checkout, so the
+    # canonical path is legitimately a parent. Name the file that must not be
+    # written instead: the canonical checkout's own state.
+    assert resolved != canonical / ".fno" / ".orphan-sweep-seen"
 
 
 def test_session_start_appends_outstanding_then_orphan_sweep() -> None:

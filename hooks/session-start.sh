@@ -290,11 +290,10 @@ fi
 orphan_content=""
 orphan_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
 if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
-    # Anchored to the canonical checkout, exactly like the sweep's own
-    # seen-file. A per-worktree stamp beside a shared seen-file silences the
-    # wrong session: worktree A records a finding, and worktree B's sweep an
-    # hour later treats it as already reported and says nothing about an
-    # orphan sitting in B.
+    # Shared on purpose: it throttles a MACHINE-wide scan of every process,
+    # and 50 worktrees would run that scan 50 times an hour. The seen-file is
+    # per worktree instead, so each session is told once. Two questions, two
+    # anchors. An earlier comment here claimed they had to match.
     # `|| true` is load-bearing under `set -e`: git exits 128 outside a repo,
     # and an unguarded command substitution in an assignment takes the WHOLE
     # hook down with it. The suite caught exactly that - session-start returned

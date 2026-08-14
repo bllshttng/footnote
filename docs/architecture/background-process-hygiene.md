@@ -107,7 +107,11 @@ A clean machine here still reports third-party daemons at PPID 1 whose cwd is th
 
 The quiet gate keys on pid, name and start time, so it mutes a process, never a kind of process. A harness that starts a fresh `node` or `bash` per session mints a new key each time, and the sweep speaks again. That is correct and it is also the noisiest thing here. Read a repeat as a new process, not as a broken gate.
 
+A repeat can also be a different WORKTREE. The seen-file is per working tree, so one long-lived third-party daemon is reported once per worktree rather than once per machine. That is the deliberate side of the trade. Sharing one file across worktrees is quieter, and it silences a real finding in worktree B because worktree A happened to see it first. A session that has never been told about a process gets told once. On a machine carrying many worktrees this is the noisiest thing here, alongside the per-session key above.
+
 **Footnote's own daemons are counted, never listed.** `fno-agents-daemon` and `fno-agents-worker` run detached at PPID 1 by design. So PPID 1 says nothing about whether one leaked. Each restart also mints a fresh seen-key that speaks again. An hourly report nobody can act on is how a sweep gets ignored. The scan line names the count (`3 own-daemon`), because a silent exclusion is the same absence trap the rest of this module refuses. The match is on argv[0] exactly, so `fno-agents-daemon-load` is still a finding. A prefix test hands anyone an opt-out.
+
+**The seen-file belongs to the working tree the sweep ran in.** It is anchored with `git rev-parse --show-toplevel`, never with the first entry of the attribution roots. Those answer different questions, and one list was serving both. Attribution wants EVERY worktree, so its first entry comes from `--git-common-dir` and is the canonical checkout. Anchoring state there made every worktree write its quiet-gate into the canonical checkout. Worktrees then silenced each other's findings, and the plan's `done_probe` can never pass inside one. That is the normal case in a repo whose first working principle is worktree-first. The probe is what caught it, which is what a `done_probe` is for.
 
 A broken scan records nothing in the seen-file. It withheld its findings, so marking them reported lets one census failure silence a real orphan on every healthy sweep after it.
 
