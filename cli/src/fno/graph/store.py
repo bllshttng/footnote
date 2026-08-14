@@ -572,7 +572,7 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     _normalize_lock_fields(entries)
 
     # Dependency readiness, computed fresh on every read rather than trusted
-    # from disk (x-cc90): recompute_statuses no longer derives `status` from
+    # from disk: recompute_statuses no longer derives `status` from
     # `blocked_by` at write time, so this is the one seam every reader shares
     # (read_graph, read_graph_strict, load_graph, read_graph_nodes) and the
     # only place a stale on-disk snapshot cannot survive. Precedence matches
