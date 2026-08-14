@@ -50,7 +50,9 @@ approvals ls	T1	approvals ls	2
 approvals show	T1	approvals show	3
 backlog add	T1	backlog add	3
 backlog advance	KEEP	backlog advance	43	deliberate readability slack for a high-traffic distinct operation
+backlog album	T1	backlog album	0
 backlog archive	T1	backlog archive	2
+backlog archive-dedupe-ids	T1	backlog archive-dedupe-ids	0
 backlog bases	T1	backlog bases	0
 backlog batch join	T1	backlog batch join	1
 backlog batch metrics	T1	backlog batch metrics	0
