@@ -570,6 +570,34 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     # status derivation see the canonical field. Runs last so the key-presence
     # rule still sees a pre-rename node's missing locked_by key.
     _normalize_lock_fields(entries)
+
+    # Dependency readiness, computed fresh on every read rather than trusted
+    # from disk (x-cc90): recompute_statuses no longer derives `status` from
+    # `blocked_by` at write time, so this is the one seam every reader shares
+    # (read_graph, read_graph_strict, load_graph, read_graph_nodes) and the
+    # only place a stale on-disk snapshot cannot survive. Precedence matches
+    # what recompute_statuses used to enforce inline: done/superseded/
+    # deferred/in_review are direct facts about THIS node and already outrank
+    # blocked, so they are left alone; everything else (in_progress/idea/
+    # design/ready) is a candidate for the blocked overlay.
+    from fno.graph.statuses import compute_readiness
+
+    id_to_entry = {
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if e.get("status") in ("done", "superseded", "deferred", "in_review"):
+            e.setdefault("blocked_reason", None)
+            continue
+        kind, blocker_id = compute_readiness(e, id_to_entry)
+        if kind == "ready":
+            e["blocked_reason"] = None
+        else:
+            e["status"] = "blocked"
+            e["blocked_reason"] = f"{kind}:{blocker_id}"
+
     if not keep_malformed:
         entries = [e for e in entries if isinstance(e, dict)]
     return entries

@@ -2,11 +2,11 @@
 
 Public API:
     recompute_statuses(entries) -> list[dict]
+    compute_readiness(entry, id_to_entry) -> (kind, blocker_id)
     is_stale_lock(task) -> bool
 """
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
 
 from fno.graph._constants import LOCK_TTL_HOURS, PRIORITY_MIGRATION
@@ -71,6 +71,29 @@ def _rung_to_graph_status() -> dict:
     }
 
 
+def compute_readiness(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str, str | None]:
+    """Read-time dependency readiness for one entry: never a boolean.
+
+    Returns ("ready", None), ("blocked-by", blocker_id) for a real, open
+    blocker, or ("unknown-dep", blocker_id) for a blocked_by id absent from
+    the graph. An unknown id always resolves unknown-dep, never ready - fail
+    closed on an ambiguous or missing id rather than treat an absence as
+    satisfied.
+
+    Call fresh on every read (``_apply_graph_defaults`` is the shared seam
+    every reader routes through). Never persisted: ``recompute_statuses``
+    does not derive ``status`` from ``blocked_by`` at write time, so this is
+    the only place the dependency-satisfaction question gets answered.
+    """
+    for blocker_id in entry.get("blocked_by") or []:
+        blocker = id_to_entry.get(blocker_id)
+        if blocker is None:
+            return ("unknown-dep", blocker_id)
+        if blocker.get("completed_at") is None:
+            return ("blocked-by", blocker_id)
+    return ("ready", None)
+
+
 def is_stale_lock(task: dict) -> bool:
     """Check if a feature's claim has expired (>TTL hours)."""
     lock_time_str = task.get("claimed_at")
@@ -94,7 +117,11 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
 
     Called inside locked_mutate_graph() after every mutation.
     Derives status from: completed_at, superseded_by, deferred_at, pr_number,
-    blocked_by, locked_by.
+    locked_by. Does NOT derive from blocked_by: dependency-satisfaction is a
+    cross-node join that can go stale the instant a sibling changes after
+    this write, so it is answered fresh on every read instead (see
+    compute_readiness, wired into _apply_graph_defaults in store.py) rather
+    than snapshotted here.
     """
     # Reconcile the locked_by/session_id mirror first so derivation keys on the
     # canonical field even when called directly on legacy (session_id-only)
@@ -127,11 +154,18 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["completed_at"] = None
             e.setdefault("deferred_reason", "")
 
-    id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
-
     for e in entries:
         if not isinstance(e.get("id"), str):
             continue
+
+        # Never persist a stale readiness detail: `_apply_graph_defaults`
+        # (store.py) runs this same dict through its read-time blocked
+        # overlay before the mutator sees it (locked_mutate_graph reads via
+        # _apply_graph_defaults first), which can leave a transient
+        # `blocked_reason` on the entry. Reset it unconditionally here so the
+        # write path never round-trips that value to disk; the next read
+        # recomputes it fresh regardless.
+        e["blocked_reason"] = None
 
         if e.get("completed_at"):
             e["status"] = "done"
@@ -178,26 +212,16 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["status"] = "in_review"
             continue
 
-        has_open_blockers = False
-        for blocker_id in e.get("blocked_by", []):
-            blocker = id_to_entry.get(blocker_id)
-            if blocker is None:
-                print(f"Warning: {e['id']} blocked by unknown node {blocker_id}", file=sys.stderr)
-                has_open_blockers = True
-                break
-            if blocker.get("completed_at") is None:
-                has_open_blockers = True
-                break
-
         # Precedence: done > superseded > deferred > in_review > blocked >
         # in_progress > idea > design > ready.
-        # Lifecycle states (claim/blocker/completion/deferral) win over
-        # plan-existence so a plan-less node that gets claimed shows
-        # `in_progress`, one with an open blocker shows `blocked` rather than
-        # `idea`, and a deferred node never re-surfaces in either bucket.
-        if has_open_blockers:
-            e["status"] = "blocked"
-        elif e.get("locked_by"):
+        # Lifecycle states (claim/completion/deferral) win over plan-existence
+        # so a plan-less node that gets claimed shows `in_progress`, and a
+        # deferred node never re-surfaces. `blocked` is NOT decided here - it
+        # is a read-time overlay (compute_readiness, store._apply_graph_defaults)
+        # layered on top of whatever this function writes, so a node with an
+        # open blocker persists as `in_progress`/idea/design/ready here and
+        # reads as `blocked` fresh on every read instead.
+        if e.get("locked_by"):
             e["status"] = "in_progress"
         else:
             # One rung read answers the rest. Persisted so every reader sees it

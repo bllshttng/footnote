@@ -85,8 +85,15 @@ def test_ac1_hp_recompute_done():
     assert result[0]["status"] == "done"
 
 
-def test_ac1_hp_recompute_blocked():
-    """AC1-HP: entry blocked by incomplete node is blocked."""
+def test_ac1_hp_recompute_ignores_blocked_by_at_write_time():
+    """AC1-HP: write-time status no longer derives from blocked_by.
+
+    Dependency readiness is a cross-node join that can go stale the instant
+    a sibling changes after this write, so it is answered fresh on every
+    read (compute_readiness, via store._apply_graph_defaults) instead of
+    snapshotted here - see test_graph_readiness.py for the read-time
+    'blocked' result on this same shape.
+    """
     entries = [
         _entry("ab-cccccccc"),
         _entry("ab-dddddddd", blocked_by=["ab-cccccccc"]),
@@ -94,11 +101,16 @@ def test_ac1_hp_recompute_blocked():
     result = recompute_statuses(entries)
     statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-cccccccc"] == "ready"
-    assert statuses["ab-dddddddd"] == "blocked"
+    assert statuses["ab-dddddddd"] == "ready"
 
 
 def test_ac1_hp_recompute_unblock_on_completion():
-    """AC1-HP: completing a blocker unblocks the dependent."""
+    """AC1-HP: completing a blocker unblocks the dependent.
+
+    Passes either way now: blocked_by no longer participates in the
+    write-time derivation at all, so both entries were already headed to
+    their non-blocked rung-based status regardless of blocked_by's contents.
+    """
     entries = [
         _entry("ab-eeeeeeee", completed_at="2026-01-01T00:00:00Z"),
         _entry("ab-ffffffff", blocked_by=["ab-eeeeeeee"]),
@@ -128,8 +140,14 @@ def test_ac1_hp_recompute_stale_lock_cleared():
     assert e["claimed_at"] is None
 
 
-def test_ac1_hp_recompute_cascade_unblock():
-    """AC1-HP: chain A->B->C: completing A unblocks B but C stays blocked."""
+def test_ac1_hp_recompute_cascade_unblock_ignores_blocked_by_at_write_time():
+    """AC1-HP: chain A->B->C at write time - only A's completion matters here.
+
+    C's blocked_by (pointing at still-open B) plays no role in write-time
+    derivation: C carries a plan_path, so it derives ready via the rung
+    table exactly like B. The cascade-wide "C is actually still blocked"
+    fact is answered at read time - see test_graph_readiness.py.
+    """
     entries = [
         _entry("ab-aaaabbbb", completed_at="2026-01-01T00:00:00Z"),
         _entry("ab-bbbbcccc", blocked_by=["ab-aaaabbbb"]),
@@ -139,7 +157,7 @@ def test_ac1_hp_recompute_cascade_unblock():
     statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-aaaabbbb"] == "done"
     assert statuses["ab-bbbbcccc"] == "ready"
-    assert statuses["ab-ccccdddd"] == "blocked"
+    assert statuses["ab-ccccdddd"] == "ready"
 
 
 # -- recompute_statuses idea state --
@@ -177,8 +195,12 @@ def test_ac4_edge_idea_overridden_by_claimed():
     assert result[0]["status"] == "in_progress"
 
 
-def test_ac4_edge_idea_overridden_by_blocked():
-    """AC4-EDGE: a plan-less node with an open blocker stays blocked."""
+def test_ac4_edge_idea_not_overridden_by_blocked_at_write_time():
+    """AC4-EDGE: a plan-less node with an open blocker derives idea at write
+    time, same as if it had no blocker - blocked_by plays no role in write-time
+    derivation anymore. The read-time overlay still reports it blocked for
+    callers (test_graph_readiness.py).
+    """
     entries = [
         _entry("ab-blockero", plan_path=None),
         _entry("ab-ideaa004", plan_path=None, blocked_by=["ab-blockero"]),
@@ -186,7 +208,7 @@ def test_ac4_edge_idea_overridden_by_blocked():
     result = recompute_statuses(entries)
     statuses = {e["id"]: e["status"] for e in result}
     assert statuses["ab-blockero"] == "idea"  # the blocker itself is also plan-less
-    assert statuses["ab-ideaa004"] == "blocked"
+    assert statuses["ab-ideaa004"] == "idea"
 
 
 def test_ac4_edge_node_with_plan_path_remains_ready():
