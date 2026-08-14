@@ -26,6 +26,7 @@ agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents report	T1	agents report	3
 agents restart	T1	agents restart	6
+agents review-coverage	T1	agents review-coverage	34
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
 agents spawn	KEEP	agents spawn	256	deliberate readability slack for a high-traffic distinct operation
