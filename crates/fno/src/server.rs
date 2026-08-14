@@ -7351,10 +7351,12 @@ impl Core {
                 // must not return at restart). Keyed by name when named, else by
                 // the durable key (an unnamed lane persists too now). Reaping its
                 // member panes below then no-ops on the store (entry + tracking gone).
-                if self.squad_members.remove(&id).is_some() {
-                    let sq = &self.session.squads[pos];
-                    let name = sq.name.clone().unwrap_or_default();
-                    let key = sq.key.clone();
+                // UNCONDITIONAL: `squad_members` tracks recruited members, not
+                // store presence - a squad the store holds but the session never
+                // tracked (e.g. skipped by restore's per-squad isolation) took
+                // the false branch and its row survived the dismiss.
+                self.squad_members.remove(&id);
+                if let Some((name, key)) = self.squad_identity(id) {
                     self.persist_remove(&name, &key);
                 }
                 let pids: Vec<u64> = self.session.squads[pos]
