@@ -4198,7 +4198,7 @@ impl Core {
         // disk onto that key and collapses the duplicates. One locked mutation,
         // prune-shaped; a write error degrades to a notice, never refuses
         // (AC2-FR / AC-ERR1).
-        if let Err(e) = crate::squad_store::collapse_duplicate_unnamed() {
+        if let Err(e) = crate::squad_store::collapse_duplicate_squads() {
             self.notice_all(format!("squad collapse at restore skipped: {e}"));
         }
         let loaded = crate::squad_store::load();

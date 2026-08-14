@@ -741,18 +741,29 @@ pub fn prune(decide: impl Fn(&StoredSquad) -> PruneDecision) -> io::Result<Prune
     Ok(out)
 }
 
-/// Heal the UNNAMED-squad rows that accumulated under the old random-mint
-/// identity (x-e447). Migrate every unnamed squad with origins onto its derived
+/// Heal duplicate rows that accumulated under the old random-mint identity
+/// (x-e447, unnamed; legacy shared mint keys, named). Migrate every unnamed
+/// squad with origins onto its derived
 /// [`origin_key`] (Locked Decision 1: the durable key IS a function of the
 /// origin set), then collapse rows that now share an identity: among same-key
 /// rows keep the one with the most members (tiebreak newest `created_at`),
 /// MERGE every dropped row's members and tab specs into it, and drop the rest.
-/// Named squads are never touched (they key by name); an originless unnamed
-/// squad keeps its random key and never collapses (Locked Decision 2: no stable
-/// identity). One locked mutation, prune-shaped; a write error surfaces to the
-/// caller rather than healing on one machine and silently staying broken on
-/// another.
-pub fn collapse_duplicate_unnamed() -> io::Result<usize> {
+/// An originless unnamed squad keeps its random key and never collapses on it
+/// (Locked Decision 2: no stable identity).
+///
+/// A second pass heals named duplicates: two named rows sharing one legacy
+/// random `key` (a pre-origin-identity `mint_key`, unique per squad, so a
+/// shared one proves common descent) collapse to one row named after the
+/// NEWEST `created_at` entry - the name the operator chose most recently.
+/// Deliberately different from the unnamed pass's most-members rule: the name
+/// is the operator's most recent choice, not a popularity contest; do not
+/// "fix" it back. A shared key that equals `origin_key` of the rows' own
+/// origins proves nothing (two same-origin squads each derived it) and both
+/// rows survive.
+///
+/// One locked mutation, prune-shaped; a write error surfaces to the caller
+/// rather than healing on one machine and silently staying broken on another.
+pub fn collapse_duplicate_squads() -> io::Result<usize> {
     let mut dropped = 0usize;
     mutate_file(|sf| {
         for sq in sf.squads.iter_mut() {
@@ -760,52 +771,22 @@ pub fn collapse_duplicate_unnamed() -> io::Result<usize> {
                 sq.key = origin_key(&sq.origins);
             }
         }
-        let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+        let mut unnamed: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        let mut named: std::collections::BTreeMap<String, Vec<usize>> =
             std::collections::BTreeMap::new();
         for (i, sq) in sf.squads.iter().enumerate() {
-            if sq.name.is_empty() && !sq.key.is_empty() {
-                groups.entry(sq.key.clone()).or_default().push(i);
-            }
-        }
-        let mut drop_idx: Vec<usize> = Vec::new();
-        for idxs in groups.values() {
-            if idxs.len() < 2 {
+            if sq.key.is_empty() {
                 continue;
             }
-            // Survivor: most members, tiebreak newest created_at.
-            let mut ranked: Vec<usize> = idxs.clone();
-            ranked.sort_by(|&a, &b| {
-                sf.squads[b]
-                    .members
-                    .len()
-                    .cmp(&sf.squads[a].members.len())
-                    .then_with(|| sf.squads[b].created_at.cmp(&sf.squads[a].created_at))
-            });
-            let surv = ranked[0];
-            for &i in &ranked[1..] {
-                let extra_members = std::mem::take(&mut sf.squads[i].members);
-                let extra_specs = std::mem::take(&mut sf.squads[i].tab_specs);
-                sf.squads[surv].members.extend(extra_members);
-                sf.squads[surv].tab_specs.extend(extra_specs);
-                drop_idx.push(i);
+            if sq.name.is_empty() {
+                unnamed.entry(sq.key.clone()).or_default().push(i);
+            } else if sq.key != origin_key(&sq.origins) {
+                named.entry(sq.key.clone()).or_default().push(i);
             }
-            // Dedup merged members by attach_id; a live member (tombstone=false)
-            // wins over a tombstone of the same id.
-            sf.squads[surv].members.sort_by(|a, b| {
-                a.attach_id
-                    .cmp(&b.attach_id)
-                    .then(a.tombstone.cmp(&b.tombstone))
-            });
-            sf.squads[surv]
-                .members
-                .dedup_by(|a, b| a.attach_id == b.attach_id);
-            sf.squads[surv]
-                .tab_specs
-                .sort_by(|a, b| a.tab_name.cmp(&b.tab_name));
-            sf.squads[surv]
-                .tab_specs
-                .dedup_by(|a, b| a.tab_name == b.tab_name);
         }
+        let mut drop_idx = collapse_groups(&mut sf.squads, &unnamed, false);
+        drop_idx.extend(collapse_groups(&mut sf.squads, &named, true));
         if drop_idx.is_empty() {
             return;
         }
@@ -822,6 +803,62 @@ pub fn collapse_duplicate_unnamed() -> io::Result<usize> {
         sf.squads = kept;
     })?;
     Ok(dropped)
+}
+
+/// Merge each same-key group of size >= 2 into one survivor, returning the
+/// dropped indices. `newest_wins` picks the survivor by newest `created_at`
+/// (the named pass - keep the most recently chosen name); else most members
+/// wins (the unnamed pass). Members and tab specs merge and dedup identically
+/// in both: by `attach_id` with a live member beating a tombstone, and by
+/// `tab_name`.
+fn collapse_groups(
+    squads: &mut [StoredSquad],
+    groups: &std::collections::BTreeMap<String, Vec<usize>>,
+    newest_wins: bool,
+) -> Vec<usize> {
+    let mut drop_idx = Vec::new();
+    for idxs in groups.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        let mut ranked: Vec<usize> = idxs.clone();
+        ranked.sort_by(|&a, &b| {
+            if newest_wins {
+                squads[b].created_at.cmp(&squads[a].created_at)
+            } else {
+                squads[b]
+                    .members
+                    .len()
+                    .cmp(&squads[a].members.len())
+                    .then_with(|| squads[b].created_at.cmp(&squads[a].created_at))
+            }
+        });
+        let surv = ranked[0];
+        for &i in &ranked[1..] {
+            let extra_members = std::mem::take(&mut squads[i].members);
+            let extra_specs = std::mem::take(&mut squads[i].tab_specs);
+            squads[surv].members.extend(extra_members);
+            squads[surv].tab_specs.extend(extra_specs);
+            drop_idx.push(i);
+        }
+        // Dedup merged members by attach_id; a live member (tombstone=false)
+        // wins over a tombstone of the same id.
+        squads[surv].members.sort_by(|a, b| {
+            a.attach_id
+                .cmp(&b.attach_id)
+                .then(a.tombstone.cmp(&b.tombstone))
+        });
+        squads[surv]
+            .members
+            .dedup_by(|a, b| a.attach_id == b.attach_id);
+        squads[surv]
+            .tab_specs
+            .sort_by(|a, b| a.tab_name.cmp(&b.tab_name));
+        squads[surv]
+            .tab_specs
+            .dedup_by(|a, b| a.tab_name == b.tab_name);
+    }
+    drop_idx
 }
 
 /// Rename `old` -> `new` in one locked mutation, carrying `created_at` across
@@ -1461,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn collapse_duplicate_unnamed_merges_same_origin_into_one() {
+    fn collapse_duplicate_squads_merges_same_origin_into_one() {
         // x-e447 AC-HP2: the backlog rows carry distinct random keys (the old
         // mint), so a key-based upsert cannot heal them. collapse groups by
         // origin, rekeys onto origin_key, keeps the membered row, merges every
@@ -1477,7 +1514,7 @@ mod tests {
         upsert("", "other1", &["/other".into()], &[]).unwrap();
         upsert("named", "", &[repo.into()], &[m("cccccccc")]).unwrap();
 
-        let dropped = collapse_duplicate_unnamed().unwrap();
+        let dropped = collapse_duplicate_squads().unwrap();
         assert_eq!(dropped, 2, "collapsed the two extra same-origin rows");
 
         let loaded = load();
@@ -1508,15 +1545,15 @@ mod tests {
     }
 
     #[test]
-    fn collapse_duplicate_unnamed_is_idempotent() {
+    fn collapse_duplicate_squads_is_idempotent() {
         // x-e447: collapse runs every restore; a second pass must be a no-op
         // (drops nothing) once the store has converged.
         let _s = Scratch::new("collapse-idempotent");
         upsert("", "k1", &["/r".into()], &[m("aaaaaaaa")]).unwrap();
         upsert("", "k2", &["/r".into()], &[]).unwrap();
-        assert_eq!(collapse_duplicate_unnamed().unwrap(), 1);
+        assert_eq!(collapse_duplicate_squads().unwrap(), 1);
         assert_eq!(
-            collapse_duplicate_unnamed().unwrap(),
+            collapse_duplicate_squads().unwrap(),
             0,
             "second pass no-op"
         );
@@ -1526,13 +1563,112 @@ mod tests {
     }
 
     #[test]
-    fn collapse_duplicate_unnamed_surfaces_a_write_error() {
+    fn collapse_duplicate_squads_surfaces_a_write_error() {
         // x-e447 AC-ERR1: a collapse write error is not swallowed. A corrupt
         // store makes the locked read fail loud, and collapse returns Err so the
         // caller degrades restore instead of healing silently on one machine.
         let s = Scratch::new("collapse-err");
         std::fs::write(s.file(), "{garbage not json").unwrap();
-        assert!(collapse_duplicate_unnamed().is_err());
+        assert!(collapse_duplicate_squads().is_err());
+    }
+
+    #[test]
+    fn collapse_duplicate_named_merges_a_legacy_shared_key_newest_name_wins() {
+        // AC5-HP: two named rows sharing one legacy random mint key are one
+        // workspace wearing two names (a mint is unique per squad). They
+        // collapse to the NEWEST created_at row's name with the union of both
+        // member lists. `prune --include-named` cannot reach this pair (the
+        // origin still exists), so this collapse is the only heal.
+        let s = Scratch::new("collapse-named-legacy");
+        let legacy = "25a5abd2af1696a0";
+        let origins = vec!["/repo".into()];
+        assert_ne!(
+            legacy,
+            origin_key(&origins),
+            "precondition: a legacy mint, not a derived origin key"
+        );
+        let file = StoreFile {
+            version: STORE_VERSION,
+            squads: vec![
+                StoredSquad {
+                    name: "f[no]".into(),
+                    key: legacy.into(),
+                    origins: origins.clone(),
+                    members: vec![m("aaaaaaaa"), m("bbbbbbbb")],
+                    created_at: "2026-07-23T00:00:00Z".into(),
+                    tab_specs: vec![],
+                },
+                StoredSquad {
+                    name: "fno".into(),
+                    key: legacy.into(),
+                    origins,
+                    members: vec![m("cccccccc")],
+                    created_at: "2026-07-26T00:00:00Z".into(),
+                    tab_specs: vec![],
+                },
+            ],
+            external_lifecycle: vec![],
+        };
+        std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
+
+        let dropped = collapse_duplicate_squads().unwrap();
+        assert_eq!(dropped, 1, "the older duplicate row is gone");
+
+        let loaded = load();
+        let rows: Vec<_> = loaded
+            .squads
+            .iter()
+            .filter(|r| r.name == "fno" || r.name == "f[no]")
+            .collect();
+        assert_eq!(rows.len(), 1, "one row survives");
+        assert_eq!(
+            rows[0].name, "fno",
+            "the newest created_at row's name wins"
+        );
+        for id in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
+            assert!(
+                rows[0].members.iter().any(|x| x.attach_id == id),
+                "member {id} merged into the survivor"
+            );
+        }
+    }
+
+    #[test]
+    fn collapse_duplicate_named_spares_same_origin_derived_keys() {
+        // AC6-EDGE: two named rows sharing a key that EQUALS origin_key of
+        // their own origins are two same-origin squads that each derived it -
+        // common key proves nothing, and both rows must survive the heal.
+        let s = Scratch::new("collapse-named-derived");
+        let key = origin_key(&["/repo".into()]);
+        let file = StoreFile {
+            version: STORE_VERSION,
+            squads: vec![
+                StoredSquad {
+                    name: "one".into(),
+                    key: key.clone(),
+                    origins: vec!["/repo".into()],
+                    members: vec![m("aaaaaaaa")],
+                    created_at: "2026-07-23T00:00:00Z".into(),
+                    tab_specs: vec![],
+                },
+                StoredSquad {
+                    name: "two".into(),
+                    key,
+                    origins: vec!["/repo".into()],
+                    members: vec![m("bbbbbbbb")],
+                    created_at: "2026-07-26T00:00:00Z".into(),
+                    tab_specs: vec![],
+                },
+            ],
+            external_lifecycle: vec![],
+        };
+        std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
+
+        let dropped = collapse_duplicate_squads().unwrap();
+        assert_eq!(dropped, 0, "derived shared keys are not duplicates");
+        let loaded = load();
+        assert!(loaded.squads.iter().any(|r| r.name == "one"));
+        assert!(loaded.squads.iter().any(|r| r.name == "two"));
     }
 
     #[test]
