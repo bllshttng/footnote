@@ -1,0 +1,20 @@
+# Lines that QUOTE `uv tool install` without running it: log/err strings,
+# user-facing hints, docstrings, and test fixtures asserting on message text.
+# Keyed <path>::<whitespace-collapsed line>. A baseline entry that matches
+# nothing anymore fails the check, so this file cannot rot silently.
+# A real run site is NOT baseline-able: it must carry --compile-bytecode.
+.claude-plugin/postinstall.sh::err "uv tool install failed; falling through to pip fallback."
+.claude-plugin/postinstall.sh::log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
+.claude-plugin/postinstall.sh::log "preferring the published PyPI wheel: uv tool install fno (by name)..."
+cli/benchmarks/measure_cli_help.py::print(" install with: uv tool install <fno-repo>/cli", file=sys.stderr)
+cli/src/fno/config/registry.py::"dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
+cli/tests/smoke/cargo_bootstrap_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
+cli/tests/smoke/fno_sh_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
+cli/tests/smoke/test_postinstall.sh::"uv tool install --force fno" \
+cli/tests/smoke/test_postinstall.sh::for needle in "uv tool install" "pip install --user" "ERROR:"; do
+cli/tests/unit/test_update.py::(l for l in output.splitlines() if "uv tool install" in l), ""
+cli/tests/unit/test_update.py::assert "uv tool install --reinstall" in line
+cli/tests/unit/test_update.py::assert line.index("uv tool install") < line.index("printf")
+crates/fno/src/bootstrap.rs::m.contains("uv tool install --force --from <repo>/cli fno"),
+crates/fno/src/bootstrap.rs::uv tool install --force --from <repo>/cli fno"
+scripts/triage.py::f"error: fno CLI not found. Install with: uv tool install '{_repo_root / 'cli'}'\n"

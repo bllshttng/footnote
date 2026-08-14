@@ -204,6 +204,27 @@ which cost more than a transient, self-healing failure. Specifically rejected:
   distinction is the point: it retries only after confirming on disk that the
   module is present, so an absent module is never waited on and never masked.
 
+### The bytecode-write race (fixed at install time)
+
+A plain `uv tool install` ships zero `.pyc`, so every process that runs out of
+the tool venv writes `__pycache__` bytecode into `site-packages` as it imports:
+the pr-watch daemon on its timer, every hook, every manual call. When a
+`--force`/`--reinstall` later deletes that tree, new `.pyc` entries appear
+behind uv's walk and the closing `rmdir` returns ENOTEMPTY (`os error 66`),
+leaving no entrypoint behind. The failed install is sticky: the next `fno` call
+re-attempts it and hits the same error, so the CLI stays down until an install
+lands in a quiet window. This is the mechanism behind node x-46b5, measured at
+427 `.pyc` files written into the venv during the failure window.
+
+Every provisioning site therefore passes `--compile-bytecode`: the venv ships
+its own bytecode up front, a matching `.pyc` gives no process a reason to
+write, and the write side of the race is gone for every caller at once
+(`PYTHONDONTWRITEBYTECODE` was rejected as the fix because it protects only
+the processes that remember to set it). `scripts/ci/check-uv-install-compiles-bytecode.sh`
+keeps this true: it fails CI on any `uv tool install` run site without the
+flag, and its `--self-test` proves the search matches a real invocation rather
+than certifying an empty result.
+
 ## Contracts (do not break)
 
 A future refactor must preserve:

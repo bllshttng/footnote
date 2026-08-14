@@ -292,7 +292,7 @@ def test_install_then_mark_gates_marker_on_install_success(tmp_path: Path) -> No
     """The shell line writes the marker ONLY after a zero install exit (&&)."""
     marker = tmp_path / "state" / "installed-rev"
     line = update._install_then_mark(
-        ["uv", "tool", "install", "--reinstall", "/some src"],
+        ["uv", "tool", "install", "--reinstall", "--compile-bytecode", "/some src"],
         "abc123",
         marker=marker,
         pid=4242,
@@ -1461,6 +1461,13 @@ def test_ac1_edge_dry_run_shows_both_would_run_lines(
     # Both Would-run lines should appear
     would_run_count = output.count("Would run:")
     assert would_run_count >= 2, f"Expected >=2 'Would run:' lines, got {would_run_count}. Output:\n{output}"
+    # The uv reinstall must carry --compile-bytecode: a venv that ships no
+    # bytecode is written to by every process that uses it, and those writes
+    # race a later reinstall into ENOTEMPTY.
+    uv_line = next(
+        (l for l in output.splitlines() if "uv tool install" in l), ""
+    )
+    assert "--compile-bytecode" in uv_line, f"missing --compile-bytecode in: {uv_line}"
     # Neither actually ran
     assert cargo_actually_ran == [], "cargo must not execute under --dry-run"
     assert execvp_called == [], "execvp must not execute under --dry-run"

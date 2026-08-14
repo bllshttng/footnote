@@ -1021,7 +1021,14 @@ def update_command(
         # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
         # stale cached wheel that predates newly-added modules, so `fno restart`
         # etc. crash with ModuleNotFoundError even after `fno update`.
-        cmd = ["uv", "tool", "install", "--reinstall", "--refresh", str(resolved)]
+        # --compile-bytecode: ship the venv's own .pyc so no later process
+        # writes into a tree a reinstall may be deleting
+        # (docs/architecture/cli-lazy-imports.md).
+        cmd = [
+            "uv", "tool", "install",
+            "--reinstall", "--refresh", "--compile-bytecode",
+            str(resolved),
+        ]
     elif shutil.which("pip"):
         cmd = [
             sys.executable,

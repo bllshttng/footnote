@@ -55,7 +55,9 @@ uv_installed_fno_version() {
 
 install_source_via_uv() {
   log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
-  if uv tool install --force "$CLI_DIR"; then
+  # --compile-bytecode: ship the venv's own .pyc so no later process writes
+  # into a tree a reinstall may be deleting (docs/architecture/cli-lazy-imports.md).
+  if uv tool install --force --compile-bytecode "$CLI_DIR"; then
     log "installed Python-only fno from source. The Rust binaries are NOT included -"
     log "run 'fno update --rust' for the daemon-backed verbs (or install a published PyPI wheel)."
     log "restart your shell (or source your env) to pick up PATH."
@@ -81,7 +83,7 @@ if command -v uv >/dev/null 2>&1; then
   fi
 
   log "preferring the published PyPI wheel: uv tool install fno (by name)..."
-  if uv tool install --force fno >/dev/null 2>&1; then
+  if uv tool install --force --compile-bytecode fno >/dev/null 2>&1; then
     INSTALLED="$(uv_installed_fno_version)"
     if [[ -n "$SRC_VERSION" && "$INSTALLED" == "$SRC_VERSION" ]]; then
       log "installed binary-complete fno $INSTALLED from PyPI (CLI + all three Rust binaries on PATH)."

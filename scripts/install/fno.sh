@@ -320,7 +320,9 @@ main() {
 	# failing with "already installed" (AC4-FR); we only reach here when no usable
 	# verified install was found, so --force never clobbers a healthy one.
 	say "provisioning the fno CLI via uv (one time, may take a few seconds)..."
-	if ! "$FNO_UV" tool install --force "$FNO_SOURCE"; then
+	# --compile-bytecode: ship the venv's own .pyc so no later process writes
+	# into a tree a reinstall may be deleting (docs/architecture/cli-lazy-imports.md).
+	if ! "$FNO_UV" tool install --force --compile-bytecode "$FNO_SOURCE"; then
 		die "\`uv tool install $(redact_source "$FNO_SOURCE")\` failed (network/PyPI unreachable, disk full, or a bad version). Check the error above and retry, or run it manually (re-supplying any credential your FNO_INSTALL_WHEEL carries)."
 	fi
 

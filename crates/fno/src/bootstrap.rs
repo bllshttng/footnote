@@ -288,8 +288,11 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     // with "already installed" (AC4-FR: never trust a half-provisioned state).
     // We only reach here when no usable install was found, so --force never does
     // a redundant reinstall over a healthy one.
+    // --compile-bytecode so the venv ships its own .pyc and no later process
+    // (pr-watch, hooks, any caller) writes into a tree a reinstall may be
+    // deleting; see docs/architecture/cli-lazy-imports.md.
     let status = Command::new(uv)
-        .args(["tool", "install", "--force", source])
+        .args(["tool", "install", "--force", "--compile-bytecode", source])
         .status();
     match status {
         Ok(s) if s.success() => Ok(()),
@@ -312,9 +315,10 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
 /// This used to say "Check your network / PyPI access". uv exits nonzero for
 /// plenty of reasons that are not the network -- the case that prompted this was
 /// `failed to remove directory .../lib: Directory not empty (os error 66)`,
-/// printed verbatim on the line immediately above -- and naming a subsystem we
-/// have not tested sends the reader off to diagnose the wrong one. uv's own
-/// error is right there and is the better pointer.
+/// printed verbatim on the line immediately above. That error now has a cause
+/// and a fix (bytecode writes racing the reinstall; closed by
+/// `--compile-bytecode` in `install_wheel`), so uv's own error above is the
+/// pointer only for the failures we have NOT yet diagnosed.
 fn install_failure_message(source: &str) -> String {
     format!(
         "`uv tool install {}` failed; uv's own error is printed above. \

@@ -1,0 +1,32 @@
+name: uv-install-bytecode
+
+# check-uv-install-compiles-bytecode.sh enforces --compile-bytecode on every
+# `uv tool install` run site. A venv that ships no bytecode is written to by
+# every process that uses it, and those writes race a --force reinstall into
+# ENOTEMPTY (os error 66), stranding the CLI with no entrypoint. No paths
+# filter: the guard scans the whole tree, and a paths filter is how a new
+# call site in an unfiltered file lands green.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: uv-install-bytecode-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-uv-install-compiles-bytecode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bytecode gate + self-test
+        run: |
+          bash scripts/ci/check-uv-install-compiles-bytecode.sh --self-test
+          bash scripts/ci/check-uv-install-compiles-bytecode.sh
