@@ -4719,25 +4719,34 @@ def _daemon_rpc(
 
 
 # read_timeout exceeds the daemon's per-turn ceiling
-# (SWITCHBOARD_TURN_TIMEOUT_MS=120s) so a real reply is not cut short. Used ONLY
-# by the detached background relay continuation (_relay_worker_loop, x-1f23):
-# it runs off-thread, so a sender never waits on it, and a genuine multi-hop
-# stream exchange legitimately wants the full ceiling.
+# (SWITCHBOARD_TURN_TIMEOUT_MS=120s) plus its 5s grace, so a real reply is never
+# cut short and the client never abandons a turn the daemon is still driving.
+# The detached background relay continuation (_relay_worker_loop, x-1f23) runs
+# off-thread and wants the full ceiling for its own reason: a genuine multi-hop
+# stream exchange. The first hop needs the same number for the reason below.
 _SWITCHBOARD_READ_TIMEOUT = 130.0
-# The FIRST hop's read budget (node x-1904, change 6), separate from the relay's
-# above: this one is SYNCHRONOUS -- the sender blocks on it -- so it must not
-# inherit the relay's 130s. Measured specimen: a daemon that connected fine
-# (the 1s connect timeout below was never the problem) then read-timed-out at
-# the full 130s on what this module's own comment already documents as a
-# "well under a second" fast-fail case, on two separate sends (killed by the
-# operator at 90s and 120s having produced neither a live delivery nor a
-# durable row); a third send eventually succeeded through the mail-inject
-# fallback lane after paying the whole 130s first. So the daemon's own
-# documented fast-fail promise cannot be trusted for up to 130s; enforce a
-# much tighter bound with headroom over "well under a second" for a genuine
-# fast reply, and fall through to the lane that works well before a human
-# gives up and kills the process by hand.
-_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT = 15.0
+# The FIRST hop's read budget. SYNCHRONOUS -- the sender blocks on it -- so a
+# tighter value than the relay's is tempting, and a 15s one shipped here. It is
+# unsafe, and the ceiling is not ours to pick: `agent.switchboard_v2` does not
+# ack and return. `handle_switchboard` drives B's WHOLE turn before it answers,
+# bounded by SWITCHBOARD_TURN_TIMEOUT_MS (120s) + SWITCHBOARD_DRIVE_GRACE_S (5s).
+# Reading for less than 125s abandons a turn the daemon is still driving: the
+# body already reached B, `_switchboard_exchange` returns None, and
+# `_deliver_live` falls through and injects the SAME body a second time under a
+# receipt that says durable. Most real model turns run past 15s, so that was the
+# common case, not the edge.
+#
+# Capping the daemon instead (`timeout_ms` in params) is worse: a drive that
+# misses its deadline stamps B orphaned, so a short cap marks every slow-but-
+# healthy peer dead.
+#
+# The complaint behind the 15s is real -- a wedged daemon held a sender for the
+# full budget, twice killed by hand at 90s and 120s. The fix belongs on the
+# daemon side (ack first, drive after), not in a client read cap. Until that
+# lands, the sender pays the daemon's own ceiling. The common non-stream case
+# still fast-fails in about a second: every pre-drive check is bounded, the
+# stream probe at STREAM_PROBE_TIMEOUT_S = 2s.
+_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT = _SWITCHBOARD_READ_TIMEOUT
 # A SHORT connect timeout: every claude send now tries the switchboard first, so
 # a DOWN/wedged daemon must not tax the common (non-stream) path — it should fail
 # the connect fast and demote, rather than burn the 3s default before the
@@ -5130,13 +5139,9 @@ def _switchboard_exchange(
 
     The FIRST hop (drive B with ``body``) is the actual ``send A->B`` delivery and
     runs synchronously so the delivered/demote decision is exact. Its read
-    budget is ``_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT`` (node x-1904, change 6),
-    NOT the relay's 130s: the sender blocks on this call, and a daemon that
-    fails to honor its own documented "well under a second" fast-fail promise
-    must not tax a sender for over two minutes before falling through to a lane
-    that works (measured specimen: two sends killed by hand at 90s/120s, a
-    third that paid the whole 130s before succeeding through the mail-inject
-    fallback). When ``config.agents.a2a.auto`` is True (the default) the
+    budget is ``_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT``, which must stay above the
+    daemon's own drive ceiling; see that constant for why a tighter one delivers
+    the message twice. When ``config.agents.a2a.auto`` is True (the default) the
     bounded autonomous relay that follows (drive A with B's reply, then B with
     A's reply, ... up to ``config.agents.a2a.turn_ceiling`` total turns) is
     kicked off in a DETACHED background process and the caller returns

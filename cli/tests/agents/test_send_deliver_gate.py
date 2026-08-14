@@ -1804,3 +1804,30 @@ def test_mail_context_uses_canonical_sender_handle(monkeypatch) -> None:
         "codex",
     )
     assert context.from_ == "019fb417"
+
+
+def test_first_hop_read_budget_covers_the_daemon_drive_ceiling() -> None:
+    """The client must never abandon a turn the daemon is still driving.
+
+    `agent.switchboard_v2` does not ack and return: the daemon drives B's whole
+    turn before answering. A read budget below that ceiling makes the client give
+    up on a body B already received, and `_deliver_live` then injects it again.
+    The two numbers live in different languages, so pin them against each other
+    rather than against a literal.
+    """
+    import re
+    from pathlib import Path
+
+    from fno.agents.dispatch import _SWITCHBOARD_FIRST_HOP_READ_TIMEOUT
+
+    daemon = Path(__file__).resolve().parents[3] / "crates/fno-agents/src/daemon.rs"
+    src = daemon.read_text(encoding="utf-8")
+    turn_ms = re.search(r"const SWITCHBOARD_TURN_TIMEOUT_MS: u64 = ([\d_]+);", src)
+    grace_s = re.search(r"const SWITCHBOARD_DRIVE_GRACE_S: u64 = ([\d_]+);", src)
+    assert turn_ms and grace_s, "the daemon's switchboard budget constants moved"
+
+    ceiling = int(turn_ms.group(1).replace("_", "")) / 1000 + int(grace_s.group(1))
+    assert _SWITCHBOARD_FIRST_HOP_READ_TIMEOUT >= ceiling, (
+        f"first-hop read budget {_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT}s is below the "
+        f"daemon's own drive ceiling {ceiling}s; a send would be delivered twice"
+    )
