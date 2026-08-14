@@ -902,3 +902,202 @@ def test_record_success_swallows_oserror_from_runtime_state(
     monkeypatch.setattr(fo, "reset_provider_health", _boom)
     # Should not raise; warning is logged.
     fo.record_success("X")
+
+
+
+
+# ---------------------------------------------------------------------------
+# x-8183 / x-8665: attempt_swap must materialize a managed candidate through
+# managed.switch BEFORE writing accounts.active. Before this fix, the write
+# was decorative for auth=managed records: config.toml said one thing, the
+# CLI's credential slot said another. See loader.py's `_active_id_for` note.
+# ---------------------------------------------------------------------------
+
+
+def _seed_managed_settings(
+    tmp_path: Path,
+    *,
+    active: str,
+    managed_ids: list[str],
+    api_key_ids: list[str] | None = None,
+) -> Path:
+    settings_path = tmp_path / "config.toml"
+    records = []
+    for rid in managed_ids:
+        records.append({
+            "id": rid, "name": rid, "harness": "claude", "auth": "managed",
+        })
+    for rid in (api_key_ids or []):
+        records.append({
+            "id": rid, "name": rid, "harness": "claude", "auth": "api_key",
+            "env": {"ANTHROPIC_API_KEY": f"sk-{rid}"},
+        })
+    block = {"active": active, "records": records}
+    settings_path.write_text(tomli_w.dumps({"providers": block}))
+    return settings_path
+
+
+def _managed_blob(token: str) -> str:
+    import json
+    return json.dumps({"claudeAiOauth": {"accessToken": token}})
+
+
+@pytest.fixture()
+def fake_managed_slot(tmp_path, monkeypatch):
+    """Same fake-slot seam as test_managed.py's fake_slot fixture (not
+    importable as a fixture across files), plus store_root pinned to
+    tmp_path/store so snapshot_current/switch never touch the real store."""
+    from fno.adapters.providers import managed
+
+    slot: dict[str, str | None] = {}
+    monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: slot.get(cli))
+    monkeypatch.setattr(
+        managed, "_write_slot_blob", lambda cli, blob, config_dir=None: slot.__setitem__(cli, blob)
+    )
+    monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+    monkeypatch.setattr(
+        managed, "canonical_slot_blobs",
+        lambda cli: [slot[cli]] if slot.get(cli) else [],
+    )
+    monkeypatch.setattr(managed, "store_root", lambda: tmp_path / "store")
+    return slot
+
+
+class TestManagedCandidateMaterializes:
+    def test_hp_managed_candidate_materializes_slot_and_active(
+        self, tmp_path: Path, fake_managed_slot,
+    ):
+        """Acceptance 1: managed candidate w/ stored snapshot, no live pin ->
+        SWAPPED, slot holds candidate's blob, active_slot_id(candidate),
+        AND accounts.active == candidate. Asserting accounts.active alone is
+        the exact assertion that passed for months while this bug shipped."""
+        from fno.adapters.providers import managed
+        from fno.adapters.providers.failover import FailoverController, SwapDecision
+        from fno.adapters.providers.error_taxonomy import normalize
+        from fno.adapters.providers.model import ProviderRecord
+
+        store_root = tmp_path / "store"
+        outgoing = ProviderRecord(id="readyrule", name="readyrule", harness="claude", auth="managed")
+        candidate = ProviderRecord(id="makers", name="makers", harness="claude", auth="managed")
+
+        fake_managed_slot["claude"] = _managed_blob("OUTGOING")
+        managed.snapshot_current(outgoing, root=store_root)
+        fake_managed_slot["claude"] = _managed_blob("CANDIDATE")
+        managed.snapshot_current(candidate, root=store_root)
+        # Pre-swap world: the slot is materialized as the outgoing account.
+        fake_managed_slot["claude"] = _managed_blob("OUTGOING")
+        managed.stamp_active_slot("claude", "readyrule", root=store_root)
+
+        settings_path = _seed_managed_settings(
+            tmp_path, active="readyrule", managed_ids=["readyrule", "makers"],
+        )
+        state_path = tmp_path / "failover-state.json"
+        ctrl = FailoverController(
+            settings_path=settings_path, state_path=state_path, phase_id="phase-A",
+        )
+        err = normalize(http_status=529, exit_code=None, body="")
+
+        result = ctrl.attempt_swap(current_provider_id="readyrule", error=err)
+
+        assert result.decision is SwapDecision.SWAPPED
+        assert result.new_provider_id == "makers"
+        # THE assertion that matters: the slot actually moved.
+        assert managed.active_slot_id("claude", root=store_root) == "makers"
+        assert fake_managed_slot["claude"] == _managed_blob("CANDIDATE")
+        # AND config.toml agrees. A write migrates [providers] -> [accounts].
+        raw = tomllib.loads(settings_path.read_text())
+        assert raw["accounts"]["active"] == "makers"
+
+    def test_hp_pinned_slot_refuses_swap_and_advances_no_counter(
+        self, tmp_path: Path, fake_managed_slot, monkeypatch,
+    ):
+        """Acceptance 2: a live-pinned slot refuses the swap. No credential
+        write, accounts.active unchanged, swaps_this_phase unchanged."""
+        from fno.adapters.providers import managed
+        from fno.adapters.providers.failover import FailoverController, SwapDecision
+        from fno.adapters.providers.error_taxonomy import normalize
+        from fno.adapters.providers.model import ProviderRecord
+
+        store_root = tmp_path / "store"
+        candidate = ProviderRecord(id="makers", name="makers", harness="claude", auth="managed")
+        fake_managed_slot["claude"] = _managed_blob("CANDIDATE")
+        managed.snapshot_current(candidate, root=store_root)
+        fake_managed_slot["claude"] = _managed_blob("OUTGOING")
+
+        class _FakePin:
+            pid = 4242
+
+        monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [_FakePin()])
+
+        settings_path = _seed_managed_settings(
+            tmp_path, active="readyrule", managed_ids=["readyrule", "makers"],
+        )
+        state_path = tmp_path / "failover-state.json"
+        ctrl = FailoverController(
+            settings_path=settings_path, state_path=state_path, phase_id="phase-A",
+        )
+        err = normalize(http_status=529, exit_code=None, body="")
+
+        result = ctrl.attempt_swap(current_provider_id="readyrule", error=err)
+
+        assert result.decision is SwapDecision.BLOCKED_PINNED
+        assert fake_managed_slot["claude"] == _managed_blob("OUTGOING")
+        raw = tomllib.loads(settings_path.read_text())
+        assert raw["providers"]["active"] == "readyrule"
+        assert ctrl.snapshot_state().swaps_this_phase == 0
+
+    def test_hp_missing_snapshot_refuses_swap(
+        self, tmp_path: Path, fake_managed_slot,
+    ):
+        """Acceptance 3: candidate has no stored credential snapshot ->
+        ManagedStoreError is caught, accounts.active unchanged, not SWAPPED."""
+        from fno.adapters.providers.failover import FailoverController, SwapDecision
+        from fno.adapters.providers.error_taxonomy import normalize
+
+        # No snapshot_current() call for "makers" - the store has nothing.
+        settings_path = _seed_managed_settings(
+            tmp_path, active="readyrule", managed_ids=["readyrule", "makers"],
+        )
+        state_path = tmp_path / "failover-state.json"
+        ctrl = FailoverController(
+            settings_path=settings_path, state_path=state_path, phase_id="phase-A",
+        )
+        err = normalize(http_status=529, exit_code=None, body="")
+
+        result = ctrl.attempt_swap(current_provider_id="readyrule", error=err)
+
+        assert result.decision is SwapDecision.SWAP_FAILED
+        raw = tomllib.loads(settings_path.read_text())
+        assert raw["providers"]["active"] == "readyrule"
+        assert ctrl.snapshot_state().swaps_this_phase == 0
+
+    def test_hp_api_key_candidate_takes_the_unchanged_path(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """Acceptance 4: an api_key candidate needs no slot write; managed.switch
+        must not even be called, and behavior matches today."""
+        from fno.adapters.providers.failover import FailoverController, SwapDecision
+        from fno.adapters.providers.error_taxonomy import normalize
+        import fno.adapters.providers.managed as managed_mod
+
+        def _must_not_be_called(*_a, **_k):
+            raise AssertionError("managed.switch must not be called for an api_key candidate")
+
+        monkeypatch.setattr(managed_mod, "switch", _must_not_be_called)
+
+        settings_path = _seed_managed_settings(
+            tmp_path, active="readyrule",
+            managed_ids=["readyrule"], api_key_ids=["anthropic-key"],
+        )
+        state_path = tmp_path / "failover-state.json"
+        ctrl = FailoverController(
+            settings_path=settings_path, state_path=state_path, phase_id="phase-A",
+        )
+        err = normalize(http_status=529, exit_code=None, body="")
+
+        result = ctrl.attempt_swap(current_provider_id="readyrule", error=err)
+
+        assert result.decision is SwapDecision.SWAPPED
+        assert result.new_provider_id == "anthropic-key"
+        raw = tomllib.loads(settings_path.read_text())
+        assert raw["accounts"]["active"] == "anthropic-key"

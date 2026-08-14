@@ -38,6 +38,7 @@ from fno.adapters.providers.error_taxonomy import (
 )
 from fno.adapters.providers.loader import (
     _extract_accounts_block,
+    _parse_providers_block,
     _read_parsed,
     atomic_mutate_settings,
     mutable_accounts_block,
@@ -60,6 +61,8 @@ class SwapDecision(str, enum.Enum):
     BLOCKED_THRASH = "blocked_thrash"
     QUEUE_EXHAUSTED = "queue_exhausted"
     NO_SWAP_NEEDED = "no_swap_needed"  # error did not trigger swap
+    BLOCKED_PINNED = "blocked_pinned"  # managed candidate's slot is live-pinned
+    SWAP_FAILED = "swap_failed"  # managed candidate materialization raised
 
 
 @dataclasses.dataclass(frozen=True)
@@ -417,6 +420,36 @@ class FailoverController:
         if candidate is None:
             return SwapResult(decision=SwapDecision.QUEUE_EXHAUSTED,
                               reason="no_eligible_provider")
+
+        # For an auth=managed candidate, config.toml's `active` pointer is
+        # decorative until the slot itself is materialized (see the note on
+        # `_active_id_for` in loader.py). Do that FIRST, and refuse the swap
+        # on a pin or store error rather than write `active` for a credential
+        # no worker will actually have.
+        by_id = _parse_providers_block(
+            _extract_accounts_block(_read_parsed(self._settings_path)) or {}
+        ).by_id
+        candidate_record = by_id.get(candidate)
+        if candidate_record is not None and candidate_record.auth == "managed":
+            from fno.adapters.providers.managed import (
+                ManagedStoreError,
+                SwitchDeferred,
+                switch,
+            )
+
+            try:
+                # defer, not warn: a swap that rotates credentials out from
+                # under a live CLI is the live-pty-gate failure this store
+                # exists to prevent. Pass the full by_id (not just the
+                # candidate) so switch() can find the CURRENTLY active
+                # record for its capture-before-overwrite step.
+                switch(candidate_record, by_id=by_id, pin_policy="defer")
+            except SwitchDeferred as exc:
+                return SwapResult(decision=SwapDecision.BLOCKED_PINNED,
+                                  reason=f"slot pinned: {exc}")
+            except ManagedStoreError as exc:
+                return SwapResult(decision=SwapDecision.SWAP_FAILED,
+                                  reason=f"materialize failed: {exc}")
 
         # Mutate config.toml to flip active under exclusive lock. Flat shape:
         # accounts is top-level (atomic_mutate_settings flattens any legacy
