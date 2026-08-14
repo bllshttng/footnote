@@ -1552,11 +1552,7 @@ mod tests {
         upsert("", "k1", &["/r".into()], &[m("aaaaaaaa")]).unwrap();
         upsert("", "k2", &["/r".into()], &[]).unwrap();
         assert_eq!(collapse_duplicate_squads().unwrap(), 1);
-        assert_eq!(
-            collapse_duplicate_squads().unwrap(),
-            0,
-            "second pass no-op"
-        );
+        assert_eq!(collapse_duplicate_squads().unwrap(), 0, "second pass no-op");
         let loaded = load();
         assert_eq!(loaded.squads.len(), 1);
         assert_eq!(loaded.squads[0].key, origin_key(&["/r".into()]));
@@ -1621,10 +1617,7 @@ mod tests {
             .filter(|r| r.name == "fno" || r.name == "f[no]")
             .collect();
         assert_eq!(rows.len(), 1, "one row survives");
-        assert_eq!(
-            rows[0].name, "fno",
-            "the newest created_at row's name wins"
-        );
+        assert_eq!(rows[0].name, "fno", "the newest created_at row's name wins");
         for id in ["aaaaaaaa", "bbbbbbbb", "cccccccc"] {
             assert!(
                 rows[0].members.iter().any(|x| x.attach_id == id),

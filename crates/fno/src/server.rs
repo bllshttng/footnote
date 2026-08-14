@@ -12514,8 +12514,10 @@ mod tests {
         assert!(core.session.squads.is_empty());
         let rows = crate::squad_store::load().squads;
         assert!(
-            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1
-                || (s.name.clone(), s.key.clone()) == ident2),
+            !rows
+                .iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident1
+                    || (s.name.clone(), s.key.clone()) == ident2),
             "both dismissed workspaces left the store, SessionEmpty included"
         );
     }
@@ -12549,11 +12551,14 @@ mod tests {
         assert!(matches!(flow, Flow::Continue), "squad 2 keeps the session");
         let rows = crate::squad_store::load().squads;
         assert!(
-            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            !rows
+                .iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident1),
             "the memberless workspace's row left the store"
         );
         assert!(
-            rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident2),
+            rows.iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident2),
             "the sibling's row survives"
         );
     }
@@ -12578,11 +12583,14 @@ mod tests {
         assert!(matches!(flow, Flow::Continue), "squad 2 keeps the session");
         let rows = crate::squad_store::load().squads;
         assert!(
-            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            !rows
+                .iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident1),
             "closing the last pane cleared the workspace's row"
         );
         assert!(
-            rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident2),
+            rows.iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident2),
             "the sibling's row survives"
         );
     }
@@ -12608,7 +12616,9 @@ mod tests {
         assert!(matches!(flow, Flow::Shutdown));
         let rows = crate::squad_store::load().squads;
         assert!(
-            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            !rows
+                .iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident1),
             "the untracked workspace's row left the store"
         );
     }

@@ -607,7 +607,11 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
         };
         out.push(format!("{marker} {label}"));
     }
-    let members: Vec<&AgentRow> = layout.agents.iter().filter(|a| a.squad == Some(sid)).collect();
+    let members: Vec<&AgentRow> = layout
+        .agents
+        .iter()
+        .filter(|a| a.squad == Some(sid))
+        .collect();
     if members.is_empty() {
         out.push("members none".into());
         return out;
@@ -10052,7 +10056,7 @@ async fn keys_modal_mouse(
                     }
                 }
             }
-        },
+        }
         _ => {}
     }
     Ok(StdinFlow::Continue)
@@ -10485,21 +10489,21 @@ async fn row_menu_mouse(
                 return Ok(());
             }
             match view.row_menu_hit(rep.row, rep.col) {
-            Some(t) => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.select(t);
+                Some(t) => {
+                    if let Some(m) = view.row_menu.as_mut() {
+                        m.popup.select(t);
+                    }
+                    row_menu_execute_selected(view, sock_w).await?;
                 }
-                row_menu_execute_selected(view, sock_w).await?;
-            }
-            // A click inside the block that hit no target (a Header or Rule, which
-            // contribute none) is swallowed; only a click OFF the menu dismisses.
-            None => {
-                if !view.row_menu_block_contains(rep.row, rep.col) {
-                    view.row_menu = None;
+                // A click inside the block that hit no target (a Header or Rule, which
+                // contribute none) is swallowed; only a click OFF the menu dismisses.
+                None => {
+                    if !view.row_menu_block_contains(rep.row, rep.col) {
+                        view.row_menu = None;
+                    }
                 }
             }
-            }
-        },
+        }
         MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
             // Re-anchor on the row under the second right-press (never stack two
             // menus); a non-agent row leaves nothing open.
@@ -10780,7 +10784,7 @@ async fn aux_mouse(
                     }
                 }
             }
-        },
+        }
         _ => {}
     }
     Ok(StdinFlow::Continue)
@@ -15703,7 +15707,8 @@ mod tests {
             "the member row is listed: {body:?}"
         );
         assert!(
-            body.iter().any(|l| l.contains("tab") || l.contains("origin")),
+            body.iter()
+                .any(|l| l.contains("tab") || l.contains("origin")),
             "the summary carries tabs/origin"
         );
         assert!(buf.is_empty(), "no wire command for a workspace peek");
@@ -15724,7 +15729,10 @@ mod tests {
 
         // Same squad at the cursor: holds (and never refetches an agent).
         assert_eq!(v.peek_reanchor(), None, "holds, no agent refetch");
-        assert!(v.peek.is_some(), "the workspace peek survives a layout push");
+        assert!(
+            v.peek.is_some(),
+            "the workspace peek survives a layout push"
+        );
         // The auto-refresh path never arms for a workspace peek.
         assert!(v.peek_refresh_due().is_none(), "no PeekAgent is ever sent");
 
@@ -15788,7 +15796,11 @@ mod tests {
         // the idle caret: two presses leave the fold alone, state Expanded.
         selector_keys(&mut view, b"l", &mut buf).await.unwrap();
         selector_keys(&mut view, b"l", &mut buf).await.unwrap();
-        assert_eq!(rendered(&view, "idle"), 7, "`l` does not fold or unfold idle rows");
+        assert_eq!(
+            rendered(&view, "idle"),
+            7,
+            "`l` does not fold or unfold idle rows"
+        );
         assert_eq!(
             view.section_view.get(&footnote_key()),
             Some(&SectionView::Expanded),
@@ -15801,10 +15813,7 @@ mod tests {
         selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
             .await
             .unwrap();
-        assert!(
-            view.notice.is_some(),
-            "Right off a workspace row says why"
-        );
+        assert!(view.notice.is_some(), "Right off a workspace row says why");
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -17529,10 +17538,7 @@ mod tests {
             row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
             assert_eq!(
                 decode_cmds(buf),
-                vec![Command::MoveSquad {
-                    squad: 1,
-                    delta
-                }],
+                vec![Command::MoveSquad { squad: 1, delta }],
                 "move {label} sends the reorder command"
             );
             assert!(v.open_row_menu(hdr, Anchor::Center), "re-open for the next");
@@ -19470,11 +19476,7 @@ mod tests {
             // A pathological parameter run is dropped rather than growing the
             // carry without limit.
             let mut esc = Vec::new();
-            let flood: Vec<u8> = b"\x1b["
-                .iter()
-                .copied()
-                .chain([b'1'; 500])
-                .collect();
+            let flood: Vec<u8> = b"\x1b[".iter().copied().chain([b'1'; 500]).collect();
             fold(&mut esc, &flood);
             assert!(
                 esc.len() <= MAX_ESC_CARRY,

@@ -644,20 +644,16 @@ mod tests {
             .expect("the footer line carries the close target");
         assert_eq!(row.hits, vec![(ESC_CLOSE_HIT, char_off + 1, 9)]);
         // The span is inside the line and lands on the words.
-        let words: String = row
-            .text
-            .chars()
-            .skip(char_off + 1)
-            .take(9)
-            .collect();
+        let words: String = row.text.chars().skip(char_off + 1).take(9).collect();
         assert_eq!(words, "esc close");
 
         // No words, no target: only the footer line ever carries one.
         let c = Chrome::new("t", Anchor::Center).footer("just some text");
         let framed = frame(&[bl("body")], &c, 40, None);
-        assert!(framed.lines.iter().all(|l| {
-            l.hits.iter().all(|(t, _, _)| *t != ESC_CLOSE_HIT)
-        }));
+        assert!(framed
+            .lines
+            .iter()
+            .all(|l| { l.hits.iter().all(|(t, _, _)| *t != ESC_CLOSE_HIT) }));
     }
 
     #[test]
