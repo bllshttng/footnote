@@ -6647,7 +6647,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `gh pr checks <N> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `i=0; while [ $i -lt 30 ]; do fno pr status <N> 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` - REST, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -6798,17 +6798,22 @@ fn short_sha(s: &str) -> String {
 /// returns - left alive, it wakes 30m later and kills whatever now holds that
 /// recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
-    // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
-    // the instant CI has no pending checks, so on a review wait (CI already
-    // green) it returns immediately and the session just re-blocks - the review
-    // path needs a watcher that polls REVIEW state, not checks (codex P2).
+    // The watcher must WAIT on the actual blocker (codex P2): a review wait
+    // has CI already green, so a checks watcher returns instantly and the
+    // session just re-blocks. Both recipes poll on REST at a 60s interval
+    // (x-9715 item 3): `gh pr checks --watch` / `gh pr view` are GraphQL, and
+    // a fleet of 60s GraphQL watchers is exactly what exhausts the per-USER
+    // quota the merge guard needs. The CI recipe greps for the POSITIVE
+    // settled marker, never for an absence: a rate-limited read answers
+    // `settled: false`, so an exhausted window keeps the watcher waiting
+    // instead of reading as "nothing pending".
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `n=$(gh pr view {pr_number} --json reviews --jq '.reviews|length'); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh pr view {pr_number} --json reviews --jq '.reviews|length')\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m)"
+            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api repos/$r/pulls/{pr_number}/reviews --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api repos/$r/pulls/{pr_number}/reviews --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m)"
         )
     } else {
         format!(
-            "background Bash `gh pr checks {pr_number} --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null`"
+            "background Bash `i=0; while [ $i -lt 30 ]; do fno pr status {pr_number} 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` (wakes when CI settles - green or red - or after ~30m)"
         )
     };
     format!(
@@ -9454,7 +9459,10 @@ mod tests {
         let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("<watching"), "got: {reason}");
         assert!(reason.contains("timeout"), "got: {reason}");
-        assert!(reason.contains("gh pr checks"), "got: {reason}");
+        // x-9715 item 3: the taught watcher is the REST status poll, never the
+        // GraphQL `gh pr checks --watch` this assertion used to pin.
+        assert!(reason.contains("fno pr status"), "got: {reason}");
+        assert!(!reason.contains("gh pr checks"), "got: {reason}");
         assert!(!reason.contains("wait silently"), "got: {reason}");
     }
 
@@ -10611,13 +10619,20 @@ mod tests {
     #[test]
     fn unwatched_async_nudge_review_uses_review_aware_watcher() {
         // codex P2: the review-wait watcher must poll REVIEW state, not
-        // `gh pr checks --watch` (which exits instantly when CI is green).
+        // checks. x-9715 item 3: it must also poll on REST - the GraphQL
+        // reviews read is part of what exhausts the shared quota.
         let hint = arm_watch_hint(404, "review");
-        assert!(hint.contains("--json reviews"), "got: {hint}");
-        assert!(!hint.contains("gh pr checks"), "got: {hint}");
-        // The CI-wait watcher still uses checks --watch.
+        assert!(hint.contains("pulls/404/reviews"), "got: {hint}");
+        assert!(hint.contains("gh api"), "got: {hint}");
+        assert!(!hint.contains("gh pr view"), "got: {hint}");
+        assert!(hint.contains("sleep 60"), "got: {hint}");
+        // The CI-wait watcher polls the REST status chokepoint for the
+        // POSITIVE settled marker, never `gh pr checks --watch` (GraphQL).
         let ci_hint = arm_watch_hint(404, "ci");
-        assert!(ci_hint.contains("gh pr checks"), "got: {ci_hint}");
+        assert!(ci_hint.contains("fno pr status 404"), "got: {ci_hint}");
+        assert!(!ci_hint.contains("gh pr checks"), "got: {ci_hint}");
+        assert!(ci_hint.contains("'\"settled\": true'"), "got: {ci_hint}");
+        assert!(ci_hint.contains("sleep 60"), "got: {ci_hint}");
     }
 
     #[test]
