@@ -24,10 +24,10 @@ make_repo() {
 echo "== mode help is discoverable =="
 out="$(bash "$CHECK" --help 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "help exits zero" || fail "help failed: $out"
-echo "$out" | grep -q -- '--strict' \
-    && echo "$out" | grep -q -- '--baseline' \
+grep -q <<<"$out" -- '--strict' \
+    && grep -q <<<"$out" -- '--baseline' \
     && ok "help names strict and baseline modes" || fail "mode help missing: $out"
-echo "$out" | grep -q 'strict.*existing violations' \
+grep -q <<<"$out" 'strict.*existing violations' \
     && ok "help says strict remains red" || fail "strict semantics missing: $out"
 
 echo "== clean module-granularity map observes its positive control =="
@@ -35,14 +35,14 @@ CLEAN="$TMP/clean"
 make_repo "$CLEAN"
 out="$(bash "$CHECK" --strict "$CLEAN" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "clean fixture exits zero" || fail "clean fixture failed: $out"
-echo "$out" | grep -q "positive control ok" \
+grep -q <<<"$out" "positive control ok" \
     && ok "positive control is reported" || fail "positive control missing: $out"
-echo "$out" | grep -Eq '[0-9]+ layers, [0-9]+ modules, 0 violations' \
+grep -Eq <<<"$out" '[0-9]+ layers, [0-9]+ modules, 0 violations' \
     && ok "clean result reports measured coverage" || fail "coverage missing: $out"
 
 printf 'value = 1\n' > "$CLEAN/cli/src/fno/unmapped.py"
 out="$(bash "$CHECK" --strict "$CLEAN" 2>&1)"; rc=$?
-echo "$out" | grep -q '6 layers, 3 modules, 0 violations' \
+grep -q <<<"$out" '6 layers, 3 modules, 0 violations' \
     && ok "coverage excludes unmapped modules" || fail "coverage over-counts: $out"
 
 echo "== a broken scan fails closed =="
@@ -51,9 +51,9 @@ make_repo "$BROKEN"
 printf 'class RoleLayer:\n    pass\n' > "$BROKEN/cli/src/fno/roles/models.py"
 out="$(bash "$CHECK" --strict "$BROKEN" 2>&1)"; rc=$?
 [[ $rc -eq 2 ]] && ok "missing control exits two" || fail "expected exit 2, got $rc: $out"
-echo "$out" | grep -q "positive control failed" \
+grep -q <<<"$out" "positive control failed" \
     && ok "broken scan names the failed control" || fail "failure message missing: $out"
-echo "$out" | grep -q "0 violations" \
+grep -q <<<"$out" "0 violations" \
     && fail "broken scan printed a clean verdict" || ok "broken scan never prints clean"
 
 echo "== prohibited edges report the exact path, line, layers, and statement =="
@@ -66,10 +66,10 @@ make_repo "$VIOLATION"
 } > "$VIOLATION/cli/src/fno/company/contracts.py"
 out="$(bash "$CHECK" --strict "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "prohibited edge exits one" || fail "expected exit 1, got $rc: $out"
-echo "$out" | grep -q \
+grep -q <<<"$out" \
     'cli/src/fno/company/contracts.py:12: L1 core -> L2 roles / from fno.roles.models import ApprovalFloor' \
     && ok "finding carries exact evidence" || fail "exact evidence missing: $out"
-echo "$out" | grep -q 'layer cycle: L1 core -> L2 roles -> L1 core' \
+grep -q <<<"$out" 'layer cycle: L1 core -> L2 roles -> L1 core' \
     && ok "declared-layer cycle is printed" || fail "cycle missing: $out"
 
 echo "== baseline mode holds the exact finding set and ratchets downward =="
@@ -81,13 +81,13 @@ layer cycle: L1 core -> L2 roles -> L1 core
 EOF
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "unchanged baseline exits zero" || fail "baseline failed: $out"
-echo "$out" | grep -q 'baseline holds: 1 prohibited dependency and 1 cycle' \
+grep -q <<<"$out" 'baseline holds: 1 prohibited dependency and 1 cycle' \
     && ok "baseline pass names retained debt" || fail "retained debt hidden: $out"
 
 printf '\nfrom fno.agents.events import emit\n' >> "$VIOLATION/cli/src/fno/company/contracts.py"
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "new violation fails baseline" || fail "new violation escaped: $out"
-echo "$out" | grep -q 'new or changed violation' \
+grep -q <<<"$out" 'new or changed violation' \
     && ok "new violation is diagnosed" || fail "new diagnosis missing: $out"
 
 sed 's/ApprovalFloor/ChangedApprovalFloor/' \
@@ -95,20 +95,20 @@ sed 's/ApprovalFloor/ChangedApprovalFloor/' \
 sed '$d' "$TMP/changed-contracts.py" > "$VIOLATION/cli/src/fno/company/contracts.py"
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "changed violation fails baseline" || fail "changed violation escaped: $out"
-echo "$out" | grep -q 'new or changed violation' \
-    && echo "$out" | grep -q 'resolved or changed baseline entry' \
+grep -q <<<"$out" 'new or changed violation' \
+    && grep -q <<<"$out" 'resolved or changed baseline entry' \
     && ok "changed violation shows both halves" || fail "changed diagnosis incomplete: $out"
 
 printf 'class WorkOrderRef:\n    pass\n' > "$VIOLATION/cli/src/fno/company/contracts.py"
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "reduction needs baseline update" || fail "stale baseline passed: $out"
-echo "$out" | grep -q 'resolved or changed baseline entry' \
+grep -q <<<"$out" 'resolved or changed baseline entry' \
     && ok "stale baseline names removed debt" || fail "stale diagnosis missing: $out"
 
 printf '%s\n' '# No known violations remain in this fixture.' > "$FIXTURE_BASELINE"
 out="$(bash "$CHECK" --baseline --baseline-file "$FIXTURE_BASELINE" "$VIOLATION" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "reduction plus baseline update passes" || fail "ratchet update failed: $out"
-echo "$out" | grep -q '0 violations' \
+grep -q <<<"$out" '0 violations' \
     && ok "clean ratchet result is explicit" || fail "clean result missing: $out"
 
 out="$(bash "$CHECK" --baseline --baseline-file "$TMP/missing.txt" "$VIOLATION" 2>&1)"; rc=$?
@@ -126,7 +126,7 @@ make_repo "$PACKAGE_MAP"
 } > "$PACKAGE_MAP/cli/src/fno/company/topology.py"
 out="$(FNO_BOUNDARY_TEST_COMPANY_PACKAGE_CORE=1 bash "$CHECK" --strict "$PACKAGE_MAP" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "package map exits one" || fail "expected exit 1, got $rc: $out"
-echo "$out" | grep -q \
+grep -q <<<"$out" \
     'cli/src/fno/company/topology.py:16: L1 core -> L2 roles / from fno.roles.models import RoleLayer' \
     && ok "package map names topology.py:16" || fail "topology evidence missing: $out"
 
@@ -137,11 +137,11 @@ printf 'from fno import roles\n' > "$ALIASES/cli/src/fno/company/contracts.py"
 printf 'from .. import roles\n' > "$ALIASES/cli/src/fno/approvals/__init__.py"
 out="$(bash "$CHECK" --strict "$ALIASES" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "alias forms exit one" || fail "expected exit 1, got $rc: $out"
-echo "$out" | grep -q 'cli/src/fno/company/contracts.py:1: L1 core -> L2 roles / from fno import roles' \
+grep -q <<<"$out" 'cli/src/fno/company/contracts.py:1: L1 core -> L2 roles / from fno import roles' \
     && ok "absolute package alias caught" || fail "absolute alias missed: $out"
 [[ "$(echo "$out" | grep -c 'cli/src/fno/company/contracts.py:1: L1 core -> L2 roles')" -eq 1 ]] \
     && ok "absolute alias emits one finding" || fail "absolute alias duplicated: $out"
-echo "$out" | grep -q 'cli/src/fno/approvals/__init__.py:1: L1 core -> L2 roles / from .. import roles' \
+grep -q <<<"$out" 'cli/src/fno/approvals/__init__.py:1: L1 core -> L2 roles / from .. import roles' \
     && ok "relative package alias caught" || fail "relative alias missed: $out"
 
 echo "== the public fno.company facade is part of the core layer =="
@@ -150,7 +150,7 @@ make_repo "$FACADE"
 printf 'from fno.company import WorkOrderRef\n' > "$FACADE/cli/src/fno/paths.py"
 out="$(bash "$CHECK" --strict "$FACADE" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "public facade edge exits one" || fail "expected exit 1, got $rc: $out"
-echo "$out" | grep -q 'cli/src/fno/paths.py:1: L0 platform -> L1 core / from fno.company import WorkOrderRef' \
+grep -q <<<"$out" 'cli/src/fno/paths.py:1: L0 platform -> L1 core / from fno.company import WorkOrderRef' \
     && ok "public facade edge caught" || fail "public facade edge missed: $out"
 
 echo "== pack-marked root files are attributed to their source pack =="
@@ -164,12 +164,12 @@ printf '%s\n' '---' 'name: growth-launch' 'pack: growth-studio' '---' \
     > "$PROJECTION/skills/growth-launch/SKILL.md"
 out="$(bash "$CHECK" --strict "$PROJECTION" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "valid projections stay clean" || fail "projection fixture failed: $out"
-echo "$out" | grep -q 'agents/growth-marketer.md -> growth-studio' \
+grep -q <<<"$out" 'agents/growth-marketer.md -> growth-studio' \
     && ok "agent projection attributed" || fail "agent attribution missing: $out"
-echo "$out" | grep -q 'skills/growth-launch -> growth-studio' \
+grep -q <<<"$out" 'skills/growth-launch -> growth-studio' \
     && ok "skill projection attributed" || fail "skill attribution missing: $out"
-echo "$out" | grep -q 'no enforcement for fno-skills' \
-    && echo "$out" | grep -q 'fno-mux' \
+grep -q <<<"$out" 'no enforcement for fno-skills' \
+    && grep -q <<<"$out" 'fno-mux' \
     && ok "uncovered seams named honestly" || fail "coverage caveat missing: $out"
 
 echo "== an orphaned pack marker is a violation =="
@@ -179,7 +179,7 @@ printf '%s\n' '---' 'name: orphan' 'pack: no-such-pack' '---' \
     > "$ORPHAN/agents/orphan.md"
 out="$(bash "$CHECK" --strict "$ORPHAN" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "orphan exits one" || fail "expected exit 1, got $rc: $out"
-echo "$out" | grep -q \
+grep -q <<<"$out" \
     "agents/orphan.md:3: pack marker 'no-such-pack' names no plugins/no-such-pack/plugin.yaml" \
     && ok "orphan finding names file and marker" || fail "orphan evidence missing: $out"
 
@@ -197,11 +197,11 @@ actual_violations="$(echo "$out" | grep -c '^  cli/.*L[0-9].* -> L[0-9]')"
     || fail "strict reports $actual_violations, baseline holds $expected_violations: $out"
 expected_cycle="$(grep '^layer cycle: ' "$REPO_BASELINE" || true)"
 if [[ -n "$expected_cycle" ]]; then
-    echo "$out" | grep -q "  $expected_cycle" \
+    grep -q <<<"$out" "  $expected_cycle" \
         && ok "strict audit retains the baselined cycle" \
         || fail "expected '$expected_cycle' in strict output: $out"
 else
-    echo "$out" | grep -q 'layer cycle: ' \
+    grep -q <<<"$out" 'layer cycle: ' \
         && fail "baseline holds no cycle but strict reports one: $out" \
         || ok "no cycle in baseline, none in strict"
 fi
