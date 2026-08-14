@@ -661,16 +661,32 @@ def _seen_key(f: Finding) -> str:
 
 
 def seen_path() -> Path:
-    """Where the already-reported set lives, anchored to the repo root.
+    """Where the already-reported set lives, anchored to THIS working tree.
 
     Not a bare relative `.fno/...`: a caller with an unexpected cwd would nest
     a second state directory somewhere it does not belong, which is the
     cwd-anchoring bug class `scripts/ci/check-placement-rule.sh` exists to
     catch. Falls back to cwd only outside a repo, where there is no root to
     anchor to.
+
+    `--show-toplevel`, never `_repo_roots()[0]`. Those answer different
+    questions and one list was serving both. `_repo_roots` answers "which paths
+    are ATTRIBUTABLE to this project" and is deliberately every worktree, so its
+    first entry comes from `--git-common-dir` and is the canonical checkout. Ask
+    it where MY state lives and every worktree writes its quiet-gate into the
+    canonical checkout instead of its own: worktrees then silence each other's
+    findings, and the plan's `done_probe` can never pass in the worktree-first
+    layout this repo mandates. The probe is what caught it.
     """
-    roots = _repo_roots()
-    base = Path(roots[0]) if roots else Path.cwd()
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        top = out.stdout.strip()
+    except Exception:  # noqa: BLE001 -- outside a repo is not an error here
+        top = ""
+    base = Path(top) if top else Path.cwd()
     return base / ".fno" / ".orphan-sweep-seen"
 
 
