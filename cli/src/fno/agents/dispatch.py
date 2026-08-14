@@ -6089,8 +6089,8 @@ def _deliver_live(
     self-recording (``grep <fno_mail>`` reconstructs a2a history). Every live
     transport below carries the same wrapped turn.
 
-    For claude peers: the proven ``control.sock`` ``op:'reply'`` inject via the
-    ``fno-agents mail-inject`` verb (G1, x-26df) is the live primitive for adopted
+    For claude peers: the ``control.sock`` inject via the ``fno-agents
+    mail-inject`` verb (G1, x-26df) is the live primitive for adopted
     ``claude --bg`` sessions, replacing the dead per-worker messaging socket; the
     switchboard / MCP fast lanes still apply first for stream-json / MCP-routed
     peers.

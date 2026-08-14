@@ -32,10 +32,12 @@ msg-3a7f1c2e delivered (hosted)
 or
 
 ```
-msg-3a7f1c2e queued (durable)
+msg-3a7f1c2e queued (durable) [not-confirmed]
 ```
 
-`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` `op:'reply'` inject (claude, via the `fno-agents mail-inject` verb) succeeded.
+The bracketed reason on a durable line is the live lane's own cause. `live-miss` when no live lane ran at all.
+
+`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` inject succeeded (claude, via the `fno-agents mail-inject` verb, which pastes and submits a wire-level CR).
 `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain.
 Both are exit 0.
 The `msg-<8hex>` id is stable and appears in the live `<fno_mail>` envelope, but it exists in the bus log only for a `queued (durable)` send.

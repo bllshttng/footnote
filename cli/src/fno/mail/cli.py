@@ -2264,7 +2264,8 @@ def cmd_send(
     --unclaimed`` finds it and ``fno mail withdraw <id>`` retracts it.
 
     Stdout contract (US3 AC3-UI / US6 AC6-UI): exactly one line, either
-    ``msg-<id> delivered (hosted)`` or ``msg-<id> queued (durable)``.
+    ``msg-<id> delivered (hosted)`` or ``msg-<id> queued (durable) [<reason>]``,
+    where ``<reason>`` is the live lane's own cause (node x-1904).
     Exit 0 for both outcomes. Failures surface on stderr with nonzero exit.
     """
     from fno.agents.dispatch import (
