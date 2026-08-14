@@ -587,10 +587,7 @@ mod tests {
         assert_eq!(c.level(), Level::Bare);
         let framed = frame(&[bl("x")], &c, 3, None);
         assert_eq!(framed.lines.len(), 3);
-        assert!(framed
-            .lines
-            .iter()
-            .all(|l| l.text.contains("ignored") == false));
+        assert!(framed.lines.iter().all(|l| !l.text.contains("ignored")));
     }
 
     #[test]
@@ -603,8 +600,8 @@ mod tests {
         assert!(top.text.contains("Settings"));
         assert!(top.text.contains("esc"));
         // Positive markers: the chip and title carry their own roles.
-        assert!(top.roles.iter().any(|&r| r == Role::Chip));
-        assert!(top.roles.iter().any(|&r| r == Role::Title));
+        assert!(top.roles.contains(&Role::Chip));
+        assert!(top.roles.contains(&Role::Title));
     }
 
     #[test]
@@ -613,7 +610,7 @@ mod tests {
         let framed = frame(&[bl("body")], &c, 6, None);
         let bottom = framed.lines.last().unwrap();
         assert!(bottom.text.contains("esc"));
-        assert!(bottom.roles.iter().any(|&r| r == Role::Chip));
+        assert!(bottom.roles.contains(&Role::Chip));
     }
 
     #[test]

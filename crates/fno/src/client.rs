@@ -587,6 +587,52 @@ struct TabDrag {
     last_at: Instant,
 }
 
+/// (x-10ec) The workspace peek body: everything the layout already holds for
+/// one squad - its origin, its tabs (the active one marked), and its member
+/// rows with their states. Pure and local; no wire round trip.
+fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
+    let Some(s) = layout.squads.iter().find(|s| s.id == sid) else {
+        return vec!["workspace is no longer here".into()];
+    };
+    let mut out = vec![
+        format!("origin  {}", s.canonical_cwd),
+        format!("tabs    {} · panes {}", s.tabs.len(), s.panes),
+    ];
+    for (i, t) in s.tabs.iter().enumerate() {
+        let marker = if i == s.active_tab { "*" } else { " " };
+        let label = if t.name.is_empty() {
+            format!("tab {}", i + 1)
+        } else {
+            t.name.clone()
+        };
+        out.push(format!("{marker} {label}"));
+    }
+    let members: Vec<&AgentRow> = layout.agents.iter().filter(|a| a.squad == Some(sid)).collect();
+    if members.is_empty() {
+        out.push("members none".into());
+        return out;
+    }
+    out.push("members".into());
+    for a in members {
+        let state = if a.exited {
+            "exited"
+        } else {
+            match a.badge {
+                Some(AgentBadge::Blocked) => "blocked",
+                Some(AgentBadge::Working) => "working",
+                Some(AgentBadge::Done) if a.seen => "idle",
+                Some(AgentBadge::Done) | None => "idle",
+            }
+        };
+        let pane = a
+            .pane_id
+            .map(|p| format!(" · pane {p}"))
+            .unwrap_or_default();
+        out.push(format!("  {} · {state}{pane}", a.name));
+    }
+    out
+}
+
 /// (v43, x-d6a8 G3) The drag source of a sideline agent row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowSource {
@@ -1122,6 +1168,12 @@ struct PeekView {
     /// busy row would supersede each response before it arrives and never settle.
     /// Cleared when any body lands (`apply_peek_body`).
     refresh_pending: bool,
+    /// (x-10ec) Some for a WORKSPACE peek: `sid` of the peeked squad. The body
+    /// is rendered locally from the layout (a workspace has no transcript), so
+    /// no request follows the seq `open_peek` consumed - which is the point:
+    /// that seq can never be answered, so a late `PeekBody` for a superseded
+    /// agent peek is dropped by the guard instead of landing in this overlay.
+    squad: Option<u64>,
 }
 
 /// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
@@ -2635,9 +2687,30 @@ impl View {
             name,
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         });
         self.peek_esc.clear();
         self.peek_seq
+    }
+
+    /// (x-10ec) Open a read-only peek on a WORKSPACE row, rendered locally
+    /// from the layout the client already holds: its tabs and its member rows
+    /// with their states. No wire command - a workspace has no transcript to
+    /// fetch - and the auto-refresh and re-anchor paths key off `squad` so
+    /// nothing ever sends a `PeekAgent` for a workspace label.
+    fn open_squad_peek(&mut self, cursor: usize, sid: u64) {
+        let label = self
+            .layout
+            .squads
+            .iter()
+            .find(|s| s.id == sid)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let _unanswered = self.open_peek(cursor, label);
+        if let Some(p) = self.peek.as_mut() {
+            p.squad = Some(sid);
+            p.body = Some(squad_peek_lines(&self.layout, sid));
+        }
     }
 
     /// The `display_rows()` index of squad `id`'s own row (a `Sel` with no tab),
@@ -4420,6 +4493,25 @@ impl View {
     /// name to re-fetch when it re-anchored, `None` when it held or closed.
     fn peek_reanchor(&mut self) -> Option<(usize, String)> {
         let (cursor, peeked) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone()))?;
+        // (x-10ec) A workspace peek holds while its squad's row still sits at
+        // the cursor, refreshing the local body from the live layout; the
+        // squad gone, it closes. Never re-anchors onto an agent row - that
+        // would silently swap a workspace summary for a transcript fetch.
+        if let Some(sid) = self.peek.as_ref().and_then(|p| p.squad) {
+            let holds = matches!(
+                self.display_rows().get(cursor),
+                Some(DisplayRow::Sel(r)) if r.tab.is_none() && r.squad == sid
+            );
+            if holds {
+                if let Some(p) = self.peek.as_mut() {
+                    p.last_fetch = Instant::now();
+                    p.body = Some(squad_peek_lines(&self.layout, sid));
+                }
+            } else {
+                self.clear_peek();
+            }
+            return None;
+        }
         // One `display_rows()` snapshot for the whole check: the identity test,
         // both direction scans, and the re-anchored name all read it (gemini
         // review).
@@ -4462,6 +4554,12 @@ impl View {
     /// name) to send the fresh `PeekAgent`, or `None` when peek is closed / not
     /// yet due.
     fn peek_refresh_due(&mut self) -> Option<(u64, String)> {
+        // (x-10ec) A workspace peek has no transcript to refresh - its body
+        // re-renders locally on each Layout push in `peek_reanchor`. Arming a
+        // request here would send a `PeekAgent` carrying a workspace label.
+        if self.peek.as_ref().is_some_and(|p| p.squad.is_some()) {
+            return None;
+        }
         // Skip while a prior refresh is still in flight: stacking a new request
         // every push would supersede each response before it lands on a slow peek
         // read, so the transcript would never settle (never re-arm mid-flight).
@@ -11223,18 +11321,20 @@ async fn selector_keys(
                 }
             }
             b' ' => {
-                // Open the read-only peek overlay on the focused agent row
-                // (x-c376): its status sentence + recent transcript, read from
-                // disk (peek/logs read disk; only attach spawns a pane). Any
-                // non-agent row notices why (x-f331 US3). The selector stays
-                // open underneath; Esc drops back into it at the peeked row.
-                let name = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
-                    _ => None,
-                };
-                match name {
-                    Some(name) => fetch_peek(view, cur, name, sock_w).await?,
-                    None => view.set_notice("only an agent row can be peeked".into()),
+                // Open the read-only peek overlay: an agent row (x-c376) shows
+                // its status sentence + recent transcript from disk; a
+                // workspace row (x-10ec) shows its tabs and members rendered
+                // locally from the layout, no wire round trip. Any other row
+                // notices why (x-f331 US3). The selector stays open
+                // underneath; Esc drops back into it at the peeked row.
+                match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) => {
+                        fetch_peek(view, cur, a.name.clone(), sock_w).await?
+                    }
+                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => {
+                        view.open_squad_peek(cur, r.squad);
+                    }
+                    _ => view.set_notice("only an agent or workspace row can be peeked".into()),
                 }
             }
             b'\t' => {
@@ -15585,6 +15685,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // AC12-HP: Space on a workspace row opens a LOCAL peek (tabs + members
+    // from the layout), no wire round trip; a late agent PeekBody cannot land
+    // in it; it closes when the squad goes and holds while it stays.
+    #[tokio::test]
+    async fn space_opens_a_local_workspace_peek() {
+        let mut v = unified_rows_view();
+        let hdr = squad_header_at(&v, 1);
+        v.selector = Some(hdr);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        let peek = v.peek.as_ref().expect("peek opens on a workspace row");
+        assert_eq!(peek.squad, Some(1), "marked as a workspace peek");
+        let body = peek.body.as_ref().expect("the body renders locally");
+        assert!(
+            body.iter().any(|l| l.contains("worker")),
+            "the member row is listed: {body:?}"
+        );
+        assert!(
+            body.iter().any(|l| l.contains("tab") || l.contains("origin")),
+            "the summary carries tabs/origin"
+        );
+        assert!(buf.is_empty(), "no wire command for a workspace peek");
+        // The seq open_peek consumed was never attached to a request, so no
+        // PeekBody can arrive carrying it: a superseded agent request (the
+        // prior seq) is dropped by the guard instead of landing here.
+        assert!(peek.seq >= 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_peek_holds_on_layout_and_closes_when_the_squad_goes() {
+        let mut v = unified_rows_view();
+        let hdr = squad_header_at(&v, 1);
+        v.selector = Some(hdr);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        assert!(v.peek.is_some());
+
+        // Same squad at the cursor: holds (and never refetches an agent).
+        assert_eq!(v.peek_reanchor(), None, "holds, no agent refetch");
+        assert!(v.peek.is_some(), "the workspace peek survives a layout push");
+        // The auto-refresh path never arms for a workspace peek.
+        assert!(v.peek_refresh_due().is_none(), "no PeekAgent is ever sent");
+
+        // The squad gone: the peek closes rather than re-anchoring onto an
+        // agent row.
+        v.layout.squads.retain(|s| s.id != 1);
+        assert_eq!(v.peek_reanchor(), None);
+        assert!(v.peek.is_none(), "the peek closes with its workspace");
+    }
+
     // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N idle`
     // -> all idle shown with a `- fewer` affordance -> folded again.
     #[test]
@@ -15636,8 +15786,8 @@ mod tests {
 
         // `l` remains the EXPLICIT section expand (x-975a) and never touches
         // the idle caret: two presses leave the fold alone, state Expanded.
-        selector_keys(&mut view, &[b'l'], &mut buf).await.unwrap();
-        selector_keys(&mut view, &[b'l'], &mut buf).await.unwrap();
+        selector_keys(&mut view, b"l", &mut buf).await.unwrap();
+        selector_keys(&mut view, b"l", &mut buf).await.unwrap();
         assert_eq!(rendered(&view, "idle"), 7, "`l` does not fold or unfold idle rows");
         assert_eq!(
             view.section_view.get(&footnote_key()),
@@ -16989,7 +17139,7 @@ mod tests {
         // Esc still closes: the click added a target, it did not move the key.
         v.aux = Some(v.build_settings_modal());
         v.aux_esc = vec![0x1b];
-        aux_keys(&mut v, &[b'z'], &mut buf).await.unwrap();
+        aux_keys(&mut v, b"z", &mut buf).await.unwrap();
         assert!(v.aux.is_none(), "Esc still closes the modal");
     }
 
@@ -19323,7 +19473,7 @@ mod tests {
             let flood: Vec<u8> = b"\x1b["
                 .iter()
                 .copied()
-                .chain(std::iter::repeat(b'1').take(500))
+                .chain([b'1'; 500])
                 .collect();
             fold(&mut esc, &flood);
             assert!(
@@ -20085,6 +20235,7 @@ mod tests {
             name: String::new(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         });
         assert!(
             !v.apply_peek_body(4, vec!["stale".into()]),
@@ -20134,6 +20285,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let out = peek_overlay_lines(Some(&row), &loading, None, 0).join("\n");
         assert!(
@@ -20152,6 +20304,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let out = peek_overlay_lines(Some(&row), &loaded, None, 0).join("\n");
         assert!(out.contains("line one") && out.contains("line two"));
@@ -20189,6 +20342,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let out = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
         assert!(!out.contains('\x1b'), "ESC stripped");
@@ -20213,6 +20367,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         assert!(peek_overlay_lines(Some(&row), &peek, None, 0)[0].contains("@readyrule"));
 
@@ -20239,6 +20394,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         row.updated_at = Some(1_000);
@@ -20265,6 +20421,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         let live = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
@@ -20290,6 +20447,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let row = agent_row("w", 3, Some(AgentBadge::Working), false);
         let out = peek_overlay_lines(Some(&row), &peek, Some("fix the test"), 0).join("\n");

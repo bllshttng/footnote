@@ -646,7 +646,7 @@ mod tests {
         let body0 = &r.lines[1];
         let body1 = &r.lines[2];
         assert!(
-            body0.roles.iter().any(|&role| role == Role::BodySel),
+            body0.roles.contains(&Role::BodySel),
             "selected row's cells are BodySel"
         );
         assert!(body1.roles.iter().all(|&role| role != Role::BodySel));
