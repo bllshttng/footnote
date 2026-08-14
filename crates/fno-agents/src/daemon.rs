@@ -286,12 +286,22 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
         }
     }
     if !to_reap.is_empty() {
-        let reaped: std::collections::BTreeSet<String> =
-            to_reap.iter().map(|(s, _)| s.clone()).collect();
+        // Keyed on (short_id, pid), not short_id alone (x-9de7 task 1). Every
+        // codex/gemini shellout row shares the same empty short_id, so a
+        // short_id-only set condemns every row wearing that empty id the
+        // moment ONE of them fails pid_is_ours -- including live pane-hosted
+        // siblings that were never checked. pid is what pid_is_ours actually
+        // verified, so it is what must gate the write.
+        let reaped: std::collections::BTreeSet<(String, u32)> = to_reap.iter().cloned().collect();
+        let is_reaped = |e: &RegistryEntry| {
+            e.pid
+                .map(|p| reaped.contains(&(e.short_id.clone(), p)))
+                .unwrap_or(false)
+        };
         // Ordered exit teardown (E3.3, AC-X2-4): publish any inside-leg
         // completion before the reap write clears the report below.
         for e in &registry.entries {
-            if reaped.contains(&e.short_id) {
+            if is_reaped(e) {
                 emit_inside_leg_completion(emitter, e);
             }
         }
@@ -299,7 +309,7 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
         // event log (which says reaped) from the on-disk registry (Gemini high).
         if let Err(e) = state::update_registry(&home.registry_json(), |r| {
             for e in r.entries.iter_mut() {
-                if reaped.contains(&e.short_id) {
+                if is_reaped(e) {
                     e.status = AgentStatus::Exited;
                     // Clear the inside-leg authority on exit (E3.3 / AC-X2-4):
                     // a dead pane's last badge must not linger. Same for a
@@ -5973,6 +5983,58 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             row.host_mode_or_default(),
             crate::state::HOST_MODE_INTERACTIVE,
             "host_mode must survive recovery"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_orphan_pid_sweep_does_not_condemn_every_row_sharing_an_empty_short_id() {
+        // x-9de7 task 1: the orphan-PID sweep (Step 6 of recover(), ~line 270)
+        // collects reaped short_ids into a `BTreeSet<String>`, then marks EVERY
+        // entry whose short_id is a MEMBER of that set as Exited -- not just the
+        // specific entry that failed pid_is_ours. Every codex/gemini shellout
+        // row shares the same empty short_id (see the comment at the top of
+        // recover()), so one genuinely dead pane-hosted row poisons every live
+        // one that happens to sit beside it in the registry. This is the writer
+        // behind the false `exited` write on a live mux pane row.
+        let home = tmp_home("recover-empty-short-id-collision");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return; // platform without start-time support; nothing to assert
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            // Genuinely dead: pid_is_ours must return false for this one.
+            let mut dead = ask_row("dead-pane", None);
+            dead.status = AgentStatus::Live;
+            dead.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(dead);
+
+            // Live: real pid, matching start time, hosted in a mux pane -- same
+            // empty short_id as the dead row above.
+            let mut live = ask_row("live-pane", None);
+            live.status = AgentStatus::Live;
+            live.pid = Some(me);
+            live.pid_start_time = Some(my_start);
+            live.mux = Some(state::MuxRef {
+                session: "main".into(),
+                pane_id: 1,
+            });
+            r.entries.push(live);
+        })
+        .unwrap();
+
+        let _ = recover(&home, &emitter);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let live = reg.find("live-pane").unwrap();
+        assert_eq!(
+            live.status,
+            AgentStatus::Live,
+            "a live pane-hosted row must not be condemned by a sibling's empty short_id"
+        );
+        assert!(
+            live.pid.is_some(),
+            "the writer clears no pid; a fix must not start clearing it here either"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }
