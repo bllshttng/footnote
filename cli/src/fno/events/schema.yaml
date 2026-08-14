@@ -2971,6 +2971,41 @@ event_types:
         failed:
           type: array
           description: "Qualified keys retained as UNKNOWN after a failed state read."
+        receipt_id:
+          type: string
+          description: "Identifier shared with pr_watch_sweep_chunk events when the exact receipt exceeds the inline event budget."
+        receipt_chunks:
+          type: integer
+          description: "Number of bounded exact-detail events emitted before this summary; omitted when the full receipt is inline."
+
+  - name: pr_watch_sweep_chunk
+    description: "Bounded exact identities for an oversized pr_watch_tick receipt. All chunks precede the summary carrying the same receipt_id."
+    sources: [daemon]
+    data:
+      required: [receipt_id, chunk_index, chunk_count, item_count, items]
+      properties:
+        receipt_id:
+          type: string
+        chunk_index:
+          type: integer
+        chunk_count:
+          type: integer
+        item_count:
+          type: integer
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              action:
+                type: string
+                enum: [swept, dropped, normalized, failed]
+              key:
+                type: string
+              reason:
+                type: string
+              target:
+                type: string
 
   - name: recovery_nudge
     description: "Session auto-recovery (x-f47c) injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."

@@ -548,6 +548,42 @@ class TestTickOrchestrator:
         assert receipt["dropped_count"] == 1
         assert receipt["dropped"] == {"closed": {"owner/repo": [7]}}
 
+    def test_oversized_tick_receipt_emits_bounded_exact_chunks(self):
+        """The positive receipt survives the 64KB event validation ceiling."""
+        from fno.events import validate
+        from fno.pr_watch._dispatch import _emit_tick_receipt
+
+        numbers = list(range(1, 10_001))
+        receipt = {
+            "open_prs": 0,
+            "acted": 0,
+            "swept_count": len(numbers),
+            "swept": {"owner/repo": numbers},
+            "dropped_count": len(numbers),
+            "dropped": {"closed": {"owner/repo": numbers}},
+            "normalized_count": 0,
+            "normalized": [],
+            "failed_count": 0,
+            "failed": [],
+        }
+        events = []
+
+        _emit_tick_receipt(lambda kind, data: events.append((kind, data)), receipt)
+
+        chunks = [data for kind, data in events if kind == "pr_watch_sweep_chunk"]
+        summary = next(data for kind, data in events if kind == "pr_watch_tick")
+        assert len(chunks) > 1
+        assert summary["receipt_chunks"] == len(chunks)
+        assert sum(chunk["item_count"] for chunk in chunks) == 20_000
+        for kind, data in events:
+            assert len(json.dumps(data).encode()) < 65_536
+            validate({
+                "ts": "2026-06-14T12:00:00Z",
+                "type": kind,
+                "source": "daemon",
+                "data": data,
+            })
+
     def test_terminal_candidate_is_evicted_after_current_observation(self, tmp_path):
         """Stored OPEN is not truth: a measured MERGED candidate leaves the cache."""
         from fno.pr_watch._dispatch import tick
@@ -1756,7 +1792,7 @@ class TestPerRepoReviewers:
 class TestWarmMergeRouting:
     """The tick's merge branch routes through the shared post-merge dispatcher."""
 
-    def _run_merge_tick(self, tmp_path, ritual_outcome, ritual_detail=None):
+    def _run_merge_tick(self, tmp_path, ritual_outcome, ritual_detail=None, *, ticks=1):
         from fno.post_merge_route import PostMergeDispatchResult
         from fno.pr_watch._dispatch import tick
         from fno.pr_watch._state import WatermarkStore
@@ -1783,20 +1819,21 @@ class TestWarmMergeRouting:
                 ritual_outcome, cand.pr_number, short_id="abcd1234", detail=ritual_detail
             )
 
-        tick(
-            graph_path=tmp_path / "graph.json",
-            store_path=store_path,
-            discover_fn=deps["discover"],
-            read_pr_state_fn=deps["read_pr_state"],
-            fire_skill_fn=deps["fire_skill"],
-            dispatch_ritual_fn=fake_ritual,
-            emit=deps["emit"],
-            reviewers_for=deps["reviewers_for"],
-            claim=deps["claim"],
-            notify=deps["notify"],
-            post_merge_readiness_fn=deps["post_merge_readiness"],
-            now_iso="2026-06-14T12:00:00Z",
-        )
+        for _ in range(ticks):
+            tick(
+                graph_path=tmp_path / "graph.json",
+                store_path=store_path,
+                discover_fn=deps["discover"],
+                read_pr_state_fn=deps["read_pr_state"],
+                fire_skill_fn=deps["fire_skill"],
+                dispatch_ritual_fn=fake_ritual,
+                emit=deps["emit"],
+                reviewers_for=deps["reviewers_for"],
+                claim=deps["claim"],
+                notify=deps["notify"],
+                post_merge_readiness_fn=deps["post_merge_readiness"],
+                now_iso="2026-06-14T12:00:00Z",
+            )
         return deps, store_path, ritual_calls
 
     def test_routed_warm_counts_as_dispatched(self, tmp_path):
@@ -1846,9 +1883,10 @@ class TestWarmMergeRouting:
         """A concurrent hand-off remains explicit without retaining merged state."""
         from fno.pr_watch._state import WatermarkStore
 
-        deps, store_path, _calls = self._run_merge_tick(
-            tmp_path, "already-dispatched", ritual_detail="lock-contention"
+        deps, store_path, calls = self._run_merge_tick(
+            tmp_path, "already-dispatched", ritual_detail="lock-contention", ticks=2
         )
+        assert len(calls) == 2
         assert deps["fired"] == []
         assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatched"] == []
         skips = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
@@ -1859,7 +1897,8 @@ class TestWarmMergeRouting:
         """A failed hand-off emits failure evidence without retaining merged state."""
         from fno.pr_watch._state import WatermarkStore
 
-        deps, store_path, _calls = self._run_merge_tick(tmp_path, "spawn-failed")
+        deps, store_path, calls = self._run_merge_tick(tmp_path, "spawn-failed", ticks=2)
+        assert len(calls) == 2
         assert WatermarkStore(path=store_path).get("owner/repo#1") is None
         failed = [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"]
-        assert len(failed) == 1
+        assert len(failed) == 2

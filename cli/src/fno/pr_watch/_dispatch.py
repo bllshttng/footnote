@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -66,6 +67,9 @@ class TickResult:
     lock_holder: str = ""
 
 
+_INLINE_RECEIPT_MAX_BYTES = 48_000
+
+
 def _compact_keys(keys: list[str] | set[str]) -> dict[str, list[Any]]:
     """Name many PRs compactly as ``repo -> [numbers]`` for event receipts."""
     from fno.pr_watch._state import parse_watermark_key
@@ -92,6 +96,80 @@ def _compact_drops(dropped: list[dict[str, Any]]) -> dict[str, dict[str, list[An
         reason = str(row.get("reason") or "unknown")
         by_reason.setdefault(reason, []).append(str(row.get("key") or ""))
     return {reason: _compact_keys(keys) for reason, keys in sorted(by_reason.items())}
+
+
+def _receipt_detail_items(receipt: dict[str, Any]) -> list[dict[str, str]]:
+    """Flatten an oversized receipt into exact, independently chunkable facts."""
+    items: list[dict[str, str]] = []
+    for repo, numbers in receipt["swept"].items():
+        for number in numbers:
+            key = str(number) if repo == "_unqualified" else f"{repo}#{number}"
+            items.append({"action": "swept", "key": key})
+    for reason, compact in receipt["dropped"].items():
+        for repo, numbers in compact.items():
+            for number in numbers:
+                key = str(number) if repo == "_unqualified" else f"{repo}#{number}"
+                items.append({"action": "dropped", "key": key, "reason": reason})
+    for row in receipt["normalized"]:
+        items.append(
+            {"action": "normalized", "key": str(row["from"]), "target": str(row["to"])}
+        )
+    for key in receipt["failed"]:
+        items.append({"action": "failed", "key": str(key)})
+    return items
+
+
+def _chunk_receipt_items(items: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    """Pack exact facts below the event payload ceiling with ample envelope room."""
+    chunks: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    current_bytes = 256
+    for item in items:
+        item_bytes = len(json.dumps(item, separators=(",", ":")).encode("utf-8")) + 1
+        if current and current_bytes + item_bytes > _INLINE_RECEIPT_MAX_BYTES:
+            chunks.append(current)
+            current = []
+            current_bytes = 256
+        current.append(item)
+        current_bytes += item_bytes
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _emit_tick_receipt(emit: Callable[[str, dict], None], receipt: dict[str, Any]) -> None:
+    """Emit one inline receipt or bounded exact-detail chunks plus a summary."""
+    encoded = json.dumps(receipt, separators=(",", ":")).encode("utf-8")
+    if len(encoded) <= _INLINE_RECEIPT_MAX_BYTES:
+        emit("pr_watch_tick", receipt)
+        return
+
+    receipt_id = uuid.uuid4().hex
+    chunks = _chunk_receipt_items(_receipt_detail_items(receipt))
+    for index, items in enumerate(chunks, start=1):
+        emit(
+            "pr_watch_sweep_chunk",
+            {
+                "receipt_id": receipt_id,
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+                "item_count": len(items),
+                "items": items,
+            },
+        )
+
+    summary = dict(receipt)
+    summary.update(
+        {
+            "swept": {},
+            "dropped": {},
+            "normalized": [],
+            "failed": [],
+            "receipt_id": receipt_id,
+            "receipt_chunks": len(chunks),
+        }
+    )
+    emit("pr_watch_tick", summary)
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +642,17 @@ def _run_tick(
                 store.set(key, baseline)
                 log.debug("pr-watch: first-seen PR #%d baselined as %s", pr, obs.state)
                 continue
+            if entry is None and obs.state == "MERGED":
+                # Terminal records never live in the cache, but a graph-backed
+                # merged candidate must still retry an idempotent ritual after
+                # a transient dispatch failure or lock contention.
+                entry = {
+                    "last_review_ts": obs.latest_review_ts,
+                    "last_seen_state": "MERGED",
+                    "merge_dispatched": False,
+                    "retries": 0,
+                    "parked": None,
+                }
             if entry is None:
                 continue
 
@@ -724,7 +813,7 @@ def _run_tick(
         "failed_count": len(failed),
         "failed": sorted(failed),
     }
-    emit("pr_watch_tick", receipt)
+    _emit_tick_receipt(emit, receipt)
     return TickResult(open_prs=open_prs, acted=acted, skipped=skipped)
 
 
