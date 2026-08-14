@@ -4590,14 +4590,21 @@ fn run_reconcile_sweep(
         ));
     }
 
-    // Roster-progress refresh (x-cdc7 SECOND HALF): the same per-tick,
-    // fairly-budgeted set the reconcile sweep just probed, so this pays no
-    // new unbounded cost - only rows with a worktree `cwd` are touched, and
-    // `roster_progress::compute` itself bounds its own `gh` call to branches
-    // with an upstream. Best-effort and non-fatal: an I/O failure here must
-    // never fail the reconcile sweep that already wrote the registry.
+    // Roster-progress refresh (x-cdc7 SECOND HALF): the same per-tick set the
+    // reconcile sweep just probed - but this loop's own git/gh subprocess
+    // calls are NOT covered by the probe loop's budget check above (that one
+    // stops feeding `plan_reconcile` new entries; it does not bound what runs
+    // after). Re-check the SAME `start`/`RECONCILE_SWEEP_BUDGET` clock here so
+    // a large changed-row set cannot extend a sweep that runs synchronously at
+    // daemon startup and blocks `accept()` on every `reconcile` RPC. Remaining
+    // rows are simply deferred to the next tick, the same fairness the probe
+    // loop itself relies on. Best-effort and non-fatal otherwise: an I/O
+    // failure here must never fail the sweep that already wrote the registry.
     let progress_path = home.roster_progress_json();
     for ch in &changes {
+        if start.elapsed() >= RECONCILE_SWEEP_BUDGET {
+            break;
+        }
         let Some(e) = entries.iter().find(|e| e.name == ch.name) else {
             continue;
         };

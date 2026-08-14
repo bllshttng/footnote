@@ -2347,12 +2347,35 @@ pub(crate) fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
 ///
 /// `git add -A` is deliberate here, unlike the stale-base-rebase case this
 /// repo otherwise warns off `-A` for (AGENTS.md pitfalls corpus): this is the
-/// SAME worker's own in-flight work, not a merge in progress, and only `-A`
-/// reliably captures new untracked files alongside modifications - the exact
-/// shape of the measured near-miss (950 insertions, 11 files, none staged).
+/// SAME worker's own in-flight work, not a merge in progress (checked below,
+/// not assumed), and only `-A` reliably captures new untracked files alongside
+/// modifications - the exact shape of the measured near-miss (950 insertions,
+/// 11 files, none staged).
 fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
     if !cwd.join(".git").exists() {
         return None; // not a git worktree at all
+    }
+    // Refuse to touch a tree mid-merge/mid-rebase/mid-cherry-pick: `git add -A`
+    // would stage conflicted files (still holding `<<<<<<<` markers) as
+    // "resolved", and `git commit` would silently finish the operation on
+    // garbage content. `git rev-parse --git-path` resolves worktree-relative
+    // (a linked worktree's real gitdir lives under `.git/worktrees/<name>/`,
+    // not `<cwd>/.git/`), unlike a bare `cwd.join(".git")` check.
+    let in_progress = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "rebase-merge", "rebase-apply"]
+        .iter()
+        .any(|marker| {
+            // `--git-path` prints a path relative to the git invocation's cwd
+            // (the worktree, via `current_dir(cwd)` inside `git_capture`), so
+            // it must be re-joined onto `cwd` before checking existence - this
+            // process's own cwd is unrelated.
+            git_capture(cwd, &["rev-parse", "--git-path", marker])
+                .is_some_and(|p| cwd.join(p).exists())
+        });
+    if in_progress {
+        eprintln!(
+            "finalize: worktree is mid-merge/rebase; skipping WIP rescue commit ({reason})"
+        );
+        return None;
     }
     let status = git_capture(cwd, &["status", "--porcelain"])?;
     if status.trim().is_empty() {
@@ -2929,6 +2952,50 @@ mod tests {
     fn commit_wip_if_dirty_is_a_noop_outside_a_git_dir() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(commit_wip_if_dirty(tmp.path(), "Budget"), None);
+    }
+
+    #[test]
+    fn commit_wip_if_dirty_refuses_a_tree_mid_merge_conflict() {
+        // The specimen this guard exists for: a worker dies with an unresolved
+        // merge conflict on disk. `git add -A` would stage the conflicted file
+        // as "resolved" and commit garbage, silently finishing the merge.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base on main", 1000, 1000);
+        Command::new("git")
+            .args(["checkout", "-qb", "other"])
+            .current_dir(d)
+            .status()
+            .unwrap();
+        std::fs::write(d.join("in_flight.txt"), "other side").unwrap();
+        commit_at(d, "other side", 1001, 1001);
+        Command::new("git")
+            .args(["checkout", "-q", "-"])
+            .current_dir(d)
+            .status()
+            .unwrap();
+        std::fs::write(d.join("in_flight.txt"), "main side").unwrap();
+        commit_at(d, "main side", 1002, 1002);
+        // Provoke a real conflict: silently ignore the failing merge exit code.
+        let _ = Command::new("git")
+            .args(["merge", "-q", "--no-edit", "other"])
+            .current_dir(d)
+            .status();
+        assert!(
+            d.join(".git/MERGE_HEAD").exists(),
+            "fixture must actually be mid-conflict"
+        );
+        let before = head_of(d);
+
+        let sha = commit_wip_if_dirty(d, "NoProgress");
+
+        assert_eq!(sha, None, "a mid-merge tree must never be auto-committed");
+        assert_eq!(head_of(d), before, "HEAD must not move");
+        assert!(
+            d.join(".git/MERGE_HEAD").exists(),
+            "the merge must still be in progress, not silently finished"
+        );
     }
 
     // ── x-32f3 HALF TWO: mandatory outstanding-question filing ─────────────
