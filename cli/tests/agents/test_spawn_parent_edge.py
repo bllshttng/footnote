@@ -19,6 +19,7 @@ Acceptance criteria (operator-locked):
 """
 from __future__ import annotations
 
+import os
 
 import pytest
 
@@ -371,3 +372,18 @@ def test_spawn_trigger_absent_for_a_direct_human_spawn(
     entry = next((e for e in entries if e.name == "test-no-spawn-trigger"), None)
     assert entry is not None
     assert entry.spawn_trigger is None
+
+
+def test_spawn_trigger_does_not_leak_into_this_process_environment(monkeypatch):
+    """Code-review finding (x-42c5): _capture_spawn_trigger POPS the var, not just
+    reads it. Left in place, it would ride into a spawned worker's own persistent
+    environment via a later dict(os.environ) snapshot (bg_create builds the new
+    worker's env that way, and scrub_ambient_identity does not know this marker),
+    mislabeling that worker's OWN later spawns with this spawn's cause."""
+    from fno.agents.dispatch import _capture_spawn_trigger
+
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "think_spawn:work-start")
+    assert _capture_spawn_trigger() == "think_spawn:work-start"
+    assert "FNO_SPAWN_TRIGGER" not in os.environ
+    # A second read in the same process (e.g. a nested spawn) sees nothing left.
+    assert _capture_spawn_trigger() is None

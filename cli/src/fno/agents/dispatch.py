@@ -1179,8 +1179,15 @@ def _capture_spawn_trigger() -> Optional[str]:
     the subprocess env before shelling out to ``fno agents spawn``; a human
     running the command directly never sets it, so absence reads as "an
     operator asked for this." Never raises.
+
+    Pops the var after reading it (one-shot, not just get): the create paths
+    downstream (e.g. claude.py's ``bg_create``) build the *new* worker's own
+    process env from a ``dict(os.environ)`` snapshot of this process, and
+    ``scrub_ambient_identity`` does not know about this marker. Left in place,
+    it would ride into the spawned session's environment and mislabel that
+    session's own later spawns with this spawn's cause.
     """
-    return (os.environ.get("FNO_SPAWN_TRIGGER") or "").strip() or None
+    return (os.environ.pop("FNO_SPAWN_TRIGGER", "") or "").strip() or None
 
 
 # Bounded lookup of the spawned supervisor's pid. Short by design: the sidecar is
