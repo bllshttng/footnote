@@ -107,8 +107,9 @@ policy_required="$(printf '%s' "$policy_json" | jq -er 'if .required == true the
   exit 1
 }
 if [ "$policy_required" = "true" ]; then
-  candidate_fno pr evidence-check || {
-    echo "PR creation refused: current HEAD has no full/passed verification receipt." >&2
+  candidate_fno pr evidence-check --allow-rebase-equivalent || {
+    echo "PR creation refused: no full/passed verification receipt for HEAD, and no earlier receipt whose patches match it." >&2
+    echo "Run scripts/ci/preflight.sh." >&2
     exit 1
   }
 fi

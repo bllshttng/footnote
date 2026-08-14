@@ -235,22 +235,7 @@ def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> d
             }
         event = newest[0][2]
         data = event["data"]
-        command = data["command"]
-        environment = data["environment"]
-        producer = data["producer"]
-        command_path = Path(command[0]).as_posix()
-        trusted_producer = (
-            event["source"] == "target"
-            and producer["kind"] == "preflight"
-            and producer["id"].startswith(f"{environment['host']}:")
-            and environment["runner"] == "scripts/ci/preflight.sh"
-            and (
-                command_path == "scripts/ci/preflight.sh"
-                or command_path.endswith("/scripts/ci/preflight.sh")
-            )
-            and frozenset(data["scope"]) in {_PREFLIGHT_BASE_SCOPE, _PREFLIGHT_GATE_SCOPE}
-            and len(data["scope"]) == len(frozenset(data["scope"]))
-        )
+        trusted_producer = _trusted_preflight_producer(event)
         return {
             "satisfied": (
                 coverage["complete"]
@@ -279,6 +264,27 @@ def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> d
         "receipt": None,
         "coverage": coverage,
     }
+
+
+def _trusted_preflight_producer(event: dict) -> bool:
+    """The one producer test every receipt must clear before it counts."""
+    data = event["data"]
+    command = data["command"]
+    environment = data["environment"]
+    producer = data["producer"]
+    command_path = Path(command[0]).as_posix()
+    return (
+        event["source"] == "target"
+        and producer["kind"] == "preflight"
+        and producer["id"].startswith(f"{environment['host']}:")
+        and environment["runner"] == "scripts/ci/preflight.sh"
+        and (
+            command_path == "scripts/ci/preflight.sh"
+            or command_path.endswith("/scripts/ci/preflight.sh")
+        )
+        and frozenset(data["scope"]) in {_PREFLIGHT_BASE_SCOPE, _PREFLIGHT_GATE_SCOPE}
+        and len(data["scope"]) == len(frozenset(data["scope"]))
+    )
 
 
 def verification_decision(candidate_sha: str, event_paths: list[Path]) -> dict:
@@ -496,6 +502,7 @@ def check_verification_evidence(
     cwd: Optional[str] = None,
     candidate_sha: Optional[str] = None,
     event_paths: Optional[list[Path]] = None,
+    allow_equivalent: bool = False,
 ) -> dict:
     repo = cwd or os.getcwd()
     if candidate_sha is None:
@@ -527,6 +534,19 @@ def check_verification_evidence(
                 decision["coverage"]["complete"] = False
                 decision["coverage"]["discovery_errors"] = discovery_errors
                 decision["satisfied"] = False
+            if (
+                allow_equivalent
+                and not decision["satisfied"]
+                and not discovery_errors
+            ):
+                equivalent = rebase_equivalent_evidence(
+                    cwd=repo,
+                    candidate_sha=candidate_sha,
+                    event_paths=event_paths,
+                    decision=decision,
+                )
+                if equivalent is not None:
+                    decision = equivalent
     except VerificationLockReleaseError as exc:
         return {
             "satisfied": False,
@@ -536,6 +556,119 @@ def check_verification_evidence(
             "coverage": {"complete": False, "lock_error": str(exc)},
         }
     return decision
+
+
+def _patch_identity(
+    sha: str, *, cwd: str, base_ref: str = BASE_DEFAULT
+) -> Optional[Tuple[str, ...]]:
+    """Sorted stable patch ids of the commits ``sha`` adds over its merge-base.
+
+    ``None`` on any failure (unresolvable ref, git error, empty id set); None
+    never matches anything, so every failure mode refuses. Patch ids are the
+    right key for rebase equivalence and nothing weaker is: a rebase preserves
+    them, a conflict resolution or any code edit changes them.
+    """
+    try:
+        mb = _git(["merge-base", base_ref, sha], cwd)
+        if mb.returncode != 0 or not mb.stdout.strip():
+            return None
+        log = _git(["log", "--no-merges", "-p", f"{mb.stdout.strip()}..{sha}"], cwd)
+        if log.returncode != 0:
+            return None
+        ids = run(["git", "patch-id", "--stable"], cwd=cwd, input_text=log.stdout)
+        if ids.returncode != 0:
+            return None
+    except ToolMissing:
+        return None
+    found: set[str] = set()
+    for line in ids.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            found.add(parts[0])
+    return tuple(sorted(found)) or None
+
+
+def rebase_equivalent_evidence(
+    *,
+    cwd: str,
+    candidate_sha: str,
+    event_paths: list[Path],
+    decision: dict,
+    base_ref: str = BASE_DEFAULT,
+) -> Optional[dict]:
+    """Satisfy a refused strict decision from a receipt whose patches match.
+
+    Runs only when the strict exact-HEAD decision is unsatisfied (typically a
+    rebase rewrote HEAD after a full green run). Walks the already-discovered
+    receipts for a full/passed one that clears the trusted-producer test,
+    whose commit still resolves, and whose patch ids equal HEAD's. On a match
+    returns the strict decision with ``satisfied``, ``result:
+    "equivalent"``, and the borrowed commit named in coverage; no match
+    returns ``None`` and the refusal stands.
+    """
+    from fno.events import ValidationError, validate
+
+    head_ids = _patch_identity(candidate_sha, cwd=cwd, base_ref=base_ref)
+    if head_ids is None:
+        return None
+    seen_paths: set[str] = set()
+    for raw_path in event_paths:
+        path = Path(raw_path).expanduser()
+        try:
+            path_key = str(path.resolve())
+        except OSError:
+            path_key = os.path.abspath(path)
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                not isinstance(event, dict)
+                or event.get("type") != "verification_receipt"
+            ):
+                continue
+            try:
+                validate(event)
+            except ValidationError:
+                continue
+            parsed_ts = _event_timestamp(event.get("ts"))
+            if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            if data.get("mode") != "full" or data.get("result") != "passed":
+                continue
+            if not _trusted_preflight_producer(event):
+                continue
+            sha = data.get("candidate_sha")
+            if not isinstance(sha, str) or sha.lower() == candidate_sha.lower():
+                continue
+            if _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd).returncode != 0:
+                continue
+            if _patch_identity(sha, cwd=cwd, base_ref=base_ref) == head_ids:
+                return {
+                    **decision,
+                    "satisfied": True,
+                    "result": "equivalent",
+                    "coverage": {
+                        **decision.get("coverage", {}),
+                        "matched_sha": sha,
+                        "equivalence": "patch-id",
+                    },
+                }
+    return None
 
 
 def local_verification_required(
@@ -623,9 +756,17 @@ def _verification_read_lock(repo: str):
             ) from exc
 
 
-def run_evidence_check(*, cwd: Optional[str] = None) -> int:
-    decision = check_verification_evidence(cwd=cwd)
+def run_evidence_check(
+    *, cwd: Optional[str] = None, allow_equivalent: bool = False
+) -> int:
+    decision = check_verification_evidence(cwd=cwd, allow_equivalent=allow_equivalent)
     print(json.dumps(decision, separators=(",", ":")))
+    if decision.get("satisfied") and decision.get("result") == "equivalent":
+        matched = (decision.get("coverage") or {}).get("matched_sha")
+        print(
+            f"evidence: satisfied by rebase-equivalent receipt for {matched}",
+            file=sys.stderr,
+        )
     return 0 if decision["satisfied"] else 1
 
 

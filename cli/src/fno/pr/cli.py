@@ -177,13 +177,24 @@ def base_lineage_check(
     "evidence-check",
     help=(
         "Require a newest exact-HEAD full/passed verification receipt across "
-        "project, global, and known delivery-root event journals."
+        "project, global, and known delivery-root event journals. "
+        "--allow-rebase-equivalent also accepts a full/passed receipt for an "
+        "earlier commit whose patch ids match HEAD (a rebase with no code "
+        "change); review entry opts in, the attestation reuse path never does."
     ),
 )
-def evidence_check() -> None:
+def evidence_check(
+    allow_rebase_equivalent: bool = typer.Option(
+        False,
+        "--allow-rebase-equivalent",
+        help="Accept a receipt for an earlier commit whose patches match HEAD.",
+    ),
+) -> None:
     from fno.pr import _preflight
 
-    raise typer.Exit(code=_preflight.run_evidence_check())
+    raise typer.Exit(
+        code=_preflight.run_evidence_check(allow_equivalent=allow_rebase_equivalent)
+    )
 
 
 @pr_app.command("evidence-required", hidden=True)

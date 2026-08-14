@@ -811,3 +811,122 @@ def test_hosted_workflow_discovery_distinguishes_absent_present_and_unavailable(
     workflows.rmdir()
     workflows.write_text("not a directory\n")
     assert hosted_workflow_state(tmp_path) == "unavailable"
+
+
+# ---- rebase-equivalent evidence: a receipt survives a rebase ------------------
+
+
+def _git_ok(repo: Path, *args: str) -> str:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _commit(repo: Path, message: str, fname: str, content: str) -> str:
+    (repo / fname).write_text(content)
+    _git_ok(repo, "add", fname)
+    _git_ok(
+        repo,
+        "-c",
+        "user.email=t@example.com",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    )
+    return _git_ok(repo, "rev-parse", "HEAD")
+
+
+def _rebase_fixture(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A feature commit rebased onto a newer main, plus its old-SHA receipt."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q")
+    _git_ok(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git_ok(repo, "config", "user.email", "t@example.com")
+    _git_ok(repo, "config", "user.name", "t")
+    _commit(repo, "base", "base.txt", "base\n")
+    _git_ok(repo, "checkout", "-q", "-b", "feature")
+    sha_a = _commit(repo, "a", "a.txt", "a\n")
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt(candidate_sha=sha_a))
+    _git_ok(repo, "checkout", "-q", "main")
+    _commit(repo, "sibling", "sibling.txt", "sibling\n")
+    # patch identity is measured against origin/main, like the real check
+    _git_ok(
+        repo,
+        "update-ref",
+        "refs/remotes/origin/main",
+        _git_ok(repo, "rev-parse", "HEAD"),
+    )
+    _git_ok(repo, "checkout", "-q", "feature")
+    _git_ok(repo, "rebase", "main")
+    return repo, journal, sha_a
+
+
+def test_rebase_equivalent_receipt_satisfies_only_with_the_flag(
+    tmp_path: Path,
+) -> None:
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+
+    strict = check_verification_evidence(cwd=str(repo), event_paths=[journal])
+
+    assert strict["satisfied"] is False
+    assert strict["result"] == "stale"
+
+    equivalent = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert equivalent["satisfied"] is True
+    assert equivalent["result"] == "equivalent"
+    assert equivalent["coverage"]["matched_sha"] == sha_a
+    assert equivalent["coverage"]["equivalence"] == "patch-id"
+
+
+def test_equivalence_refused_after_a_code_change(tmp_path: Path) -> None:
+    repo, journal, _sha_a = _rebase_fixture(tmp_path)
+    _commit(repo, "extra", "extra.txt", "extra\n")
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "stale"
+
+
+def test_equivalence_refused_when_borrowed_sha_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    repo, journal, _sha_a = _rebase_fixture(tmp_path)
+    write(journal, receipt(candidate_sha="c" * 40))
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "stale"
+
+
+def test_equivalence_never_rescues_incomplete_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, journal, _sha_a = _rebase_fixture(tmp_path)
+    monkeypatch.setattr(
+        "fno.pr._preflight.verification_event_paths",
+        lambda **_kwargs: ([journal], ["delivery journal discovery failed"]),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False

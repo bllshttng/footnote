@@ -447,7 +447,7 @@ def ship_batch(
         cwd=worktree, base_ref=f"origin/{base}"
     )
     if evidence_required:
-        evidence = check_verification_evidence(cwd=worktree)
+        evidence = check_verification_evidence(cwd=worktree, allow_equivalent=True)
         if not evidence["satisfied"]:
             preflight = run(["scripts/ci/preflight.sh", "--force"], cwd=worktree)
             if preflight.returncode != 0:
@@ -457,14 +457,18 @@ def ship_batch(
                     reason=f"verification pending: preflight exited {preflight.returncode}",
                     members=members,
                 )
-            evidence = check_verification_evidence(cwd=worktree)
+            evidence = check_verification_evidence(
+                cwd=worktree, allow_equivalent=True
+            )
         if not evidence["satisfied"]:
             return ShipResult(
                 "noop",
                 domain,
                 reason=(
-                    "verification pending: "
-                    f"mode={evidence['mode']} result={evidence['result']}"
+                    "verification pending: no full/passed verification receipt "
+                    "for HEAD, and no earlier receipt whose patches match it. "
+                    "Run scripts/ci/preflight.sh. "
+                    f"(mode={evidence['mode']} result={evidence['result']})"
                 ),
                 members=members,
             )
