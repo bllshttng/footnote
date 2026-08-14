@@ -168,6 +168,17 @@ Candidate categories:
 - One-off task details with no reuse value.
 - Near-duplicates of existing memory entries. The writer's dedup (exit 2) catches exact-name collisions, but you should avoid semantic near-duplicates too - read MEMORY.md index before writing.
 
+### Blocklist (x-8fc0)
+
+Four lesson classes to never write, regardless of how confident the session felt writing them. Hermes bans the same classes for the same reason: "these harden into refusals the agent cites against itself for months after the actual problem was fixed."
+
+- **Env-dependent findings stated as durable fact.** "X is absent on this machine" is true of one shell on one day, not the project. If you must record it, name the machine and the date, and say so is a snapshot, not a rule.
+- **Negative claims about a tool** ("X doesn't work", "X is broken"). These age the worst: the tool gets fixed and the refusal outlives the bug. The live specimen: a memory entry once claimed `timeout`/`gtimeout` were absent from this machine and that watchers therefore no-op at exit 127. Both binaries are installed. The false claim survived until someone checked it against the running system.
+- **Transient/one-off errors** (a flaky network call, a rate limit, a single bad process state). One occurrence is noise, not a pattern - do not write a workaround for something you saw exactly once.
+- **An unresolved failure written up as validated workflow.** If the session ended blocked, uncertain, or with the fix unverified, say so plainly in the entry (or skip it) - never phrase a guess as a confirmed approach.
+
+None of this bars a REAL, source-verified fact: a bug fixed at a cited PR, a genuinely repeated failure mode, an environment constraint that names its scope. Ask: is this still true tomorrow, on someone else's machine, after the bug it describes is fixed? If not, skip it, or narrow it until it is.
+
 ### Writing recipe
 
 For each candidate, construct a JSON object and call the writer:
@@ -196,11 +207,31 @@ BODY
 )" \
   '{type: $type, name: $name, description: $description, body: $body}')
 
+# Read-before-write (x-8fc0). A memory file with this name may already
+# exist. If it does, the writer refuses the update without proof you read
+# the CURRENT content this turn - the guard against rewriting a rule from a
+# hallucinated memory of its contents. Compute the same target path the
+# writer computes: lowercase the name, replace non [a-z0-9_] with _, trim
+# edge underscores. Read that file with the Read tool first, THEN hash it -
+# the hash is proof of the read, not a substitute for it.
+TYPE=$(jq -r '.type' <<<"$CANDIDATE")
+SLUG=$(jq -r '.name' <<<"$CANDIDATE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_]+/_/g; s/^_+//; s/_+$//')
+TARGET="$MEMORY_DIR/${TYPE}_${SLUG}.md"
+SOURCE_SHA256=""
+if [[ -f "$TARGET" ]]; then
+  # <- Read "$TARGET" here before computing the hash, every time.
+  SOURCE_SHA256=$(shasum -a 256 "$TARGET" 2>/dev/null | awk '{print $1}' || sha256sum "$TARGET" 2>/dev/null | awk '{print $1}')
+fi
+
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory/write-memory-entry.sh" \
   --memory-dir "$MEMORY_DIR" \
   --session-id "$SESSION_ID" \
-  --candidate "$CANDIDATE"
-# exit 0 = wrote/updated; exit 2 = dedup (fine, no action needed); exit 1 = real error
+  --candidate "$CANDIDATE" \
+  --source-sha256 "$SOURCE_SHA256"
+# exit 0 = wrote/updated; exit 2 = dedup (fine, no action needed);
+# exit 3 = staged (refused to overwrite - the existing entry is hand-written,
+#   or the sha256 above didn't match; the proposal landed in
+#   $MEMORY_DIR/.staged/ for a human to review, not lost); exit 1 = real error
 
 # Dual-emit ONLY for project-lesson candidates (type: project - a load-bearing
 # how-footnote-works lesson a stranger cloning the repo would need, NOT session
