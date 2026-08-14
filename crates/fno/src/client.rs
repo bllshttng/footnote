@@ -11123,8 +11123,41 @@ async fn selector_keys(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
     let mut esc = std::mem::take(&mut view.sel_esc);
-    let keys = fold_selector_keys(&mut esc, bytes);
+    // Right arrow is the caret TOGGLE on a workspace row, distinct from `l`'s
+    // explicit expand: strip each COMPLETE `ESC [ C` from this chunk and handle
+    // it below, so it never aliases onto `l` through the fold. A sequence the
+    // read split lands in the carry and folds to `l` (expand) - a valid caret
+    // open, never a mis-toggle. A modified Right (`ESC [ 1 ; 5 C`) does not
+    // contain the contiguous triple, so it still drops as unmapped.
+    let mut rights = 0usize;
+    let mut cleaned: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(&[0x1b, b'[', b'C']) {
+            rights += 1;
+            i += 3;
+        } else {
+            cleaned.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let keys = fold_selector_keys(&mut esc, &cleaned);
     view.sel_esc = esc;
+    for _ in 0..rights {
+        // The hovered row wins over the cursor when the pointer rests on one
+        // (x-f331's pointer-follow); otherwise the selected row.
+        let Some(cur) = view.hover_row.or(view.selector) else {
+            break;
+        };
+        let squad = match view.display_rows().get(cur) {
+            Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
+            _ => None,
+        };
+        match squad.and_then(|sq| squad_key(&view.layout, sq)) {
+            Some(key) => view.toggle_idle(key),
+            None => view.set_notice("only a workspace row has a caret".into()),
+        }
+    }
     for &k in &keys {
         // Rows are re-read per key (via the View helpers below) so a layout
         // push or a close mid-chunk acts on the CURRENT catalog, never a stale
@@ -15576,6 +15609,52 @@ mod tests {
         view.toggle_idle(footnote_key());
         assert_eq!(rendered(&view, "idle"), 7, "toggling again re-folds");
         assert_eq!(idle_fold(&view), Some((5, false)));
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC11-HP: Right on a hovered or selected workspace row toggles its caret;
+    // `l` stays the explicit expand and never toggles.
+    #[tokio::test]
+    async fn right_arrow_toggles_a_workspace_caret() {
+        let dir = isolate_view_store("right-caret");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        view.selector = Some(0); // the workspace header row
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(rendered(&view, "idle"), 12, "Right opens the caret");
+        selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(rendered(&view, "idle"), 7, "Right again re-folds it");
+
+        // `l` remains the EXPLICIT section expand (x-975a) and never touches
+        // the idle caret: two presses leave the fold alone, state Expanded.
+        selector_keys(&mut view, &[b'l'], &mut buf).await.unwrap();
+        selector_keys(&mut view, &[b'l'], &mut buf).await.unwrap();
+        assert_eq!(rendered(&view, "idle"), 7, "`l` does not fold or unfold idle rows");
+        assert_eq!(
+            view.section_view.get(&footnote_key()),
+            Some(&SectionView::Expanded),
+            "`l` sets the explicit Expanded view"
+        );
+
+        // A non-workspace row notices rather than toggling something else.
+        view.selector = Some(1); // an agent row
+        view.notice = None;
+        selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            view.notice.is_some(),
+            "Right off a workspace row says why"
+        );
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
     }
