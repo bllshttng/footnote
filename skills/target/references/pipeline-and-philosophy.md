@@ -9,7 +9,6 @@ Read this for a from-idea or multi-phase run when you want the whole phase map a
          │
          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  /think          → Design thinking, explore problem space   │
 │  discovery gate  → Surface unknowns before planning         │
 │  /blueprint      → Create implementation plan with waves    │
 │  /do waves {expertise} → Execute with TDD (archer agents)    │
@@ -27,6 +26,8 @@ Read this for a from-idea or multi-phase run when you want the whole phase map a
    PR ready for merge (docs + browser verification included)
 ```
 
+`/think` is not in this diagram (x-42c5, operator ruling). It is a research verb outside the delivery path, never a pipeline phase and never a `/blueprint` prerequisite. `/blueprint` grounds a bare idea itself via the discovery gate above, which runs `fno think inspect` for a receipt. When a question needs deeper investigation than that receipt gives, run `/think` beforehand, only as a deliberate choice, never automatically.
+
 Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, get reviewed alongside the code, and are included in any auto-merge. Historic versions of this skill ran docs last, which led to docs landing in a follow-up PR whenever `auto_merge_approved: true` tripped immediately after external review.
 
 ## Philosophy
@@ -35,8 +36,7 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 
 | Phase | Skill Used | Purpose | When to Run | Model |
 |-------|------------|---------|-------------|-------|
-| Think | `/think` | Design exploration | If starting from idea | Opus (inline) |
-| Plan | `/blueprint` | Create waves + tasks | If no plan exists | Opus (inline) |
+| Plan | `/blueprint` | Create waves + tasks | If no plan exists (self-grounds via its own discovery gate; never awaits a `/think` doc - x-42c5) | Opus (inline) |
 | Execute |`/do waves` | Wave orchestration + TDD | Always | Opus (inline) |
 | Clean | `/simplify` | Remove AI slop patterns | Only with `clean` modifier | Opus (inline) |
 | Review | advisory self-review | Self-review of the changed files (BEFORE push); sigma panel only when `config.review.reviewers` names it | Always | Opus (inline) |
@@ -51,7 +51,7 @@ See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to
 
 **Phase applicability is judgment, not a gate.** Every phase above is available; run the ones the work needs. User skip flags (CLI) and project config (`.fno/config.toml`) still force-skip. Otherwise judge by what the change is:
 
-- **/think + /blueprint**: only if you started from a bare idea, OR the bound plan is still design-stage (then `/blueprint` alone - the thinking is already done). A blueprint-complete plan skips straight to implement.
+- **/blueprint**: run it whenever you started from a bare idea, or the bound plan is still design-stage. It self-grounds on a bare idea via its own discovery gate (`fno think inspect` + up to 3-5 targeted questions). It never awaits a `/think` doc (x-42c5). A prior `/think` doc is consumed as already-cited findings, never required. A blueprint-complete plan skips straight to implement.
 - **/do waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
 - **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
 - **review**: run it; it is cheap insurance - an advisory self-review of the diff by the invoking agent, not the sigma panel (sigma only when `config.review.reviewers` names it). For a tiny prose/config change a light self-review is enough.

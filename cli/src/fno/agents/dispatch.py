@@ -1172,6 +1172,24 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     return identity.session_id, identity.harness, parent_cwd
 
 
+def _capture_spawn_trigger() -> Optional[str]:
+    """The CAUSE of this spawn (x-42c5), distinct from :func:`_capture_parent_edge`.
+
+    An automated dispatcher (today: think-spawn) sets ``FNO_SPAWN_TRIGGER`` in
+    the subprocess env before shelling out to ``fno agents spawn``; a human
+    running the command directly never sets it, so absence reads as "an
+    operator asked for this." Never raises.
+
+    Pops the var after reading it (one-shot, not just get): the create paths
+    downstream (e.g. claude.py's ``bg_create``) build the *new* worker's own
+    process env from a ``dict(os.environ)`` snapshot of this process, and
+    ``scrub_ambient_identity`` does not know about this marker. Left in place,
+    it would ride into the spawned session's environment and mislabel that
+    session's own later spawns with this spawn's cause.
+    """
+    return (os.environ.pop("FNO_SPAWN_TRIGGER", "") or "").strip() or None
+
+
 # Bounded lookup of the spawned supervisor's pid. Short by design: the sidecar is
 # normally written by receipt time, so this only covers a race, and a wake must
 # not stall behind it.
@@ -1352,6 +1370,13 @@ def _claude_create_path(
 
     route_settings_path = route_settings_path_for(route_env)
 
+    # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
+    # bg_create snapshots dict(os.environ) to build the NEW worker's own
+    # persistent env; popping post-call is too late, the snapshot already
+    # happened and the var would ride into that worker's environment (see
+    # _capture_spawn_trigger's own docstring for what that mislabels).
+    spawn_trigger = _capture_spawn_trigger()
+
     try:
         result: ProviderResult = claude_mod.bg_create(
             name=name,
@@ -1424,6 +1449,7 @@ def _claude_create_path(
 
     # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
     # Best-effort: never raises, degrades to (None, None, None) when absent.
+    # spawn_trigger was already popped before bg_create above (x-42c5 ordering fix).
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
@@ -1447,6 +1473,7 @@ def _claude_create_path(
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
+        spawn_trigger=spawn_trigger,
         # x-ae2d: the route this launch got, so a relaunch can come back on it.
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM

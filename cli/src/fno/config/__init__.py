@@ -1808,9 +1808,12 @@ class ThinkSpawnBlock(BaseModel):
     """Context-carrying /think spawn settings (nested under 'config.think_spawn').
 
     The opt-in for node x-6a10: when enabled, the node-birth path (``fno backlog
-    idea``) spawns/offers a context-carrying ``/think`` thread for a generated
-    organic node, handing it the *resolved* origin transcript pointer (not a
-    paraphrase) so a later pickup starts from ground truth.
+    idea``) OFFERS a context-carrying ``/think`` thread for a generated organic
+    node (a birth trigger never auto-spawns - x-42c5), handing it the *resolved*
+    origin transcript pointer (not a paraphrase) so a later pickup starts from
+    ground truth. A real spawn still happens for the explicit conversational
+    verb, an armed lifecycle trigger (``on_work_start``/``on_retro``), or a
+    consented decompose fan-out.
 
     Default ``False`` (Locked Decision 2): shipping this changes nothing until
     the operator arms it; an absent key reads as off. The fail-safe posture

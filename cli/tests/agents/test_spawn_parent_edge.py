@@ -1,5 +1,9 @@
 """Task 2.2: spawn-time parent edge — spawned_by_session/harness/cwd.
 
+Also covers x-42c5's spawn_trigger field: the CAUSE of a spawn (distinct from
+the parent-edge WHO above), ambient-captured from FNO_SPAWN_TRIGGER the same
+way spawned_by_* is captured from the session env vars.
+
 Acceptance criteria (operator-locked):
 
   AC-HP: spawn a claude worker when CLAUDE_CODE_SESSION_ID is set ->
@@ -15,6 +19,7 @@ Acceptance criteria (operator-locked):
 """
 from __future__ import annotations
 
+import os
 
 import pytest
 
@@ -308,3 +313,77 @@ def test_spawn_emits_exactly_one_agent_spawned(workdir_claude, captured_emits, m
     assert len(spawned_events) == 1, (
         f"expected exactly 1 agent_spawned, got {len(spawned_events)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# x-42c5: spawn_trigger — the CAUSE of a spawn, distinct from the parent edge
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_records_trigger_cause_when_dispatcher_sets_it(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """A dispatcher (e.g. think-spawn) sets FNO_SPAWN_TRIGGER before shelling
+    out to `fno agents spawn`; the registry row it writes records the cause,
+    answering "why was this spawned" as a field rather than a timestamp-gap
+    inference against the filing node's created_at."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-session-abc123")
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "think_spawn:work-start")
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "test-spawn-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+
+    entries = load_registry()
+    entry = next((e for e in entries if e.name == "test-spawn-trigger"), None)
+    assert entry is not None
+    assert entry.spawn_trigger == "think_spawn:work-start"
+
+
+def test_spawn_trigger_absent_for_a_direct_human_spawn(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """A human running `fno agents spawn` directly never sets FNO_SPAWN_TRIGGER,
+    so the field stays None - absence reads as "an operator asked for this,"
+    which is the honest default (not every registry row has an automated cause)."""
+    monkeypatch.delenv("FNO_SPAWN_TRIGGER", raising=False)
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "test-no-spawn-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+
+    entries = load_registry()
+    entry = next((e for e in entries if e.name == "test-no-spawn-trigger"), None)
+    assert entry is not None
+    assert entry.spawn_trigger is None
+
+
+def test_spawn_trigger_does_not_leak_into_this_process_environment(monkeypatch):
+    """Code-review finding (x-42c5): _capture_spawn_trigger POPS the var, not just
+    reads it. Left in place, it would ride into a spawned worker's own persistent
+    environment via a later dict(os.environ) snapshot (bg_create builds the new
+    worker's env that way, and scrub_ambient_identity does not know this marker),
+    mislabeling that worker's OWN later spawns with this spawn's cause."""
+    from fno.agents.dispatch import _capture_spawn_trigger
+
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "think_spawn:work-start")
+    assert _capture_spawn_trigger() == "think_spawn:work-start"
+    assert "FNO_SPAWN_TRIGGER" not in os.environ
+    # A second read in the same process (e.g. a nested spawn) sees nothing left.
+    assert _capture_spawn_trigger() is None
