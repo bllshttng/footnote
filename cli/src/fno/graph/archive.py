@@ -158,6 +158,51 @@ def partition_for_archive(
     return to_archive, remaining, skipped
 
 
+def stamp_archived_at(entries: list[Entry], ts: str) -> list[Entry]:
+    """Return ``entries`` with ``archived_at`` set to ``ts`` on each (new dicts).
+
+    Pure, never mutates the input. Called once per sweep, right before the
+    entries are merged into ``graph-archive.json`` -- nothing recorded WHEN a
+    node left the working graph before this, so a "did the last sweep move
+    anything" question had no answer on the archive side either.
+    """
+    return [{**e, "archived_at": ts} for e in entries]
+
+
+def remint_archive_collisions(
+    working_ids: set[str], archive_entries: list[Entry]
+) -> tuple[list[Entry], dict[str, str]]:
+    """Remint any archive entry whose id collides with a live working-graph id.
+
+    17 such collisions exist on disk (x-f69b): the id generator only checked
+    the working graph, so a freed id got reissued while the archive still
+    held a different node under it. Reminting the LIVE id would break every
+    open reference to it today (blockers, parents, branches, worktrees, open
+    PRs); the archived side is passive history, so it moves instead and keeps
+    its old id as ``previous_id`` so a stale reference can still resolve
+    (``cmd_get``'s archive read-through checks it as a fallback).
+
+    Returns ``(patched_entries, {old_id: new_id})`` for the caller to report.
+    A no-op (empty remap) when nothing collides.
+    """
+    from fno.graph._constants import mint_node_id
+
+    reserved = set(working_ids) | {
+        e.get("id") for e in archive_entries if isinstance(e, dict) and e.get("id")
+    }
+    remap: dict[str, str] = {}
+    patched: list[Entry] = []
+    for e in archive_entries:
+        eid = e.get("id")
+        if isinstance(eid, str) and eid in working_ids:
+            new_id = mint_node_id(reserved)
+            reserved.add(new_id)
+            remap[eid] = new_id
+            e = {**e, "id": new_id, "previous_id": eid}
+        patched.append(e)
+    return patched, remap
+
+
 def merge_into_archive(existing: list[Entry], new: list[Entry]) -> list[Entry]:
     """Append ``new`` to ``existing`` archive entries, deduped by id (last wins).
 
