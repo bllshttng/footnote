@@ -12473,12 +12473,26 @@ mod tests {
     fn remove_squad_reanchors_then_last_ends_the_session() {
         // AC2-HP / AC2-EDGE (server half): removing a squad drops it and re-
         // anchors active_squad; removing the last squad ends the session.
+        // Store half (de-persist contract): both rows leave the store too,
+        // the SessionEmpty path included.
+        let _s = StoreScratch::new("x361b-remove-reanchor");
         let mut core = empty_core();
         core.session
             .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
         core.session
             .add_squad(2, vec!["/b".into()], None, leaf_tab(6, 2));
         core.session.active_squad = Some(1);
+        core.persist_squad(1);
+        core.persist_squad(2);
+        let ident1 = core.squad_identity(1).expect("identity before removal");
+        let ident2 = core.squad_identity(2).expect("identity before removal");
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            "row 1 written before the removal"
+        );
 
         core.clients.push(client(1, 5, (24, 80), false));
         let flow = core.command(1, Command::RemoveSquad(1));
@@ -12498,6 +12512,105 @@ mod tests {
             "removing the last squad ends the session (Locked Decision 8)"
         );
         assert!(core.session.squads.is_empty());
+        let rows = crate::squad_store::load().squads;
+        assert!(
+            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1
+                || (s.name.clone(), s.key.clone()) == ident2),
+            "both dismissed workspaces left the store, SessionEmpty included"
+        );
+    }
+
+    #[test]
+    fn close_tab_depersists_a_memberless_workspace() {
+        // The reported leak: a workspace of plain shell panes has no member
+        // context, so CloseTab's reconcile loop did nothing and the row
+        // survived in the store. Positives on both sides: the closed identity
+        // is gone AND the sibling's row is still there.
+        let _s = StoreScratch::new("x361b-closetab");
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec!["/b".into()], Some("two".into()), leaf_tab(6, 2));
+        core.persist_squad(1);
+        core.persist_squad(2);
+        let ident1 = core.squad_identity(1).expect("identity before close");
+        let ident2 = core.squad_identity(2).expect("identity before close");
+        assert!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            "row written before the close"
+        );
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(1, Command::CloseTab);
+        assert!(matches!(flow, Flow::Continue), "squad 2 keeps the session");
+        let rows = crate::squad_store::load().squads;
+        assert!(
+            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            "the memberless workspace's row left the store"
+        );
+        assert!(
+            rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident2),
+            "the sibling's row survives"
+        );
+    }
+
+    #[test]
+    fn close_last_pane_depersists_its_workspace() {
+        // Same contract through close_pane (the mouse pane-close path), which
+        // de-persisted never before: it handled template specs and nothing
+        // else when remove_tab dropped the squad.
+        let _s = StoreScratch::new("x361b-closepane");
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec!["/b".into()], Some("two".into()), leaf_tab(6, 2));
+        core.persist_squad(1);
+        core.persist_squad(2);
+        let ident1 = core.squad_identity(1).expect("identity before close");
+        let ident2 = core.squad_identity(2).expect("identity before close");
+
+        let flow = core.close_pane(1);
+        assert!(matches!(flow, Flow::Continue), "squad 2 keeps the session");
+        let rows = crate::squad_store::load().squads;
+        assert!(
+            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            "closing the last pane cleared the workspace's row"
+        );
+        assert!(
+            rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident2),
+            "the sibling's row survives"
+        );
+    }
+
+    #[test]
+    fn remove_squad_depersists_an_untracked_workspace() {
+        // The gate this drops: a squad the store holds but squad_members does
+        // not (restore's per-squad isolation can produce exactly that) took
+        // the false branch and its row survived the dismiss.
+        let _s = StoreScratch::new("x361b-remove-untracked");
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
+        core.persist_squad(1);
+        let ident1 = core.squad_identity(1).expect("identity before removal");
+        assert!(
+            !core.squad_members.contains_key(&1),
+            "precondition: the squad is in the store but untracked"
+        );
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        let flow = core.command(1, Command::RemoveSquad(1));
+        assert!(matches!(flow, Flow::Shutdown));
+        let rows = crate::squad_store::load().squads;
+        assert!(
+            !rows.iter().any(|s| (s.name.clone(), s.key.clone()) == ident1),
+            "the untracked workspace's row left the store"
+        );
     }
 
     #[test]
