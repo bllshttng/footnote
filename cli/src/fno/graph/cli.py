@@ -323,6 +323,7 @@ _RECEIPT_TYPES = {
     "advance_failed",
     "quota_deferred",
     "dispatch_deferred",
+    "quota_rotation_declined",
 }
 
 
@@ -401,6 +402,9 @@ def _format_receipt(etype: str, data: dict) -> str:
     if etype == "advance_failed":
         err = (data.get("error") or "").strip()
         return f"failed: {err[:80]}" if err else "failed"
+    if etype == "quota_rotation_declined":
+        prov = data.get("provider") or ""
+        return f"declined: {prov}" if prov else "declined"
     # quota_deferred / dispatch_deferred
     prov = data.get("provider") or data.get("owner_harness") or ""
     return f"deferred: {prov}" if prov else "deferred"

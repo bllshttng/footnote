@@ -269,6 +269,7 @@ def _autonomous_route_for(
             pinned=bool((harness or "").strip())
             or launch_is_pinned(rec, node_cwd=cwd),
             node_cwd=cwd,
+            node_id=node or (rec or {}).get("id"),
         )
     except Exception:  # noqa: BLE001 - a quota read must never block a dispatch
         return None
@@ -487,6 +488,7 @@ def _dispatch_one(
                 honors_config_harness=False,
             ),
             node_cwd=cwd,
+            node_id=node_id,
         )
         if route.action == "cutover":
             # Render the destination's own command HERE, before any claim or
