@@ -5333,7 +5333,11 @@ def _mux_content_confirm(
     """
     import json
 
-    escaped = json.dumps(marker)[1:-1]
+    # ensure_ascii=False to match Rust's `serde_json::to_string`, which leaves
+    # non-ASCII literal. With the default the marker's accented or emoji
+    # characters become \uXXXX escapes that a claude transcript never carries,
+    # and the confirm could never match.
+    escaped = json.dumps(marker, ensure_ascii=False)[1:-1]
     if not escaped:
         return False
     needle = escaped.encode("utf-8")
@@ -5521,7 +5525,9 @@ def _mux_pane_send(
             # Bytes-written alone is Locked-Decision-4 banned as a hosted
             # verdict; confirm by content against the recipient's own
             # transcript, never optimistically on an unreadable one.
-            marker = text.split("\n", 1)[0]
+            # Strip first: a leading newline would make the first line empty,
+            # and an empty marker never confirms (a landed paste read as a miss).
+            marker = text.strip().split("\n", 1)[0]
             sent = confirm_transcript is not None and confirm_baseline is not None and (
                 _mux_content_confirm(confirm_transcript, marker, confirm_baseline)
             )
