@@ -402,6 +402,12 @@ pub struct GcSummary {
     /// becomes the main path silently, and the corroboration gate it bypasses
     /// turns into decoration. Reported at every pass, including zero.
     pub reaped_backstop: Vec<String>,
+    /// Past-grace rows kept by the corroboration gate alone: no confirmed-dead
+    /// pid, no positively-stale transcript, and a liveness surface still on
+    /// record - short of the backstop horizon too (x-9de7 task 5). This is
+    /// the "stuck and invisible" case `gc.rs`'s own comments warn about;
+    /// before this field it had no report at all.
+    pub kept_uncorroborated: Vec<String>,
 }
 
 /// Distinct canonical repo roots the registry knows about, deduplicated.
@@ -766,6 +772,32 @@ pub fn gc_sweep(
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
 ) -> GcSummary {
+    gc_sweep_impl(home, emitter, grace_for_harness, false)
+}
+
+/// `fno agents reap --dry-run` (x-9de7 task 5): classify the registry exactly
+/// as [`gc_sweep`] does, including every `kept_dirty` / `kept_uncorroborated`
+/// diagnostic, but never write the registry, never emit a `daemon_recovery_error`
+/// or `agent_row_reaped` event, and never touch dispatch termination. "Would
+/// reap" and "would keep, and why" are read straight off the same
+/// classification the real sweep uses - a reaper an operator cannot rehearse
+/// is one they will not run.
+pub fn gc_sweep_dry_run(
+    home: &AgentsHome,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+) -> GcSummary {
+    // Never emitted to in dry-run mode (the whole write+emit tail is skipped
+    // below), so an unused placeholder path satisfies the shared signature.
+    let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
+    gc_sweep_impl(home, &emitter, grace_for_harness, true)
+}
+
+fn gc_sweep_impl(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+    dry_run: bool,
+) -> GcSummary {
     let mut summary = GcSummary::default();
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
     if registry.entries.is_empty() {
@@ -855,7 +887,6 @@ pub fn gc_sweep(
         if needs_probe {
             row.worktree_clean = worktree_clean_probe(&e.cwd);
         }
-        let worktree_clean = row.worktree_clean;
         let id = if e.short_id.is_empty() {
             e.name.clone()
         } else {
@@ -877,15 +908,55 @@ pub fn gc_sweep(
                     // Resurrected: drop the stale exit stamp so a later death
                     // starts a fresh grace clock.
                     to_clear.insert(e.name.clone(), e.created_at.clone());
-                } else if needs_probe && matches!(worktree_clean, Some(false) | None) {
-                    // Past grace but held back by a dirty/undeterminable worktree.
-                    summary.kept_dirty.push((id, e.cwd.clone()));
+                } else {
+                    // The SAME decision `gc_action` above just made, read a
+                    // second time for its reason (x-9de7 task 5): a row that
+                    // is stuck and invisible is the failure mode `gc.rs`'s own
+                    // comments warn about, so a past-grace Keep always gets a
+                    // named gate instead of a silent, unexplained keep.
+                    match crate::gc::keep_reason(&row, now, grace_secs) {
+                        Some(
+                            crate::gc::KeepReason::WorktreeDirty
+                            | crate::gc::KeepReason::WorktreeUnprobed,
+                        ) => {
+                            summary.kept_dirty.push((id, e.cwd.clone()));
+                        }
+                        Some(crate::gc::KeepReason::Uncorroborated) => {
+                            summary.kept_uncorroborated.push(id);
+                        }
+                        // Live / NotTerminal / WithinGrace: the ordinary,
+                        // expected keep - not what task 5 exists to surface.
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
     if to_reap.is_empty() && to_stamp.is_empty() && to_clear.is_empty() {
+        return summary;
+    }
+    if dry_run {
+        // "Would reap": same `to_reap`/`backstop_ids` membership the real
+        // write below applies, read straight off the classification pass
+        // with no lock taken and no disk touched - `--dry-run`'s whole
+        // contract. Stamp/clear candidates need no report: they never remove
+        // a row, so a rehearsal has nothing to say about them.
+        for e in &registry.entries {
+            if to_reap.get(&e.name) != Some(&e.created_at) {
+                continue;
+            }
+            let id = if e.short_id.is_empty() {
+                e.name.clone()
+            } else {
+                e.short_id.clone()
+            };
+            if backstop_ids.contains_key(&e.name) {
+                summary.reaped_backstop.push(id);
+            } else {
+                summary.reaped.push(id);
+            }
+        }
         return summary;
     }
 
@@ -3135,7 +3206,13 @@ fn rendered_status_from_truth(
     match probe.and_then(|p| p.reachability.as_deref()) {
         Some("reachable") => return "live",
         Some("unreachable") => return "orphaned",
-        Some("unknown") => return if pid_confirmed_live { "live" } else { "unknown" },
+        Some("unknown") => {
+            return if pid_confirmed_live {
+                "live"
+            } else {
+                "unknown"
+            }
+        }
         _ => {}
     }
     match probe.map(|p| p.state.as_str()) {
@@ -5633,6 +5710,95 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
         assert!(summary.reaped.is_empty());
         assert!(summary.kept_dirty.is_empty());
+        assert!(summary.kept_uncorroborated.is_empty());
+    }
+
+    /// x-9de7 task 5: the "stuck and invisible" case named in the plan -
+    /// past grace, a liveness surface on record, but no positive corroboration
+    /// (no confirmed-dead pid, no resolvable transcript) and short of the
+    /// backstop horizon. Before `kept_uncorroborated` this row was neither
+    /// reaped nor reported: an operator staring at `fno agents reap` saw
+    /// nothing at all.
+    #[test]
+    fn gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row() {
+        let home = tmp_home("gc-uncorroborated");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        // Past a 1h grace, nowhere near the 7-day backstop horizon: the case
+        // the corroboration gate exists to hold, not the escape hatch.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("stuck", Some(exited_at.as_str()));
+            e.short_id = "stuck".into(); // liveness_surface, no live socket
+            e.log_path = None; // transcript unresolvable -> transcript_fresh: None
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
+
+        assert!(
+            summary.reaped.is_empty(),
+            "no corroboration -> never reaped"
+        );
+        assert!(summary.kept_dirty.is_empty(), "not a worktree case");
+        assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
+
+        // The row itself is untouched (still on disk, unstamped-differently).
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().any(|e| e.name == "stuck"));
+    }
+
+    /// `--dry-run` (x-9de7 task 5): the same classification as a real sweep,
+    /// including the kept-reason diagnostics, but the registry is provably
+    /// untouched and no `agent_row_reaped` event lands.
+    #[test]
+    fn gc_sweep_dry_run_reports_without_mutating() {
+        let home = tmp_home("gc-dry-run");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let recent_exit = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            // Would reap (no liveness surface -> auto-corroborated regardless
+            // of age, so an old stamp is fine here).
+            r.entries
+                .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
+            // Would keep uncorroborated: past grace, short of the 7-day
+            // backstop horizon.
+            let mut stuck = ask_row("stuck", Some(recent_exit.as_str()));
+            stuck.short_id = "stuck".into();
+            stuck.log_path = None;
+            r.entries.push(stuck);
+        })
+        .unwrap();
+        let before = state::load_registry(&home.registry_json()).unwrap();
+
+        let summary = gc_sweep_dry_run(&home, &|_| Duration::from_secs(3600));
+
+        assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
+        assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
+
+        let after = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            before.entries.len(),
+            after.entries.len(),
+            "dry-run must not remove a row"
+        );
+        assert!(
+            after.entries.iter().any(|e| e.name == "ask-old"),
+            "dry-run must not remove ask-old from disk"
+        );
+        assert!(
+            !std::path::Path::new(&home.events_jsonl()).exists(),
+            "dry-run must never emit agent_row_reaped"
+        );
     }
 
     /// The long-silence repro (x-9de7 verification #7, the one task 6 exists
@@ -5656,8 +5822,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             let home = tmp_home(tag);
             let log_path = home.root().join("transcript.jsonl");
             std::fs::write(&log_path, "{}\n").unwrap();
-            let mtime = std::time::SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_secs(now - 90 * 60);
+            let mtime =
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now - 90 * 60);
             std::fs::File::options()
                 .write(true)
                 .open(&log_path)
@@ -7381,7 +7547,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(
-            reg.find("pane-bound").unwrap().harness_session_id.as_deref(),
+            reg.find("pane-bound")
+                .unwrap()
+                .harness_session_id
+                .as_deref(),
             Some("already-there")
         );
         std::fs::remove_dir_all(home.root()).ok();
@@ -7606,10 +7775,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // a live pid -- that would contradict the monotone-lowering rule
         // task 4 exists to enforce.
         assert_eq!(
-            rendered_status_from_truth(
-                probe_with_verdict("working", "unreachable").as_ref(),
-                true
-            ),
+            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref(), true),
             "orphaned",
             "a positive falsifier must never be overridden by pid liveness"
         );

@@ -159,19 +159,53 @@ pub fn removal_is_corroborated(row: &GcRow) -> bool {
     row.pid_confirmed_dead || row.transcript_fresh == Some(false) || !row.liveness_surface
 }
 
-/// Decide the GC action for one row. Pure: no clock, no I/O.
-///
-/// The reap condition is all three of: (1) terminal status OR pid confirmed dead
-/// (with liveness re-checked, never trusting a stale `exited`), (2) strictly past
-/// `grace_secs` since `exited_at`, (3) the worktree is clean, OR the row owns no
-/// worktree for the guard to protect. A row seen dead for the first time is
-/// `StampExit`ed rather than reaped, so a just-finished row stays visible for the
-/// whole grace window.
-pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
+/// WHICH gate is holding a [`GcAction::Keep`] row, for diagnostic reporting
+/// only (x-9de7 task 5). Never read by the policy itself - a row that is
+/// stuck and invisible is the failure mode `gc_action`'s own corroboration
+/// gate warns about, and this exists so `fno agents reap --dry-run` can name
+/// the gate instead of a silent, unexplained keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepReason {
+    /// Liveness re-check reports the row alive right now.
+    Live,
+    /// Not yet terminal and no confirmed-dead pid: still coming up or running.
+    NotTerminal,
+    /// Dead, but still inside the grace window since first observed dead.
+    WithinGrace,
+    /// Past grace, but nothing positively corroborates the worker is gone,
+    /// and the row is short of the absolute-age backstop horizon. The
+    /// stuck-and-invisible case this reason exists to surface.
+    Uncorroborated,
+    /// Earned a reap (or the backstop), but the worktree it owns is dirty.
+    WorktreeDirty,
+    /// Earned a reap (or the backstop), but the worktree cleanliness probe
+    /// could not answer (fail-closed).
+    WorktreeUnprobed,
+}
+
+impl KeepReason {
+    /// Stable, human-readable tag for CLI/JSON output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeepReason::Live => "live",
+            KeepReason::NotTerminal => "not-terminal",
+            KeepReason::WithinGrace => "within-grace",
+            KeepReason::Uncorroborated => "uncorroborated",
+            KeepReason::WorktreeDirty => "worktree-dirty",
+            KeepReason::WorktreeUnprobed => "worktree-unprobed",
+        }
+    }
+}
+
+/// The one decision implementation `gc_action` and `keep_reason` both read
+/// from, so the policy is never spelled twice (the exact drift `gc_action`'s
+/// own doc comment warns `removal_is_corroborated` against). `KeepReason` is
+/// `Some` iff the action is `GcAction::Keep`.
+fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     // (AC1-FR) A live worker -- re-checked -- is never touched. The caller clears
     // any stale `exited_at` on such a row separately.
     if row.is_live {
-        return GcAction::Keep;
+        return (GcAction::Keep, Some(KeepReason::Live));
     }
     // Reap condition #1: terminal status OR a confirmed-dead pid. A non-terminal
     // row with no confirmed-dead pid (e.g. `Spawning` with no pid recorded yet)
@@ -179,16 +213,16 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
     let terminal_or_dead = matches!(row.status, AgentStatus::Exited | AgentStatus::PermanentDead)
         || row.pid_confirmed_dead;
     if !terminal_or_dead {
-        return GcAction::Keep;
+        return (GcAction::Keep, Some(KeepReason::NotTerminal));
     }
     match row.exited_at {
         // First observation of a dead row: start the grace clock, do not reap yet.
-        None => GcAction::StampExit,
+        None => (GcAction::StampExit, None),
         Some(exited) => {
             // Boundary: keep until STRICTLY past the grace window. A row that
             // exited exactly `grace_secs` ago is still kept.
             if now.saturating_sub(exited) <= grace_secs {
-                return GcAction::Keep;
+                return (GcAction::Keep, Some(KeepReason::WithinGrace));
             }
             // CORROBORATION GATE. `status` and `exited_at` both derive from one
             // sweep's failure to reach a worker, so they are a single signal
@@ -220,19 +254,42 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
                 // ordinary route out of the registry.
                 GcAction::ReapBackstop
             } else {
-                return GcAction::Keep;
+                return (GcAction::Keep, Some(KeepReason::Uncorroborated));
             };
             if !row.owns_worktree {
                 // No worktree to protect, so nothing for cleanliness to say.
-                return earned;
+                return (earned, None);
             }
             match row.worktree_clean {
-                Some(true) => earned,
+                Some(true) => (earned, None),
                 // Dirty worktree kept (AC1-EDGE); probe failure fails closed.
-                Some(false) | None => GcAction::Keep,
+                Some(false) => (GcAction::Keep, Some(KeepReason::WorktreeDirty)),
+                None => (GcAction::Keep, Some(KeepReason::WorktreeUnprobed)),
             }
         }
     }
+}
+
+/// Decide the GC action for one row. Pure: no clock, no I/O.
+///
+/// The reap condition is all three of: (1) terminal status OR pid confirmed dead
+/// (with liveness re-checked, never trusting a stale `exited`), (2) strictly past
+/// `grace_secs` since `exited_at`, (3) the worktree is clean, OR the row owns no
+/// worktree for the guard to protect. A row seen dead for the first time is
+/// `StampExit`ed rather than reaped, so a just-finished row stays visible for the
+/// whole grace window.
+pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
+    gc_decide(row, now, grace_secs).0
+}
+
+/// WHICH gate is keeping this row, diagnostic-only (x-9de7 task 5). `None`
+/// when the action is not `Keep` (nothing to explain) or the row was just
+/// `StampExit`ed (not yet a candidate). Never changes the verdict `gc_action`
+/// returns - a pure readout of the same decision, for `fno agents reap
+/// --dry-run` to name the gate holding a stuck row instead of reporting it
+/// as a silent, unexplained keep.
+pub fn keep_reason(row: &GcRow, now: i64, grace_secs: i64) -> Option<KeepReason> {
+    gc_decide(row, now, grace_secs).1
 }
 
 #[cfg(test)]
@@ -689,5 +746,138 @@ mod tests {
         );
         // And the default config lands exactly on the floor, so nothing moved.
         assert_eq!(backstop_horizon_secs(GRACE), BACKSTOP_MIN_HORIZON_SECS);
+    }
+
+    // -- keep_reason (x-9de7 task 5): diagnostic-only, must never move gc_action
+
+    #[test]
+    fn keep_reason_agrees_with_gc_action_on_every_fixture_in_this_file() {
+        // The single strongest guarantee this function needs: `Some(_)` iff
+        // `GcAction::Keep`, on every fixture already exercised above, so the
+        // diagnostic can never say Keep while the policy reaps (or vice
+        // versa). Reuses the exact combinatorial sweep already proven to
+        // cover the policy's branches.
+        let past = NOW - GRACE - 1;
+        for &pid_dead in &[true, false] {
+            for &fresh in &[Some(true), Some(false), None] {
+                for &surface in &[true, false] {
+                    for &live in &[true, false] {
+                        for &wt_clean in &[Some(true), Some(false), None] {
+                            let row = GcRow {
+                                is_live: live,
+                                pid_confirmed_dead: pid_dead,
+                                transcript_fresh: fresh,
+                                liveness_surface: surface,
+                                exited_at: Some(past),
+                                owns_worktree: true,
+                                worktree_clean: wt_clean,
+                                ..reapable()
+                            };
+                            let action = gc_action(&row, NOW, GRACE);
+                            let reason = keep_reason(&row, NOW, GRACE);
+                            assert_eq!(
+                                action == GcAction::Keep,
+                                reason.is_some(),
+                                "action={action:?} reason={reason:?} for \
+                                 live={live} pid_dead={pid_dead} fresh={fresh:?} \
+                                 surface={surface} wt_clean={wt_clean:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keep_reason_is_none_for_a_stamp_exit() {
+        // A row seen dead for the first time is StampExit'd, not Keep: there
+        // is nothing yet to explain.
+        let row = GcRow {
+            exited_at: None,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::StampExit);
+        assert_eq!(keep_reason(&row, NOW, GRACE), None);
+    }
+
+    #[test]
+    fn keep_reason_names_live() {
+        let row = GcRow {
+            is_live: true,
+            ..reapable()
+        };
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::Live));
+    }
+
+    #[test]
+    fn keep_reason_names_not_terminal() {
+        let row = GcRow {
+            status: AgentStatus::Idle,
+            pid_confirmed_dead: false,
+            ..reapable()
+        };
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::NotTerminal));
+    }
+
+    #[test]
+    fn keep_reason_names_within_grace() {
+        let row = GcRow {
+            exited_at: Some(NOW - GRACE + 10),
+            ..reapable()
+        };
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::WithinGrace));
+    }
+
+    #[test]
+    fn keep_reason_names_uncorroborated_the_stuck_and_invisible_case() {
+        // The exact case task 5 exists for: past grace, nothing positively
+        // corroborates death, short of the backstop horizon.
+        let row = uncorroborated(NOW - GRACE - 1);
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::Uncorroborated)
+        );
+    }
+
+    #[test]
+    fn keep_reason_names_worktree_dirty_and_worktree_unprobed_distinctly() {
+        let dirty = GcRow {
+            worktree_clean: Some(false),
+            ..reapable()
+        };
+        assert_eq!(
+            keep_reason(&dirty, NOW, GRACE),
+            Some(KeepReason::WorktreeDirty)
+        );
+        let unprobed = GcRow {
+            worktree_clean: None,
+            ..reapable()
+        };
+        assert_eq!(
+            keep_reason(&unprobed, NOW, GRACE),
+            Some(KeepReason::WorktreeUnprobed)
+        );
+    }
+
+    #[test]
+    fn keep_reason_as_str_is_pairwise_distinct() {
+        // The CLI/JSON tag: every variant must read differently, or two
+        // distinct stuck reasons collapse into one string an operator cannot
+        // tell apart.
+        let all = [
+            KeepReason::Live,
+            KeepReason::NotTerminal,
+            KeepReason::WithinGrace,
+            KeepReason::Uncorroborated,
+            KeepReason::WorktreeDirty,
+            KeepReason::WorktreeUnprobed,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.as_str(), b.as_str());
+            }
+        }
     }
 }

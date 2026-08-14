@@ -281,7 +281,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     # enforces the invariant).
     "status": "Report daemon liveness and per-agent state.",
     "restart": "Restart a stale daemon (pick up a new build; PTY workers survive).",
-    "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output.",
+    "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, mutates nothing).",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
