@@ -1527,6 +1527,11 @@ struct GraphqlQuota {
     reset_epoch: i64,
 }
 
+/// Below this GraphQL remaining count, a no-promise fire stands down entirely
+/// (x-9715 item 4): the last of the budget belongs to the operation that
+/// ships. Code default, named in the PR body - never the operator's config.
+const GRAPHQL_FLOOR: i64 = 200;
+
 fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
     let out = Command::new(gh_bin)
         .args(["api", "rate_limit"])
@@ -5499,6 +5504,52 @@ pub fn decide(args: &[String]) -> (i32, String) {
         detect_intent(last_assistant_message.as_deref(), &transcript_path);
     let git_bin = &parsed.git_bin;
     let head_sha = git_head_sha(git_bin, &cwd);
+
+    // ── x-9715 item 4: reserve a GraphQL floor for the merge guard ────────────
+    // The GraphQL quota is per-USER and shared by every session on the machine;
+    // an idle fire's fingerprint reads are the unbounded low-value consumer that
+    // starves the bounded high-value one (the promise/merge evaluation). Below
+    // the floor, a fire carrying no promise intent STANDS DOWN: it spends no
+    // GraphQL at all rather than politely spending less. A promise-intent fire
+    // always proceeds - the floor belongs to it. The probe itself is REST and
+    // primary-exempt; a failed probe (None) changes nothing.
+    let quota_probe = probe_graphql_quota(gh_bin, &cwd);
+    if let Some(q) = &quota_probe {
+        if q.remaining < GRAPHQL_FLOOR && intent != Intent::Promise {
+            emit(
+                "loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "decision": "block",
+                    "intent": "none",
+                    "intent_source": intent_source,
+                    "pr_state": "unknown",
+                    "ci": "unknown",
+                    "reviewed": false,
+                    "standing_down": true,
+                    "graphql_remaining": q.remaining,
+                    "graphql_floor": GRAPHQL_FLOOR
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "block",
+                    None,
+                    &format!(
+                        "standing down: GraphQL remaining {} is below the floor of {} \
+                         reserved for the merge guard, so this fire spends no GraphQL - \
+                         `gh pr view` / `gh pr checks` are SKIPPED, not retried. \
+                         `fno pr status <n>` still answers on the REST budget. The next \
+                         fire re-probes; a promise intent always proceeds.",
+                        q.remaining, GRAPHQL_FLOOR
+                    ),
+                    0,
+                    None,
+                ),
+            );
+        }
+    }
 
     // Compute fingerprint from a quick PR state read (or "none" if no PR)
     // We do a lightweight fingerprint computation even when intent is None,

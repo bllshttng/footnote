@@ -5853,3 +5853,171 @@ fn line_bucket(line: &str, label: &str) -> usize {
         .parse()
         .unwrap_or_else(|_| panic!("no digits after {label:?} in {line}"))
 }
+
+// ── x-9715: GraphQL quota floor + exhaustion naming ──────────────────────────
+
+/// A gh mock that answers ONLY `api rate_limit` (GraphQL bucket per `remaining`
+/// in the script body) and `--version`, fails everything else, and logs every
+/// invocation to `calls.log` so a test can prove which reads a fire spent.
+fn quota_gh(dir: &Path, remaining: i64, green_pr_view: bool) -> PathBuf {
+    let reset = chrono::Utc::now().timestamp() + 40 * 60;
+    let pr_view_body = if green_pr_view {
+        r#"if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}'
+  exit 0
+fi"#
+    } else {
+        "true"
+    };
+    make_script(
+        dir,
+        "gh",
+        &format!(
+            r#"echo "$*" >> "{calls}"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if [ "$1" = api ] && [ "$2" = rate_limit ]; then
+  echo '{{"resources":{{"graphql":{{"remaining":{remaining},"reset":{reset}}}}}}}'
+  exit 0
+fi
+{pr_view_body}
+exit 1"#,
+            calls = dir.join("calls.log").display(),
+            remaining = remaining,
+            reset = reset,
+            pr_view_body = pr_view_body,
+        ),
+    )
+}
+
+/// Item 4: below the floor and carrying no promise intent, a fire spends NO
+/// GraphQL at all - the stand-down must precede every `gh pr view`.
+#[test]
+fn floor_stand_down_spends_no_graphql() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floor", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+
+    let gh = quota_gh(cwd, 50, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("standing down"), "got: {}", d.message);
+    assert!(d.message.contains("floor"), "got: {}", d.message);
+    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
+    assert!(calls.contains("api rate_limit"), "probe must run: {calls}");
+    assert!(
+        !calls.contains("pr view"),
+        "no GraphQL spend below floor: {calls}"
+    );
+}
+
+/// Item 4's other half: the floor belongs to the merge guard, so a
+/// promise-intent fire proceeds below it.
+#[test]
+fn floor_never_blocks_a_promise() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floor2", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // Exhausted (0 remaining) AND green: the promise must still be evaluated.
+    let gh = quota_gh(cwd, 0, true);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert!(!d.message.contains("standing down"), "got: {}", d.message);
+    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
+    assert!(calls.contains("pr view"), "promise reads proceed: {calls}");
+    assert_eq!(code, 0);
+}
+
+/// Item 2: an exhausted quota turns the bare read failure into the exhaustion
+/// name with a reset horizon, and drops the "retrying next fire" advice.
+#[test]
+fn exhaustion_named_on_read_failure() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-exh", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // remaining 0 with a FAILING pr view: the done() read errors and the
+    // reason must name the bucket, not just "retrying next fire".
+    let gh = quota_gh(cwd, 0, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("GraphQL quota exhausted"),
+        "got: {}",
+        d.message
+    );
+    assert!(d.message.contains("resets in ~"), "got: {}", d.message);
+    assert!(d.message.contains("fno pr status"), "got: {}", d.message);
+    assert!(
+        !d.message.contains("retrying next fire"),
+        "exhaustion must not be advised to retry: {}",
+        d.message
+    );
+}
