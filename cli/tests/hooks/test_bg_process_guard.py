@@ -152,10 +152,14 @@ DENIED = [
     # It is punctuation and not a separator, so the backward walk stepped over
     # it to whatever ran upstream. Both of these exit 124 under `timeout 3`.
     "true | for ((;;)); do :; done",
-    # `_head_of` skips an assignment prefix and the backward walk did not, so
-    # the arithmetic flag was charged to the first loop and its `break` cleared
-    # it. This is the mis-attribution `_opens_command` exists to close.
+    # A second walk paired headers to loops by counting, and an assignment
+    # prefix shifted the count, so the flag was charged to the first loop and
+    # its `break` cleared it. Each loop reads its own header now.
     "x=$(for f in a b; do break; done); for ((;;)); do :; done",
+    # The third bug from that same pairing: a `case` pattern word `for`
+    # consumed the real loop's flag, so the endless loop after `esac` ran.
+    "case $x in a|for) echo hi;; esac; for ((;;)); do :; done",
+    "case $x in for|while) echo hi;; esac; for ((;;)); do :; done",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -262,6 +266,11 @@ ALLOWED = [
     "cat f | while read -r l; do echo $l; done",
     "x=1; for f in a b; do echo $f; done",
     "x=$(date); for f in a b; do echo $f; done",
+    # A `case` pattern word is a pattern, never a loop header.
+    "case $x in a|for) echo hi;; esac",
+    "case $x in for|while) echo hi;; esac",
+    "a=b=c; for f in a b; do echo $f; done",
+    "cmd --opt=value; for f in a b; do echo $f; done",
 ]
 
 

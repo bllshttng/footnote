@@ -212,33 +212,63 @@ def _pipe_parts(segment, split=True):
     same fail-open direction as the rest of this file, and a refusal of the
     plain `y|yes)` idiom is the more expensive error.
     """
+    return [part for part, _ in _pipe_spans(segment, 0, split=split)]
+
+
+def _pipe_spans(segment, start, split=True):
+    """`_pipe_parts`, but each part carries its absolute index in the token list.
+
+    The index is what lets a `for` head look up its OWN arithmetic header. The
+    header is not in the segment (`((;;));` is punctuation, so `_segments`
+    drops it as a separator), and matching headers to loops by counting `for`s
+    in a second walk produced three separate bugs: a subshell `(`, an
+    assignment prefix, and a `case` pattern alternation each made the two walks
+    count different sets, and the flag then described one loop while being
+    charged to another. Positional pairing is the defect; this removes it.
+
+    Segment tokens are contiguous in the token list, because `_segments` splits
+    only on single separator tokens, so `start + offset` is exact.
+    """
     if not split:
-        return [segment]
-    parts, current = [], []
-    for tok in segment:
+        return [(segment, start)] if segment else []
+    parts, current, cur_start = [], [], start
+    for offset, tok in enumerate(segment):
         # `|&` pipes stdout AND stderr. It is a pipe, so it resets command
         # position exactly as `|` does.
         if tok in ("|", "|&"):
-            parts.append(current)
-            current = []
+            if current:
+                parts.append((current, cur_start))
+            current, cur_start = [], start + offset + 1
         else:
+            if not current:
+                cur_start = start + offset
             current.append(tok)
-    parts.append(current)
-    return [p for p in parts if p]
+    if current:
+        parts.append((current, cur_start))
+    return parts
 
 
 def _segments(tokens):
     """Split a token list on command separators. Redirections stay attached to
     their segment; only control operators split."""
-    out, current = [], []
-    for tok in tokens:
+    return [seg for seg, _ in _segment_spans(tokens)]
+
+
+def _segment_spans(tokens):
+    """`_segments`, but each segment carries its start index in `tokens`."""
+    out, current, start = [], [], 0
+    for idx, tok in enumerate(tokens):
         if _is_separator(tok):
-            out.append(current)
-            current = []
+            if current:
+                out.append((current, start))
+            current, start = [], idx + 1
         else:
+            if not current:
+                start = idx
             current.append(tok)
-    out.append(current)
-    return [seg for seg in out if seg]
+    if current:
+        out.append((current, start))
+    return out
 
 
 def _head_of(segment, greedy=False):
@@ -403,70 +433,22 @@ def _payload_of(head, argv):
     return None
 
 
-def _opens_command(tokens, i):
-    """Is `tokens[i]` in command position, by the SAME rules `_head_of` uses?
-
-    `_head_of` walks forward past punctuation-only tokens and TRANSPARENT
-    openers, so `( for ((;;))` resolves its head to `for`. A backward test that
-    accepted only a separator disagreed with it, and the two walks then counted
-    different `for`s. The flag list ran short, the counter drifted, and
-    `( for ((;;)); do :; done ) &` was ALLOWED. `( cmd & )` is the canonical
-    detach idiom named in AGENTS.md, so that is the likeliest spelling of it.
-
-    The drift also mis-attributed: with one innocent `for` inside a subshell,
-    the arithmetic flag landed on the innocent loop, and a `break` in that loop
-    then cleared it while the real endless `for` ran.
-    """
-    j = i - 1
-    while j >= 0:
-        tok = tokens[j]
-        if _is_separator(tok):
-            return True
-        # A pipe RESETS command position, which is the whole premise of
-        # `_pipe_parts`. It is punctuation and not a separator, so the walk used
-        # to step over it to whatever ran upstream and answer False:
-        # `true | for ((;;)); do :; done` was allowed, and under
-        # `timeout 3 bash -c` it exits 124, so it really does run forever.
-        if tok in ("|", "|&"):
-            return True
-        if tok and all(ch in PUNCT_CHARS for ch in tok):
-            j -= 1
-            continue
-        if tok.rsplit("/", 1)[-1] in TRANSPARENT:
-            j -= 1
-            continue
-        # A leading assignment is a prefix, not the command, exactly as
-        # `_head_of` reads it. Without this the two walks still disagreed, and
-        # the mis-attribution this function exists to close survived in its
-        # assignment spelling:
-        # `x=$(for f in a b; do break; done); for ((;;)); do :; done` charged
-        # the arithmetic flag to the first loop, whose `break` cleared it.
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tok):
-            j -= 1
-            continue
-        return False
-    return True
-
-
-def _arith_for_flags(tokens):
-    """One bool per command-position `for`, in order: can its header never end?
+def _arith_endless(tokens, for_index):
+    """Can the `for` at `for_index` never end?
 
     Bash reads three `;`-separated arithmetic expressions and the MIDDLE one is
     the condition. An empty condition is what never ends: `for ((i=0;i<10;i++))`
     counts to ten and stops, `for ((i=0;;))` does not. A shape test that reads
     only `((;;))` calls the first one infinite too.
 
-    Read from the token walk, in command position, never from the raw text. A
-    text match denied `echo "for ((;;))"`, `rg 'for ((;;))' hooks/`, and a
-    commit message naming the shape. None of those has a shell loop in it, and
-    the third blocked writing about this guard in the repo that ships it. That
-    is the same defect this file already refused for `break`, reached from the
-    other side.
+    Read from tokens, never from the raw text. A text match denied
+    `echo "for ((;;))"`, `rg 'for ((;;))' hooks/`, and a commit message naming
+    the shape. None of those has a shell loop in it, and the third blocked
+    writing about this guard in the repo that ships it.
 
-    The header is rebuilt by joining tokens rather than read per segment.
-    `((;;));` is all punctuation, so the lexer emits it as one operator token
-    and `_segments` drops it as a separator; by the time there are segments the
-    condition is gone.
+    The header is rebuilt by joining tokens, because it is not in the segment:
+    `((;;));` is punctuation, so `_segments` drops it as a separator and by the
+    time there are segments the condition is gone.
 
     Two rules keep that join from reaching past the header. The arithmetic must
     start IMMEDIATELY after `for`, and a token carrying whitespace ends it. A
@@ -475,32 +457,32 @@ def _arith_for_flags(tokens):
     denied. Moving the read off raw text onto tokens did not fix that on its
     own, because the quoted text is still inside a token.
 
-    A flag per `for` rather than one answer for the command, so an escape can be
-    charged to the loop it actually leaves.
+    Asked PER LOOP, at the index the caller already resolved. The previous
+    design built a positional list of flags in a second walk and paired them to
+    loops by counting. That pairing produced three separate bugs, because the
+    two walks disagreed about which `for`s were in command position: a subshell
+    `(`, an assignment prefix, and a `case` pattern alternation each shifted the
+    count, and a flag then described one loop while being charged to another. In
+    the last of those, `case $x in a|for) echo hi;; esac; for ((;;)); do :; done`
+    was ALLOWED, because the pattern word `for` consumed the real loop's flag.
+    There is no counter now, so there is nothing left to drift.
     """
-    flags = []
-    for i, tok in enumerate(tokens):
-        if tok != "for" or not _opens_command(tokens, i):
-            continue
-        rest = tokens[i + 1:]
-        if not rest or not rest[0].startswith("(("):
-            flags.append(False)  # `for f in *`, a word list and not arithmetic
-            continue
-        header = []
-        for nxt in rest:
-            if nxt == "do" or any(ch.isspace() for ch in nxt):
-                break
-            header.append(nxt)
-            if "))" in nxt:
-                break
-        joined = "".join(header)
-        end = joined.find("))", 2)
-        if end == -1:
-            flags.append(False)  # a header this walk cannot read; fail open
-            continue
-        parts = joined[2:end].split(";")
-        flags.append(len(parts) == 3 and not parts[1].strip())
-    return flags
+    rest = tokens[for_index + 1:]
+    if not rest or not rest[0].startswith("(("):
+        return False  # `for f in *`, a word list and not arithmetic
+    header = []
+    for nxt in rest:
+        if nxt == "do" or any(ch.isspace() for ch in nxt):
+            break
+        header.append(nxt)
+        if "))" in nxt:
+            break
+    joined = "".join(header)
+    end = joined.find("))", 2)
+    if end == -1:
+        return False  # a header this walk cannot read; fail open
+    parts = joined[2:end].split(";")
+    return len(parts) == 3 and not parts[1].strip()
 
 
 def _find_unbounded(text, inherited_bound=False, depth=0):
@@ -541,24 +523,27 @@ def _find_unbounded(text, inherited_bound=False, depth=0):
     # ponytail: `break` leaves one loop and `exit` leaves the shell, but both
     # mark every open loop here. Distinguishing them costs another rule and
     # buys a refusal, and this file fails open on purpose.
+    spans = _segment_spans(all_tokens)
+    all_segments = [seg for seg, _ in spans]
     in_case = _case_regions(all_segments)
+    # (head, absolute token index of that head) per pipe stage, per segment. The
+    # index is what lets a `for` ask about its OWN header instead of being
+    # paired to one by position in a second walk.
     heads = [
-        [_head_of(part)[0] for part in _pipe_parts(segment, split=not cased)]
-        for segment, cased in zip(all_segments, in_case)
+        [
+            (_head_of(part)[0], part_start + (part.index("for") if "for" in part else 0))
+            for part, part_start in _pipe_spans(segment, seg_start, split=not cased)
+        ]
+        for (segment, seg_start), cased in zip(spans, in_case)
     ]
-    arith = _arith_for_flags(all_tokens)
     escaped_at = {}
     endless_for = []
     stack = []
-    seen_for = 0
     for idx, hs in enumerate(heads):
-        for head in hs:
+        for head, for_index in hs:
             if head in {"while", "until", "for"}:
-                arith_endless = False
-                if head == "for":
-                    arith_endless = arith[seen_for] if seen_for < len(arith) else False
-                    seen_for += 1
-                stack.append({"idx": idx, "endless": arith_endless, "escaped": False})
+                endless = head == "for" and _arith_endless(all_tokens, for_index)
+                stack.append({"idx": idx, "endless": endless, "escaped": False})
             elif head == "done" and stack:
                 closed = stack.pop()
                 escaped_at[closed["idx"]] = closed["escaped"]
