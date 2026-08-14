@@ -8030,8 +8030,15 @@ impl Core {
                 // reconcile). This is the ONLY writer of `external_lifecycle` on
                 // the core loop, so a stale action's late sync just re-renders
                 // the durable truth it already re-read.
+                //
+                // (x-0f42) Same shape as `AgentRows`/`BacklogCards` below: only
+                // sideline data moved, rects are unchanged, so push without a
+                // frame re-emit. `push_layout(true)` here flushed and reseeded
+                // every visible pane's frame on every sync - a resize-storm-
+                // shaped redraw across every viewed pane on a routine poll,
+                // even when nothing in the record set actually changed.
                 self.external_lifecycle = records;
-                self.push_layout(true);
+                self.push_layout(false);
                 for n in notices {
                     match to {
                         Some(cid) => self.notice(cid, n),
@@ -14746,6 +14753,149 @@ mod tests {
             row.cwd_base.as_deref(),
             Some("x-6851"),
             "a squad-matched external row now carries its cwd basename"
+        );
+    }
+
+    #[test]
+    fn external_lifecycle_sync_does_not_flush_the_dirty_map() {
+        // x-0f42: reemit=true's frame-flush (`d.clear()` then reseed only the
+        // client's CURRENTLY VIEWED pane ids) is the actual resize-storm-shaped
+        // defect: it drops any dirty-map entry that isn't part of the live
+        // view, same failure class as x-0296's quiet-pane loss. A currently
+        // VIEWED pane is a bad probe for this (reemit=true immediately reseeds
+        // it with a fresh frame, so `contains_key` stays true either way) - the
+        // probe has to be a dirty entry that push_layout can never reseed: a
+        // pane id belonging to no live tab. reemit=false never touches `dirty`
+        // at all, so it survives; reemit=true's unconditional `d.clear()` wipes
+        // it with nothing to put back.
+        use crate::squad_store::{ExternalLifecycle, ExternalState};
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/x0f42".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(p1),
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        let dirty: DirtyMap = Arc::default();
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/x0f42".into(),
+            "/tmp/x0f42".into(),
+            tx,
+            dirty.clone(),
+            Arc::new(Notify::new()),
+        );
+        while rx.try_recv().is_ok() {}
+        // A dangling dirty-map entry under a pane id that belongs to no tab -
+        // standing in for a background/quiet pane whose only copy of a frame
+        // sits in a client's dirty map outside its current view. No real
+        // geometry pass can ever reseed this key.
+        const DANGLING_PANE_ID: u64 = 999_999;
+        let sentinel = core.panes.get(&p1).unwrap().vt.frame();
+        dirty.lock().unwrap().insert(DANGLING_PANE_ID, sentinel);
+
+        let existing = vec![ExternalLifecycle {
+            attach_id: "abc123".into(),
+            name: "worker".into(),
+            cwd: "/tmp/other".into(),
+            state: ExternalState::Stopping,
+            generation: 3,
+            updated_at: "t0".into(),
+            reason: None,
+        }];
+        core.external_lifecycle = existing.clone();
+        // A late sync carrying the IDENTICAL record set (a stale action's
+        // late completion, or the startup reconcile re-observing the same
+        // state) is exactly the no-op-content case this handler must treat
+        // as sideline-only.
+        core.handle_msg(CoreMsg::ExternalLifecycleSync {
+            to: None,
+            records: existing,
+            notices: vec![],
+        });
+        assert!(
+            dirty.lock().unwrap().contains_key(&DANGLING_PANE_ID),
+            "an ExternalLifecycleSync must not flush the dirty map: rects \
+             never depend on external_lifecycle content, so this is exactly \
+             the reemit=false case AgentRows/BacklogCards already use (x-0f42)"
+        );
+    }
+
+    #[test]
+    fn external_lifecycle_sync_with_changed_records_still_pushes_layout_to_clients() {
+        // x-0f42: the fix must not turn this into a no-op path entirely - a
+        // genuinely different sideline (a real state transition, e.g.
+        // Stopping -> Stopped) still has to reach clients as a fresh Layout
+        // so the sideline agent list actually updates. reemit=false still
+        // sends Layout unconditionally; only the frame flush is skipped.
+        use crate::squad_store::{ExternalLifecycle, ExternalState};
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/x0f42b".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(p1),
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        let dirty: DirtyMap = Arc::default();
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/x0f42b".into(),
+            "/tmp/x0f42b".into(),
+            tx,
+            dirty.clone(),
+            Arc::new(Notify::new()),
+        );
+        while rx.try_recv().is_ok() {}
+
+        core.external_lifecycle = vec![ExternalLifecycle {
+            attach_id: "abc123".into(),
+            name: "worker".into(),
+            cwd: "/tmp/other".into(),
+            state: ExternalState::Stopping,
+            generation: 3,
+            updated_at: "t0".into(),
+            reason: None,
+        }];
+        let changed = vec![ExternalLifecycle {
+            attach_id: "abc123".into(),
+            name: "worker".into(),
+            cwd: "/tmp/other".into(),
+            state: ExternalState::Stopped,
+            generation: 4,
+            updated_at: "t1".into(),
+            reason: None,
+        }];
+        core.handle_msg(CoreMsg::ExternalLifecycleSync {
+            to: None,
+            records: changed,
+            notices: vec![],
+        });
+        let saw_layout = std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|m| matches!(m, ServerMsg::Layout { .. }));
+        assert!(
+            saw_layout,
+            "a genuinely different external_lifecycle set must still re-push \
+             Layout to clients, even though no pane resizes (x-0f42)"
         );
     }
 
