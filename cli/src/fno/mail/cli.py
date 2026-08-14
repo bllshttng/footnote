@@ -1609,7 +1609,10 @@ def _name_lane_send(
     # change is which misses reach the send-time nudge, not a second mechanism.
     # Best-effort, never affects the send's exit code or receipt.
     attended = _recipient_is_attended(recipient)
-    resolved_reachable = resolved is not None and bool(getattr(resolved, "is_reachable", False))
+    # Reuse the `recipient_live` verdict computed above rather than asking
+    # `is_reachable` a second time: one derivation, one default, and the two
+    # cannot disagree about the same recipient.
+    resolved_reachable = resolved is not None and recipient_live
     if live_attempted and (attended or resolved_reachable):
         esc_reason = "attended-miss" if attended else "reachable-miss"
         if (
