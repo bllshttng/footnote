@@ -1331,23 +1331,51 @@ fn run_reap(rest: &[String]) -> i32 {
     let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let summary = fno_agents::daemon::gc_sweep(&home, &emitter, grace);
 
+    print!("{}", render_reap(&summary, json_out));
+    0
+}
+
+/// Render a sweep outcome. Pure, like [`render_restart`], so the one property
+/// that matters here is testable without a registry: BOTH counts appear at every
+/// pass, including zero.
+///
+/// A backstop removal bypassed the corroboration gate. Reporting it separately is
+/// the entire reason it is a separate verdict, so an operator can see the bypass
+/// happening and compare the two totals. A field nothing prints is not a count -
+/// it reported zero reaps while rows were being deleted.
+fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool) -> String {
     if json_out {
         let kept: Vec<Value> = summary
             .kept_dirty
             .iter()
             .map(|(id, path)| json!({"id": id, "worktree": path}))
             .collect();
-        println!("{}", json!({"reaped": summary.reaped, "kept_dirty": kept}));
-    } else {
-        println!("reaped {} row(s)", summary.reaped.len());
-        for id in &summary.reaped {
-            println!("  reaped {id}");
-        }
-        for (id, path) in &summary.kept_dirty {
-            println!("  kept {id} (dirty worktree: {path})");
-        }
+        return format!(
+            "{}\n",
+            json!({
+                "reaped": summary.reaped,
+                "reaped_backstop": summary.reaped_backstop,
+                "kept_dirty": kept,
+            })
+        );
     }
-    0
+    let mut out = format!(
+        "reaped {} row(s) ({} by the age backstop)\n",
+        summary.reaped.len(),
+        summary.reaped_backstop.len()
+    );
+    for id in &summary.reaped {
+        out.push_str(&format!("  reaped {id}\n"));
+    }
+    for id in &summary.reaped_backstop {
+        out.push_str(&format!(
+            "  reaped {id} (age backstop: nothing corroborated it)\n"
+        ));
+    }
+    for (id, path) in &summary.kept_dirty {
+        out.push_str(&format!("  kept {id} (dirty worktree: {path})\n"));
+    }
+    out
 }
 
 /// Render a restart outcome into (stdout line, optional stderr line, exit code).
@@ -2904,6 +2932,59 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // `reap` outcome rendering: both counts, at every pass, including zero.
+    // -----------------------------------------------------------------------
+
+    fn summary(reaped: &[&str], backstop: &[&str]) -> fno_agents::daemon::GcSummary {
+        fno_agents::daemon::GcSummary {
+            reaped: reaped.iter().map(|s| (*s).to_string()).collect(),
+            reaped_backstop: backstop.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reap_reports_the_backstop_count_even_when_it_is_zero() {
+        // The always-on half of the criterion. An operator reading a quiet pass
+        // must still see that the second count exists and is zero, or a later
+        // nonzero one has nothing to be read against.
+        let out = render_reap(&summary(&["a1"], &[]), false);
+        assert!(
+            out.starts_with("reaped 1 row(s) (0 by the age backstop)"),
+            "missing the zero backstop count: {out}"
+        );
+    }
+
+    #[test]
+    fn reap_names_every_backstop_row_it_removed() {
+        // The regression: the field existed and nothing printed it, so the verb
+        // said "reaped 0 row(s)" while the backstop deleted two rows.
+        let out = render_reap(&summary(&[], &["b1", "b2"]), false);
+        assert!(
+            out.starts_with("reaped 0 row(s) (2 by the age backstop)"),
+            "backstop removals missing from the totals: {out}"
+        );
+        assert!(out.contains("  reaped b1 (age backstop"), "{out}");
+        assert!(out.contains("  reaped b2 (age backstop"), "{out}");
+    }
+
+    #[test]
+    fn reap_json_carries_both_lists() {
+        let out = render_reap(&summary(&["a1"], &["b1"]), true);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["reaped"], json!(["a1"]));
+        assert_eq!(v["reaped_backstop"], json!(["b1"]));
+    }
+
+    #[test]
+    fn reap_json_keeps_the_backstop_key_when_empty() {
+        // A key that vanishes at zero makes every consumer write a default, and
+        // one of them will default to "no backstop removals ever happened".
+        let out = render_reap(&summary(&[], &[]), true);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["reaped_backstop"], json!([]));
+    }
+
     // ab-1891cdff: `restart` outcome rendering (AC2-HP / AC2-EDGE / AC2-FR)
     // -----------------------------------------------------------------------
 
