@@ -1514,6 +1514,51 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
+/// The GraphQL bucket's state, from `gh api rate_limit`.
+///
+/// That endpoint is REST and primary-exempt, so the probe is free even while
+/// GraphQL sits at 0 - which is its whole job: it distinguishes "the call
+/// cannot succeed for N minutes" from "gh blipped", the two outcomes a bare
+/// read failure conflates. None on any failure: a failed probe must never
+/// fabricate an exhaustion verdict (a false "resets in 40m" would stall a
+/// healthy session for no reason).
+struct GraphqlQuota {
+    remaining: i64,
+    reset_epoch: i64,
+}
+
+fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
+    let out = Command::new(gh_bin)
+        .args(["api", "rate_limit"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let g = v.get("resources")?.get("graphql")?;
+    Some(GraphqlQuota {
+        remaining: g.get("remaining").and_then(|x| x.as_i64())?,
+        reset_epoch: g.get("reset").and_then(|x| x.as_i64())?,
+    })
+}
+
+/// The self-teaching exhaustion message. A session that reads it must stop
+/// retrying the GraphQL reads this window and know where the answer still
+/// lives - anything less and it burns a fire every tick on a call that
+/// cannot succeed until the reset.
+fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
+    let now = Utc::now().timestamp();
+    let mins = ((q.reset_epoch - now) / 60).max(0);
+    format!(
+        "GraphQL quota exhausted ({} remaining, resets in ~{}m). `gh pr view` / \
+         `gh pr checks` cannot succeed until the reset: stop retrying them this \
+         window. `fno pr status <n>` still answers on the REST budget.",
+        q.remaining, mins
+    )
+}
+
 /// A configured local reviewer with no head-pinned `pass` attestation.
 #[derive(Debug, Clone, PartialEq)]
 struct UnattestedReviewer {
@@ -6524,12 +6569,22 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // still the binding ceiling, not budget. AC4-EDGE holds only in
                 // the sense that budget is checked before any gh read, so a gh
                 // outage alone never makes a session immortal from fno's side.
+                // Name the real reason when the quota is the reason (x-9715 item
+                // 2). "retrying next fire" is the right advice for a blip and
+                // the worst possible advice for an exhausted quota: it burns a
+                // fire every tick for the whole reset window on a call that
+                // cannot succeed. The probe is REST and primary-exempt, so it
+                // still answers while GraphQL is at 0; a failed probe keeps
+                // the transient wording rather than guessing.
+                let quota = probe_graphql_quota(gh_bin, &cwd);
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
                         "session_id": session_id,
                         "read": failed_read,
-                        "stderr_tail": failed_stderr
+                        "stderr_tail": failed_stderr,
+                        "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                        "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
                     }),
                 );
                 emit(
@@ -6549,17 +6604,22 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fp_read_failed": true
                     }),
                 );
+                // Name the real reason when the quota is the reason (x-9715 item
+                // 2). "retrying next fire" is the right advice for a blip and
+                // the worst possible advice for an exhausted quota: it burns a
+                // fire every tick for the whole reset window on a call that
+                // cannot succeed. The probe is REST and primary-exempt, so it
+                // still answers while GraphQL is at 0; a failed probe keeps
+                // the transient wording rather than guessing.
+                let reason = match &quota {
+                    Some(q) if q.remaining == 0 => graphql_exhausted_reason(q),
+                    _ => format!(
+                        "gh read '{failed_read}' failed; retrying next fire. {failed_stderr}"
+                    ),
+                };
                 return (
                     0,
-                    allow_output(
-                        "block",
-                        None,
-                        &format!(
-                            "gh read '{failed_read}' failed; retrying next fire. {failed_stderr}"
-                        ),
-                        this_fire,
-                        Some(fingerprint),
-                    ),
+                    allow_output("block", None, &reason, this_fire, Some(fingerprint)),
                 );
             }
         }
@@ -7896,12 +7956,18 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 );
                 return (4, data.to_string());
             }
+            // The emitted unknown row above is schema-gated, so the exhaustion
+            // diagnosis rides this stdout-only branch (and the stop hook's own
+            // block reason); it must not fork the event contract.
+            let quota = probe_graphql_quota(&gh_bin, &cwd);
             (
                 4,
                 serde_json::json!({
                     "error": format!("gh read failed: {read}"),
                     "detail": tail,
                     "emitted": false,
+                    "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                    "graphql_exhausted": quota.as_ref().map(|q| q.remaining == 0),
                 })
                 .to_string(),
             )
@@ -10481,6 +10547,65 @@ mod tests {
         assert!(!harness_can_self_review(Some("agy")));
         assert!(!harness_can_self_review(Some("opencode")));
         assert!(!harness_can_self_review(None));
+    }
+
+    #[test]
+    fn graphql_exhausted_reason_names_reset_and_rest_lane() {
+        // The message must make a session STOP retrying and say where the
+        // answer still lives; "retrying next fire" is the advice it replaces.
+        let q = GraphqlQuota {
+            remaining: 0,
+            reset_epoch: Utc::now().timestamp() + 40 * 60 + 5,
+        };
+        let msg = graphql_exhausted_reason(&q);
+        assert!(msg.contains("GraphQL quota exhausted"), "got: {msg}");
+        assert!(msg.contains("~40m"), "got: {msg}");
+        assert!(msg.contains("fno pr status"), "got: {msg}");
+        assert!(!msg.contains("retrying next fire"), "got: {msg}");
+    }
+
+    #[test]
+    fn graphql_exhausted_reason_never_reports_a_past_reset() {
+        let q = GraphqlQuota {
+            remaining: 0,
+            reset_epoch: Utc::now().timestamp() - 120,
+        };
+        assert!(graphql_exhausted_reason(&q).contains("~0m"));
+    }
+
+    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn probe_graphql_quota_parses_the_graphql_bucket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(
+            tmp.path(),
+            "gh",
+            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000}}}' && exit 0\n\
+             exit 1\n",
+        );
+        let q = probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).unwrap();
+        assert_eq!(q.remaining, 0);
+        assert_eq!(q.reset_epoch, 1750000000);
+    }
+
+    #[test]
+    fn probe_graphql_quota_failure_is_none_not_a_false_exhaustion() {
+        // A failed probe must degrade to the transient wording, never
+        // fabricate an exhaustion verdict that stalls a healthy session.
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 1\n");
+        assert!(probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).is_none());
     }
 
     #[test]
