@@ -12,12 +12,24 @@ node, :func:`maybe_spawn_think` evaluates a spawn decision *deterministically in
 code* (Locked Decision 1: never LLM-volunteered, the ambient-capture principle
 inherited from x-30f6) and, when armed:
 
-  - **away** (the originating session is headless/autonomous): spawns a
+  - **unforced birth** (x-42c5): ALWAYS surfaces a single copy-pasteable
+    ``/think <node-id>`` handoff line - never auto-spawns - regardless of
+    away/attended presence or the ``think_spawn.attended`` config. A node
+    birth is the one trigger with zero human decision behind it (every
+    ``fno backlog idea``/``intake``/``add``/retro-harvest call routes here),
+    so it is the one trigger that must never fire a worker on its own. Prior
+    to x-42c5 an away-classified birth (a headless/spawned session filing a
+    node) spawned a real ``/think`` worker unconditionally - the near-miss
+    that motivated this: ~20 nodes filed in one attended session with the
+    gate armed, each three seconds from an unplanned worker had that session
+    been away instead.
+  - **consented dispatch** (``chain_blueprint=True``, e.g. decompose's
+    ``needs_think``/wave0 fan-out; or a non-birth ``reason`` such as the
+    explicit conversational verb or an armed lifecycle trigger): spawns a
     fire-and-forget ``/think`` background worker carrying the *resolved*
-    transcript pointer (not a paraphrase), then stamps the node with the
-    spawned think's session pointer.
-  - **attended** (an operator is present): surfaces a single copy-pasteable
-    ``/think <node-id>`` handoff line rather than auto-spawning.
+    transcript pointer (not a paraphrase) when away, or per
+    ``think_spawn.attended`` when an operator is present; stamps the node
+    with the spawned think's session pointer on a real spawn.
 
 The whole evaluation is opt-in (``config.think_spawn.enabled``, default OFF),
 bounded (per-run blast-radius cap + at-most-once dedup token), and strictly
@@ -795,7 +807,13 @@ def _spawn_think_worker(
         cmd += ["--permission-mode", mode]
     cmd += ["--name", agent_name, rendered_prompt]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # x-42c5: tag the CAUSE of this spawn (never reached for an unforced birth -
+    # maybe_spawn_think resolves that to "offered" before this function is ever
+    # called), so a future provenance question is a registry field, not a
+    # timestamp-gap inference. FNO_SPAWN_TRIGGER rides the subprocess env; the
+    # spawn command's own AgentEntry write reads it back (_capture_spawn_trigger).
+    spawn_env = {**os.environ, "FNO_SPAWN_TRIGGER": f"think_spawn:{reason}"}
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=spawn_env)
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         if proc.returncode == 2 and _SPAWN_ALREADY_EXISTS in stderr:
@@ -961,6 +979,12 @@ def on_node_born(
     quiet: bool = False,
 ) -> Optional[ThinkSpawnResult]:
     """Single post-persist birth hook: every node-creation path routes here.
+
+    x-42c5: this call never results in a real spawn (the module docstring's
+    "unforced birth" case) - the worst outcome is a durable ``think_offered``
+    event, never an unplanned worker. Callers do not need to reason about
+    presence or config here; that decision is centralized in
+    :func:`maybe_spawn_think`.
 
     Before v2 only ``cmd_idea`` called :func:`maybe_spawn_think` inline, so a
     retro-harvest / intake / decompose birth carried no why forward (the
@@ -1301,7 +1325,22 @@ def maybe_spawn_think(
     # 6. Attended => offer a single handoff line by default; auto-spawn only when
     #    the operator opted in via config.think_spawn.attended: spawn (AC4-HP, B).
     #    Default 'offer' is byte-for-byte x-6a10.
-    if presence == "attended" and _attended_mode(project_root, env=environ) == "offer":
+    #
+    #    x-42c5: an UNFORCED birth trigger (reason==birth, no explicit consent)
+    #    must never silently auto-spawn, in ANY presence and regardless of the
+    #    attended-mode config - a node born while the originating session
+    #    classifies as away previously fired a real bg /think with nobody
+    #    deciding that (the near-miss this closes: ~20 nodes filed in one
+    #    session with the gate armed, each three seconds from an unplanned
+    #    worker). `chain_blueprint=True` is the existing, already-tested signal
+    #    a caller uses to mark a REASON_BIRTH-tagged call as consented (the
+    #    decompose `needs_think`/wave0 fan-out forces it, alongside its own
+    #    env override); an organic on_node_born call never sets it, so this
+    #    check alone separates "nobody decided" from "a human/king flagged
+    #    this child for design."
+    unforced_birth = reason == REASON_BIRTH and not chain_blueprint
+    attended_offer = presence == "attended" and _attended_mode(project_root, env=environ) == "offer"
+    if unforced_birth or attended_offer:
         # quiet: a machine-mode caller (e.g. `decompose --json`) suppresses the
         # human-facing offer print so it can't pollute a captured JSON stream; the
         # durable EVENT_OFFERED below still fires, so the offer survives for
@@ -1314,12 +1353,12 @@ def maybe_spawn_think(
             )
         _emit(
             EVENT_OFFERED,
-            {"node_id": node_id, "trigger": reason, "presence": "attended",
+            {"node_id": node_id, "trigger": reason, "presence": presence,
              "resolved": seed.resolved, "offer_line": seed.offer_line},
             ev_path,
         )
         return ThinkSpawnResult(
-            "offered", EVENT_OFFERED, node_id=node_id, presence="attended",
+            "offered", EVENT_OFFERED, node_id=node_id, presence=presence,
             resolved=seed.resolved, offer_line=seed.offer_line,
         )
 

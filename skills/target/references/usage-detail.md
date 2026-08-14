@@ -85,7 +85,7 @@ Common overrides:
 
 ## Model Optimization
 
-Opus stays inline for phases 1-5 (think, plan, execute, review, validate) because:
+Opus stays inline for phases 1-4 (plan, execute, review, validate) - and, when a deliberate `/think` precedes them, that too - because:
 - These need full conversation context and deep reasoning
 - Cached input tokens (90% discount) make inline Opus cheaper than fresh agents
 - 1M context window prevents freezing on long sessions

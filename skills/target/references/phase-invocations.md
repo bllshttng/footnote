@@ -8,7 +8,6 @@ Phases resolve from `domain_phases` in config.toml (falling back to built-in cod
 
 | Phase | Default Skill (code domain) |
 |-------|-------|
-| think | `fno:think` |
 | plan | `fno:plan` |
 | do | Resolved from `domain_phases.execute` |
 | review | Resolved from `domain_phases.review` |
@@ -23,25 +22,26 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 - If value is a skill name (contains `:`): invoke via the Skill tool
 - If value is a bash command (contains spaces or starts with a command): run via Bash
 - If value is `"none"`: skip phase (the corresponding skip flag in the manifest controls this)
-- Think and spec phases are NOT domain-resolved (always use fno:think/blueprint)
+- The plan phase is NOT domain-resolved (always uses `fno:blueprint`). `/think` is not a pipeline phase (x-42c5, operator ruling): it is a research verb outside the delivery path and is never invoked automatically here, only by a deliberate choice before `/blueprint`.
 
 ## Phase Details Table
 
+`/think` is not a phase in this table (x-42c5): a bare idea routes directly to Plan below, which self-grounds via its own discovery gate. Run `/think` beforehand only as a deliberate choice, never as an automatic step 1.
+
 | Phase | Condition | Skill |
 |-------|-----------|-------|
-| 1. Think | `input_type == idea` | `fno:think` |
-| 2. Plan | idea OR no 00-INDEX.md | `fno:plan` |
-| 3. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:do waves`) |
-| 3. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
-| 3.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
-| 4. Review | Always (BEFORE PUSH) | `preship_review_plan` decides (see [phase-bodies.md](phase-bodies.md)): advisory self-review by default; `domain_phases.review`/`fno:review` sigma only when `config.review.reviewers` names `sigma` |
-| 5. Validate | Always (BEFORE PUSH) | `domain_phases.validate` (default: project-detected); CI green on the PR is verified by the loop-check verb at promise time |
-| 5.5 Docs | **Default: YES** (skip only with `--no-docs` or config) | `domain_phases.docs` (default: `fno:ship-docs`); docs MUST land BEFORE ship so they ride in the same PR |
-| 6. Browser | If `has_ui` (skip with `--no-browser`) | `fno:tdd` (browser-testing reference); advisory run-and-log, never gates completion and is not a loop-check input; run BEFORE ship so any findings ride in the same PR |
-| 7. Ship | Default YES (skip with `--no-ship`) | `domain_phases.ship` (default: `fno:pr create`); run AFTER docs + browser |
-| 7a. Pre-ship rebase | Only if `auto_merge_approved: true` | `fno pr rebase` |
-| 8. External | **Default: YES** (skip only with `--no-external` or config) | `domain_phases.external` (default: `fno:pr check {pr_number}`) |
-| 8a. Post-review merge | Only if `auto_merge_approved: true` AND external review done | `fno pr merge --invoker=target "$PR_NUMBER"` |
+| 1. Plan | idea OR no 00-INDEX.md | `fno:plan` |
+| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:do waves`) |
+| 2. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
+| 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
+| 3. Review | Always (BEFORE PUSH) | `preship_review_plan` decides (see [phase-bodies.md](phase-bodies.md)): advisory self-review by default; `domain_phases.review`/`fno:review` sigma only when `config.review.reviewers` names `sigma` |
+| 4. Validate | Always (BEFORE PUSH) | `domain_phases.validate` (default: project-detected); CI green on the PR is verified by the loop-check verb at promise time |
+| 4.5 Docs | **Default: YES** (skip only with `--no-docs` or config) | `domain_phases.docs` (default: `fno:ship-docs`); docs MUST land BEFORE ship so they ride in the same PR |
+| 5. Browser | If `has_ui` (skip with `--no-browser`) | `fno:tdd` (browser-testing reference); advisory run-and-log, never gates completion and is not a loop-check input; run BEFORE ship so any findings ride in the same PR |
+| 6. Ship | Default YES (skip with `--no-ship`) | `domain_phases.ship` (default: `fno:pr create`); run AFTER docs + browser |
+| 6a. Pre-ship rebase | Only if `auto_merge_approved: true` | `fno pr rebase` |
+| 7. External | **Default: YES** (skip only with `--no-external` or config) | `domain_phases.external` (default: `fno:pr check {pr_number}`) |
+| 7a. Post-review merge | Only if `auto_merge_approved: true` AND external review done | `fno pr merge --invoker=target "$PR_NUMBER"` |
 
 See [auto-merge-mechanics.md](auto-merge-mechanics.md) for the full pre-ship rebase + post-review merge protocol.
 

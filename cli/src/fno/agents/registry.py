@@ -254,6 +254,18 @@ class AgentEntry:
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+    # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
+    # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
+    # sets FNO_SPAWN_TRIGGER before shelling out so the subprocess's own
+    # environment carries the reason (ambient-captured here the same way
+    # spawned_by_* is); a human-run `fno agents spawn` never sets it, so
+    # None/absent means "an operator asked for this directly." Format is
+    # "<dispatcher>:<reason>", e.g. "think_spawn:work-start" or
+    # "think_spawn:conversational" - the only producer today is
+    # fno.provenance.spawn_think._spawn_think_worker. Before x-42c5 the only
+    # evidence for "did a birth trigger spawn this?" was a timestamp gap
+    # between a node's created_at and a worker's registry row.
+    spawn_trigger: Optional[str] = None
     # Registration origin: "operator" for a session a human started by hand (the
     # SessionStart register hook / ``fno agents register``); absent for a
     # spawn/host worker row. Additive-optional (None default) so pre-existing

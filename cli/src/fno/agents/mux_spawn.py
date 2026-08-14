@@ -40,6 +40,7 @@ from fno import paths
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
+    _capture_spawn_trigger,
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
@@ -2020,6 +2021,7 @@ def dispatch_spawn_pane(
                     exit_code=1,
                 )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+        spawn_trigger = _capture_spawn_trigger()
 
         # The receipt's two independent facts (see MuxSpawnResult.bound), plus
         # the death-branch evidence. Only the codex route fills them in today;
@@ -2291,6 +2293,7 @@ def dispatch_spawn_pane(
                     spawned_by_session=spawned_by_session,
                     spawned_by_harness=spawned_by_harness,
                     spawned_by_cwd=spawned_by_cwd,
+                    spawn_trigger=spawn_trigger,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,
