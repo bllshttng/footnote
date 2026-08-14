@@ -3119,16 +3119,29 @@ fn reap_zombies() {
 /// because silence is absence of evidence and this registry lists REACHABLE
 /// agents rather than live processes -- a row is never condemned for being
 /// quiet, only for an affirmative falsification.
-fn rendered_status_from_truth(probe: Option<&crate::claude_ask::TruthProbe>) -> &'static str {
+/// `pid_confirmed_live` is a positive measurement in its OWN right (x-9de7
+/// task 3): a row whose `short_id` and `harness_session_id` are both empty
+/// resolves to its bare `name` in `registry_truth_handle`, which the truth
+/// probe can never find, so it answers `unknown` -- unrelated to whether the
+/// worker is actually running. Only the two shapes that mean "the probe could
+/// not measure" (`Some("unknown")`, and the state fallthrough) accept the
+/// override; `reachable`/`unreachable` and `working`/`done`/`stalled` stay
+/// probe-authoritative and unchanged, matching the monotone-lowering rule
+/// (never let a weaker signal raise a row the probe positively lowered).
+fn rendered_status_from_truth(
+    probe: Option<&crate::claude_ask::TruthProbe>,
+    pid_confirmed_live: bool,
+) -> &'static str {
     match probe.and_then(|p| p.reachability.as_deref()) {
         Some("reachable") => return "live",
         Some("unreachable") => return "orphaned",
-        Some("unknown") => return "unknown",
+        Some("unknown") => return if pid_confirmed_live { "live" } else { "unknown" },
         _ => {}
     }
     match probe.map(|p| p.state.as_str()) {
         Some("working" | "watching" | "your-move") => "live",
         Some("done" | "stalled") => "orphaned",
+        _ if pid_confirmed_live => "live",
         _ => "unknown",
     }
 }
@@ -3234,7 +3247,11 @@ where
         .map(|e| {
             let truth_handle = registry_truth_handle(e);
             let truth = truth_fn(&truth_handle);
-            let rendered_status = rendered_status_from_truth(truth.as_ref());
+            let pid_confirmed_live = e
+                .pid
+                .map(|p| pid_is_ours(p, e.pid_start_time))
+                .unwrap_or(false);
+            let rendered_status = rendered_status_from_truth(truth.as_ref(), pid_confirmed_live);
             // The whole reachability triple, not just the verdict that
             // `rendered_status` above was picked from. That rendered word says
             // WHAT the row is; the triple says which question was answered and
@@ -7547,20 +7564,54 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     #[test]
     fn the_reachability_verdict_outranks_the_transcript_state() {
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
+            rendered_status_from_truth(
+                probe_with_verdict("working", "unreachable").as_ref(),
+                false
+            ),
             "orphaned",
             "a falsified row must not render live merely because its transcript is recent"
         );
         // And silence is not death: the verdict says unknown where the legacy
         // state mapping said orphaned.
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
+            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref(), false),
             "unknown"
         );
         assert_eq!(
-            rendered_status_from_truth(probe("stalled").as_ref()),
+            rendered_status_from_truth(probe("stalled").as_ref(), false),
             "orphaned",
             "the fallback keeps its old meaning for a fno too old to send a verdict"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_live_pid_overrides_an_unresolvable_truth_probe_but_never_a_falsifier() {
+        // x-9de7 task 3 (the second render path the king's live measurement
+        // found): a row with no short_id/harness_session_id resolves through
+        // its bare name, which the truth probe can never find -- "unknown" is
+        // then a statement about missing session identity, not about whether
+        // the worker is alive. A confirmed-live pid is its own measurement.
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("working", "unknown").as_ref(), true),
+            "live",
+            "an unresolvable probe + a confirmed-live pid must render live, not unknown"
+        );
+        assert_eq!(
+            rendered_status_from_truth(None, true),
+            "live",
+            "no probe at all (too-old fno / shellout failure) + a live pid still renders live"
+        );
+        // The override is scoped to the two unmeasured shapes ONLY. A probe
+        // that positively falsified the row (unreachable) is never raised by
+        // a live pid -- that would contradict the monotone-lowering rule
+        // task 4 exists to enforce.
+        assert_eq!(
+            rendered_status_from_truth(
+                probe_with_verdict("working", "unreachable").as_ref(),
+                true
+            ),
+            "orphaned",
+            "a positive falsifier must never be overridden by pid liveness"
         );
     }
 
@@ -7676,6 +7727,49 @@ done
             });
         })
         .unwrap();
+    }
+
+    /// A row with no `short_id` and no `harness_session_id` -- the shape
+    /// `registry_truth_handle` cannot resolve to anything a truth probe can
+    /// find, matching a pane-hosted codex row that never bound a session id.
+    fn seed_bare_row(name: &str) -> RegistryEntry {
+        RegistryEntry {
+            name: name.into(),
+            short_id: String::new(),
+            legacy_provider: "codex".into(),
+            harness: None,
+            harness_session_id: None,
+            cwd: "/tmp".into(),
+            project_root: "/tmp".into(),
+            session_id: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: None,
+            status: AgentStatus::Live,
+            last_message_at: None,
+            created_at: "2026-06-09T00:00:00Z".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: Some(state::MuxRef {
+                session: "main".into(),
+                pane_id: 1,
+            }),
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+        }
     }
 
     /// The shared key-set contract. `handle_list` -- NOT Python's
@@ -7862,6 +7956,54 @@ done
         let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"], json!({"kind": "no-transcript"}));
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The end-to-end shape of the king's live measurement (x-9de7 task 3): a
+    /// codex pane row with no short_id and no harness_session_id -- the exact
+    /// specimen -- resolves through `registry_truth_handle` to its bare name,
+    /// which no truth probe can ever find. `status` must still read `live`
+    /// when the pid demonstrably is, not `unknown`.
+    #[test]
+    fn list_status_is_live_for_an_unresolvable_row_with_a_confirmed_live_pid() {
+        let home = short_home("listlivepid");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = seed_bare_row("cx-x-e14b");
+            e.pid = Some(std::process::id());
+            e.pid_start_time = process_start_time(std::process::id());
+            r.entries.push(e);
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["status"], "live");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The pid-liveness override never fires FOR a row the probe positively
+    /// falsified, and never fires when the pid is confirmed dead -- only
+    /// "the probe could not measure" plus "the pid is confirmed live" together
+    /// produce the override.
+    #[test]
+    fn list_status_stays_unknown_for_an_unresolvable_row_with_no_confirmed_live_pid() {
+        let home = short_home("listnolivepid");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = seed_bare_row("cx-dead");
+            e.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(e);
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["status"], "unknown");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
