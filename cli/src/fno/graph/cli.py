@@ -9824,20 +9824,20 @@ def cmd_archive_dedupe_ids(
     from fno.graph.archive import remint_archive_collisions
 
     archive_path = _archive_path()
-    try:
-        archive_entries = (
-            _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
-        )
-    except GraphCorruptError:
-        typer.echo(f"Error: {archive_path} is corrupt", err=True)
-        raise typer.Exit(code=1)
+
+    def _read_archive_or_exit() -> list:
+        try:
+            return _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
+        except GraphCorruptError:
+            typer.echo(f"Error: {archive_path} is corrupt", err=True)
+            raise typer.Exit(code=1)
 
     if not apply:
         working_ids = {
             e.get("id") for e in read_graph(_graph_path())
             if isinstance(e, dict) and e.get("id")
         }
-        _, remap = remint_archive_collisions(working_ids, archive_entries)
+        _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
         typer.echo(f"[dry-run] would remint {len(remap)} archive id(s):")
         for old, new in sorted(remap.items()):
             typer.echo(f"  {old} -> {new}")
@@ -9849,10 +9849,13 @@ def cmd_archive_dedupe_ids(
 
     def mutator(entries):
         # Never mutates the working graph; runs under its lock only to
-        # serialize against a concurrent `archive --apply` touching the same
-        # archive file.
+        # serialize the archive read-modify-write against a concurrent
+        # `archive --apply`, which also writes archive.json under this same
+        # lock. Reading the archive HERE (not before the lock) is load-bearing:
+        # a pre-lock read would go stale under that race and the write below
+        # would clobber whatever the concurrent sweep just archived.
         working_ids = {e.get("id") for e in entries if isinstance(e, dict) and e.get("id")}
-        patched, remap = remint_archive_collisions(working_ids, archive_entries)
+        patched, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
         remap_holder.update(remap)
         if remap:
             archive_path.parent.mkdir(parents=True, exist_ok=True)
