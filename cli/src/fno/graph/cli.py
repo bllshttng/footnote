@@ -9891,6 +9891,60 @@ def cmd_archive_dedupe_ids(
 
 
 @cli.command(
+    "album",
+    hidden=True,
+    epilog="Read-only browse over graph-archive.json. `fno backlog get <id>` "
+    "still resolves one archived node by id; `fno backlog unarchive <id>` "
+    "brings one back into the working graph.",
+)
+def cmd_album(
+    limit: int = typer.Option(20, "--limit", help="Max cards to print, newest first."),
+    project: Optional[str] = typer.Option(None, "--project", help="Filter to one project."),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Full entries as a JSON array instead of cards."
+    ),
+) -> None:
+    """Browse shipped work: the archive as a collection, newest first.
+
+    Every archive reader before this was a fallback on a lookup miss - given
+    an id you could retrieve one archived node, but nothing let you page
+    through what shipped. This is that one read verb, and it adds nothing to
+    the archive's shape: the sweep already writes every field a card shows.
+    """
+    from fno.graph.store import read_graph
+
+    archive_path = _archive_path()
+    entries = read_graph(archive_path) if archive_path.exists() else []
+    if project:
+        entries = [e for e in entries if e.get("project") == project]
+
+    def _sort_key(e: dict) -> str:
+        return e.get("completed_at") or e.get("updated") or e.get("created_at") or ""
+
+    entries.sort(key=_sort_key, reverse=True)
+    page = entries[:limit]
+
+    if json_output:
+        typer.echo(json.dumps(page, indent=2))
+        return
+
+    if not page:
+        typer.echo("The album is empty.")
+        return
+
+    for e in page:
+        ts = _sort_key(e)
+        date = ts[:10] if ts else "?"
+        title = e.get("title") or e.get("slug") or e.get("id")
+        gift = f" -> {e['pr_url']}" if e.get("pr_url") else " (no gift)"
+        typer.echo(f"{date}  {e.get('id')}  {title}{gift}")
+
+    remaining = len(entries) - len(page)
+    if remaining > 0:
+        typer.echo(f"... {remaining} more. Raise --limit or narrow with --project.")
+
+
+@cli.command(
     "unarchive",
     hidden=True,
     epilog="Reverses `archive` for one node. Follow it with `fno backlog reopen "
