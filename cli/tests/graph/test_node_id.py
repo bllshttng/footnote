@@ -114,9 +114,38 @@ def test_has_prefix_rejects_obvious_non_id(monkeypatch):
 # --- accessors: legacy fallback + configured ------------------------------
 
 
-def _patch_settings(monkeypatch, **backlog):
-    model = SettingsModel(config={"backlog": backlog})
+def _patch_settings(monkeypatch, *, state_dir=None, **backlog):
+    """Patch ``load_settings`` directly to a fixed model.
+
+    ``state_dir`` is a distinct kwarg, not folded into ``backlog``: it must
+    land in ``config.state_dir``, a sibling of ``config.backlog``, not inside
+    it. Passing it lets a caller combine backlog config (id_prefix etc.) with
+    filesystem isolation in ONE patched settings object - composing this with
+    ``paths_testing.use_tmpdir`` instead does not work, because whichever of
+    the two monkeypatches ``fno.config.load_settings`` LAST wins outright and
+    silently drops the other's config.
+    """
+    config: dict = {"backlog": backlog}
+    if state_dir is not None:
+        config["state_dir"] = state_dir
+    model = SettingsModel(config=config)
     monkeypatch.setattr("fno.config.load_settings", lambda: model)
+    # fno.paths._settings() caches independently of load_settings() and does
+    # not re-invoke it on a cache hit, so a stale value from an earlier test
+    # in this same worker process would otherwise survive the patch above
+    # untouched. Swap in a fresh, empty-cache wrapper (monkeypatch reverts to
+    # the untouched original at teardown) rather than clearing the real cache
+    # in place - clearing in place leaves it populated with THIS test's
+    # model for whichever test in this worker reads it next with no
+    # isolation of its own, which is exactly how a corrupt archive fixture
+    # from one test used to leak a stray warning into an unrelated test.
+    import functools
+
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(
+        paths_mod, "_settings", functools.cache(paths_mod._settings.__wrapped__)
+    )
 
 
 def test_prefix_legacy_fallback_when_unset(monkeypatch):
@@ -194,10 +223,7 @@ def test_mint_avoids_archived_id(tmp_path, monkeypatch):
     """A freed working-graph id must not collide with a live archive entry."""
     import json
 
-    from fno.paths_testing import use_tmpdir
-
-    use_tmpdir(monkeypatch, tmp_path)
-    _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4)
+    _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4, state_dir=str(tmp_path))
 
     from fno.paths import graph_archive_json
 
@@ -226,10 +252,7 @@ def test_mint_avoids_archived_id(tmp_path, monkeypatch):
 
 def test_mint_archive_read_failure_degrades_to_working_pool(tmp_path, monkeypatch):
     """A corrupt archive must not block minting (advisory read, x-f69b)."""
-    from fno.paths_testing import use_tmpdir
-
-    use_tmpdir(monkeypatch, tmp_path)
-    _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4)
+    _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4, state_dir=str(tmp_path))
 
     from fno.paths import graph_archive_json
 

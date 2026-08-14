@@ -16,9 +16,17 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     """Point state_dir and settings file at tmp_path.
 
     Writes a minimal settings.yaml so paths.X() resolves cleanly.
-    Clears the paths._settings cache so the new settings take effect
-    immediately (avoids the per-test monkeypatching issue described in
-    feedback_default_arg_breaks_monkeypatch_isolation).
+
+    ``load_settings``/``_settings`` are process-lifetime ``@cache``d. Clearing
+    them in place (the old approach) took effect immediately but had no
+    teardown: the cleared cache repopulates with THIS test's tmp_path and
+    stays that way for the rest of the worker process, so any later test in
+    the same xdist worker that resolves a path without its own isolation
+    silently inherits this test's tmp_path - including any corrupt fixture
+    file left on it. Swapping in fresh wrapper functions via ``monkeypatch``
+    instead means the ORIGINAL cached functions are never touched, so
+    ``monkeypatch``'s automatic teardown restores them exactly as they were
+    before this test ran, with no leftover state to leak forward.
 
     Returns the path to the tmp settings file for further customization
     (caller can overwrite it before calling paths.X()).
@@ -36,12 +44,22 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
     # Wire the env var so load_settings() finds the tmp file
     monkeypatch.setenv("FNO_CONFIG", str(settings))  # type: ignore[attr-defined]
 
-    # Clear both caches so the new env var takes effect immediately.
-    # Must clear load_settings first, then _settings, so the next
-    # _settings() call re-runs load_settings() with the new env.
+    # Fresh, empty caches for this test only - the module's real cached
+    # functions are restored untouched when monkeypatch reverts at teardown.
+    import functools
+
     from fno import config as config_mod
-    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
     import fno.paths as paths_mod
-    paths_mod._settings.cache_clear()
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        config_mod,
+        "load_settings",
+        functools.lru_cache(maxsize=1)(config_mod.load_settings.__wrapped__),
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        paths_mod,
+        "_settings",
+        functools.cache(paths_mod._settings.__wrapped__),
+    )
 
     return settings
