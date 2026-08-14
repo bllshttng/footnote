@@ -1106,7 +1106,13 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # needs it anyway. A failed fetch returns None and neither consumer can
     # act on it - same best-effort stance as before, one round trip earlier.
     head: Optional[str] = _pr_head_oid(pr_number, repo) if review_lane else None
-    cov, recompute_note = _review_coverage_for_pr(pr_number, repo, head)
+    # Same lane guard as the head fetch: with no lane configured `cov` is never
+    # consulted (`covered` short-circuits, `covered_head` is lane-gated), and
+    # the read is no longer free - a missing row would fire the 120s recompute
+    # subprocess and append coverage rows nobody on this path asked for.
+    cov, recompute_note = (
+        _review_coverage_for_pr(pr_number, repo, head) if review_lane else (None, "")
+    )
     covered = (
         not review_lane
         or (
@@ -1140,12 +1146,12 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             )
         # Name the recompute and its outcome: a refusal reporting only a count
         # is what taught two workers to design around a gate that was green
-        # somewhere else (x-3a3f).
+        # somewhere else (x-3a3f). Bracket append, never paren-splice surgery
+        # on a builder's output: a reason whose trailing paren closes an inner
+        # clause (a searched list, a truncated sha) would swallow the note
+        # into the wrong parenthetical.
         if recompute_note:
-            if refusal.endswith(")"):
-                refusal = f"{refusal[:-1]}; {recompute_note})"
-            else:
-                refusal = f"{refusal} ({recompute_note})"
+            refusal = f"{refusal} [{recompute_note}]"
         _emit(
             pr_number,
             "blocked",

@@ -11,42 +11,15 @@
 //! lands as `unknown`, and a stale attestation still lands as a `stale`
 //! verdict rather than `reviewed`.
 
+mod common;
+
+use common::make_script;
 use fno_agents::loopcheck::{run_loop_check_capture, run_review_coverage_capture};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-// ── helpers (mirrors tests/loop_check.rs, kept local so this file stands
-// alone; the fixtures are deliberately smaller than that suite's) ────────────
-
-fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-    // Probe-exec until the script actually runs (ETXTBSY guard, same as
-    // tests/loop_check.rs): a parallel test's fork can inherit the just-written
-    // fd, so an exec of this script can read as NotFound and flip a gh-probed
-    // decision to advisory mode.
-    for _ in 0..100 {
-        match std::process::Command::new(&path)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            _ => break,
-        }
-    }
-    path
-}
-
-const HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000001";
+const HEAD: &str = "deadbeefdeadbeefdeadbeef00000001";
 
 /// gh: OPEN PR #1 at HEAD, green CI, one COMMENTED review by the configured
 /// bot at HEAD (counts as reviewed), no inline comments. git: HEAD echo, with
@@ -199,9 +172,7 @@ fn verb_payload_equals_run_done_payload() {
     let manifest = cwd.join("target-state.md");
     fs::write(
         &manifest,
-        format!(
-            "---\nsession_id: sess-par\nharness_session_id: sess-par\ncreated_at: 2026-08-14T00:00:00Z\nattended: true\n---\n"
-        ),
+        "---\nsession_id: sess-par\nharness_session_id: sess-par\ncreated_at: 2026-08-14T00:00:00Z\nattended: true\n---\n",
     )
     .unwrap();
     let transcript = cwd.join("transcript.jsonl");

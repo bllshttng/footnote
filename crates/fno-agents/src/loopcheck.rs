@@ -7631,6 +7631,16 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             git_bin = val;
         } else if let Some(val) = try_flag_value(&args[i], "--author-harness", args, &mut i) {
             author_harness_override = Some(val);
+        } else if args[i].starts_with('-') {
+            // Unknown flag (or one missing its value): silently ignoring it is
+            // not leniency - a typo'd `--events` would leave events_path=None
+            // and append to the REAL logs while the caller believed their
+            // scratch path was used. Exit 2, as the usage text promises.
+            return (
+                2,
+                serde_json::json!({"error": format!("unknown or valueless argument: {}", args[i])})
+                    .to_string(),
+            );
         }
         i += 1;
     }
@@ -7662,11 +7672,15 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // Authorship: --session-id, else the manifest's harness_session_id when one
     // exists, else None. None leaves every local verdict's attestation_origin
     // Unknown (the documented fail-open-on-authorship behavior) and the payload
-    // OMITS self_attested_count rather than reporting an unmeasured 0.
+    // OMITS self_attested_count rather than reporting an unmeasured 0. The
+    // "null" filter is parse_manifest's own (init writes ${_HARNESS_SESSION:-null}):
+    // Some("null") would mislabel every origin other_session and emit the
+    // unmeasured-0 self_attested_count the omission exists to prevent.
     let author_session = session_id.or_else(|| {
         std::fs::read_to_string(cwd.join(".fno/target-state.md"))
             .ok()
             .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
+            .filter(|s| s != "null")
     });
 
     match read_pr_info(

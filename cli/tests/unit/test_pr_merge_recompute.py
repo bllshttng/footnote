@@ -108,5 +108,5 @@ def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     # shape); the heads disagreeing is the point, and so is the recompute
     # clause proving a fresh event was attempted and did not clear it.
     assert "otherhea" in reason and "newhead" in reason, reason
-    assert "(recomputed)" in reason, reason
+    assert "[recomputed]" in reason, reason
     assert len(calls) == 1

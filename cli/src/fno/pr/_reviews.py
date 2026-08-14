@@ -310,7 +310,10 @@ def _fire_review_coverage_verb(
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"recompute failed: {exc}"
     if proc.returncode not in (0, 3, 4):
-        why = (proc.stderr or "").strip().splitlines()
+        # The verb prints its JSON (errors included) on stdout; stderr carries
+        # anything the process itself choked on. Read both or an exit-2 refusal
+        # names the exit with no cause.
+        why = ((proc.stderr or "").strip() or (proc.stdout or "").strip()).splitlines()
         return False, f"recompute failed (exit {proc.returncode}: {why[-1] if why else ''})"
     return True, ""
 
@@ -323,10 +326,13 @@ def review_coverage_for_gate(
     """The coverage event a gate should act on, recomputed at most ONCE (x-3a3f).
 
     Reads :func:`latest_review_coverage`; when there is no usable row (nothing
-    found, or the found row pins a head that is not ``head``), fires the
-    ``fno-agents review-coverage`` verb once - the same producer the stop hook
-    uses - and re-reads once. Never more than one recompute per invocation: a
-    loop here would turn a refusal into a spin.
+    found, the found row pins a head that is not ``head``, or it says
+    ``unknown``), fires the ``fno-agents review-coverage`` verb once - the same
+    producer the stop hook uses - and re-reads once. Never more than one
+    recompute per invocation: a loop here would turn a refusal into a spin. The
+    ``unknown`` arm matters because the verb's own gh-failure exit writes
+    exactly that row: without it one transient gh failure wedges the gate
+    forever - a present, head-matching row no later merge ever recomputes.
 
     Every failure keeps the refusal: a binary that cannot be resolved, a
     non-zero exit, or a re-read that still yields nothing all return the
@@ -335,19 +341,23 @@ def review_coverage_for_gate(
     design around a gate that was green somewhere else.
 
     Returns ``(data_or_None, note)``; ``note`` is ``""`` when no recompute ran,
-    else ``"recomputed"`` or ``"recompute unavailable: <why>"``.
+    else ``"recomputed"``, ``"recompute produced no row"``, or
+    ``"recompute unavailable: <why>"``.
     """
     data = latest_review_coverage(pr_number, cwd)
     note = ""
     ev_head = (data or {}).get("head_sha")
     mismatch = bool(head and data and ev_head and head != ev_head)
-    if data is None or mismatch:
+    unusable = data is not None and data.get("coverage") == "unknown"
+    if data is None or mismatch or unusable:
         ran, why = _fire_review_coverage_verb(pr_number, cwd, head)
         if ran:
             fresh = latest_review_coverage(pr_number, cwd)
             if fresh is not None:
                 data = fresh
                 note = "recomputed"
+            else:
+                note = "recompute produced no row"
         else:
             note = f"recompute unavailable: {why}"
     return data, note
