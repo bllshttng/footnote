@@ -4288,11 +4288,102 @@ struct ReconcileSweepResult {
 /// the registry write fails (the registry is then unchanged, so callers degrade
 /// to serving last-recorded status rather than reporting a sweep that did not
 /// apply -- Codex P1). Shared by the `reconcile` RPC and the startup sweep.
+/// Late bind (x-9de7 task 2): resolve a pane-hosted codex row's session id on
+/// the reconcile tick, keyed on the PANE, not on cwd. `(harness, cwd)` is not
+/// a join key -- 43 of 49 registry rows share a `(harness, cwd)` bucket with
+/// a sibling on this machine, so joining on it would light every sibling
+/// alive off one live transcript. The pane-tree rollout probe already used at
+/// spawn time (`_codex_session_id_for_pid`) identifies a session down to the
+/// exact pane, because each pane's process tree holds a distinct rollout.
+///
+/// A codex spawn's 8-second bind window (`_BINDING_WINDOW_S`) is real and is
+/// NOT widened here: widening blocks the spawn caller longer, still loses the
+/// race whenever codex is slower than whatever number is picked, and does
+/// nothing for rows already on disk. This runs the same probe later instead,
+/// bounded to rows that still need it (a live pid, a mux ref, no session id
+/// yet -- a handful of rows, never the full registry), and NEVER from a
+/// render path: `fno agents list --json` already shells one Python
+/// subprocess per row and is not getting a second.
+///
+/// `probe` is injected so this is testable without shelling out.
+fn late_bind_codex_sessions(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    probe: &dyn Fn(u32) -> Option<String>,
+) {
+    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let candidates: Vec<(String, u32)> = registry
+        .entries
+        .iter()
+        .filter(|e| {
+            e.harness_name() == "codex"
+                && e.mux.is_some()
+                && e.harness_session_id.is_none()
+                && e.pid.is_some_and(|p| pid_is_ours(p, e.pid_start_time))
+        })
+        .filter_map(|e| e.pid.map(|p| (e.name.clone(), p)))
+        .collect();
+    for (name, pid) in candidates {
+        let Some(sid) = probe(pid) else { continue };
+        let bound = state::update_registry(&home.registry_json(), |r| {
+            let Some(e) = r.find_mut(&name) else {
+                return false;
+            };
+            // A concurrent writer may have bound this row (or reaped it) since
+            // the candidate scan above; never clobber a session id that
+            // arrived in between.
+            if e.harness_session_id.is_some() {
+                return false;
+            }
+            e.harness_session_id = Some(sid.clone());
+            true
+        })
+        .unwrap_or(false);
+        if bound {
+            let _ = emitter.emit_fields(
+                "agent_late_bind",
+                json_obj(&[
+                    ("name", Value::String(name)),
+                    ("pid", Value::Number(pid.into())),
+                    ("harness_session_id", Value::String(sid)),
+                ]),
+            );
+        }
+    }
+}
+
+/// Shell `fno agents codex-session-for-pid <pid>` -- the pane-tree rollout
+/// walk (`_codex_session_id_for_pid`), reused rather than reimplemented in
+/// Rust (Codex's rollout discovery needs a process-tree + open-fd walk this
+/// crate has no dependency for; see `worktree_clean_probe` for the same
+/// shell-and-parse-a-marker pattern). Fails closed to `None` on anything but
+/// a clean exit with a non-empty `session_id=` line.
+fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("fno")
+        .args(["agents", "codex-session-for-pid", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("session_id="))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn run_reconcile_sweep(
     home: &AgentsHome,
     emitter: &EventEmitter,
 ) -> Result<ReconcileSweepResult, String> {
     use crate::provider::ReachabilityProbeError;
+
+    // Late bind (x-9de7 task 2), before the registry snapshot below is taken,
+    // so a row bound this tick is already visible to the probe/reconcile pass
+    // that follows.
+    late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout);
+
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
 
     // Fairness: probe least-recently-reconciled first (None < Some), so a
@@ -7052,6 +7143,152 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         );
         assert_eq!(out.deferred, 2, "two trailing entries should defer");
         assert_eq!(changes.len(), 1, "only one entry probed before budget");
+    }
+
+    /// A pane-hosted codex row: empty short_id (matches the real spawn shape),
+    /// a mux ref, and whatever pid/session id the caller sets afterward.
+    fn codex_pane_row(name: &str) -> RegistryEntry {
+        let mut e = ask_row(name, None);
+        e.legacy_provider = "codex".into();
+        e.status = AgentStatus::Live;
+        e.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 1,
+        });
+        e
+    }
+
+    #[test]
+    fn late_bind_writes_harness_session_id_for_an_unbound_live_codex_pane() {
+        // AC1 (x-9de7 task 2): a codex pane whose spawn-time bind window
+        // expired carries no harness_session_id. One late-bind pass, given a
+        // live pid, resolves and writes it.
+        let home = tmp_home("late-bind-basic");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = codex_pane_row("pane-a");
+            e.pid = Some(me);
+            e.pid_start_time = Some(my_start);
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions(&home, &emitter, &|pid| {
+            (pid == me).then(|| "sess-a".to_string())
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            reg.find("pane-a").unwrap().harness_session_id.as_deref(),
+            Some("sess-a")
+        );
+        let events = read_events(&home);
+        assert!(events
+            .iter()
+            .any(|e| e.get("type").and_then(Value::as_str) == Some("agent_late_bind")));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_gives_each_same_cwd_pane_its_own_session_id() {
+        // The same-cwd repro (x-9de7 verification #5): two codex panes in one
+        // cwd, both bound late, each keyed on its own pid -- this is the test
+        // that would have caught a `(harness, cwd)` join.
+        let home = tmp_home("late-bind-same-cwd");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut a = codex_pane_row("pane-a");
+            a.cwd = "/repo".into();
+            a.pid = Some(me);
+            a.pid_start_time = Some(my_start);
+            r.entries.push(a);
+
+            let mut b = codex_pane_row("pane-b");
+            b.cwd = "/repo".into();
+            b.pid = Some(me);
+            b.pid_start_time = Some(my_start);
+            r.entries.push(b);
+        })
+        .unwrap();
+
+        // A real probe is keyed on pid, so two DISTINCT pids would resolve to
+        // two distinct sessions; here both rows share this test's own pid (no
+        // second live process to fork), so the fake keys on name via a
+        // once-per-call counter to prove per-row binding still lands
+        // per-row rather than being skipped as "already bound" after the
+        // first write.
+        let calls = std::cell::RefCell::new(0);
+        late_bind_codex_sessions(&home, &emitter, &|_pid| {
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            Some(format!("sess-{n}"))
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let sid_a = reg.find("pane-a").unwrap().harness_session_id.clone();
+        let sid_b = reg.find("pane-b").unwrap().harness_session_id.clone();
+        assert!(sid_a.is_some() && sid_b.is_some());
+        assert_ne!(sid_a, sid_b, "each pane must receive its own session id");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_leaves_a_gone_pane_for_the_reaper() {
+        // A pane-hosted row whose pane is gone: no session id is written and
+        // the row is left for the reaper (x-9de7 task 2 AC3).
+        let home = tmp_home("late-bind-gone-pane");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = codex_pane_row("pane-gone");
+            e.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions(&home, &emitter, &|_| {
+            panic!("the probe must not run against a pid that already fails pid_is_ours")
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.find("pane-gone").unwrap().harness_session_id.is_none());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_never_clobbers_an_already_bound_row() {
+        let home = tmp_home("late-bind-already-bound");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = codex_pane_row("pane-bound");
+            e.pid = Some(me);
+            e.pid_start_time = Some(my_start);
+            e.harness_session_id = Some("already-there".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions(&home, &emitter, &|_| {
+            panic!("an already-bound row must not be re-probed")
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            reg.find("pane-bound").unwrap().harness_session_id.as_deref(),
+            Some("already-there")
+        );
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     #[test]
