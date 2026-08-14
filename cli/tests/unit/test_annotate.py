@@ -34,14 +34,14 @@ def claimed_node(tmp_path, monkeypatch):
 def _read_events(path: Path) -> list[dict]:
     if not path.is_file():
         return []
-    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def test_ac1_hp_records_and_delivers(events_path, claimed_node, monkeypatch):
     """AC1-HP: a claimed node -> review_finding appended, delivered, listed open."""
     captured = {}
 
-    def fake_inject(sid, text):
+    def fake_inject(sid, text, **_k):
         captured["sid"] = sid
         captured["text"] = text
         return True
@@ -98,7 +98,7 @@ def test_ac2_edge_delimiter_text_defanged_in_frame_original_in_event(
 
 def test_ac1_fr_daemon_down_defers(events_path, claimed_node, monkeypatch):
     """AC1-FR: delivery miss (daemon down) -> deferred, event durable, no raise."""
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda s, t: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda s, t, **_k: False)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda s, t: False)
 
     result = core.add_finding(claimed_node, "codex bot rate-limited", events_path=events_path)

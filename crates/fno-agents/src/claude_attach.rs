@@ -184,7 +184,16 @@ pub fn parse_attach_reply(line: &str) -> Result<AttachOk, AttachError> {
 /// fake in unit tests and the real `UnixStream` path is the only thing that needs
 /// a live daemon.
 pub trait ControlTransport {
-    /// Write one already-newline-terminated line.
+    /// Write `line` VERBATIM -- despite the name, this does NOT append a
+    /// terminator of any kind (pre-existing naming defect, node x-1904:
+    /// `send_line` invites a caller to assume one is added, the way
+    /// `writeln!`/`println!` do). Every caller supplies its own: either a
+    /// pre-terminated string (`AttachRequest::to_json_line`, which already
+    /// ends in `\n`) or a deliberate bare `"\r"` as the raw wire-level Enter
+    /// keystroke (`crates/fno-agents/src/mail_inject.rs`). This file's whole
+    /// job is raw keystroke bytes on a post-attach `control.sock`, where one
+    /// stray unintended newline IS an unintended Enter -- so a future caller
+    /// must never rely on this method to add one.
     fn send_line(&mut self, line: &str) -> io::Result<()>;
     /// Read the next line (without the trailing newline). `Ok(None)` == EOF.
     fn recv_line(&mut self) -> io::Result<Option<String>>;

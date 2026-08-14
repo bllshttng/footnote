@@ -980,6 +980,44 @@ mod tests {
     }
 
     #[test]
+    fn content_confirm_matches_the_real_enqueue_record_shape() {
+        // AC3-HP (node x-1904, change 3, mechanism-supported / specimen-unsupported).
+        // The `content_confirm_rejects_growth_and_accepts_the_landed_envelope` test
+        // above pins the SUBMITTED-turn shape
+        // (`{"type":"user","message":{"role":"user","content":...}}`). A BUSY
+        // recipient's transcript instead records the paste as a
+        // `queue-operation`/`enqueue` row at submit time, before its own turn
+        // boundary -- the shape measured directly off a live session
+        // (`7f393344-7a69-49fa-9f6d-db838a549ac1`) receiving an `<fno_mail>` while
+        // mid-turn. This pins THAT shape specifically: a claude transcript-schema
+        // change to either row type breaks a test here rather than silently
+        // reverting delivery to idle-only, per the plan's own instruction not to
+        // let this drift undetected.
+        let path = tmp_transcript("enqueue");
+        let mut f = File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"older"}}}}"#
+        )
+        .unwrap();
+        let baseline = transcript_len(&path);
+        let marker = "<fno_mail from=\"e4dca1f9\" id=\"msg-aae714\">";
+
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"queue-operation","operation":"enqueue","content":"{}\nSCOPE ADDITION from the operator ...\n</fno_mail>"}}"#,
+            escaped_marker(marker)
+        )
+        .unwrap();
+        assert!(
+            confirm_content_after(&path, marker, baseline).unwrap(),
+            "the enqueue record (submit-time, not turn-end) must confirm delivery"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn parse_args_requires_session() {
         assert_eq!(parse_args(&[]).unwrap_err().0, 2);
         assert_eq!(

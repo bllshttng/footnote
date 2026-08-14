@@ -18,7 +18,6 @@ import json
 import os
 import socket
 import sys
-import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -757,7 +756,7 @@ def test_ask_followup_control_sock_fallback_delivers_and_returns_reply(
 
     captured: dict[str, Any] = {}
 
-    def _fake_inject(recipient: str, text: str) -> bool:
+    def _fake_inject(recipient: str, text: str, **_k) -> bool:
         captured["recipient"] = recipient
         captured["text"] = text
         # The recipient processes the injected turn and replies.
@@ -792,7 +791,7 @@ def test_ask_followup_control_sock_fallback_not_delivered_raises_distinct_reason
     _write_socket_null_session(tmp_path, short_id)
     _write_roster(tmp_path, _FB_UUID)
 
-    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda r, t: False)
+    monkeypatch.setattr(dispatch_mod, "_mail_inject_claude", lambda r, t, **_k: False)
 
     with pytest.raises(ProviderOrphanError) as exc_info:
         ask_followup(
@@ -817,7 +816,7 @@ def test_ask_followup_socket_null_without_transcript_is_inconclusive(
 
     calls = {"n": 0}
 
-    def _counting_inject(recipient: str, text: str) -> bool:
+    def _counting_inject(recipient: str, text: str, **_k) -> bool:
         calls["n"] += 1
         return True
 

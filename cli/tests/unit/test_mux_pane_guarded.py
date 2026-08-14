@@ -1,9 +1,23 @@
-"""Turn-taken confirmation for the mux-pane delivery lane (US4).
+"""``_mux_pane_send``'s three modes (node x-1904 rewrote this file).
 
-``_mux_pane_send`` guards the paste against the server-side turn-taken interlock:
-a mid-turn recipient refuses with EXIT_TARGET_NOT_IDLE (15), so the lane demotes
-to the caller's durable floor instead of swallowing the bytes and letting the
-sender report ``hosted`` (Locked Decision 4: hosted-on-bytes-written is banned).
+``guarded=True`` rides the server-side turn-taken interlock (EXIT_TARGET_NOT_IDLE,
+15): a mid-turn recipient refuses before any byte is written. It is kept as a
+real capability of the underlying ``fno mux pane send --guarded`` verb (the
+rerun caller still wants it -- refusing mid-turn is the conservative call for a
+rerun, unlike mail) but no mail-delivery caller opts into it any more: the
+guard was ``rerun_allowed``, borrowed from the rerun verb, and a busy claude
+session actually enqueues an injected paste rather than corrupting its composer
+(measured, not inferred; see ``crates/fno/src/server.rs``), so refusing before
+any byte was written vetoed exactly the delivery this transport can make.
+
+``guarded=False, confirm=True`` is the mail-delivery lane now: paste unguarded
+(holding the writer claim across the burst so nothing interleaves), then
+confirm by CONTENT against the recipient's own transcript -- never by bytes
+written alone, which Locked Decision 4 bans as a hosted verdict.
+
+``guarded=False`` with no ``confirm`` is the peer follow-up lane
+(``_mux_followup_path``), unaffected by this node: it has no durable floor to
+demote to, so it keeps reporting on bytes written.
 """
 
 from types import SimpleNamespace
@@ -11,8 +25,13 @@ from types import SimpleNamespace
 import fno.agents.dispatch as dispatch
 
 
-def _entry():
-    return SimpleNamespace(mux={"session": "main", "pane_id": 3})
+def _entry(session_id="me-session", harness="claude"):
+    return SimpleNamespace(
+        mux={"session": "main", "pane_id": 3},
+        harness_session_id=session_id,
+        session_id=None,
+        harness=harness,
+    )
 
 
 def _install_fake_run(monkeypatch, exit_codes):
@@ -46,9 +65,10 @@ def _verbs(calls):
     return [c[3] for c in calls if len(c) > 3 and c[1:3] == ["mux", "pane"]]
 
 
-def test_guarded_paste_carries_the_guarded_flag_and_confirms(monkeypatch):
+def test_guarded_paste_carries_the_guarded_flag(monkeypatch):
     # Guarded send: paste, then CR. No claim/release -- holding the writer claim
-    # would self-block the server guard ("busy: relay").
+    # would self-block the server guard ("busy: relay"). Kept for the rerun
+    # caller; no mail-delivery caller passes guarded=True any more.
     calls = _install_fake_run(monkeypatch, [0, 0])
     assert dispatch._mux_pane_send(_entry(), "hi") is True
     assert "--guarded" in _paste_call(calls)
@@ -56,8 +76,9 @@ def test_guarded_paste_carries_the_guarded_flag_and_confirms(monkeypatch):
     assert "release" not in _verbs(calls)
 
 
-def test_not_idle_paste_stalls_to_durable(monkeypatch, capsys):
-    # Guarded paste refused because the recipient's turn is not takeable.
+def test_not_idle_paste_stalls(monkeypatch, capsys):
+    # Guarded paste refused because the recipient's turn is not takeable. Real
+    # behavior for the rerun caller; mail no longer reaches this branch.
     calls = _install_fake_run(monkeypatch, [dispatch._MUX_EXIT_TARGET_NOT_IDLE])
     assert dispatch._mux_pane_send(_entry(), "hi") is False
     # The CR submit never fires once the paste stalls -- no half-sent prompt.
@@ -68,8 +89,74 @@ def test_not_idle_paste_stalls_to_durable(monkeypatch, capsys):
 
 def test_unguarded_follow_up_omits_the_flag_and_holds_claim(monkeypatch):
     # The peer follow-up lane keeps its raw channel and holds the writer claim
-    # across the burst (claim, paste, CR, release).
+    # across the burst (claim, paste, CR, release). No confirm: it has no
+    # durable floor to demote to.
     calls = _install_fake_run(monkeypatch, [0, 0, 0, 0])
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False) is True
     assert "--guarded" not in _paste_call(calls)
     assert _verbs(calls) == ["claim", "send", "send", "release"]
+
+
+def test_mail_delivery_confirms_by_content_before_reporting_true(monkeypatch, tmp_path):
+    """x-1904: bytes-written alone is not enough (Locked Decision 4). The
+    unguarded mail-delivery paste only reports True once the recipient's OWN
+    transcript carries the injected turn's content."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "--stdin" in argv:
+            # The recipient "processes" the paste and it lands in its transcript
+            # before the confirm poll runs.
+            transcript.write_text('{"type":"queue-operation","content":"hi there"}\n')
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(dispatch.subprocess, "run", _run)
+
+    assert dispatch._mux_pane_send(_entry(), "hi there", guarded=False, confirm=True) is True
+    assert _verbs(calls) == ["claim", "send", "send", "release"]
+
+
+def test_mail_delivery_bytes_written_without_confirming_content_reports_false(
+    monkeypatch, tmp_path
+):
+    """The paste-then-CR burst can exit 0 (bytes written) while the paste sits
+    unread in the recipient's input box -- exactly the Locked Decision 4 gap a
+    bytes-only verdict would paper over."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")  # never gets the marker
+    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: transcript)
+    _install_fake_run(monkeypatch, [0, 0, 0, 0])
+
+    assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
+
+
+def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
+    """No transcript to confirm against -> never optimistically True. A confirm
+    that passes because the transcript was unreadable is the false-positive
+    shape the pitfalls corpus warns against."""
+    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", lambda _entry: None)
+    _install_fake_run(monkeypatch, [0, 0, 0, 0])
+
+    assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
+
+
+def test_non_claude_recipient_keeps_the_bytes_written_verdict(monkeypatch):
+    """The transcript confirm reads ~/.claude/projects only, so a mux-hosted
+    codex pane has nothing to confirm against. Applying it there would report
+    every landed paste as a miss -- a false durable demotion, and a duplicate
+    once the recipient drains the durable copy."""
+
+    def _boom(_entry):
+        raise AssertionError("a non-claude pane has no claude transcript to poll")
+
+    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", _boom)
+    _install_fake_run(monkeypatch, [0, 0, 0, 0])
+
+    entry = _entry(harness="codex")
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is True

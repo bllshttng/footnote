@@ -4595,6 +4595,11 @@ class DispatchSendResult:
 
     msg_id: str
     delivery: str  # "hosted" | "durable"
+    # The live lane's own cause when delivery demoted to durable (node x-1904):
+    # the claude control.sock vocabulary (not-confirmed / attach-failed / ...),
+    # a codex RPC reason, or a mux token. None when no live attempt ran (the
+    # recipient was asleep, so durable was written upfront with no live miss).
+    reason: Optional[str] = None
     # Set by the --to-project anycast path (resolve_to_project): the registry
     # name the project resolved to (when one live peer), and the destination
     # project (for the durable-queue and resolved-recipient stdout lines).
@@ -4714,10 +4719,34 @@ def _daemon_rpc(
 
 
 # read_timeout exceeds the daemon's per-turn ceiling
-# (SWITCHBOARD_TURN_TIMEOUT_MS=120s) so a real reply is not cut short. The
-# demote/probe case answers in well under a second (a failed stream.ping), so
-# normal sends to non-stream sessions are not slowed materially.
+# (SWITCHBOARD_TURN_TIMEOUT_MS=120s) plus its 5s grace, so a real reply is never
+# cut short and the client never abandons a turn the daemon is still driving.
+# The detached background relay continuation (_relay_worker_loop, x-1f23) runs
+# off-thread and wants the full ceiling for its own reason: a genuine multi-hop
+# stream exchange. The first hop needs the same number for the reason below.
 _SWITCHBOARD_READ_TIMEOUT = 130.0
+# The FIRST hop's read budget. SYNCHRONOUS -- the sender blocks on it -- so a
+# tighter value than the relay's is tempting, and a 15s one shipped here. It is
+# unsafe, and the ceiling is not ours to pick: `agent.switchboard_v2` does not
+# ack and return. `handle_switchboard` drives B's WHOLE turn before it answers,
+# bounded by SWITCHBOARD_TURN_TIMEOUT_MS (120s) + SWITCHBOARD_DRIVE_GRACE_S (5s).
+# Reading for less than 125s abandons a turn the daemon is still driving: the
+# body already reached B, `_switchboard_exchange` returns None, and
+# `_deliver_live` falls through and injects the SAME body a second time under a
+# receipt that says durable. Most real model turns run past 15s, so that was the
+# common case, not the edge.
+#
+# Capping the daemon instead (`timeout_ms` in params) is worse: a drive that
+# misses its deadline stamps B orphaned, so a short cap marks every slow-but-
+# healthy peer dead.
+#
+# The complaint behind the 15s is real -- a wedged daemon held a sender for the
+# full budget, twice killed by hand at 90s and 120s. The fix belongs on the
+# daemon side (ack first, drive after), not in a client read cap. Until that
+# lands, the sender pays the daemon's own ceiling. The common non-stream case
+# still fast-fails in about a second: every pre-drive check is bounded, the
+# stream probe at STREAM_PROBE_TIMEOUT_S = 2s.
+_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT = _SWITCHBOARD_READ_TIMEOUT
 # A SHORT connect timeout: every claude send now tries the switchboard first, so
 # a DOWN/wedged daemon must not tax the common (non-stream) path — it should fail
 # the connect fast and demote, rather than burn the 3s default before the
@@ -5109,14 +5138,17 @@ def _switchboard_exchange(
     caller then demotes to the MCP/socket path).
 
     The FIRST hop (drive B with ``body``) is the actual ``send A->B`` delivery and
-    runs synchronously so the delivered/demote decision is exact. When
-    ``config.agents.a2a.auto`` is True (the default) the bounded autonomous relay
-    that follows (drive A with B's reply, then B with A's reply, ... up to
-    ``config.agents.a2a.turn_ceiling`` total turns) is kicked off in a DETACHED
-    background process and the caller returns ``True`` immediately (ab-3bd520ab) —
-    it no longer blocks for up to ``turn_ceiling × 130s``. When ``auto`` is False,
-    a single OBSERVED hop drives B and mirrors B's reply into A's view, with no
-    autonomous relay.
+    runs synchronously so the delivered/demote decision is exact. Its read
+    budget is ``_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT``, which must stay above the
+    daemon's own drive ceiling; see that constant for why a tighter one delivers
+    the message twice. When ``config.agents.a2a.auto`` is True (the default) the
+    bounded autonomous relay that follows (drive A with B's reply, then B with
+    A's reply, ... up to ``config.agents.a2a.turn_ceiling`` total turns) is
+    kicked off in a DETACHED background process and the caller returns
+    ``True`` immediately (ab-3bd520ab) — it no longer blocks for up to
+    ``turn_ceiling × 130s``, so the relay hop keeps the full ceiling: nothing
+    is waiting on it. When ``auto`` is False, a single OBSERVED hop drives B
+    and mirrors B's reply into A's view, with no autonomous relay.
     """
     auto, ceiling = _load_a2a_settings()
     # US6 (ab-098967b4): the first-use confirm gates the first autonomous hop.
@@ -5140,7 +5172,7 @@ def _switchboard_exchange(
         _SWITCHBOARD_RPC_METHOD,
         params,
         connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
-        read_timeout=_SWITCHBOARD_READ_TIMEOUT,
+        read_timeout=_SWITCHBOARD_FIRST_HOP_READ_TIMEOUT,
     )
     if (
         sb is None
@@ -5178,6 +5210,23 @@ def _switchboard_exchange(
 # Subprocess budget for the mail-inject verb. It polls the recipient transcript
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
+
+# Liveness-scaled confirm budget (node x-1904, change 2). The enqueue record is
+# written at submit time, not at turn end, so a healthy busy recipient confirms
+# in well under a second -- the default 10s budget already exists only to cover
+# recipients the daemon successfully attached to, i.e. ones already proven
+# alive. What it currently does wrong is convert "the CR has not landed yet
+# because the recipient is deep in a long tool call" into a live-miss, handing
+# the message to a queue nobody drains. When the SENDER's own liveness signal
+# (`_registered_family1_state`) independently reports the recipient mid-turn,
+# raise the poll budget to ~30s (120 * 250ms) so a long tool call has room to
+# yield back to the prompt before we give up; any other recipient keeps the
+# unscaled default. A live recipient that still has not enqueued within the
+# raised budget is genuinely wedged, a different fact from "busy" (change 4
+# reports it as such via the reason token). Not a fixed sleep: the poll still
+# exits the instant the enqueue lands.
+_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS = 120
+_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S = 40.0
 
 # Rust mux pane exit code for a guarded send the server refused because the
 # recipient pane's turn is not takeable (crates/fno/src/mux_cli.rs
@@ -5239,25 +5288,124 @@ def _build_mail_ctx(
     )
 
 
+# Poll budget for the mux lane's content confirm (node x-1904, change 3),
+# matched to the claude control.sock lane's default (crates/fno-agents/src/
+# mail_inject.rs DEFAULT_ATTEMPTS/DEFAULT_INTERVAL_MS): 40 * 250ms = 10s. Kept
+# in parity so neither keystroke lane is structurally more patient than the
+# other for the same "did the paste land" question.
+_MUX_CONFIRM_ATTEMPTS = 40
+_MUX_CONFIRM_INTERVAL_S = 0.25
+
+
+def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
+    """Locate the mux recipient's OWN claude transcript by session uuid, the
+    confirm target for :func:`_mux_pane_send`'s ``confirm`` mode (node x-1904).
+
+    Reuses the resolver `fno.doctor._find_transcript_for` already used for the
+    self-diagnostic surface rather than writing a second transcript-by-uuid
+    walk (the Rust control.sock lane's own mirror is `find_transcript` in
+    `crates/fno-agents/src/claude_drive.rs`). None when the entry carries no
+    resolvable full session uuid, or no matching transcript file exists --
+    both fail the confirm closed, never open.
+    """
+    from fno.doctor import _find_transcript_for
+
+    session_id = entry.harness_session_id or entry.session_id
+    if not session_id:
+        return None
+    return _find_transcript_for(session_id)
+
+
+def _mux_content_confirm(
+    transcript: Path,
+    marker: str,
+    since_byte: int,
+    *,
+    attempts: int = _MUX_CONFIRM_ATTEMPTS,
+    interval_s: float = _MUX_CONFIRM_INTERVAL_S,
+) -> bool:
+    """Poll ``transcript`` for ``marker`` in lines appended after ``since_byte``
+    (node x-1904, change 3): content, not growth, mirroring the claude
+    control.sock lane's ``confirm_content_after``/``escaped_marker`` pair
+    (``crates/fno-agents/src/mail_inject.rs``) so both keystroke lanes confirm
+    delivery the same way. ``marker`` is escaped the same way ``json.dumps``
+    would embed it in a JSON string field, since a claude transcript line
+    stores the turn's text JSON-encoded -- matching Rust's
+    ``serde_json::to_string`` + quote-strip. An empty escaped marker (an empty
+    ``text``) never confirms; a submitted turn is recorded verbatim, an unsent
+    paste records nothing, so a busy recipient's unrelated transcript growth
+    never carries our marker by accident.
+    """
+    import json
+
+    # ensure_ascii=False to match Rust's `serde_json::to_string`, which leaves
+    # non-ASCII literal. With the default the marker's accented or emoji
+    # characters become \uXXXX escapes that a claude transcript never carries,
+    # and the confirm could never match.
+    escaped = json.dumps(marker, ensure_ascii=False)[1:-1]
+    if not escaped:
+        return False
+    needle = escaped.encode("utf-8")
+    for _ in range(max(attempts, 1)):
+        try:
+            with transcript.open("rb") as fh:
+                fh.seek(since_byte)
+                for raw_line in fh:
+                    if needle in raw_line:
+                        return True
+        except OSError:
+            pass
+        time.sleep(interval_s)
+    return False
+
+
 def _mux_pane_send(
-    entry: "AgentEntry", text: str, *, guarded: bool = True, sender: Optional[str] = None
+    entry: "AgentEntry",
+    text: str,
+    *,
+    guarded: bool = True,
+    sender: Optional[str] = None,
+    confirm: bool = False,
 ) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
-    When ``guarded`` (the mail-delivery default, US4), the paste rides the
-    server-side turn-taken interlock: a pane whose recipient is mid-turn refuses
-    with EXIT_TARGET_NOT_IDLE and this returns False -- a ``stalled`` demotion to
-    the caller's durable floor -- rather than swallowing the bytes and letting the
-    sender report ``hosted`` (Locked Decision 4: hosted-on-bytes-written is
-    banned). A guarded send does NOT hold the pane's writer claim: the server
-    guard refuses any pane whose claim a live pid holds ("busy: relay"), so
-    holding our own claim would self-block every guarded send; the atomic
-    server-side idle check is itself the interleave protection for the paste.
+    When ``guarded``, the paste rides the server-side turn-taken interlock: a
+    pane whose recipient is mid-turn refuses with EXIT_TARGET_NOT_IDLE and this
+    returns False -- a ``stalled`` demotion to the caller's durable floor --
+    rather than swallowing the bytes and letting the sender report ``hosted``
+    (Locked Decision 4: hosted-on-bytes-written is banned). A guarded send does
+    NOT hold the pane's writer claim: the server guard refuses any pane whose
+    claim a live pid holds ("busy: relay"), so holding our own claim would
+    self-block every guarded send; the atomic server-side idle check is itself
+    the interleave protection for the paste. No caller opts into this branch any
+    more (node x-1904): the guard was `rerun_allowed`, borrowed from the rerun
+    verb, and a busy recipient enqueues an injected paste rather than corrupting
+    a composer (measured, not inferred -- see the doc comment on
+    `rerun_allowed` in `crates/fno/src/server.rs`), so refusing before any byte
+    was written vetoed exactly the delivery this transport can make. Left in
+    place (not deleted) as a real capability of the underlying `fno mux pane
+    send --guarded` verb, which the rerun caller still legitimately wants.
 
-    ``guarded=False`` is the raw channel the writer-claim holder owns (peer
-    follow-up); it holds the claim across the text-then-CR burst so no other
-    writer interleaves. The claim is best-effort (an unclaimed pane refuses the
-    acquire; send proceeds), but a failed send fails closed -> durable.
+    ``guarded=False`` is the raw channel the writer-claim holder owns; it holds
+    the claim across the text-then-CR burst so no other writer interleaves. The
+    claim is best-effort (an unclaimed pane refuses the acquire; send proceeds),
+    but a failed send fails closed -> durable.
+
+    ``confirm`` (node x-1904, mail-delivery default): the mux lane had no
+    confirm at all before this -- the busy-veto stood in for one, wrongly,
+    since it refused before any byte was written rather than checking whether
+    the byte landed. When set, a bytes-written success from the unguarded paste
+    is not enough: poll the recipient's OWN transcript for the injected turn's
+    content (mirrors the claude control.sock lane's
+    ``confirm_content_after``/``escaped_marker`` pair in
+    ``crates/fno-agents/src/mail_inject.rs``, so both lanes confirm the same
+    way -- content, not growth). No confirmable transcript, or the marker never
+    lands within the poll budget, both report False; a confirm that "passes" on
+    an unreadable transcript is the false-positive shape the pitfalls corpus
+    warns against. Ignored when ``guarded`` (a guarded send's idle check was
+    itself standing in for a confirm, and this flag governs the unguarded path
+    replacing it), and ignored for a non-claude recipient, which has no
+    ~/.claude/projects transcript to confirm against.
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -5357,9 +5505,37 @@ def _mux_pane_send(
         _audit_raw_inject(sent)
         return sent
 
+    # Baseline BEFORE the paste (not after): the confirm below scans only lines
+    # appended past this offset, so it never matches something already in the
+    # transcript when we started.
+    #
+    # The transcript confirm is a CLAUDE-lane capability: the resolver reads
+    # ~/.claude/projects only, so a mux-hosted codex/opencode/gemini pane has no
+    # transcript to confirm against and every landed paste would report a miss --
+    # a false durable demotion, and a duplicate once the recipient drains the
+    # durable copy. Those panes keep the bytes-written verdict.
+    confirm = confirm and (getattr(entry, "harness", "") or "") == "claude"
+    confirm_transcript = _mux_recipient_transcript(entry) if confirm else None
+    confirm_baseline: Optional[int] = None
+    if confirm_transcript is not None:
+        try:
+            confirm_baseline = confirm_transcript.stat().st_size
+        except OSError:
+            confirm_transcript = None
+
     claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
     try:
         sent = _paste_then_submit()
+        if sent and confirm:
+            # Bytes-written alone is Locked-Decision-4 banned as a hosted
+            # verdict; confirm by content against the recipient's own
+            # transcript, never optimistically on an unreadable one.
+            # Strip first: a leading newline would make the first line empty,
+            # and an empty marker never confirms (a landed paste read as a miss).
+            marker = text.strip().split("\n", 1)[0]
+            sent = confirm_transcript is not None and confirm_baseline is not None and (
+                _mux_content_confirm(confirm_transcript, marker, confirm_baseline)
+            )
         _audit_raw_inject(sent)
         return sent
     finally:
@@ -5489,7 +5665,14 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
         return False, "probe-unavailable"
 
 
-def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = None) -> bool:
+def _mail_inject_claude(
+    recipient: str,
+    text: str,
+    *,
+    sender: Optional[str] = None,
+    reason_out: Optional[list] = None,
+    liveness_scaled: bool = False,
+) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
 
@@ -5497,6 +5680,22 @@ def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = No
     transcript; any miss (binary absent, recipient not on the roster, not
     confirmed within the poll budget) returns False so the caller writes the
     durable fallback.
+
+    ``reason_out`` (node x-1904), when a non-empty list, receives the verb's own
+    reason token (not-confirmed / attach-failed / io-error / no-transcript /
+    not-injectable / unsafe-text) so a durable demotion receipt can name WHY the
+    live lane missed instead of a generic live-miss. It is a side-channel rather
+    than a second return value so the many callers and test mocks that read this
+    as a plain bool are unaffected. A missing binary, subprocess failure, or
+    unparseable stdout names that boundary too, so the receipt never silently
+    reverts to a bare live-miss at the Python edge.
+
+    ``liveness_scaled`` (node x-1904, change 2): pass the raised confirm budget
+    (``_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS``) when the caller's OWN liveness
+    signal already reports the recipient mid-turn, so a long tool call gets room
+    to yield back to the prompt before the confirm gives up. The unscaled
+    default otherwise (a recipient we cannot independently prove busy stays on
+    the tight budget, converting a wedged send to durable quickly).
 
     ``sender`` is the invoking session's mail handle, forwarded to the binary's
     audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
@@ -5506,25 +5705,39 @@ def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = No
 
     from fno import rust_binary
 
+    def _record(reason: str) -> None:
+        if reason_out is not None:
+            reason_out.append(reason)
+
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
+        _record("no-binary")
         return False
     argv = [str(binary), "mail-inject", "--session", recipient]
     if sender:
         argv += ["--sender", sender]
+    timeout = _MAIL_INJECT_TIMEOUT_S
+    if liveness_scaled:
+        argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
+        timeout = _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S
     try:
         proc = subprocess.run(
             argv,
             input=text,
             capture_output=True,
             text=True,
-            timeout=_MAIL_INJECT_TIMEOUT_S,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
+        _record("probe-unavailable")
         return False
     try:
-        return bool(json.loads(proc.stdout.strip()).get("delivered"))
+        out = json.loads(proc.stdout.strip())
+        delivered = bool(out.get("delivered"))
+        _record(str(out.get("reason") or "unknown"))
+        return delivered
     except (ValueError, AttributeError):
+        _record("unreadable")
         return False
 
 
@@ -5855,20 +6068,34 @@ def _deliver_live(
     from_name: str,
     mail: "Optional[_MailCtx]" = None,
     sender_entry: "Optional[AgentEntry]" = None,
+    reason_out: "Optional[list]" = None,
+    family1_state: Optional[str] = None,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node x-1f23).
 
-    Returns True on success, False when live delivery is not possible or fails
-    (not live-reachable, socket error, daemon unreachable, etc.).
+    ``reason_out`` (node x-1904), when a non-empty list, receives the live
+    lane's own cause (the claude control.sock vocabulary from
+    :func:`_mail_inject_claude`, the codex daemon RPC reason, or a mux token) so
+    a durable demotion receipt can name WHY the live lane missed instead of a
+    generic live-miss. A side-channel, not a second return value, so callers
+    and test mocks that read this as a plain bool are unaffected.
+
+    ``family1_state`` (node x-1904, change 2) is the caller's ALREADY-COMPUTED
+    :func:`_registered_family1_state` classification for ``entry`` -- passed in
+    rather than recomputed here, since ``dispatch_send`` already resolves it
+    before calling this function and a second call would re-read the recipient
+    transcript for no new information. ``"working"`` (mid-turn, per
+    :func:`_registered_family1_state`) scales the claude control.sock confirm
+    budget so a long tool call has room to yield before we give up.
 
     When ``mail`` is set the body is wrapped in the paired ``<fno_mail>`` envelope
     so the recipient sees agent-to-agent structure and the delivered turn is
     self-recording (``grep <fno_mail>`` reconstructs a2a history). Every live
     transport below carries the same wrapped turn.
 
-    For claude peers: the proven ``control.sock`` ``op:'reply'`` inject via the
-    ``fno-agents mail-inject`` verb (G1, x-26df) is the live primitive for adopted
+    For claude peers: the ``control.sock`` inject via the ``fno-agents
+    mail-inject`` verb (G1, x-26df) is the live primitive for adopted
     ``claude --bg`` sessions, replacing the dead per-worker messaging socket; the
     switchboard / MCP fast lanes still apply first for stream-json / MCP-routed
     peers.
@@ -5893,8 +6120,15 @@ def _deliver_live(
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
     # PaneSend; worker/bg rows keep the legacy lanes below until G4.
+    def _record(reason: str) -> None:
+        if reason_out is not None:
+            reason_out.append(reason)
+
     if entry.mux:
-        return _mux_pane_send(entry, wrapped)
+        mux_delivered = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+        if not mux_delivered:
+            _record("mux-send-failed")
+        return mux_delivered
 
     # Route key is the canonical harness, legacy provider as fallback (x-ec59):
     # an unknown harness with no inject lane (e.g. opencode) falls through to the
@@ -5916,11 +6150,12 @@ def _deliver_live(
         if result.get("delivered") is True:
             return True
         # delivered=false: print the demotion reason to stderr.
-        reason = result.get("reason", "unknown")
+        reason = str(result.get("reason") or "unknown")
         print(
             f"fno-agents deliver demoted: {reason}; message queued durable",
             file=sys.stderr,
         )
+        _record(reason)
         return False
 
     # Group 2 (Task 3.1): both-endpoints-live switchboard fast lane. When B is a
@@ -5983,8 +6218,14 @@ def _deliver_live(
     # fallback for an MCP-registered row whose short_id field was since cleared.
     recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
     if not recipient:
+        _record("no-recipient")
         return False
-    return _mail_inject_claude(recipient, wrapped)
+    return _mail_inject_claude(
+        recipient,
+        wrapped,
+        reason_out=reason_out,
+        liveness_scaled=family1_state == "working",
+    )
 
 
 def _registered_family1_state(entry: "AgentEntry") -> str:
@@ -6178,7 +6419,21 @@ def dispatch_send(
             flush=True,
         )
 
-    # 3. Per-agent flock.
+    # 3. Per-agent flock. Confirmed (node x-1904, change 6): this `with` block
+    # spans the ENTIRE rest of the send, including the live-delivery attempt
+    # below -- not only the registry read/identity-check mutation it exists to
+    # guard (the "second resolution under that lock closes the read/lock race"
+    # comment a few lines down). A live-delivery attempt at a busy recipient
+    # can now take up to `_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S` (40s, change
+    # 2's own budget raise) or the switchboard's 130s relay ceiling, so a
+    # second sender addressing the SAME busy recipient serializes behind the
+    # whole first attempt rather than just the identity check -- the specimen
+    # measured delivering this plan's own report ("Waiting for agent
+    # 'king-footnote-g3' lock..." with no progress until killed). Narrowing
+    # this to cover only the registry mutation is a real fix but a nontrivial
+    # restructuring of a concurrency-sensitive 300-line function under time
+    # pressure is the wrong place to guess; filed as a carveout rather than
+    # rushed here.
     try:
         with hold_agent_lock(
             canonical_name,
@@ -6369,24 +6624,34 @@ def dispatch_send(
                     _write_durable()
                 delivery = "durable"
                 demotion_notice: Optional[str] = None
+                live_miss_reason: Optional[str] = None
 
-                if family1_attemptable and _deliver_live(
-                    existing,
-                    message,
-                    from_name,
-                    mail_ctx,
-                    sender_entry=sender_entry,
-                ):
-                    delivery = "hosted"
-                elif durable_recipient is None or family1_attemptable:
+                _live_delivered = False
+                _live_reason: list = []
+                if family1_attemptable:
+                    _live_delivered = _deliver_live(
+                        existing,
+                        message,
+                        from_name,
+                        mail_ctx,
+                        sender_entry=sender_entry,
+                        reason_out=_live_reason,
+                        family1_state=family1_state,
+                    )
+                    if _live_delivered:
+                        delivery = "hosted"
+                    else:
+                        live_miss_reason = _live_reason[0] if _live_reason else None
+                if not _live_delivered and (durable_recipient is None or family1_attemptable):
                     # Live-first fallback: an attemptable recipient whose live
                     # attempt missed, or a recipient with no durable address
                     # (which raises durable-address exit 12 inside _write_durable).
                     _write_durable()
 
                 if delivery == "durable" and family1_live:
+                    why = f" ({live_miss_reason})" if live_miss_reason else ""
                     demotion_notice = (
-                        f"live delivery failed for {name!r}; message queued durable ({msg_id})"
+                        f"live delivery failed for {name!r}{why}; message queued durable ({msg_id})"
                     )
 
                 _emit_ev(
@@ -6466,7 +6731,7 @@ def dispatch_send(
                 except (OSError, ValueError):
                     pass  # stderr already carries the non-retryable degradation
 
-            return DispatchSendResult(msg_id=msg_id, delivery=delivery)
+            return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
     except AgentLockTimeout as exc:
         events.emit(

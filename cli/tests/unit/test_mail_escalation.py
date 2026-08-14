@@ -256,19 +256,26 @@ def test_attended_live_miss_escalates(mailbox, monkeypatch, emitted_events):
     assert emitted_events[0]["data"]["recipient"] == "9a063cd3"
 
 
-def test_worker_recipient_live_miss_does_not_escalate(mailbox, monkeypatch, emitted_events):
+def test_reachable_worker_live_miss_escalates_as_reachable_miss(
+    mailbox, monkeypatch, emitted_events
+):
+    # A spawn/host worker row: no origin -> not attended, so it never matched the
+    # attended lane and a live miss sat silent. The reachable-miss lane covers it
+    # (node x-1904). The overlay event must actually LAND: its reason is an
+    # enforced enum, and the emit is best-effort, so an unlisted reason would be
+    # swallowed and this lane would surface nothing on a headless host.
     from fno.agents.registry import register_existing_session
     from fno.mail.cli import _name_lane_send
 
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
-    # A spawn/host worker row: no origin -> reads as not-attended.
     register_existing_session(provider="claude", session_id=sid, cwd=str(mailbox))
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     _skip_mux(monkeypatch)
 
     _name_lane_send("fyi", from_name="sender", resolved=_resolved_claude(sid))
 
-    assert emitted_events == [], "a worker recipient never fires the attended lane"
+    assert len(emitted_events) == 1, "a reachable worker live-miss escalates once"
+    assert emitted_events[0]["data"]["reason"] == "reachable-miss"
 
 
 def test_live_confirmed_send_does_not_escalate(mailbox, monkeypatch, emitted_events):
