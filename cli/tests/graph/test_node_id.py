@@ -185,3 +185,57 @@ def test_mint_raises_on_exhaustion(monkeypatch):
 
     with pytest.raises(RuntimeError, match="exhaustion"):
         c.mint_node_id(AllContains())
+
+
+# --- mint_node_id vs the archive (x-f69b) -----------------------------------
+
+
+def test_mint_avoids_archived_id(tmp_path, monkeypatch):
+    """A freed working-graph id must not collide with a live archive entry."""
+    import json
+
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4)
+
+    from fno.paths import graph_archive_json
+
+    archive_path = graph_archive_json()
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text(
+        json.dumps({"entries": [{"id": "xy-dead", "completed_at": "2026-01-01T00:00:00Z"}]}),
+        encoding="utf-8",
+    )
+
+    # Minting against an empty working pool must still avoid the id the
+    # archive holds: force the first candidate to collide, second to be free.
+    import uuid as uuid_mod
+
+    calls = iter(["dead" + "0" * 28, "cafe" + "0" * 28])
+
+    class _FakeUUID:
+        def __init__(self, hexval):
+            self.hex = hexval
+
+    monkeypatch.setattr(uuid_mod, "uuid4", lambda: _FakeUUID(next(calls)))
+    mid = c.mint_node_id(set())
+    assert mid != "xy-dead"
+    assert mid == "xy-cafe"
+
+
+def test_mint_archive_read_failure_degrades_to_working_pool(tmp_path, monkeypatch):
+    """A corrupt archive must not block minting (advisory read, x-f69b)."""
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _patch_settings(monkeypatch, id_prefix="xy-", id_hex_width=4)
+
+    from fno.paths import graph_archive_json
+
+    archive_path = graph_archive_json()
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text("{not json at all", encoding="utf-8")
+
+    mid = c.mint_node_id(set())
+    assert c.is_wellformed_node_id(mid)

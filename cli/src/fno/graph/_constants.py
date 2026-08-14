@@ -218,8 +218,14 @@ def mint_node_id(existing_ids) -> str:
 
     ``<prefix><hex>`` where prefix/width come from config (legacy fallback).
     Retries on collision against ``existing_ids`` (any container of current
-    graph keys), bounded by ``_MINT_MAX_ATTEMPTS``; raises RuntimeError when the
-    ID space is near exhaustion rather than looping forever (AC2-EDGE).
+    graph keys) UNION the archive's ids, bounded by ``_MINT_MAX_ATTEMPTS``;
+    raises RuntimeError when the ID space is near exhaustion rather than
+    looping forever (AC2-EDGE).
+
+    The archive read is best-effort (x-f69b): a sweep frees a working-graph id
+    for reuse, so minting against the working graph alone reissues an id that
+    still names a different node in graph-archive.json. A bad archive read
+    degrades to the working-graph-only pool rather than blocking every mint.
 
     MUST be called inside ``locked_mutate_graph`` so ``existing_ids`` is a
     consistent snapshot and two concurrent mints cannot collide (AC2-FR).
@@ -227,14 +233,30 @@ def mint_node_id(existing_ids) -> str:
     import uuid
     prefix = node_id_prefix()
     width = node_id_hex_width()
+    # Kept separate from `existing_ids` (never converted to a set): callers pass
+    # containers that only promise `__contains__`/`__len__`, not iteration.
+    archive_ids: set[str] = set()
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_archive_json
+
+        archive_path = graph_archive_json()
+        if archive_path.exists():
+            archive_ids = {
+                e.get("id") for e in read_graph(archive_path)
+                if isinstance(e, dict) and e.get("id")
+            }
+    except Exception:  # noqa: BLE001 - archive is advisory; a bad read must not block minting
+        pass
     for _ in range(_MINT_MAX_ATTEMPTS):
         candidate = f"{prefix}{uuid.uuid4().hex[:width]}"
-        if candidate not in existing_ids:
+        if candidate not in existing_ids and candidate not in archive_ids:
             return candidate
     count = len(existing_ids) if hasattr(existing_ids, "__len__") else "?"
     raise RuntimeError(
         f"node-ID space near exhaustion: {_MINT_MAX_ATTEMPTS} mint attempts at "
-        f"prefix {prefix!r} width {width} all collided ({count} existing ids). "
+        f"prefix {prefix!r} width {width} all collided ({count} existing ids, "
+        f"{len(archive_ids)} archived). "
         "Increase config.backlog.id_hex_width."
     )
 

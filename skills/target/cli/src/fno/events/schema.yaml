@@ -810,6 +810,35 @@ event_types:
           description: "The gh-reported state of the PR at force-close time (OPEN/CLOSED/MERGED/UNKNOWN)."
     consumers: [operator]
 
+  - name: graph_archive_swept
+    description: "One archive sweep ran to completion (fno backlog archive --apply), whether invoked directly or from the daily groom pass. Moved and every held-back bucket are always present, so a run that moves nothing still reports why: 'ok' with no count is indistinguishable from a sweep that never ran."
+    sources: [backlog]
+    data:
+      required: [moved, held_referenced, held_related, held_too_recent, held_no_timestamp, older_than_days]
+      properties:
+        moved:
+          type: integer
+          description: "Terminal nodes actually moved into graph-archive.json this run."
+        held_referenced:
+          type: integer
+          description: "Terminal nodes held back because an open node still references them (blocker/parent/supersede/related/origin)."
+        held_related:
+          type: integer
+          description: "Terminal nodes held back because a related peer is staying behind (moving one side of a symmetric edge would strand the other)."
+        held_too_recent:
+          type: integer
+          description: "Terminal nodes held back because they are younger than the age gate."
+        held_no_timestamp:
+          type: integer
+          description: "Terminal nodes held back because no parseable terminal timestamp was found."
+        older_than_days:
+          type: integer
+          description: "The age gate this sweep used (--older-than-days)."
+        remint_count:
+          type: integer
+          description: "Archive-side ids reminted this run to resolve a collision with a working-graph id (x-f69b); 0 on an ordinary sweep."
+    consumers: [operator]
+
   - name: style_refusal
     description: "A mail body was refused by the six-rule style gate before delivery. The retry rate (a refusal followed by a passing send in the same session) is a query over events.jsonl."
     sources: [target, subagent, test]

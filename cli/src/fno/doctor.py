@@ -739,6 +739,36 @@ def _groom_health() -> dict[str, Any]:
         return {"state": "unknown", "hours": None, "stale": False, "agent_installed": False}
 
 
+def _archive_id_collisions() -> dict[str, Any]:
+    """Ids present in BOTH the working graph and the archive (x-f69b).
+
+    Each is a real collision, not a duplicate: the id generator only checked
+    the working graph, so a freed id gets reminted while the archive still
+    holds a different node under the same id. A repeat sweep frees more ids,
+    so this count grows on its own; it changes doctor's exit code rather than
+    reporting quietly.
+    """
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_archive_json, graph_json
+
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            return {"count": 0, "ids": []}
+        working_ids = {
+            e.get("id") for e in read_graph(graph_json())
+            if isinstance(e, dict) and e.get("id")
+        }
+        archive_ids = {
+            e.get("id") for e in read_graph(archive_path)
+            if isinstance(e, dict) and e.get("id")
+        }
+        collisions = sorted(working_ids & archive_ids)
+        return {"count": len(collisions), "ids": collisions}
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"count": 0, "ids": []}
+
+
 def _post_merge_sync_health() -> dict[str, Any]:
     """Is the canonical checkout current with recently-merged PRs?
 
@@ -1462,6 +1492,16 @@ def _emit_human(
             f"fno doctor: backlog grooming last ran {gr['hours']:.0f}h ago "
             "(the daily pass is not running); check `launchctl list | grep sh.fno.groom` "
             "and ~/.fno/groom.err.log."
+        )
+
+    ids = result.get("archive_id_collisions") or {}
+    if ids.get("count"):
+        shown = ", ".join(ids["ids"][:10])
+        more = f" (+{ids['count'] - 10} more)" if ids["count"] > 10 else ""
+        out(
+            f"fno doctor: {ids['count']} node id(s) collide between the working "
+            f"graph and the archive: {shown}{more}; run "
+            "`fno backlog archive-dedupe-ids --apply` to remint the archived side."
         )
 
     # Canonical-sync freshness. Advisory like grooming: the alarm
@@ -2601,6 +2641,7 @@ def doctor_command(
     # LaunchAgent DOES change the exit code - an installed-but-dead agent is
     # exactly the silence this check exists to break.
     result["groom"] = _groom_health()
+    result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
     result["launch_agents"] = _launch_agent_failures()
 
@@ -2716,4 +2757,5 @@ def doctor_command(
             typer.echo("fno doctor: nothing to fix.", err=True)
 
     dead_agents = bool((result.get("launch_agents") or {}).get("dead"))
-    raise typer.Exit(1 if result["status"] == "stale" or dead_agents else 0)
+    id_collisions = bool((result.get("archive_id_collisions") or {}).get("count"))
+    raise typer.Exit(1 if result["status"] == "stale" or dead_agents or id_collisions else 0)
