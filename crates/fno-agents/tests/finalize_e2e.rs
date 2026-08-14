@@ -34,6 +34,8 @@ struct Env {
     calls_log: PathBuf,
     bin_dir: PathBuf,
     gh_calls: PathBuf,
+    fno_calls: PathBuf,
+    outstanding_store: PathBuf,
 }
 
 /// Build a hermetic env. `register_fails` makes the register-task stub exit 1.
@@ -65,6 +67,42 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // `fno` stub (x-32f3 HALF TWO): a tiny python3 double for `fno outstanding
+    // --json` / `fno outstanding ask`, keyed off FNO_STUB_STORE /
+    // FNO_STUB_CALLS_LOG so a test can assert the filing (and its dedup)
+    // without depending on the real Python outstanding store.
+    let fno_stub = bin_dir.join("fno");
+    fs::write(
+        &fno_stub,
+        "#!/usr/bin/env python3\n\
+         import json, os, sys\n\
+         args = sys.argv[1:]\n\
+         calls_log = os.environ.get('FNO_STUB_CALLS_LOG')\n\
+         if calls_log:\n\
+         \x20   open(calls_log, 'a').write('fno ' + ' '.join(args) + '\\n')\n\
+         store = os.environ.get('FNO_STUB_OUTSTANDING_STORE')\n\
+         if args[:2] == ['outstanding', '--json']:\n\
+         \x20   if store and os.path.exists(store):\n\
+         \x20       sys.stdout.write(open(store).read())\n\
+         \x20   else:\n\
+         \x20       sys.stdout.write(json.dumps({'carveouts': {'total': 0, 'by_kind': {}, 'oldest_ts': None}, 'questions': []}))\n\
+         \x20   sys.exit(0)\n\
+         if args[:2] == ['outstanding', 'ask']:\n\
+         \x20   question = args[2] if len(args) > 2 else ''\n\
+         \x20   node = args[args.index('--node') + 1] if '--node' in args else None\n\
+         \x20   session_id = os.environ.get('FNO_STUB_SESSION_ID', '')\n\
+         \x20   data = {'carveouts': {'total': 0, 'by_kind': {}, 'oldest_ts': None}, 'questions': [\n\
+         \x20       {'id': 'q-test', 'ts': '2026-01-01T00:00:00Z', 'question': question, 'session_id': session_id, 'cwd': None, 'node': node}\n\
+         \x20   ]}\n\
+         \x20   if store:\n\
+         \x20       open(store, 'w').write(json.dumps(data))\n\
+         \x20   print('q-test')\n\
+         \x20   sys.exit(0)\n\
+         sys.exit(1)\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fno_stub, fs::Permissions::from_mode(0o755)).unwrap();
 
     // Manifest (frontmatter + body graph_node_id, like the real one).
     let state = cwd.join(".fno/target-state.md");
@@ -150,6 +188,8 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
         calls_log,
         bin_dir,
         gh_calls,
+        fno_calls: root.join("fno-calls.log"),
+        outstanding_store: root.join("outstanding-store.json"),
     }
 }
 
@@ -188,6 +228,51 @@ fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
         .current_dir(&env.cwd)
         .output()
         .expect("run finalize")
+}
+
+/// Same as `run_finalize`, plus `--transcript` and the `fno` stub's env vars
+/// (x-32f3 HALF TWO tests): a separate helper rather than widening
+/// `run_finalize`'s signature and rippling through every existing call site.
+fn run_finalize_with_transcript(
+    env: &Env,
+    reason: &str,
+    session_id: &str,
+    transcript: &Path,
+) -> std::process::Output {
+    Command::new(BIN)
+        .arg("finalize")
+        .arg("--state")
+        .arg(&env.state)
+        .arg("--cwd")
+        .arg(&env.cwd)
+        .arg("--reason")
+        .arg(reason)
+        .arg("--transcript")
+        .arg(transcript)
+        .arg("--events")
+        .arg(&env.events)
+        .arg("--global-events")
+        .arg(&env.global_events)
+        .arg("--handoffs-dir")
+        .arg(&env.handoffs)
+        .arg("--postmortems-dir")
+        .arg(&env.postmortems)
+        .env("PYTHONPATH", &env.pypath)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                env.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("GH_CALLS_LOG", &env.gh_calls)
+        .env("FNO_STUB_CALLS_LOG", &env.fno_calls)
+        .env("FNO_STUB_OUTSTANDING_STORE", &env.outstanding_store)
+        .env("FNO_STUB_SESSION_ID", session_id)
+        .current_dir(&env.cwd)
+        .output()
+        .expect("run finalize with transcript")
 }
 
 fn prepare_real_plan_stamp(env: &Env, expected_url_count: Option<u32>) {
@@ -1431,4 +1516,171 @@ fn finalize_never_arms_auto_merge_on_a_non_green_terminal() {
             "{reason} must never arm auto-merge"
         );
     }
+}
+
+// ── x-cdc7 HALF ONE: WIP-commit at every terminal (e2e) ─────────────────────
+
+/// The specimen this fix exists for, at the wiring level: a worker dies
+/// mid-flight holding uncommitted work. Assert the work is ON THE BRANCH
+/// after `finalize` runs, not merely that some function returned a sha.
+#[test]
+fn finalize_wip_commits_a_dirty_worktree_at_any_terminal() {
+    let env = setup("S-wip", false);
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&env.cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap()
+    };
+    git(&["init", "-q", "."]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    // `.fno/` is gitignored in the real repo (session state, never committed);
+    // mirror that here so finalize's OWN bookkeeping writes (events.jsonl,
+    // the gh/fno stub call logs) don't read as leftover dirt from the rescue
+    // commit's point of view.
+    fs::write(env.cwd.join(".gitignore"), ".fno/\ncalls.log\ngh-calls.log\n").unwrap();
+    fs::write(env.cwd.join("committed.txt"), "base").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    // Dirty the tree exactly like a killed worker would: a modification plus
+    // a brand-new untracked file.
+    fs::write(env.cwd.join("committed.txt"), "changed mid-flight").unwrap();
+    fs::write(env.cwd.join("in_flight.txt"), "950 insertions worth").unwrap();
+
+    let out = run_finalize(&env, "NoProgress");
+    assert!(out.status.success(), "{out:?}");
+
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "the worktree must be clean after a rescue commit: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let log = Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(&env.cwd)
+        .output()
+        .unwrap();
+    let subject = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        subject.contains("WIP") && subject.contains("NoProgress"),
+        "{subject}"
+    );
+}
+
+/// Every OTHER test in this file runs `finalize` against `env.cwd` with no
+/// `.git` at all - this asserts that is a deliberate no-op (finalize still
+/// exits 0, no repo is ever created), not an untested gap.
+#[test]
+fn finalize_no_wip_commit_when_cwd_is_not_a_git_worktree() {
+    let env = setup("S-nowip", false);
+    fs::write(env.cwd.join("stray.txt"), "not a git repo").unwrap();
+    let out = run_finalize(&env, "NoProgress");
+    assert!(out.status.success());
+    assert!(!env.cwd.join(".git").exists());
+}
+
+// ── x-32f3 HALF TWO: mandatory outstanding-question filing (e2e) ───────────
+
+fn write_transcript(path: &Path, last_message: &str) {
+    let line = serde_json::json!({"role": "assistant", "content": last_message}).to_string();
+    fs::write(path, line + "\n").unwrap();
+}
+
+fn fno_calls(env: &Env) -> String {
+    fs::read_to_string(&env.fno_calls).unwrap_or_default()
+}
+
+/// The specimen this fix exists for: a worker idles seven hours on an
+/// unanswered question, then dies with `fno outstanding` empty the whole
+/// time. Assert the question survives the death.
+#[test]
+fn finalize_files_outstanding_question_on_stuck_terminal() {
+    let env = setup("S-outq", false);
+    let transcript = env.cwd.join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        "mouse-mode root cause identified; awaiting operator's terminal/mux info",
+    );
+
+    let out = run_finalize_with_transcript(&env, "NoProgress", "S-outq", &transcript);
+    assert!(out.status.success(), "{out:?}");
+
+    let c = fno_calls(&env);
+    assert!(c.contains("outstanding ask"), "{c}");
+    assert!(
+        env.outstanding_store.exists(),
+        "the stub must have recorded the filed question"
+    );
+}
+
+/// Dedup reads real state, not finalize's own once-per-session idempotency
+/// (a different, ledger-gated mechanism): pre-seed the store as if the
+/// question was already filed by some other path, and assert `finalize`
+/// still refuses to double-file it.
+#[test]
+fn finalize_does_not_refile_an_already_open_question_for_this_session() {
+    let env = setup("S-outq2", false);
+    let transcript = env.cwd.join("transcript.jsonl");
+    write_transcript(
+        &transcript,
+        "mouse-mode root cause identified; awaiting operator's terminal/mux info",
+    );
+    fs::write(
+        &env.outstanding_store,
+        serde_json::json!({
+            "carveouts": {"total": 0, "by_kind": {}, "oldest_ts": null},
+            "questions": [{
+                "id": "q-existing",
+                "ts": "2026-01-01T00:00:00Z",
+                "question": "prior",
+                "session_id": "S-outq2",
+                "cwd": null,
+                "node": null
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run_finalize_with_transcript(&env, "NoProgress", "S-outq2", &transcript);
+    assert!(out.status.success());
+    assert!(
+        !fno_calls(&env).contains("outstanding ask"),
+        "a session with an already-open question must not file a second one"
+    );
+}
+
+#[test]
+fn finalize_files_nothing_when_no_question_is_detected() {
+    let env = setup("S-outq3", false);
+    let transcript = env.cwd.join("transcript.jsonl");
+    write_transcript(&transcript, "implemented the fix and pushed a commit");
+
+    let out = run_finalize_with_transcript(&env, "NoProgress", "S-outq3", &transcript);
+    assert!(out.status.success());
+    assert!(!fno_calls(&env).contains("outstanding ask"));
+}
+
+/// A clean ship is never a stuck-with-a-question terminal, however the
+/// transcript happens to read - the check only runs on the STUCK bucket.
+#[test]
+fn finalize_files_nothing_on_a_ship_terminal_regardless_of_transcript() {
+    let env = setup("S-outq4", false);
+    let transcript = env.cwd.join("transcript.jsonl");
+    write_transcript(&transcript, "awaiting operator's decision before shipping");
+
+    let out = run_finalize_with_transcript(&env, "DonePRGreen", "S-outq4", &transcript);
+    assert!(out.status.success());
+    assert!(
+        !fno_calls(&env).contains("outstanding ask"),
+        "a clean ship must never be treated as a stuck-with-a-question terminal"
+    );
 }
