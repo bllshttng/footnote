@@ -22,7 +22,7 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 - If value is a skill name (contains `:`): invoke via the Skill tool
 - If value is a bash command (contains spaces or starts with a command): run via Bash
 - If value is `"none"`: skip phase (the corresponding skip flag in the manifest controls this)
-- The plan phase is NOT domain-resolved (always uses `fno:blueprint`). `/think` is not a pipeline phase (x-42c5, operator ruling): it is a research verb outside the delivery path and is never invoked automatically here, only by a deliberate choice before `/blueprint`.
+- The plan phase is NOT domain-resolved (always uses `fno:blueprint`). `/think` is not a pipeline phase (x-42c5, operator ruling). It is a research verb outside the delivery path. It never runs automatically here. Run it only as a deliberate choice before `/blueprint`.
 
 ## Phase Details Table
 

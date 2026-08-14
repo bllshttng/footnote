@@ -213,7 +213,7 @@ See [domain-profiles.md](domain-profiles.md) for full schema and examples.
 
 ## Step 3d2: Discovery Gate (idea input only)
 
-When `input_type == idea`, run the discovery protocol before plan to surface unknowns before planning. This is the most important touch point - it prevents target from silently assuming its way through ambiguity. `/think` is NOT a step here (x-42c5, operator ruling): it is a research verb outside the delivery path, never an automatic prerequisite. The discovery protocol (and `/blueprint` after it) self-grounds via `fno think inspect` when no prior `/think` doc exists.
+When `input_type == idea`, run the discovery protocol before plan to surface unknowns before planning. This is the most important touch point - it prevents target from silently assuming its way through ambiguity. `/think` is NOT a step here (x-42c5, operator ruling): it is a research verb outside the delivery path, never an automatic prerequisite. When no prior `/think` doc exists, the discovery protocol (and `/blueprint` after it) self-grounds via `fno think inspect`.
 
 ```
 DISCOVERY GATE -> plan -> execute -> review -> ship
