@@ -587,6 +587,58 @@ struct TabDrag {
     last_at: Instant,
 }
 
+/// (x-10ec) The workspace peek body: everything the layout already holds for
+/// one squad - its origin, its tabs (the active one marked), and its member
+/// rows with their states. Pure and local; no wire round trip.
+fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
+    let Some(s) = layout.squads.iter().find(|s| s.id == sid) else {
+        return vec!["workspace is no longer here".into()];
+    };
+    let mut out = vec![
+        format!("origin  {}", s.canonical_cwd),
+        format!("tabs    {} · panes {}", s.tabs.len(), s.panes),
+    ];
+    for (i, t) in s.tabs.iter().enumerate() {
+        let marker = if i == s.active_tab { "*" } else { " " };
+        let label = if t.name.is_empty() {
+            format!("tab {}", i + 1)
+        } else {
+            t.name.clone()
+        };
+        out.push(format!("{marker} {label}"));
+    }
+    let members: Vec<&AgentRow> = layout
+        .agents
+        .iter()
+        .filter(|a| a.squad == Some(sid))
+        .collect();
+    if members.is_empty() {
+        out.push("members none".into());
+        return out;
+    }
+    out.push("members".into());
+    for a in members {
+        let state = if a.exited {
+            "exited"
+        } else {
+            // The one state vocabulary (pane_state + the nav filter words): a
+            // finished-but-unseen member is `done`, not `idle`.
+            match pane_state(a.badge, a.seen) {
+                PaneState::Blocked => "blocked",
+                PaneState::Working => "working",
+                PaneState::DoneUnseen => "done",
+                PaneState::Idle => "idle",
+            }
+        };
+        let pane = a
+            .pane_id
+            .map(|p| format!(" · pane {p}"))
+            .unwrap_or_default();
+        out.push(format!("  {} · {state}{pane}", a.name));
+    }
+    out
+}
+
 /// (v43, x-d6a8 G3) The drag source of a sideline agent row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowSource {
@@ -1122,6 +1174,12 @@ struct PeekView {
     /// busy row would supersede each response before it arrives and never settle.
     /// Cleared when any body lands (`apply_peek_body`).
     refresh_pending: bool,
+    /// (x-10ec) Some for a WORKSPACE peek: `sid` of the peeked squad. The body
+    /// is rendered locally from the layout (a workspace has no transcript), so
+    /// no request follows the seq `open_peek` consumed - which is the point:
+    /// that seq can never be answered, so a late `PeekBody` for a superseded
+    /// agent peek is dropped by the guard instead of landing in this overlay.
+    squad: Option<u64>,
 }
 
 /// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
@@ -1296,6 +1354,13 @@ enum MenuAction {
     /// Open the rename overlay for a workspace section header - menu parity with
     /// selector `r` (x-96e8). Only built for a section carrying a squad id.
     Rename,
+    /// Reorder a workspace section `delta` slots on the sideline - menu parity
+    /// with selector `J`/`K`, bound to the same `Command::MoveSquad`.
+    MoveSquad(i32),
+    /// Remove a whole workspace. Routed through the same
+    /// `ConfirmKind::RemoveSquad` confirm the keyboard path uses - a mouse
+    /// click must not skip the destructive-action gate.
+    RemoveSquad,
 }
 
 /// What the numbered move picker is relocating: a whole tab (selector `m`) or a
@@ -1496,12 +1561,20 @@ fn build_section_menu(
     let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
     let mut actions: Vec<MenuAction> = Vec::new();
     if squad.is_some() {
-        rows.push(PopupRow::Entry {
-            glyph: "✎".into(),
-            label: "Rename".into(),
+        let entry = |glyph: &str, label: &str| PopupRow::Entry {
+            glyph: glyph.into(),
+            label: label.into(),
             hint: String::new(),
-        });
+        };
+        rows.push(entry("✎", "Rename"));
         actions.push(MenuAction::Rename);
+        rows.push(entry("▲", "Move up"));
+        actions.push(MenuAction::MoveSquad(-1));
+        rows.push(entry("▼", "Move down"));
+        actions.push(MenuAction::MoveSquad(1));
+        rows.push(PopupRow::Rule);
+        rows.push(entry("✕", "Remove workspace"));
+        actions.push(MenuAction::RemoveSquad);
     }
     if dead > 0 {
         rows.push(PopupRow::Entry {
@@ -2205,9 +2278,13 @@ impl View {
         let li = (row as usize).checked_sub(r0)?;
         let line = r.lines.get(li)?;
         let cc = (col as usize).checked_sub(c0)?;
+        // The footer's close target is not a row index; returning it here would
+        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
         line.hits
             .iter()
-            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .find(|(t, off, len)| {
+                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
             .map(|(t, _, _)| *t)
     }
 
@@ -2456,9 +2533,13 @@ impl View {
         let li = (row as usize).checked_sub(r0)?;
         let line = r.lines.get(li)?;
         let cc = (col as usize).checked_sub(c0)?;
+        // The footer's close target is not a row index; returning it here would
+        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
         line.hits
             .iter()
-            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .find(|(t, off, len)| {
+                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
             .map(|(t, _, _)| *t)
     }
 
@@ -2538,9 +2619,13 @@ impl View {
         let li = (row as usize).checked_sub(r0)?;
         let line = r.lines.get(li)?;
         let cc = (col as usize).checked_sub(c0)?;
+        // The footer's close target is not a row index; returning it here would
+        // clamp `select(usize::MAX)` onto the LAST entry on a hover sweep.
         line.hits
             .iter()
-            .find(|(_, off, len)| cc >= *off && cc < *off + *len)
+            .find(|(t, off, len)| {
+                *t != crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
             .map(|(t, _, _)| *t)
     }
 
@@ -2566,6 +2651,26 @@ impl View {
             .as_ref()
             .map(|m| m.popup.render(self.term).contains(row, col))
             .unwrap_or(false)
+    }
+
+    /// True when `(row, col)` lands on a popup chrome footer's `esc close`
+    /// span - the clickable close every footer-bearing modal inherits from the
+    /// one hit span `chrome::frame` stamps. Checked BEFORE the entry hit
+    /// routers so the footer's target is never mistaken for a row index.
+    fn footer_close_hit(&self, popup: &Popup, row: u16, col: u16) -> bool {
+        let r = popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let (Some(li), Some(cc)) = (
+            (row as usize).checked_sub(r0),
+            (col as usize).checked_sub(c0),
+        ) else {
+            return false;
+        };
+        r.lines.get(li).is_some_and(|line| {
+            line.hits.iter().any(|(t, off, len)| {
+                *t == crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
+        })
     }
 
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
@@ -2600,9 +2705,30 @@ impl View {
             name,
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         });
         self.peek_esc.clear();
         self.peek_seq
+    }
+
+    /// (x-10ec) Open a read-only peek on a WORKSPACE row, rendered locally
+    /// from the layout the client already holds: its tabs and its member rows
+    /// with their states. No wire command - a workspace has no transcript to
+    /// fetch - and the auto-refresh and re-anchor paths key off `squad` so
+    /// nothing ever sends a `PeekAgent` for a workspace label.
+    fn open_squad_peek(&mut self, cursor: usize, sid: u64) {
+        let label = self
+            .layout
+            .squads
+            .iter()
+            .find(|s| s.id == sid)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let _unanswered = self.open_peek(cursor, label);
+        if let Some(p) = self.peek.as_mut() {
+            p.squad = Some(sid);
+            p.body = Some(squad_peek_lines(&self.layout, sid));
+        }
     }
 
     /// The `display_rows()` index of squad `id`'s own row (a `Sel` with no tab),
@@ -4385,6 +4511,25 @@ impl View {
     /// name to re-fetch when it re-anchored, `None` when it held or closed.
     fn peek_reanchor(&mut self) -> Option<(usize, String)> {
         let (cursor, peeked) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone()))?;
+        // (x-10ec) A workspace peek holds while its squad's row still sits at
+        // the cursor, refreshing the local body from the live layout; the
+        // squad gone, it closes. Never re-anchors onto an agent row - that
+        // would silently swap a workspace summary for a transcript fetch.
+        if let Some(sid) = self.peek.as_ref().and_then(|p| p.squad) {
+            let holds = matches!(
+                self.display_rows().get(cursor),
+                Some(DisplayRow::Sel(r)) if r.tab.is_none() && r.squad == sid
+            );
+            if holds {
+                if let Some(p) = self.peek.as_mut() {
+                    p.last_fetch = Instant::now();
+                    p.body = Some(squad_peek_lines(&self.layout, sid));
+                }
+            } else {
+                self.clear_peek();
+            }
+            return None;
+        }
         // One `display_rows()` snapshot for the whole check: the identity test,
         // both direction scans, and the re-anchored name all read it (gemini
         // review).
@@ -4427,6 +4572,12 @@ impl View {
     /// name) to send the fresh `PeekAgent`, or `None` when peek is closed / not
     /// yet due.
     fn peek_refresh_due(&mut self) -> Option<(u64, String)> {
+        // (x-10ec) A workspace peek has no transcript to refresh - its body
+        // re-renders locally on each Layout push in `peek_reanchor`. Arming a
+        // request here would send a `PeekAgent` carrying a workspace label.
+        if self.peek.as_ref().is_some_and(|p| p.squad.is_some()) {
+            return None;
+        }
         // Skip while a prior refresh is still in flight: stacking a new request
         // every push would supersede each response before it lands on a slow peek
         // read, so the transcript would never settle (never re-arm mid-flight).
@@ -9888,26 +10039,38 @@ async fn keys_modal_mouse(
                 m.popup.scroll_by(3);
             }
         }
-        MouseKind::Press(MouseButton::Left) => match view.keys_modal_hit(rep.row, rep.col) {
-            Some(t) => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
+        MouseKind::Press(MouseButton::Left) => {
+            // The footer's `esc close` words close the modal (chrome-stamped
+            // target); checked before the entry routers.
+            if view
+                .keys_modal
+                .as_ref()
+                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.keys_modal = None;
+                return Ok(StdinFlow::Continue);
+            }
+            match view.keys_modal_hit(rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.keys_modal.as_mut() {
+                        m.popup.select(t);
+                    }
+                    if matches!(
+                        keys_modal_execute_selected(view, scanner, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
                 }
-                if matches!(
-                    keys_modal_execute_selected(view, scanner, sock_w).await?,
-                    DispatchFlow::Detach
-                ) {
-                    return Ok(StdinFlow::Detach);
+                None => {
+                    // A click inside the block that hit no target (a header, a border)
+                    // is swallowed; only a click OFF the modal dismisses.
+                    if !view.keys_modal_block_contains(rep.row, rep.col) {
+                        view.keys_modal = None;
+                    }
                 }
             }
-            None => {
-                // A click inside the block that hit no target (a header, a border)
-                // is swallowed; only a click OFF the modal dismisses.
-                if !view.keys_modal_block_contains(rep.row, rep.col) {
-                    view.keys_modal = None;
-                }
-            }
-        },
+        }
         _ => {}
     }
     Ok(StdinFlow::Continue)
@@ -9960,6 +10123,50 @@ async fn execute_row_menu_action(
             MenuAction::Rename,
         ) => {
             view.open_rename(RenameTarget::Squad(id));
+            return Ok(());
+        }
+        // A workspace section's Move up/down sends the same `MoveSquad` the
+        // selector's `J`/`K` send; the server clamps at the edges silently, so
+        // an at-edge click is a no-op exactly like the key.
+        (
+            MenuTarget::Section {
+                squad: Some(sq), ..
+            },
+            MenuAction::MoveSquad(delta),
+        ) => {
+            view.sel_follow = Some(sq);
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
+            )
+            .await
+            .map_err(|e| format!("move-squad send failed: {e}"))?;
+            return Ok(());
+        }
+        // A workspace section's Remove opens the SAME confirm the keyboard
+        // path builds - the destructive-action gate, never skipped by a mouse.
+        (
+            MenuTarget::Section {
+                squad: Some(sq), ..
+            },
+            MenuAction::RemoveSquad,
+        ) => {
+            let Some(s) = view.layout.squads.iter().find(|s| s.id == sq) else {
+                view.set_notice("workspace is no longer here".into());
+                return Ok(());
+            };
+            if view.term.0 < MIN_ROWS_FOR_STATUS {
+                view.set_notice("terminal too short for the confirm prompt".into());
+                return Ok(());
+            }
+            view.open_confirm(ConfirmAction {
+                action: ConfirmKind::RemoveSquad {
+                    squad: sq,
+                    panes: s.panes,
+                    last: view.layout.squads.len() == 1,
+                },
+                label: s.name.clone(),
+            });
             return Ok(());
         }
         // A menu is built for exactly one target kind, so a crossed pair can only
@@ -10151,6 +10358,9 @@ async fn execute_row_menu_action(
         // A Notice rather than `unreachable!` - a panic here would take the whole
         // multiplexer down over a menu-construction bug.
         MenuAction::ClearDead => view.set_notice("clear dead needs a section header".into()),
+        MenuAction::MoveSquad(_) | MenuAction::RemoveSquad => {
+            view.set_notice("move and remove need a workspace section header".into())
+        }
     }
     Ok(())
 }
@@ -10281,21 +10491,33 @@ async fn row_menu_mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Left) => match view.row_menu_hit(rep.row, rep.col) {
-            Some(t) => {
-                if let Some(m) = view.row_menu.as_mut() {
-                    m.popup.select(t);
-                }
-                row_menu_execute_selected(view, sock_w).await?;
+        MouseKind::Press(MouseButton::Left) => {
+            // The footer's `esc close` words close the popup (chrome-stamped
+            // target); checked before the entry routers.
+            if view
+                .row_menu
+                .as_ref()
+                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.row_menu = None;
+                return Ok(());
             }
-            // A click inside the block that hit no target (a Header or Rule, which
-            // contribute none) is swallowed; only a click OFF the menu dismisses.
-            None => {
-                if !view.row_menu_block_contains(rep.row, rep.col) {
-                    view.row_menu = None;
+            match view.row_menu_hit(rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.row_menu.as_mut() {
+                        m.popup.select(t);
+                    }
+                    row_menu_execute_selected(view, sock_w).await?;
+                }
+                // A click inside the block that hit no target (a Header or Rule, which
+                // contribute none) is swallowed; only a click OFF the menu dismisses.
+                None => {
+                    if !view.row_menu_block_contains(rep.row, rep.col) {
+                        view.row_menu = None;
+                    }
                 }
             }
-        },
+        }
         MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
             // Re-anchor on the row under the second right-press (never stack two
             // menus); a non-agent row leaves nothing open.
@@ -10546,25 +10768,37 @@ async fn aux_mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Left) => match view.aux_hit(rep.row, rep.col) {
-            Some(t) => {
-                if let Some(m) = view.aux.as_mut() {
-                    m.popup.select(t);
+        MouseKind::Press(MouseButton::Left) => {
+            // The footer's `esc close` words close the popup (chrome-stamped
+            // target); checked before the entry routers.
+            if view
+                .aux
+                .as_ref()
+                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.aux = None;
+                return Ok(StdinFlow::Continue);
+            }
+            match view.aux_hit(rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.aux.as_mut() {
+                        m.popup.select(t);
+                    }
+                    if matches!(
+                        aux_execute_selected(view, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
                 }
-                if matches!(
-                    aux_execute_selected(view, sock_w).await?,
-                    DispatchFlow::Detach
-                ) {
-                    return Ok(StdinFlow::Detach);
+                None => {
+                    // In-block miss (a header) is swallowed; off-block dismisses.
+                    if !view.aux_block_contains(rep.row, rep.col) {
+                        view.aux = None;
+                    }
                 }
             }
-            None => {
-                // In-block miss (a header) is swallowed; off-block dismisses.
-                if !view.aux_block_contains(rep.row, rep.col) {
-                    view.aux = None;
-                }
-            }
-        },
+        }
         _ => {}
     }
     Ok(StdinFlow::Continue)
@@ -10989,7 +11223,8 @@ async fn peek_input_keys(
 }
 
 /// Selector-mode keys: j/k (and arrows) move over the unified display rows,
-/// skipping inert Headers; h/l (and left/right) collapse/expand squad rows;
+/// skipping inert Headers; h (and left) collapse, `l` explicitly expands a
+/// squad row, Right toggles a workspace row's idle caret;
 /// Enter acts on the row through [`View::row_action`] + [`apply_hit`] - the
 /// same resolver a mouse click uses (x-260a), so squad/tab switch, agent
 /// focus/attach, card dispatch-confirm, and workspace-create are all keyboard
@@ -11005,8 +11240,43 @@ async fn selector_keys(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
     let mut esc = std::mem::take(&mut view.sel_esc);
-    let keys = fold_selector_keys(&mut esc, bytes);
+    // Right arrow is the caret TOGGLE on a workspace row, distinct from `l`'s
+    // explicit expand: strip each COMPLETE `ESC [ C` from this chunk and handle
+    // it below, so it never aliases onto `l` through the fold. A sequence the
+    // read split lands in the carry and folds to `l` (expand) - a valid caret
+    // open, never a mis-toggle. A modified Right (`ESC [ 1 ; 5 C`) does not
+    // contain the contiguous triple, so it still drops as unmapped.
+    let mut rights = 0usize;
+    let mut cleaned: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(&[0x1b, b'[', b'C']) {
+            rights += 1;
+            i += 3;
+        } else {
+            cleaned.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let keys = fold_selector_keys(&mut esc, &cleaned);
     view.sel_esc = esc;
+    for _ in 0..rights {
+        // Same cursor as every other selector verb: pointer-follow works
+        // through the hover-ARMED selector (x-f331), and an explicit prefix+w
+        // selector keeps keyboard control even with the pointer parked on an
+        // inert sideline cell.
+        let Some(cur) = view.selector else {
+            break;
+        };
+        let squad = match view.display_rows().get(cur) {
+            Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
+            _ => None,
+        };
+        match squad.and_then(|sq| squad_key(&view.layout, sq)) {
+            Some(key) => view.toggle_idle(key),
+            None => view.set_notice("only a workspace row has a caret".into()),
+        }
+    }
     for &k in &keys {
         // Rows are re-read per key (via the View helpers below) so a layout
         // push or a close mid-chunk acts on the CURRENT catalog, never a stale
@@ -11072,18 +11342,20 @@ async fn selector_keys(
                 }
             }
             b' ' => {
-                // Open the read-only peek overlay on the focused agent row
-                // (x-c376): its status sentence + recent transcript, read from
-                // disk (peek/logs read disk; only attach spawns a pane). Any
-                // non-agent row notices why (x-f331 US3). The selector stays
-                // open underneath; Esc drops back into it at the peeked row.
-                let name = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) => Some(a.name.clone()),
-                    _ => None,
-                };
-                match name {
-                    Some(name) => fetch_peek(view, cur, name, sock_w).await?,
-                    None => view.set_notice("only an agent row can be peeked".into()),
+                // Open the read-only peek overlay: an agent row (x-c376) shows
+                // its status sentence + recent transcript from disk; a
+                // workspace row (x-10ec) shows its tabs and members rendered
+                // locally from the layout, no wire round trip. Any other row
+                // notices why (x-f331 US3). The selector stays open
+                // underneath; Esc drops back into it at the peeked row.
+                match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) => {
+                        fetch_peek(view, cur, a.name.clone(), sock_w).await?
+                    }
+                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => {
+                        view.open_squad_peek(cur, r.squad);
+                    }
+                    _ => view.set_notice("only an agent or workspace row can be peeked".into()),
                 }
             }
             b'\t' => {
@@ -15434,6 +15706,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // AC12-HP: Space on a workspace row opens a LOCAL peek (tabs + members
+    // from the layout), no wire round trip; a late agent PeekBody cannot land
+    // in it; it closes when the squad goes and holds while it stays.
+    #[tokio::test]
+    async fn space_opens_a_local_workspace_peek() {
+        let mut v = unified_rows_view();
+        let hdr = squad_header_at(&v, 1);
+        v.selector = Some(hdr);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        let peek = v.peek.as_ref().expect("peek opens on a workspace row");
+        assert_eq!(peek.squad, Some(1), "marked as a workspace peek");
+        let body = peek.body.as_ref().expect("the body renders locally");
+        assert!(
+            body.iter().any(|l| l.contains("worker")),
+            "the member row is listed: {body:?}"
+        );
+        assert!(
+            body.iter()
+                .any(|l| l.contains("tab") || l.contains("origin")),
+            "the summary carries tabs/origin"
+        );
+        assert!(buf.is_empty(), "no wire command for a workspace peek");
+        // The seq open_peek consumed was never attached to a request, so no
+        // PeekBody can arrive carrying it: a superseded agent request (the
+        // prior seq) is dropped by the guard instead of landing here.
+        assert!(peek.seq >= 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_peek_holds_on_layout_and_closes_when_the_squad_goes() {
+        let mut v = unified_rows_view();
+        let hdr = squad_header_at(&v, 1);
+        v.selector = Some(hdr);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b" ", &mut buf).await.unwrap();
+        assert!(v.peek.is_some());
+
+        // Same squad at the cursor: holds (and never refetches an agent).
+        assert_eq!(v.peek_reanchor(), None, "holds, no agent refetch");
+        assert!(
+            v.peek.is_some(),
+            "the workspace peek survives a layout push"
+        );
+        // The auto-refresh path never arms for a workspace peek.
+        assert!(v.peek_refresh_due().is_none(), "no PeekAgent is ever sent");
+
+        // The squad gone: the peek closes rather than re-anchoring onto an
+        // agent row.
+        v.layout.squads.retain(|s| s.id != 1);
+        assert_eq!(v.peek_reanchor(), None);
+        assert!(v.peek.is_none(), "the peek closes with its workspace");
+    }
+
     // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N idle`
     // -> all idle shown with a `- fewer` affordance -> folded again.
     #[test]
@@ -15458,6 +15784,53 @@ mod tests {
         view.toggle_idle(footnote_key());
         assert_eq!(rendered(&view, "idle"), 7, "toggling again re-folds");
         assert_eq!(idle_fold(&view), Some((5, false)));
+        crate::view_store::clear_test_path();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // AC11-HP: Right on a hovered or selected workspace row toggles its caret;
+    // `l` stays the explicit expand and never toggles.
+    #[tokio::test]
+    async fn right_arrow_toggles_a_workspace_caret() {
+        let dir = isolate_view_store("right-caret");
+        let mut agents = vec![sv_agent(1, "w", Some(AgentBadge::Working), false)];
+        for i in 0..12 {
+            agents.push(sv_agent(1, &format!("idle{i}"), None, false));
+        }
+        let mut view = view_with_agents(agents);
+        view.selector = Some(0); // the workspace header row
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(rendered(&view, "idle"), 12, "Right opens the caret");
+        selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(rendered(&view, "idle"), 7, "Right again re-folds it");
+
+        // `l` remains the EXPLICIT section expand (x-975a) and never touches
+        // the idle caret: two presses leave the fold alone, state Expanded.
+        selector_keys(&mut view, b"l", &mut buf).await.unwrap();
+        selector_keys(&mut view, b"l", &mut buf).await.unwrap();
+        assert_eq!(
+            rendered(&view, "idle"),
+            7,
+            "`l` does not fold or unfold idle rows"
+        );
+        assert_eq!(
+            view.section_view.get(&footnote_key()),
+            Some(&SectionView::Expanded),
+            "`l` sets the explicit Expanded view"
+        );
+
+        // A non-workspace row notices rather than toggling something else.
+        view.selector = Some(1); // an agent row
+        view.notice = None;
+        selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
+            .await
+            .unwrap();
+        assert!(view.notice.is_some(), "Right off a workspace row says why");
         crate::view_store::clear_test_path();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -16746,6 +17119,103 @@ mod tests {
         assert!(v.keys_modal.is_none(), "click off the popup dismisses");
     }
 
+    #[tokio::test]
+    async fn clicking_the_footer_esc_close_dismisses_the_modal() {
+        // AC10-HP: the chrome footer's `esc close` words are a mouse target
+        // stamped by chrome::frame, so clicking them closes the modal without
+        // touching a key. Verified THROUGH the mouse router (footer_close_hit
+        // feeding aux_mouse) on the settings modal, whose footer reads
+        // `tab switches section · esc close`, on the real rendered geometry.
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.aux = Some(v.build_settings_modal());
+        // Where do the words sit on screen? Render exactly as the router does.
+        let (fr, fc) = {
+            let r = v.aux.as_ref().unwrap().popup.render(v.term);
+            let (li, row) = r
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, l)| {
+                    l.hits
+                        .iter()
+                        .any(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                })
+                .expect("the modal footer carries the close target");
+            let (off, len) = row
+                .hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, o, l)| (*o, *l))
+                .unwrap();
+            (r.origin.0 + li, r.origin.1 + off + len / 2)
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let click = MouseReport {
+            row: fr as u16,
+            col: fc as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        aux_mouse(&mut v, click, &mut buf).await.unwrap();
+        assert!(v.aux.is_none(), "clicking `esc close` closes");
+        assert!(buf.is_empty(), "the close sends nothing on the wire");
+
+        // Esc still closes: the click added a target, it did not move the key.
+        v.aux = Some(v.build_settings_modal());
+        v.aux_esc = vec![0x1b];
+        aux_keys(&mut v, b"z", &mut buf).await.unwrap();
+        assert!(v.aux.is_none(), "Esc still closes the modal");
+    }
+
+    #[tokio::test]
+    async fn hovering_the_footer_esc_close_keeps_the_selection() {
+        // The footer's close target must never surface through `aux_hit` as a
+        // row index: ESC_CLOSE_HIT clamps in `Popup::select` to the LAST entry,
+        // so a hover sweep over the words would silently re-target Enter.
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.aux = Some(v.build_settings_modal());
+        let n = v.aux.as_ref().unwrap().popup.targets().len();
+        v.aux.as_mut().unwrap().popup.select(0);
+        let sel_before = v.aux.as_ref().unwrap().popup.sel;
+        let (fr, fc) = {
+            let r = v.aux.as_ref().unwrap().popup.render(v.term);
+            let (li, row) = r
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, l)| {
+                    l.hits
+                        .iter()
+                        .any(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                })
+                .expect("the modal footer carries the close target");
+            let (off, len) = row
+                .hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, o, l)| (*o, *l))
+                .unwrap();
+            (r.origin.0 + li, r.origin.1 + off + len / 2)
+        };
+        let hover = MouseReport {
+            row: fr as u16,
+            col: fc as u16,
+            kind: MouseKind::Move,
+            shift: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        aux_mouse(&mut v, hover, &mut buf).await.unwrap();
+        assert!(
+            n < 2 || v.aux.as_ref().unwrap().popup.sel == sel_before,
+            "hover over the close words keeps the selection put ({} targets)",
+            n
+        );
+    }
+
     #[test]
     fn row_menu_entries_gate_by_agent_state() {
         // US2: no dead item - a bg row gets new-tab + the 2x2 split grid; a pane
@@ -16921,7 +17391,12 @@ mod tests {
         assert!(v.open_row_menu(hdr, Anchor::Center));
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::Rename]
+            vec![
+                super::MenuAction::Rename,
+                super::MenuAction::MoveSquad(-1),
+                super::MenuAction::MoveSquad(1),
+                super::MenuAction::RemoveSquad,
+            ]
         );
         v.row_menu = None;
         // A truly menu-less row (the dim subline) refuses with no notice at all.
@@ -17071,8 +17546,13 @@ mod tests {
         assert!(v.open_row_menu(hdr, Anchor::Center), "workspace menu opens");
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::Rename],
-            "no dead rows -> Rename only"
+            vec![
+                super::MenuAction::Rename,
+                super::MenuAction::MoveSquad(-1),
+                super::MenuAction::MoveSquad(1),
+                super::MenuAction::RemoveSquad
+            ],
+            "no dead rows -> the five standing workspace verbs"
         );
         let mut buf: Vec<u8> = Vec::new();
         row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
@@ -17092,8 +17572,65 @@ mod tests {
         assert!(v.open_row_menu(hdr, Anchor::Center));
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::Rename, super::MenuAction::ClearDead]
+            vec![
+                super::MenuAction::Rename,
+                super::MenuAction::MoveSquad(-1),
+                super::MenuAction::MoveSquad(1),
+                super::MenuAction::RemoveSquad,
+                super::MenuAction::ClearDead
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_section_menu_move_sends_the_reorder_command() {
+        // AC8-HP: Move up/down ride the same Command::MoveSquad the keyboard
+        // J/K path sends; the server's silent clamp covers the at-edge case
+        // (AC9-EDGE), so the client sends unconditionally and never bells.
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        for (delta, label) in [(-1, "up"), (1, "down")] {
+            let m = v.row_menu.as_mut().unwrap();
+            m.popup.sel = m
+                .actions
+                .iter()
+                .position(|a| *a == super::MenuAction::MoveSquad(delta))
+                .unwrap_or_else(|| panic!("move-{label} entry present"));
+            let mut buf: Vec<u8> = Vec::new();
+            row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+            assert_eq!(
+                decode_cmds(buf),
+                vec![Command::MoveSquad { squad: 1, delta }],
+                "move {label} sends the reorder command"
+            );
+            assert!(v.open_row_menu(hdr, Anchor::Center), "re-open for the next");
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_section_menu_remove_opens_the_confirm_not_the_command() {
+        // AC8-HP: Remove workspace routes through the SAME
+        // ConfirmKind::RemoveSquad confirm the keyboard path builds - a mouse
+        // click must not skip the destructive-action gate.
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        let m = v.row_menu.as_mut().unwrap();
+        m.popup.sel = m
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::RemoveSquad)
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "the entry arms the confirm, sends nothing");
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(ConfirmKind::RemoveSquad { squad, .. }) => assert_eq!(*squad, 1),
+            _ => panic!("expected a RemoveSquad confirm"),
+        }
     }
 
     #[test]
@@ -19003,11 +19540,7 @@ mod tests {
             // A pathological parameter run is dropped rather than growing the
             // carry without limit.
             let mut esc = Vec::new();
-            let flood: Vec<u8> = b"\x1b["
-                .iter()
-                .copied()
-                .chain(std::iter::repeat(b'1').take(500))
-                .collect();
+            let flood: Vec<u8> = b"\x1b[".iter().copied().chain([b'1'; 500]).collect();
             fold(&mut esc, &flood);
             assert!(
                 esc.len() <= MAX_ESC_CARRY,
@@ -19768,6 +20301,7 @@ mod tests {
             name: String::new(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         });
         assert!(
             !v.apply_peek_body(4, vec!["stale".into()]),
@@ -19817,6 +20351,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let out = peek_overlay_lines(Some(&row), &loading, None, 0).join("\n");
         assert!(
@@ -19835,6 +20370,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let out = peek_overlay_lines(Some(&row), &loaded, None, 0).join("\n");
         assert!(out.contains("line one") && out.contains("line two"));
@@ -19872,6 +20408,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let out = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
         assert!(!out.contains('\x1b'), "ESC stripped");
@@ -19896,6 +20433,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         assert!(peek_overlay_lines(Some(&row), &peek, None, 0)[0].contains("@readyrule"));
 
@@ -19922,6 +20460,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         row.updated_at = Some(1_000);
@@ -19948,6 +20487,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let mut row = agent_row("w", 3, Some(AgentBadge::Working), false);
         let live = peek_overlay_lines(Some(&row), &peek, None, 0).join("\n");
@@ -19973,6 +20513,7 @@ mod tests {
             name: "w".into(),
             last_fetch: Instant::now(),
             refresh_pending: false,
+            squad: None,
         };
         let row = agent_row("w", 3, Some(AgentBadge::Working), false);
         let out = peek_overlay_lines(Some(&row), &peek, Some("fix the test"), 0).join("\n");

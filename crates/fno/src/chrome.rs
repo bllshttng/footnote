@@ -216,12 +216,37 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
     // IS the bottom border, so a footer (if any was set) is ignored there.
     if chrome.level == Level::Full {
         if let Some(f) = &chrome.footer {
-            out.push(content_row(f, Role::Footer, inner_w));
+            let mut row = content_row(f, Role::Footer, inner_w);
+            // The close words are a mouse target, defined once here so every
+            // popup that sets this footer inherits the clickable close (a
+            // per-modal hit test leaves the others printing the same lie).
+            if let Some((off, len)) = esc_close_span(f) {
+                row.hits.push((ESC_CLOSE_HIT, off + 1, len)); // +1: past the left border
+            }
+            out.push(row);
         }
     }
     out.push(bottom_border(chrome, inner_w));
 
     Framed { lines: out, width }
+}
+
+/// The hit target marking a chrome footer's `esc close` span: `usize::MAX` can
+/// never collide with a body row's real target (an index).
+pub const ESC_CLOSE_HIT: usize = usize::MAX;
+
+/// The `(char offset, char len)` of a footer's close affordance when it
+/// carries one: the words `esc close` when present, else a bare `esc`. Char
+/// offsets, matching how `content_row` lays the text out; `frame` shifts them
+/// into framed coordinates.
+fn esc_close_span(footer: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = footer.chars().collect();
+    let find = |needle: &[char]| chars.windows(needle.len()).position(|w| w == needle);
+    let long: Vec<char> = "esc close".chars().collect();
+    let short: Vec<char> = "esc".chars().collect();
+    find(&long)
+        .map(|o| (o, long.len()))
+        .or_else(|| find(&short).map(|o| (o, short.len())))
 }
 
 /// Framed width: left border + body + optional scrollbar + right border.
@@ -562,10 +587,7 @@ mod tests {
         assert_eq!(c.level(), Level::Bare);
         let framed = frame(&[bl("x")], &c, 3, None);
         assert_eq!(framed.lines.len(), 3);
-        assert!(framed
-            .lines
-            .iter()
-            .all(|l| l.text.contains("ignored") == false));
+        assert!(framed.lines.iter().all(|l| !l.text.contains("ignored")));
     }
 
     #[test]
@@ -578,8 +600,8 @@ mod tests {
         assert!(top.text.contains("Settings"));
         assert!(top.text.contains("esc"));
         // Positive markers: the chip and title carry their own roles.
-        assert!(top.roles.iter().any(|&r| r == Role::Chip));
-        assert!(top.roles.iter().any(|&r| r == Role::Title));
+        assert!(top.roles.contains(&Role::Chip));
+        assert!(top.roles.contains(&Role::Title));
     }
 
     #[test]
@@ -588,7 +610,7 @@ mod tests {
         let framed = frame(&[bl("body")], &c, 6, None);
         let bottom = framed.lines.last().unwrap();
         assert!(bottom.text.contains("esc"));
-        assert!(bottom.roles.iter().any(|&r| r == Role::Chip));
+        assert!(bottom.roles.contains(&Role::Chip));
     }
 
     #[test]
@@ -599,6 +621,39 @@ mod tests {
         let framed = frame(&[line], &c, 5, None);
         let body = framed.lines.iter().find(|l| !l.hits.is_empty()).unwrap();
         assert_eq!(body.hits[0], (0, 1, 5));
+    }
+
+    #[test]
+    fn footer_esc_close_words_carry_a_hit_span() {
+        // The clickable close is defined HERE, once, so every popup that sets
+        // an `esc close` footer inherits the target. The span covers the
+        // words, offset past the left border exactly like a body hit, and a
+        // footer without the words carries no target.
+        let footer = "tab switches section · esc close";
+        let c = Chrome::new("settings", Anchor::Center).footer(footer);
+        let framed = frame(&[bl("body")], &c, 40, None);
+        let off = footer
+            .char_indices()
+            .find_map(|(i, _)| footer[i..].starts_with("esc close").then_some(i))
+            .unwrap();
+        let char_off = footer[..off].chars().count();
+        let row = framed
+            .lines
+            .iter()
+            .find(|l| !l.hits.is_empty())
+            .expect("the footer line carries the close target");
+        assert_eq!(row.hits, vec![(ESC_CLOSE_HIT, char_off + 1, 9)]);
+        // The span is inside the line and lands on the words.
+        let words: String = row.text.chars().skip(char_off + 1).take(9).collect();
+        assert_eq!(words, "esc close");
+
+        // No words, no target: only the footer line ever carries one.
+        let c = Chrome::new("t", Anchor::Center).footer("just some text");
+        let framed = frame(&[bl("body")], &c, 40, None);
+        assert!(framed
+            .lines
+            .iter()
+            .all(|l| { l.hits.iter().all(|(t, _, _)| *t != ESC_CLOSE_HIT) }));
     }
 
     #[test]
