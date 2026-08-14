@@ -172,12 +172,12 @@ Candidate categories:
 
 Four lesson classes to never write, regardless of how confident the session felt writing them. Hermes bans the same classes for the same reason: "these harden into refusals the agent cites against itself for months after the actual problem was fixed."
 
-- **Env-dependent findings stated as durable fact.** "X is absent on this machine" is true of one shell on one day, not the project. If you must record it, name the machine and the date, and say so is a snapshot, not a rule.
-- **Negative claims about a tool** ("X doesn't work", "X is broken"). These age the worst: the tool gets fixed and the refusal outlives the bug. The live specimen: a memory entry once claimed `timeout`/`gtimeout` were absent from this machine and that watchers therefore no-op at exit 127. Both binaries are installed. The false claim survived until someone checked it against the running system.
-- **Transient/one-off errors** (a flaky network call, a rate limit, a single bad process state). One occurrence is noise, not a pattern - do not write a workaround for something you saw exactly once.
-- **An unresolved failure written up as validated workflow.** If the session ended blocked, uncertain, or with the fix unverified, say so plainly in the entry (or skip it) - never phrase a guess as a confirmed approach.
+- **Env-dependent findings stated as durable fact:** "X is absent on this machine" is true of one shell on one day, not the project. If you must record it, name the machine and the date. Say plainly that it is a snapshot, not a rule.
+- **Negative claims about a tool** ("X doesn't work", "X is broken"): these age worst. The tool gets fixed and the refusal outlives the bug. The live specimen: an entry once claimed `timeout`/`gtimeout` were absent, causing watchers to no-op at exit 127. Both binaries are installed on the machine. The false claim survived until someone checked it against the running system.
+- **Transient/one-off errors**: a flaky network call, a rate limit, a single bad process state. One occurrence is noise, not a pattern. Do not write a workaround for something you saw exactly once.
+- **An unresolved failure written up as validated workflow**. When a session ends blocked, uncertain, or with the fix unverified, say so plainly in the entry. Or skip the entry. Never phrase a guess as a confirmed approach.
 
-None of this bars a REAL, source-verified fact: a bug fixed at a cited PR, a genuinely repeated failure mode, an environment constraint that names its scope. Ask: is this still true tomorrow, on someone else's machine, after the bug it describes is fixed? If not, skip it, or narrow it until it is.
+None of this bars a REAL, source-verified fact. Examples: a bug fixed at a cited PR, a repeated failure mode, an environment constraint that names its scope. Ask: is this still true tomorrow, on someone else's machine? Is it still true after the bug it describes is fixed? If not, skip it, or narrow it until it is.
 
 ### Writing recipe
 

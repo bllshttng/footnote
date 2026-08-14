@@ -120,9 +120,10 @@ Both passes write entries via `scripts/memory/write-memory-entry.sh`. The interf
 
 ```bash
 bash scripts/memory/write-memory-entry.sh \
-    --memory-dir  /path/to/memory/dir  \
-    --session-id  20260505T102342Z-...  \
-    --candidate   '{"type":"feedback","name":"...","description":"...","body":"..."}'
+    --memory-dir     /path/to/memory/dir  \
+    --session-id     20260505T102342Z-...  \
+    --candidate      '{"type":"feedback","name":"...","description":"...","body":"..."}' \
+    --source-sha256  <sha256 of the existing target file, if any>
 ```
 
 Exit codes:
@@ -132,9 +133,24 @@ Exit codes:
 | 0 | Entry written successfully |
 | 1 | Error (bad args, write failure) |
 | 2 | Deduped (entry with same `name` already exists and body matches) |
+| 3 | Staged (see [Guards against bad autonomous writes](#guards-against-bad-autonomous-writes) below) |
 
-The `type` field must be `feedback` or `project`. The `name` field is a
-`snake_case_identifier` used as the filename and dedup key. Both passes respect
-the same dedup semantics: if `name` already exists with matching body, the entry
-is skipped (exit 2). If `name` exists with a different body, a `## Session {sid}
-update` stanza is appended rather than overwriting the original.
+The `type` field must be one of `feedback`, `project`, `reference`, `user`. The `name` field is a `snake_case_identifier` used as the filename and dedup key. Both passes respect the same dedup semantics. If `name` already exists with a matching body, the entry is skipped (exit 2). If `name` exists with a different body, the writer appends a `## Session {sid} update` stanza instead of overwriting the original, subject to the guards below.
+
+## Guards against bad autonomous writes
+
+Two problems compound here. The trigger for what gets evaluated was biased toward failure. And there was no blocklist for lesson classes that age badly. Both are fixed below, plus three smaller guards borrowed from the same review that flagged the bias. A comparable open-source agent memory system, "Hermes", bans the same lesson classes for the same stated reason. Their rule: these harden into refusals the agent cites against itself for months after the actual problem was fixed.
+
+**Blocklist.** `skills/target/references/pre-promise.md` ("Blocklist" under the Memory Pass section) is the canonical list of four lesson classes never to write. The classes: env-dependent findings stated as durable fact, negative claims about a tool, transient/one-off errors, and an unresolved failure written up as validated workflow. The live specimen that motivated this: a memory entry once claimed `timeout`/`gtimeout` were absent from a machine, causing watchers to no-op at exit 127. Both binaries were installed. The false claim survived until someone checked it against the running system. `cli/src/fno/retro/classify.py` carries a small deterministic backstop (`_PM_BLOCKLIST_RE` in `classify_postmortem`) that archives two of the four classes on sight: negative tool claims and transient error signatures. It fires only on a postmortem that is not also a genuine wedge. The other two classes stay judgment calls the prompt-text blocklist governs.
+
+**Read-before-write.** `write-memory-entry.sh` refuses to mutate an existing memory file unless the caller passes `--source-sha256` matching that file's CURRENT on-disk content. This proves the write is grounded in a read this turn, not a hallucinated memory of what the file says. New-file writes are unaffected, since there is nothing to hallucinate about. A dedup hit is unaffected too, since no mutation happens.
+
+**Provenance tag.** Every autonomously-written entry already carried `auto_generated: true` in its frontmatter. The writer now enforces the other half: it refuses an update to an existing entry that is NOT `auto_generated: true`. That means a human wrote or edited it directly. This writer has no caller that is a human editing their own memory by hand. Every call is an autonomous pass, pre-promise or post-merge, so the refusal is unconditional, never gated on an attended/unattended flag. The same defect shows up elsewhere. `groom`'s stale-ideas leg re-deferred a backlog node hours after a human undeferred it. It reads `created_at` age with no notion that a human had just touched it. A provenance check on the write path is the general shape of that fix. The specific `maintain` fix is tracked separately.
+
+**Stage as a third gate outcome.** Neither guard above hard-blocks. Both refuse the LIVE write and instead write the proposed content to `{memory-dir}/.staged/{filename}.md` (exit 3), for a human to review and apply by hand. `allow` (exit 0/2) and `block` (exit 1, a real error) were the only two outcomes before. `stage` is the third, for a write attempted with no human in the loop to confirm it on the spot.
+
+## Completion eval (a separate autonomous writer)
+
+`crates/fno-agents/src/finalize.rs::write_postmortem` is a second, older autonomous writer, unrelated to `write-memory-entry.sh` above. It writes one structured artifact per `fno-agents finalize` call to `~/.fno/postmortems/`. `cli/src/fno/retro/harvest.py` and `classify.py` consume that artifact into a backlog node or an inbox item: the autocorrect monthly review's corpus.
+
+It used to fire only for a stuck terminal (`NoProgress`/`Budget`/`Interrupted`/`Aborted`, then named `POSTMORTEM_REASONS`), a failure-only sample. A failure-only sample writes rules in a predictable direction. Nothing ever confirmed what a clean session did right, so every lesson skewed toward caution nobody asked for. `finalize.rs::eval_should_fire` now fires this for every terminal reason except `NoWork` (nothing happened, nothing to evaluate). That covers every ship reason and every stuck reason alike. The body still branches on `STUCK_REASONS` (renamed from `POSTMORTEM_REASONS`). A stuck session gets the original failure-triage prose. Every other reason gets a lighter completion-eval prose pointing at the blocklist above.
