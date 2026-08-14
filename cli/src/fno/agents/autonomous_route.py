@@ -201,6 +201,35 @@ def _healthy_alternate_exists(node_cwd: Optional[str] = None) -> bool:
         return False
 
 
+def _emit_quota_rotation_declined(
+    node_id: Optional[str], provider: str, reason: str,
+) -> None:
+    """Emit the single quota_rotation_declined decision event. Non-fatal,
+    mirrors ``_emit_quota_deferred`` (``dispatch.py``). The counterpart to
+    that event: this one fires when the launch went out on UNKNOWN headroom
+    rather than being held, so a healthy system and an absent probe stop
+    looking identical in the journal."""
+    try:
+        import time as _time
+
+        from fno.events import _build, append_event
+
+        data: dict = {"provider": provider, "reason": reason}
+        if node_id:
+            data["node_id"] = node_id
+        try:
+            from fno.adapters.providers.runtime_state import read_usage
+
+            snap = read_usage(provider, ttl_seconds=float("inf"))
+            if snap is not None:
+                data["snapshot_age_s"] = _time.time() - snap.probed_at
+        except Exception:  # noqa: BLE001 - the age is a nice-to-have, not the event
+            pass
+        append_event(_build("quota_rotation_declined", "backlog", data))
+    except Exception:  # noqa: BLE001 - a telemetry write must never block dispatch
+        pass
+
+
 def select_autonomous_route(
     *,
     provider_id: str,
@@ -208,11 +237,14 @@ def select_autonomous_route(
     pinned: bool = False,
     node_cwd: Optional[str] = None,
     now: Optional[float] = None,
+    node_id: Optional[str] = None,
 ) -> AutonomousRoute:
     """Resolve one autonomous launch's route from one quota probe.
 
     ``pinned`` is any explicit harness / provider / account / model / node
     route pin: it forbids automatic replacement, never the existing defer.
+    ``node_id`` is only for the ``quota_rotation_declined`` telemetry event -
+    it never changes the routing decision.
     """
     from fno.adapters.providers.runtime_state import (
         HeadroomState,
@@ -264,6 +296,7 @@ def select_autonomous_route(
             window=window,
         )
     if sig.state is HeadroomState.UNKNOWN:
+        _emit_quota_rotation_declined(node_id, sig.provider_id, sig.reason)
         return AutonomousRoute(
             "unknown-proceed", sig.reason, source_record=sig.provider_id, window=window
         )

@@ -568,3 +568,111 @@ def test_a_launcher_that_hardcodes_its_harness_cannot_pin_on_the_config(monkeypa
     assert ar.launch_is_pinned({}, honors_config_harness=False) is False
     # An explicit pin still wins regardless of the opt-out.
     assert ar.launch_is_pinned({}, account="ccr", honors_config_harness=False) is True
+
+
+class TestQuotaRotationDeclinedEvent:
+    """unknown-proceed is a launch on blind headroom, not a healthy no-op -
+    an absent event and a healthy system must not read the same in the
+    journal (the assert-a-positive-marker pitfall)."""
+
+    def _events(self, tmp_path):
+        events_path = tmp_path / ".fno" / "events.jsonl"
+        if not events_path.exists():
+            return []
+        return [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
+
+    def test_unknown_proceed_emits_exactly_one_declined_event(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
+        _signal(
+            monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
+            resets_at=None, reason="defer-dispatch-off",
+        )
+
+        r = ar.select_autonomous_route(provider_id="ccm", node_id="fake-node-1")
+
+        assert r.action == "unknown-proceed"
+        events = self._events(tmp_path)
+        assert len(events) == 1
+        assert events[0]["type"] == "quota_rotation_declined"
+        assert events[0]["data"] == {
+            "provider": "ccm", "reason": "defer-dispatch-off", "node_id": "fake-node-1",
+        }
+
+    def test_no_usage_snapshot_omits_age_and_the_event_still_lands(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        # AC2: read_usage() with no snapshot ever written returns None, so
+        # snapshot_age_s is simply absent - the event must still validate and
+        # append (both `provider` and `reason` are its only required fields).
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
+        _signal(
+            monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
+            resets_at=None, reason="no-provider",
+        )
+
+        ar.select_autonomous_route(provider_id="ccm")  # no node_id this time
+
+        events = self._events(tmp_path)
+        assert len(events) == 1
+        assert "snapshot_age_s" not in events[0]["data"]
+        assert "node_id" not in events[0]["data"]
+
+    def test_append_event_failure_is_swallowed_and_route_is_unchanged(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        import fno.events as events_mod
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
+        _signal(
+            monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
+            resets_at=None, reason="not-probed",
+        )
+
+        def _boom(*_a, **_k):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(events_mod, "append_event", _boom)
+
+        r = ar.select_autonomous_route(provider_id="ccm")
+
+        assert r.action == "unknown-proceed"
+        assert r.reason == "not-probed"
+        assert not (tmp_path / ".fno" / "events.jsonl").exists()
+
+    def test_explicit_node_never_calls_select_autonomous_route(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        # AC4: dispatch.py's explicit --node path sets `explicit = True`, which
+        # skips select_autonomous_route entirely (Locked Decision 5) - so no
+        # quota_rotation_declined event can be emitted for a human-directed
+        # launch. Pin the CONTRACT (fail loudly if that call is ever added to
+        # the explicit branch), mirroring the account-probing test above.
+        import fno.dispatch as dm
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            dm, "_lookup_node",
+            lambda node: {"id": node, "priority": "p2", "cwd": str(tmp_path)},
+        )
+        monkeypatch.setattr(
+            "fno.agents.autonomous_route.select_autonomous_route",
+            lambda **k: pytest.fail("explicit --node dispatch must never route on quota"),
+        )
+        monkeypatch.setattr(
+            dm, "dispatch_spawn_pane",
+            lambda **kw: SimpleNamespace(pane_id="p1", bound=True),
+        )
+
+        dm._dispatch_one(session="s", node="ab-1111aaaa", project=None)
+
+        # _dispatch_one legitimately emits its own events (e.g. claim_acquired)
+        # regardless of quota routing - the contract under test is narrower:
+        # no quota_rotation_declined event, since select_autonomous_route was
+        # never called to produce one.
+        declined = [e for e in self._events(tmp_path) if e["type"] == "quota_rotation_declined"]
+        assert not declined

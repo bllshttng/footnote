@@ -11,6 +11,7 @@ import datetime as _dt
 import os
 import shutil
 import subprocess
+import time as time_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, Optional, cast
 
@@ -21,6 +22,7 @@ from fno.adapters.providers.dispatch import dispatch_env
 from fno.adapters.providers.loader import (
     is_effective_active,
     load_providers,
+    load_quota_config,
     mutable_accounts_block,
     save_providers,
 )
@@ -97,8 +99,10 @@ def list_providers(
     if json_output:
         import json as _json
 
-        rows = [
-            {
+        rows = []
+        for record in config.records:
+            usage_reading = _usage_age(record.id)
+            rows.append({
                 "id": record.id,
                 "name": record.name,
                 "harness": record.harness,
@@ -111,9 +115,10 @@ def list_providers(
                     if record.auth == "managed"
                     else None
                 ),
-            }
-            for record in config.records
-        ]
+                "usage_age_s": usage_reading.age_seconds,
+                "usage_ttl_seconds": usage_reading.ttl_seconds,
+                "usage_stale": usage_reading.stale,
+            })
         typer.echo(_json.dumps(rows))
         return
 
@@ -131,7 +136,15 @@ def list_providers(
         )
         if record.auth == "managed":
             line += f"  snapshot={managed.snapshot_age_label(record.id)}"
+        line += f"  {_usage_age_col(record.id)}"
         typer.echo(line)
+
+    if not load_quota_config().defer_dispatch:
+        typer.echo(
+            "\nrotation is DISARMED: accounts.quota.defer_dispatch = false, so "
+            "nothing probes and headroom stays unknown. Arm it in "
+            "~/.fno/config.toml under [accounts.quota]."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +160,45 @@ def _headroom_label(provider_id: str) -> str:
         return headroom(provider_id).state.name.lower()
     except Exception:  # noqa: BLE001 - a display read must never break `list`
         return "unknown"
+
+
+class _UsageAge(NamedTuple):
+    """The usage-PROBE age, distinct from `snapshot=` (the credential blob
+    age). Neither `age_seconds` nor `stale` renders when no probe has ever
+    landed for this record - that is the `never` case."""
+
+    age_seconds: Optional[float]
+    ttl_seconds: int
+    stale: bool
+
+
+def _usage_age(record_id: str) -> _UsageAge:
+    """Read the cached usage snapshot's age regardless of TTL (a stale
+    snapshot must still report its age, never vanish - `read_usage`'s
+    default TTL treats stale as absent, so bypass it with a large one)."""
+    try:
+        from fno.adapters.providers.runtime_state import read_usage
+
+        ttl = load_quota_config().probe_ttl_seconds
+        snap = read_usage(record_id, ttl_seconds=float("inf"))
+        if snap is None:
+            return _UsageAge(age_seconds=None, ttl_seconds=ttl, stale=False)
+        age = time_module.time() - snap.probed_at
+        return _UsageAge(age_seconds=age, ttl_seconds=ttl, stale=age > ttl)
+    except Exception:  # noqa: BLE001 - a display read must never break `list`
+        return _UsageAge(age_seconds=None, ttl_seconds=300, stale=False)
+
+
+def _usage_age_col(record_id: str) -> str:
+    """The `usage=<age>` column text: `never`, `<age>`, or `<age> (STALE, ttl=<ttl>)`."""
+    reading = _usage_age(record_id)
+    if reading.age_seconds is None:
+        return "usage=never"
+    label = managed.age_label_from_seconds(reading.age_seconds)
+    if reading.stale:
+        ttl_label = managed.age_label_from_seconds(reading.ttl_seconds)
+        return f"usage={label} (STALE, ttl={ttl_label})"
+    return f"usage={label}"
 
 
 def _fmt_resets_in(resets_at: float, now: float) -> str:

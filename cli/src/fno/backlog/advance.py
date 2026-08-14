@@ -1836,6 +1836,7 @@ def advance(
                 node, provider=provider, model=model, node_cwd=node_cwd
             ),
             node_cwd=node_cwd,
+            node_id=node_id,
         )
     except Exception:  # noqa: BLE001 - a quota read must never wedge advance
         route = None

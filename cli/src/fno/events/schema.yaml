@@ -2545,6 +2545,26 @@ event_types:
           description: "Unix epoch seconds of the binding window's reset; the tick after this dispatches the node."
     consumers: [operator]
 
+  - name: quota_rotation_declined
+    description: "Emitted by an autonomous dispatcher when a launch proceeds on a provider whose headroom is UNKNOWN, so no rotation decision could be made. Names the reason the sensor could not answer (defer-dispatch-off, no-provider, p0-exempt, not-probed) and the age of the usage snapshot it fell back to. The counterpart to quota_deferred: that event means work was held, this one means work went out blind."
+    sources: [backlog]
+    data:
+      required: [provider, reason]
+      properties:
+        provider:
+          type: string
+          description: "The resolved provider record id the launch proceeded on."
+        reason:
+          type: string
+          description: "QuotaSignal.reason: why headroom could not be resolved."
+        snapshot_age_s:
+          type: number
+          description: "Age in seconds of the usage snapshot at decision time; absent when none exists."
+        node_id:
+          type: string
+          description: "The node dispatched blind, when the caller knows it."
+    consumers: [operator]
+
   - name: dispatch_substrate_fallback
     description: "Emitted by an autonomous dispatcher (dispatch-node.sh / /target bg) when the resolved harness has no bg substrate, so dispatch falls BACK to headless (a one-shot that runs to completion, not a detached thread). Provider-aware dispatch (x-567d, epic AC1-EDGE): the downgrade is loud, never silent. bg is claude-only; every other harness resolves to headless via the harness-capability map."
     sources: [backlog]

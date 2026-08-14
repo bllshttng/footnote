@@ -985,7 +985,21 @@ def _default_failover(candidate: "Candidate", error) -> str:
             settings_path=settings_path, state_path=state_path,
             phase_id=f"{candidate.short_id}:recovery",
         )
-        result = ctrl.attempt_swap(current_provider_id=active, error=error)
+        # This sweep never lets attempt_swap materialize eagerly: the candidate
+        # is a still-live exhausted worker that pins the shared slot until
+        # _redispatch stops it below, so an eager switch() here would hit that
+        # live pin and return BLOCKED_PINNED before the worker is ever stopped
+        # - silently defeating the swap. The sweep does its OWN materialize,
+        # correctly ordered post-stop, via _redispatch's / _revive_bg_thread's
+        # pre_spawn hook (_materialize_managed_switch below), gated on the same
+        # auto_switch opt-in. materialize_managed=False here just tells
+        # attempt_swap to flip the routing pointer (accounts.active) and leave
+        # slot materialization to that later, correctly-ordered step.
+        repo_root = getattr(candidate, "cwd", None)
+        result = ctrl.attempt_swap(
+            current_provider_id=active, error=error,
+            materialize_managed=False,
+        )
     except Exception:  # noqa: BLE001 - failover must never break the sweep
         return "no-swap"
 
@@ -1002,7 +1016,9 @@ def _default_failover(candidate: "Candidate", error) -> str:
         # be bg-redispatched (the Rust client rejects --substrate bg for it).
         if snap.harness != "claude":
             return "rotated-no-worker"
-        repo_root = getattr(candidate, "cwd", None)
+        # repo_root was already resolved above, before attempt_swap, so the
+        # materialize_managed gate and every downstream auto_switch check
+        # here read the same value.
         managed = getattr(snap, "auth", None) == "managed"
         # US4: a node-less bg thread (a live worktree with NO target-state
         # manifest) has no /target to redispatch; resume its transcript under the
