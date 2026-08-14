@@ -1366,7 +1366,10 @@ mod tests {
     #[test]
     fn key_for_resolves_the_live_glyph_and_moves_on_a_rebind() {
         // Default table: detach answers on `d`; an unknown action has no hint.
-        assert_eq!(disp_for("detach", &default_bindings()).as_deref(), Some("d"));
+        assert_eq!(
+            disp_for("detach", &default_bindings()).as_deref(),
+            Some("d")
+        );
         assert_eq!(disp_for("no-such-action", &default_bindings()), None);
         // `key_for` reads the live (global) table; an unknown action is None
         // under any installed keymap.

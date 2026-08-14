@@ -1549,14 +1549,22 @@ mod verb_baseline_tests {
         // Positive control: the baseline parsed and carries a known leaf, so a
         // miss below is a real missing leaf, not an unread baseline.
         assert!(
-            leaves.contains("backlog rank"),
+            leaves.contains("backlog advance"),
             "baseline parsed; leaves: {leaves:?}"
         );
         for v in ALL_BACKLOG_VERBS {
             let leaf = v.leaf();
+            // verb-collapse-map.tsv's `test_live_baseline_matches_the_projected_
+            // allocation` collapses a T1-tier leaf to its bare GROUP word in the
+            // baseline (e.g. "backlog rank" -> the standalone "backlog" line);
+            // only a KEEP-tier row (like "backlog advance", EndMission's own
+            // leaf) keeps its full string. So a leaf is baseline-covered either
+            // way: verbatim, or by its group word appearing as its own line.
+            let group = leaf.split_whitespace().next().unwrap_or(leaf);
             assert!(
-                leaves.contains(leaf),
-                "BacklogVerb leaf {leaf:?} is missing from scripts/ci/verb-baseline.txt; \
+                leaves.contains(leaf) || leaves.contains(group),
+                "BacklogVerb leaf {leaf:?} is covered by neither the full string \
+                 nor its group {group:?} in scripts/ci/verb-baseline.txt; \
                  a menu item binds it, so the ratchet must list it"
             );
         }
@@ -1574,7 +1582,10 @@ mod verb_baseline_tests {
             }
         }
         for v in ALL_BACKLOG_VERBS {
-            assert!(listed(*v), "ALL_BACKLOG_VERBS lists {v:?} but the sync match does not");
+            assert!(
+                listed(*v),
+                "ALL_BACKLOG_VERBS lists {v:?} but the sync match does not"
+            );
         }
     }
 

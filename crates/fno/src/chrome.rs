@@ -460,7 +460,14 @@ fn body_row(
                 };
                 (c, role)
             }
-            None => (' ', if line.disabled { Role::BodyDim } else { Role::Body }),
+            None => (
+                ' ',
+                if line.disabled {
+                    Role::BodyDim
+                } else {
+                    Role::Body
+                },
+            ),
         };
         text.push(ch);
         roles.push(role);

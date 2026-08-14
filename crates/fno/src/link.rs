@@ -298,7 +298,9 @@ fn resolve_vault_root_with(vault: &str, home: Option<&Path>) -> PathBuf {
             .unwrap_or_else(|| PathBuf::from(vault));
     }
     if vault == "~" {
-        return home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(vault));
+        return home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(vault));
     }
     let p = Path::new(vault);
     if p.is_absolute() {
@@ -593,11 +595,11 @@ mod tests {
     fn obsidian_uri_percent_encodes_space_amp_hash_and_round_trips() {
         let uri = obsidian_open_uri("my vault", "a & b#c.md");
         assert!(uri.contains("vault=my%20vault"), "{uri}");
-        let file = uri
-            .split("file=")
-            .nth(1)
-            .expect("file= present");
-        assert_eq!(file, "a%20%26%20b%23c.md", "space/&# encoded in the file value: {uri}");
+        let file = uri.split("file=").nth(1).expect("file= present");
+        assert_eq!(
+            file, "a%20%26%20b%23c.md",
+            "space/&# encoded in the file value: {uri}"
+        );
         // No raw space anywhere (it is never legitimate); the dangerous chars
         // must not appear raw in the FILE value. The whole URI legitimately
         // carries `&` as the vault/file separator, so that is checked on `file`.

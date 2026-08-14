@@ -50,12 +50,10 @@ annotate list
 approvals
 backlog
 backlog advance !--continuation
-backlog defer
 backlog done
 backlog get
 backlog next
 backlog queued
-backlog rank
 backlog reconcile
 backlog update !--tag !--untag
 bundle

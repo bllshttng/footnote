@@ -309,7 +309,9 @@ impl Popup {
             .map(|r| match r {
                 PopupRow::Header(s) | PopupRow::FullWidth(s) => s.chars().count() + 2,
                 PopupRow::Rule => 0,
-                PopupRow::Entry { glyph, label, hint, .. } => {
+                PopupRow::Entry {
+                    glyph, label, hint, ..
+                } => {
                     // glyph + space + label + gap + hint
                     glyph.chars().count() + 1 + label.chars().count() + 2 + hint.chars().count() + 2
                 }
@@ -348,7 +350,12 @@ impl Popup {
                         roles: vec![],
                     }
                 }
-                PopupRow::Entry { glyph, label, hint, enabled } => {
+                PopupRow::Entry {
+                    glyph,
+                    label,
+                    hint,
+                    enabled,
+                } => {
                     // The right column is EXACT; the left one ellipsizes. Padding
                     // the whole row and letting `pad` clip from the right ate the
                     // hint on a narrow modal, and in the key modal the hint is the
@@ -671,7 +678,10 @@ mod tests {
             "disabled row has no hit target"
         );
         assert!(
-            disabled_line.roles.iter().any(|&role| role == Role::BodyDim),
+            disabled_line
+                .roles
+                .iter()
+                .any(|&role| role == Role::BodyDim),
             "disabled row greys via BodyDim"
         );
         // Every non-border cell on the disabled row is BodyDim: it carries no
