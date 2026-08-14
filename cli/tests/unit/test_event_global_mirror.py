@@ -147,7 +147,14 @@ def test_the_mirrored_copy_is_repo_scoped_and_the_project_copy_is_not(
         ["git", "remote", "add", "origin", "git@github.com:Owner/Repo.git"],
         cwd=checkout, check=True,
     )
-    monkeypatch.chdir(checkout)
+    # The identity comes from the resolved REPO ROOT, not from the CWD, so that
+    # an `--events` aimed at another checkout cannot stamp this one's name on it.
+    # Setting only the CWD here would leave the row unscoped, which is the assert
+    # below failing rather than passing by accident.
+    monkeypatch.setenv("FNO_REPO_ROOT", str(checkout))
+    monkeypatch.chdir(tmp_path)
+    from fno import paths as paths_mod
+    paths_mod.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
 
     project = checkout / ".fno" / "events.jsonl"
     result = _emit(project, "review_attestation", ATTESTATION)

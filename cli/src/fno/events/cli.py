@@ -362,6 +362,9 @@ def emit(
         default_state = repo_root / ".fno" / "target-state.md"
         default_events = repo_root / ".fno" / "events.jsonl"
     except Exception:
+        # Bound either way: the global-log mirror below reads it, and leaving it
+        # unbound here would turn a discovery failure into a NameError there.
+        repo_root = None
         default_state = Path(".fno/target-state.md")
         default_events = Path(".fno/events.jsonl")
 
@@ -433,11 +436,12 @@ def emit(
                 # the row already appended above must not change under it.
                 # Omitted, never null, when no remote resolves.
                 mirrored = dict(event)
-                # From the CWD, not from the events path: `--events` can point
-                # anywhere, so deriving a repo root from it invents one.
-                # `git -C` reads the same remote from any directory inside the
-                # checkout, worktrees included.
-                slug = repo_identity(Path.cwd())
+                # `resolve_repo_root()`, the same root this emit already resolved
+                # above - not `Path.cwd()`. It honours FNO_REPO_ROOT, and a
+                # `--events` pointing into another checkout would otherwise stamp
+                # the row with the CWD's identity: a silently mis-scoped row,
+                # which is the one failure the scoping exists to prevent.
+                slug = repo_identity(repo_root) if repo_root else None
                 if slug:
                     mirrored["data"] = {**event.get("data", {}), "repo": slug}
                 append_event(mirrored, events_path=global_events)
