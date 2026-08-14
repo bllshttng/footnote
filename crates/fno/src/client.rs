@@ -7283,13 +7283,21 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
 /// An agent row's icon-lattice state (x-df4c US2): exit beats badge beats
 /// liveness. Unlike [`nav_agent_state`] this keeps `Exited` distinct (`✗`)
 /// rather than folding it to `Idle` - a row shows its own exit, but a squad/tab
-/// rollup ignores it. The non-exit case goes through `pane_state`, so the row
-/// respects the `seen` bit (x-4328) exactly as the nav/tab rollups do: a Done
-/// pane the operator has already viewed folds to `Idle` (`○`) instead of holding
-/// a stale bold `✓` needs-attention marker - one system across every surface.
+/// rollup ignores it. Within the exited case, `unmeasured` (x-9de7) further
+/// splits `Exited` (`✗`, confirmed dead, respawn is safe) from `Unmeasured`
+/// (`?`, no corroboration, look before you spawn) - the operator's routing
+/// decision turns on telling the two apart at a glance. The non-exit case goes
+/// through `pane_state`, so the row respects the `seen` bit (x-4328) exactly
+/// as the nav/tab rollups do: a Done pane the operator has already viewed
+/// folds to `Idle` (`○`) instead of holding a stale bold `✓` needs-attention
+/// marker - one system across every surface.
 fn agent_lattice_state(a: &AgentRow) -> LatticeState {
     if a.exited {
-        LatticeState::Exited
+        if a.unmeasured {
+            LatticeState::Unmeasured
+        } else {
+            LatticeState::Exited
+        }
     } else {
         pane_to_lattice(pane_state(a.badge, a.seen))
     }
@@ -7572,6 +7580,11 @@ enum LatticeState {
     Blocked,
     DoneUnseen,
     Exited,
+    /// (x-9de7) A terminal row with no positive corroboration: no confirmed-
+    /// dead pid, no confirmed-gone pane. Distinct from `Exited` because the
+    /// operator's routing decision turns on it - `Exited` means respawn is
+    /// safe, `Unmeasured` means look before you spawn.
+    Unmeasured,
 }
 
 /// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
@@ -7633,6 +7646,11 @@ fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
             flags: cell_flags::DIM,
             fg: Color::Default,
         },
+        LatticeState::Unmeasured => LatticeStyle {
+            glyph: '?',
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+        },
     }
 }
 
@@ -7645,15 +7663,18 @@ fn lattice_glyph(s: LatticeState) -> (char, u8) {
 }
 
 /// (x-6851 US2) Severity order for the header rollup strip: most-severe first,
-/// so the strip reads `▲ ✓ ● ○ ✗` and narrow-panel truncation drops from the
-/// least-severe (`✗`) end. The single ordering authority the fold and the
+/// so the strip reads `▲ ✓ ● ○ ✗ ?` and narrow-panel truncation drops from the
+/// least-severe (`?`) end. `Unmeasured` (x-9de7) sits after `Exited`: it is a
+/// sub-case of the same terminal bucket, just less certain, so it never
+/// outranks a live state. The single ordering authority the fold and the
 /// truncation share.
-const SEVERITY_ORDER: [LatticeState; 5] = [
+const SEVERITY_ORDER: [LatticeState; 6] = [
     LatticeState::Blocked,
     LatticeState::DoneUnseen,
     LatticeState::Working,
     LatticeState::Idle,
     LatticeState::Exited,
+    LatticeState::Unmeasured,
 ];
 
 /// (x-6851 US2) Fold a section's rows into per-state counts, nonzero only, in
@@ -7668,6 +7689,7 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
             LatticeState::Working => 2,
             LatticeState::Idle => 3,
             LatticeState::Exited => 4,
+            LatticeState::Unmeasured => 5,
         };
         // The match is exhaustive (a new state breaks the build), but the index
         // mapping is coupled by hand to SEVERITY_ORDER's order; this catches a
@@ -12828,7 +12850,7 @@ mod tests {
     #[test]
     fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
         use LatticeState::*;
-        let states = [Working, Idle, Blocked, DoneUnseen, Exited];
+        let states = [Working, Idle, Blocked, DoneUnseen, Exited, Unmeasured];
         let glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
         // Pairwise distinct: every state pair reads differently by GLYPH alone,
         // so a monochrome/weak-BOLD terminal never collapses two states
@@ -12857,7 +12879,7 @@ mod tests {
         // state stays default-colored (US6 invariant). The accent is now the
         // theme's pick (x-f75e); pass it in and expect Blocked to wear it.
         assert_eq!(lattice_style(Blocked, LATTICE_ACCENT).fg, LATTICE_ACCENT);
-        for s in [Working, Idle, DoneUnseen, Exited] {
+        for s in [Working, Idle, DoneUnseen, Exited, Unmeasured] {
             assert_eq!(
                 lattice_style(s, LATTICE_ACCENT).fg,
                 Color::Default,
@@ -12882,6 +12904,46 @@ mod tests {
         };
         assert_eq!(agent_lattice_state(&seen), LatticeState::Idle);
         assert_eq!(lattice_glyph(agent_lattice_state(&seen)).0, '○');
+    }
+
+    #[test]
+    fn agent_row_unmeasured_renders_a_distinct_dim_glyph_from_exited() {
+        // x-9de7: `exited` alone no longer says "dead" - `unmeasured` marks
+        // the uncorroborated case, and it must draw a DIFFERENT glyph than a
+        // confirmed exit, because the operator's routing decision turns on
+        // telling the two apart at a glance (dead => respawn is safe,
+        // unmeasured => look before you spawn).
+        let confirmed_dead = tab_agent(None, None, true);
+        assert_eq!(agent_lattice_state(&confirmed_dead), LatticeState::Exited);
+        assert_eq!(lattice_glyph(agent_lattice_state(&confirmed_dead)).0, '✗');
+
+        let uncorroborated = AgentRow {
+            unmeasured: true,
+            ..tab_agent(None, None, true)
+        };
+        assert_eq!(
+            agent_lattice_state(&uncorroborated),
+            LatticeState::Unmeasured
+        );
+        assert_eq!(lattice_glyph(agent_lattice_state(&uncorroborated)).0, '?');
+
+        // The two glyphs must never collide.
+        assert_ne!(
+            lattice_glyph(agent_lattice_state(&confirmed_dead)).0,
+            lattice_glyph(agent_lattice_state(&uncorroborated)).0
+        );
+
+        // `unmeasured` on a LIVE row (exited: false) is inert - a live row is
+        // never rendered Unmeasured just because some upstream sentinel left
+        // the bit set.
+        let live_with_stale_bit = AgentRow {
+            unmeasured: true,
+            ..tab_agent(None, None, false)
+        };
+        assert_ne!(
+            agent_lattice_state(&live_with_stale_bit),
+            LatticeState::Unmeasured
+        );
     }
 
     #[test]
@@ -12925,6 +12987,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -12963,6 +13026,7 @@ mod tests {
             pane_id: None,
             attach_id: Some("job1".into()),
             exited: true,
+            unmeasured: false,
             tombstone: true,
             ..hosted.clone()
         };
@@ -12987,6 +13051,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: Some("job1".into()),
             external: false,
@@ -13241,6 +13306,7 @@ mod tests {
             badge,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -13672,6 +13738,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -15421,6 +15488,7 @@ mod tests {
             badge,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16084,6 +16152,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16265,6 +16334,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16573,6 +16643,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16622,6 +16693,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16729,6 +16801,7 @@ mod tests {
             badge: Some(AgentBadge::Working),
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16753,6 +16826,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: Some("c19cd2c3".into()),
             external: false,
@@ -16776,6 +16850,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -16830,6 +16905,7 @@ mod tests {
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
+                unmeasured: false,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -17228,6 +17304,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: attach.map(Into::into),
             external: false,
@@ -17989,6 +18066,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -18040,6 +18118,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -18592,6 +18671,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: Some("perm prompt".into()),
                     exited: false,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: None,
                     external: false,
@@ -18614,6 +18694,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: None,
                     external: false,
@@ -18636,6 +18717,7 @@ mod tests {
                     badge: Some(AgentBadge::Working),
                     reason: None,
                     exited: false,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: None,
                     external: false,
@@ -18714,6 +18796,7 @@ mod tests {
                 badge,
                 reason: None,
                 exited,
+                unmeasured: false,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -19119,6 +19202,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: None,
                     external: false,
@@ -19141,6 +19225,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: false,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: Some("ab12cd34".into()),
                     external: true,
@@ -19163,6 +19248,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: false,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: None,
                     external: false,
@@ -19188,6 +19274,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: None,
                     exited: false,
+                    unmeasured: false,
                     answerable: None,
                     attach_id: Some("ff99ff99".into()),
                     external: true,
@@ -19676,6 +19763,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: attach_id.map(Into::into),
             external: false,
@@ -20329,6 +20417,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: Some("waiting on a menu".into()),
             exited: false,
+            unmeasured: false,
             answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
             attach_id: None,
             external: false,
@@ -20760,6 +20849,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: true,
+            unmeasured: false,
             answerable: None,
             attach_id: Some("deadbeef".into()),
             external: false,
@@ -20803,6 +20893,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external,
@@ -21817,6 +21908,7 @@ mod tests {
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
+                unmeasured: false,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -21839,6 +21931,7 @@ mod tests {
                 badge: None,
                 reason: None,
                 exited: false,
+                unmeasured: false,
                 answerable: None,
                 attach_id: Some("deadbee1".into()),
                 external: false,
@@ -21897,6 +21990,7 @@ mod tests {
             badge,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -21959,6 +22053,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -22010,6 +22105,7 @@ mod tests {
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
+                unmeasured: false,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -22032,6 +22128,7 @@ mod tests {
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
+                unmeasured: false,
                 answerable: None,
                 attach_id: None,
                 external: false,
@@ -22118,6 +22215,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -22531,6 +22629,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: None,
             attach_id: None,
             external: false,
@@ -22691,6 +22790,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
+            unmeasured: false,
             answerable: ans,
             attach_id: None,
             external: false,

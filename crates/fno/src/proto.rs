@@ -250,7 +250,7 @@ fn default_true() -> bool {
 /// - the CLI door onto the focus trunk the TUI already owns. New variants, not
 /// additive fields, so a v45 server cannot deserialize a `PaneFocus`; the
 /// handshake is what stops the skew.
-pub const PROTO_VERSION: u32 = 46;
+pub const PROTO_VERSION: u32 = 47;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -873,6 +873,18 @@ pub struct AgentRow {
     /// Pane-exit / registry-exited fact: renders dim + exit marker regardless
     /// of any live-TTL badge (fact beats report, structurally).
     pub exited: bool,
+    /// (v47, x-9de7) True only when `exited` is a terminal registry status
+    /// with NO positive corroboration (no confirmed-dead pid, no confirmed-
+    /// gone pane) -- `agents_view::Liveness::Unmeasured`. `exited` keeps its
+    /// full meaning for every existing consumer (attach eligibility, sort,
+    /// section membership); this is additive, for the render layer alone:
+    /// dead means respawn is safe, unmeasured means look before you spawn,
+    /// and the two must be visually distinguishable at a glance.
+    /// `#[serde(default)]` keeps a v46 reader wire-tolerant (defaults false,
+    /// which degrades to today's single dead glyph -- never invents doubt on
+    /// an old client that cannot render the third state).
+    #[serde(default)]
+    pub unmeasured: bool,
     /// (v9, x-c929) The answerable-prompt payload when this row is `blocked` on
     /// a numbered menu a manifest `[rule.answer]` grammar could enumerate;
     /// `None` for any other state or a focus-only blocked prompt. A structural
@@ -2674,20 +2686,26 @@ mod tests {
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
         // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
         // clickable links (x-a2d0) bumped it 44 -> 45; pane focus (x-3e17) 45 ->
-        // 46. The two additive crown fields stay skew-tolerant both ways
-        // regardless of the version number.
+        // 46; the tri-state liveness join (x-9de7) bumped it 46 -> 47. The
+        // additive crown fields, and now `unmeasured`, stay skew-tolerant both
+        // ways regardless of the version number.
         //
         // This is the ONE canonical pin, as this test's name says. Two sibling
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 46);
+        assert_eq!(PROTO_VERSION, 47);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
+        // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
         let row: AgentRow = serde_json::from_str(older).unwrap();
         assert_eq!(row.crown_level, None, "missing crown_level => None");
         assert_eq!(row.crown_scope, None, "missing crown_scope => None");
+        assert!(
+            !row.unmeasured,
+            "missing unmeasured => false (v46 reader stays wire-tolerant)"
+        );
         // A crowned row round-trips losslessly.
         let mut crowned = row.clone();
         crowned.crown_level = Some(1);
@@ -2930,6 +2948,7 @@ mod tests {
                         badge: Some(AgentBadge::Blocked),
                         reason: Some("permission prompt".into()),
                         exited: false,
+                        unmeasured: false,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
                             options: vec![
@@ -2968,6 +2987,7 @@ mod tests {
                         badge: None,
                         reason: None,
                         exited: true,
+                        unmeasured: false,
                         answerable: None,
                         attach_id: None,
                         external: false,

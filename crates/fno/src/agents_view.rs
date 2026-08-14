@@ -78,6 +78,67 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
+    /// (x-9de7) Whether this row's terminal-looking status is a POSITIVE
+    /// falsification or an absence of evidence. `Alive` for anything
+    /// non-terminal (mirrors `exited == false`, unchanged). Only a terminal
+    /// row is further split: `Dead` when a recorded pid is CONFIRMED gone (or
+    /// no pid/short_id was ever recorded to check), `Unmeasured` for every
+    /// other terminal row -- most commonly a live pid contradicting a stale
+    /// or falsely-written `exited` status. `exited` keeps its today meaning
+    /// (terminal-status, `Dead` OR `Unmeasured`) for every existing
+    /// attach/sort/filter call site; this field exists so the render layer
+    /// can draw the two differently, per the repo's "assert a positive
+    /// marker, never an absence" rule applied to the sideline.
+    pub liveness: Liveness,
+}
+
+/// See [`RegistryAgent::liveness`]. `Alive`/`Dead` are confident reads;
+/// `Unmeasured` is the deliberate third state a `bool` could never hold --
+/// terminal status with no corroborating evidence either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    Alive,
+    Dead,
+    Unmeasured,
+}
+
+/// A recorded pid is CONFIRMED gone (`kill(pid, 0)` -> ESRCH). Fails toward
+/// "not confirmed" on any other outcome (alive, or unprobeable/EPERM): a
+/// falsification must be positive, never inferred from an ambiguous errno.
+/// pid 0/1 are never a worker's pid, so a stored 0/1 (corrupt row) also reads
+/// as unconfirmed rather than as license to signal the caller's own group or
+/// init.
+fn pid_confirmed_dead(pid: u64) -> bool {
+    if pid <= 1 || pid > i32::MAX as u64 {
+        return false;
+    }
+    // SAFETY: signal 0 performs no delivery, only an existence/permission
+    // check (mirrors `server.rs::pid_alive`, inverted for a POSITIVE read).
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Derive [`Liveness`] for one row. `status` is the raw registry string;
+/// `pid`/`short_id` are read the same tolerant way `derive_rows` reads every
+/// other field. Pure and syscall-free except the one `kill(pid, 0)` probe,
+/// gated behind a terminal status so a live-ish row never pays it.
+fn derive_liveness(status: &str, pid: Option<u64>, short_id: &str) -> Liveness {
+    let terminal = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
+    if !terminal {
+        return Liveness::Alive;
+    }
+    // Mirrors fno-agents' gc.rs::removal_is_corroborated (this crate does not
+    // depend on fno-agents; the raw JSON reader restates the same rule): a
+    // row with neither a pid nor a short_id owns no identity surface to
+    // falsify, so the absence itself is the corroboration -- there is
+    // nothing left that COULD be checked and found alive.
+    let liveness_surface = pid.is_some() || !short_id.is_empty();
+    let corroborated_dead = !liveness_surface || pid.is_some_and(pid_confirmed_dead);
+    if corroborated_dead {
+        Liveness::Dead
+    } else {
+        Liveness::Unmeasured
+    }
 }
 
 impl RegistryAgent {
@@ -1040,6 +1101,11 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         let cwd = row.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let exited = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
+        let liveness = derive_liveness(
+            status,
+            row.get("pid").and_then(|v| v.as_u64()),
+            row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
+        );
         let mux = row.get("mux").and_then(|m| {
             Some((
                 m.get("session")?.as_str()?.to_string(),
@@ -1216,6 +1282,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             updated_at,
             crown_level,
             crown_scope,
+            liveness,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -1303,6 +1370,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // A roster worker carries no crown (crown is an fno-registry fact).
             crown_level: None,
             crown_scope: None,
+            liveness: Liveness::Alive,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -1900,6 +1968,78 @@ mod tests {
             Some("12345678-1234-1234-1234-1234567890ab")
         );
         assert_eq!(get("cx").claude_session_uuid, None, "codex carries no uuid");
+    }
+
+    #[test]
+    fn derive_liveness_pure_function_covers_the_three_states() {
+        // Non-terminal status: Alive regardless of pid/short_id.
+        assert_eq!(derive_liveness("live", None, ""), Liveness::Alive);
+        assert_eq!(derive_liveness("busy", Some(999_999), ""), Liveness::Alive);
+        // Terminal + no identity surface at all: nothing to falsify -> Dead
+        // (mirrors gc.rs's !liveness_surface corroboration).
+        assert_eq!(derive_liveness("exited", None, ""), Liveness::Dead);
+        // Terminal + a pid that is unambiguously gone: a real pid this
+        // process does not own. Use a pid in-range but astronomically
+        // unlikely to be a live process on the test runner.
+        assert_eq!(
+            derive_liveness("exited", Some(0x7fff_fff0), ""),
+            Liveness::Dead
+        );
+        // Terminal + THIS test process's own pid (definitely alive): the
+        // status/pid contradiction that used to render a confident "x".
+        let me = std::process::id() as u64;
+        assert_eq!(
+            derive_liveness("exited", Some(me), "short"),
+            Liveness::Unmeasured
+        );
+        assert_eq!(
+            derive_liveness("permanent-dead", Some(me), ""),
+            Liveness::Unmeasured
+        );
+    }
+
+    #[test]
+    fn derive_rows_renders_unmeasured_not_dead_for_an_exited_row_with_a_live_pid() {
+        // AC1 (x-9de7 task 3): status says exited, but a recorded live pid
+        // contradicts it. This is the exact shape task 1 stops the writer
+        // from producing, and this is the render-layer half: even if such a
+        // row exists (a different writer, a race, a stale read), the
+        // sideline must not draw a confident dead "x" over it.
+        let me = std::process::id();
+        let raw = reg(&format!(
+            r#"{{"name":"cx-pane","cwd":"/w","status":"exited","provider":"codex",
+                "pid":{me},"mux":{{"session":"main","pane_id":1}}}}"#
+        ));
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let row = rows.iter().find(|r| r.name == "cx-pane").unwrap();
+        assert_eq!(row.liveness, Liveness::Unmeasured);
+        assert!(
+            row.exited,
+            "exited keeps its today meaning: terminal status"
+        );
+    }
+
+    #[test]
+    fn derive_rows_renders_dead_for_an_exited_row_with_a_confirmed_gone_pid() {
+        // AC2: a terminal status corroborated by a pid that is confirmed
+        // gone renders Dead -- the confident state stays confident.
+        let raw = reg(
+            r#"{"name":"cx-gone","cwd":"/w","status":"exited","provider":"codex",
+                "pid":2147483632}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let row = rows.iter().find(|r| r.name == "cx-gone").unwrap();
+        assert_eq!(row.liveness, Liveness::Dead);
+    }
+
+    #[test]
+    fn derive_rows_renders_alive_for_a_live_status_row() {
+        let raw = reg(r#"{"name":"live-one","cwd":"/w","status":"live","provider":"claude"}"#);
+        let rows = derive_rows(&raw, NOW).unwrap();
+        assert_eq!(
+            rows.iter().find(|r| r.name == "live-one").unwrap().liveness,
+            Liveness::Alive
+        );
     }
 
     #[test]
@@ -2552,6 +2692,11 @@ config_dir = "~/.claude-alt"
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            liveness: if exited {
+                Liveness::Dead
+            } else {
+                Liveness::Alive
+            },
         }
     }
 
