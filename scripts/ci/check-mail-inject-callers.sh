@@ -41,7 +41,9 @@ for path in sorted((root / "cli" / "src").rglob("*.py")):
     rel = path.relative_to(root).as_posix()
     fn = ""
     for line in path.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^[ \t]*def ([A-Za-z_]\w*)\b", line)
+        # Top-level defs only: a nested helper closure (e.g. a local `_record`)
+        # must not steal attribution from its enclosing caller.
+        m = re.match(r"^def ([A-Za-z_]\w*)\b", line)
         if m:
             fn = m.group(1)
         if '"mail-inject"' in line or "'mail-inject'" in line:
