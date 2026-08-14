@@ -35,7 +35,7 @@ or
 msg-3a7f1c2e queued (durable) [not-confirmed]
 ```
 
-The bracketed reason on a durable line is the live lane's own cause. `live-miss` when no live lane ran at all.
+The bracketed reason on a durable line is the live lane's own cause. When no live lane ran at all, the reason reads `live-miss`.
 
 `delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` inject succeeded (claude, via the `fno-agents mail-inject` verb, which pastes and submits a wire-level CR).
 `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain.
