@@ -2583,6 +2583,26 @@ impl View {
             .unwrap_or(false)
     }
 
+    /// True when `(row, col)` lands on a popup chrome footer's `esc close`
+    /// span - the clickable close every footer-bearing modal inherits from the
+    /// one hit span `chrome::frame` stamps. Checked BEFORE the entry hit
+    /// routers so the footer's target is never mistaken for a row index.
+    fn footer_close_hit(&self, popup: &Popup, row: u16, col: u16) -> bool {
+        let r = popup.render(self.term);
+        let (r0, c0) = r.origin;
+        let (Some(li), Some(cc)) = (
+            (row as usize).checked_sub(r0),
+            (col as usize).checked_sub(c0),
+        ) else {
+            return false;
+        };
+        r.lines.get(li).is_some_and(|line| {
+            line.hits.iter().any(|(t, off, len)| {
+                *t == crate::chrome::ESC_CLOSE_HIT && cc >= *off && cc < *off + *len
+            })
+        })
+    }
+
     /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
     /// only when peek is open AND `seq` is the current request. Returns whether
     /// it applied (the caller redraws on true). A stale body (any other seq) is
@@ -9903,23 +9923,35 @@ async fn keys_modal_mouse(
                 m.popup.scroll_by(3);
             }
         }
-        MouseKind::Press(MouseButton::Left) => match view.keys_modal_hit(rep.row, rep.col) {
-            Some(t) => {
-                if let Some(m) = view.keys_modal.as_mut() {
-                    m.popup.select(t);
-                }
-                if matches!(
-                    keys_modal_execute_selected(view, scanner, sock_w).await?,
-                    DispatchFlow::Detach
-                ) {
-                    return Ok(StdinFlow::Detach);
-                }
+        MouseKind::Press(MouseButton::Left) => {
+            // The footer's `esc close` words close the modal (chrome-stamped
+            // target); checked before the entry routers.
+            if view
+                .keys_modal
+                .as_ref()
+                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.keys_modal = None;
+                return Ok(StdinFlow::Continue);
             }
-            None => {
-                // A click inside the block that hit no target (a header, a border)
-                // is swallowed; only a click OFF the modal dismisses.
-                if !view.keys_modal_block_contains(rep.row, rep.col) {
-                    view.keys_modal = None;
+            match view.keys_modal_hit(rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.keys_modal.as_mut() {
+                        m.popup.select(t);
+                    }
+                    if matches!(
+                        keys_modal_execute_selected(view, scanner, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
+                }
+                None => {
+                    // A click inside the block that hit no target (a header, a border)
+                    // is swallowed; only a click OFF the modal dismisses.
+                    if !view.keys_modal_block_contains(rep.row, rep.col) {
+                        view.keys_modal = None;
+                    }
                 }
             }
         },
@@ -10343,7 +10375,18 @@ async fn row_menu_mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Left) => match view.row_menu_hit(rep.row, rep.col) {
+        MouseKind::Press(MouseButton::Left) => {
+            // The footer's `esc close` words close the popup (chrome-stamped
+            // target); checked before the entry routers.
+            if view
+                .row_menu
+                .as_ref()
+                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.row_menu = None;
+                return Ok(());
+            }
+            match view.row_menu_hit(rep.row, rep.col) {
             Some(t) => {
                 if let Some(m) = view.row_menu.as_mut() {
                     m.popup.select(t);
@@ -10356,6 +10399,7 @@ async fn row_menu_mouse(
                 if !view.row_menu_block_contains(rep.row, rep.col) {
                     view.row_menu = None;
                 }
+            }
             }
         },
         MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
@@ -10608,22 +10652,34 @@ async fn aux_mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Left) => match view.aux_hit(rep.row, rep.col) {
-            Some(t) => {
-                if let Some(m) = view.aux.as_mut() {
-                    m.popup.select(t);
-                }
-                if matches!(
-                    aux_execute_selected(view, sock_w).await?,
-                    DispatchFlow::Detach
-                ) {
-                    return Ok(StdinFlow::Detach);
-                }
+        MouseKind::Press(MouseButton::Left) => {
+            // The footer's `esc close` words close the popup (chrome-stamped
+            // target); checked before the entry routers.
+            if view
+                .aux
+                .as_ref()
+                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+            {
+                view.aux = None;
+                return Ok(StdinFlow::Continue);
             }
-            None => {
-                // In-block miss (a header) is swallowed; off-block dismisses.
-                if !view.aux_block_contains(rep.row, rep.col) {
-                    view.aux = None;
+            match view.aux_hit(rep.row, rep.col) {
+                Some(t) => {
+                    if let Some(m) = view.aux.as_mut() {
+                        m.popup.select(t);
+                    }
+                    if matches!(
+                        aux_execute_selected(view, sock_w).await?,
+                        DispatchFlow::Detach
+                    ) {
+                        return Ok(StdinFlow::Detach);
+                    }
+                }
+                None => {
+                    // In-block miss (a header) is swallowed; off-block dismisses.
+                    if !view.aux_block_contains(rep.row, rep.col) {
+                        view.aux = None;
+                    }
                 }
             }
         },
@@ -16806,6 +16862,56 @@ mod tests {
             .await
             .unwrap();
         assert!(v.keys_modal.is_none(), "click off the popup dismisses");
+    }
+
+    #[tokio::test]
+    async fn clicking_the_footer_esc_close_dismisses_the_modal() {
+        // AC10-HP: the chrome footer's `esc close` words are a mouse target
+        // stamped by chrome::frame, so clicking them closes the modal without
+        // touching a key. Verified THROUGH the mouse router (footer_close_hit
+        // feeding aux_mouse) on the settings modal, whose footer reads
+        // `tab switches section · esc close`, on the real rendered geometry.
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.aux = Some(v.build_settings_modal());
+        // Where do the words sit on screen? Render exactly as the router does.
+        let (fr, fc) = {
+            let r = v.aux.as_ref().unwrap().popup.render(v.term);
+            let (li, row) = r
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, l)| {
+                    l.hits
+                        .iter()
+                        .any(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                })
+                .expect("the modal footer carries the close target");
+            let (off, len) = row
+                .hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .map(|(_, o, l)| (*o, *l))
+                .unwrap();
+            (r.origin.0 + li, r.origin.1 + off + len / 2)
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let click = MouseReport {
+            row: fr as u16,
+            col: fc as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        aux_mouse(&mut v, click, &mut buf).await.unwrap();
+        assert!(v.aux.is_none(), "clicking `esc close` closes");
+        assert!(buf.is_empty(), "the close sends nothing on the wire");
+
+        // Esc still closes: the click added a target, it did not move the key.
+        v.aux = Some(v.build_settings_modal());
+        v.aux_esc = vec![0x1b];
+        aux_keys(&mut v, &[b'z'], &mut buf).await.unwrap();
+        assert!(v.aux.is_none(), "Esc still closes the modal");
     }
 
     #[test]
