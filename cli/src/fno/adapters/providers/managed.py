@@ -866,8 +866,28 @@ def read_meta(record_id: str, root: Path | None = None) -> Optional[dict]:
         return None
 
 
+def age_label_from_seconds(age_seconds: float) -> str:
+    """The ``d``/``h``/``m`` age ladder, shared by every age display in this
+    module. A negative age (clock skew) floors to 0m rather than printing a
+    negative number."""
+    age_seconds = max(0.0, age_seconds)
+    days = int(age_seconds // 86400)
+    if days >= 1:
+        return f"{days}d"
+    hours = int(age_seconds // 3600)
+    if hours >= 1:
+        return f"{hours}h"
+    return f"{int(age_seconds // 60)}m"
+
+
 def snapshot_age_label(record_id: str, root: Path | None = None) -> str:
-    """Human 'snapshot 3d' style age for `list`; 'none' when unregistered."""
+    """Human 'snapshot 3d' style age for `list`; 'none' when unregistered.
+
+    This is the CREDENTIAL BLOB age (when this record was last registered/
+    re-registered), not the usage-probe age - the two are unrelated and the
+    TTL governs neither of them the same way. See `_usage_age_col` in cli.py
+    for the usage-probe reading.
+    """
     meta = read_meta(record_id, root)
     if not meta or "captured_at" not in meta:
         return "none"
@@ -877,14 +897,8 @@ def snapshot_age_label(record_id: str, root: Path | None = None) -> str:
         )
     except (ValueError, TypeError):
         return "unknown"
-    delta = datetime.now(timezone.utc) - captured
-    days = delta.days
-    if days >= 1:
-        return f"{days}d"
-    hours = delta.seconds // 3600
-    if hours >= 1:
-        return f"{hours}h"
-    return f"{delta.seconds // 60}m"
+    delta_seconds = (datetime.now(timezone.utc) - captured).total_seconds()
+    return age_label_from_seconds(delta_seconds)
 
 
 def active_slot_id(cli: str, root: Path | None = None) -> Optional[str]:

@@ -157,6 +157,140 @@ class TestListWithRecords:
 
 
 # ---------------------------------------------------------------------------
+# x-8183: the usage=<age> column (distinct from snapshot=<age>, the
+# credential blob age) and the DISARMED footer.
+# ---------------------------------------------------------------------------
+
+class TestListUsageColumn:
+    def test_never_probed_shows_usage_never(self, tmp_path: Path):
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, _two_record_config())
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        for line in result.output.splitlines():
+            if "claude-primary" in line:
+                assert "usage=never" in line
+
+    def test_stale_snapshot_reports_its_age_with_ttl(self, tmp_path: Path):
+        import os as _os
+        import time
+
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot
+
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, _two_record_config())
+        state_path = tmp_path / "provider-runtime-state.json"
+        now = time.time()
+
+        # write_usage_snapshot resolves its path the same way `list`'s read
+        # does - via FNO_RUNTIME_STATE_PATH - so seed through that env var.
+        _os.environ["FNO_RUNTIME_STATE_PATH"] = str(state_path)
+        try:
+            write_usage_snapshot(
+                UsageSnapshot(
+                    provider_id="claude-primary", windows=(), probed_at=now - 900,
+                    source="oauth-endpoint",
+                ),
+                now=now,
+            )
+        finally:
+            _os.environ.pop("FNO_RUNTIME_STATE_PATH", None)
+
+        result = runner.invoke(
+            providers_app, ["list"],
+            env={"HOME": str(tmp_path), "PWD": str(tmp_path),
+                 "FNO_RUNTIME_STATE_PATH": str(state_path)},
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if "claude-primary" in ln)
+        assert "usage=15m (STALE, ttl=5m)" in line
+
+    def test_configured_ttl_renders_in_stale_label(self, tmp_path: Path):
+        import os as _os
+        import time
+
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot
+
+        settings_path = tmp_path / ".fno" / "config.toml"
+        config = _two_record_config()
+        config["config"]["providers"]["quota"] = {"probe_ttl_seconds": 900}
+        _write_settings(settings_path, config)
+        state_path = tmp_path / "provider-runtime-state.json"
+        now = time.time()
+
+        _os.environ["FNO_RUNTIME_STATE_PATH"] = str(state_path)
+        try:
+            write_usage_snapshot(
+                UsageSnapshot(
+                    provider_id="claude-primary", windows=(), probed_at=now - 3600,
+                    source="oauth-endpoint",
+                ),
+                now=now,
+            )
+        finally:
+            _os.environ.pop("FNO_RUNTIME_STATE_PATH", None)
+
+        result = runner.invoke(
+            providers_app, ["list"],
+            env={"HOME": str(tmp_path), "PWD": str(tmp_path),
+                 "FNO_RUNTIME_STATE_PATH": str(state_path)},
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if "claude-primary" in ln)
+        assert "ttl=15m" in line
+
+    def test_json_rows_carry_usage_fields(self, tmp_path: Path):
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, _two_record_config())
+        result = _invoke(["list", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        import json as _json
+
+        rows = _json.loads(result.output)
+        row = next(r for r in rows if r["id"] == "claude-primary")
+        assert row["usage_age_s"] is None
+        assert row["usage_stale"] is False
+        assert row["usage_ttl_seconds"] == 300
+
+
+class TestListDisarmedFooter:
+    def test_footer_prints_when_defer_dispatch_false(self, tmp_path: Path):
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, _two_record_config())
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert "rotation is DISARMED" in result.output
+        assert "accounts.quota.defer_dispatch" in result.output
+
+    def test_footer_absent_when_defer_dispatch_true(self, tmp_path: Path):
+        settings_path = tmp_path / ".fno" / "config.toml"
+        config = _two_record_config()
+        config["config"]["providers"]["quota"] = {"defer_dispatch": True}
+        _write_settings(settings_path, config)
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert "rotation is DISARMED" not in result.output
+
+    def test_footer_absent_on_empty_config(self, tmp_path: Path):
+        """The disarmed footer is a `list` addendum, not a fresh-install nag;
+        the empty-state branch returns before the footer check."""
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert "rotation is DISARMED" not in result.output
+
+    def test_footer_absent_from_json_output(self, tmp_path: Path):
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, _two_record_config())
+        result = _invoke(["list", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert "DISARMED" not in result.output
+
+
+# ---------------------------------------------------------------------------
 # Show
 # ---------------------------------------------------------------------------
 
