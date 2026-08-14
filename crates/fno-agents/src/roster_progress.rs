@@ -240,25 +240,15 @@ mod tests {
     fn live_process_zero_commits_past_grace_is_not_healthy() {
         // The measured near-miss: a roster row reading live with zero
         // commits an hour in. Assert it does NOT classify as healthy.
-        let stale = is_stale_despite_liveness(
-            AgentStatus::Live,
-            None,
-            Some(1_000),
-            1_000 + 3_601,
-            3_600,
-        );
+        let stale =
+            is_stale_despite_liveness(AgentStatus::Live, None, Some(1_000), 1_000 + 3_601, 3_600);
         assert!(stale, "a live row with zero commits past grace must flag");
     }
 
     #[test]
     fn live_process_zero_commits_within_grace_is_not_flagged() {
-        let ok = is_stale_despite_liveness(
-            AgentStatus::Live,
-            None,
-            Some(1_000),
-            1_000 + 600,
-            3_600,
-        );
+        let ok =
+            is_stale_despite_liveness(AgentStatus::Live, None, Some(1_000), 1_000 + 600, 3_600);
         assert!(!ok, "still inside the grace window");
     }
 
@@ -275,7 +265,10 @@ mod tests {
             1_000 + 999_999,
             3_600,
         );
-        assert!(!ok, "a row with a real commit is never stale despite liveness");
+        assert!(
+            !ok,
+            "a row with a real commit is never stale despite liveness"
+        );
     }
 
     #[test]
@@ -287,12 +280,18 @@ mod tests {
             1_000 + 999_999,
             3_600,
         );
-        assert!(!ok, "a terminal row is not a liveness/progress disagreement");
+        assert!(
+            !ok,
+            "a terminal row is not a liveness/progress disagreement"
+        );
     }
 
     #[test]
     fn missing_clock_fails_toward_not_flagged() {
         let ok = is_stale_despite_liveness(AgentStatus::Live, None, None, 999_999, 3_600);
-        assert!(!ok, "an unreliable clock must never manufacture a false alarm");
+        assert!(
+            !ok,
+            "an unreliable clock must never manufacture a false alarm"
+        );
     }
 }

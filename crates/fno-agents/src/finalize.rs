@@ -2361,20 +2361,22 @@ fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
     // garbage content. `git rev-parse --git-path` resolves worktree-relative
     // (a linked worktree's real gitdir lives under `.git/worktrees/<name>/`,
     // not `<cwd>/.git/`), unlike a bare `cwd.join(".git")` check.
-    let in_progress = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "rebase-merge", "rebase-apply"]
-        .iter()
-        .any(|marker| {
-            // `--git-path` prints a path relative to the git invocation's cwd
-            // (the worktree, via `current_dir(cwd)` inside `git_capture`), so
-            // it must be re-joined onto `cwd` before checking existence - this
-            // process's own cwd is unrelated.
-            git_capture(cwd, &["rev-parse", "--git-path", marker])
-                .is_some_and(|p| cwd.join(p).exists())
-        });
+    let in_progress = [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+    ]
+    .iter()
+    .any(|marker| {
+        // `--git-path` prints a path relative to the git invocation's cwd
+        // (the worktree, via `current_dir(cwd)` inside `git_capture`), so
+        // it must be re-joined onto `cwd` before checking existence - this
+        // process's own cwd is unrelated.
+        git_capture(cwd, &["rev-parse", "--git-path", marker]).is_some_and(|p| cwd.join(p).exists())
+    });
     if in_progress {
-        eprintln!(
-            "finalize: worktree is mid-merge/rebase; skipping WIP rescue commit ({reason})"
-        );
+        eprintln!("finalize: worktree is mid-merge/rebase; skipping WIP rescue commit ({reason})");
         return None;
     }
     let status = git_capture(cwd, &["status", "--porcelain"])?;
@@ -2926,13 +2928,15 @@ mod tests {
 
         assert!(sha.is_some(), "a dirty tree must produce a rescue commit");
         assert_ne!(sha.as_deref(), Some(before.as_str()));
-        assert_eq!(git_capture(d, &["status", "--porcelain"]), Some(String::new()));
+        assert_eq!(
+            git_capture(d, &["status", "--porcelain"]),
+            Some(String::new())
+        );
         let log = git_capture(d, &["log", "-1", "--format=%s"]).unwrap();
         assert!(log.contains("WIP") && log.contains("NoProgress"));
         // The untracked file must be captured too - that is the whole point
         // of `git add -A` over a partial `git add -u`.
-        let tracked =
-            git_capture(d, &["show", "--stat", "HEAD"]).unwrap_or_default();
+        let tracked = git_capture(d, &["show", "--stat", "HEAD"]).unwrap_or_default();
         assert!(tracked.contains("new_untracked.txt"));
     }
 
@@ -3002,8 +3006,7 @@ mod tests {
 
     #[test]
     fn extract_operator_question_matches_the_measured_specimen() {
-        let text =
-            "mouse-mode root cause identified; awaiting operator's terminal/mux info";
+        let text = "mouse-mode root cause identified; awaiting operator's terminal/mux info";
         assert_eq!(extract_operator_question(text).as_deref(), Some(text));
     }
 

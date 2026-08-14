@@ -1541,7 +1541,11 @@ fn finalize_wip_commits_a_dirty_worktree_at_any_terminal() {
     // mirror that here so finalize's OWN bookkeeping writes (events.jsonl,
     // the gh/fno stub call logs) don't read as leftover dirt from the rescue
     // commit's point of view.
-    fs::write(env.cwd.join(".gitignore"), ".fno/\ncalls.log\ngh-calls.log\n").unwrap();
+    fs::write(
+        env.cwd.join(".gitignore"),
+        ".fno/\ncalls.log\ngh-calls.log\n",
+    )
+    .unwrap();
     fs::write(env.cwd.join("committed.txt"), "base").unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "base"]);

@@ -4614,7 +4614,10 @@ fn run_reconcile_sweep(
         if let Err(err) =
             crate::roster_progress::refresh_row(&progress_path, &e.name, Path::new(&e.cwd), &now)
         {
-            eprintln!("reconcile: roster-progress refresh failed for {}: {err}", e.name);
+            eprintln!(
+                "reconcile: roster-progress refresh failed for {}: {err}",
+                e.name
+            );
         }
     }
 
