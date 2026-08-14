@@ -83,6 +83,10 @@ if [[ "${1:-}" == "audit" ]]; then
         exit 1
     fi
 fi
+if [[ "${PREFLIGHT_TEST_FAIL_FNO_TEST:-0}" == "1" && "${1:-}" == "test" && "$PWD" == */fno ]]; then
+    echo "stub: cargo test (fno) forced red" >&2
+    exit 1
+fi
 exit 0
 EOF
 cat > "$BIN/cargo-audit" <<'EOF'
@@ -265,6 +269,8 @@ echo "$out" | grep -q "reused attestation" && fail "trusted a non-green attestat
 
 echo "== AC1-ERR: a --retry-failed (subset) pass mints no FULL attestation; reuse then full-runs =="
 rm -f "$ATT"
+LEGREC="$FIX/.fno/preflight-last-failed-legs.txt"
+printf 'rustfmt:fno\n' > "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
 [[ ! -f "$ATT" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
@@ -279,6 +285,51 @@ jq -se --arg sha "$GREEN_FULL" \
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "subsequent full run passes" || fail "expected 0 got $rc: $out"
 echo "$out" | grep -q "reused attestation" && fail "reused a subset-only green" || ok "no FULL attestation to reuse -> full run"
+
+echo "== leg record: a cargo-only RED records its leg scope alone =="
+rm -f "$ATT"
+out="$(PREFLIGHT_TEST_FAIL_FNO_TEST=1 run_pf --force 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && ok "cargo-only red exits non-zero" || fail "expected red got $rc: $out"
+[[ -f "$LEGREC" ]] && ok "RED wrote the leg record" || fail "no leg record after RED"
+[[ "$(cat "$LEGREC")" == "cargo-test:fno" ]] && ok "record names exactly cargo-test:fno" \
+    || fail "record wrong: $(cat "$LEGREC")"
+
+echo "== --retry-failed honors the leg record: smoke skipped, only the red leg re-runs =="
+rm -f "$ATT"
+out="$(run_pf --retry-failed 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "leg-scoped retry passes" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "smoke suite (skipped - not in the retry leg record)" \
+    && ok "smoke leg skipped" || fail "smoke leg ran: $out"
+echo "$out" | grep -q "cargo test --all-targets (fno-agents) (skipped - not in the retry leg record)" \
+    && ok "untouched cargo leg skipped" || fail "fno-agents leg ran: $out"
+echo "$out" | grep -q "=== cargo test --all-targets (fno) ===" \
+    && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
+[[ ! -f "$ATT" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
+jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.steps_executed < .data.steps_expected' \
+    "$EVENTS" >/dev/null \
+    && ok "leg-scoped retry records subset with partial coverage" \
+    || fail "leg-scoped retry receipt is not a partial-coverage subset"
+[[ ! -s "$LEGREC" ]] && ok "green retry truncated the record" || fail "record not truncated: $(cat "$LEGREC")"
+
+echo "== fallback: a missing leg record runs every leg and earns FULL =="
+rm -f "$ATT" "$LEGREC"
+out="$(run_pf --retry-failed 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "fallback retry passes" || fail "expected 0 got $rc: $out"
+[[ -f "$ATT" ]] && ok "fallback retry minted the FULL attestation it earned" || fail "no attestation after full-coverage retry"
+jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
+    '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.steps_executed == .data.steps_expected' \
+    "$EVENTS" >/dev/null \
+    && ok "fallback retry receipt is full with equal coverage" \
+    || fail "fallback retry receipt is not full"
+
+echo "== corrupt record: unrecognized names run every leg =="
+printf 'not-a-leg\n' > "$LEGREC"
+rm -f "$ATT"
+out="$(run_pf --retry-failed 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "corrupt record falls back to every leg" || fail "expected 0 got $rc: $out"
+echo "$out" | grep -q "=== smoke suite" && ok "smoke ran under a corrupt record" || fail "smoke skipped on a corrupt record"
+rm -f "$LEGREC"
 
 echo "== AC3-ERR: a RED run deletes a matching attestation =="
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "poison for AC3-ERR" )

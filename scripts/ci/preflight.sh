@@ -19,8 +19,10 @@
 #
 # Usage:
 #   scripts/ci/preflight.sh [--retry-failed] [--force]
-#     --retry-failed   re-run only the steps the smoke runner recorded last time
+#     --retry-failed   re-run only the legs named in .fno/preflight-last-failed-legs.txt
 #                      (a SUBSET; run a full preflight before the settle push).
+#                      A missing or unparsable record runs every leg, and a run
+#                      that executes every required leg earns FULL, flag or not.
 #     --force          ignore a cached attestation for this SHA and run every
 #                      suite. A FULL GREEN still records a fresh attestation;
 #                      a RED still deletes a matching one.
@@ -100,6 +102,35 @@ if ! RECEIPT_PLATFORM="$(uname -sm 2>/dev/null)" || [[ -z "$RECEIPT_PLATFORM" ]]
     exit 1
 fi
 EVENTS_PATH="$INVOKING_ROOT/.fno/events.jsonl"
+
+# --- leg failure record (--retry-failed reads what a RED run writes here) ----
+# One required scope name per line for the legs that failed the last
+# verdict-bearing run; a GREEN run truncates it. This file is preflight's,
+# never hand-edited, and an unreadable or unparsable file is treated as absent
+# (every leg runs - the same fallback as a missing smoke failure record).
+LEG_RECORD="$INVOKING_ROOT/.fno/preflight-last-failed-legs.txt"
+FAILED_LEG_SCOPES=""
+if [[ $RETRY_FAILED -eq 1 && -r "$LEG_RECORD" ]]; then
+    while read -r _leg_line; do
+        [[ -z "$_leg_line" ]] && continue
+        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno " in
+            *" $_leg_line "*)
+                case " $FAILED_LEG_SCOPES " in
+                    *" $_leg_line "*) ;;
+                    *) FAILED_LEG_SCOPES="$FAILED_LEG_SCOPES $_leg_line" ;;
+                esac ;;
+        esac
+    done < "$LEG_RECORD"
+fi
+# retry_run_leg <scope>: under --retry-failed with a usable record, run only
+# the recorded legs. Any other situation (no flag, or no usable record) runs
+# every leg.
+retry_run_leg() {
+    [[ $RETRY_FAILED -eq 0 ]] && return 0
+    [[ -z "${FAILED_LEG_SCOPES// /}" ]] && return 0
+    case " $FAILED_LEG_SCOPES " in *" $1 "*) return 0 ;; esac
+    return 1
+}
 _this_host() { printf '%s\n' "$RECEIPT_HOST"; }
 
 _json_array() {
@@ -542,8 +573,8 @@ exit_if_void() {
 # VOID exited 5 above, so it reaches neither write nor delete and any
 # pre-existing attestation is left untouched (AC2-ERR). A FULL GREEN records;
 # any RED deletes a matching attestation so a stale green cannot outlive a real
-# failure (AC3-ERR); a --retry-failed pass mints nothing (AC1-ERR: subset green
-# is not full green).
+# failure (AC3-ERR); a subset pass mints nothing (AC1-ERR: subset green is not
+# full green).
 record_attestation() {
     local now iso tmp
     now="$(date +%s 2>/dev/null || echo 0)"
@@ -571,8 +602,11 @@ invalidate_attestation() {
     rm -f "$ATTEST" && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
 }
 # --- suites ------------------------------------------------------------------
-LEG_NAMES=(); LEG_STATUS=(); LEG_SECS=()
-record_leg() { LEG_NAMES+=("$1"); LEG_STATUS+=("$2"); LEG_SECS+=("$3"); }
+# LEG_SCOPES holds the required-scope name(s) each leg answers to ("" = not a
+# required leg: the changed packet and the advisory audit). The fmt-missing
+# case names both fmt scopes on one summary line.
+LEG_SCOPES=(); LEG_NAMES=(); LEG_STATUS=(); LEG_SECS=()
+record_leg() { LEG_SCOPES+=("$1"); LEG_NAMES+=("$2"); LEG_STATUS+=("$3"); LEG_SECS+=("$4"); }
 FAIL=0
 
 # --- changed packet: earliest actionable signal, before the full gate --------
@@ -596,10 +630,10 @@ if [[ -n "$CHANGED_BASE" ]]; then
         --base "$CHANGED_BASE" --head "$CANDIDATE_SHA"
     creq=$?
     case $creq in
-        0)  record_leg "changed packet (CHANGED SUBSET)" pass $(( SECONDS - c0 )) ;;
-        20) record_leg "changed packet" "unselected" $(( SECONDS - c0 ))
+        0)  record_leg "" "changed packet (CHANGED SUBSET)" pass $(( SECONDS - c0 )) ;;
+        20) record_leg "" "changed packet" "unselected" $(( SECONDS - c0 ))
             echo "preflight: changed packet mapped nothing - not coverage; the full gate decides" ;;
-        21) record_leg "changed packet" "unevaluated" $(( SECONDS - c0 ))
+        21) record_leg "" "changed packet" "unevaluated" $(( SECONDS - c0 ))
             echo "preflight: changed packet UNEVALUATED - continuing to the full gate" ;;
         22) # The packet could not run at all. A dedicated code, not the child
             # exit-code space: several selectable lint steps exit 2 on a genuine
@@ -611,7 +645,7 @@ if [[ -n "$CHANGED_BASE" ]]; then
             # path does: a packet that failed while the shared worktree was reset
             # under it earned nothing and must VOID rather than accuse this SHA.
             exit_if_void "changed packet (CHANGED SUBSET)"
-            record_leg "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
+            record_leg "" "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
             invalidate_attestation
             echo ""
             echo "preflight: SUMMARY  repo=$REPO_NAME  candidate=$CANDIDATE_SHORT  mode=CHANGED-SUBSET"
@@ -626,45 +660,71 @@ elif [[ $RETRY_FAILED -eq 0 ]]; then
 fi
 
 echo ""
-echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
-SMOKE_ARGS=(--keep-going); [[ $RETRY_FAILED -eq 1 ]] && SMOKE_ARGS=(--retry-failed --keep-going)
-s0="$SECONDS"
 REQUIRED_EXECUTED=0
-# Bootstrap via `uv run --project cli`: there is no repo-root pyproject and no
-# global fno-py in a hermetic env, so a bare `fno test smoke` is not on PATH
-# until uv syncs the cli project (uv auto-syncs). The attestation logic below
-# is unchanged: a FULL GREEN records, a RED deletes, a subset mints nothing.
-run_hermetic uv run --project cli fno-py test smoke "${SMOKE_ARGS[@]}"
-sreq=$?
-REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-[[ $sreq -eq 0 ]] && record_leg "smoke suite" pass $(( SECONDS - s0 )) || { record_leg "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
+SQUADS_INCLUDED=0
+RECEIPT_UNAVAILABLE=0
+if retry_run_leg smoke; then
+    echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
+    SMOKE_ARGS=(--keep-going); [[ $RETRY_FAILED -eq 1 ]] && SMOKE_ARGS=(--retry-failed --keep-going)
+    s0="$SECONDS"
+    # Bootstrap via `uv run --project cli`: there is no repo-root pyproject and
+    # no global fno-py in a hermetic env, so a bare `fno test smoke` is not on
+    # PATH until uv syncs the cli project (uv auto-syncs). The attestation
+    # logic below is unchanged: a FULL GREEN records, a RED deletes, a subset
+    # mints nothing.
+    run_hermetic uv run --project cli fno-py test smoke "${SMOKE_ARGS[@]}"
+    sreq=$?
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    [[ $sreq -eq 0 ]] && record_leg smoke "smoke suite" pass $(( SECONDS - s0 )) || { record_leg smoke "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
+else
+    echo "preflight: === smoke suite (skipped - not in the retry leg record) ==="
+    record_leg "" "smoke suite" skipped 0
+fi
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
 have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
-run_rust_leg() { # name status-var  cwd  cmd...
-    local name="$1" cwd="$2"; shift 2
+run_rust_leg() { # scope  name  cwd  cmd...
+    local scope="$1" name="$2" cwd="$3"; shift 3
     echo ""
     echo "preflight: === $name ==="
     local t0="$SECONDS"
     run_hermetic bash -c "cd '$cwd' && $*"
     local rc=$?
-    if [[ $rc -eq 0 ]]; then record_leg "$name" pass $(( SECONDS - t0 ))
-    else record_leg "$name" fail $(( SECONDS - t0 )); FAIL=1; fi
+    if [[ $rc -eq 0 ]]; then record_leg "$scope" "$name" pass $(( SECONDS - t0 ))
+    else record_leg "$scope" "$name" fail $(( SECONDS - t0 )); FAIL=1; fi
+}
+
+skip_rust_leg() { # scope  name
+    echo "preflight: === $2 (skipped - not in the retry leg record) ==="
+    record_leg "" "$2" skipped 0
 }
 
 if have_pinned_fmt; then
-    run_rust_leg "cargo fmt --check (fno-agents, +$PINNED_FMT)" "crates/fno-agents" "cargo +$PINNED_FMT fmt --all --check"
-    run_rust_leg "cargo fmt --check (fno, +$PINNED_FMT)" "crates/fno" "cargo +$PINNED_FMT fmt --all --check"
-    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 2))
+    if retry_run_leg rustfmt:fno-agents; then
+        run_rust_leg rustfmt:fno-agents "cargo fmt --check (fno-agents, +$PINNED_FMT)" "crates/fno-agents" "cargo +$PINNED_FMT fmt --all --check"
+        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    else
+        skip_rust_leg rustfmt:fno-agents "cargo fmt --check (fno-agents, +$PINNED_FMT)"
+    fi
+    if retry_run_leg rustfmt:fno; then
+        run_rust_leg rustfmt:fno "cargo fmt --check (fno, +$PINNED_FMT)" "crates/fno" "cargo +$PINNED_FMT fmt --all --check"
+        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    else
+        skip_rust_leg rustfmt:fno "cargo fmt --check (fno, +$PINNED_FMT)"
+    fi
 else
     echo "preflight: pinned rustfmt toolchain $PINNED_FMT not installed - fmt leg cannot match rust-ci" >&2
     echo "preflight: install it: rustup toolchain install $PINNED_FMT --component rustfmt" >&2
-    record_leg "cargo fmt --check (+$PINNED_FMT MISSING)" fail 0; FAIL=1
+    record_leg "rustfmt:fno-agents rustfmt:fno" "cargo fmt --check (+$PINNED_FMT MISSING)" fail 0; FAIL=1
 fi
 
-run_rust_leg "cargo test --all-targets (fno-agents)" "crates/fno-agents" "cargo test --all-targets"
-REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+if retry_run_leg cargo-test:fno-agents; then
+    run_rust_leg cargo-test:fno-agents "cargo test --all-targets (fno-agents)" "crates/fno-agents" "cargo test --all-targets"
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+else
+    skip_rust_leg cargo-test:fno-agents "cargo test --all-targets (fno-agents)"
+fi
 
 # squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
 # crates/fno cargo test leg. A test that bypasses run_hermetic's HOME redirect and
@@ -686,42 +746,50 @@ except OSError:
     print('unavailable')
 " 2>/dev/null
 }
-_squads_before="$(_real_squads_state || printf '%s' unavailable)"
-case "$_squads_before" in
-    absent|unavailable|present:*) ;;
-    *) _squads_before=unavailable ;;
-esac
-run_rust_leg "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
-REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-_squads_after="$(_real_squads_state || printf '%s' unavailable)"
-case "$_squads_after" in
-    absent|unavailable|present:*) ;;
-    *) _squads_after=unavailable ;;
-esac
-SQUADS_INCLUDED=1
-RECEIPT_UNAVAILABLE=0
-if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
-    SQUADS_INCLUDED=0
-    record_leg "squads.json leak guard (fno)" "not configured (no real store)" 0
-    SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
-    emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
-        || echo "preflight: WARN could not append squads not-configured receipt" >&2
-elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
+# The leak guard snapshots the real store around the crates/fno cargo test leg,
+# so the pair runs together: selecting either scope runs both.
+RUN_FNO_CARGO=0
+retry_run_leg cargo-test:fno && RUN_FNO_CARGO=1
+retry_run_leg squads-leak-guard:fno && RUN_FNO_CARGO=1
+if [[ $RUN_FNO_CARGO -eq 1 ]]; then
+    _squads_before="$(_real_squads_state || printf '%s' unavailable)"
+    case "$_squads_before" in
+        absent|unavailable|present:*) ;;
+        *) _squads_before=unavailable ;;
+    esac
+    run_rust_leg cargo-test:fno "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    RECEIPT_UNAVAILABLE=1
-    FAIL=1
-    record_leg "squads.json leak guard (fno)" unavailable 0
-elif [[ "$_squads_after" != "$_squads_before" ]]; then
-    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
-         "(mtime $_squads_before -> $_squads_after)" >&2
-    echo "  if a real mux session is running concurrently it is a valid writer;" >&2
-    echo "  otherwise a crates/fno test bypassed the HOME redirect and leaked." >&2
-    FAIL=1
-    record_leg "squads.json leak guard (fno)" fail 0
+    _squads_after="$(_real_squads_state || printf '%s' unavailable)"
+    case "$_squads_after" in
+        absent|unavailable|present:*) ;;
+        *) _squads_after=unavailable ;;
+    esac
+    SQUADS_INCLUDED=1
+    if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
+        SQUADS_INCLUDED=0
+        record_leg "" "squads.json leak guard (fno)" "not configured (no real store)" 0
+        SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
+        emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
+            || echo "preflight: WARN could not append squads not-configured receipt" >&2
+    elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
+        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+        RECEIPT_UNAVAILABLE=1
+        FAIL=1
+        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" unavailable 0
+    elif [[ "$_squads_after" != "$_squads_before" ]]; then
+        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+        echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
+             "(mtime $_squads_before -> $_squads_after)" >&2
+        echo "  if a real mux session is running concurrently it is a valid writer;" >&2
+        echo "  otherwise a crates/fno test bypassed the HOME redirect and leaked." >&2
+        FAIL=1
+        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" fail 0
+    else
+        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" pass 0
+    fi
 else
-    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    record_leg "squads.json leak guard (fno)" pass 0
+    skip_rust_leg cargo-test:fno "cargo test --all-targets (fno)"
 fi
 
 # advisory: never flips the exit code
@@ -737,12 +805,12 @@ if run_hermetic bash -c "command -v cargo-audit >/dev/null 2>&1"; then
     run_hermetic bash -c "cd crates/fno && cargo audit" || ADVISORY_FAILED=1
     ADVISORY_EXECUTED=$((ADVISORY_EXECUTED + 1))
     if [[ $ADVISORY_FAILED -eq 0 ]]; then
-        record_leg "cargo audit (ADVISORY)" pass $(( SECONDS - a0 ))
+        record_leg "" "cargo audit (ADVISORY)" pass $(( SECONDS - a0 ))
     else
-        record_leg "cargo audit (ADVISORY)" "advisory-fail" $(( SECONDS - a0 ))
+        record_leg "" "cargo audit (ADVISORY)" "advisory-fail" $(( SECONDS - a0 ))
     fi
 else
-    record_leg "cargo audit (ADVISORY)" "skipped (not installed)" 0
+    record_leg "" "cargo audit (ADVISORY)" "skipped (not installed)" 0
 fi
 ADVISORY_STATUS="${LEG_STATUS[${#LEG_STATUS[@]}-1]}"
 case "$ADVISORY_STATUS" in
@@ -771,12 +839,47 @@ elif [[ $FAIL -ne 0 ]]; then
     invalidate_attestation
 fi
 
+# Refresh the leg failure record from THIS run: a RED names the required legs
+# that did not pass, a GREEN truncates. Skipped legs record nothing (they did
+# not run, so they can neither pass nor fail here). Temp file + rename so a
+# concurrent reader never sees a half-written record; an unwritable path warns
+# and leaves --retry-failed on its run-every-leg fallback.
+write_leg_record() {
+    local tmp="$LEG_RECORD.$$" failed="" i scope
+    for i in "${!LEG_SCOPES[@]}"; do
+        [[ -n "${LEG_SCOPES[$i]}" ]] || continue
+        case "${LEG_STATUS[$i]}" in pass|skipped) continue ;; esac
+        for scope in ${LEG_SCOPES[$i]}; do
+            case " $failed " in
+                *" $scope "*) ;;
+                *) failed="$failed $scope" ;;
+            esac
+        done
+    done
+    if ! mkdir -p "$(dirname "$LEG_RECORD")" 2>/dev/null; then
+        echo "preflight: WARN cannot create leg-record dir; --retry-failed will run every leg" >&2
+        return 0
+    fi
+    : > "$tmp"
+    [[ -n "$failed" ]] && printf '%s\n' $failed >> "$tmp"
+    if mv -f "$tmp" "$LEG_RECORD" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    echo "preflight: WARN leg-record write failed; --retry-failed will run every leg" >&2
+}
+write_leg_record
+
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
+# Coverage-derived mode: a run that executed every required leg is FULL whether
+# or not --retry-failed was typed; only a run that skipped legs is a SUBSET.
+# This is what makes the no-record retry fallback usable: it does the whole
+# job and mints the receipt it earned.
 RECEIPT_MODE=full
-[[ $RETRY_FAILED -eq 1 ]] && RECEIPT_MODE=subset
+[[ $REQUIRED_EXECUTED -lt $REQUIRED_COUNT ]] && RECEIPT_MODE=subset
 RECEIPT_RESULT=passed
 [[ $FAIL -ne 0 ]] && RECEIPT_RESULT=failed
 [[ $RECEIPT_UNAVAILABLE -eq 1 ]] && RECEIPT_RESULT=unavailable
@@ -784,20 +887,20 @@ if ! emit_verification_receipt "$RECEIPT_MODE" "$RECEIPT_RESULT" "$REQUIRED_SCOP
     echo "preflight: verification receipt append failed; verdict is unavailable" >&2
     FAIL=1
     invalidate_attestation
-elif [[ $RETRY_FAILED -eq 0 && $FAIL -eq 0 ]]; then
+elif [[ "$RECEIPT_MODE" == "full" && $FAIL -eq 0 ]]; then
     record_attestation
 fi
 
 # --- summary -----------------------------------------------------------------
 echo ""
-echo "preflight: SUMMARY  repo=$REPO_NAME  candidate=$CANDIDATE_SHORT  mode=$([[ $RETRY_FAILED -eq 1 ]] && echo RETRY-SUBSET || echo FULL)"
-[[ $RETRY_FAILED -eq 1 ]] && echo "preflight: RETRY SUBSET - run a full preflight before the settle-green push"
+echo "preflight: SUMMARY  repo=$REPO_NAME  candidate=$CANDIDATE_SHORT  mode=$([[ "$RECEIPT_MODE" == subset ]] && echo RETRY-SUBSET || echo FULL)"
+[[ "$RECEIPT_MODE" == subset ]] && echo "preflight: RETRY SUBSET - run a full preflight before the settle-green push"
 for i in "${!LEG_NAMES[@]}"; do
     printf '  %-24s %5ss  %s\n' "${LEG_STATUS[$i]}" "${LEG_SECS[$i]}" "${LEG_NAMES[$i]}"
 done
 echo ""
 if [[ $FAIL -eq 0 ]]; then
-    if [[ $RETRY_FAILED -eq 0 && -f "$ATTEST" ]]; then
+    if [[ "$RECEIPT_MODE" == "full" && -f "$ATTEST" ]]; then
         echo "preflight: GREEN - safe to push $CANDIDATE_SHORT (attestation recorded; next call on this SHA reuses it)"
     else
         echo "preflight: GREEN - safe to push $CANDIDATE_SHORT"
