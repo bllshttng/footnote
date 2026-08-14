@@ -62,8 +62,17 @@ fi
 - **First push / settle-green push:** run `scripts/ci/preflight.sh` (full).
 - **Between fix-loop commits** (external-review fixes, iteration pushes): run
   `scripts/ci/preflight.sh --retry-failed` for a fast re-check of only the
-  steps that failed last time, then one **full** run before the push you expect
-  to go green (a subset green is not a full green - the runner labels this).
+  preflight legs that failed last time (smoke, rustfmt, cargo test, the squads
+  leak guard - recorded per leg in `.fno/preflight-last-failed-legs.txt`),
+  then one **full** run before the push you expect
+  to go green (a subset green is not a full green - the runner labels this;
+  a retry with no usable record runs every leg and earns FULL).
+- The receipt preflight mints is **review-entry evidence, not merge
+  eligibility**: `fno pr evidence-check` needs it to open the PR, hosted CI on
+  the PR head plus the configured reviewers decide the merge, and nothing
+  local gates the merge. It survives a rebase (`fno pr evidence-check
+  --allow-rebase-equivalent` accepts a full/passed receipt whose patch ids
+  match HEAD) but not a code change.
 - The guard is `-x scripts/ci/preflight.sh`, a relative existence check, so
   this no-ops in any repo that does not ship the script (the self-containment
   lint forbids repo-root-anchored script refs; the relative form is portable).

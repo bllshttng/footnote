@@ -180,8 +180,11 @@ Behavior:
   because a GREEN printed by a process that ran no tests is exactly the receipt
   a reader should be able to audit; `--force` discards it and re-runs every
   suite. A RED run deletes a matching attestation, so a stale green cannot
-  outlive a real failure; a `--retry-failed` (subset) pass or a VOID mints
-  nothing. The SHA is a complete cache key because the runner hard-resets a
+  outlive a real failure; a subset pass (fewer legs executed than the required
+  scope) or a VOID mints nothing. The mode is derived from coverage, not from
+  the flag: a `--retry-failed` run with no usable failure record executes every
+  leg and earns FULL. The SHA is a complete cache key because the runner
+  hard-resets a
   dedicated worktree to that SHA and scrubs the environment; `host=` closes the
   one cross-environment hole a SHA key alone leaves.
 - Exits 5 (VOID) if the shared preflight worktree or the lock changed hands
@@ -191,8 +194,10 @@ Behavior:
   which is the misattribution this tripwire exists to catch.
 - Exit 0 iff every non-advisory suite passed; `cargo audit` findings are shown
   in an advisory row and never flip the exit code.
-- `--retry-failed` runs only smoke's recorded failures (a fast SUBSET); run a
-  full preflight before the push you expect to settle green.
+- `--retry-failed` re-runs only the legs named in
+  `.fno/preflight-last-failed-legs.txt` (a fast SUBSET; the record is
+  preflight's, never hand-edited, and a missing or corrupt record means every
+  leg runs). run a full preflight before the push you expect to settle green.
 
 ## Ship-phase wiring
 
@@ -202,6 +207,20 @@ script exists in the repo (see `skills/target/references/ship-phase.md`):
 - Full run before the first PR push and before the settle-green push.
 - `--retry-failed` between fix-loop commits, then one full run before the push
   you expect to go green.
+
+The receipt this mints is **review-entry evidence, not merge eligibility**.
+`fno pr evidence-check` (and the ship/batch lanes behind it) requires a
+full/passed receipt bound to the exact HEAD before a PR is opened; from there,
+hosted CI re-runs everything on the PR head and the configured reviewers
+decide. Nothing local gates the merge: `fno pr merge` reads hosted CI and
+review attestations, never a preflight receipt. A receipt also survives a
+rebase: `fno pr evidence-check --allow-rebase-equivalent` accepts a full/passed
+receipt for an earlier commit whose patch ids equal HEAD's, so `fno pr rebase`
+does not destroy evidence about code that did not change. Any code edit or
+conflict resolution changes the patch ids, so the equivalence path refuses
+exactly there. The flag is review-entry only; the attestation reuse check
+inside `preflight.sh` stays strict, so a cached carrier from a different
+commit is never blessed.
 
 Verdict reuse needs no caller change: it is checked inside `preflight.sh`
 itself, before the lock, so the ship phase and fix loop inherit it from the one
@@ -221,7 +240,7 @@ The scripts never self-skip; the skip decision lives in the caller.
 ```bash
 scripts/ci/preflight.sh                 # full run; reuses a matching attestation if one exists
 scripts/ci/preflight.sh --force         # ignore the cached attestation, run every suite
-scripts/ci/preflight.sh --retry-failed  # fast: only last run's failures
+scripts/ci/preflight.sh --retry-failed  # fast: only the legs that failed last run
 fno test smoke --keep-going             # non-hermetic, in your working tree
 fno test smoke --changed                # earliest signal: only what your diff maps to
 fno test smoke --changed --list         # what it would run, and what it could not map
