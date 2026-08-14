@@ -5395,7 +5395,8 @@ def _mux_pane_send(
     an unreadable transcript is the false-positive shape the pitfalls corpus
     warns against. Ignored when ``guarded`` (a guarded send's idle check was
     itself standing in for a confirm, and this flag governs the unguarded path
-    replacing it).
+    replacing it), and ignored for a non-claude recipient, which has no
+    ~/.claude/projects transcript to confirm against.
     """
     mux = entry.mux or {}
     session = mux.get("session")
@@ -5498,6 +5499,13 @@ def _mux_pane_send(
     # Baseline BEFORE the paste (not after): the confirm below scans only lines
     # appended past this offset, so it never matches something already in the
     # transcript when we started.
+    #
+    # The transcript confirm is a CLAUDE-lane capability: the resolver reads
+    # ~/.claude/projects only, so a mux-hosted codex/opencode/gemini pane has no
+    # transcript to confirm against and every landed paste would report a miss --
+    # a false durable demotion, and a duplicate once the recipient drains the
+    # durable copy. Those panes keep the bytes-written verdict.
+    confirm = confirm and (getattr(entry, "harness", "") or "") == "claude"
     confirm_transcript = _mux_recipient_transcript(entry) if confirm else None
     confirm_baseline: Optional[int] = None
     if confirm_transcript is not None:

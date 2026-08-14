@@ -25,11 +25,12 @@ from types import SimpleNamespace
 import fno.agents.dispatch as dispatch
 
 
-def _entry(session_id="me-session"):
+def _entry(session_id="me-session", harness="claude"):
     return SimpleNamespace(
         mux={"session": "main", "pane_id": 3},
         harness_session_id=session_id,
         session_id=None,
+        harness=harness,
     )
 
 
@@ -143,3 +144,19 @@ def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
+
+
+def test_non_claude_recipient_keeps_the_bytes_written_verdict(monkeypatch):
+    """The transcript confirm reads ~/.claude/projects only, so a mux-hosted
+    codex pane has nothing to confirm against. Applying it there would report
+    every landed paste as a miss -- a false durable demotion, and a duplicate
+    once the recipient drains the durable copy."""
+
+    def _boom(_entry):
+        raise AssertionError("a non-claude pane has no claude transcript to poll")
+
+    monkeypatch.setattr(dispatch, "_mux_recipient_transcript", _boom)
+    _install_fake_run(monkeypatch, [0, 0, 0, 0])
+
+    entry = _entry(harness="codex")
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is True
