@@ -13,7 +13,6 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -111,75 +110,12 @@ def _repo_root(cwd: Optional[str] = None) -> Path:
     return base
 
 
-def _repo_identity_from_remote_url(url: str) -> Optional[str]:
-    """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
-
-    Deliberately NOT ``paths._remote_url_to_slug``, which yields only the last
-    path segment. That is fine for a path token, but this keys ``review_coverage``
-    in the cross-project global log, and there a collision is a correctness hole:
-    ``org-a/widget`` and ``org-b/widget`` both reduce to ``widget``, so with a
-    shared PR number one repo's coverage could satisfy the other's auto-merge
-    review guard - and a fork shares head SHAs, so the staleness check that would
-    otherwise catch it does not fire.
-
-    Mirrors ``repo_identity_from_remote_url`` in ``crates/fno-agents/src/finalize.rs``.
-    The two MUST agree or the reader stops finding the writer's events; the
-    parity cases are covered by tests on both sides.
-    """
-    s = (url or "").strip().rstrip("/")
-    if not s:
-        return None
-    idx = s.find("://")
-    if idx != -1:
-        s = s[idx + 3:]
-    idx = s.find("@")
-    if idx != -1:
-        s = s[idx + 1:]
-    m = re.search(r"[/:]", s)
-    if not m:
-        return None
-    host_port, path = s[: m.start()], s[m.start() + 1:]
-    # `ssh://host:22/o/r` glues a numeric port to the host; a non-numeric suffix
-    # is part of the host and must survive.
-    host = host_port
-    if ":" in host_port:
-        h, _, p = host_port.partition(":")
-        # `isascii()` guard: Rust uses `is_ascii_digit`, and `str.isdigit()` is
-        # true for non-ASCII digits ("²", "٣"). Without it the two sides
-        # disagree on a remote nobody sane writes, and the reader silently
-        # stops finding the writer's events - the one failure this parity
-        # exists to prevent.
-        if p.isascii() and p.isdigit():
-            host = h
-    path = path.lstrip("/")
-    first, _, rest = path.partition("/")
-    if first.isascii() and first.isdigit() and rest:
-        path = rest
-    path = path.rstrip("/")
-    if path.endswith(".git"):
-        path = path[:-4]
-    if not host or "\\" in path:
-        return None
-    segments = [p for p in path.split("/") if p]
-    if len(segments) < 2 or any(p in (".", "..") for p in segments):
-        return None
-    return f"{host}/{'/'.join(segments)}".lower()
-
-
-def _repo_identity(root: "Path") -> Optional[str]:
-    """``host/owner/repo`` for the checkout at ``root``, or None."""
-    try:
-        import subprocess
-
-        out = subprocess.run(
-            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:  # noqa: BLE001 - no git -> no identity -> no global read
-        return None
-    if getattr(out, "returncode", 1) != 0:
-        return None
-    return _repo_identity_from_remote_url(out.stdout or "")
+# Repo identity moved down to `fno.paths` (the platform layer) when the mirrored
+# attestation in `fno.events.cli` needed the same parser: `fno.events` may not
+# import `fno.pr`, and a second copy would be two parsers to hold in parity with
+# `finalize.rs` instead of one. Re-exported under the old private names so every
+# call site and test here reads unchanged.
+from fno.paths import repo_identity as _repo_identity  # noqa: E402
 
 
 def _scan_coverage(

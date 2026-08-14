@@ -15,13 +15,24 @@ cli = typer.Typer(name="event", help="emit and audit events", no_args_is_help=Tr
 # reason from bloating an events.jsonl line while still landing the event.
 _PROTOCOL_DATA_STR_CAP = 500
 
-# Event types a reader in ANOTHER checkout must be able to see, so they are
-# mirrored into the global log as well as the project one.
+# Event types written to the global log as well as the project one, so a reader
+# in ANOTHER checkout of the same repo can see them.
 #
-# Small on purpose. Membership is earned by having a cross-checkout reader:
-# `review_attestation` gates `fno pr merge`, which runs from canonical while the
-# reviewer runs in a worktree. `review_coverage` needs no entry here because
-# loopcheck.rs emits it to both logs itself.
+# NO READER CONSUMES THE MIRRORED `review_attestation` TODAY, AND THAT IS
+# DELIBERATE. Say it plainly here, because dead code that reads as load-bearing
+# is its own trap. The gate chain runs attestation -> loopcheck -> coverage:
+# `unattested_reviewers_scan` (loopcheck.rs) reads attestations from the PROJECT
+# log alone, and `fno pr merge` reads `review_coverage`, never an attestation.
+# This entry was originally added on a misdiagnosis - the block it was meant to
+# fix was coverage never being produced at all, not an attestation missing from
+# canonical. It stays for symmetry with the coverage path, which loopcheck.rs
+# already dual-writes for exactly this reason, and because x-3a3f moves a reader
+# to the global log and will need it. Named intent, not dead code.
+#
+# Small on purpose. Membership is earned by a cross-checkout reader, current or
+# named-and-coming. `review_coverage` needs no entry: loopcheck.rs emits it to
+# both logs itself, and a second writer here would double every row the merge
+# gate counts.
 GLOBAL_MIRROR_TYPES = frozenset({"review_attestation"})
 
 
@@ -393,23 +404,43 @@ def emit(
     # CROSS-CHECKOUT TYPES ALSO REACH THE GLOBAL LOG.
     #
     # The project log is written wherever the emitter happens to run, which for
-    # a review is a worktree. `fno pr merge` runs from canonical and reads
-    # canonical, so a worktree-local attestation is a satisfied gate that reads
-    # as an unsatisfiable one - silently, with a refusal naming a count and not
-    # a location. loopcheck.rs already fixed exactly this for `review_coverage`
-    # by emitting to both logs; `review_attestation` goes through this path
-    # instead and kept the defect. The global log is the one file every
-    # checkout of a repo stands in.
+    # a review is a worktree. The global log is the one file every checkout of a
+    # repo stands in, so it is where a cross-checkout reader looks. See
+    # GLOBAL_MIRROR_TYPES for which types earn a place here and for the fact
+    # that the mirrored attestation has no reader yet.
+    #
+    # `global_events_json()`, never `state_dir() / "events.jsonl"`. A RELATIVE
+    # `config.state_dir` resolves into the repo checkout, while the global
+    # journal deliberately falls back to `~/.fno` - which is also the path the
+    # Rust writer hardcodes. Writing via state_dir() on exactly those configs
+    # puts the row in a file nobody opens. `fno/pr/_reviews.py` carries the same
+    # warning on the READ side; the two must name one path or the mirror is a
+    # write with no reader by construction.
     #
     # Best-effort: the durable project append above already succeeded, so a
     # failure here must not fail the emit and lose that record.
     if type_ in GLOBAL_MIRROR_TYPES:
         try:
-            from fno.paths import state_dir
+            from fno.paths import global_events_json, repo_identity
 
-            global_events = state_dir() / "events.jsonl"
+            global_events = global_events_json()
             if global_events.resolve() != Path(resolved_events).resolve():
-                append_event(event, events_path=global_events)
+                # Scope the row the way loopcheck scopes every coverage row it
+                # writes here (x-f43c). The global log is cross-project and this
+                # payload carries no repo of its own, so without it a reader can
+                # only match on `head_sha` - and a fork shares those. Stamped on
+                # the MIRRORED copy alone: the project log needs no scoping, and
+                # the row already appended above must not change under it.
+                # Omitted, never null, when no remote resolves.
+                mirrored = dict(event)
+                # From the CWD, not from the events path: `--events` can point
+                # anywhere, so deriving a repo root from it invents one.
+                # `git -C` reads the same remote from any directory inside the
+                # checkout, worktrees included.
+                slug = repo_identity(Path.cwd())
+                if slug:
+                    mirrored["data"] = {**event.get("data", {}), "repo": slug}
+                append_event(mirrored, events_path=global_events)
         except Exception as exc:  # noqa: BLE001 - never lose the project append
             typer.echo(
                 f"warning: {type_} not mirrored to the global log: {exc}",

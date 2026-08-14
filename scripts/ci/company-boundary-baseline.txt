@@ -9,6 +9,6 @@
 # agents.registry IS the agents registry. They keep the platform -> runtime leg
 # alive, which is why the cycle below is still listed.
 # See docs/architecture/company-boundaries.md.
-cli/src/fno/events/cli.py:119: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
-cli/src/fno/events/cli.py:151: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
+cli/src/fno/events/cli.py:130: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
+cli/src/fno/events/cli.py:162: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
 layer cycle: L0 platform -> L5 runtime -> L0 platform

@@ -1650,7 +1650,7 @@ def test_same_named_repos_under_different_owners_do_not_share_coverage(monkeypat
 def test_repo_identity_agrees_across_remote_forms():
     """Every clone form of one repo must produce one key, or the reader stops
     finding the writer's events. Mirrors the Rust parity test."""
-    from fno.pr._reviews import _repo_identity_from_remote_url as ident
+    from fno.paths import repo_identity_from_remote_url as ident
 
     want = "github.com/org-a/widget"
     for url in (
