@@ -1445,7 +1445,7 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   warns when a `config.review` required-bot's provider is `EXHAUSTED`, naming
   the reset, so a coming review-gate wedge surfaces immediately.
 
-The probe only runs at all when `defer_dispatch` is on. The knob is `false` by default. Off, `evaluate_quota_signal` short-circuits to `UNKNOWN` (reason `defer-dispatch-off`) before it ever calls the probe - see the CLI's DISARMED footer below.
+When `defer_dispatch` is on, the probe runs. The knob is `false` by default. Off, `evaluate_quota_signal` short-circuits to `UNKNOWN` (reason `defer-dispatch-off`) before it ever calls the probe - see the CLI's DISARMED footer below.
 
 When the resolved signal is `UNKNOWN` for any reason and the launch proceeds anyway, one `quota_rotation_declined` event fires. It names the reason and the age of any usage snapshot. A launch that went out blind is now distinguishable in the journal from a system that never needed to rotate.
 
@@ -1526,7 +1526,7 @@ later.
 
 A rotation onto a `managed` record needs a human at a login prompt. One Claude/codex login shares the CLI's one credential slot. `managed.switch` materializes the *stored* snapshot into the slot, but a slot with only one account registered has nowhere to rotate to without a fresh `/login`.
 
-An `api_key` record has no such ceiling. Its credential rides the env overlay (`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`). `pick_account` and `attempt_swap` can select it with nobody watching. A Claude-wide outage takes every `managed` record down together, they share one failure domain, the subscription, not the account row, but never touches this lane.
+An `api_key` record has no such ceiling. Its credential rides the env overlay (`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`). `pick_account` and `attempt_swap` can select it with nobody watching. Every `managed` record shares one failure domain, the subscription, not the account row. A Claude-wide outage takes them all down together but never touches this lane.
 
 So a two-record queue of `readyrule` + `makers`, both `auth: managed`, is not really two candidates for an unattended failover. It is one failure domain with two names.
 
