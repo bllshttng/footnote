@@ -181,11 +181,20 @@ def _case_regions(segments):
     the last alternative became a pipeline stage with no reader, so the ordinary
     confirm idiom `case $a in y|yes) echo go;; esac` was refused. Worse, it was
     order-dependent: `yes|y)` allowed and `y|yes)` denied.
+
+    Read in COMMAND POSITION. Counting the WORD over every token was a
+    token-list scan, and this file's own lexer comment forbids exactly that,
+    because comment text survives as tokens. Any comment carrying the bare word
+    `case` opened a region that never closed, which both refused the remedy the
+    refusal text advertises (`# drained case` then `yes | head -c 1M`) and hid a
+    real generator (the same comment then `: | yes > /dev/null`). 43 of 366,573
+    real commands open such a region, most of them ordinary English comments.
     """
     out, depth = [], 0
     for segment in segments:
-        opens = sum(1 for tok in segment if tok == "case")
-        closes = sum(1 for tok in segment if tok == "esac")
+        head = _head_of(segment)[0]
+        opens = 1 if head == "case" else 0
+        closes = 1 if head == "esac" else 0
         out.append(depth > 0 or opens > 0)
         depth = max(0, depth + opens - closes)
     return out
@@ -394,6 +403,35 @@ def _payload_of(head, argv):
     return None
 
 
+def _opens_command(tokens, i):
+    """Is `tokens[i]` in command position, by the SAME rules `_head_of` uses?
+
+    `_head_of` walks forward past punctuation-only tokens and TRANSPARENT
+    openers, so `( for ((;;))` resolves its head to `for`. A backward test that
+    accepted only a separator disagreed with it, and the two walks then counted
+    different `for`s. The flag list ran short, the counter drifted, and
+    `( for ((;;)); do :; done ) &` was ALLOWED. `( cmd & )` is the canonical
+    detach idiom named in AGENTS.md, so that is the likeliest spelling of it.
+
+    The drift also mis-attributed: with one innocent `for` inside a subshell,
+    the arithmetic flag landed on the innocent loop, and a `break` in that loop
+    then cleared it while the real endless `for` ran.
+    """
+    j = i - 1
+    while j >= 0:
+        tok = tokens[j]
+        if _is_separator(tok):
+            return True
+        if tok and all(ch in PUNCT_CHARS for ch in tok):
+            j -= 1
+            continue
+        if tok.rsplit("/", 1)[-1] in TRANSPARENT:
+            j -= 1
+            continue
+        return False
+    return True
+
+
 def _arith_for_flags(tokens):
     """One bool per command-position `for`, in order: can its header never end?
 
@@ -426,7 +464,7 @@ def _arith_for_flags(tokens):
     """
     flags = []
     for i, tok in enumerate(tokens):
-        if tok != "for" or (i and not _is_separator(tokens[i - 1])):
+        if tok != "for" or not _opens_command(tokens, i):
             continue
         rest = tokens[i + 1:]
         if not rest or not rest[0].startswith("(("):

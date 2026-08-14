@@ -48,6 +48,10 @@ A wrapper's flags are skipped so the real command surfaces, and the list of valu
 
 The denial set is small enough to read line by line. That is the point. A guard whose refusals you cannot enumerate is a guard nobody can judge.
 
+The sweep is also the only check that confirms the guard does its job. On the current corpus it denies 20 commands and refuses nothing else, and one of the 20 is `for i in $(seq 1 24); do yes > /dev/null & done`. That is the command that burned 71 core-hours, taken verbatim from the transcript that ran it. Both it and the subshell spinner `for j in 1 2 3 4 5 6; do ( while :; do :; done ) & done` are rows in the test table now.
+
+Two rules keep the sweep honest. Read every denial, never a count of them. And run it after any change to the parser, because both regressions found this way were introduced by the round that fixed the previous ones.
+
 Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
 It denies whether or not the call sets `run_in_background`. A foreground unbounded `yes` is orphaned just as surely at session exit.

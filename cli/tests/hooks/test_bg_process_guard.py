@@ -131,6 +131,23 @@ DENIED = [
     # The non-greedy reading has to survive too: `-E` is a real boolean, and
     # reading it as value-taking eats the generator behind it.
     "sudo -E yes > /dev/null",
+    # A comment carrying the word `case` opened a region that never closed, and
+    # a disabled pipe split then hid the generator downstream of the pipe.
+    "# handle the drained case\n: | yes > /dev/null",
+    "echo case; yes > /dev/null",
+    # `(` and `{` are transparent to the head walk but are not separators, so a
+    # backward test that accepted only a separator counted a different set of
+    # `for`s and the arithmetic flags drifted out of step. `( cmd & )` is the
+    # canonical detach idiom, so it is the likeliest spelling of specimen 1.
+    "( for ((;;)); do :; done ) &",
+    "{ for ((;;)); do :; done; } &",
+    # The drift also mis-attributed: the flag landed on the innocent loop, and
+    # its `break` then cleared the endless one.
+    "( for f in a b; do echo $f; done ); for ((;;)); do :; done &",
+    "( for f in a b; do break; done ); for ((;;)); do :; done &",
+    # The command that caused the incident, verbatim from the transcript.
+    "for i in $(seq 1 24); do yes > /dev/null & done",
+    "for j in 1 2 3 4 5 6; do ( while :; do :; done ) & done",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -222,6 +239,15 @@ ALLOWED = [
     "stress-ng --cpu 4 --timeout 60s",
     "stress-ng --cpu 1 -t 30s",
     "stress --timeout=60 --cpu 1",
+    # A comment must change no verdict. Counting the WORD `case` over every
+    # token refused the exact remedy the refusal text advertises, and comment
+    # text survives as tokens here on purpose. 43 of 366,594 real commands open
+    # such a region, most of them ordinary English.
+    "# handle the drained case\nyes | head -c 1M",
+    "echo case; yes | head -c 1M",
+    "grep case notes.txt; yes | head -c 1M",
+    # An `esac` in a comment must not close a real region early.
+    "case $a in # y|yes esac\n y|yes) echo go;; esac",
 ]
 
 
