@@ -870,7 +870,7 @@ dispatch._daemon_rpc = lambda *_args, **_kwargs: {
     "reply": "continue",
 }
 
-def deliver(entry, body, from_name, mail=None, sender_entry=None, reason_out=None):
+def deliver(entry, body, from_name, mail=None, sender_entry=None, reason_out=None, **_kw):
     return dispatch._switchboard_exchange(
         entry.name,
         from_name,
