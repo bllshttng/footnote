@@ -371,21 +371,30 @@ fn finalize_ledger_every_exit() {
     );
 }
 
-/// A ship reason (and a benign NoWork) is NOT "stuck": no postmortem written.
-/// (ab-1a92b677 negative case.)
+/// x-8fc0: a ship reason now gets a completion eval too (the trigger fires on
+/// every reason but NoWork), but its body is the lighter eval prose, never
+/// the stuck-triage "(stuck: exited without shipping)" wording. NoWork is the
+/// sole exclusion: nothing happened, so nothing is written.
 #[test]
-fn finalize_no_postmortem_on_ship_or_benign() {
+fn finalize_completion_eval_on_ship_not_benign() {
     let ship = setup("S-noprm-ship", false);
     assert!(run_finalize(&ship, "DonePRGreen").status.success());
+    let pms = postmortem_files(&ship);
+    assert_eq!(pms.len(), 1, "ship reason must write a completion eval");
+    let pm = fs::read_to_string(&pms[0]).unwrap();
     assert!(
-        postmortem_files(&ship).is_empty(),
-        "ship reason must NOT write a postmortem"
+        pm.starts_with("# Completion eval:"),
+        "ship reason gets the eval prose, not the stuck-postmortem prose: {pm}"
+    );
+    assert!(
+        !pm.contains("stuck: exited without shipping"),
+        "ship reason must not carry stuck-triage wording: {pm}"
     );
     let benign = setup("S-noprm-nowork", false);
     assert!(run_finalize(&benign, "NoWork").status.success());
     assert!(
         postmortem_files(&benign).is_empty(),
-        "NoWork is benign, must NOT write a postmortem"
+        "NoWork is benign, must NOT write a completion eval"
     );
 }
 
