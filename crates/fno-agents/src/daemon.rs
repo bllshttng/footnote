@@ -803,11 +803,17 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         } else {
             None
         };
+        // A backstop-eligible row needs the probe too. Its transcript is exactly
+        // what it does NOT have, so gating the probe on `Some(false)` alone
+        // leaves `worktree_clean` at `None`, the guard fails closed forever, and
+        // the valve never opens for the worktree-owning rows it was ordered for.
+        let past_backstop = matches!(exited_at,
+            Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
         let needs_probe = !is_live
             && terminal_or_dead
             && past_grace
             && owns_worktree
-            && transcript_fresh == Some(false);
+            && (transcript_fresh == Some(false) || past_backstop);
         let worktree_clean = if needs_probe {
             worktree_clean_probe(&e.cwd)
         } else {
@@ -980,7 +986,11 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
                 &json!({"op": "gc_sweep", "error": err.to_string()}),
             );
             // Nothing was removed; report no reaps (no event/disk divergence).
+            // BOTH lists, or the next writer that populates them earlier leaves
+            // this path claiming zero ordinary reaps beside phantom backstop
+            // ones - two counts that disagree about the same failed sweep.
             summary.reaped.clear();
+            summary.reaped_backstop.clear();
         }
     }
     summary

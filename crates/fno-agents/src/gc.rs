@@ -18,6 +18,24 @@ use crate::AgentStatus;
 /// path out of the registry.
 pub const BACKSTOP_GRACE_MULTIPLE: i64 = 168;
 
+/// Absolute floor for the backstop horizon, in seconds (7 days).
+///
+/// A horizon derived purely by multiplication collapses with its input: a
+/// configured `agents.dead_row_grace` of 0 (`FNO_AGENTS_DEAD_ROW_GRACE_SECS=0`
+/// or the config scalar, neither clamped) makes the product 0, and then EVERY
+/// uncorroborated row reaps on the next tick - the exact inversion the
+/// corroboration gate exists to prevent. The floor is what the default grace
+/// already multiplies out to (3600 * 168), so a default config sees no change.
+pub const BACKSTOP_MIN_HORIZON_SECS: i64 = 3600 * BACKSTOP_GRACE_MULTIPLE;
+
+/// Seconds a row with nothing to corroborate is kept before the absolute-age
+/// backstop is willing to remove it. Never below [`BACKSTOP_MIN_HORIZON_SECS`].
+pub fn backstop_horizon_secs(grace_secs: i64) -> i64 {
+    grace_secs
+        .saturating_mul(BACKSTOP_GRACE_MULTIPLE)
+        .max(BACKSTOP_MIN_HORIZON_SECS)
+}
+
 /// What the GC sweep should do with one registry row this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcAction {
@@ -36,6 +54,9 @@ pub enum GcAction {
     /// It is a SEPARATE variant so the sweep can report it separately. Folded
     /// into `Reap`, it silently becomes the main path and turns the
     /// corroboration into decoration.
+    ///
+    /// It clears the SAME worktree guard `Reap` does. Only the corroboration
+    /// requirement is waived here, never the cleanliness one.
     ReapBackstop,
     /// First tick we observe this row dead: stamp `exited_at` to start the grace
     /// clock. The row stays visible for the whole grace window after this.
@@ -167,22 +188,30 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
             let independently_gone = row.pid_confirmed_dead
                 || row.transcript_fresh == Some(false)
                 || !row.liveness_surface;
-            if !independently_gone {
+            // Which removal this row has EARNED, before the worktree guard gets
+            // its say. Both removals fall through to that one guard below. An
+            // early `return` here is the decorative-guard shape: the backstop
+            // would skip the dirty-worktree keep AND the fail-closed `None`
+            // arm, so one removal path would honour a protection the other
+            // silently walks past, and the uncommitted work in that worktree
+            // would lose its only pointer.
+            let earned = if independently_gone {
+                GcAction::Reap
+            } else if now.saturating_sub(exited) > backstop_horizon_secs(grace_secs) {
                 // ABSOLUTE-AGE BACKSTOP. At this horizon, no signal for that
                 // long is itself a signal. Deliberately many multiples of the
                 // grace window, so it can never overtake corroboration as the
                 // ordinary route out of the registry.
-                if now.saturating_sub(exited) > grace_secs.saturating_mul(BACKSTOP_GRACE_MULTIPLE) {
-                    return GcAction::ReapBackstop;
-                }
+                GcAction::ReapBackstop
+            } else {
                 return GcAction::Keep;
-            }
+            };
             if !row.owns_worktree {
                 // No worktree to protect, so nothing for cleanliness to say.
-                return GcAction::Reap;
+                return earned;
             }
             match row.worktree_clean {
-                Some(true) => GcAction::Reap,
+                Some(true) => earned,
                 // Dirty worktree kept (AC1-EDGE); probe failure fails closed.
                 Some(false) | None => GcAction::Keep,
             }
@@ -541,5 +570,72 @@ mod tests {
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- The backstop clears the same worktree guard `Reap` does ------------
+    //
+    // The backstop waives CORROBORATION. It waives nothing else. Returning it
+    // above these two arms is the decorative-guard shape: the dirty-worktree
+    // keep and the fail-closed probe arm would protect one removal path and be
+    // skipped by the other, and the uncommitted work in that worktree would be
+    // orphaned with no registry row left pointing at it.
+
+    #[test]
+    fn backstop_does_not_reap_a_dirty_worktree() {
+        let past = NOW - backstop_horizon_secs(GRACE) - 1;
+        let row = GcRow {
+            worktree_clean: Some(false),
+            ..uncorroborated(past)
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn backstop_fails_closed_when_the_cleanliness_probe_cannot_answer() {
+        let past = NOW - backstop_horizon_secs(GRACE) - 1;
+        let row = GcRow {
+            worktree_clean: None,
+            ..uncorroborated(past)
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn backstop_still_reaps_a_row_that_owns_no_worktree() {
+        // The guard above must not become a blanket refusal: a row with no
+        // worktree has nothing for cleanliness to protect, so the valve opens.
+        let past = NOW - backstop_horizon_secs(GRACE) - 1;
+        let row = GcRow {
+            owns_worktree: false,
+            worktree_clean: None,
+            ..uncorroborated(past)
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::ReapBackstop);
+    }
+
+    // -- The horizon has an absolute floor ----------------------------------
+
+    #[test]
+    fn a_zero_grace_does_not_collapse_the_horizon() {
+        // `agents.dead_row_grace = 0` reaches here unclamped. Multiplied alone
+        // the horizon is 0, and every uncorroborated row reaps one tick later -
+        // the gate inverted by a config scalar. A day old is still kept.
+        let row = uncorroborated(NOW - 86_400);
+        assert_eq!(gc_action(&row, NOW, 0), GcAction::Keep);
+        assert_eq!(backstop_horizon_secs(0), BACKSTOP_MIN_HORIZON_SECS);
+    }
+
+    #[test]
+    fn the_floor_never_shortens_a_larger_configured_horizon() {
+        // The floor is a minimum, not a cap. A grace larger than the default
+        // must still multiply out past it.
+        let big = GRACE * 10;
+        assert_eq!(
+            backstop_horizon_secs(big),
+            big * BACKSTOP_GRACE_MULTIPLE,
+            "the floor overrode a horizon that was already longer"
+        );
+        // And the default config lands exactly on the floor, so nothing moved.
+        assert_eq!(backstop_horizon_secs(GRACE), BACKSTOP_MIN_HORIZON_SECS);
     }
 }
