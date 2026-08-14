@@ -985,18 +985,20 @@ def _default_failover(candidate: "Candidate", error) -> str:
             settings_path=settings_path, state_path=state_path,
             phase_id=f"{candidate.short_id}:recovery",
         )
-        # auto_switch (default False) is this sweep's own opt-in gate for
-        # materializing a managed candidate's credentials (model.py docstring:
-        # "so single- and multi-account setups keep today's warn/defer/nudge
-        # behavior"). attempt_swap materializes by default (x-8183 Task 1 -
-        # its own SWAPPED claim must be true), so THIS caller passes the
-        # resolved auto_switch through explicitly rather than inheriting the
-        # default, or an unarmed sweep would materialize credentials the
-        # operator never authorized.
+        # This sweep never lets attempt_swap materialize eagerly: the candidate
+        # is a still-live exhausted worker that pins the shared slot until
+        # _redispatch stops it below, so an eager switch() here would hit that
+        # live pin and return BLOCKED_PINNED before the worker is ever stopped
+        # - silently defeating the swap. The sweep does its OWN materialize,
+        # correctly ordered post-stop, via _redispatch's / _revive_bg_thread's
+        # pre_spawn hook (_materialize_managed_switch below), gated on the same
+        # auto_switch opt-in. materialize_managed=False here just tells
+        # attempt_swap to flip the routing pointer (accounts.active) and leave
+        # slot materialization to that later, correctly-ordered step.
         repo_root = getattr(candidate, "cwd", None)
         result = ctrl.attempt_swap(
             current_provider_id=active, error=error,
-            materialize_managed=_auto_switch_enabled(repo_root),
+            materialize_managed=False,
         )
     except Exception:  # noqa: BLE001 - failover must never break the sweep
         return "no-swap"

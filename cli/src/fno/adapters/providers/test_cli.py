@@ -157,7 +157,7 @@ class TestListWithRecords:
 
 
 # ---------------------------------------------------------------------------
-# x-8183: the usage=<age> column (distinct from snapshot=<age>, the
+# The usage=<age> column (distinct from snapshot=<age>, the
 # credential blob age) and the DISARMED footer.
 # ---------------------------------------------------------------------------
 

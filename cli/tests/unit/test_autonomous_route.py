@@ -571,9 +571,9 @@ def test_a_launcher_that_hardcodes_its_harness_cannot_pin_on_the_config(monkeypa
 
 
 class TestQuotaRotationDeclinedEvent:
-    """x-8183 Task 3: unknown-proceed is a launch on blind headroom, not a
-    healthy no-op - an absent event and a healthy system must not read the
-    same in the journal (the assert-a-positive-marker pitfall)."""
+    """unknown-proceed is a launch on blind headroom, not a healthy no-op -
+    an absent event and a healthy system must not read the same in the
+    journal (the assert-a-positive-marker pitfall)."""
 
     def _events(self, tmp_path):
         events_path = tmp_path / ".fno" / "events.jsonl"
@@ -591,14 +591,14 @@ class TestQuotaRotationDeclinedEvent:
             resets_at=None, reason="defer-dispatch-off",
         )
 
-        r = ar.select_autonomous_route(provider_id="ccm", node_id="x-8183")
+        r = ar.select_autonomous_route(provider_id="ccm", node_id="fake-node-1")
 
         assert r.action == "unknown-proceed"
         events = self._events(tmp_path)
         assert len(events) == 1
         assert events[0]["type"] == "quota_rotation_declined"
         assert events[0]["data"] == {
-            "provider": "ccm", "reason": "defer-dispatch-off", "node_id": "x-8183",
+            "provider": "ccm", "reason": "defer-dispatch-off", "node_id": "fake-node-1",
         }
 
     def test_no_usage_snapshot_omits_age_and_the_event_still_lands(
@@ -670,4 +670,9 @@ class TestQuotaRotationDeclinedEvent:
 
         dm._dispatch_one(session="s", node="ab-1111aaaa", project=None)
 
-        assert not self._events(tmp_path)
+        # _dispatch_one legitimately emits its own events (e.g. claim_acquired)
+        # regardless of quota routing - the contract under test is narrower:
+        # no quota_rotation_declined event, since select_autonomous_route was
+        # never called to produce one.
+        declined = [e for e in self._events(tmp_path) if e["type"] == "quota_rotation_declined"]
+        assert not declined

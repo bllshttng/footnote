@@ -243,8 +243,8 @@ def select_autonomous_route(
 
     ``pinned`` is any explicit harness / provider / account / model / node
     route pin: it forbids automatic replacement, never the existing defer.
-    ``node_id`` is only for the ``quota_rotation_declined`` telemetry event
-    (Task 3, x-8183) - it never changes the routing decision.
+    ``node_id`` is only for the ``quota_rotation_declined`` telemetry event -
+    it never changes the routing decision.
     """
     from fno.adapters.providers.runtime_state import (
         HeadroomState,

@@ -907,7 +907,7 @@ def test_record_success_swallows_oserror_from_runtime_state(
 
 
 # ---------------------------------------------------------------------------
-# x-8183 / x-8665: attempt_swap must materialize a managed candidate through
+# attempt_swap must materialize a managed candidate through
 # managed.switch BEFORE writing accounts.active. Before this fix, the write
 # was decorative for auth=managed records: config.toml said one thing, the
 # CLI's credential slot said another. See loader.py's `_active_id_for` note.
@@ -1070,6 +1070,48 @@ class TestManagedCandidateMaterializes:
         raw = tomllib.loads(settings_path.read_text())
         assert raw["providers"]["active"] == "readyrule"
         assert ctrl.snapshot_state().swaps_this_phase == 0
+
+    def test_materialize_managed_false_skips_pin_check_entirely(
+        self, tmp_path: Path, fake_managed_slot, monkeypatch,
+    ):
+        """recovery.py's _default_failover passes materialize_managed=False:
+        the candidate is a still-live exhausted worker that pins the slot
+        until _redispatch stops it AFTER this call returns, so attempt_swap
+        must route the pointer (accounts.active) without ever touching
+        managed.switch. A live pin here must NOT block the swap - if it did,
+        the sweep's SWAPPED->_redispatch->post-stop-materialize path could
+        never run for the (normal) case of a live pinning candidate."""
+        from fno.adapters.providers import managed
+        from fno.adapters.providers.failover import FailoverController, SwapDecision
+        from fno.adapters.providers.error_taxonomy import normalize
+
+        class _FakePin:
+            pid = 4242
+
+        monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [_FakePin()])
+
+        def _must_not_be_called(*_a, **_k):
+            raise AssertionError("managed.switch must not be called when materialize_managed=False")
+
+        monkeypatch.setattr(managed, "switch", _must_not_be_called)
+
+        settings_path = _seed_managed_settings(
+            tmp_path, active="readyrule", managed_ids=["readyrule", "makers"],
+        )
+        state_path = tmp_path / "failover-state.json"
+        ctrl = FailoverController(
+            settings_path=settings_path, state_path=state_path, phase_id="phase-A",
+        )
+        err = normalize(http_status=529, exit_code=None, body="")
+
+        result = ctrl.attempt_swap(
+            current_provider_id="readyrule", error=err, materialize_managed=False,
+        )
+
+        assert result.decision is SwapDecision.SWAPPED
+        assert result.new_provider_id == "makers"
+        raw = tomllib.loads(settings_path.read_text())
+        assert raw["accounts"]["active"] == "makers"
 
     def test_hp_api_key_candidate_takes_the_unchanged_path(
         self, tmp_path: Path, monkeypatch,

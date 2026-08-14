@@ -739,12 +739,12 @@ class TestDefaultFailover:
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "swapped"
         assert mat == ["claude-secondary"]   # materialized the swapped-to record
         assert calls == [_stale_candidate(tmp_path).short_id]  # via _redispatch
-        # x-8183: attempt_swap ITSELF now materializes by default (its own
-        # SWAPPED claim must be true) - this caller must pass the resolved
-        # auto_switch through explicitly, or an unarmed sweep would rotate
-        # credentials the operator never authorized (model.py's auto_switch
-        # docstring). Armed here, so True.
-        assert seen_materialize == [True]
+        # attempt_swap itself must NOT materialize here: the candidate still
+        # pins the shared slot until _redispatch stops it below, so an eager
+        # switch() would hit that live pin and self-block the swap. This
+        # sweep always does its own, correctly post-stop materialize via
+        # _redispatch's pre_spawn instead (asserted above via `mat`).
+        assert seen_materialize == [False]
 
     def test_managed_materialize_fails_is_rotated_no_worker(self, monkeypatch, tmp_path):
         # Armed, but a live-pin defer / store error makes materialize (the
@@ -780,18 +780,15 @@ class TestDefaultFailover:
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
         assert calls == []                    # never stopped/redispatched the worker
         assert mat["called"] is False         # never materialized
-        # x-8183: THE assertion this test existed to make and couldn't before -
-        # attempt_swap itself must be told NOT to materialize when auto_switch
-        # is off, or the credential slot moves regardless of this whole gate.
+        # attempt_swap is never asked to materialize from this caller,
+        # armed or not - the sweep's own auto_switch gate above (line 775)
+        # is what actually decides, and it decided nothing happens here.
         assert seen_materialize == [False]
 
     def test_oauth_dir_swap_skips_materialize(self, monkeypatch, tmp_path):
         # An oauth_dir claude record needs no materialization (env-var switch at
-        # spawn); _redispatch runs with no pre_spawn hook. x-8183: the
-        # auto_switch gate IS now consulted before the swap even happens (it
-        # has to be - attempt_swap needs materialize_managed up front, before
-        # the candidate's own auth strategy is known to this caller), but it
-        # must have no effect on an oauth_dir candidate: no pre_spawn hook,
+        # spawn); _redispatch runs with no pre_spawn hook. auto_switch being
+        # armed has no effect on an oauth_dir candidate: no pre_spawn hook,
         # no _materialize_managed_switch call.
         from fno.adapters.providers.failover import SwapDecision
 

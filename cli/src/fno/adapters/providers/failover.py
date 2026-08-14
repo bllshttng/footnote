@@ -363,9 +363,9 @@ class FailoverController:
             current_provider_id: provider that produced ``error``.
             error: normalized error from ``error_taxonomy.normalize``.
             materialize_managed: whether a managed candidate's credentials
-                should actually be materialized into the shared slot (x-8183
-                Task 1). Default True so the common case (this call itself IS
-                the operator-authorized swap) never lies about swapping.
+                should actually be materialized into the shared slot. Default
+                True so the common case (this call itself IS the
+                operator-authorized swap) never lies about swapping.
                 ``recovery.py``'s exhaustion-sweep caller passes the resolved
                 ``config.accounts.auto_switch`` here instead: that knob is
                 documented (model.py) as gating exactly this materialization
