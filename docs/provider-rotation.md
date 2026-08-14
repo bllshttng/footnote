@@ -740,22 +740,22 @@ record, the account switch depends on the swapped-to record's `auth` strategy:
 - **`oauth_dir`** (two-dir substrate): nothing extra - the record's own config
   dir rides the respawn's `dispatch_env`, so the new worker reads the other
   account's credentials directly.
-- **`managed`** (single shared slot): `attempt_swap` itself materializes the candidate into the slot before it writes the routing pointer, using the same capture-before-overwrite and live-pin gate as `fno config accounts use`, and refuses the swap outright on a pin or store error instead of reporting one that never happened.
+- **`managed`** (single shared slot): `attempt_swap` itself materializes the candidate into the slot before it writes the routing pointer. It uses the same capture-before-overwrite and live-pin gate as `fno config accounts use`. It refuses the swap outright on a pin or store error, instead of reporting one that never happened.
 
-This closes x-8665: the pointer used to flip while the slot kept the exhausted account's credentials, so `list` and dispatch read the new pointer while every worker kept the old creds.
+This closes x-8665. The pointer used to flip while the slot kept the exhausted account's credentials. `list` and dispatch read the new pointer, but every worker kept the old creds.
 
-This materialization is **opt-in**, gated by `auto_switch` on `attempt_swap`'s only production caller, the recovery sweep:
+This materialization is **opt-in**. It is gated by `auto_switch`, on `attempt_swap`'s only production caller, the recovery sweep:
 
 ```toml
 [accounts]
 auto_switch = true   # default false; arms managed-account materialization on auto-switch
 ```
 
-When `auto_switch` is off (default), the sweep tells `attempt_swap` not to materialize a managed candidate (`materialize_managed=False`): the pointer still flips (today's warn/defer/nudge behavior, unchanged), the slot does not, and the sweep degrades to the bounded nudge instead of redispatching onto un-switched (exhausted) credentials.
+When `auto_switch` is off (default), the sweep tells `attempt_swap` not to materialize a managed candidate (`materialize_managed=False`). The pointer still flips, today's warn/defer/nudge behavior, unchanged. The slot does not. The sweep degrades to the bounded nudge instead of redispatching onto un-switched (exhausted) credentials.
 
-A caller that omits the argument gets the default: materialize, which is correct for every `attempt_swap` caller except the recovery sweep, which has its own separate opt-in contract to honor.
+A caller that omits the argument gets the default: materialize. That default is correct for every `attempt_swap` caller except the recovery sweep, which has its own separate opt-in contract to honor.
 
-A live-pin defer or a store/keychain failure degrades the same way regardless of the setting, and single-account or `oauth_dir` setups are unaffected by the knob.
+A live-pin defer or a store/keychain failure degrades the same way, regardless of the setting. Single-account and `oauth_dir` setups are unaffected by the knob.
 
 ### Per-provider Cost Sub-cap
 
@@ -1445,9 +1445,9 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   warns when a `config.review` required-bot's provider is `EXHAUSTED`, naming
   the reset, so a coming review-gate wedge surfaces immediately.
 
-The probe only runs at all when `defer_dispatch` is on: `evaluate_quota_signal` short-circuits to `UNKNOWN` (reason `defer-dispatch-off`) before it ever calls the probe when the knob is off, which is `false` by default - see the CLI's DISARMED footer below.
+The probe only runs at all when `defer_dispatch` is on. The knob is `false` by default. Off, `evaluate_quota_signal` short-circuits to `UNKNOWN` (reason `defer-dispatch-off`) before it ever calls the probe - see the CLI's DISARMED footer below.
 
-When the resolved signal is `UNKNOWN` for any reason and the launch proceeds anyway, one `quota_rotation_declined` event fires, naming the reason and the age of whatever usage snapshot exists, so a launch that went out blind is distinguishable in the journal from a system that never needed to rotate.
+When the resolved signal is `UNKNOWN` for any reason and the launch proceeds anyway, one `quota_rotation_declined` event fires. It names the reason and the age of any usage snapshot. A launch that went out blind is now distinguishable in the journal from a system that never needed to rotate.
 
 ### CLI
 
@@ -1472,7 +1472,7 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
 
 `usage=never` names a record with no landed probe. `usage=<age> (STALE, ttl=<ttl>)` names a cached reading older than `probe_ttl_seconds`.
 
-When `defer_dispatch` is `false`, `list` also prints a one-line footer naming the disarmed knob. This is the display gap that let quota-aware dispatch go unobserved for months on a fresh install, where `defer_dispatch` defaults off and nothing ever probed.
+When `defer_dispatch` is `false`, `list` also prints a one-line footer naming the disarmed knob. `defer_dispatch` defaults off, so a fresh install never probes. This display gap is what let quota-aware dispatch go unobserved for months.
 
 ### Config (`config.accounts.quota`)
 
@@ -1524,15 +1524,15 @@ later.
 
 ### The credential-shape discriminator: `managed` vs `api_key`
 
-A rotation onto a `managed` record (one Claude/codex login sharing the CLI's one credential slot) needs a human at a login prompt: `managed.switch` materializes the *stored* snapshot into the slot, but a slot with only one account registered has nowhere to rotate to without a fresh `/login`.
+A rotation onto a `managed` record needs a human at a login prompt. One Claude/codex login shares the CLI's one credential slot. `managed.switch` materializes the *stored* snapshot into the slot, but a slot with only one account registered has nowhere to rotate to without a fresh `/login`.
 
-An `api_key` record has no such ceiling. Its credential rides the env overlay (`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`), so `pick_account` and `attempt_swap` can select it with nobody watching, and a Claude-wide outage takes every `managed` record down together (they share one failure domain, the subscription, not the account row) but never touches it.
+An `api_key` record has no such ceiling. Its credential rides the env overlay (`ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`). `pick_account` and `attempt_swap` can select it with nobody watching. A Claude-wide outage takes every `managed` record down together, they share one failure domain, the subscription, not the account row, but never touches this lane.
 
 So a two-record queue of `readyrule` + `makers`, both `auth: managed`, is not really two candidates for an unattended failover. It is one failure domain with two names.
 
 The fix is not more `managed` records. It is one `api_key` record as the last-resort rung.
 
-The lane is already wired end to end: `resolve_account_overlay` returns the `api-key` lane and `pick_account` accepts it, so this needs no code, only registration.
+The lane is already wired end to end. `resolve_account_overlay` returns the `api-key` lane and `pick_account` accepts it. This needs no code, only registration.
 
 ```bash
 fno config accounts add anthropic-key \
@@ -1556,7 +1556,7 @@ priority = 200
 env = { ANTHROPIC_API_KEY = "sk-ant-..." }
 ```
 
-Add it to the active combo (the live key is `accounts.combos.accounts.providers`, not `accounts`) and give every record a distinct priority. `(priority, id)` is already the tiebreak, so two records sharing a priority resolve by an alphabetical accident, not by intent.
+Add it to the active combo. The live key is `accounts.combos.accounts.providers`, not `accounts`. Give every record a distinct priority too. `(priority, id)` is already the tiebreak, so two records sharing a priority resolve by an alphabetical accident, not by intent.
 
 ```toml
 [accounts.combos.accounts]
