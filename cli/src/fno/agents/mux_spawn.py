@@ -1949,6 +1949,11 @@ def dispatch_spawn_pane(
         if exact:
             run_args.append("--json")
         run_args += ["--", *wrapped]
+        # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
+        # bg_create ordering fix in dispatch.py. `{**os.environ, ...}` here
+        # seeds the pane-run transport (and, at server birth, the mux server
+        # that spawns pane shells) - popped after this snapshot is too late.
+        spawn_trigger = _capture_spawn_trigger()
         proc = _run_mux(
             run_args,
             runner,
@@ -2021,7 +2026,7 @@ def dispatch_spawn_pane(
                     exit_code=1,
                 )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
-        spawn_trigger = _capture_spawn_trigger()
+        # spawn_trigger was already popped before the pane-run env snapshot above.
 
         # The receipt's two independent facts (see MuxSpawnResult.bound), plus
         # the death-branch evidence. Only the codex route fills them in today;

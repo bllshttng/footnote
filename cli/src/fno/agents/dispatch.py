@@ -1370,6 +1370,13 @@ def _claude_create_path(
 
     route_settings_path = route_settings_path_for(route_env)
 
+    # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
+    # bg_create snapshots dict(os.environ) to build the NEW worker's own
+    # persistent env; popping post-call is too late, the snapshot already
+    # happened and the var would ride into that worker's environment (see
+    # _capture_spawn_trigger's own docstring for what that mislabels).
+    spawn_trigger = _capture_spawn_trigger()
+
     try:
         result: ProviderResult = claude_mod.bg_create(
             name=name,
@@ -1442,8 +1449,8 @@ def _claude_create_path(
 
     # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
     # Best-effort: never raises, degrades to (None, None, None) when absent.
+    # spawn_trigger was already popped before bg_create above (x-42c5 ordering fix).
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
-    spawn_trigger = _capture_spawn_trigger()
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
     # spawning session captured just above, or "human" for a direct human spawn
