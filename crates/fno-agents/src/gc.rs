@@ -141,6 +141,24 @@ pub struct GcRow {
     pub worktree_clean: Option<bool>,
 }
 
+/// Whether this row has at least one POSITIVE, independent reading that its
+/// worker is gone. See the corroboration gate in [`gc_action`] for why an
+/// absence never qualifies.
+///
+/// A function rather than an inline expression because the DAEMON must ask the
+/// same question before it decides whether to probe the worktree. Gate that
+/// probe on anything narrower and a row this call says is reapable never gets
+/// its worktree read: `worktree_clean` stays `None`, the fail-closed arm keeps
+/// the row, and the `kept_dirty` line that would have named it is gated on the
+/// same narrow flag - so the row is stuck AND invisible. Two spellings of one
+/// rule is how they drifted apart the first time.
+///
+/// Ignores `worktree_clean` on purpose: this is the corroboration question
+/// alone, asked before any probe has run.
+pub fn removal_is_corroborated(row: &GcRow) -> bool {
+    row.pid_confirmed_dead || row.transcript_fresh == Some(false) || !row.liveness_surface
+}
+
 /// Decide the GC action for one row. Pure: no clock, no I/O.
 ///
 /// The reap condition is all three of: (1) terminal status OR pid confirmed dead
@@ -185,9 +203,7 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
             // None of them available means keep. Reaping a live session destroys
             // work in progress and, worse, the only process able to satisfy its
             // own PR's review gate.
-            let independently_gone = row.pid_confirmed_dead
-                || row.transcript_fresh == Some(false)
-                || !row.liveness_surface;
+            let independently_gone = removal_is_corroborated(row);
             // Which removal this row has EARNED, before the worktree guard gets
             // its say. Both removals fall through to that one guard below. An
             // early `return` here is the decorative-guard shape: the backstop
@@ -611,6 +627,42 @@ mod tests {
             ..uncorroborated(past)
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::ReapBackstop);
+    }
+
+    // -- The probe condition and the removal condition are one rule ---------
+
+    #[test]
+    fn corroboration_agrees_with_the_verdict_on_every_signal_combination() {
+        // The daemon gates its worktree probe on `removal_is_corroborated`. If
+        // the two ever answer differently, a row the policy would reap never
+        // gets probed, `worktree_clean` stays None, the fail-closed arm keeps it
+        // forever, and `kept_dirty` (gated on the same flag) names nothing. So
+        // assert the equivalence directly, across all 12 signal combinations.
+        let past = NOW - GRACE - 1;
+        for &pid_dead in &[true, false] {
+            for &fresh in &[Some(true), Some(false), None] {
+                for &surface in &[true, false] {
+                    let row = GcRow {
+                        pid_confirmed_dead: pid_dead,
+                        transcript_fresh: fresh,
+                        liveness_surface: surface,
+                        exited_at: Some(past),
+                        owns_worktree: false,
+                        worktree_clean: None,
+                        ..reapable()
+                    };
+                    let corroborated = removal_is_corroborated(&row);
+                    // Just past grace, far short of the horizon, so the ONLY
+                    // route to a removal here is corroboration.
+                    let reaped = gc_action(&row, NOW, GRACE) == GcAction::Reap;
+                    assert_eq!(
+                        corroborated, reaped,
+                        "probe and verdict disagree for pid_dead={pid_dead} \
+                         fresh={fresh:?} surface={surface}"
+                    );
+                }
+            }
+        }
     }
 
     // -- The horizon has an absolute floor ----------------------------------

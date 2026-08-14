@@ -803,24 +803,9 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         } else {
             None
         };
-        // A backstop-eligible row needs the probe too. Its transcript is exactly
-        // what it does NOT have, so gating the probe on `Some(false)` alone
-        // leaves `worktree_clean` at `None`, the guard fails closed forever, and
-        // the valve never opens for the worktree-owning rows it was ordered for.
-        let past_backstop = matches!(exited_at,
-            Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
-        let needs_probe = !is_live
-            && terminal_or_dead
-            && past_grace
-            && owns_worktree
-            && (transcript_fresh == Some(false) || past_backstop);
-        let worktree_clean = if needs_probe {
-            worktree_clean_probe(&e.cwd)
-        } else {
-            None
-        };
-
-        let row = crate::gc::GcRow {
+        // Built with `worktree_clean` unset so the probe decision can ask the
+        // policy itself. Filled in below, before any verdict is read from it.
+        let mut row = crate::gc::GcRow {
             status: e.status,
             is_live,
             pid_confirmed_dead,
@@ -830,8 +815,26 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
             // hiding behind an identity that was never recorded.
             liveness_surface: e.pid.is_some() || !e.short_id.is_empty(),
             transcript_fresh,
-            worktree_clean,
+            worktree_clean: None,
         };
+        // The probe condition MIRRORS the removal condition, asked through the
+        // one function that defines it. A narrower test here strands any row the
+        // policy would remove: `worktree_clean` stays `None`, the fail-closed arm
+        // keeps it, and the `kept_dirty` line below is gated on this same flag,
+        // so the operator is told nothing either. A backstop row is the other
+        // half - it has no corroboration by definition, and without it the valve
+        // never opens for the worktree-owning rows it was ordered for.
+        let past_backstop = matches!(exited_at,
+            Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
+        let needs_probe = !is_live
+            && terminal_or_dead
+            && past_grace
+            && owns_worktree
+            && (crate::gc::removal_is_corroborated(&row) || past_backstop);
+        if needs_probe {
+            row.worktree_clean = worktree_clean_probe(&e.cwd);
+        }
+        let worktree_clean = row.worktree_clean;
         let id = if e.short_id.is_empty() {
             e.name.clone()
         } else {
