@@ -160,6 +160,10 @@ DENIED = [
     # consumed the real loop's flag, so the endless loop after `esac` ran.
     "case $x in a|for) echo hi;; esac; for ((;;)); do :; done",
     "case $x in for|while) echo hi;; esac; for ((;;)); do :; done",
+    # The second spelling of the same drift: a real pipeline inside a case ARM.
+    # The consumer does not split there, so it never saw that `for` either.
+    'case "$m" in a) true | for f in 1 2; do echo $f; done;; esac; '
+    "for ((;;)); do :; done",
 ]
 
 # The allow cases. Two kinds: bounded versions of the same generators, and
@@ -271,6 +275,8 @@ ALLOWED = [
     "case $x in for|while) echo hi;; esac",
     "a=b=c; for f in a b; do echo $f; done",
     "cmd --opt=value; for f in a b; do echo $f; done",
+    # A finite pipeline inside a case arm stays legal.
+    'case "$m" in a) true | for f in 1 2; do echo $f; done;; esac',
 ]
 
 
