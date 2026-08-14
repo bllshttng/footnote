@@ -88,13 +88,14 @@ def test_emit_event_logs_warning_on_write_failure(tmp_path: Path, caplog: pytest
 
     with caplog.at_level(logging.WARNING, logger="fno.pr_watch.cli"):
         # Must NOT raise
-        _emit_event(
+        result = _emit_event(
             "pr_watch_tick",
             {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
              "dropped_count": 0, "dropped": {}},
             events_path=bad_events_path,
         )
 
+    assert result is False
     # Must have logged a warning
     assert any("pr-watch" in r.message and "emit" in r.message for r in caplog.records), (
         f"expected a warning log mentioning 'pr-watch' and 'emit'; got: {[r.message for r in caplog.records]}"

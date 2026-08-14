@@ -584,6 +584,34 @@ class TestTickOrchestrator:
                 "data": data,
             })
 
+    def test_oversized_receipt_never_summarizes_after_a_failed_chunk(self):
+        """A missing exact-detail chunk makes the whole tick fail closed."""
+        from fno.pr_watch._dispatch import _emit_tick_receipt
+
+        numbers = list(range(1, 10_001))
+        receipt = {
+            "open_prs": 0,
+            "acted": 0,
+            "swept_count": len(numbers),
+            "swept": {"owner/repo": numbers},
+            "dropped_count": len(numbers),
+            "dropped": {"closed": {"owner/repo": numbers}},
+            "normalized_count": 0,
+            "normalized": [],
+            "failed_count": 0,
+            "failed": [],
+        }
+        events = []
+
+        def emit(kind, data):
+            events.append((kind, data))
+            return not (kind == "pr_watch_sweep_chunk" and len(events) == 2)
+
+        with pytest.raises(RuntimeError, match="chunk 2/"):
+            _emit_tick_receipt(emit, receipt)
+
+        assert all(kind != "pr_watch_tick" for kind, _data in events)
+
     def test_terminal_candidate_is_evicted_after_current_observation(self, tmp_path):
         """Stored OPEN is not truth: a measured MERGED candidate leaves the cache."""
         from fno.pr_watch._dispatch import tick
@@ -1897,8 +1925,11 @@ class TestWarmMergeRouting:
         """A failed hand-off emits failure evidence without retaining merged state."""
         from fno.pr_watch._state import WatermarkStore
 
-        deps, store_path, calls = self._run_merge_tick(tmp_path, "spawn-failed", ticks=2)
-        assert len(calls) == 2
+        deps, store_path, calls = self._run_merge_tick(tmp_path, "spawn-failed", ticks=4)
+        assert len(calls) == 3
         assert WatermarkStore(path=store_path).get("owner/repo#1") is None
         failed = [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"]
-        assert len(failed) == 2
+        assert [event["data"]["retries"] for event in failed] == [1, 2, 3]
+        parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
+        assert len(parked) == 1
+        assert parked[0]["data"]["reason"] == "retries-exhausted"

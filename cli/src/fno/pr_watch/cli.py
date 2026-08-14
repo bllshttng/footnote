@@ -54,7 +54,9 @@ def _resolve_fno_binary() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _emit_event(event_type: str, data: dict[str, Any], *, events_path: Optional[Path] = None) -> None:
+def _emit_event(
+    event_type: str, data: dict[str, Any], *, events_path: Optional[Path] = None
+) -> bool:
     """Append a canonical event envelope to events.jsonl.
 
     Uses fno.events._build + fno.events.append_event (the same path the
@@ -74,13 +76,15 @@ def _emit_event(event_type: str, data: dict[str, Any], *, events_path: Optional[
             events_path = state_dir() / "events.jsonl"
         except Exception as exc:
             log.warning("pr-watch: could not resolve state_dir for events path: %s", exc)
-            return
+            return False
     try:
         from fno.events import _build, append_event
         event = _build(event_type, "daemon", data)
         append_event(event, events_path)
+        return True
     except Exception as exc:
         log.warning("pr-watch: emit %s failed: %s", event_type, exc)
+        return False
 
 
 def _notify_parked(message: str) -> None:
@@ -242,7 +246,10 @@ def tick() -> None:
         try:
             from fno.recovery import run_recovery_sweep
 
-            n = run_recovery_sweep(settings.recovery, emit=_emit_event)
+            def emit_recovery(event_type: str, data: dict) -> None:
+                _emit_event(event_type, data)
+
+            n = run_recovery_sweep(settings.recovery, emit=emit_recovery)
             typer.echo(f"recovery sweep: candidates={n}")
         except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
             log.warning("pr-watch: recovery sweep failed: %s", exc)

@@ -137,17 +137,20 @@ def _chunk_receipt_items(items: list[dict[str, str]]) -> list[list[dict[str, str
     return chunks
 
 
-def _emit_tick_receipt(emit: Callable[[str, dict], None], receipt: dict[str, Any]) -> None:
+def _emit_tick_receipt(
+    emit: Callable[[str, dict], Optional[bool]], receipt: dict[str, Any]
+) -> None:
     """Emit one inline receipt or bounded exact-detail chunks plus a summary."""
     encoded = json.dumps(receipt, separators=(",", ":")).encode("utf-8")
     if len(encoded) <= _INLINE_RECEIPT_MAX_BYTES:
-        emit("pr_watch_tick", receipt)
+        if emit("pr_watch_tick", receipt) is False:
+            raise RuntimeError("pr-watch tick receipt emission failed")
         return
 
     receipt_id = uuid.uuid4().hex
     chunks = _chunk_receipt_items(_receipt_detail_items(receipt))
     for index, items in enumerate(chunks, start=1):
-        emit(
+        emitted = emit(
             "pr_watch_sweep_chunk",
             {
                 "receipt_id": receipt_id,
@@ -157,6 +160,10 @@ def _emit_tick_receipt(emit: Callable[[str, dict], None], receipt: dict[str, Any
                 "items": items,
             },
         )
+        if emitted is False:
+            raise RuntimeError(
+                f"pr-watch sweep receipt chunk {index}/{len(chunks)} emission failed"
+            )
 
     summary = dict(receipt)
     summary.update(
@@ -169,7 +176,19 @@ def _emit_tick_receipt(emit: Callable[[str, dict], None], receipt: dict[str, Any
             "receipt_chunks": len(chunks),
         }
     )
-    emit("pr_watch_tick", summary)
+    if emit("pr_watch_tick", summary) is False:
+        raise RuntimeError("pr-watch tick receipt summary emission failed")
+
+
+def _delivery_state_path(store_path: Optional[Path]) -> Path:
+    """Keep delivery retries separate from the observed PR-state cache."""
+    if store_path is None:
+        from fno.pr_watch._state import pr_watcher_state_path
+
+        base = pr_watcher_state_path()
+    else:
+        base = Path(store_path)
+    return base.with_name(f"{base.stem}-delivery{base.suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +370,7 @@ def tick(
     fire_skill_fn: Optional[Callable] = None,
     dispatch_ritual_fn: Optional[Callable] = None,
     # I/O seams
-    emit: Optional[Callable[[str, dict], None]] = None,
+    emit: Optional[Callable[[str, dict], Optional[bool]]] = None,
     reviewers_for: Optional[Callable[[Path], list]] = None,
     claim: Optional[Any] = None,
     notify: Optional[Callable] = None,
@@ -502,6 +521,10 @@ def _run_tick(
         except ValueError:
             continue
     normalization = store.normalize_keys(candidate_keys)
+    delivery_store = WatermarkStore(path=_delivery_state_path(store_path))
+    delivery_state = delivery_store.load()
+    for stale_key in set(delivery_state) - candidate_keys:
+        delivery_state.pop(stale_key, None)
     dropped = list(normalization.dropped)
     swept: set[str] = set()
     failed: set[str] = set()
@@ -646,12 +669,14 @@ def _run_tick(
                 # Terminal records never live in the cache, but a graph-backed
                 # merged candidate must still retry an idempotent ritual after
                 # a transient dispatch failure or lock contention.
+                pending = delivery_state.get(key)
+                pending = pending if isinstance(pending, dict) else {}
                 entry = {
                     "last_review_ts": obs.latest_review_ts,
                     "last_seen_state": "MERGED",
                     "merge_dispatched": False,
-                    "retries": 0,
-                    "parked": None,
+                    "retries": pending.get("retries", 0),
+                    "parked": pending.get("parked"),
                 }
             if entry is None:
                 continue
@@ -686,7 +711,8 @@ def _run_tick(
 
             elif decision.kind == "park":
                 entry["parked"] = decision.reason
-                store.set(key, entry)
+                if obs.state not in ("MERGED", "CLOSED"):
+                    store.set(key, entry)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
             elif decision.kind in ("merge", "review"):
@@ -716,7 +742,7 @@ def _run_tick(
                             emit("pr_watch_skipped", {"pr": pr, "reason": "dispatch-in-flight"})
                         else:
                             entry["merge_dispatched"] = True
-                            store.set(key, entry)
+                            delivery_state.pop(key, None)
                             emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
                         state.pop(key, None)
@@ -729,7 +755,10 @@ def _run_tick(
                         # no retry, no failure notify. If the operator later
                         # arms auto_run, the past merge is handled manually.
                         entry["parked"] = "auto-run-disabled"
-                        store.set(key, entry)
+                        delivery_state[key] = {
+                            "retries": entry.get("retries", 0),
+                            "parked": "auto-run-disabled",
+                        }
                         emit("pr_watch_skipped", {"pr": pr, "reason": "auto-run-disabled"})
                         skipped += 1
                         state.pop(key, None)
@@ -760,7 +789,10 @@ def _run_tick(
                     else:
                         entry["last_review_ts"] = obs.latest_review_ts
                     entry["retries"] = 0
-                    store.set(key, entry)
+                    if obs.state in ("MERGED", "CLOSED"):
+                        delivery_state.pop(key, None)
+                    else:
+                        store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
@@ -769,11 +801,20 @@ def _run_tick(
                     except (TypeError, ValueError):
                         retries = 1
                     entry["retries"] = retries
-                    store.set(key, entry)
+                    if obs.state in ("MERGED", "CLOSED"):
+                        delivery_state[key] = {"retries": retries, "parked": None}
+                    else:
+                        store.set(key, entry)
                     emit("pr_watch_dispatch_failed", {"pr": pr, "retries": retries})
                     if retries >= max_retries:
                         entry["parked"] = "retries-exhausted"
-                        store.set(key, entry)
+                        if obs.state in ("MERGED", "CLOSED"):
+                            delivery_state[key] = {
+                                "retries": retries,
+                                "parked": "retries-exhausted",
+                            }
+                        else:
+                            store.set(key, entry)
                         emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
                         try:
                             notify(
@@ -796,6 +837,7 @@ def _run_tick(
                 log.warning("pr-watch: failed to release PR lock for #%d: %s", pr, exc)
 
     store.persist()
+    delivery_store.persist()
     open_prs = sum(
         1
         for entry in state.values()
