@@ -441,6 +441,10 @@ def _run_tick(
     batch_baselined: set[str] = set()
     query_keys = batch_keys | candidate_keys
     if query_keys:
+        # The batch reader attempts every qualified key up front. Record that
+        # positive fact even when a later per-PR lock prevents rich dispatch
+        # observation for one candidate.
+        swept.update(query_keys)
         try:
             batch_states = read_tracked_states_fn(query_keys)
         except Exception as exc:  # noqa: BLE001 - receipt names the outage
@@ -511,6 +515,7 @@ def _run_tick(
                 reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
                 swept.add(key)
+                failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
                 swept.add(key)

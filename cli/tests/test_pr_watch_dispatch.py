@@ -631,6 +631,45 @@ class TestTickOrchestrator:
         assert list(persisted) == ["owner/repo#316"]
         assert persisted["owner/repo#316"]["merge_dispatched"] is True
 
+    def test_batch_sweep_receipt_survives_per_pr_lock_contention(self, tmp_path):
+        """The receipt names a measured key even when dispatch owns its lock."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#1", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(tmp_path, candidates=[candidate])
+
+        def held(_key, _holder):
+            raise _ClaimHeldByOtherStub()
+
+        deps["claim"].acquire_pr_lock = held
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: {key: "OPEN" for key in keys},
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["swept_count"] == 1
+        assert receipt["swept"] == {"owner/repo": [1]}
+
     def test_tick_lock_held_returns_immediately(self, tmp_path):
         """AC-concurrency: if tick lock held, return without discovering/firing."""
         from fno.pr_watch._dispatch import tick
