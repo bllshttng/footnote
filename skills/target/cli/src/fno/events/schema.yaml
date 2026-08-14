@@ -3584,6 +3584,23 @@ event_types:
           description: "How many rows were actually removed (may be fewer than requested)."
     consumers: [operator]
 
+  - name: agent_late_bind
+    description: "Emitted by the daemon reconcile tick (x-9de7 task 2) when it binds a codex pane's `harness_session_id` after the initial 8-second spawn window missed it. The bind stays a probe on the pane-tree rollout walk, not a wider window: a row this event never fires for still gets one more reconcile tick's chance before it renders unmeasured or dead."
+    sources: [daemon]
+    data:
+      required: [name, pid, harness_session_id]
+      properties:
+        name:
+          type: string
+          description: "The registry row's name."
+        pid:
+          type: integer
+          description: "The pane's process id the session id was resolved from."
+        harness_session_id:
+          type: string
+          description: "The codex rollout session id the late bind resolved."
+    consumers: [operator]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

@@ -5833,7 +5833,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             state::update_registry(&home.registry_json(), |r| {
                 let mut e = ask_row("codex-silent", Some(exited_at.as_str()));
                 e.short_id = "codex-silent".into(); // liveness_surface, no live socket
-                e.legacy_provider = "codex".into();
+                e.harness = Some("codex".into());
                 e.log_path = Some(log_path.to_string_lossy().into_owned());
                 r.entries.push(e);
             })
@@ -7411,7 +7411,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     /// a mux ref, and whatever pid/session id the caller sets afterward.
     fn codex_pane_row(name: &str) -> RegistryEntry {
         let mut e = ask_row(name, None);
-        e.legacy_provider = "codex".into();
+        e.harness = Some("codex".into());
         e.status = AgentStatus::Live;
         e.mux = Some(state::MuxRef {
             session: "main".into(),
@@ -7902,8 +7902,8 @@ done
         RegistryEntry {
             name: name.into(),
             short_id: String::new(),
-            legacy_provider: "codex".into(),
-            harness: None,
+            legacy_provider: String::new(),
+            harness: Some("codex".into()),
             harness_session_id: None,
             cwd: "/tmp".into(),
             project_root: "/tmp".into(),

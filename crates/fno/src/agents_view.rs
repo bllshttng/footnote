@@ -2007,7 +2007,7 @@ mod tests {
         // sideline must not draw a confident dead "x" over it.
         let me = std::process::id();
         let raw = reg(&format!(
-            r#"{{"name":"cx-pane","cwd":"/w","status":"exited","provider":"codex",
+            r#"{{"name":"cx-pane","cwd":"/w","status":"exited","harness":"codex",
                 "pid":{me},"mux":{{"session":"main","pane_id":1}}}}"#
         ));
         let rows = derive_rows(&raw, NOW).unwrap();
@@ -2024,7 +2024,7 @@ mod tests {
         // AC2: a terminal status corroborated by a pid that is confirmed
         // gone renders Dead -- the confident state stays confident.
         let raw = reg(
-            r#"{"name":"cx-gone","cwd":"/w","status":"exited","provider":"codex",
+            r#"{"name":"cx-gone","cwd":"/w","status":"exited","harness":"codex",
                 "pid":2147483632}"#,
         );
         let rows = derive_rows(&raw, NOW).unwrap();
@@ -2034,7 +2034,7 @@ mod tests {
 
     #[test]
     fn derive_rows_renders_alive_for_a_live_status_row() {
-        let raw = reg(r#"{"name":"live-one","cwd":"/w","status":"live","provider":"claude"}"#);
+        let raw = reg(r#"{"name":"live-one","cwd":"/w","status":"live","harness":"claude"}"#);
         let rows = derive_rows(&raw, NOW).unwrap();
         assert_eq!(
             rows.iter().find(|r| r.name == "live-one").unwrap().liveness,
