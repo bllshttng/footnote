@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -154,7 +153,11 @@ class TestEmitEventAnchoredPath:
         try:
             from fno.pr_watch.cli import _emit_event
             # Call WITHOUT explicit events_path — uses the default resolver
-            _emit_event("pr_watch_tick", {"open_prs": 0, "acted": 0})
+            _emit_event(
+                "pr_watch_tick",
+                {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+                 "dropped_count": 0, "dropped": {}},
+            )
         finally:
             os.chdir(original_cwd)
 
@@ -165,7 +168,6 @@ class TestEmitEventAnchoredPath:
         )
 
         # Event MUST land under state_dir (HOME/.fno)
-        from fno.paths import state_dir
         # Reset cache after HOME change
         try:
             from fno.config import load_settings
@@ -200,7 +202,11 @@ class TestEmitEventAnchoredPath:
             pass
 
         from fno.pr_watch.cli import _emit_event
-        _emit_event("pr_watch_tick", {"open_prs": 0, "acted": 0})
+        _emit_event(
+            "pr_watch_tick",
+            {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+             "dropped_count": 0, "dropped": {}},
+        )
 
         # Now verify _last_tick_ts (with no explicit path) finds that event
         from fno.pr_watch._install import _last_tick_ts
@@ -346,7 +352,7 @@ class TestCliTickIntegration:
             )
             from datetime import datetime, timezone
 
-            result = _dispatch_tick(
+            _dispatch_tick(
                 claim=ClaimAdapter(),
                 emit=_emit_event,  # <-- the real adapter, no explicit path
                 reviewers_for=_reviewers_for,
@@ -363,7 +369,7 @@ class TestCliTickIntegration:
             f"No events.jsonl found at {events_path}. "
             "The real _emit_event wrote to a cwd-relative path instead (bug #1 not fixed)."
         )
-        events = [json.loads(l) for l in events_path.read_text().strip().splitlines() if l.strip()]
+        events = [json.loads(line) for line in events_path.read_text().strip().splitlines() if line.strip()]
         tick_events = [e for e in events if e.get("type") == "pr_watch_tick"]
         assert len(tick_events) >= 1, (
             f"No pr_watch_tick event in {events_path}. Events found: {events}"
@@ -576,16 +582,16 @@ class TestFrozenDataclasses:
 # ---------------------------------------------------------------------------
 
 
-class TestClosedPrParkAtOrchestrator:
-    """AC6-FR: CLOSED PR parks with reason 'closed' at the tick() level.
+class TestClosedPrEvictionAtOrchestrator:
+    """AC6-FR: CLOSED PR is receipted and evicted at the tick() level.
 
     The decide()-level coverage exists; this verifies the full orchestrator
     path: watermark seeded, CLOSED observation fed through tick(), assert
-    parked=True in store + pr_watch_parked event emitted + nothing fired.
+    terminal cache eviction + pr_watch_parked event emitted + nothing fired.
     """
 
-    def test_closed_pr_parked_at_tick_level(self, tmp_path):
-        """AC6-FR: tick() parks a CLOSED PR, emits pr_watch_parked, fires nothing."""
+    def test_closed_pr_evicted_at_tick_level(self, tmp_path):
+        """AC6-FR: tick() receipts CLOSED, evicts it, and fires nothing."""
         from fno.pr_watch._dispatch import tick
         from fno.pr_watch._state import WatermarkStore
 
@@ -628,10 +634,6 @@ class TestClosedPrParkAtOrchestrator:
         assert parked_events[0]["data"]["reason"] == "closed"
         assert parked_events[0]["data"]["pr"] == 5
 
-        # Watermark store updated: parked = "closed"
-        store2 = WatermarkStore(path=store_path)
-        entry = store2.get("owner/repo#5")
-        assert entry is not None, "watermark entry missing after tick"
-        assert entry.get("parked") == "closed", (
-            f"expected parked='closed' in store, got {entry.get('parked')!r}"
-        )
+        assert WatermarkStore(path=store_path).get("owner/repo#5") is None
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["dropped"] == {"closed": {"owner/repo": [5]}}

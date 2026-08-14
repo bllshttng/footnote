@@ -2936,17 +2936,41 @@ event_types:
           description: "Why the PR was parked: 'closed', 'max-age', 'retries-exhausted', or decide()'s park reason."
 
   - name: pr_watch_tick
-    description: "Heartbeat emitted at the end of every PR-state watcher poll interval, including quiet ticks with no actionable PRs."
+    description: "Heartbeat and positive sweep receipt emitted at the end of every successful PR-state watcher poll interval, including quiet ticks with no actionable PRs."
     sources: [daemon]
     data:
-      required: [open_prs, acted]
+      required: [open_prs, acted, swept_count, swept, dropped_count, dropped]
       properties:
         open_prs:
           type: integer
-          description: "Total number of open-PR candidates discovered from the graph this tick."
+          description: "Number of cache records observed OPEN after this tick's sweep."
         acted:
           type: integer
           description: "Number of PRs for which a skill was successfully dispatched this tick."
+        swept_count:
+          type: integer
+          description: "Number of qualified PR keys whose current GitHub state was read or attempted."
+        swept:
+          type: object
+          description: "Exact swept identities compacted as owner/repo to sorted PR-number arrays."
+        dropped_count:
+          type: integer
+          description: "Number of terminal, invalid, ambiguous, or unresolvable records removed."
+        dropped:
+          type: object
+          description: "Exact removed identities grouped by reason, then owner/repo to sorted PR-number arrays."
+        normalized_count:
+          type: integer
+          description: "Number of legacy keys rewritten or collapsed into qualified keys."
+        normalized:
+          type: array
+          description: "Legacy-to-qualified key rewrites performed before polling."
+        failed_count:
+          type: integer
+          description: "Number of qualified keys whose GitHub state could not be read."
+        failed:
+          type: array
+          description: "Qualified keys retained as UNKNOWN after a failed state read."
 
   - name: recovery_nudge
     description: "Session auto-recovery (x-f47c) injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."

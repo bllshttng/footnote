@@ -34,7 +34,12 @@ def test_emit_event_writes_real_event_to_events_jsonl(tmp_path: Path) -> None:
     from fno.events import validate
 
     events_path = tmp_path / "events.jsonl"
-    _emit_event("pr_watch_tick", {"open_prs": 0, "acted": 0}, events_path=events_path)
+    _emit_event(
+        "pr_watch_tick",
+        {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+         "dropped_count": 0, "dropped": {}},
+        events_path=events_path,
+    )
 
     assert events_path.exists(), "events.jsonl was not created"
     lines = events_path.read_text().strip().splitlines()
@@ -74,8 +79,6 @@ def test_emit_event_logs_warning_on_write_failure(tmp_path: Path, caplog: pytest
     """AC2-ERR: unwritable events path triggers a warning log, not a silent pass or raise."""
     from fno.pr_watch.cli import _emit_event
 
-    # Unwritable path: a file where a directory is expected
-    bad_path = tmp_path / "not-a-dir" / "events.jsonl"
     # Don't create the parent so mkdir will fail if parent doesn't exist
     # Actually parent needs to fail in a way that can't be mkdir'd
     # Point at a path whose parent is a FILE, not a dir
@@ -85,7 +88,12 @@ def test_emit_event_logs_warning_on_write_failure(tmp_path: Path, caplog: pytest
 
     with caplog.at_level(logging.WARNING, logger="fno.pr_watch.cli"):
         # Must NOT raise
-        _emit_event("pr_watch_tick", {"open_prs": 0, "acted": 0}, events_path=bad_events_path)
+        _emit_event(
+            "pr_watch_tick",
+            {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+             "dropped_count": 0, "dropped": {}},
+            events_path=bad_events_path,
+        )
 
     # Must have logged a warning
     assert any("pr-watch" in r.message and "emit" in r.message for r in caplog.records), (
