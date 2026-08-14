@@ -1296,6 +1296,13 @@ enum MenuAction {
     /// Open the rename overlay for a workspace section header - menu parity with
     /// selector `r` (x-96e8). Only built for a section carrying a squad id.
     Rename,
+    /// Reorder a workspace section `delta` slots on the sideline - menu parity
+    /// with selector `J`/`K`, bound to the same `Command::MoveSquad`.
+    MoveSquad(i32),
+    /// Remove a whole workspace. Routed through the same
+    /// `ConfirmKind::RemoveSquad` confirm the keyboard path uses - a mouse
+    /// click must not skip the destructive-action gate.
+    RemoveSquad,
 }
 
 /// What the numbered move picker is relocating: a whole tab (selector `m`) or a
@@ -1496,12 +1503,20 @@ fn build_section_menu(
     let mut rows = vec![PopupRow::Header(label.clone()), PopupRow::Rule];
     let mut actions: Vec<MenuAction> = Vec::new();
     if squad.is_some() {
-        rows.push(PopupRow::Entry {
-            glyph: "✎".into(),
-            label: "Rename".into(),
+        let entry = |glyph: &str, label: &str| PopupRow::Entry {
+            glyph: glyph.into(),
+            label: label.into(),
             hint: String::new(),
-        });
+        };
+        rows.push(entry("✎", "Rename"));
         actions.push(MenuAction::Rename);
+        rows.push(entry("▲", "Move up"));
+        actions.push(MenuAction::MoveSquad(-1));
+        rows.push(entry("▼", "Move down"));
+        actions.push(MenuAction::MoveSquad(1));
+        rows.push(PopupRow::Rule);
+        rows.push(entry("✕", "Remove workspace"));
+        actions.push(MenuAction::RemoveSquad);
     }
     if dead > 0 {
         rows.push(PopupRow::Entry {
@@ -9962,6 +9977,50 @@ async fn execute_row_menu_action(
             view.open_rename(RenameTarget::Squad(id));
             return Ok(());
         }
+        // A workspace section's Move up/down sends the same `MoveSquad` the
+        // selector's `J`/`K` send; the server clamps at the edges silently, so
+        // an at-edge click is a no-op exactly like the key.
+        (
+            MenuTarget::Section {
+                squad: Some(sq), ..
+            },
+            MenuAction::MoveSquad(delta),
+        ) => {
+            view.sel_follow = Some(sq);
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::MoveSquad { squad: sq, delta }),
+            )
+            .await
+            .map_err(|e| format!("move-squad send failed: {e}"))?;
+            return Ok(());
+        }
+        // A workspace section's Remove opens the SAME confirm the keyboard
+        // path builds - the destructive-action gate, never skipped by a mouse.
+        (
+            MenuTarget::Section {
+                squad: Some(sq), ..
+            },
+            MenuAction::RemoveSquad,
+        ) => {
+            let Some(s) = view.layout.squads.iter().find(|s| s.id == sq) else {
+                view.set_notice("workspace is no longer here".into());
+                return Ok(());
+            };
+            if view.term.0 < MIN_ROWS_FOR_STATUS {
+                view.set_notice("terminal too short for the confirm prompt".into());
+                return Ok(());
+            }
+            view.open_confirm(ConfirmAction {
+                action: ConfirmKind::RemoveSquad {
+                    squad: sq,
+                    panes: s.panes,
+                    last: view.layout.squads.len() == 1,
+                },
+                label: s.name.clone(),
+            });
+            return Ok(());
+        }
         // A menu is built for exactly one target kind, so a crossed pair can only
         // come from a bug; refuse rather than guess at a target.
         (MenuTarget::Card(_), _)
@@ -10151,6 +10210,9 @@ async fn execute_row_menu_action(
         // A Notice rather than `unreachable!` - a panic here would take the whole
         // multiplexer down over a menu-construction bug.
         MenuAction::ClearDead => view.set_notice("clear dead needs a section header".into()),
+        MenuAction::MoveSquad(_) | MenuAction::RemoveSquad => {
+            view.set_notice("move and remove need a workspace section header".into())
+        }
     }
     Ok(())
 }
@@ -16921,7 +16983,12 @@ mod tests {
         assert!(v.open_row_menu(hdr, Anchor::Center));
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::Rename]
+            vec![
+                super::MenuAction::Rename,
+                super::MenuAction::MoveSquad(-1),
+                super::MenuAction::MoveSquad(1),
+                super::MenuAction::RemoveSquad,
+            ]
         );
         v.row_menu = None;
         // A truly menu-less row (the dim subline) refuses with no notice at all.
@@ -17071,8 +17138,13 @@ mod tests {
         assert!(v.open_row_menu(hdr, Anchor::Center), "workspace menu opens");
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::Rename],
-            "no dead rows -> Rename only"
+            vec![
+                super::MenuAction::Rename,
+                super::MenuAction::MoveSquad(-1),
+                super::MenuAction::MoveSquad(1),
+                super::MenuAction::RemoveSquad
+            ],
+            "no dead rows -> the five standing workspace verbs"
         );
         let mut buf: Vec<u8> = Vec::new();
         row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
@@ -17092,8 +17164,68 @@ mod tests {
         assert!(v.open_row_menu(hdr, Anchor::Center));
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
-            vec![super::MenuAction::Rename, super::MenuAction::ClearDead]
+            vec![
+                super::MenuAction::Rename,
+                super::MenuAction::MoveSquad(-1),
+                super::MenuAction::MoveSquad(1),
+                super::MenuAction::RemoveSquad,
+                super::MenuAction::ClearDead
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_section_menu_move_sends_the_reorder_command() {
+        // AC8-HP: Move up/down ride the same Command::MoveSquad the keyboard
+        // J/K path sends; the server's silent clamp covers the at-edge case
+        // (AC9-EDGE), so the client sends unconditionally and never bells.
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        for (delta, label) in [(-1, "up"), (1, "down")] {
+            let m = v.row_menu.as_mut().unwrap();
+            m.popup.sel = m
+                .actions
+                .iter()
+                .position(|a| *a == super::MenuAction::MoveSquad(delta))
+                .unwrap_or_else(|| panic!("move-{label} entry present"));
+            let mut buf: Vec<u8> = Vec::new();
+            row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+            assert_eq!(
+                decode_cmds(buf),
+                vec![Command::MoveSquad {
+                    squad: 1,
+                    delta
+                }],
+                "move {label} sends the reorder command"
+            );
+            assert!(v.open_row_menu(hdr, Anchor::Center), "re-open for the next");
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_section_menu_remove_opens_the_confirm_not_the_command() {
+        // AC8-HP: Remove workspace routes through the SAME
+        // ConfirmKind::RemoveSquad confirm the keyboard path builds - a mouse
+        // click must not skip the destructive-action gate.
+        let mut v = view_with_agents(vec![]);
+        v.layout.agents = vec![lifecycle_row("live-a", false, false)];
+        let hdr = squad_header_at(&v, 1);
+        assert!(v.open_row_menu(hdr, Anchor::Center));
+        let m = v.row_menu.as_mut().unwrap();
+        m.popup.sel = m
+            .actions
+            .iter()
+            .position(|a| *a == super::MenuAction::RemoveSquad)
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "the entry arms the confirm, sends nothing");
+        match v.confirm.as_ref().map(|c| &c.action) {
+            Some(ConfirmKind::RemoveSquad { squad, .. }) => assert_eq!(*squad, 1),
+            _ => panic!("expected a RemoveSquad confirm"),
+        }
     }
 
     #[test]
