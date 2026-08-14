@@ -272,6 +272,74 @@ if [[ -f "${SCRIPT_DIR}/outstanding-session-start.sh" ]]; then
     outstanding_content=$(bash "${SCRIPT_DIR}/outstanding-session-start.sh" 2>/dev/null || true)
 fi
 
+# 8. orphan sweep — processes that outlived whatever started them. The
+#    counterpart to hooks/bg-process-guard.py: the guard refuses a process that
+#    can never end, this reports the ones that already survived, and it is the
+#    only layer that reaches a test fixture, a non-Claude harness, or a hook
+#    that leaked its own work.
+#
+#    Hourly, and SYNCHRONOUS on purpose. The other sweeps here detach because
+#    their output is a log; this one's output is for a human to read now, and
+#    detaching a background process to hunt background processes is a joke this
+#    repo does not need to be in. Bounded at 20s by the one shared wall-clock
+#    helper.
+#
+#    `--quiet-unless-new` is what keeps it survivable: long-lived third-party
+#    daemons at PPID 1 are real findings and reprinting them every session is
+#    how a hook gets disabled. A broken scan still speaks, always.
+orphan_content=""
+orphan_lib="${PLUGIN_ROOT}/scripts/lib/with-timeout.sh"
+if command -v fno >/dev/null 2>&1 && [[ -d .fno && -f "$orphan_lib" ]]; then
+    # Anchored to the canonical checkout, exactly like the sweep's own
+    # seen-file. A per-worktree stamp beside a shared seen-file silences the
+    # wrong session: worktree A records a finding, and worktree B's sweep an
+    # hour later treats it as already reported and says nothing about an
+    # orphan sitting in B.
+    # `|| true` is load-bearing under `set -e`: git exits 128 outside a repo,
+    # and an unguarded command substitution in an assignment takes the WHOLE
+    # hook down with it. The suite caught exactly that - session-start returned
+    # 128 and injected nothing.
+    orphan_root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    orphan_root=${orphan_root:+$(dirname "$orphan_root")}
+    orphan_stamp="${orphan_root:-.}/.fno/.orphan-sweep-stamp"
+    orphan_now=$(date +%s 2>/dev/null || echo 0)
+    orphan_then=$(stat -c %Y "$orphan_stamp" 2>/dev/null || stat -f %m "$orphan_stamp" 2>/dev/null || echo 0)
+    orphan_then=${orphan_then//[!0-9]/}
+    if (( orphan_now - ${orphan_then:-0} >= ${FNO_ORPHAN_SWEEP_SECONDS:-3600} )); then
+        # The stamp's own directory, not the cwd's. The `-d .fno` guard above
+        # tests the session cwd, so a canonical checkout without one left the
+        # write failing under `|| true`, the mtime at 0 forever, and the
+        # "hourly" sweep spawning probes and reaping on EVERY session start.
+        # shellcheck source=scripts/lib/with-timeout.sh
+        source "$orphan_lib" 2>/dev/null || true
+        if declare -F with_timeout >/dev/null 2>&1; then
+            # Stamped only once the sweep is actually about to run. Stamping
+            # before the `declare` check burned a full hour window every time
+            # the source failed, and the sweep that never ran said nothing.
+            mkdir -p "$(dirname "$orphan_stamp")" 2>/dev/null || true
+            : >"$orphan_stamp" 2>/dev/null || true
+            orphan_rc=0
+            orphan_raw="$(with_timeout 20 fno agents orphans --reap --quiet-unless-new 2>/dev/null)" || orphan_rc=$?
+            if [[ -n "$orphan_raw" ]]; then
+                orphan_content="## Orphan processes"$'\n'"$orphan_raw"
+            elif (( orphan_rc != 0 )); then
+                # ANY non-zero with no stdout, not just the 124 time bound. The
+                # likeliest case is a stale deployed `fno` with no `orphans`
+                # verb, which exits non-zero with its error on stderr and stderr
+                # is discarded here. The stamp is already written, so silence
+                # would cost a full window - the exact outcome the sweep exists
+                # to make impossible.
+                if (( orphan_rc == 124 )); then
+                    orphan_reason="hit its 20s bound and was killed. Any reap it started is unrecorded."
+                else
+                    orphan_reason="failed with exit ${orphan_rc}. A deployed \`fno\` predating the verb is the usual cause; try \`fno doctor --fix\`."
+                fi
+                orphan_content="## Orphan processes"$'\n'"the sweep ${orphan_reason} Run \`fno agents orphans\` by hand."
+            fi
+        fi
+    fi
+fi
+
 # ── Combine context ───────────────────────────────────────────────────
 # Newline-separate non-empty blocks so the agent sees each preamble as
 # its own section rather than one wall of text.
@@ -292,6 +360,7 @@ append_section "$hygiene_content"
 append_section "$nudge_content"
 append_section "$mail_content"
 append_section "$outstanding_content"
+append_section "$orphan_content"
 
 # Self-heal a defunct target manifest (x-4af4) before anything reads it, so a
 # dead target-state.md can no longer auto-lock an attended /think. Advisory.

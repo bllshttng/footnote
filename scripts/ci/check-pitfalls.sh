@@ -101,6 +101,17 @@ fi
 REGISTRY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/cli/src/fno/cli.py"
 if [[ -n "$TITLES" && -f "$REGISTRY" ]]; then
   SHIPPED_VERBS=$(sed -n 's/^[[:space:]]*"\([a-z][a-z0-9-]*\)":[[:space:]]*(.*/\1/p' "$REGISTRY")
+  # An empty list here is a BROKEN READ, not a CLI with no verbs. Every title
+  # then matches nothing and the gate passes on anything, which is the shape
+  # this gate exists to refuse. An ABSENT registry is the legitimate skip
+  # (a consumer repo without the CLI) and is handled by the -f test above; a
+  # PRESENT registry that yields nothing is an instrument failure. Fail loud.
+  if [[ -z "$SHIPPED_VERBS" ]]; then
+    echo "check-pitfalls: read 0 verbs from ${REGISTRY}." >&2
+    echo "  The registry exists, so this is a broken read, not an empty CLI." >&2
+    echo "  Refusing rather than passing every title against an empty list." >&2
+    exit 1
+  fi
   while IFS= read -r title; do
     [[ -z "$title" ]] && continue
     # Backticks are decoration around the verb, not part of it.

@@ -153,3 +153,50 @@ def test_title_with_pipe_parses_staleness(tmp_path: Path) -> None:
     assert "over the 60-day limit" in r.stderr
     assert "A | B trap" in r.stderr
     assert "unparseable" not in r.stderr
+
+
+def _transplant(tmp_path: Path, registry_text: str | None) -> Path:
+    """A copy of the gate whose sibling registry is ours.
+
+    REGISTRY resolves from BASH_SOURCE, so moving the script moves the file it
+    reads. That is what lets these two cases run without adding a test-only
+    environment knob to the gate itself.
+    """
+    lint = tmp_path / "scripts" / "ci" / LINT.name
+    lint.parent.mkdir(parents=True)
+    lint.write_text(LINT.read_text(encoding="utf-8"), encoding="utf-8")
+    if registry_text is not None:
+        registry = tmp_path / "cli" / "src" / "fno" / "cli.py"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(registry_text, encoding="utf-8")
+    return lint
+
+
+def test_a_registry_that_yields_no_verbs_fails_loud(tmp_path: Path) -> None:
+    """An empty verb list makes every title match nothing.
+
+    The gate would then pass on the exact entry it exists to reject, which is
+    the absence trap it is written to enforce against. A PRESENT registry that
+    parses to nothing is a broken read, not a CLI without verbs.
+    """
+    target = _one_entry(tmp_path, "fno backlog silently drops a node")
+    lint = _transplant(tmp_path, "# a registry with no lazy-subcommand rows\n")
+
+    r = subprocess.run(
+        ["bash", str(lint), str(target)], capture_output=True, text=True
+    )
+    assert r.returncode == 1
+    assert "read 0 verbs" in r.stderr
+    assert "broken read" in r.stderr
+
+
+def test_an_absent_registry_still_skips_the_verb_check(tmp_path: Path) -> None:
+    """The legitimate skip stays a skip: a consumer repo has no CLI to read."""
+    target = _one_entry(tmp_path, "fno backlog silently drops a node")
+    lint = _transplant(tmp_path, None)
+
+    r = subprocess.run(
+        ["bash", str(lint), str(target)], capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert "read 0 verbs" not in r.stderr

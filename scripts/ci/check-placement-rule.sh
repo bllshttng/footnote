@@ -45,6 +45,13 @@
 #      discovery) - allowlisted by file below rather than re-derived here.
 #      context_audit.py reads project-owned .claude/rules/*.md to census the
 #      exact progressive instructions Claude loads; it never writes there.
+#      guard-corpus-sweep.py joins ~/.claude/projects for the same reason: it
+#      READS Claude Code's own transcripts to replay every real Bash command
+#      through hooks/bg-process-guard.py. That corpus is the only source of
+#      the commands agents actually write, and it found three false refusals
+#      that eight rounds of hand-written cases missed. Read-only rglob over
+#      the harness's data; footnote stores nothing there, and a missing root
+#      exits 1 with a message rather than creating anything.
 #      review_capability.py's `requires: skill` predicate globs the two roots
 #      Claude resolves a bare skill name from (~/.claude/skills and
 #      <cwd>/.claude/skills) to answer "is this registered reviewer's skill
@@ -161,6 +168,7 @@ cli/src/fno/agents/cli.py
 cli/src/fno/agents/discover.py
 cli/src/fno/agents/dispatch.py
 cli/src/fno/agents/format.py
+cli/src/fno/agents/orphans.py
 cli/src/fno/agents/harnesses/_claude_session_registry.py
 cli/src/fno/agents/harnesses/claude.py
 cli/src/fno/agents/read.py
@@ -237,6 +245,7 @@ scripts/ci/check-no-internal-refs.sh
 scripts/ci/check-no-stale-skill-refs.sh
 scripts/ci/check-placement-rule.sh
 scripts/corrections-insights-tag.sh
+scripts/diagnostics/guard-corpus-sweep.py
 scripts/corrections-log-init.sh
 scripts/corrections-migrate-to-fno.sh
 scripts/ensure-global-dir.sh

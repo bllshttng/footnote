@@ -39,6 +39,11 @@
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/git-protection.py",
             "statusMessage": "checking git guardrails"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/bg-process-guard.py",
+            "statusMessage": "checking for unbounded background processes"
           }
         ]
       }

@@ -16,6 +16,7 @@ agents loop-check	KEEP	agents loop-check	61	deliberate readability slack for a h
 agents name	T1	agents name	5
 agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to needs_overlay
 agents nudge-peek	T1	agents nudge-peek	6
+agents orphans	T1	agents orphans	10
 agents peek	T1	agents peek	29
 agents ping	T1	agents ping	3
 agents probe-run	T1	agents probe-run	3

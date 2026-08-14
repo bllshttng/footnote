@@ -45,6 +45,33 @@ BASELINE_REL = Path("scripts") / "ci" / "verb-baseline.txt"
 COLLAPSE_MAP_REL = Path("scripts") / "ci" / "verb-collapse-map.tsv"
 COLLAPSE_FLAGS_REL = Path("scripts") / "ci" / "verb-collapse-flags.txt"
 
+# Two people hit these gates cold within an hour and both reverse-engineered the
+# row format by reading the file. The refusal said what to do and not how, so it
+# now carries the shape. Runtime text cannot drift from the behaviour that
+# raises it, which a doc can.
+COLLAPSE_MAP_ROW_HELP = (
+    "Append one tab-separated row per new action, e.g.\n"
+    "  agents orphans\tT1\tagents orphans\t10\t\n"
+    "  current-leaf          the action exactly as a user types it after `fno`\n"
+    "  tier                  T1 collapses to an argument of its group, KEEP stays "
+    "a distinct subcommand (T2 and T3 are legal and currently unused)\n"
+    "  post-collapse-typing  what a user types after the collapse, equal to "
+    "current-leaf on every T1 row\n"
+    "  refs                  how many times the corpus outside cli/src names this "
+    "leaf, swept by `python3 scripts/diagnostics/verb-callers.py`\n"
+    "  reason-if-not-T1      required on every non-T1 row, left empty on T1\n"
+    "Then bump the row count pinned in cli/tests/unit/test_verb_collapse_map.py, "
+    "and regenerate scripts/ci/verb-baseline.txt last."
+)
+COLLAPSE_FLAGS_ROW_HELP = (
+    "One line per hidden option on an argument-dispatched action, e.g.\n"
+    "  agents discovered-json !--provider\n"
+    "  <action> !<option>    the action as a user types it after `fno`, then `!`, "
+    "then the long option\n"
+    "code-only means the option exists and the file omits it: add that line. "
+    "file-only means the file lists an option the code dropped: delete that line."
+)
+
 # The Rust front's leaf tree is READ FROM ITS DISPATCHERS, not listed here.
 #
 # It used to be a hand-typed tuple checked against a hand-typed usage string,
@@ -328,7 +355,8 @@ def iter_python_leaves():
             "scripts/ci/verb-collapse-map.tsv; "
             f"code-only={sorted(live_actions - mapped_actions)}, "
             f"map-only={sorted(mapped_actions - live_actions)}. Allocate every new "
-            "action in the map before regenerating the registered-leaf baseline."
+            "action in the map before regenerating the registered-leaf baseline.\n"
+            + COLLAPSE_MAP_ROW_HELP
         )
     mapped_action_flags = {
         line.strip()
@@ -340,7 +368,8 @@ def iter_python_leaves():
             "verb-ratchet: collapsed action hidden-option inventory drifted from "
             "scripts/ci/verb-collapse-flags.txt; "
             f"code-only={sorted(live_action_flags - mapped_action_flags)}, "
-            f"file-only={sorted(mapped_action_flags - live_action_flags)}"
+            f"file-only={sorted(mapped_action_flags - live_action_flags)}.\n"
+            + COLLAPSE_FLAGS_ROW_HELP
         )
 
 
@@ -773,6 +802,15 @@ _HEADER = """\
 # Every invocable leaf verb, one per line, sorted: the fno-py registry (visible
 # AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
 # Remove or add a line only in the same PR that removes or adds the verb.
+#
+# ALLOCATE THE ACTION FIRST. A new action must have a row in
+# scripts/ci/verb-collapse-map.tsv before this file can regenerate, or the lint
+# refuses with `collapsed action inventory drifted ... code-only=[...]`. Copy a
+# neighbouring row: tier T1 keeps the pre-collapse typing, and the refs column
+# comes from the sweep in scripts/diagnostics/verb-callers.py, not from a guess.
+# The map's contract test pins the inventory count, so that number moves in the
+# same PR. Two separate branches hit this within one hour on 2026-08-13, which
+# is why it is written here rather than learned twice.
 #
 # To regenerate after an intentional change:
 #   uv run --project cli fno-py lint verb-ratchet --update

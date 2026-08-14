@@ -235,6 +235,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # `fno agents list`, which lazy-starts the daemon a Stop hook must never wait
     # on. No Rust client port, so it must never auto-route to the daemon.
     "registry-json",
+    # The orphan sweep (`fno agents orphans`). Pure Python: it plants its own
+    # probe processes and reads the machine through psutil, and the SessionStart
+    # hook calls it synchronously. Routing it to the daemon would make a sweep
+    # for stray processes lazy-start a process. No Rust client port.
+    "orphans",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
