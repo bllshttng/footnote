@@ -189,7 +189,11 @@ fn verb_payload_equals_run_done_payload() {
 
     // One fresh local attestation by the authoring session: it exercises the
     // attestation_origin axis, so parity covers self_attested_count too.
-    fs::write(&project, attestation_line("code-review", HEAD, "sess-par") + "\n").unwrap();
+    fs::write(
+        &project,
+        attestation_line("code-review", HEAD, "sess-par") + "\n",
+    )
+    .unwrap();
 
     // run_done side: a manifest-bearing session promises on a green PR.
     let manifest = cwd.join("target-state.md");
@@ -205,7 +209,7 @@ fn verb_payload_equals_run_done_payload() {
         &transcript,
         serde_json::json!({"message": {"role": "assistant",
             "content": "Done! <promise>MISSION COMPLETE</promise>"}})
-            .to_string()
+        .to_string()
             + "\n",
     )
     .unwrap();
@@ -351,7 +355,11 @@ fn stale_attestation_recomputes_to_stale() {
     let (cwd, project, global) = fixture(parent.path(), "stale");
     fs::write(
         &project,
-        attestation_line("code-review", "oldhead0000000000000000000000000000000", "sess-x") + "\n",
+        attestation_line(
+            "code-review",
+            "oldhead0000000000000000000000000000000",
+            "sess-x",
+        ) + "\n",
     )
     .unwrap();
     let bins = TempDir::new().unwrap();

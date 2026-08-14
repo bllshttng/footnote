@@ -7591,7 +7591,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         args
     };
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        return (0, serde_json::json!({"usage": REVIEW_COVERAGE_USAGE}).to_string());
+        return (
+            0,
+            serde_json::json!({"usage": REVIEW_COVERAGE_USAGE}).to_string(),
+        );
     }
     let mut cwd: Option<PathBuf> = None;
     let mut pr: Option<String> = None;
@@ -7601,10 +7604,8 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     let mut global_events_path: Option<PathBuf> = None;
     let mut settings_path: Option<PathBuf> = None;
     let mut global_settings_path: Option<PathBuf> = None;
-    let mut gh_bin =
-        std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "gh".to_string());
-    let mut git_bin =
-        std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
+    let mut gh_bin = std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "gh".to_string());
+    let mut git_bin = std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
     let mut author_harness_override: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -7635,7 +7636,12 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     }
     let cwd = match cwd {
         Some(c) => c,
-        None => return (2, serde_json::json!({"error": "--cwd is required"}).to_string()),
+        None => {
+            return (
+                2,
+                serde_json::json!({"error": "--cwd is required"}).to_string(),
+            )
+        }
     };
 
     let inputs = resolve_review_inputs(
@@ -8387,7 +8393,10 @@ mod tests {
         let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
         assert_eq!(rep.coverage, Coverage::Covered(1));
         // Every origin is Unknown - the direct statement of "unmeasured".
-        assert!(rep.verdicts.iter().all(|v| v.attestation_origin == AttestationOrigin::Unknown));
+        assert!(rep
+            .verdicts
+            .iter()
+            .all(|v| v.attestation_origin == AttestationOrigin::Unknown));
         let data = coverage_event_data(826, &rep, "h", "", None);
         assert_eq!(data["reviewed_count"], serde_json::json!(1));
         assert!(
@@ -8501,7 +8510,13 @@ mod tests {
             &project,
             &global,
             "review_coverage",
-            coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote", None),
+            coverage_event_data(
+                781,
+                &rep,
+                "a3f4b413b",
+                "github.com/bllshttng/footnote",
+                None,
+            ),
         );
         for path in [&project, &global] {
             let text = std::fs::read_to_string(path).unwrap();

@@ -49,9 +49,7 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
             "reached only from a terminal-allow, which implies run_done already \
              ran this fire; a failed arm leaves a green reviewed PR for a human, \
              which is the safe direction",
-            ProducerReach::SafeDirection(
-                "cannot be starved: terminal-allow implies run_done ran",
-            ),
+            ProducerReach::SafeDirection("cannot be starved: terminal-allow implies run_done ran"),
         ),
         (
             "a human running the verb by hand",
@@ -165,8 +163,7 @@ fn every_reachable_path_produces_an_event() {
                 match *path_name {
                     "stop hook decide() -> run_done" => {
                         let parent = TempDir::new().unwrap();
-                        let (cwd, project, global, gh, git) =
-                            fixture(parent.path(), "stop-hook");
+                        let (cwd, project, global, gh, git) = fixture(parent.path(), "stop-hook");
                         let manifest = cwd.join("target-state.md");
                         fs::write(
                             &manifest,
@@ -178,7 +175,7 @@ fn every_reachable_path_produces_an_event() {
                             &transcript,
                             serde_json::json!({"message": {"role": "assistant",
                                 "content": "<promise>MISSION COMPLETE</promise>"}})
-                                .to_string()
+                            .to_string()
                                 + "\n",
                         )
                         .unwrap();
