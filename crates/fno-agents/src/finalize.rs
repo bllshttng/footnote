@@ -2347,51 +2347,56 @@ fn write_postmortem(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "(clean)".into());
 
+    // Header/commits/tree scaffolding is identical in both branches; only the
+    // heading word, the termination-line suffix, the trailing section name,
+    // and its prose differ. Share the scaffold, branch only what differs
+    // (was two ~20-line near-identical format! blocks).
     let stuck = STUCK_REASONS.contains(&reason);
-    let body = if stuck {
-        format!(
-            "# Postmortem: {sid_short}\n\n\
-             - session: `{session_id}`\n\
-             - termination: **{reason}** (stuck: exited without shipping)\n\
-             - node: `{node}`\n\
-             - plan: `{plan}`\n\
-             - feature: {title}\n\
-             - generated: {now} (mechanical, by `fno-agents finalize`)\n\n\
-             ## Last assistant message\n\n```\n{last_msg}\n```\n\n\
-             ## Recent commits\n\n```\n{commits}\n```\n\n\
-             ## Working tree\n\n```\n{tree}\n```\n\n\
-             ## Triage\n\n\
-             A `{reason}` terminal means `fno-agents loop-check` saw no forward \
-             progress (or the budget cap tripped) and let the session exit. Review \
-             the last message and working tree above: was the agent blocked on an \
-             external dependency, looping without committing, or done but unable to \
-             emit a promise? Feed recurring patterns back into the rules.\n",
+    let (heading, term_suffix, section, prose): (&str, &str, &str, String) = if stuck {
+        (
+            "Postmortem",
+            " (stuck: exited without shipping)",
+            "Triage",
+            format!(
+                "A `{reason}` terminal means `fno-agents loop-check` saw no forward \
+                 progress (or the budget cap tripped) and let the session exit. Review \
+                 the last message and working tree above: was the agent blocked on an \
+                 external dependency, looping without committing, or done but unable to \
+                 emit a promise? Feed recurring patterns back into the rules."
+            ),
         )
     } else {
-        format!(
-            "# Completion eval: {sid_short}\n\n\
-             - session: `{session_id}`\n\
-             - termination: **{reason}**\n\
-             - node: `{node}`\n\
-             - plan: `{plan}`\n\
-             - feature: {title}\n\
-             - generated: {now} (mechanical, by `fno-agents finalize`)\n\n\
-             ## Last assistant message\n\n```\n{last_msg}\n```\n\n\
-             ## Recent commits\n\n```\n{commits}\n```\n\n\
-             ## Working tree\n\n```\n{tree}\n```\n\n\
-             ## Eval\n\n\
-             A `{reason}` terminal means this session completed - a clean \
-             completion still belongs in the corpus the autocorrect monthly \
-             review reads, not only a stuck one (x-8fc0: a failure-only \
-             sample writes rules in a predictable, overcautious direction). \
-             Review the last message above for anything the pre-promise \
-             memory pass should have captured and check it against the \
-             blocklist in skills/target/references/pre-promise.md before \
-             promoting it - do not write an env-dependent finding, a \
-             negative tool claim, a transient error, or an unresolved \
-             failure dressed up as a validated workflow.\n",
+        (
+            "Completion eval",
+            "",
+            "Eval",
+            format!(
+                "A `{reason}` terminal means this session completed - a clean \
+                 completion still belongs in the corpus the autocorrect monthly \
+                 review reads, not only a stuck one (x-8fc0: a failure-only \
+                 sample writes rules in a predictable, overcautious direction). \
+                 Review the last message above for anything the pre-promise \
+                 memory pass should have captured and check it against the \
+                 blocklist in skills/target/references/pre-promise.md before \
+                 promoting it - do not write an env-dependent finding, a \
+                 negative tool claim, a transient error, or an unresolved \
+                 failure dressed up as a validated workflow."
+            ),
         )
     };
+    let body = format!(
+        "# {heading}: {sid_short}\n\n\
+         - session: `{session_id}`\n\
+         - termination: **{reason}**{term_suffix}\n\
+         - node: `{node}`\n\
+         - plan: `{plan}`\n\
+         - feature: {title}\n\
+         - generated: {now} (mechanical, by `fno-agents finalize`)\n\n\
+         ## Last assistant message\n\n```\n{last_msg}\n```\n\n\
+         ## Recent commits\n\n```\n{commits}\n```\n\n\
+         ## Working tree\n\n```\n{tree}\n```\n\n\
+         ## {section}\n\n{prose}\n",
+    );
     fs::write(&file, &body).map_err(|e| format!("write {}: {e}", file.display()))?;
 
     append_corrections_pointer(home, &file, reason, &last_msg);

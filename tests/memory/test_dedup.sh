@@ -50,7 +50,14 @@ pass "case2 identical no-op"
 # as it stands on disk right now (read-before-write, x-8fc0) - the writer
 # refuses (stages instead) an update without it.
 CAND_B='{"type":"project","name":"dedup_test_one","description":"dedup test updated","body":"Body B.\n**Why:** revised.\n**How to apply:** new path.\n"}'
-SHA_BEFORE=$(shasum -a 256 "$ENTRY" 2>/dev/null | awk '{print $1}' || sha256sum "$ENTRY" | awk '{print $1}')
+# A pipeline's exit status is the LAST command's (awk succeeds on empty
+# input), so `A | awk || B | awk` never falls through when A is missing.
+# Check which binary exists first instead.
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_BEFORE=$(sha256sum "$ENTRY" | awk '{print $1}')
+else
+    SHA_BEFORE=$(shasum -a 256 "$ENTRY" | awk '{print $1}')
+fi
 bash "$WRITE" --memory-dir "$WORK" --session-id sid-003 --candidate "$CAND_B" \
     --source-sha256 "$SHA_BEFORE" \
     >/dev/null 2>&1 || fail "case3 update failed"

@@ -220,7 +220,15 @@ TARGET="$MEMORY_DIR/${TYPE}_${SLUG}.md"
 SOURCE_SHA256=""
 if [[ -f "$TARGET" ]]; then
   # <- Read "$TARGET" here before computing the hash, every time.
-  SOURCE_SHA256=$(shasum -a 256 "$TARGET" 2>/dev/null | awk '{print $1}' || sha256sum "$TARGET" 2>/dev/null | awk '{print $1}')
+  # `A | awk || B | awk` is a trap: a pipeline's exit status is the LAST
+  # command's (awk succeeds on empty input), so a missing shasum never falls
+  # through to sha256sum. Check which binary exists first, like the writer's
+  # own sha256_of() does.
+  if command -v sha256sum >/dev/null 2>&1; then
+    SOURCE_SHA256=$(sha256sum "$TARGET" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    SOURCE_SHA256=$(shasum -a 256 "$TARGET" | awk '{print $1}')
+  fi
 fi
 
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/memory/write-memory-entry.sh" \

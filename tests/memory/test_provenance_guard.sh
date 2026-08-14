@@ -23,8 +23,14 @@ pass() { printf '[provenance-guard] PASS: %s\n' "$*"; }
 [[ -x "$WRITER" ]] || fail "writer not executable at $WRITER"
 
 sha256_of() {
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' \
-        || sha256sum "$1" | awk '{print $1}'
+    # A pipeline's exit status is the LAST command's (awk succeeds on empty
+    # input), so `A | awk || B | awk` never falls through when A is missing.
+    # Check which binary exists first instead.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
 }
 
 WORK=$(mktemp -d -t provenance-guard-XXXXXX)
