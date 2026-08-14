@@ -922,7 +922,7 @@ def _seed_managed_settings(
     api_key_ids: list[str] | None = None,
 ) -> Path:
     settings_path = tmp_path / "config.toml"
-    records = []
+    records: list[dict[str, object]] = []
     for rid in managed_ids:
         records.append({
             "id": rid, "name": rid, "harness": "claude", "auth": "managed",
