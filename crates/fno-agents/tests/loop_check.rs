@@ -5975,8 +5975,7 @@ fn floor_never_blocks_a_promise() {
 /// Item 2: an exhausted quota turns the bare read failure into the exhaustion
 /// name with a reset horizon, and drops the "retrying next fire" advice.
 #[test]
-fn exhaustion_named_on_read_failure() {
-    let tmp = TempDir::new().unwrap();
+fn exhaustion_named_on_read_failure() {    let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     isolate_settings(cwd);
@@ -6018,6 +6017,61 @@ fn exhaustion_named_on_read_failure() {
     assert!(
         !d.message.contains("retrying next fire"),
         "exhaustion must not be advised to retry: {}",
+        d.message
+    );
+}
+
+/// The floor's watching exemption must NEVER idle without a lease: a watching
+/// fire below floor whose claim cannot be renewed falls through to the
+/// stand-down block (and never crashes on the exemption path itself).
+#[test]
+fn floor_watching_fire_without_lease_still_blocks() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floorw", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    // A newest-entry <watching> tag (no claim fields in the manifest, so the
+    // lease renewal cannot succeed).
+    let msg = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": "<watching reason=\"ci\" pr=\"1\" timeout=\"30m\">"
+        }
+    });
+    fs::write(
+        &transcript_path,
+        serde_json::to_string(&msg).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let gh = quota_gh(cwd, 50, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("standing down"), "got: {}", d.message);
+    assert!(
+        !d.message.contains("watching under GraphQL stand-down"),
+        "an unleased watching fire must not idle: {}",
         d.message
     );
 }

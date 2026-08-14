@@ -5516,6 +5516,70 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let quota_probe = probe_graphql_quota(gh_bin, &cwd);
     if let Some(q) = &quota_probe {
         if q.remaining < GRAPHQL_FLOOR && intent != Intent::Promise {
+            // Lease-only exemption for a WATCHING fire (review finding on the
+            // floor): the watch-idle branch below is unreachable from here, so
+            // without this a quota window converts every watching fire into a
+            // "continue working" block - killing watch-idle exactly when quota
+            // is low - and the claim lease never renews. The wait class itself
+            // CANNOT be verified (that needs the reads we are refusing to
+            // spend), so this idles on the tag + lease alone, only on a
+            // harness that self-wakes, and the message says the state was not
+            // verified. The watcher's exit re-evaluates with fresh quota.
+            if let Intent::Watching {
+                ref reason,
+                ref timeout,
+                ..
+            } = intent
+            {
+                if harness_can_idle(
+                    author_harness.as_deref(),
+                    std::env::var("FNO_DRIVER_LIB").is_ok(),
+                ) {
+                    let window_ms = watch_window_ms(timeout.as_deref());
+                    let renewed = match (
+                        scan_manifest_field(&manifest_content, "target_claim_key"),
+                        scan_manifest_field(&manifest_content, "target_claim_holder"),
+                    ) {
+                        (Some(key), Some(holder)) => matches!(
+                            crate::claims::renew(&key, &holder, window_ms, None),
+                            Ok(true)
+                        ),
+                        _ => false,
+                    };
+                    if renewed {
+                        emit(
+                            "loop_check_watch_idle",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "blocker": "unknown",
+                                "declared_timeout": timeout.clone().unwrap_or_default(),
+                                "reason": reason,
+                                "lease_ms": window_ms,
+                                "stand_down": true,
+                                "graphql_remaining": q.remaining
+                            }),
+                        );
+                        return (
+                            0,
+                            allow_output(
+                                "allow",
+                                None,
+                                &format!(
+                                    "watching under GraphQL stand-down (remaining {} below \
+                                     floor {}): idling until the watcher fires. This fire \
+                                     verified NO PR state - the lease is renewed for the \
+                                     window and the watcher's exit re-evaluates.",
+                                    q.remaining, GRAPHQL_FLOOR
+                                ),
+                                0,
+                                None,
+                            ),
+                        );
+                    }
+                    // renewal failed -> never idle without a lease: fall
+                    // through to the stand-down block below.
+                }
+            }
             emit(
                 "loop_check",
                 serde_json::json!({
