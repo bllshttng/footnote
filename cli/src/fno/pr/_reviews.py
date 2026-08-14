@@ -274,6 +274,85 @@ def latest_review_coverage(
     return best
 
 
+def _fire_review_coverage_verb(
+    pr_number: int, cwd: Optional[str], head: Optional[str]
+) -> tuple[bool, str]:
+    """Run the ``fno-agents review-coverage`` verb once. Returns ``(ran, why)``.
+
+    ``ran`` is True for any exit the verb defines (0/3/4) - including the
+    unknown-coverage exit 4, which still emitted a row the caller re-reads.
+    ``why`` names the failure when ``ran`` is False, for the refusal text.
+    Binary resolution reuses :func:`fno.rust_binary.resolve_binary` (the one
+    resolver; never a second lookup here).
+    """
+    import subprocess
+
+    try:
+        from fno import rust_binary
+
+        binary = rust_binary.resolve_binary()
+    except Exception:  # noqa: BLE001 - no resolver -> unavailable, fail closed
+        return False, "fno-agents not found"
+    if binary is None:
+        return False, "fno-agents not found"
+    argv = [
+        str(binary),
+        "review-coverage",
+        "--cwd",
+        str(_repo_root(cwd)),
+        "--pr",
+        str(pr_number),
+    ]
+    if head:
+        argv += ["--head", head]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"recompute failed: {exc}"
+    if proc.returncode not in (0, 3, 4):
+        why = (proc.stderr or "").strip().splitlines()
+        return False, f"recompute failed (exit {proc.returncode}: {why[-1] if why else ''})"
+    return True, ""
+
+
+def review_coverage_for_gate(
+    pr_number: int,
+    cwd: Optional[str] = None,
+    head: Optional[str] = None,
+) -> tuple[Optional[dict], str]:
+    """The coverage event a gate should act on, recomputed at most ONCE (x-3a3f).
+
+    Reads :func:`latest_review_coverage`; when there is no usable row (nothing
+    found, or the found row pins a head that is not ``head``), fires the
+    ``fno-agents review-coverage`` verb once - the same producer the stop hook
+    uses - and re-reads once. Never more than one recompute per invocation: a
+    loop here would turn a refusal into a spin.
+
+    Every failure keeps the refusal: a binary that cannot be resolved, a
+    non-zero exit, or a re-read that still yields nothing all return the
+    original (or absent) row plus a note naming the recompute's outcome,
+    because a refusal that reports only a count is what taught two workers to
+    design around a gate that was green somewhere else.
+
+    Returns ``(data_or_None, note)``; ``note`` is ``""`` when no recompute ran,
+    else ``"recomputed"`` or ``"recompute unavailable: <why>"``.
+    """
+    data = latest_review_coverage(pr_number, cwd)
+    note = ""
+    ev_head = (data or {}).get("head_sha")
+    mismatch = bool(head and data and ev_head and head != ev_head)
+    if data is None or mismatch:
+        ran, why = _fire_review_coverage_verb(pr_number, cwd, head)
+        if ran:
+            fresh = latest_review_coverage(pr_number, cwd)
+            if fresh is not None:
+                data = fresh
+                note = "recomputed"
+        else:
+            note = f"recompute unavailable: {why}"
+    return data, note
+
+
 def _is_covered(data: Optional[dict]) -> bool:
     """Whether a coverage event reports a real pass (covered AND count > 0)."""
     if not data or data.get("coverage") != "covered":
@@ -307,31 +386,45 @@ def _stale_verdicts(data: dict) -> list[dict]:
     ]
 
 
-def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
-    """The latest ``review_coverage`` verdict for a PR (loop-check emits it every
-    gate eval). Additive and fail-open: any failure degrades to the unknown
-    sentinel. Python consumes the event rather than recomputing (Ownership: Rust
-    computes, Python reads), so a human and the loop see one number for the same
-    PR.
+def read_review_coverage(
+    pr_number: int,
+    cwd: Optional[str] = None,
+    head: Optional[str] = None,
+    *,
+    recompute: bool = False,
+) -> dict:
+    """The ``review_coverage`` verdict for a PR, recomputed once when there is
+    no usable row and ``recompute`` is set (x-3a3f). The default stays a pure
+    read so direct callers (and hermetic tests) never spawn a subprocess; the
+    two gate surfaces - ``fno pr merge`` and ``fno pr status`` - opt in.
+    Additive and fail-open: any failure degrades to the unknown sentinel.
+    Python still consumes the event rather than recomputing coverage itself
+    (Ownership: Rust computes, Python reads) - the recompute shells out to the
+    SAME Rust producer the stop hook runs.
 
     Carries ``head_sha`` and ``stale_verdicts`` (x-5b99) so a reader can see
-    WHICH commit was covered and by whom. Without them a stale verdict and a
-    fresh one rendered identically, and the operator was left merging by hand
-    because a green word could not be checked against anything.
+    WHICH commit was covered and by whom, and ``recompute`` (only when one ran)
+    so a human report and the merge gate can name how the number arrived.
     """
     try:
-        latest = latest_review_coverage(pr_number, cwd)
+        if recompute:
+            latest, note = review_coverage_for_gate(pr_number, cwd, head)
+        else:
+            latest, note = latest_review_coverage(pr_number, cwd), ""
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails
         return dict(_UNKNOWN_COVERAGE)
     if latest is None:
         return dict(_UNKNOWN_COVERAGE)
-    return {
+    shaped = {
         "coverage": latest.get("coverage", "unknown"),
         "reviewed_count": latest.get("reviewed_count"),
         "self_attested_count": latest.get("self_attested_count"),
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": _stale_verdicts(latest),
     }
+    if note:
+        shaped["recompute"] = note
+    return shaped
 
 
 def _is_optional(login: str, names: list[str]) -> bool:

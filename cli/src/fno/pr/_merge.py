@@ -143,23 +143,28 @@ def _read_state_field(state_file: str, field: str) -> str:
     return ""
 
 
-def _review_coverage_for_pr(pr_number: int, repo: str) -> Optional[dict]:
-    """The latest ``review_coverage`` event data for ``pr_number``, or None.
+def _review_coverage_for_pr(
+    pr_number: int, repo: str, head: Optional[str] = None
+) -> "tuple[Optional[dict], str]":
+    """The ``review_coverage`` event data for ``pr_number``, recomputed once
+    when there is no usable row, or ``(None, note)``.
 
-    loop-check emits one every gate eval (x-0eaf). Python consumes it rather
-    than recomputing coverage (Ownership: Rust computes, Python reads). A
-    missing or corrupt log degrades to None, which the caller treats as Unknown
-    and refuses - never a pass.
+    loop-check emits one every gate eval (x-0eaf); a session with no manifest
+    never does, which made the gate unsatisfiable for that shape - so a missing
+    or head-mismatched row now fires the standalone producer once (x-3a3f).
+    Python still consumes the event rather than recomputing coverage itself
+    (Ownership: Rust computes, Python reads). Any failure degrades to the
+    original row (or None) plus a note naming the recompute's outcome, which
+    the caller treats as Unknown and refuses - never a pass.
     """
     try:
-        from fno.pr._reviews import latest_review_coverage
+        from fno.pr._reviews import review_coverage_for_gate
     except Exception:  # noqa: BLE001 - events module unavailable -> Unknown
-        return None
+        return None, ""
     try:
-        data = latest_review_coverage(pr_number, repo)
+        return review_coverage_for_gate(pr_number, repo, head)
     except Exception:  # noqa: BLE001 - corrupt log -> Unknown, not a crash
-        return None
-    return data
+        return None, ""
 
 
 def _coverage_sources(repo: str) -> list[str]:
@@ -1096,7 +1101,12 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # local-attestation check preserves a specifically required code-review.
     review_lane = _review_lane_configured(repo, pr_number)
     code_review_required = _code_review_attestation_required(repo, pr_number)
-    cov = _review_coverage_for_pr(pr_number, repo)
+    # Head fetched up front (x-3a3f): the recompute below needs it to pin the
+    # emitted event to what would actually merge, and the staleness comparison
+    # needs it anyway. A failed fetch returns None and neither consumer can
+    # act on it - same best-effort stance as before, one round trip earlier.
+    head: Optional[str] = _pr_head_oid(pr_number, repo) if review_lane else None
+    cov, recompute_note = _review_coverage_for_pr(pr_number, repo, head)
     covered = (
         not review_lane
         or (
@@ -1109,16 +1119,12 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             )
         )
     )
-    # Carried into the refusal reason so a stale-head block says so. Stays None
-    # when the count already refused (no gh round-trip on a path that cannot be
-    # stale) or when the fetch failed.
-    head: Optional[str] = None
     if covered and cov is not None and review_lane:
         # Staleness: the event pins a head; if the PR head moved after the gate
-        # eval, the coverage no longer describes what would merge. Best-effort:
-        # a head-fetch failure does not itself block (the event is from the
-        # current autonomous flow), but a confirmed mismatch refuses.
-        head = _pr_head_oid(pr_number, repo)
+        # eval, the coverage no longer describes what would merge. A recompute
+        # ran against this same head when the row was stale or missing, so a
+        # mismatch here means the recompute's own output disagrees with the PR
+        # - still a confirmed mismatch, still refuses.
         ev_head = cov.get("head_sha") if cov else None
         if head and ev_head and head != ev_head:
             covered = False
@@ -1132,6 +1138,14 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             refusal = _coverage_refused_reason(
                 cov, head, _coverage_sources(repo) if cov is None else None
             )
+        # Name the recompute and its outcome: a refusal reporting only a count
+        # is what taught two workers to design around a gate that was green
+        # somewhere else (x-3a3f).
+        if recompute_note:
+            if refusal.endswith(")"):
+                refusal = f"{refusal[:-1]}; {recompute_note})"
+            else:
+                refusal = f"{refusal} ({recompute_note})"
         _emit(
             pr_number,
             "blocked",
