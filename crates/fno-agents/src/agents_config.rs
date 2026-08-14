@@ -238,15 +238,13 @@ pub fn dead_row_grace_secs(cwd: &Path, harness: &str) -> u64 {
     {
         return v;
     }
-    resolve(cwd, |t| {
-        match table_agents_scalar(t, "dead_row_grace")? {
-            Value::Integer(i) => u64::try_from(i).ok(),
-            Value::Table(per_harness) => per_harness
-                .get(harness)?
-                .as_integer()
-                .and_then(|i| u64::try_from(i).ok()),
-            _ => None,
-        }
+    resolve(cwd, |t| match table_agents_scalar(t, "dead_row_grace")? {
+        Value::Integer(i) => u64::try_from(i).ok(),
+        Value::Table(per_harness) => per_harness
+            .get(harness)?
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok()),
+        _ => None,
     })
     .unwrap_or(DEFAULT_DEAD_ROW_GRACE_SECS)
 }
