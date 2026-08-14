@@ -44,6 +44,10 @@ A `|` between `case` patterns is alternation, not a pipe. Split as a pipe, the l
 
 A wrapper's flags are skipped so the real command surfaces, and the list of value-taking flags is hand-written. Any flag missing from it handed command position to its own value: `caffeinate -t 3600 yes > /dev/null` resolved to a command called `3600`. Measured, not reasoned: under `timeout 3` it exits 124, so the `yes` really does run forever. Each segment is now read BOTH ways, because neither is safe alone. Reading every unknown flag as value-taking loses `sudo -E yes > /dev/null`. There `-E` is a real boolean, and the skip eats the generator behind it.
 
+**Test a change to this guard against real history, not against invented cases.** Every false refusal above was found the same way. Extract the unique Bash commands from the local transcripts under `~/.claude/projects/`. Run each one through the hook. Read every DENIAL. On a corpus of 366,478 commands the guard denied 23, and 3 of those were wrong. A hand-written case list missed all three across four rounds. The shapes that break a parser are the ones nobody thinks to write. A poll loop wearing a nested `for`. A `case` arm listing `y|yes`. A quoted argument holding the very syntax being matched.
+
+The denial set is small enough to read line by line. That is the point. A guard whose refusals you cannot enumerate is a guard nobody can judge.
+
 Heredoc bodies are stripped before parsing. `cat > poll.sh <<'EOF' ... EOF` writes a script. It does not run one. Reading the body as commands refused the write.
 
 It denies whether or not the call sets `run_in_background`. A foreground unbounded `yes` is orphaned just as surely at session exit.
