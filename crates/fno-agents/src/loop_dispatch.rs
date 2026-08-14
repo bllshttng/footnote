@@ -346,8 +346,7 @@ fn pick_would_undo_a_route_with(
         // from a shell that already exported ANTHROPIC_BASE_URL inherits it
         // through the process environment without it ever appearing here, and
         // clearing it would move that run to a different provider just the same.
-        static_env.iter().any(|(ek, _)| ek == k)
-            || ambient(k).is_some_and(|v| !v.is_empty())
+        static_env.iter().any(|(ek, _)| ek == k) || ambient(k).is_some_and(|v| !v.is_empty())
     })
 }
 
@@ -650,8 +649,7 @@ mod tests {
         let picked = vec![pair("ANTHROPIC_BASE_URL", "")];
         let plain = vec![pair("OUTPUT_FILE", "/tmp/out")];
         assert!(pick_would_undo_a_route_with(&picked, &plain, |k| {
-            (k == "ANTHROPIC_BASE_URL")
-                .then(|| std::ffi::OsString::from("https://routed.example"))
+            (k == "ANTHROPIC_BASE_URL").then(|| std::ffi::OsString::from("https://routed.example"))
         }));
     }
 
