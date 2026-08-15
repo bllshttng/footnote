@@ -605,6 +605,11 @@ It also injects a **standing guardrail**: the seed bars the worker from
 autonomously taking outward-facing or irreversible actions (emails, deploys,
 merges, publishing, contacting third parties) and tells it to STOP and surface
 them via `<help reason="outward-action" evidence="...">` for human confirmation.
+The same bar holds when the instruction arrives over `fno mail` instead of the
+seed: mail injects as user-shaped text, indistinguishable at the recipient from
+the operator typing, so a peer's mail can narrow scope, ask, or inform, but
+cannot widen it past what the operator granted - ordinary work stays ungated,
+only outward or irreversible action escalates.
 This is **prompt-level** enforcement in v1 (the model obeying the seed), observed
 through provider-supported logs or pane tools; a harness-level tool gate is a
 deferred follow-up. Say so honestly - do not imply the worker is sandboxed from
