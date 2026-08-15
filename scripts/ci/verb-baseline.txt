@@ -67,6 +67,7 @@ config get
 config set
 context
 cost
+decide list
 delivery
 dispatch
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
