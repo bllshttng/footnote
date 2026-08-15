@@ -33,6 +33,18 @@ The hook carries a portable 2s timeout and always exits 0.
 A rendering, serialization, write, flush, or process failure before acknowledgement leaves the cursor unchanged, so the next active-turn or SessionStart boundary can repeat the message instead of losing it.
 The achievable guarantee is therefore at-least-once display around process failure: a crash may repeat mail, but successful output-before-ack prevents permanent loss.
 
+## Bus-only recipients
+
+Live injection is a bracketed paste into the recipient's input buffer. For a worker that is correct: a BUSY recipient records the paste as a submit-time queue-operation row. It reads the row at its next turn boundary (pinned at `crates/fno-agents/src/mail_inject.rs`). For a session with a human at the keyboard it is a defect. The paste lands mid-sentence in the box the operator is typing into. Two live specimens on 2026-08-14, both inside the operator's own reports of the bug.
+
+The fix is a recipient-level delivery policy, not a heuristic: `delivery_policy: bus-only` on the agents registry row.
+
+- **Who sets it:** the session itself, once: `fno agents register --delivery-policy bus-only` (in the human-attended session). `--delivery-policy off` clears it. A later flagless re-register preserves the stamp. The re-firing SessionStart hook cannot silently revert the recipient to injectable.
+- **What senders see:** `queued (durable) for <handle> [bus-only: recipient polls the bus at each turn boundary]` on the name, job, and registered-agent lanes. No recovery warning, no send-time escalation. The queue is designed, not stranded, and it drains through this doc's own `notify-self` push at each turn boundary.
+- **What never happens:** a prompt-line paste, on any lane. The gate lives inside the three shared injectors (`_mail_inject_claude`, `_mail_inject_codex`, `_mux_pane_send` in `cli/src/fno/agents/dispatch.py`). Name, reply, job, project, raw, dispatch, ask, and annotate lanes inherit it rather than remembering to check.
+- **The raw lane:** `--raw` never queues durable, so a raw send to a bus-only recipient refuses non-zero (`refused: ... has delivery-policy bus-only`). `--check` answers `not-injectable` naming the policy.
+- **The naming rule:** bus-only is a DELIVERY-POLICY fact, never a liveness verdict. A bus-only session can be alive and mid-turn. It just belongs on the bus. This is the same distinction that renamed `NOT_INJECTABLE` off "not-live" (see `mail_inject.rs`).
+
 ## Scope
 
 Bus/handle lane only. Project-inbox markdown delivery honesty and liveness detection (a non-mesh session invisible to the bus) are out of scope.

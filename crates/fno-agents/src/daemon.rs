@@ -1965,6 +1965,7 @@ fn build_claude_stream_entry(
         crown_grantor: None,
         route_settings_path: None,
         fno_id: None,
+        delivery_policy: None,
     }
 }
 
@@ -5476,6 +5477,7 @@ mod tests {
             crown_grantor: None,
             route_settings_path: None,
             fno_id: None,
+            delivery_policy: None,
         }
     }
 
@@ -6108,6 +6110,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 crown_grantor: None,
                 route_settings_path: None,
                 fno_id: None,
+                delivery_policy: None,
             });
         })
         .unwrap();
@@ -6180,6 +6183,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 crown_grantor: None,
                 route_settings_path: None,
                 fno_id: None,
+                delivery_policy: None,
             });
         })
         .unwrap();
@@ -6321,6 +6325,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 crown_grantor: None,
                 route_settings_path: None,
                 fno_id: None,
+                delivery_policy: None,
             });
         })
         .unwrap();
@@ -6637,6 +6642,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 crown_grantor: None,
                 route_settings_path: None,
                 fno_id: None,
+                delivery_policy: None,
             });
         })
         .unwrap();
@@ -6729,6 +6735,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             crown_grantor: None,
             route_settings_path: None,
             fno_id: None,
+            delivery_policy: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -6769,6 +6776,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             crown_grantor: None,
             route_settings_path: None,
             fno_id: None,
+            delivery_policy: None,
         }
     }
 
@@ -7921,6 +7929,7 @@ done
                 crown_grantor: None,
                 route_settings_path: None,
                 fno_id: None,
+                delivery_policy: None,
             });
         })
         .unwrap();
@@ -7966,6 +7975,7 @@ done
             crown_grantor: None,
             route_settings_path: None,
             fno_id: None,
+            delivery_policy: None,
         }
     }
 

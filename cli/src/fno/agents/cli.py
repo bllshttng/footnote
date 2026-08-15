@@ -2205,6 +2205,18 @@ def cmd_whoami(
 @agents_app.command("register", hidden=True)
 def cmd_register(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
+    delivery_policy: str | None = typer.Option(
+        None,
+        "--delivery-policy",
+        help=(
+            "This session's mail delivery policy. 'bus-only' forbids prompt-line "
+            "injection: mail to this session never pastes into its input buffer "
+            "and always queues durable, surfaced at each turn boundary. 'off' "
+            "clears back to the default injectable policy. A delivery-policy "
+            "fact, never a liveness verdict. Omitted: leave the row unchanged "
+            "(a re-firing SessionStart hook must not clobber a stamp)."
+        ),
+    ),
 ) -> None:
     """Join THIS session to the mesh roster so peers can `fno mail send` to it.
 
@@ -2227,6 +2239,13 @@ def cmd_register(
     from fno.agents.registry import register_existing_session
     from fno.harness_identity import resolve_harness_identity
 
+    if delivery_policy is not None and delivery_policy not in ("bus-only", "off"):
+        sys.stderr.write(
+            f"error: --delivery-policy accepts 'bus-only' or 'off', "
+            f"got {delivery_policy!r}\n"
+        )
+        raise typer.Exit(code=2)
+
     ident = resolve_harness_identity()
     session_id = ident.session_id
     harness = ident.harness or ("claude" if session_id else None)
@@ -2241,6 +2260,7 @@ def cmd_register(
         entry = register_existing_session(
             provider=harness, session_id=session_id, cwd=os.getcwd(),
             origin="operator",
+            delivery_policy=delivery_policy,
         )
     except Exception as exc:  # a deliberate manual join reports failure (unlike the fail-open hook)
         sys.stderr.write(f"register failed: {exc}\n")
@@ -2257,11 +2277,21 @@ def cmd_register(
         import json as _json
 
         sys.stdout.write(
-            _json.dumps({"registered": True, "name": entry.name, "harness": entry.harness}) + "\n"
+            _json.dumps({
+                "registered": True,
+                "name": entry.name,
+                "harness": entry.harness,
+                "delivery_policy": entry.delivery_policy,
+            }) + "\n"
         )
     else:
+        policy_note = (
+            " [bus-only: mail to this session queues durable, never injects]"
+            if getattr(entry, "delivery_policy", None) == "bus-only"
+            else ""
+        )
         sys.stdout.write(
-            f"joined the mesh as {entry.name} - peers can now reach you with "
+            f"joined the mesh as {entry.name}{policy_note} - peers can now reach you with "
             f"`fno mail send {entry.name} \"...\"`\n"
         )
 

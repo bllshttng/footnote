@@ -417,7 +417,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     # US8: no live daemon in the test env -- force the codex live-inject miss so
     # the send deterministically writes the durable floor (round-trip target).
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
 
     # A claude session sends to the codex handle (codex row is unregistered, so
     # the send falls through registry-unknown into disk resolution).
@@ -444,7 +444,7 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     # reports "delivered (hosted)" and writes NO durable thread.
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: True)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: True)
 
     sent = runner.invoke(
         app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
@@ -512,7 +512,7 @@ def test_us7b_mux_pane_rung_delivers_live_when_socket_inject_misses(
     takes the turn live, so no durable thread is written."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=True, pane_sends=True, expect_token=sid
     )
@@ -538,7 +538,7 @@ def test_us7b_mux_pane_send_failure_falls_closed_to_durable(
     message must land on the durable floor, never vanish."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=True, pane_sends=False, expect_token=sid
     )
@@ -563,7 +563,7 @@ def test_us7b_unrostered_session_skips_pane_rung_silently(
     through to the durable floor without a crash or a stderr complaint."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=False, pane_sends=True, expect_token=sid
     )
@@ -609,7 +609,7 @@ def test_us7b_non_live_entry_never_pane_sends(
     live transport. Parameterized so weakening the gate to `!= "exited"` fails."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     calls = _stub_pane_rung(
         monkeypatch, in_roster=True, pane_sends=True, expect_token=sid, status=status
     )
@@ -641,7 +641,7 @@ def test_us7b_rostered_but_paneless_entry_falls_to_durable(
 
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a: False)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
     paneless = SimpleNamespace(name="not-hosted", status="live", mux=None)
 
     def _resolve(token, **_kw):

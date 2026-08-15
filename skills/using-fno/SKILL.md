@@ -46,7 +46,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno mail reply --to X "..."`: it threads the reply and resolves the sender itself, whether the message arrived live or was drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 
-**Read send evidence literally.** `delivered (hosted)` is confirmed; `queued (durable)` may never drain - no receipt is no coordination. Before re-sending, `peek` (a busy recipient may still get it), then `resume`/`attach`.
+**Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (a busy recipient can still get it), then `resume`/`attach`. One exception: a `[bus-only]` queue drains by design. The recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
 
 **Sending with a reply address.** `send <name>` self-stamps your handle; `--to-project` stamps the project (add `--from-self` if you will hold for the answer). Only `fno whoami`'s `mail:` line is a valid `--from-name`.
 

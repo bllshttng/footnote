@@ -81,6 +81,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         crown_grantor: None,
         route_settings_path: None,
         fno_id: None,
+        delivery_policy: None,
         legacy_claude_short_id: None,
     }
 }
@@ -100,7 +101,15 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 .position(|e| e.claude_session_uuid.as_deref() == Some(k))
         });
         match idx {
-            Some(i) => reg.entries[i] = entry,
+            Some(i) => {
+                // x-e21e: `delivery_policy` is a stamp the SESSION declared
+                // about itself; the adopt path does not own it, so a refresh
+                // carries it forward instead of reverting the row to the
+                // injectable default (a re-adopted leader must stay bus-only).
+                let policy = reg.entries[i].delivery_policy.clone();
+                reg.entries[i] = entry;
+                reg.entries[i].delivery_policy = policy;
+            }
             None => reg.entries.push(entry),
         }
     })
@@ -280,6 +289,37 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1, "upsert must not duplicate");
         assert_eq!(rows[0].cwd, "/Users/x/code/moved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_refresh_carries_a_declared_delivery_policy_forward() {
+        // x-e21e: the replace path swaps the WHOLE row for a fresh mint, which
+        // would silently revert a session's self-declared bus-only stamp to
+        // injectable on re-adopt -- the delivery defect again, one adopt later.
+        let dir = std::env::temp_dir().join(format!(
+            "fno-adopt-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+
+        let mut stamped = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
+        stamped.delivery_policy = Some("bus-only".into());
+        upsert_adopted_row(&reg, stamped).unwrap();
+        // A later re-adopt of the SAME session mints a fresh default row.
+        upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z")).unwrap();
+
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        assert_eq!(
+            loaded.entries[0].delivery_policy.as_deref(),
+            Some("bus-only"),
+            "a re-adopt must not revert a declared delivery policy"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

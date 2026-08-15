@@ -158,7 +158,7 @@ def test_send_live_holder_delivers_no_durable(runner, isolated, monkeypatch):
 
     inject_calls: list[str] = []
 
-    def _fake_inject(session_id, wrapped):
+    def _fake_inject(session_id, wrapped, **_k):
         inject_calls.append(session_id)
         return True  # confirmed delivery
 
@@ -187,7 +187,7 @@ def test_send_live_miss_durables_to_job_address(runner, isolated, monkeypatch):
 
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_claude",
-        lambda sid, wrapped: False,  # live miss
+        lambda sid, wrapped, **_k: False,  # live miss
     )
 
     res = runner.invoke(
@@ -223,7 +223,7 @@ def test_pr_resolves_to_node_and_delivers(runner, isolated, monkeypatch):
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
 
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped: True
+        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped, **_k: True
     )
 
     res = runner.invoke(
@@ -278,7 +278,7 @@ def test_pr_resolves_via_additional_prs(runner, isolated, monkeypatch):
     _acquire_node("x-multi", "88888888-8888-8888-8888-888888888888")
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped: True
+        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped, **_k: True
     )
     res = runner.invoke(
         app, ["mail", "send", "pr:101", "secondary pr", "--from-name", "king"]
@@ -376,7 +376,28 @@ def test_drain_self_surfaces_job_mail_for_holder(runner, isolated, monkeypatch):
 
     res = runner.invoke(app, ["mail", "drain-self"])
     assert res.exit_code == 0, res.output
-    assert "reached the successor" in res.stdout
+    # CI-only failure triage (changed-smoke, ubuntu): when the job mail does
+    # not surface, dump the exact legs the scan depends on so the next red run
+    # names the broken one instead of an empty stdout.
+    from pathlib import Path as _P
+
+    from fno.agents.truth_status import resolve_truth_status as _rts
+
+    _diag = {
+        "claim": _rts("drain-abcd", manifest_cwd=str(_P.cwd())),
+        "manifest": ( _P.cwd() / ".fno" / "target-state.md").read_text()[:120]
+        if (_P.cwd() / ".fno" / "target-state.md").exists()
+        else "MISSING",
+        "claims_root": __import__("os").environ.get("FNO_CLAIMS_ROOT"),
+        "cwd": str(_P.cwd()),
+    }
+    _root = _P(__import__("os").environ["FNO_CLAIMS_ROOT"])
+    if _root.exists():
+        _diag["root_ls"] = sorted(p.name for p in _root.rglob("*"))[:12]
+    from fno.claims.core import claim_status as _cs
+
+    _diag["direct_status"] = _cs("node:drain-abcd", root=_root)
+    assert "reached the successor" in res.stdout, f"diag={_diag}"
 
 
 def test_drain_self_skips_job_mail_when_not_holder(runner, isolated, monkeypatch):

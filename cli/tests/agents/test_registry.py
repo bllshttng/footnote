@@ -650,7 +650,7 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -773,7 +773,7 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1800,7 +1800,7 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     # Write-back drops the legacy key and carries short_id at the current schema.
     write_registry(loaded, path=registry_path)
     raw = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 13
+    assert raw["schema_version"] == 14
     row = raw["agents"][0]
     assert "claude_short_id" not in row
     assert row["short_id"] == "7c5dcf5d"

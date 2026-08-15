@@ -1339,7 +1339,12 @@ def _name_lane_send(
     ``reply_to`` stamps BOTH the wire ``reply_to`` attr and the bus
     ``in_reply_to`` from ONE msg-id -- never one set, the other null. Exits 12 on
     a durable-floor write failure."""
-    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex, _mux_pane_send
+    from fno.agents.dispatch import (
+        BUS_ONLY_POLICY,
+        _mail_inject_claude,
+        _mail_inject_codex,
+        _mux_pane_send,
+    )
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.agents.store_fallback import is_full_session_id, is_session_shaped
@@ -1461,14 +1466,26 @@ def _name_lane_send(
             # injectors are cheap and side-effect-free on a miss.
             probe_agent = token_reachable.agent if token_reachable is not None else None
             if probe_agent == "codex":
-                injected = _mail_inject_codex(probe_target, wrapped)
+                _codex_probe_reason: list = []
+                injected = _mail_inject_codex(
+                    probe_target, wrapped, reason_out=_codex_probe_reason
+                )
+                if not injected:
+                    live_reason = (
+                        _codex_probe_reason[0] if _codex_probe_reason else None
+                    )
             else:
                 _probe_reason: list = []
                 injected = _mail_inject_claude(probe_target, wrapped, reason_out=_probe_reason)
                 if not injected:
                     live_reason = _probe_reason[0] if _probe_reason else None
                 if not injected and probe_agent is None:
-                    injected = _mail_inject_codex(probe_target, wrapped)
+                    _both_reason: list = []
+                    injected = _mail_inject_codex(
+                        probe_target, wrapped, reason_out=_both_reason
+                    )
+                    if not injected and _both_reason:
+                        live_reason = _both_reason[0]
             if not injected:
                 lanes.append("inject=not-delivered")
                 if token_reachable is None:
@@ -1482,6 +1499,13 @@ def _name_lane_send(
                     # Resolved, but uniqueness was unprovable. Do not wake a
                     # possible stranger; demote durably to this candidate.
                     lanes.append(token_lane)
+                elif live_reason == BUS_ONLY_POLICY:
+                    # x-e21e: bus-only also declines the wake rung. Waking
+                    # revives a second writer on the recipient; the policy
+                    # named the durable bus as this recipient's ONE lane, so
+                    # hold to it rather than spawning a bg copy of a session
+                    # that declared itself bus-only.
+                    pass
                 else:
                     injected, woken_as, wake_lane = _wake_rung(
                         token_reachable, wrapped
@@ -1500,7 +1524,14 @@ def _name_lane_send(
             if not injected:
                 live_reason = _resolved_reason[0] if _resolved_reason else None
         elif provider == "codex":
-            injected = _mail_inject_codex(resolved.session_id, wrapped)
+            _resolved_codex_reason: list = []
+            injected = _mail_inject_codex(
+                resolved.session_id, wrapped, reason_out=_resolved_codex_reason
+            )
+            if not injected:
+                live_reason = (
+                    _resolved_codex_reason[0] if _resolved_codex_reason else None
+                )
         if not injected:
             # A send addressed by session id never consults the roster, so a
             # mux-hosted session of any provider would demote to durable with a
@@ -1567,6 +1598,11 @@ def _name_lane_send(
     )
 
     assert recipient is not None  # resolved by the name-lane logic before the durable write
+    # x-e21e: a bus-only queue is DESIGNED, not stranded. The recipient polls
+    # the durable bus at each turn boundary (notify-self), so this is delivery
+    # on the recipient's terms -- no recovery warning, no escalation, and a
+    # receipt that says so instead of reading as a live-miss.
+    bus_only = live_reason == BUS_ONLY_POLICY
     try:
         th = write_new_thread(
             recipient=recipient,
@@ -1582,16 +1618,22 @@ def _name_lane_send(
     except (OSError, ValueError, RuntimeError) as exc2:
         print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
         raise typer.Exit(code=12) from exc2
-    _warn_deferred(recipient, reason=live_reason)
+    if not bus_only:
+        _warn_deferred(recipient, reason=live_reason)
     # Routing-reason disclosure (US10): name WHY this is durable so a delivery
     # bug is diagnosable from the sender's own terminal. A self-send can never
     # inject itself; everything else here is a live miss. When the live lane
     # named its own cause (node x-1904), carry that token so a miss to a LIVE
     # recipient reads as its real cause (e.g. not-confirmed), not a bare
-    # live-miss that reads as a dead recipient.
-    reason = "self-send" if self_send else (live_reason or "live-miss")
+    # live-miss that reads as a dead recipient. A bus-only queue is neither: it
+    # is the recipient's declared delivery policy, and its receipt says the
+    # message WILL surface at the recipient's turn boundary.
+    if bus_only:
+        reason = "bus-only: recipient polls the bus at each turn boundary"
+    else:
+        reason = "self-send" if self_send else (live_reason or "live-miss")
     hint = ""
-    if not self_send and provider == "codex" and _codex_daemon_socket_absent():
+    if not self_send and not bus_only and provider == "codex" and _codex_daemon_socket_absent():
         hint = (
             " codex app-server daemon not running: run "
             "`codex app-server daemon start`, then restart the session "
@@ -1613,7 +1655,7 @@ def _name_lane_send(
     # `is_reachable` a second time: one derivation, one default, and the two
     # cannot disagree about the same recipient.
     resolved_reachable = resolved is not None and recipient_live
-    if live_attempted and (attended or resolved_reachable):
+    if live_attempted and not bus_only and (attended or resolved_reachable):
         esc_reason = "attended-miss" if attended else "reachable-miss"
         if (
             _escalate_to_human(
@@ -1656,7 +1698,11 @@ def _job_lane_send(
     the durable envelope always carries the canonical node address and the drain
     consumes one address space.
     """
-    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
+    from fno.agents.dispatch import (
+        BUS_ONLY_POLICY,
+        _mail_inject_claude,
+        _mail_inject_codex,
+    )
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.dispatch_flags import infer_invoking_harness
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
@@ -1702,12 +1748,16 @@ def _job_lane_send(
 
     # Live-inject to the current holder's session. Inject targets the session id
     # (control.sock / codex daemon are keyed by it, cwd-independent), so a holder
-    # in another worktree is reachable from this sender's cwd.
+    # in another worktree is reachable from this sender's cwd. A bus-only holder
+    # (x-e21e) is refused inside the injector, so the receipt below names the
+    # policy rather than a miss.
     provider = job.harness or "claude"
+    _job_reason: list = []
     if provider == "codex":
-        injected = _mail_inject_codex(session_id, wrapped)
+        injected = _mail_inject_codex(session_id, wrapped, reason_out=_job_reason)
     else:
-        injected = _mail_inject_claude(session_id, wrapped)
+        injected = _mail_inject_claude(session_id, wrapped, reason_out=_job_reason)
+    bus_only = not injected and BUS_ONLY_POLICY in _job_reason
 
     holder_tag = f" [holder {provider} {session_id[:8]}]"
     if injected:
@@ -1741,6 +1791,22 @@ def _job_lane_send(
         raise typer.Exit(code=12) from exc
     # One stdout line (the receipt contract) + an advisory on stderr naming the
     # recovery: the message waits for the holder's next drain, not a reply window.
+    # A bus-only holder skipped the inject by policy (x-e21e), so the receipt
+    # says the policy, not a miss. A node:<id> thread is NOT surfaced by the
+    # holder's turn-boundary notify-self (that scan reads only the session's
+    # own handle): it drains at a holder's SessionStart scan, so the receipt
+    # must not promise turn-boundary visibility.
+    if bus_only:
+        print(
+            "mail: holder is bus-only by delivery policy; queued durable "
+            "until a holder drains",
+            file=sys.stderr,
+        )
+        print(
+            f"{th.thread_id} queued (durable) for {recipient} "
+            f"[bus-only: a holder drains it by policy]{holder_tag}"
+        )
+        return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
           file=sys.stderr)
     print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss]{holder_tag}")
@@ -1991,6 +2057,20 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             "fine:\n    fno mail send <own-id> \"text\"\n"
             "To fire a verb at your own prompt line (no envelope, so the slash "
             "parses):\n    fno mail send '<payload>' --to-self --raw"
+        )
+
+    # 3b. Bus-only delivery policy (x-e21e): this recipient's mail belongs on
+    #     the durable bus, and the raw lane never queues durable -- so a raw
+    #     send here can do nothing and must refuse loud rather than silently
+    #     not-deliver. Under --check this refusal is an ANSWER about the
+    #     session, the same not-injectable shape as any other no-path verdict.
+    from fno.agents.dispatch import BUS_ONLY_POLICY
+
+    if getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY:
+        _refused(
+            f"{name!r} has delivery-policy bus-only: prompt-line injection is "
+            "forbidden for this recipient. Send wrapped mail instead - it "
+            "queues durable and surfaces at their turn boundary"
         )
 
     # 4. Keystroke lane: a raw slash payload fires only where it reaches a prompt
@@ -2562,9 +2642,13 @@ def cmd_send(
         # time to drain it: the per-project watch daemon drains project inboxes,
         # never a session-handle inbox, so send time is the reachable trigger
         # (US9). The durable note is already written, so a wake miss loses nothing.
+        # A bus-only recipient (x-e21e) declines the wake too: waking revives a
+        # second writer on a session that declared the durable bus its one lane.
         elif kind == Kind.HEADS_UP.value:
             from fno.agents.dispatch import wake_if_asleep_claude
 
+            # A bus-only recipient declines the wake inside
+            # wake_if_asleep_claude: the note surfaces at its turn boundary.
             woke, short = wake_if_asleep_claude(recipient)
             if woke:
                 print(f"woke {recipient} to drain (bg thread {short})", file=sys.stderr)
@@ -2617,11 +2701,22 @@ def cmd_send(
             # envelope is addressed to that peer (its at-least-once copy), NOT
             # the project. Report it as such so the line is not a peer/project
             # mismatch (codex P2) - the resolved peer's own drain picks it up.
-            _warn_deferred(result.recipient)
-            print(
-                f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}] [live-miss]"
-            )
+            # A bus-only peer demoted by policy gets the designed-queue
+            # receipt, not a recovery warning.
+            from fno.agents.dispatch import BUS_ONLY_POLICY
+
+            if result.reason == BUS_ONLY_POLICY:
+                print(
+                    f"{result.msg_id} queued (durable) for {result.recipient} "
+                    f"[project {to_project}] "
+                    f"[bus-only: recipient polls the bus at each turn boundary]"
+                )
+            else:
+                _warn_deferred(result.recipient)
+                print(
+                    f"{result.msg_id} queued (durable) for {result.recipient} "
+                    f"[project {to_project}] [live-miss]"
+                )
         else:
             _warn_deferred(to_project, project=True)
             print(
@@ -2760,6 +2855,14 @@ def cmd_send(
     # problem.
     if result.delivery == "hosted":
         print(f"{result.msg_id} delivered (hosted)")
+    elif result.reason == "bus-only":
+        # x-e21e: the registered-agent lane's gate refused by policy; the
+        # durable write already happened inside dispatch_send. Designed, not
+        # stranded -- no recovery ladder.
+        print(
+            f"{result.msg_id} queued (durable) "
+            f"[bus-only: recipient polls the bus at each turn boundary]"
+        )
     else:
         reason_tok = result.reason or "live-miss"
         _warn_deferred(name, reason=result.reason)
