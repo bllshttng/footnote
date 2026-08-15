@@ -732,7 +732,7 @@ def local_verification_required(
     non_docs = [
         path
         for path in changed.stdout.splitlines()
-        if path and not path.startswith(("docs/", "internal/"))
+        if path and path != "README.md" and not path.startswith(("docs/", "internal/"))
     ]
     return (True, "required") if non_docs else (False, "docs-only")
 
