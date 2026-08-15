@@ -192,7 +192,7 @@ def test_print_command_emits_one_liner() -> None:
 
 
 # ---------------------------------------------------------------------------
-# x-c136 — claude path wakes headlessly and verifies the state moved
+# claude path wakes headlessly and verifies the state moved
 # ---------------------------------------------------------------------------
 
 
@@ -263,7 +263,7 @@ def test_claude_resume_retries_once_before_giving_up() -> None:
 
 
 def test_claude_resume_restores_routed_env() -> None:
-    """A routed row's env must reach the wake attempt (x-c136 finding 2)."""
+    """A routed row's env must reach the wake attempt."""
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -584,7 +584,7 @@ def test_stale_cwd_exits_13_with_rm_hint() -> None:
 
 
 # ---------------------------------------------------------------------------
-# code-review high --comment --fix findings on the x-c136 wake path
+# code-review high --comment --fix findings on the claude wake path
 # ---------------------------------------------------------------------------
 
 

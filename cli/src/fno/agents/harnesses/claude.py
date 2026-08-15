@@ -1288,7 +1288,7 @@ def claude_agents_json(
     which spelling the binary used; an unmapped value passes through with a
     drift warning.
     """
-    # x-c136: `claude agents --json` alone omits stopped/completed rows (57 of
+    # `claude agents --json` alone omits stopped/completed rows (57 of
     # 133 seen live on a real fleet); every reconcile/orphan sweep reading this
     # map was blind to exactly the rows it needed to inspect. `--all` is the
     # fix; there is no narrower flag that keeps only live rows visible, and no

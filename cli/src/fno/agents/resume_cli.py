@@ -7,8 +7,8 @@ registry and resumes it in the recorded cwd. ``--print-command`` dumps a
 shell-pasteable one-liner instead, useful inside Claude Code (which
 can't host an interactive TUI from inside a subprocess).
 
-Provider resume substrates (Locked Decision #6, claude arm updated by
-x-c136):
+Provider resume substrates (Locked Decision #6, claude arm reworked to wake
+instead of exec):
 
 - ``codex`` → ``codex resume <codex_session_id>`` (bypasses the
   exec-source picker filter via direct UUID argument), via
@@ -129,7 +129,7 @@ _WAKE_TARGET_STATUS = "Working"
 
 
 def _default_agents_state_fn() -> dict[str, dict]:
-    """Live-status map keyed by short_id, `--all` included (x-c136 finding 6).
+    """Live-status map keyed by short_id, `--all` included.
 
     `claude agents --json` alone omits stopped/completed rows, so a
     verification read against that narrower view can never observe a
@@ -167,7 +167,7 @@ def _default_wake_fn(
     route_env: Optional[dict[str, str]],
     timeout: float = _WAKE_ATTEMPT_TIMEOUT_SEC,
 ) -> None:
-    """One wake attempt: pty + routed env + clear/send/submit (x-c136).
+    """One wake attempt: pty + routed env + clear/send/submit.
 
     ``claude attach`` allocates no pty of its own; invoked non-interactively
     it prints "Attaching..." and exits having done nothing, which reads as a
@@ -233,6 +233,19 @@ def _default_wake_fn(
         except OSError:
             pass
         proc.wait()
+        # `script`'s pty-attached child (the process that actually execs
+        # into `claude attach`) calls login_tty(), which setsid()s it into
+        # a BRAND NEW session before exec -- so it is never a member of the
+        # bash pgid above, and the killpg call just above does not reach
+        # it. Finish the job by matching the unique short_id in its command
+        # line instead of by process-group membership; best-effort (no
+        # match is the common case when the process already exited on its
+        # own after stdin closed).
+        subprocess.run(
+            ["pkill", "-f", f"claude attach {short_id}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         raise
 
 
@@ -255,8 +268,8 @@ def _resume_claude_wake(
     the TUI, hand the terminal to the operator); this is the headless
     counterpart -- allocate a pty, restore the row's own route, inject the
     message, and confirm the live state moved to Working. Every step here
-    can exit 0 having done nothing (x-c136); the verification read is what
-    makes that detectable instead of a lie.
+    can exit 0 having done nothing; the verification read is what makes
+    that detectable instead of a lie.
     """
     route_env: Optional[dict[str, str]] = None
     if route_settings_path:
@@ -284,7 +297,13 @@ def _resume_claude_wake(
     last_err = ""
     # Already Working (a stale-registry race, or the operator resuming the
     # wrong name): don't inject anything into a session mid-turn. Skip
-    # straight to reporting; the loop below never runs.
+    # straight to reporting; the loop below never runs. This check is only
+    # AT loop entry, not re-read immediately before each wake_fn call: if
+    # the session transitions to Working during _default_wake_fn's ~7s
+    # pre-clear sleep, the keystrokes still land. Narrowing that window
+    # needs the wake subprocess itself to poll and abort mid-sleep, which
+    # would change the verified wake.sh recipe's timing; accepted as a
+    # residual few-second race rather than risk that.
     if before != _WAKE_TARGET_STATUS:
         for _attempt in range(_WAKE_ATTEMPTS):
             try:
@@ -370,7 +389,7 @@ def resume_logic(
         name: Registered agent name.
         print_command: When True, return the shell snippet and exit 0
             instead of resuming.
-        message: Text to inject once the claude session is woken (x-c136).
+        message: Text to inject once the claude session is woken.
             Ignored for every other harness, which resume via exec instead.
         registry_loader: Optional callable returning the registry list
             (defaults to ``fno.agents.registry.load_registry``).
@@ -503,7 +522,7 @@ def resume_logic(
         )
 
     if harness == "claude":
-        # x-c136: `fno agents attach` owns the interactive hand-off; a claude
+        # `fno agents attach` owns the interactive hand-off; a claude
         # resume wakes the session headlessly and verifies the state moved,
         # rather than exec'ing into an attach that (run non-interactively)
         # would print "Attaching..." and exit having done nothing.
