@@ -91,9 +91,11 @@ def is_revivable(row: dict[str, Any]) -> bool:
     """True when `row` (an `fno agents list --json` row) is a claude worker with
     a recorded resumable session - the exact predicate `_revive_orphans` applies
     per orphan. The update-readiness resolver (`fno.update`) calls this same
-    function to count what `--revive` would bring back (AC7-HP, x-b1cc): one
-    predicate, two callers, so they cannot drift apart."""
-    return row.get("provider") == "claude" and bool(row.get("session_id"))
+    function to count what `--revive` would bring back: one predicate, two
+    callers, so they cannot drift apart. Checks `harness`, the canonical
+    identity field (`AgentEntry.harness`) - the legacy `provider` key was
+    removed from the row schema and is always absent now."""
+    return row.get("harness") == "claude" and bool(row.get("session_id"))
 
 
 def _revive_orphans(

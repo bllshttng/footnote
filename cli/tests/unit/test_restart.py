@@ -222,14 +222,14 @@ def test_restart_mux_revives_orphaned_claude_workers(monkeypatch) -> None:
     orphan = {
         "name": "worker1",
         "status": "live",
-        "provider": "claude",
+        "harness": "claude",
         "session_id": "uuid-1",
         "cwd": "/w1",
     }
     survivor = {
         "name": "bgw",
         "status": "live",
-        "provider": "claude",
+        "harness": "claude",
         "session_id": "uuid-2",
         "cwd": "/w2",
     }
@@ -265,7 +265,7 @@ def test_restart_revive_skips_worker_without_resumable_session(monkeypatch) -> N
     reported as skipped, never spawned blind."""
     calls: list = []
     _revive_setup(monkeypatch, calls)
-    row = {"name": "codexw", "status": "live", "provider": "codex", "session_id": None}
+    row = {"name": "codexw", "status": "live", "harness": "codex", "session_id": None}
     _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
 
     result = runner.invoke(app, ["restart", "--mux", "--json"])
@@ -287,7 +287,7 @@ def test_restart_revive_failure_reported_not_fatal(monkeypatch) -> None:
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
 
     monkeypatch.setattr(restart.subprocess, "run", _run)
-    row = {"name": "worker1", "status": "live", "provider": "claude", "session_id": "uuid-1"}
+    row = {"name": "worker1", "status": "live", "harness": "claude", "session_id": "uuid-1"}
     _rows_seq(monkeypatch, [[row], [dict(row, status="exited")]])
 
     result = runner.invoke(app, ["restart", "--mux", "--json"])
@@ -335,12 +335,12 @@ def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
 
 
 def test_is_revivable_predicate() -> None:
-    """AC7-HP (x-b1cc): the extracted predicate matches `_revive_orphans`'s
-    inline decision exactly - a claude provider with a recorded session_id, and
-    nothing else. `fno.update.update_readiness` imports this same function to
-    count what `--revive` would attempt, so the two callers cannot drift."""
-    assert restart.is_revivable({"provider": "claude", "session_id": "uuid-1"}) is True
-    assert restart.is_revivable({"provider": "codex", "session_id": "uuid-1"}) is False
-    assert restart.is_revivable({"provider": "claude", "session_id": None}) is False
-    assert restart.is_revivable({"provider": "claude"}) is False
+    """The extracted predicate matches `_revive_orphans`'s inline decision
+    exactly - a claude harness with a recorded session_id, and nothing else.
+    `fno.update.update_readiness` imports this same function to count what
+    `--revive` would attempt, so the two callers cannot drift."""
+    assert restart.is_revivable({"harness": "claude", "session_id": "uuid-1"}) is True
+    assert restart.is_revivable({"harness": "codex", "session_id": "uuid-1"}) is False
+    assert restart.is_revivable({"harness": "claude", "session_id": None}) is False
+    assert restart.is_revivable({"harness": "claude"}) is False
     assert restart.is_revivable({}) is False
