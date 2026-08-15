@@ -349,6 +349,29 @@ def test_detect_suspect_reverts_undefer_event_before_defer():
     assert "undeferred" in reverts[0].signal
 
 
+def test_detect_suspect_reverts_undefer_signal_survives_mixed_timestamp_formats():
+    """The event log stamps ts with a bare 'Z' suffix (emit_undefer_boundary)
+    while deferred_at is a datetime.isoformat() '+00:00' suffix with
+    microseconds. A raw string comparison of the two can misorder timestamps
+    that fall in the same wall-clock second - '51Z' sorts after '51.5+00:00'
+    lexicographically even though 51.5s is later than 51s. Parsed comparison
+    must still catch this as a real reversal."""
+    entries = [
+        _n(
+            "ab-same-second",
+            status="deferred",
+            deferred_reason="stale >30d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51.500000+00:00",
+        ),
+    ]
+    events = [
+        {"type": "node_undeferred", "unit_id": "ab-same-second", "ts": "2026-08-14T18:19:51Z"},
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=events)
+    assert len(reverts) == 1
+    assert "undeferred" in reverts[0].signal
+
+
 def test_detect_suspect_reverts_priority_signal():
     entries = [
         _n(
@@ -394,6 +417,24 @@ def test_detect_suspect_reverts_ignores_other_defer_reasons():
     ]
     reverts = m.detect_suspect_reverts(entries, events=[])
     assert reverts == []
+
+
+def test_detect_suspect_reverts_matches_non_default_staleness_days():
+    """The drain reason interpolates the configured staleness_days (cli.py),
+    not always 30. A hardcoded '30d' match would silently find nothing on a
+    project configured with a different threshold."""
+    entries = [
+        _n(
+            "ab-p1",
+            status="deferred",
+            priority="p1",
+            deferred_reason="stale >45d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=[])
+    assert len(reverts) == 1
+    assert reverts[0].node_id == "ab-p1"
 
 
 def test_detect_suspect_reverts_never_mutates_input():

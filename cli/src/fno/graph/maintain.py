@@ -642,7 +642,11 @@ def detect_stale_ideas(
     return out
 
 
-STALE_IDEAS_DEFERRED_REASON_PREFIX = "stale >30d, drained by maintain"
+# The `30` is illustrative only: the real reason string (cli.py's drain
+# command) interpolates the configured `staleness_days`, which is not
+# always 30. Matching a hardcoded "30d" here would silently stop finding
+# any drain on a project configured with a different threshold.
+_STALE_IDEAS_DEFERRED_REASON_RE = re.compile(r"^stale >\d+d, drained by maintain")
 
 
 @dataclass
@@ -663,8 +667,9 @@ def detect_suspect_reverts(entries: list[dict], events: Optional[list[dict]] = N
     SECOND time, even back to the human's own choice, is the same class of
     move and is left to the operator.
 
-    Candidate set: every node whose ``deferred_reason`` starts with
-    ``STALE_IDEAS_DEFERRED_REASON_PREFIX``. A node qualifies on any one
+    Candidate set: every node whose ``deferred_reason`` matches
+    ``_STALE_IDEAS_DEFERRED_REASON_RE`` (the drain reason, at any configured
+    ``staleness_days``). A node qualifies on any one
     signal: an undefer event preceding its own ``deferred_at`` (the exact
     reversal shape), a non-default p0/p1 priority, a curated (non-null)
     ``rank``, session history, progress notes, or having reached planning
@@ -695,16 +700,22 @@ def detect_suspect_reverts(entries: list[dict], events: Optional[list[dict]] = N
         if not isinstance(e, dict):
             continue
         reason = e.get("deferred_reason")
-        if not isinstance(reason, str) or not reason.startswith(STALE_IDEAS_DEFERRED_REASON_PREFIX):
+        if not isinstance(reason, str) or not _STALE_IDEAS_DEFERRED_REASON_RE.match(reason):
             continue
         nid = e.get("id")
         if not isinstance(nid, str):
             continue
 
         signal: Optional[str] = None
-        undef_ts = undeferred_at.get(nid)
         deferred_at = e.get("deferred_at") or ""
-        if undef_ts is not None and isinstance(deferred_at, str) and undef_ts < deferred_at:
+        # Parsed, not compared as raw strings: the event log stamps ts with a
+        # "Z" suffix (emit_undefer_boundary) while deferred_at is a
+        # datetime.isoformat() "+00:00" suffix - lexicographic comparison of
+        # the two formats can misorder timestamps that fall in the same
+        # second.
+        undef_dt = _parse_ts(undeferred_at.get(nid))
+        deferred_dt = _parse_ts(deferred_at)
+        if undef_dt is not None and deferred_dt is not None and undef_dt < deferred_dt:
             signal = "undeferred before this defer"
         elif e.get("priority") in ("p0", "p1"):
             signal = f"priority {e.get('priority')} (non-default ranking)"
