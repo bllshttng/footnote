@@ -1903,10 +1903,13 @@ enum UpdateOutcome {
     Degraded(String),
 }
 
-/// Generous relative to the Connections read timeout (1.5s): `--check` shells
-/// out to `mux ls`/`agents list`/`git log` itself, so it carries more
-/// subprocess latency than a single accounts read.
-const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+/// Well above the Connections read timeout (1.5s): `--check` shells out to
+/// `mux ls` (5s), `agents list` (15s), and `git log` (5s) SEQUENTIALLY on the
+/// Python side, so its own worst-case latency alone is ~25s. This never
+/// blocks the UI loop (the probe runs off it and the menu opens on whatever
+/// outcome is already in hand), so there is no cost to sizing it well above
+/// that worst case rather than racing it.
+const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
 
 /// Run `fno update --check --json` off the UI loop and fold it into an
 /// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
