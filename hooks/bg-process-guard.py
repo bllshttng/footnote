@@ -102,6 +102,13 @@ VALUE_FLAGS = {
 
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 
+# The repo's helper first; the raw line below it is the same guarantee spelled
+# out for a caller with no checkout (a fixture in another repo, a one-off on a
+# bare host). This refusal used to teach only the raw form, which made it the
+# producer of the escape it exists to prevent: every worker hand-rolled it, and
+# a hand-rolled copy missing either the bound or the name is exactly the orphan
+# this guard refuses. scripts/lib/loadgen.sh makes both mandatory instead.
+REPLACEMENT_HELPER = "bash scripts/lib/loadgen.sh start <label> <seconds> [count]"
 REPLACEMENT = "timeout 300 bash -c 'exec -a fno-load-<node-or-session> yes > /dev/null'"
 
 
@@ -625,11 +632,16 @@ def _refusal(reason, segment):
         "On 2026-08-13 that shape cost 71 core-hours and wedged a preflight "
         "lock for 50+ minutes.\n\n"
         "Bounded and named instead:\n"
+        "  %s\n"
+        "or, with no checkout at hand, the same guarantee by hand:\n"
         "  %s\n\n"
-        "`timeout` is the death path. `exec -a fno-...` is the name, so a "
-        "survivor answers \"whose is this?\" in `top` instead of by lsof "
-        "archaeology, and `fno agents orphans --reap` may kill it unattended. "
-        "Use bash explicitly: zsh has no `exec -a`.\n"
+        "`loadgen.sh` makes the bound and the `fno-load-` name mandatory, "
+        "which is why it comes first: a hand-rolled copy missing either half "
+        "is the orphan this refusal exists to prevent. The bound is the death "
+        "path. `exec -a fno-...` is the name, so a survivor answers \"whose is "
+        "this?\" in `top` instead of by lsof archaeology, and "
+        "`fno agents orphans --reap` may kill it unattended. Use bash "
+        "explicitly for the hand form: zsh has no `exec -a`.\n"
         # Every remedy named here must actually satisfy the guard. `head -c`
         # used to sit in this list as if it were a bound on its own, but only a
         # DOWNSTREAM reader bounds anything, so following the advice literally
@@ -639,7 +651,7 @@ def _refusal(reason, segment):
         "Any of `timeout`, `gtimeout`, `count=`, `ulimit -t` in an earlier "
         "command, or `-t <seconds>` satisfies this guard. So does piping INTO "
         "a reader that exits, as in `yes | head -c 1M`."
-        % (segment, reason, REPLACEMENT)
+        % (segment, reason, REPLACEMENT_HELPER, REPLACEMENT)
     )
 
 

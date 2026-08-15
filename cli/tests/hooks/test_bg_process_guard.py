@@ -170,6 +170,11 @@ DENIED = [
 # ordinary commands that merely mention a generator word.
 ALLOWED = [
     "timeout 300 bash -c 'exec -a fno-load-x1 yes > /dev/null'",
+    # The sanctioned helper: no generator token in the command string, and the
+    # script itself makes the bound and the name mandatory.
+    "bash scripts/lib/loadgen.sh start x1 300 8",
+    "bash scripts/lib/loadgen.sh stop x1",
+    "bash scripts/lib/loadgen.sh list",
     "timeout 300 yes > /dev/null",
     "gtimeout 60 stress -c 8",
     "yes | head -c 1M > /dev/null",
@@ -442,6 +447,7 @@ def test_refusal_carries_the_replacement_verbatim() -> None:
     regression of a whole layer of the design."""
     reason = guard.decide("yes > /dev/null &")
     assert reason is not None
+    assert "loadgen.sh" in reason
     assert "timeout" in reason
     assert "exec -a fno-" in reason
     assert "SIGPIPE" in reason
@@ -450,6 +456,7 @@ def test_refusal_carries_the_replacement_verbatim() -> None:
 #: Each remedy the refusal advertises, and a command that takes the advice.
 #: ADD A ROW when you add a remedy to the refusal text.
 _ADVERTISED_REMEDIES = [
+    ("loadgen.sh", "bash scripts/lib/loadgen.sh start x1 300 8"),
     ("timeout", "timeout 300 yes > /dev/null"),
     ("gtimeout", "gtimeout 300 yes > /dev/null"),
     ("count=", "dd if=/dev/zero of=/dev/null count=10"),
