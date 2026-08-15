@@ -218,6 +218,7 @@ def test_claude_python_headless_threads_effort(monkeypatch, tmp_path):
         "--dangerously-skip-permissions",
         "--effort",
         "high",
+        "--",
         "hi",
     ]
     assert result.stdout == "reply"

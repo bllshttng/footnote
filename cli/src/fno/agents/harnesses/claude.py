@@ -370,7 +370,9 @@ def headless_create(
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     if output_format:
         argv += ["--output-format", output_format]
-    argv.append(message or "hello")
+    # Behind `--` like every other claude seed: a leading-flag seed must be
+    # the prompt positional, not a claude flag.
+    argv += ["--", message or "hello"]
     # A one-shot `claude -p` inherits the parent env, so an ambient
     # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN would override BOTH a per-spawn
     # account overlay (x-d012) AND a routed --settings token (x-6de8, codex P1):

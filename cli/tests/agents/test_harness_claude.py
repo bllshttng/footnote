@@ -481,7 +481,7 @@ def test_headless_create_forwards_json_output_format(tmp_path: Path, monkeypatch
     claude_mod.headless_create(message="hi", cwd=cwd, output_format="json")
 
     argv = captured["argv"]
-    assert argv[-3:] == ["--output-format", "json", "hi"]
+    assert argv[-4:] == ["--output-format", "json", "--", "hi"]
 
 
 def test_headless_create_scrubs_inherited_auth(tmp_path: Path, monkeypatch) -> None:
