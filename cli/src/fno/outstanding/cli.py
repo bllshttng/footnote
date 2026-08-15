@@ -129,20 +129,20 @@ def clear(
     ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
-    from fno.events import append_event, operator_question_closed
+    from fno.events import append_event, operator_decision, operator_question_closed
     from fno.outstanding.core import events_path, read_open_questions
 
     root = _storage_root()
     try:
-        open_ids = {q.id for q in read_open_questions(root)}
+        open_by_id = {q.id: q for q in read_open_questions(root)}
     except OutstandingError as exc:
         typer.echo(f"outstanding: failed to read: {exc}", err=True)
         raise typer.Exit(1)
 
     # An id that is not open is a no-op, not a failure: mirroring
     # `carveout resolve`, a second clear must be safe to run.
-    targets = [q for q in question_ids if q in open_ids]
-    skipped = [q for q in question_ids if q not in open_ids]
+    targets = [q for q in question_ids if q in open_by_id]
+    skipped = [q for q in question_ids if q not in open_by_id]
 
     closed_by = _session_id()
     for qid in targets:
@@ -153,6 +153,29 @@ def clear(
                 ),
                 events_path=events_path(root),
             )
+            # An answered question IS a decision, so the close path records it
+            # as one (AC3). A close with no answer is a withdrawal and decides
+            # nothing. Emitted alongside the closed event, never instead of it.
+            if answer is not None:
+                record = open_by_id[qid]
+                append_event(
+                    operator_decision(
+                        decision_id=f"d-{secrets.token_hex(4)}",
+                        decision=answer,
+                        subject=record.node,
+                        question_id=qid,
+                        question=record.question,
+                        asked_by=record.session_id,
+                        asked_at=record.ts or None,
+                        # The decider is the operator by definition on this
+                        # path (closed_by records the typing session on the
+                        # close event); decided_by must not depend on whether
+                        # the closing session could be resolved.
+                        decided_by="operator",
+                        authority_source="operator",
+                    ),
+                    events_path=events_path(root),
+                )
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)
             raise typer.Exit(1)

@@ -868,6 +868,47 @@ def operator_question_closed(
     return _build("operator_question_closed", source, data)
 
 
+def operator_decision(
+    *,
+    decision_id: str,
+    decision: str,
+    subject: str | None = None,
+    question_id: str | None = None,
+    question: str | None = None,
+    asked_by: str | None = None,
+    asked_at: str | None = None,
+    options: "list[str] | None" = None,
+    decided_by: str | None = None,
+    authority_source: str | None = None,
+    rationale: str | None = None,
+    supersedes: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build an ``operator_decision`` event (a durable decision record).
+
+    Modeled on ``approval_decided``: who decided, under what authority, and
+    what was on the table. ``subject`` is the recovery key a later agent
+    queries; ``supersedes`` orders two decisions on one subject so a reader
+    of the older one can tell it is not current.
+    """
+    data: dict[str, Any] = {"decision_id": decision_id, "decision": decision[:QUESTION_CAP]}
+    for key, value in (
+        ("subject", subject),
+        ("question_id", question_id),
+        ("question", question[:QUESTION_CAP] if question else None),
+        ("asked_by", asked_by),
+        ("asked_at", asked_at),
+        ("options", options),
+        ("decided_by", decided_by),
+        ("authority_source", authority_source),
+        ("rationale", rationale[:QUESTION_CAP] if rationale else None),
+        ("supersedes", supersedes),
+    ):
+        if value is not None:
+            data[key] = value
+    return _build("operator_decision", source, data)
+
+
 def agent_raw_inject(
     *,
     target_session: str,
@@ -1237,6 +1278,7 @@ __all__ = [
     "QUESTION_CAP",
     "operator_question",
     "operator_question_closed",
+    "operator_decision",
     "phase_0_decision",
     "phase_transition",
     "session_satisfied",

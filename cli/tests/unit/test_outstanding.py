@@ -188,6 +188,50 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     assert closed[0]["data"]["question_id"] == qid
 
 
+def test_clear_with_answer_emits_operator_decision(root: Path):
+    """AC3-HP: an answered close records the decision, not just the closure.
+
+    The closed event stays; the decision event lands beside it carrying the
+    recovery fields. A close with NO answer is a withdrawal and must not
+    mint a decision.
+    """
+    asked = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    )
+    qid = asked.stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+    assert cleared.exit_code == 0, cleared.output
+
+    lines = [
+        json.loads(line)
+        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    decisions = [e for e in lines if e["type"] == "operator_decision"]
+    assert len(decisions) == 1, "an answered close must emit exactly one decision"
+    data = decisions[0]["data"]
+    assert data["decision"] == "fold"
+    assert data["question_id"] == qid
+    assert data["question"] == "fold or migrate?"
+    assert data["subject"] == "x-7d94"
+    assert data["decision_id"].startswith("d-")
+    assert data["authority_source"] == "operator"
+    assert data["asked_at"], "asked_at must inherit the question's timestamp"
+    assert data["decided_by"]
+
+    # A withdrawal (no --answer) decides nothing: positive control is the
+    # closed event itself, the decision count stays at one from the ask above.
+    qid2 = runner.invoke(outstanding_app, ["ask", "second question?"]).stdout.strip().splitlines()[-1]
+    runner.invoke(outstanding_app, ["clear", qid2])
+    lines = [
+        json.loads(line)
+        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len([e for e in lines if e["type"] == "operator_decision"]) == 1
+    assert len([e for e in lines if e["type"] == "operator_question_closed"]) == 2
+
+
 def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     """The shared journal is append-only and never rotated.
 
