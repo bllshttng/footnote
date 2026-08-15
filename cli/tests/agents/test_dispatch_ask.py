@@ -180,6 +180,47 @@ def test_claude_create_path_happy_path(tmp_path: Path, monkeypatch) -> None:
     assert "7c5dcf5d" in body
 
 
+def test_claude_create_path_creates_the_log_file_it_records(tmp_path: Path, monkeypatch) -> None:
+    """x-7bcd AC4: a mint site must never record a log_path to a file it
+    never created — that is the exact shape that left 98 of 106 registry
+    rows pointing at nothing. Positive marker: the file must actually exist,
+    not merely "the row has a log_path string"."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _install_fake(tmp_path, monkeypatch)
+
+    from fno import paths
+    from fno.agents.dispatch import _claude_create_path
+    from fno.agents.registry import load_registry, _agent_lock_path
+
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+
+    registry_path = paths.agents_registry_path()
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _agent_lock_path("frontend-worker", registry_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class _FakeLockHandle:
+        def detach(self) -> None:
+            pass
+
+    _claude_create_path(
+        name="frontend-worker",
+        message="implement Login.tsx",
+        cwd=cwd,
+        chosen="claude",
+        timeout=10,
+        yolo=False,
+        lock_handle=_FakeLockHandle(),
+    )
+
+    entry = load_registry()[0]
+    assert entry.log_path
+    assert Path(entry.log_path).exists(), (
+        f"registry row records log_path={entry.log_path!r} but no file exists there"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC1-ERR — input validation
 # ---------------------------------------------------------------------------

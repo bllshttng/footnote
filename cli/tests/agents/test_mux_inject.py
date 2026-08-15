@@ -34,7 +34,12 @@ def _mux_entry(name: str = "muxed", provider: str = "claude"):
         name=name,
         harness=provider,
         cwd="/w",
-        log_path="",
+        # x-7bcd: a mux-hosted row that has not yet captured its harness
+        # session id (the happy/claude id-less lane) still needs a
+        # resolvable handle. Production mint (mux_spawn.py) now touches a
+        # fallback log file for exactly this shape; this fixture mirrors
+        # that, not a real tailed log.
+        log_path="/w/muxed.log",
         status="live",
         mux={"session": "work", "pane_id": 7},
     )

@@ -222,6 +222,7 @@ def test_crown_round_trips_through_the_registry(tmp_path: Path, monkeypatch) -> 
         cwd="/w",
         log_path="",
         harness="claude",
+        harness_session_id="sess-king-epic",  # x-7bcd: needs a resolvable handle
         short_id="deadbeef",
         crown_level=2,
         crown_scope="proj-a",
@@ -325,6 +326,7 @@ def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkey
     # Pre-seed an existing crowned row over scope "epic-x"
     write_registry([AgentEntry(
         name="incumbent", harness="claude", cwd="/w", log_path="",
+        harness_session_id="sess-incumbent",  # x-7bcd: needs a resolvable handle
         short_id="inc", status="live",
         crown_level=1, crown_scope="epic-x", crown_grantor="human",
     )])

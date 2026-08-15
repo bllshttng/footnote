@@ -170,6 +170,7 @@ def test_bg_spawn_declines_a_duplicate_crown_and_launches_uncrowned(
                 cwd=str(bg_home),
                 log_path="",
                 harness="claude",
+                harness_session_id="sess-sitting-king",  # x-7bcd: resolvable handle
                 status="busy",  # active, not merely the literal "live"
                 crown_level=2,
                 crown_scope="epic-x",
@@ -202,6 +203,7 @@ def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatc
                 cwd=str(bg_home),
                 log_path="",
                 harness="claude",
+                harness_session_id="sess-dead-king",  # x-7bcd: resolvable handle
                 status="exited",
                 crown_level=2,
                 crown_scope="epic-y",

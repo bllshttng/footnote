@@ -567,6 +567,38 @@ pub fn validate_single_live_ref(entry: &RegistryEntry) -> Result<(), String> {
     Ok(())
 }
 
+/// The resolvable-handle invariant (x-7bcd): at creation, every registry row
+/// carries at least one handle an outside observer can resolve without asking
+/// the worker anything. Any one of three legs satisfies it: (1) `pid` +
+/// `pid_start_time`, when the writer owns the process; (2) a non-empty
+/// `log_path`, when the writer has created the file it records (file
+/// existence is enforced at the mint site, not here -- a stat per row under
+/// the write lock is a stall this check does not need); (3) `harness` +
+/// `harness_session_id`, when the writer owns neither a pid nor a log file.
+/// Scoped to NEW rows only by the caller (a pre-existing violating row must
+/// never wedge the registry -- AC3-FR); this function itself does no I/O and
+/// makes no new-vs-existing distinction.
+pub fn validate_resolvable_handle(entry: &RegistryEntry) -> Result<(), String> {
+    let leg1 = entry.pid.is_some() && entry.pid_start_time.is_some();
+    let leg2 = entry
+        .log_path
+        .as_deref()
+        .is_some_and(|p| !p.is_empty());
+    let leg3 = entry.harness.as_deref().is_some_and(|h| !h.is_empty())
+        && entry
+            .harness_session_id
+            .as_deref()
+            .is_some_and(|s| !s.is_empty());
+    if leg1 || leg2 || leg3 {
+        return Ok(());
+    }
+    Err(format!(
+        "registry row '{}' carries no resolvable handle: needs one of (pid + pid_start_time), \
+         log_path, or (harness + harness_session_id)",
+        entry.name,
+    ))
+}
+
 /// `host_mode` value for a one-shot exec session (the default when absent).
 pub const HOST_MODE_EXEC: &str = "exec";
 /// `host_mode` value for a long-lived drivable interactive session.
@@ -1084,6 +1116,16 @@ where
     for entry in &registry.entries {
         if let Err(msg) = validate_single_live_ref(entry) {
             return Err(StateError::InvariantViolation(msg));
+        }
+    }
+    // Resolvable-handle invariant (x-7bcd), scoped to new rows only via the
+    // pre-write `before` snapshot already built above for identity checks --
+    // a pre-existing violating row is never re-validated (AC3-FR).
+    for entry in &registry.entries {
+        if !before.contains_key(&entry.name) {
+            if let Err(msg) = validate_resolvable_handle(entry) {
+                return Err(StateError::InvariantViolation(msg));
+            }
         }
     }
     // Upgrade-on-write (Codex P2, ab-a171ceb2): stamp the current schema version
@@ -2338,6 +2380,157 @@ mod tests {
         assert_eq!(e.status, AgentStatus::Idle);
         assert_eq!(e.codex_session_id.as_deref(), Some("uuid-1"));
         assert_eq!(e.pid, Some(1234));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A row with none of the three legs: no pid identity, no legacy provider
+    /// (so `backfill_harness_aliases` cannot promote one), no log_path, no
+    /// harness. Unlike `sample_entry`, which carries a `legacy_provider` that
+    /// backfill resolves into a real `harness`/`harness_session_id` pair
+    /// before the write-choke-point guard ever runs.
+    fn handleless_entry(name: &str) -> RegistryEntry {
+        let mut e = sample_entry(name);
+        e.legacy_provider = String::new();
+        e.codex_session_id = None;
+        e.session_id = None;
+        e.pid = None;
+        e.pid_start_time = None;
+        e.log_path = None;
+        e.harness = None;
+        e.harness_session_id = None;
+        e
+    }
+
+    #[test]
+    fn validate_resolvable_handle_refuses_all_three_legs_empty() {
+        let e = handleless_entry("ghost");
+        let err = validate_resolvable_handle(&e).expect_err("handle-less row must be refused");
+        assert_eq!(
+            err,
+            "registry row 'ghost' carries no resolvable handle: needs one of \
+             (pid + pid_start_time), log_path, or (harness + harness_session_id)"
+        );
+    }
+
+    #[test]
+    fn validate_resolvable_handle_passes_for_each_leg_alone() {
+        let mut leg1 = handleless_entry("pid-only");
+        leg1.pid = Some(4242);
+        leg1.pid_start_time = Some(9);
+        assert!(validate_resolvable_handle(&leg1).is_ok());
+
+        let mut leg2 = handleless_entry("log-only");
+        leg2.log_path = Some("/tmp/some.log".into());
+        assert!(validate_resolvable_handle(&leg2).is_ok());
+
+        let mut leg3 = handleless_entry("harness-only");
+        leg3.harness = Some("claude".into());
+        leg3.harness_session_id = Some("sess-1".into());
+        assert!(validate_resolvable_handle(&leg3).is_ok());
+
+        // Half of leg1 (pid without pid_start_time) must not pass.
+        let mut half_leg1 = handleless_entry("pid-no-start");
+        half_leg1.pid = Some(4242);
+        assert!(validate_resolvable_handle(&half_leg1).is_err());
+
+        // Half of leg3 (harness without a session id) must not pass.
+        let mut half_leg3 = handleless_entry("harness-no-session");
+        half_leg3.harness = Some("claude".into());
+        assert!(validate_resolvable_handle(&half_leg3).is_err());
+    }
+
+    #[test]
+    fn update_registry_refuses_a_new_handleless_row() {
+        let dir = tmpdir("refuse-handleless");
+        let path = dir.join("registry.json");
+        // Seed with one legitimate row so the "unchanged on refusal" assertion
+        // has real content to check.
+        update_registry(&path, |r| r.entries.push(sample_entry("seed"))).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let result = update_registry(&path, |r| r.entries.push(handleless_entry("ghost")));
+        match result {
+            Err(StateError::InvariantViolation(msg)) => {
+                assert!(msg.contains("ghost"), "error must name the row: {msg}");
+                assert!(msg.contains("resolvable handle"));
+            }
+            other => panic!("expected InvariantViolation, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused write must leave the registry unchanged"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_writes_a_new_row_carrying_any_single_leg() {
+        let dir = tmpdir("accept-single-leg");
+        let path = dir.join("registry.json");
+
+        let mut leg1 = handleless_entry("owns-pid");
+        leg1.pid = Some(111);
+        leg1.pid_start_time = Some(1);
+        update_registry(&path, |r| r.entries.push(leg1)).unwrap();
+
+        let mut leg2 = handleless_entry("owns-log");
+        leg2.log_path = Some("/tmp/owns-log.log".into());
+        update_registry(&path, |r| r.entries.push(leg2)).unwrap();
+
+        let mut leg3 = handleless_entry("owns-harness");
+        leg3.harness = Some("codex".into());
+        leg3.harness_session_id = Some("thread-1".into());
+        update_registry(&path, |r| r.entries.push(leg3)).unwrap();
+
+        let reg = load_registry(&path).unwrap();
+        let names: std::collections::BTreeSet<&str> =
+            reg.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["owns-pid", "owns-log", "owns-harness"])
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_never_revalidates_a_preexisting_violating_row() {
+        // AC3-FR, the wedge test: a registry that already holds a row
+        // violating the invariant (the measured shape -- a legacy row with
+        // no pid, no log_path, no harness_session_id) must remain writable
+        // forever after. The guard only ever looks at rows absent from the
+        // pre-write snapshot.
+        let dir = tmpdir("wedge");
+        let path = dir.join("registry.json");
+        // Written directly (not through update_registry) so no guard has ever
+        // seen this row -- exactly how a pre-x-7bcd legacy row landed.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{REGISTRY_SCHEMA_VERSION},"agents":[
+                {{"name":"legacy-ghost","cwd":"/x","log_path":null,
+                 "created_at":"2026-01-01T00:00:00Z","status":"live"}}
+            ]}}"#
+            ),
+        )
+        .unwrap();
+
+        // An unrelated mutation (touching a DIFFERENT row) must succeed even
+        // though "legacy-ghost" still carries no resolvable handle.
+        let mut leg2 = handleless_entry("new-and-valid");
+        leg2.log_path = Some("/tmp/new-and-valid.log".into());
+        let result = update_registry(&path, |r| r.entries.push(leg2));
+        assert!(
+            result.is_ok(),
+            "a pre-existing violation must never wedge an unrelated write: {result:?}"
+        );
+
+        let reg = load_registry(&path).unwrap();
+        assert!(
+            reg.find("legacy-ghost").is_some(),
+            "the pre-existing violating row must survive untouched"
+        );
+        assert!(reg.find("new-and-valid").is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 

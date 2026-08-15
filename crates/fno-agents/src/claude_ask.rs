@@ -2769,7 +2769,17 @@ fn create(
     // a miss leaves the field None and never gates the launch. This is the Rust
     // (default installed) path's parity with harnesses/claude.py's resolution.
     let session_uuid = resolve_session_uuid_at_spawn(claude_home, &short_id);
+    // Create the file the row records (x-7bcd AC4): a log_path pointing at
+    // nothing is a claim, not evidence, and the resolvable-handle guard only
+    // checks the field is non-empty, not that the file exists.
     let log_path = derive_log_path(home, name);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
     let new_entry = RegistryEntry {
         name: name.to_string(),
         // v9: the claude jobId is the unified transport key (was claude_short_id);

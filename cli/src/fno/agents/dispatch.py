@@ -1458,8 +1458,13 @@ def _claude_create_path(
     # its own grantor proves nothing.
     crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
-    # Registry write.
+    # Registry write. Create the file the row records (x-7bcd AC4): a
+    # log_path pointing at nothing is a claim, not evidence, and the
+    # resolvable-handle guard only checks the field is non-empty, not that
+    # the file exists.
     log_path = _derive_log_path(name)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch(exist_ok=True)
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),
