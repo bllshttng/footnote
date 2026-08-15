@@ -2446,6 +2446,25 @@ pub fn version_sidecar_path(socket: &Path) -> PathBuf {
     socket.with_extension("ver")
 }
 
+/// The pid sidecar for a session socket (`<name>.sock` -> `<name>.pid`),
+/// written by the server at bind with its own pid (x-48a5) so `kill-server`
+/// can signal a wedged holder without an accepted connection - the
+/// connected-peer route cannot serve a connect that never completes. Skipped
+/// by [`session_names`]'s `.sock` filter, the same reason `.ver` is.
+pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("pid")
+}
+
+/// Remove every file a session leaves beside its name: the socket, the
+/// wire-version sidecar, and the pid sidecar. Shared by the server's
+/// SocketGuard and kill-server's recovery ladder so the two cannot drift
+/// apart about what a dead session leaves behind. Tolerates missing files.
+pub fn remove_session_files(socket: &Path) {
+    let _ = std::fs::remove_file(socket);
+    let _ = std::fs::remove_file(version_sidecar_path(socket));
+    let _ = std::fs::remove_file(pid_sidecar_path(socket));
+}
+
 pub const DEFAULT_SESSION: &str = "main";
 
 /// Outcome of [`bind_or_probe`].

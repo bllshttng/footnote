@@ -541,3 +541,57 @@ fn mux_where_cli_rejects_harness_only_ambiguous_prefix() {
     assert_eq!(out.status.code(), Some(16));
     assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous prefix"));
 }
+
+#[test]
+fn server_publishes_and_removes_its_pid_sidecar() {
+    // x-48a5: the server writes its pid beside its socket at bind so
+    // kill-server can signal a wedged holder without an accepted connection,
+    // and every exit path removes it with the socket. A real headless server,
+    // watched across its whole life.
+    let scratch = Scratch::new("pid_sidecar");
+    let server = common::spawn_server(&scratch.main_sock(), &[]);
+
+    let pid_path = scratch.0.join("main.pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid: i32 = loop {
+        if let Some(p) = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            break p;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pid sidecar never appeared at {}",
+            pid_path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        unsafe { libc::kill(pid, 0) } == 0,
+        "sidecar pid {pid} must be live right after bind"
+    );
+
+    let out = scratch
+        .command()
+        .args(["mux", "kill-server", "--json"])
+        .output()
+        .expect("kill-server runs");
+    assert!(
+        out.status.success(),
+        "kill-server stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["killed"], true, "healthy server dies gracefully");
+
+    for name in ["main.sock", "main.ver", "main.pid"] {
+        let p = scratch.0.join(name);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!p.exists(), "{name} left behind after shutdown");
+    }
+    drop(server);
+}

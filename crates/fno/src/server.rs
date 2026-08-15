@@ -1056,16 +1056,16 @@ enum Flow {
     Shutdown,
 }
 
-/// Unlink the socket AND its wire-version sidecar (x-1a85) on every exit path
-/// out of `run` (a SIGKILL leaves them behind by design; the stale-socket path
-/// in `bind_or_probe` covers that, and a lingering `.ver` is inert - `ls` only
-/// reads it for a LIVE server, and a dead one probes `Stale`).
+/// Unlink the socket AND both its sidecars (x-1a85 `.ver`, x-48a5 `.pid`) on
+/// every exit path out of `run` (a SIGKILL leaves them behind by design; the
+/// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
+/// is inert - `ls` only reads it for a LIVE server, and a dead one probes
+/// `Stale`).
 struct SocketGuard(PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-        let _ = std::fs::remove_file(crate::proto::version_sidecar_path(&self.0));
+        crate::proto::remove_session_files(&self.0);
     }
 }
 
@@ -1113,6 +1113,17 @@ pub fn run(socket: PathBuf) -> i32 {
         crate::proto::PROTO_VERSION.to_string(),
     ) {
         eprintln!("fno mux: warn: could not write version sidecar: {e}");
+    }
+
+    // Stamp the server's own pid beside the socket (x-48a5) so kill-server
+    // can signal a wedged holder without an accepted connection. Best-effort
+    // like `.ver` above: a write failure only means recovery falls back to
+    // the verb's refusal naming the manual kill.
+    if let Err(e) = std::fs::write(
+        crate::proto::pid_sidecar_path(&socket),
+        std::process::id().to_string(),
+    ) {
+        eprintln!("fno mux: warn: could not write pid sidecar: {e}");
     }
 
     let runtime = match tokio::runtime::Runtime::new() {
