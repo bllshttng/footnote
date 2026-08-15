@@ -31,15 +31,17 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # A stub fno-agents that records every call's argv as one line, args joined by
-# \x1f (unit separator) so a reason string containing spaces stays
-# unambiguous against the arg boundaries around it. $CALLS_FILE is exported by
-# run_hook.
+# the unit separator (octal \037, NOT \x1f: dash's POSIX printf builtin -
+# /bin/sh on the Linux CI runner - has no \xHH hex escape and would otherwise
+# emit the four literal characters "\x1f" instead of the byte) so a reason
+# string containing spaces stays unambiguous against the arg boundaries
+# around it. $CALLS_FILE is exported by run_hook.
 STUB="$TMP/fno-agents"
 cat >"$STUB" <<'STUBEOF'
 #!/bin/sh
 out=""
 for a in "$@"; do
-  out="${out}${a}$(printf '\x1f')"
+  out="${out}${a}$(printf '\037')"
 done
 printf '%s\n' "$out" >> "$CALLS_FILE"
 exit 0
