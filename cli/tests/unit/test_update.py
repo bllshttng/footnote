@@ -2366,7 +2366,8 @@ def test_update_readiness_not_ready_when_revs_match(monkeypatch, tmp_path) -> No
 
 def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> None:
     """AC4-EDGE: `fno mux ls --json` failing degrades, guidance names the failed
-    input, never asserts shells survive."""
+    input, never asserts shells survive, and never states a false shell count -
+    a fetch that never happened is not evidence of zero live shells."""
     _readiness_env(monkeypatch, tmp_path)
     runner = _make_runner(mux_rc=1)
 
@@ -2377,6 +2378,24 @@ def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> N
     assert result["wire"]["bump"] is True
     assert result["guidance"].strip()
     assert "survive" not in result["guidance"]
+    assert "unknown number of live shells" in result["guidance"]
+
+
+def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path) -> None:
+    """AC4-EDGE: `fno agents list --json` failing names an unknown revivable
+    count, not a false zero, even though mux ls itself succeeded."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
+        agent_rc=1,
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["degraded"] is not None
+    assert "agents list" in result["degraded"]
+    assert "unknown number of workers" in result["guidance"]
+    assert "14 live shell(s)" in result["guidance"]
 
 
 def test_update_readiness_degraded_when_source_wire_unreadable(monkeypatch, tmp_path) -> None:

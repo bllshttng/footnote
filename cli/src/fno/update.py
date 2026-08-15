@@ -605,22 +605,28 @@ def _build_update_guidance(
     source_wire: Optional[int],
     shells: int,
     shells_ended: int,
+    shells_known: bool,
     revivable: int,
+    revivable_known: bool,
     degraded_reason: Optional[str],
 ) -> str:
     """The one guidance line, computed rather than authored (x-b1cc). Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
     count and a positive outcome; the degraded branch treats an unknown wire as
-    a bump so an operator is never told shells survive on evidence fno does not
-    have (AC4-EDGE)."""
+    a bump and, when the shell/worker count itself could not be read (a failed
+    `mux ls`/`agents list`, not just an unreadable wire), says "unknown" rather
+    than a false zero - a count fno never fetched is not evidence of an empty
+    fleet (AC4-EDGE)."""
     rev_label = (source_rev or "unknown")[:8]
     source_label = f"v{source_wire}" if source_wire is not None else "unknown"
 
     if degraded_reason:
+        shells_label = f"{shells} live shell(s)" if shells_known else "an unknown number of live shells"
+        revivable_label = f"{revivable} worker(s)" if revivable_known else "an unknown number of workers"
         return (
             f"update check degraded ({degraded_reason}) - wire status unknown, "
-            f"treated as a wire bump; {shells} live shell(s) at risk, "
-            f"--revive would respawn {revivable} worker(s)"
+            f"treated as a wire bump; {shells_label} at risk, "
+            f"--revive respawns {revivable_label}"
         )
 
     if not update_ready:
@@ -676,6 +682,7 @@ def update_readiness(
         degraded.append("source PROTO_VERSION unreadable")
 
     live_rows = _live_mux_rows(runner)
+    shells_known = live_rows is not None
     if live_rows is None:
         degraded.append("fno mux ls --json failed")
         live_rows = []
@@ -695,6 +702,7 @@ def update_readiness(
     shells_ended = shells if wire_bump else 0
 
     agent_rows = _live_agent_rows(runner)
+    revivable_known = agent_rows is not None
     if agent_rows is None:
         degraded.append("fno agents list --json failed")
         agent_rows = []
@@ -714,7 +722,9 @@ def update_readiness(
         source_wire=source_wire,
         shells=shells,
         shells_ended=shells_ended,
+        shells_known=shells_known,
         revivable=revivable,
+        revivable_known=revivable_known,
         degraded_reason=degraded_reason,
     )
 
