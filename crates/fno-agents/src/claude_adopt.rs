@@ -312,8 +312,7 @@ mod tests {
         stamped.delivery_policy = Some("bus-only".into());
         upsert_adopted_row(&reg, stamped).unwrap();
         // A later re-adopt of the SAME session mints a fresh default row.
-        upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z"))
-            .unwrap();
+        upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z")).unwrap();
 
         let loaded = crate::state::load_registry(&reg).unwrap();
         assert_eq!(
