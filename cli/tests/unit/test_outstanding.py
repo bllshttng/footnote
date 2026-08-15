@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.outstanding.cli import outstanding_app
+from fno.outstanding.core import RENDER_CAP
 
 runner = CliRunner()
 
@@ -65,6 +67,15 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import fno.paths as paths_mod
 
     paths_mod.resolve_repo_root.cache_clear()
+    # The clear path projects decisions onto the subject node's graph entry,
+    # resolving GRAPH_JSON through the module attribute. Pin it to a
+    # nonexistent path so these tests never read or write the real machine
+    # graph when a --node happens to resolve there.
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", tmp_path / "graph.json")
+    monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -188,6 +199,98 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     assert closed[0]["data"]["question_id"] == qid
 
 
+def test_clear_with_answer_emits_operator_decision(root: Path):
+    """An answered close records the decision, not just the closure.
+
+    The closed event stays; the decision event lands beside it carrying the
+    recovery fields. A close with NO answer is a withdrawal and must not
+    mint a decision.
+    """
+    asked = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    )
+    qid = asked.stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+    assert cleared.exit_code == 0, cleared.output
+
+    lines = [
+        json.loads(line)
+        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    decisions = [e for e in lines if e["type"] == "operator_decision"]
+    assert len(decisions) == 1, "an answered close must emit exactly one decision"
+    data = decisions[0]["data"]
+    assert data["decision"] == "fold"
+    assert data["question_id"] == qid
+    assert data["question"] == "fold or migrate?"
+    assert data["subject"] == "x-7d94"
+    assert data["decision_id"].startswith("d-")
+    assert data["authority_source"] == "operator"
+    assert data["asked_at"], "asked_at must inherit the question's timestamp"
+    assert data["decided_by"]
+
+    # A withdrawal (no --answer) decides nothing: positive control is the
+    # closed event itself, the decision count stays at one from the ask above.
+    qid2 = runner.invoke(outstanding_app, ["ask", "second question?"]).stdout.strip().splitlines()[-1]
+    runner.invoke(outstanding_app, ["clear", qid2])
+    lines = [
+        json.loads(line)
+        for line in (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len([e for e in lines if e["type"] == "operator_decision"]) == 1
+    assert len([e for e in lines if e["type"] == "operator_question_closed"]) == 2
+
+
+def test_clear_with_answer_projects_the_decision_onto_the_node(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The clear-path decision has both halves a `fno decide` record has:
+    findable by subject through the graph projection, not merely greppable
+    in the journal."""
+    graph = root / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"id": "x-7d94", "title": "t", "status": "ready"}]}) + "\n"
+    )
+
+    qid = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    ).stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+    assert cleared.exit_code == 0, cleared.output
+
+    from fno.decide.cli import decide_app as decide_cli_app
+
+    listed = runner.invoke(decide_cli_app, ["list", "--subject", "x-7d94", "--json"])
+    assert listed.exit_code == 0, listed.output
+    decisions = json.loads(listed.stdout)["decisions"]
+    assert [d["question_id"] for d in decisions] == [qid]
+    assert decisions[0]["decision"] == "fold"
+    assert decisions[0]["question"] == "fold or migrate?"
+    assert decisions[0]["asked_at"]
+
+
+def test_failed_decision_record_does_not_consume_the_question(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A projection failure must leave the question open for a safe retry."""
+    qid = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    ).stdout.strip().splitlines()[-1]
+
+    def fail_projection(_event):
+        raise OSError("graph unavailable")
+
+    monkeypatch.setattr("fno.decide._project", fail_projection)
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+
+    assert cleared.exit_code == 1, cleared.output
+    from fno.outstanding.core import read_open_questions
+
+    assert [q.id for q in read_open_questions(root)] == [qid]
+
+
 def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     """The shared journal is append-only and never rotated.
 
@@ -224,6 +327,195 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     result = runner.invoke(outstanding_app, ["--json"])
     assert result.exit_code == 0, result.output
     assert [q["id"] for q in json.loads(result.stdout)["questions"]] == [qid]
+
+
+# --- 3rd leg: the capture fold -----------------------------------------------
+
+def _write_inbox(root: Path, lines: list[str]) -> Path:
+    inbox = root / "internal" / "fno" / "backlog" / "inbox.md"
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    inbox.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return inbox
+
+
+def _capture_event(fu_id: str, ts: str) -> str:
+    return json.dumps(
+        {
+            "ts": ts,
+            "type": "capture_add",
+            "source": "backlog",
+            "data": {"session_id": "manual", "fu_id": fu_id, "title": "t"},
+        }
+    )
+
+
+@pytest.fixture()
+def capture_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> "tuple[Path, Path]":
+    """A hermetic THIS project plus one sibling project, both known to the
+    machine-wide graph so the fold finds the sibling's inbox."""
+    this = tmp_path / "this"
+    other = tmp_path / "other"
+    for p in (this, other):
+        p.mkdir(parents=True)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(this))
+    import fno.paths as paths_mod
+
+    paths_mod.resolve_repo_root.cache_clear()
+    (this / ".fno").mkdir(exist_ok=True)
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-0001", "title": "a", "cwd": str(this)},
+                    {"id": "x-0002", "title": "b", "cwd": str(other)},
+                ]
+            }
+        )
+        + "\n"
+    )
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph)
+    monkeypatch.setattr(gs, "GRAPH_JSON", graph)
+    return this, other
+
+
+def test_capture_leg_folds_every_project_and_renders_true_count(capture_roots):
+    """Three legs; the capture leg renders Showing N of M, oldest D
+    days, with M folded across projects."""
+    this, other = capture_roots
+    _write_inbox(this, ["- [ ] fu-aaaaaa - alpha (p1)", "- [ ] fu-bbbbbb - beta"])
+    _write_inbox(other, ["- [ ] fu-cccccc - gamma", "- [x] fu-dddddd - done -> ab-1"])
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert "3 captures" in res.output, res.output
+    assert "Showing 3 of 3" in res.output, res.output
+
+    as_json = runner.invoke(outstanding_app, ["--json"])
+    payload = json.loads(as_json.stdout)
+    assert payload["captures"]["total"] == 3
+    assert payload["captures"]["resolved_files"] == 2
+    assert payload["captures"]["parsed_open_rows"] == 3
+    assert payload["captures"]["repeated_ids"] == 0
+    assert payload["captures"]["by_project"][this.name] == 2
+    assert payload["captures"]["by_project"][other.name] == 2 - 1
+
+
+def test_capture_leg_reports_oldest_age_from_capture_add_events(capture_roots):
+    """The inbox markdown carries no dates; age comes from capture_add in the
+    events journal."""
+    this, other = capture_roots
+    _write_inbox(this, ["- [ ] fu-aaaaaa - alpha", "- [ ] fu-bbbbbb - beta"])
+    events = this / ".fno" / "events.jsonl"
+    events.parent.mkdir(exist_ok=True)
+    old = (datetime.now(timezone.utc) - timedelta(days=62)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    events.write_text(
+        _capture_event("fu-aaaaaa", old) + "\n" + _capture_event("fu-bbbbbb", "2026-08-14T00:00:00Z") + "\n",
+        encoding="utf-8",
+    )
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert "oldest 62 days" in res.output, res.output
+
+
+def test_capture_age_folds_every_distinct_project_journal(
+    capture_roots, monkeypatch: pytest.MonkeyPatch
+):
+    """One project's event history must not hide an older sibling capture."""
+    this, other = capture_roots
+    shared = this / "shared-parking-lot.md"
+    shared.write_text(
+        "- [ ] fu-aaaaaa - alpha\n- [ ] fu-bbbbbb - beta\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "fno.paths.inbox_path", lambda project_root=None: shared
+    )
+    old = (datetime.now(timezone.utc) - timedelta(days=80)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    def added_at(project: Path) -> dict[str, str]:
+        if project.name == "this":
+            return {"fu-aaaaaa": old}
+        if project.name == "other":
+            return {"fu-bbbbbb": recent}
+        return {}
+
+    monkeypatch.setattr("fno.outstanding.core._capture_added_at", added_at)
+    monkeypatch.setattr(
+        "fno.outstanding.core.events_path", lambda project: project / ".fno/events.jsonl"
+    )
+
+    res = runner.invoke(outstanding_app, [])
+
+    assert res.exit_code == 0, res.output
+    assert "oldest 80 days" in res.output, res.output
+
+
+def test_unreadable_inbox_contributes_zero_and_never_raises(capture_roots):
+    """A missing or unreadable sibling inbox contributes zero captures
+    and the other projects still report."""
+    this, other = capture_roots
+    _write_inbox(this, ["- [ ] fu-aaaaaa - alpha"])
+    # other/ has no inbox at all; also plant a graph cwd that does not exist.
+    import fno.graph._constants as gc
+    import json as _json
+
+    graph = gc.GRAPH_JSON
+    data = _json.loads(graph.read_text())
+    data["entries"].append({"id": "x-dead", "title": "d", "cwd": "/nonexistent/project"})
+    graph.write_text(_json.dumps(data))
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert "1 capture" in res.output, res.output
+
+
+def test_capture_render_caps_rows_but_keeps_the_true_count(capture_roots):
+    """Ruling 2: never the full list; the count beside the cap is the honesty."""
+    this, _ = capture_roots
+    _write_inbox(
+        this, [f"- [ ] fu-{i:06x} - item {i}" for i in range(10)]
+    )
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert f"Showing {RENDER_CAP} of 10" in res.output, res.output
+
+
+def test_capture_leg_prints_its_counting_rule_beside_the_count(capture_roots):
+    """The total is auditable when three plausible counting methods disagree."""
+    this, other = capture_roots
+    _write_inbox(
+        this,
+        [
+            "- [ ] fu-aaaaaa - alpha",
+            "- [ ] fu-aaaaaa - duplicate id",
+            "- [ ] ab-11111111 - filed node is not a capture",
+        ],
+    )
+    _write_inbox(other, ["- [ ] fu-bbbbbb - beta"])
+
+    res = runner.invoke(outstanding_app, [])
+
+    assert res.exit_code == 0, res.output
+    assert "Showing 2 of 2" in res.output, res.output
+    assert (
+        "Count rule: 2 unique open fu-* IDs across 2 resolved capture files "
+        "(3 parsed open rows minus 1 repeated ID); "
+        "post_merge.parking_lot_path is used when configured."
+    ) in res.output, res.output
 
 
 # --- 2.5 the SessionStart block ---------------------------------------------

@@ -1100,10 +1100,15 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
     file and a lock on that target coordinates concurrent writers. The
     no-vault default mirrors the optional-vault seam in ``handoffs_dir()``.
     """
-    settings = _settings()
+    root = project_root or resolve_repo_root()
+    if project_root is None or os.environ.get("FNO_CONFIG"):
+        settings = _settings()
+    else:
+        from fno.config import load_settings_for_repo
+
+        settings = load_settings_for_repo(root)
     override = settings.paths.inbox_path
     post_merge_parking_lot = settings.post_merge.parking_lot_path
-    root = project_root or resolve_repo_root()
     if override is not None:
         raw = override
     elif post_merge_parking_lot is not None:
@@ -1131,7 +1136,7 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
     )
     if is_plain_relative:
         return (root / raw).resolve()
-    return _resolve(raw, project_root=root)
+    return _resolve(raw, project_root=root, settings=settings)
 
 
 def maintainer_marker() -> Optional[str]:

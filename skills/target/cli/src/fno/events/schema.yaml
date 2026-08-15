@@ -2071,6 +2071,50 @@ event_types:
           description: "Optional. Session id that closed it, which need not be the session that asked."
     consumers: [operator]
 
+  - name: operator_decision
+    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Folded by `fno decide list` through the graph projection on the subject node, which inherits the archive read-through."
+    sources: [target, hook, subagent, test]
+    data:
+      required: [decision_id, decision]
+      properties:
+        decision_id:
+          type: string
+          description: "Stable id for this decision (d-<hex>), the handle another decision's supersedes points at."
+        decision:
+          type: string
+          description: "What was chosen."
+        question_id:
+          type: string
+          description: "Optional. The operator_question this answers, when the decision arrived through `fno outstanding clear`."
+        question:
+          type: string
+          description: "Optional. The question as asked, copied so the record reads whole without a join."
+        asked_by:
+          type: string
+          description: "Optional. The session that raised the question."
+        asked_at:
+          type: string
+          description: "Optional. When the question was asked; age is the attention signal."
+        subject:
+          type: string
+          description: "Optional. The node, file, or area the decision governs. The recovery key: `fno decide list --subject` and the graph projection read it."
+        options:
+          type: array
+          description: "Optional. What was on the table, so a later reader sees what was rejected."
+        decided_by:
+          type: string
+          description: "Optional. The operator, or the agent that decided under a beastmode grant."
+        authority_source:
+          type: string
+          description: "Optional. How the decider was entitled to decide: operator, beastmode, etc."
+        rationale:
+          type: string
+          description: "Optional. One line: the reason, not a restatement."
+        supersedes:
+          type: string
+          description: "Optional. The decision_id this overturns, when it overturns one."
+    consumers: [operator, fno decide list]
+
   - name: agent_raw_inject
     description: "Provenance record for an UNWRAPPED injection: a payload delivered to a live session without the <fno_mail> envelope, so the transcript no longer carries the agent-authored marker. Emitted at the transport (the mail-inject binary and the mux pane send), keyed on 'payload does not start with <fno_mail', so it covers fno mail send --raw, a direct fno-agents mail-inject, and any future caller. Moves x-f26c's greppability property from the transcript to the ledger: an unwrapped injection has no envelope to grep, so this event is the audit trail. Best-effort; an events-write failure never breaks an injection."
     sources: [daemon]

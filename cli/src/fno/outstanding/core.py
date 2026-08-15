@@ -63,17 +63,45 @@ class Question:
 
 
 @dataclass(frozen=True)
+class Capture:
+    """One open ``fu-`` item from some project's capture-tier inbox."""
+
+    fu_id: str
+    title: str
+    project: str
+    added_at: Optional[str] = None
+
+    @property
+    def age_days(self) -> Optional[int]:
+        return _age_days(self.added_at) if self.added_at else None
+
+    def as_dict(self) -> "dict[str, Any]":
+        return {
+            "id": self.fu_id,
+            "title": self.title,
+            "project": self.project,
+            "added_at": self.added_at,
+        }
+
+
+@dataclass(frozen=True)
 class Outstanding:
     carveout_total: int
     carveout_by_kind: "dict[str, int]"
     carveout_oldest_ts: Optional[str]
     questions: "list[Question]"
+    captures: "list[Capture]"
+    capture_file_total: int = 0
+    capture_row_total: int = 0
 
     @property
     def empty(self) -> bool:
-        return self.carveout_total == 0 and not self.questions
+        return self.carveout_total == 0 and not self.questions and not self.captures
 
     def as_dict(self) -> "dict[str, Any]":
+        by_project: "dict[str, int]" = {}
+        for c in self.captures:
+            by_project[c.project] = by_project.get(c.project, 0) + 1
         return {
             "carveouts": {
                 "total": self.carveout_total,
@@ -81,6 +109,14 @@ class Outstanding:
                 "oldest_ts": self.carveout_oldest_ts,
             },
             "questions": [q.as_dict() for q in self.questions],
+            "captures": {
+                "total": len(self.captures),
+                "resolved_files": self.capture_file_total,
+                "parsed_open_rows": self.capture_row_total,
+                "repeated_ids": self.capture_row_total - len(self.captures),
+                "by_project": by_project,
+                "items": [c.as_dict() for c in self.captures],
+            },
         }
 
 
@@ -180,6 +216,177 @@ def read_open_questions(root: Path) -> "list[Question]":
     return open_qs
 
 
+def _capture_project_roots(root: Path) -> "list[Path]":
+    """This project plus every project root the machine-wide graph names.
+
+    The graph is the one machine-wide store (``~/.fno/graph.json``), and its
+    entries carry the ``cwd``/``source_cwd`` each node was worked from, so it
+    is the measured-fact enumeration of sibling projects - no second registry.
+    Dead or missing roots degrade to zero captures in the fold below, and a
+    corrupt or absent graph reads as this project alone.
+    """
+    roots = {Path(root).resolve()}
+    try:
+        # The path is passed EXPLICITLY (module attr, not the def-time default
+        # arg) so a redirected graph - hermetic tests, a configured override -
+        # is the one enumerated here.
+        from fno.graph import store as graph_store
+        from fno.graph.store import read_graph
+
+        for e in read_graph(graph_store.GRAPH_JSON):
+            if not isinstance(e, dict):
+                continue
+            for key in ("cwd", "source_cwd"):
+                raw = e.get(key)
+                if isinstance(raw, str) and raw:
+                    p = Path(raw)
+                    if p.is_dir():
+                        roots.add(p.resolve())
+    except Exception:  # noqa: BLE001 - the graph is advisory here, never fatal
+        pass
+    return sorted(roots)
+
+
+def _capture_added_at(root: Path) -> "dict[str, str]":
+    """fu_id -> capture_add ts from this root's events journal.
+
+    The inbox markdown carries no dates, so age comes from the event that
+    recorded the capture. Substring prefilter before json.loads, mirroring
+    ``read_open_questions``: the journal is shared and never rotated.
+    """
+    path = events_path(root)
+    if not path.exists():
+        return {}
+    added: "dict[str, str]" = {}
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if "capture_add" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") != "capture_add":
+                    continue
+                data = rec.get("data")
+                if not isinstance(data, dict):
+                    continue
+                fu_id = data.get("fu_id")
+                ts = rec.get("ts")
+                if isinstance(fu_id, str) and isinstance(ts, str) and ts:
+                    # First write wins: the ORIGINAL capture date is the age
+                    # signal, not a re-capture of the same fu- id.
+                    added.setdefault(fu_id, ts)
+    except (OSError, UnicodeDecodeError):
+        return {}
+    return added
+
+
+def _read_open_captures_with_counts(root: Path) -> "tuple[list[Capture], int, int]":
+    """Fold every project's capture-tier inbox. Never raises.
+
+    A missing or unreadable inbox (or a whole missing project root)
+    contributes zero captures while the other projects still report -
+    mirroring ``read_open_questions``' degrade-to-empty contract, because a
+    pile the operator cannot see and a pile that failed to read must not
+    render as the same "nothing".
+
+    Deduped twice, because the roots enumerate WORKTREES too: sibling
+    worktrees of one repo resolve (through the vault symlink) to the SAME
+    inbox file, so counting per root multiplied this repo's 293 open items
+    into 18,459 on the first live run. First by RESOLVED inbox path (one
+    file is read once, and a canonical checkout - a real ``.git`` dir -
+    supplies the label, since a worktree directory names a branch rather than
+    a project), then by ``fu_id`` across the distinct files that
+    remain.
+    """
+    from fno.backlog.capture import parse_items
+    from fno.paths import inbox_path
+
+    def _store_label(path: Path, roots: "list[Path]") -> str:
+        """Name the pile by the STORE it is, not by which repo reached it.
+
+        On a vault-linked machine many repos' ``internal`` symlinks land in
+        ONE shared inbox file; naming that group after whichever repo sorted
+        first (or last) reads as one project's pile when it is everyone's.
+        Under $HOME the first path segment names the vault/store; outside it
+        (hermetic tests, foreign roots) the first contributing root's name.
+        """
+        try:
+            home = Path.home().resolve()
+            rel = path.relative_to(home)
+            first = next(iter(rel.parts), None)
+            if first:
+                return first
+        except (ValueError, OSError):
+            pass
+        return roots[0].name if roots else "unknown"
+
+    by_path: "dict[Path, list[Path]]" = {}
+    for project_root in _capture_project_roots(root):
+        try:
+            path = inbox_path(project_root=project_root).resolve()
+            if not path.exists():
+                continue
+        except Exception:  # noqa: BLE001 - a bad path is one project less
+            continue
+        by_path.setdefault(path, []).append(project_root)
+
+    captures: "list[Capture]" = []
+    seen_ids: "set[str]" = set()
+    file_total = 0
+    row_total = 0
+    for path, roots in sorted(by_path.items()):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        file_total += 1
+        items = parse_items(text)
+        row_total += len(items)
+        project = _store_label(path, roots)
+        # Canonical checkouts (a real .git dir) lead the events lookup. Fold
+        # every distinct journal because projects can share one configured
+        # capture file while writing capture events to separate journals.
+        roots = sorted(roots, key=lambda r: not (r / ".git").is_dir())
+        added: "dict[str, str]" = {}
+        seen_journals: "set[Path]" = set()
+        for r in roots:
+            try:
+                journal = events_path(r).resolve()
+            except OSError:
+                continue
+            if journal in seen_journals:
+                continue
+            seen_journals.add(journal)
+            for fu_id, ts in _capture_added_at(r).items():
+                previous = added.get(fu_id)
+                if previous is None or ts < previous:
+                    added[fu_id] = ts
+        for item in items:
+            if item["id"] in seen_ids:
+                continue
+            seen_ids.add(item["id"])
+            captures.append(
+                Capture(
+                    fu_id=item["id"],
+                    title=item["title"],
+                    project=project,
+                    added_at=added.get(item["id"]),
+                )
+            )
+    # Oldest first where the age is known, so the render's cap keeps the
+    # items that have waited longest, not an arbitrary three.
+    captures.sort(key=lambda c: (c.added_at is None, c.added_at or "", c.fu_id))
+    return captures, file_total, row_total
+
+
+def read_open_captures(root: Path) -> "list[Capture]":
+    """Return the open capture rows from the machine-wide project fold."""
+    return _read_open_captures_with_counts(root)[0]
+
+
 def collect(root: Path) -> Outstanding:
     """Read both legs. Raises ``OutstandingError`` if either store is unreadable."""
     from fno.carveout.core import CarveoutError, read_carveouts
@@ -195,11 +402,15 @@ def collect(root: Path) -> Outstanding:
         by_kind[kind] = by_kind.get(kind, 0) + 1
     stamps = sorted(str(r.get("ts") or "") for r in rows if r.get("ts"))
 
+    captures, capture_file_total, capture_row_total = _read_open_captures_with_counts(root)
     return Outstanding(
         carveout_total=len(rows),
         carveout_by_kind=by_kind,
         carveout_oldest_ts=stamps[0] if stamps else None,
         questions=read_open_questions(root),
+        captures=captures,
+        capture_file_total=capture_file_total,
+        capture_row_total=capture_row_total,
     )
 
 
@@ -287,5 +498,30 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
         if dropped:
             lines.append(f"  ... and {dropped} more.")
         lines.append("  Answer with: fno outstanding clear <id> --answer \"...\"")
+        lines.append("")
+
+    if outstanding.captures:
+        total = len(outstanding.captures)
+        lines.append(f"{_plural(total, 'capture')} awaiting triage (fu- items).")
+        shown_captures = outstanding.captures[:RENDER_CAP]
+        for c in shown_captures:
+            where = f"  ({c.project})" if c.project != Path.cwd().name else ""
+            lines.append(f"  {c.fu_id}  {c.title}{where}")
+        # Ruling 2: the cap without the count is a lie by omission in a nicer
+        # font - a 200-row pile gets abandoned in a week, but so does a list
+        # showing 3 rows while 195 wait, unnamed.
+        ages = [c.age_days for c in outstanding.captures if c.age_days is not None]
+        summary = f"  Showing {len(shown_captures)} of {total}"
+        if ages:
+            summary += f", oldest {_plural(max(ages), 'day')}"
+        summary += (
+            f". Count rule: {total} unique open fu-* IDs across "
+            f"{_plural(outstanding.capture_file_total, 'resolved capture file')} "
+            f"({_plural(outstanding.capture_row_total, 'parsed open row')} minus "
+            f"{_plural(outstanding.capture_row_total - total, 'repeated ID')}); "
+            "post_merge.parking_lot_path is used when configured."
+        )
+        lines.append(summary)
+        lines.append("  Triage with: fno backlog triage, or fno backlog capture promote <fu-id>.")
 
     return "\n".join(lines).rstrip() + "\n"

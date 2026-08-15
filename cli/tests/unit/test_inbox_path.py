@@ -245,3 +245,33 @@ def test_inbox_path_explicit_override_beats_post_merge(
 
     result = paths_mod.inbox_path(project_root=tmp_path)
     assert result == custom.resolve()
+
+
+def test_explicit_project_root_loads_that_projects_capture_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cross-project readers resolve each repository's own parking-lot path."""
+    current = tmp_path / "current"
+    sibling = tmp_path / "sibling"
+    for repo, configured in (
+        (current, "internal/current/parking-lot.md"),
+        (sibling, "internal/sibling/parking-lot.md"),
+    ):
+        config = repo / ".fno" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            f'[post_merge]\nparking_lot_path = "{configured}"\n',
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("FNO_REPO_ROOT", str(current))
+    import fno.paths as paths_mod
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    paths_mod._settings.cache_clear()
+    paths_mod.resolve_repo_root.cache_clear()
+
+    result = paths_mod.inbox_path(project_root=sibling)
+
+    assert result == (sibling / "internal/sibling/parking-lot.md").resolve()

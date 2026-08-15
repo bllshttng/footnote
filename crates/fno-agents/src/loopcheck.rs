@@ -1530,6 +1530,104 @@ struct UnattestedReviewer {
     failed_at_head: bool,
 }
 
+/// A question THIS session asked, that was closed WITH an answer, and for
+/// which no `operator_decision` event exists on any reachable journal. The
+/// stop gate holds the session until the decision is
+/// recorded, because a ruling that dies with the transcript is the failure
+/// the decision record exists to prevent.
+pub(crate) struct UnrecordedDecision {
+    pub(crate) question_id: String,
+    pub(crate) question: String,
+}
+
+/// Fold the question/decision family across a UNION of journals.
+///
+/// A question can be asked and closed in one journal while the decision lands
+/// in another (the operator verbs write to the canonical root's journal; a
+/// worktree stop gate reads its own cwd's), so membership is only decidable
+/// after every journal is folded - checking per-file would hold a session
+/// whose record sits one path away.
+///
+/// An unreadable or absent journal contributes nothing (fail open): this gate
+/// scans for an OBLIGATION contracted elsewhere, and a missing journal means
+/// no obligation is visible, not that one was breached. The substring
+/// prefilter mirrors the Python reader: the journals are shared, append-only,
+/// and never rotated, so parsing every line costs more than the scan.
+fn scan_unrecorded_decisions(
+    journals: &[std::path::PathBuf],
+    session_id: &str,
+) -> Vec<UnrecordedDecision> {
+    let mut asked: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut closed_with_answer: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for path in journals {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines() {
+            if !(line.contains("operator_question") || line.contains("operator_decision")) {
+                continue;
+            }
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let kind = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let data = val
+                .get("data")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            match kind {
+                "operator_question" => {
+                    if data.get("session_id").and_then(|v| v.as_str()) == Some(session_id) {
+                        if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
+                            asked.insert(
+                                qid.to_string(),
+                                data.get("question")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(80)
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+                "operator_question_closed" => {
+                    let answered = data
+                        .get("answer")
+                        .and_then(|v| v.as_str())
+                        .map(|a| !a.trim().is_empty())
+                        .unwrap_or(false);
+                    if answered {
+                        if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
+                            closed_with_answer.insert(qid.to_string());
+                        }
+                    }
+                }
+                "operator_decision" => {
+                    if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
+                        recorded.insert(qid.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out: Vec<UnrecordedDecision> = asked
+        .into_iter()
+        .filter(|(qid, _)| closed_with_answer.contains(qid) && !recorded.contains(qid))
+        .map(|(question_id, question)| UnrecordedDecision {
+            question_id,
+            question,
+        })
+        .collect();
+    out.sort_by(|a, b| a.question_id.cmp(&b.question_id));
+    out
+}
+
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
 /// `review_attestation` event (x-e703 Phase 2; list form added by x-cdc7). A
 /// reviewer is satisfied when events.jsonl carries a line with
@@ -5201,6 +5299,48 @@ pub fn decide(args: &[String]) -> (i32, String) {
         manifest.plan_path.as_deref(),
         &project_events,
     );
+    // ── Step 3b: decided question left no decision record ────────────────────
+    // The recording obligation is enforced here, never self-reported: a
+    // session that closed one of ITS OWN operator questions WITH an answer but
+    // emitted no matching operator_decision event is held, and the hold names
+    // the question. Scopes to questions this session asked so a foreign
+    // session's unfinished business cannot wedge an unrelated loop. The
+    // journals are folded as a UNION because the operator verbs write to the
+    // canonical root's journal while a worktree stop gate reads its own cwd's
+    // - a record on any of the three paths clears the gate.
+    let unrecorded = if session_id != "unknown" {
+        let mut journals = vec![project_events.clone(), global_events.clone()];
+        if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
+            journals.push(canon.join(".fno/events.jsonl"));
+        }
+        scan_unrecorded_decisions(&journals, &session_id)
+    } else {
+        Vec::new()
+    };
+    if !unrecorded.is_empty() {
+        let names = unrecorded
+            .iter()
+            .map(|u| format!("{} '{}'", u.question_id, u.question))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reason = format!(
+            "a decided question has no decision record ({names}); record it with \
+             `fno decide --subject <node> --question-id <id> --decision \"...\"` \
+             (the gate matches on the question id; a re-run of the clear is a \
+             no-op once the question is closed) \
+             so the decision survives this session"
+        );
+        emit(
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "decision": "block",
+                "gate": "unrecorded_decision",
+                "unrecorded": unrecorded.iter().map(|u| u.question_id.clone()).collect::<Vec<_>>()
+            }),
+        );
+        return (0, allow_output("block", None, &reason, 0, None));
+    }
     // ── Check gh binary availability ──────────────────────────────────────────
     // Probe by attempting to spawn; if the binary doesn't exist at all (NotFound
     // error kind), treat as absent. Exit-code failures from valid gh commands

@@ -17,9 +17,10 @@ from fno.outstanding.core import OutstandingError, collect, render
 
 outstanding_app = typer.Typer(
     help=(
-        "What is outstanding FOR YOU: unharvested carve-outs and open operator "
-        "questions. Read-only by default; `ask` records a question so it "
-        "survives the next turn, `clear` closes it once answered."
+        "What is outstanding FOR YOU: unharvested carve-outs, open operator "
+        "questions, and undecided fu- captures folded across every project. "
+        "Read-only by default; `ask` records a question so it survives the "
+        "next turn, `clear` closes it once answered."
     ),
 )
 
@@ -134,19 +135,43 @@ def clear(
 
     root = _storage_root()
     try:
-        open_ids = {q.id for q in read_open_questions(root)}
+        open_by_id = {q.id: q for q in read_open_questions(root)}
     except OutstandingError as exc:
         typer.echo(f"outstanding: failed to read: {exc}", err=True)
         raise typer.Exit(1)
 
     # An id that is not open is a no-op, not a failure: mirroring
     # `carveout resolve`, a second clear must be safe to run.
-    targets = [q for q in question_ids if q in open_ids]
-    skipped = [q for q in question_ids if q not in open_ids]
+    targets = [q for q in question_ids if q in open_by_id]
+    skipped = [q for q in question_ids if q not in open_by_id]
 
     closed_by = _session_id()
     for qid in targets:
         try:
+            # An answered question IS a decision, so the close path records it
+            # as one. A close with no answer is a withdrawal and decides
+            # nothing. Record it before closing so a projection failure leaves
+            # the question open and therefore retryable.
+            # Routed through record_decision so the decision gets both halves
+            # a `fno decide` record has: the event AND the graph projection
+            # onto the subject node, which is what `fno decide list` reads.
+            # The decider is the operator by definition on this path
+            # (closed_by records the typing session on the close event);
+            # decided_by must not depend on whether the closing session could
+            # be resolved.
+            if answer is not None:
+                from fno.decide import record_decision
+
+                record = open_by_id[qid]
+                record_decision(
+                    decision=answer,
+                    subject=record.node,
+                    question_id=qid,
+                    question=record.question,
+                    asked_by=record.session_id,
+                    asked_at=record.ts or None,
+                    events_root=root,
+                )
             append_event(
                 operator_question_closed(
                     question_id=qid, answer=answer, closed_by=closed_by
