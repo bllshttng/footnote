@@ -821,20 +821,20 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # the EQUAL form (yargs misparses the split form on a flag-shaped value;
     # the positional is a PROJECT PATH, not a prompt), --auto only under
     # yolo, and never the headless `run` subcommand.
-    # x-c772: opencode is always launched with a model (the z-ai/glm-5.2 default).
+    # x-c772: opencode is always launched with a model (the z-ai/glm-5.3 default).
     opencode = build_pane_argv("opencode", "task", tmp_path, False, "ignored")
-    assert opencode == ["opencode", "--prompt=task", "--model", "z-ai/glm-5.2"]
+    assert opencode == ["opencode", "--prompt=task", "--model", "z-ai/glm-5.3"]
     assert build_pane_argv("opencode", "", tmp_path, False, None) == [
         "opencode",
         "--model",
-        "z-ai/glm-5.2",
+        "z-ai/glm-5.3",
     ]
     opencode_yolo = build_pane_argv("opencode", "task", tmp_path, True, None)
     assert opencode_yolo == [
         "opencode",
         "--prompt=task",
         "--model",
-        "z-ai/glm-5.2",
+        "z-ai/glm-5.3",
         "--auto",
     ]
     assert "run" not in opencode and "--session-id" not in opencode
@@ -876,7 +876,7 @@ def test_gemini_direct_slash_spawn_refuses_cleanly(tmp_path: Path, monkeypatch) 
 def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # x-c772: an explicit --model reaches every pane provider's TUI flag
     # (opencode included, now that it is spawnable). Exact passthrough; opencode
-    # uses the provider/model form and always carries a model (z-ai/glm-5.2 default).
+    # uses the provider/model form and always carries a model (z-ai/glm-5.3 default).
     from fno.agents.mux_spawn import _PER_HARNESS_DEFAULT_MODEL, build_pane_argv
 
     cases = [

@@ -86,8 +86,8 @@ def set_cmd(
     role: str = typer.Argument(..., help="Lane/role name, e.g. build."),
     provider_model: str = typer.Argument(
         ...,
-        help="provider/model - e.g. zai/glm-5.2 or zai/glm-5.2[1m] "
-        "(legacy comma form zai,glm-5.2 is also accepted).",
+        help="provider/model - e.g. zai/glm-5.3 or zai/glm-5.3[1m] "
+        "(legacy comma form zai,glm-5.3 is also accepted).",
     ),
     local: bool = typer.Option(
         False,
@@ -243,7 +243,7 @@ def unset_cmd(
 def env_cmd(
     spec: str = typer.Argument(
         ...,
-        help="A role (build) or an explicit provider/model (zai/glm-5.2).",
+        help="A role (build) or an explicit provider/model (zai/glm-5.3).",
     ),
 ) -> None:
     """Print an eval-able env block for interactive use.

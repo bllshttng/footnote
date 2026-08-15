@@ -80,7 +80,7 @@ _DEFAULT_SESSION = "main"
 #: overrides. ponytail: a code table, not a config knob, until the set outgrows
 #: a literal.
 _PER_HARNESS_DEFAULT_MODEL = {
-    "opencode": "z-ai/glm-5.2",
+    "opencode": "z-ai/glm-5.3",
 }
 
 
