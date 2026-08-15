@@ -5975,7 +5975,8 @@ fn floor_never_blocks_a_promise() {
 /// Item 2: an exhausted quota turns the bare read failure into the exhaustion
 /// name with a reset horizon, and drops the "retrying next fire" advice.
 #[test]
-fn exhaustion_named_on_read_failure() {    let tmp = TempDir::new().unwrap();
+fn exhaustion_named_on_read_failure() {
+    let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     isolate_settings(cwd);
