@@ -824,7 +824,9 @@ class TestTickOrchestrator:
         _delivery_state_path(store_path).write_text(json.dumps({
             "owner/gone#9": {"retries": 3, "parked": "retries-exhausted"},
         }))
-        deps = _make_tick_deps(tmp_path, candidates=[])
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs_map = {1: _make_obs(1, "OPEN", latest_review_ts=None)}
+        deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map)
 
         tick(
             graph_path=tmp_path / "graph.json",
@@ -843,6 +845,34 @@ class TestTickOrchestrator:
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["dropped"] == {"delivery-pruned": {"owner/gone": [9]}}
         assert json.loads(_delivery_state_path(store_path).read_text()) == {}
+
+    def test_zero_candidate_tick_prunes_nothing(self, tmp_path):
+        """A zero-candidate tick is the graph-hiccup signature, not a license to
+        wipe every terminal PR's delivery facts."""
+        from fno.pr_watch._dispatch import _delivery_state_path, tick
+
+        store_path = tmp_path / "state.json"
+        seeded = {"owner/gone#9": {"retries": 3, "parked": "retries-exhausted"}}
+        _delivery_state_path(store_path).write_text(json.dumps(seeded))
+        deps = _make_tick_deps(tmp_path, candidates=[])
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["dropped"].get("delivery-pruned") is None
+        assert json.loads(_delivery_state_path(store_path).read_text()) == seeded
 
     def test_tick_lock_held_returns_immediately(self, tmp_path):
         """AC-concurrency: if tick lock held, return without discovering/firing."""

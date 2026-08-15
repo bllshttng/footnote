@@ -535,7 +535,12 @@ def _run_tick(
     dropped = list(normalization.dropped)
     delivery_store = WatermarkStore(path=_delivery_state_path(store_path))
     delivery_state = delivery_store.load()
-    for stale_key in set(delivery_state) - candidate_keys:
+    # Prune only on a healthy discovery. A zero-candidate tick is the graph
+    # hiccup signature, and pruning on it would wipe every terminal PR's
+    # retry facts at once; retention costs one tick until a real candidate
+    # confirms the graph is readable.
+    prunable = set(delivery_state) - candidate_keys if candidate_keys else set()
+    for stale_key in prunable:
         pruned = delivery_state.pop(stale_key, None)
         if pruned is not None:
             # A delivery record is the only persistence of a terminal PR's
