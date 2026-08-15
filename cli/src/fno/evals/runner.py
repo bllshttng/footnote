@@ -68,6 +68,8 @@ def _default_spawn(
     (SpawnResult.ok == False), never a crash of the sweep (AC3-ERR).
     """
     name = f"eval-{os.getpid()}-{int(time.time())}"
+    # argv-fence: exempt (fno's own Typer namespace, the x-04ce seam: a
+    # leading-flag seed needs fno's own -- separator, not tracked here).
     cmd = [
         "fno", "agents", "spawn", "--name", name, prompt,
         "--substrate", "headless", "--cwd", str(workdir),

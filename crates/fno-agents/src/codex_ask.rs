@@ -169,6 +169,9 @@ pub fn build_argv_create(
         argv.push(format!("model_reasoning_effort={effort}"));
     }
     argv.extend(sandbox_flag(yolo));
+    // Behind `--` like the Python twins: a leading-flag seed must be the
+    // prompt positional, not a codex flag.
+    argv.push("--".to_string());
     argv.push(full_prompt.to_string());
     argv
 }
@@ -196,6 +199,9 @@ pub fn build_argv_resume(
     if !yolo {
         argv.extend(crate::provider::codex_sandbox_config_args_resume(cwd));
     }
+    // Behind `--` like the Python twins: a leading-flag seed must be the
+    // prompt positional, not a codex flag.
+    argv.push("--".to_string());
     argv.push(full_prompt.to_string());
     argv
 }
