@@ -151,33 +151,6 @@ def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
     return fetch_pr_rest(pr, cwd)
 
 
-def _fetch_reason(res) -> str:
-    """Explain a failed gh GraphQL read (kept for callers still on that path).
-
-    A rate-limit block gets the extra clause because the obvious check disagrees
-    with it. ``gh pr view`` spends the GRAPHQL quota, while ``gh api rate_limit``
-    reports its top-level ``rate`` and ``resources.core`` bucket, which can read
-    5000 remaining at the same moment GraphQL sits at 0. An agent that polls in a
-    loop exhausts GraphQL first, then reads a clean bill of health and keeps
-    polling. Naming the bucket is what makes the wait end.
-    """
-    lines = [ln.strip() for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
-    # The WHOLE stderr is scanned for the quota line, never just the last one.
-    # gh often appends a hint after the error, and reading only the final line
-    # handed the caller the hint and dropped the clause that names the bucket.
-    quota = next((ln for ln in lines if "rate limit" in ln.lower()), "")
-    detail = quota or (lines[-1] if lines else "gh pr view failed with no message")
-    if quota:
-        return (
-            detail
-            + " | this is the GraphQL quota. `gh api rate_limit` reports the CORE"
-            " bucket and can read 5000 remaining while GraphQL is at 0, so check"
-            " `gh api rate_limit --jq .resources.graphql` and wait for its reset"
-            " rather than retrying."
-        )
-    return detail
-
-
 def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     """Pure verdict computation. Returns (verdict, exit_code, counts).
 

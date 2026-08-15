@@ -104,9 +104,11 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
     from fno.pr._status import run_status
 
     slug = _repo_slug(cwd)
-    if not slug:
-        # No local repo context: nothing to key the row on. Serve uncached
-        # rather than key every caller onto one global row.
+    if not slug or not str(pr).strip().isdigit():
+        # No local repo context (nothing to key the row on), or a non-numeric
+        # PR argument (the REST reader's own contract; letting it through would
+        # make the raw string a filesystem path component under cache_dir()).
+        # Serve uncached rather than key every caller onto one global row.
         return run_status(pr, cwd)
     key = f"{slug.replace('/', '--')}-{pr}"
 

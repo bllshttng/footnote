@@ -5972,6 +5972,45 @@ fn floor_never_blocks_a_promise() {
     assert_eq!(code, 0);
 }
 
+/// The floor's other exemption: honoring a cancel spends no GraphQL, so an
+/// aborted fire below the floor must still terminate - blocking it would trap
+/// a cancelled session behind the reserve for a whole reset window.
+#[test]
+fn floor_never_blocks_an_abort() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floor-abort", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_aborted()).unwrap();
+
+    let gh = quota_gh(cwd, 50, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert!(!d.message.contains("standing down"), "got: {}", d.message);
+    assert_eq!(d.decision, "allow");
+    assert_eq!(d.termination_reason.as_deref(), Some("Aborted"));
+}
+
 /// Item 2: an exhausted quota turns the bare read failure into the exhaustion
 /// name with a reset horizon, and drops the "retrying next fire" advice.
 #[test]

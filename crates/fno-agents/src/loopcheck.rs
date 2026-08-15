@@ -5515,7 +5515,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // primary-exempt; a failed probe (None) changes nothing.
     let quota_probe = probe_graphql_quota(gh_bin, &cwd);
     if let Some(q) = &quota_probe {
-        if q.remaining < GRAPHQL_FLOOR && intent != Intent::Promise {
+        // Aborted is exempt too: honoring a cancel spends no GraphQL (the
+        // Aborted terminal in done() reads nothing), so blocking it here
+        // would trap a cancelled session behind the floor for a whole reset
+        // window - the operator's cancel outranks the reserve.
+        if q.remaining < GRAPHQL_FLOOR
+            && !matches!(intent, Intent::Promise | Intent::Aborted { .. })
+        {
             // Lease-only exemption for a WATCHING fire (review finding on the
             // floor): the watch-idle branch below is unreachable from here, so
             // without this a quota window converts every watching fire into a
@@ -6696,7 +6702,10 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // cannot succeed. The probe is REST and primary-exempt, so it
                 // still answers while GraphQL is at 0; a failed probe keeps
                 // the transient wording rather than guessing.
-                let quota = probe_graphql_quota(gh_bin, &cwd);
+                // Reuse the fire-start probe; re-probe only if it failed, so a
+                // blip at the top still gets its one retry without a second
+                // `gh api rate_limit` on every error fire (request-rate cost).
+                let quota = quota_probe.or_else(|| probe_graphql_quota(gh_bin, &cwd));
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
@@ -6724,13 +6733,6 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fp_read_failed": true
                     }),
                 );
-                // Name the real reason when the quota is the reason (x-9715 item
-                // 2). "retrying next fire" is the right advice for a blip and
-                // the worst possible advice for an exhausted quota: it burns a
-                // fire every tick for the whole reset window on a call that
-                // cannot succeed. The probe is REST and primary-exempt, so it
-                // still answers while GraphQL is at 0; a failed probe keeps
-                // the transient wording rather than guessing.
                 let reason = match &quota {
                     Some(q) if q.remaining == 0 => graphql_exhausted_reason(q),
                     _ => format!(
@@ -6929,7 +6931,7 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // instead of reading as "nothing pending".
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api 'repos/$r/pulls/{pr_number}/reviews?per_page=100' --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api 'repos/$r/pulls/{pr_number}/reviews?per_page=100' --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m; per_page=100 because gh api fetches ONE page - at the default 30 the count saturates and a 31st review never wakes it)"
+            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api \"repos/$r/pulls/{pr_number}/reviews?per_page=100\" --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api \"repos/$r/pulls/{pr_number}/reviews?per_page=100\" --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m; per_page=100 because gh api fetches ONE page - at the default 30 the count saturates and a 31st review never wakes it)"
         )
     } else {
         format!(
