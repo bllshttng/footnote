@@ -1,6 +1,6 @@
 # Merge-triggered auto-continue
 
-When a backlog node's PR merges, footnote dispatches a fresh background `/target --no-merge` worker for the next now-unblocked node, so a merge-gated epic walks itself group-by-group across merges with no manual re-invocation. The trigger is the **merge event**, not the loop terminal.
+When a backlog node's PR merges, footnote dispatches a fresh background `/target --no-merge` worker for the next now-unblocked node. A merge-gated epic then walks itself group-by-group across merges with no manual re-invocation. The trigger is the **merge event**, not the loop terminal.
 
 ## Why
 
@@ -131,7 +131,7 @@ Do not reuse the defer horizon here - it answers the opposite question.
 
 `advance()` selects the project-scoped *next* ready node, so it can only continue a chain *within one project*: `fno backlog next --project <closed.project>` filters foreign nodes out. A multi-repo feature modeled as one node per project linked by `blocked_by` (backend node A in `etl`, frontend node B in `web`, `B blocked_by A`) would stall at the repo boundary - A merges, but B is never dispatched.
 
-`advance_dependents()` (same module) closes that gap by following `blocked_by` **edges** instead of a project-scoped selection. After a node closes, for each now-unblocked **direct** dependent in a **different** project it spawns `/target --no-merge <dep> --cwd <dep work-map root>`. The two paths are deliberately distinct (dispatch-by-edge vs select-next): `advance()` is untouched, so a pure single-project close dispatches nothing new, and the same-project continuation keeps using `next`.
+`advance_dependents()` (same module) closes that gap by following `blocked_by` **edges** instead of a project-scoped selection. After a node closes, for each now-unblocked **direct** dependent in a **different** project it spawns `/target --no-merge <dep> --cwd <dep work-map root>`. The two paths are deliberately distinct (dispatch-by-edge vs select-next). `advance()` is untouched, so a pure single-project close dispatches nothing new. The same-project continuation keeps using `next`.
 
 - **Unblocked == ready.** `_direct_dependents` reads the graph fresh (after the close commits under `locked_mutate_graph`), so `recompute_statuses` already reflects the merge: a dependent whose only open blocker was the closed node reads `ready`. The filter is `status == "ready"` + cross-project + direct edge - no hand-written unblock predicate. Plan-less (`idea`) dependents are not auto-dispatched.
 - **Root from the work map, never guessed.** The dependent's `--cwd` is `project_root_from_settings(dep.project)` (exposed standalone as `fno backlog project-root <project>`). An unmapped project is refused by name (`advance_skipped{unmapped-project, detail=<project>}`), never launched against a guessed cwd.
