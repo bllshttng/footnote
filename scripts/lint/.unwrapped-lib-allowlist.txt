@@ -216,3 +216,11 @@ worktree-reapable.sh
 # to cap convo-signals.jsonl; tests run it directly. Pure utility, not a
 # user-facing fno verb.
 rotate-append-log.sh
+
+# Cross-references a worktree path against ~/.fno/agents/registry.json for
+# its real session name + live/exited status (x-ad51). Invoked by
+# scripts/lib/worktree-lifecycle.sh's `status` case, which IS the wrapped
+# entry point (`fno worktree status` -> cli/src/fno/worktree_cli/cli.py);
+# a second wrapper here would be a third opinion on one question.
+# tests/test-worktree-status.sh runs it directly. Pure helper, no CLI of its own.
+worktree-status.py

@@ -5,7 +5,7 @@
 # assert the correct row is labeled in both text and --json output.
 set -euo pipefail
 
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd)"
 SCRATCH="$(mktemp -d)"
 SCRATCH="$(cd "$SCRATCH" && pwd -P)"  # resolve symlinks (e.g. macOS /var -> /private/var) to match git's own path reporting
 trap 'rm -rf "$SCRATCH"' EXIT
