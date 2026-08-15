@@ -1879,7 +1879,17 @@ where
     let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
     if live && !short_id.is_empty() {
-        eprintln!("fno agents resume: {name} is live - attaching");
+        // Deliberately silent on mechanism: the caller (`run_resume`) decides
+        // AFTER this returns whether the row gets --print-command'd, the
+        // Python headless wake-and-verify delegation, or (a mux pane row
+        // never reaches this arm, so that leaves) nothing else -- an
+        // "attaching" claim printed here was true when this arm always led
+        // to a bare `claude attach` exec, and stayed on the screen after the
+        // delegation replaced that exec with a wake that never attaches at
+        // all. The caller's own downstream output (the printed command, or
+        // fno-py's before -> after line) is what actually describes what
+        // happened.
+        eprintln!("fno agents resume: {name} is live");
         Ok((
             vec!["claude".into(), "attach".into(), short_id.into()],
             None,
@@ -2286,6 +2296,11 @@ fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), 
     let mut name: Option<String> = None;
     let mut print_command = false;
     let mut message: Option<String> = None;
+    // Every sibling parser in this file (`parse_trace_args`, `parse_logs_args`)
+    // expands `--flag=value` into `--flag value` before iterating; without it
+    // `--message=continue` falls into the `starts_with("--")` unknown-flag arm
+    // instead of being recognized.
+    let rest = expand_eq(rest);
     let mut iter = rest.iter();
     while let Some(a) = iter.next() {
         match a.as_str() {
@@ -2468,6 +2483,21 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 0;
     }
 
+    // Validate cwd for ALL paths before claiming, delegating, or launching. A
+    // deleted worktree is a cleanup job, not a resume. The exec path
+    // re-checks via set_current_dir below (race-free for its own chdir), but
+    // bailing here means a gone cwd never acquires the session claim, and
+    // never burns a wake attempt, on the failure path.
+    if !Path::new(cwd).is_dir() {
+        eprintln!(
+            "fno agents resume: cwd {} for {} is no longer reachable. Run `fno agents rm {}` to clean up.",
+            py_repr_str(cwd),
+            py_repr_str(&name),
+            name
+        );
+        return 13;
+    }
+
     // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
     // this arm (the dead-relaunch arm above sets Some(uuid); the two error
     // arms already returned). A bare `claude attach` exec here has no pty,
@@ -2489,6 +2519,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // dispatch, mirroring `token_helper_output` above -- without it,
         // `resume` (in RUST_CLIENT_VERBS) would auto-route straight back into
         // this same binary and loop.
+        //
+        // exec(), not status(): this REPLACES the process rather than
+        // spawning a child, matching every other `Command::new("fno")...exec()`
+        // delegation in this crate (`bin/client.rs:523-534`, `:544-554`) --
+        // same exit-127-on-failure convention, and it sidesteps process-group
+        // signal-propagation questions a spawned child would raise, since
+        // there is no separate child to propagate a signal to.
+        use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new("fno");
         command
             .args(["agents", "resume", &name])
@@ -2496,28 +2534,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Some(msg) = &message {
             command.args(["--message", msg]);
         }
-        let status = command.status();
-        return match status {
-            Ok(s) => s.code().unwrap_or(1),
-            Err(e) => {
-                eprintln!("fno agents resume: failed to delegate {name} to fno-py: {e}");
-                1
-            }
-        };
-    }
-
-    // Validate cwd for BOTH paths before claiming or launching. A deleted
-    // worktree is a cleanup job, not a resume. The exec path re-checks via
-    // set_current_dir below (race-free for its own chdir), but bailing here
-    // means a gone cwd never acquires the session claim on the failure path.
-    if !Path::new(cwd).is_dir() {
+        let err = command.exec();
         eprintln!(
-            "fno agents resume: cwd {} for {} is no longer reachable. Run `fno agents rm {}` to clean up.",
-            py_repr_str(cwd),
-            py_repr_str(&name),
-            name
+            "fno agents resume: delegating {name} to fno-py failed: {err}. \
+             Install the fno front door or run `fno-py agents resume {name}` directly."
         );
-        return 13;
+        return 127;
     }
 
     // Guard a dead-row `claude --resume` with the session single-writer claim

@@ -169,6 +169,11 @@ def list_agents(
         # ``--all``: a stopped/completed row now arrives in live_map instead
         # of being absent, and without this, its raw supervisor status would
         # silently win over the richer PR/CI-aware truth-status fallback.
+        # ``resume_cli.py``'s ``_WAKE_SKIP_STATUSES_LOWER`` independently
+        # enumerates the neighboring subset of claude.py's
+        # ``KNOWN_LIVE_STATUSES`` ("working"/"idle"/"done", the complement of
+        # "needs input") for its own not-blocked check — keep both in sync
+        # by hand if that status vocabulary ever changes.
         if live_status is None or str(live_status).lower() in ("idle", "done"):
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:

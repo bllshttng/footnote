@@ -207,7 +207,7 @@ def test_claude_resume_wakes_and_verifies_working() -> None:
     )
     wake_calls: list[dict] = []
 
-    def _wake(short_id, *, message, route_env):
+    def _wake(short_id, *, message, route_env, cwd):
         wake_calls.append({"short_id": short_id, "message": message, "route_env": route_env})
 
     states = iter(["Needs input", "Working"])
@@ -240,7 +240,7 @@ def test_claude_resume_retries_once_before_giving_up() -> None:
     )
     wake_calls: list[int] = []
 
-    def _wake(short_id, *, message, route_env):
+    def _wake(short_id, *, message, route_env, cwd):
         wake_calls.append(1)
 
     # Stays "Needs input" through the pre-check and both post-attempt reads.
@@ -286,6 +286,61 @@ def test_claude_resume_emits_no_event_on_a_failed_wake() -> None:
     assert events_seen == []
 
 
+def test_claude_resume_emits_no_event_on_a_skipped_already_working_row() -> None:
+    """A skipped row (already Working) never entered the wake loop: emitting
+    "agent_resumed" for it would claim a resume happened when nothing was
+    attempted, the same event-naming concern the failed-wake case above
+    guards against."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    events_seen: list[dict] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 0
+    assert events_seen == []
+
+
+def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
+    """The wake subprocess must run from the agent's own recorded cwd,
+    matching the non-claude exec path's os.chdir(cwd) and the Rust exec
+    fallback's set_current_dir(cwd) -- claude attach finds the session by
+    short_id, not by directory, but a wrong cwd would still leak into
+    anything the attaching process reads project-locally."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/the/agents/worktree", short_id="deadbeef",
+    )
+    seen_cwd: list[str] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        seen_cwd.append(cwd)
+
+    states = iter(["Needs input", "Working"])
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+    )
+    assert res.exit_code == 0
+    assert seen_cwd == ["/the/agents/worktree"]
+
+
 def test_claude_resume_restores_routed_env() -> None:
     """A routed row's env must reach the wake attempt."""
     from fno.agents.resume_cli import resume_logic
@@ -296,7 +351,7 @@ def test_claude_resume_restores_routed_env() -> None:
     entry.route_settings_path = "/tmp/route.json"  # type: ignore[attr-defined]
     seen_env: list[Optional[dict]] = []
 
-    def _wake(short_id, *, message, route_env):
+    def _wake(short_id, *, message, route_env, cwd):
         seen_env.append(route_env)
 
     def _read_route_settings(path):
@@ -673,7 +728,7 @@ def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
     )
     states = iter(["Needs input", "Working"])
 
-    def _wake(short_id, *, message, route_env):
+    def _wake(short_id, *, message, route_env, cwd):
         raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
 
     res = resume_logic(
@@ -717,6 +772,7 @@ def test_default_wake_fn_scrubs_ambient_auth_before_overlaying_the_route(
         "deadbeef",
         message="continue",
         route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"},
+        cwd="/the/agents/worktree",
     )
 
     assert seen["env"].get("ANTHROPIC_API_KEY") is None
@@ -749,7 +805,7 @@ def test_default_wake_fn_leaves_ambient_auth_untouched_with_no_route(
 
     monkeypatch.setattr(subprocess_mod, "Popen", _fake_popen)
 
-    _default_wake_fn("deadbeef", message="continue", route_env=None)
+    _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/the/agents/worktree")
 
     assert seen["env"]["ANTHROPIC_API_KEY"] == "sk-operators-own-key"
 

@@ -132,14 +132,14 @@ _WAKE_TARGET_STATUS = "Working"
 # benefit, since the row isn't blocked or stopped in the first place — and
 # Done is a terminal row that was never going to reach Working no matter how
 # many attempts run (visible here for the first time now that
-# `claude_agents_json` passes `--all`).
-_WAKE_SKIP_STATUSES = frozenset({"Working", "Idle", "Done"})
-# Lower-cased once for comparison: `_state_of()` compares case-insensitively
-# because a live_map producer that skips claude.py's own Title-Case
-# normalization has slipped an un-normalized status through before (see the
-# matching fix in read.py's live_status fill-in check) — an un-recognized
-# "idle" here must not be treated as blocked and get keystrokes injected.
-_WAKE_SKIP_STATUSES_LOWER = frozenset(s.lower() for s in _WAKE_SKIP_STATUSES)
+# `claude_agents_json` passes `--all`). Defined lower-case directly (not
+# derived from a Title-Case set) since `_state_of()` compares
+# case-insensitively: a live_map producer that skips claude.py's own
+# Title-Case normalization has slipped an un-normalized status through
+# before (see the matching check in read.py's live_status fill-in, ~line
+# 168 — both independently enumerate a subset of claude.py's
+# `KNOWN_LIVE_STATUSES` and must be kept in sync by hand).
+_WAKE_SKIP_STATUSES_LOWER = frozenset({"working", "idle", "done"})
 
 
 def _default_agents_state_fn() -> dict[str, dict]:
@@ -183,6 +183,7 @@ def _default_wake_fn(
     *,
     message: str,
     route_env: Optional[dict[str, str]],
+    cwd: str,
     timeout: float = _WAKE_ATTEMPT_TIMEOUT_SEC,
 ) -> None:
     """One wake attempt: pty + routed env + clear/send/submit.
@@ -215,6 +216,13 @@ def _default_wake_fn(
     exactly what would make a retry's second ``claude attach`` race the
     first for the same session.
 
+    Runs ``script``/``claude attach`` from the agent's own recorded ``cwd``,
+    matching every other resume arm (the non-claude ``os.chdir(cwd)`` before
+    exec, and the Rust exec fallback's ``set_current_dir(cwd)``): ``claude
+    attach <short_id>`` looks the session up by id, not by directory, so this
+    is not load-bearing for finding the right session, but a wrong cwd would
+    still leak into anything the attaching process reads project-locally.
+
     Does not reuse ``dispatch.py``'s ``_mux_pane_send``/``_paste_then_submit``
     (a guarded send plus content-based transcript confirmation): that
     primitive addresses a mux-hosted PANE, a different substrate from the
@@ -243,6 +251,7 @@ def _default_wake_fn(
     proc = subprocess.Popen(
         ["bash", "-c", script_cmd],
         env=env,
+        cwd=cwd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -335,7 +344,7 @@ def _resume_claude_wake(
     if before.lower() not in _WAKE_SKIP_STATUSES_LOWER:
         for _attempt in range(_WAKE_ATTEMPTS):
             try:
-                wake_fn(short_id, message=message, route_env=route_env)
+                wake_fn(short_id, message=message, route_env=route_env, cwd=cwd)
             except subprocess.TimeoutExpired:
                 last_err = "wake attempt timed out"
             except OSError as exc:
@@ -373,18 +382,24 @@ def _resume_claude_wake(
             ),
         )
 
-    try:
-        emit_event(
-            "agent_resumed",
-            name=name,
-            provider=harness,
-            session_id=session_id,
-            cwd=cwd,
-            before=before,
-            after=after,
-        )
-    except OSError:  # best-effort telemetry; never mask the resume outcome.
-        pass
+    # A skipped row never entered the wake loop -- emitting "agent_resumed"
+    # for it would claim a resume happened when nothing was attempted, the
+    # same misreport the exit-16 check above already refuses for a failed
+    # wake. The failure branch already returned above, so the only path left
+    # here besides a skip is a genuine wake that reached Working.
+    if before.lower() not in _WAKE_SKIP_STATUSES_LOWER:
+        try:
+            emit_event(
+                "agent_resumed",
+                name=name,
+                provider=harness,
+                session_id=session_id,
+                cwd=cwd,
+                before=before,
+                after=after,
+            )
+        except OSError:  # best-effort telemetry; never mask the resume outcome.
+            pass
 
     # No exec_argv/exec_cwd: this path never execs (unlike every other
     # harness's resume arm), so leaving those fields set to a
