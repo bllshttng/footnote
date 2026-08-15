@@ -5439,6 +5439,11 @@ def _mux_pane_send(
     pane_id = mux.get("pane_id")
     if not session or pane_id is None:
         return False
+    # x-e21e: the entry IS the row, so the bus-only gate reads it directly --
+    # a bus-only recipient never gets a pane paste, same as the control.sock
+    # and codex lanes.
+    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+        return False
     # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
     # the <cross-session-message> peer-follow-up container) leaves no agent-authored
     # marker in the recipient transcript, so record it in the ledger. Both wrapped
@@ -5692,6 +5697,48 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
         return False, "probe-unavailable"
 
 
+#: The one delivery-policy value that forbids prompt-line injection (x-e21e).
+#: A DELIVERY-POLICY fact, never a liveness verdict: a bus-only session may be
+#: alive and mid-turn, it just belongs on the durable bus. Kept as a literal
+#: (compared everywhere) because the registry field is an open
+#: ``Optional[str]``; a second value would graduate to an enum then.
+BUS_ONLY_POLICY = "bus-only"
+
+
+def _delivery_policy_refusal(target) -> Optional[str]:
+    """:data:`BUS_ONLY_POLICY` when ``target``'s registry row says its mail
+    belongs on the durable bus; ``None`` otherwise (no row, no policy, or an
+    unreadable registry).
+
+    The gate every shared injector consults BEFORE any transport call, so the
+    no-paste guarantee holds on every reachable lane (name/reply, job, project,
+    raw, dispatch, ask, annotate) rather than on whichever lane remembered to
+    check. Accepts the target in whatever form the lane holds: a registry
+    ``AgentEntry``, or an id/handle token matched against ``harness_session_id``,
+    ``short_id``, and ``name``. Unresolvable reads as no-policy -- failing open
+    here fails toward today's behavior (live delivery to workers), never toward
+    stranding a worker's mail on a registry hiccup.
+
+    Never raises."""
+    try:
+        if target is None:
+            return None
+        if hasattr(target, "delivery_policy"):
+            if getattr(target, "delivery_policy", None) == BUS_ONLY_POLICY:
+                return BUS_ONLY_POLICY
+            return None
+        entries = load_registry()
+    except Exception:  # noqa: BLE001 - a registry read failure never blocks delivery
+        return None
+    for entry in entries:
+        if (
+            getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY
+            and target in (entry.harness_session_id, entry.short_id, entry.name)
+        ):
+            return BUS_ONLY_POLICY
+    return None
+
+
 def _mail_inject_claude(
     recipient: str,
     text: str,
@@ -5735,6 +5782,13 @@ def _mail_inject_claude(
     def _record(reason: str) -> None:
         if reason_out is not None:
             reason_out.append(reason)
+
+    # x-e21e: a bus-only recipient never gets a prompt-line paste, on any lane
+    # that routes through this injector. Refused BEFORE the binary, the roster,
+    # and the socket: no transport call at all.
+    if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
+        _record(BUS_ONLY_POLICY)
+        return False
 
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
@@ -6036,7 +6090,9 @@ def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
     return (True, detail) if delivered else (False, None)
 
 
-def _mail_inject_codex(thread_id: str, text: str) -> bool:
+def _mail_inject_codex(
+    thread_id: str, text: str, *, reason_out: Optional[list] = None
+) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --harness codex`` verb (US8, node x-d899).
 
@@ -6044,10 +6100,22 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
     daemon accepts the turn; any miss (binary absent, no daemon socket, thread
     not attached) returns False so the caller writes the durable fallback. The
     codex app-server daemon only exists when the user runs it
-    (``codex app-server daemon start``); absent it this is a clean no-op."""
+    (``codex app-server daemon start``); absent it this is a clean no-op.
+
+    ``reason_out`` (x-e21e), when a non-empty list, receives the live lane's
+    cause on a miss -- the same side-channel contract as
+    :func:`_mail_inject_claude`, so a bus-only refusal names itself in the
+    caller's receipt instead of reading as a generic live-miss."""
     import json
 
     from fno import rust_binary
+
+    # x-e21e: same injector-level gate as the claude lane; see
+    # _delivery_policy_refusal.
+    if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
+        if reason_out is not None:
+            reason_out.append(BUS_ONLY_POLICY)
+        return False
 
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
