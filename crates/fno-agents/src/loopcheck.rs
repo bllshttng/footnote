@@ -6848,6 +6848,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 let is_graphql_read = matches!(
                     failed_read.as_str(),
                     "pr_view"
+                        | "pr_view_parse"
                         | "pr_checks"
                         | "pr_checks_parse"
                         | "pr_reviews"
