@@ -1580,7 +1580,7 @@ def _claude_create_path(
                 f"to {name} (succession). You no longer hold it.",
                 file=sys.stderr,
             )
-    except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+    except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
         # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
         # but no registry row names it, so without this the orphan's later
         # death would join no birth in the daemon log.
