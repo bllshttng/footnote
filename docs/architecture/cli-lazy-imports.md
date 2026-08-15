@@ -217,9 +217,9 @@ A future refactor must preserve:
 1. `fno --help` does not import sub-app bodies. Test: `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
 2. `fno paths state-dir` does not import the heavy sub-apps. Test: `test_fno_paths_does_not_import_heavy_subapps`.
 3. Single-command sub-apps keep their group shape. Test: `test_executor_resolve_group_shape_preserved`.
-4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_executor_resolve_group_shape_preserved` covers the group shape; the overrides themselves are exercised by the `--help` tests.
+4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_executor_resolve_group_shape_preserved` covers the group shape. The overrides themselves are exercised by the `--help` tests.
 5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
 6. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Tests: `test_error_path_never_first_imports_rich_utils`, `test_building_the_command_does_not_import_rich_utils`.
 7. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.
 
-Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py` with the import path and a short help string. Run the test suite to confirm coverage. No changes to `_lazy_group.py` should be required for a normal sub-app addition.
+Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py` with the import path and a short help string. Run the test suite to confirm coverage. No changes to `_lazy_group.py` are required for a normal sub-app addition.
