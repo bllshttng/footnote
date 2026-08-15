@@ -269,6 +269,26 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     assert decisions[0]["decision"] == "fold"
 
 
+def test_failed_decision_record_does_not_consume_the_question(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A projection failure must leave the question open for a safe retry."""
+    qid = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    ).stdout.strip().splitlines()[-1]
+
+    def fail_projection(_event):
+        raise OSError("graph unavailable")
+
+    monkeypatch.setattr("fno.decide._project", fail_projection)
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+
+    assert cleared.exit_code == 1, cleared.output
+    from fno.outstanding.core import read_open_questions
+
+    assert [q.id for q in read_open_questions(root)] == [qid]
+
+
 def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     """The shared journal is append-only and never rotated.
 

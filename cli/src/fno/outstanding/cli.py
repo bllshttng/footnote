@@ -148,15 +148,10 @@ def clear(
     closed_by = _session_id()
     for qid in targets:
         try:
-            append_event(
-                operator_question_closed(
-                    question_id=qid, answer=answer, closed_by=closed_by
-                ),
-                events_path=events_path(root),
-            )
             # An answered question IS a decision, so the close path records it
             # as one (AC3). A close with no answer is a withdrawal and decides
-            # nothing. Emitted alongside the closed event, never instead of it.
+            # nothing. Record it before closing so a projection failure leaves
+            # the question open and therefore retryable.
             # Routed through record_decision so the decision gets both halves
             # a `fno decide` record has: the event AND the graph projection
             # onto the subject node, which is what `fno decide list` reads.
@@ -177,6 +172,12 @@ def clear(
                     asked_at=record.ts or None,
                     events_root=root,
                 )
+            append_event(
+                operator_question_closed(
+                    question_id=qid, answer=answer, closed_by=closed_by
+                ),
+                events_path=events_path(root),
+            )
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)
             raise typer.Exit(1)
