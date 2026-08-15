@@ -3,7 +3,7 @@
 Covers bundled Pydantic invariant changes on cli/src/fno/schemas/target.py:
   #15  clean_passed / goal_verification_passed / browser_testing_passed: Optional[str] -> bool
        with a legacy-coercion field_validator and a once-per-session DeprecationWarning
-  #16  merged_prs, merge_auto_queued: List[Any] -> List[int]
+  #16  merged_prs: List[Any] -> List[int]
        merge_failed, conflicts_resolved: List[Any] -> List[MergeFailureRecord|ConflictResolutionRecord]
   #17  provenance_nonce: new Optional[str] = Field(pattern=r"^[a-f0-9]{16}$")
 
@@ -137,7 +137,7 @@ class TestGateBoolCoercion:
 # ---------------------------------------------------------------------------
 
 class TestTypedListFields:
-    """AC2-HP, AC2-ERR, AC2-FR for merged_prs, merge_auto_queued, merge_failed,
+    """AC2-HP, AC2-ERR, AC2-FR for merged_prs, merge_failed,
     conflicts_resolved."""
 
     # merged_prs (List[int])
@@ -156,18 +156,6 @@ class TestTypedListFields:
         """AC2-ERR (#16): non-int elements in merged_prs raise ValidationError."""
         with pytest.raises(ValidationError):
             TargetState(merged_prs=["not-int"])
-
-    # merge_auto_queued (List[int])
-
-    def test_ac2_hp_merge_auto_queued_scalar_ints(self):
-        """AC2-HP (#16): merge_auto_queued accepts a list of ints."""
-        state = TargetState(merge_auto_queued=[789])
-        assert state.merge_auto_queued == [789]
-
-    def test_ac2_err_merge_auto_queued_rejects_non_int(self):
-        """AC2-ERR (#16): non-int elements in merge_auto_queued raise ValidationError."""
-        with pytest.raises(ValidationError):
-            TargetState(merge_auto_queued=["not-int"])
 
     # merge_failed (List[MergeFailureRecord])
 

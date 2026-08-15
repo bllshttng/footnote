@@ -71,7 +71,6 @@ clean_passed: false
 auto_merge_enabled: false
 auto_merge_approved: false
 merged_prs: []
-merge_auto_queued: []
 merge_failed: []
 conflicts_resolved: []
 ---

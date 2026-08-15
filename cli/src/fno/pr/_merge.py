@@ -1355,24 +1355,12 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     except json.JSONDecodeError:
         return _miss("gh returned unparseable JSON")
     rollup = data.get("statusCheckRollup") or []
-    # GitHub's own queue waits only for REQUIRED checks (review round 7): a
-    # slow optional check (isRequired=false, e.g. a coverage-annotate or
-    # nightly job pending on every PR) must not hold a merge forever the way a
-    # pending required one legitimately does. When the rollup carries the
-    # annotation on any entry, judge the required subset - which is green when
-    # everything is optional. A payload with no annotations at all (older
-    # shapes) stays whole.
-    if any("isRequired" in c for c in rollup):
-        required = [c for c in rollup if c.get("isRequired") is True]
-        if not required:
-            # Everything optional: nothing to wait for (GitHub's queue merges
-            # in this shape too). Counts report the required subset - zero.
-            return (
-                "green",
-                {"total": 0, "pass": 0, "fail": 0, "pending": 0},
-                (data.get("headRefOid") or "").strip(),
-            )
-        rollup = required
+    # Whole-rollup semantics: with require_checks_pass, every check must pass.
+    # A required-vs-optional split would need branch-protection context that
+    # `gh pr view` does not expose - its statusCheckRollup entries carry no
+    # isRequired key (live-probed on gh 2.95.0, export_pr.go emits none), so a
+    # filter keyed on that annotation can never fire. Held is the fail-safe
+    # verdict for an optional check that never settles.
     verdict, _exit, counts = verdict_for(rollup)
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 

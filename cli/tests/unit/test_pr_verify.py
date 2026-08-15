@@ -148,8 +148,10 @@ def test_changes_requested_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
 
 
 def test_failing_required_check_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
+    # No isRequired key: gh's statusCheckRollup never emits it (whole-rollup
+    # semantics; see _merge._checks_verdict).
     sf = _state_file(tmp_path)
-    rollup = [{"name": "ci/build", "isRequired": True, "conclusion": "FAILURE"}]
+    rollup = [{"name": "ci/build", "conclusion": "FAILURE"}]
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "statusCheckRollup": rollup}])
     monkeypatch.setattr(_verify, "run", fake)
     monkeypatch.setattr(_merge, "run", fake)

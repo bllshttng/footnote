@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for auto_merge fields in init-target-state.sh
 # Verifies: auto_merge_enabled + auto_merge_approved are written to
-#           target-state.md at init time. The merged_prs / merge_auto_queued /
-#           merge_failed / conflicts_resolved arrays are NOT: the manifest became
+#           target-state.md at init time. The merged_prs / merge_failed /
+#           conflicts_resolved arrays are NOT: the manifest became
 #           write-once, and mutable per-run state left it with them.
 # Also verifies TARGET_NO_MERGE=1 forces auto_merge_approved: false.
 

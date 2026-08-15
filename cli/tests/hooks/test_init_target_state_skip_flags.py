@@ -296,7 +296,7 @@ def test_immutable_manifest_has_no_mutable_fields(tmp_path):
         "memory_pass_passed", "browser_testing_passed", "deferrals_captured",
         "ledger_updated", "provenance_nonce", "skip_flags_initial",
         "coordinator_phase", "session_start_context_loaded",
-        "merged_prs", "merge_auto_queued", "merge_failed", "conflicts_resolved",
+        "merged_prs", "merge_failed", "conflicts_resolved",
     ]
     found = [f for f in forbidden if f in fm]
     assert not found, (

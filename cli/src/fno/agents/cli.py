@@ -1235,7 +1235,16 @@ def cmd_spawn(
     elif is_target_family(message):
         # A family message WITHOUT the flag clears the carrier: the flag is the
         # authority. A non-family (prose/other-verb) message clears NOTHING - see
-        # the comment above.
+        # the comment above. Clearing an INHERITED carrier is never silent: an
+        # operator's exported TARGET_NO_MERGE is a documented control input, and
+        # the message overriding it deserves a visible line.
+        if os.environ.get("TARGET_NO_MERGE"):
+            print(
+                "fno agents spawn: inherited TARGET_NO_MERGE cleared; the "
+                "/target-family message carries no --no-merge flag and the "
+                "message is authoritative",
+                file=sys.stderr,
+            )
         os.environ.pop("TARGET_NO_MERGE", None)
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps

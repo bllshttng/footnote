@@ -364,12 +364,15 @@ def run_verify_merged(
 
 
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Required checks not in a success/neutral/skipped state (jq parity)."""
+    """Failing checks (whole rollup): not in a success/neutral/skipped state.
+
+    No isRequired filter - `gh pr view` never emits that key (see
+    _merge._checks_verdict), so with require_checks_pass every check counts."""
     failing: List[str] = []
     for c in rollup:
         state = str(_alt(c.get("conclusion"), c.get("state"), c.get("status"), "PENDING")).upper()
         name = _alt(c.get("name"), c.get("context"), "unnamed")
-        if c.get("isRequired") is True and state not in _PASS_STATES:
+        if state not in _PASS_STATES:
             failing.append(str(name))
     return failing
 

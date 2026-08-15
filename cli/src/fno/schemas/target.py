@@ -272,7 +272,6 @@ class TargetState(BaseModel):
     auto_merge_source: Optional[str] = None
     # Scalar int lists: sole writer is scripts/lib/pr-merge.sh which emits PR numbers.
     merged_prs: List[int] = Field(default_factory=list)
-    merge_auto_queued: List[int] = Field(default_factory=list)
     # Record lists: sub-models use extra="allow" for legacy tolerance.
     merge_failed: List[MergeFailureRecord] = Field(default_factory=list)
     conflicts_resolved: List[ConflictResolutionRecord] = Field(default_factory=list)

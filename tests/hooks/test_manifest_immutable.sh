@@ -144,7 +144,6 @@ if [[ -f "$MANIFEST" ]]; then
   _forbidden_absent "coordinator_phase"
   _forbidden_absent "session_start_context_loaded"
   _forbidden_absent "merged_prs"
-  _forbidden_absent "merge_auto_queued"
   _forbidden_absent "merge_failed"
   _forbidden_absent "conflicts_resolved"
 fi

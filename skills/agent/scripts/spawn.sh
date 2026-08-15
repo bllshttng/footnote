@@ -419,7 +419,10 @@ case "${MESSAGE%% *}" in
   /target|/fno:target|\$fno:target)
     case " $MESSAGE " in
       *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
-      *) unset TARGET_NO_MERGE 2>/dev/null || true ;;
+      *)
+        [[ -n "${TARGET_NO_MERGE:-}" ]] && echo "spawn: inherited TARGET_NO_MERGE cleared; /target-family message carries no --no-merge flag and the message is authoritative" >&2
+        unset TARGET_NO_MERGE 2>/dev/null || true
+        ;;
     esac
     ;;
 esac
