@@ -1798,8 +1798,8 @@ def _job_lane_send(
     # must not promise turn-boundary visibility.
     if bus_only:
         print(
-            f"mail: holder is bus-only by delivery policy; queued durable "
-            f"until a holder drains",
+            "mail: holder is bus-only by delivery policy; queued durable "
+            "until a holder drains",
             file=sys.stderr,
         )
         print(
