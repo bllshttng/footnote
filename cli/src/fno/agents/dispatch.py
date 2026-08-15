@@ -498,7 +498,13 @@ def _followup_path(
     backend = "socket"
     demote_reason: Optional[str] = None
     demote_event_kind: Optional[str] = None
-    if existing.harness == "claude" and existing.mcp_channel_id:
+    # x-e21e: the MCP sidecar lane drives a recipient turn without routing
+    # through any shared injector, so a bus-only row must not take it. Demote
+    # to the socket path, whose injector gate refuses loud by policy.
+    if _delivery_policy_refusal(existing) == BUS_ONLY_POLICY:
+        mcp_alive = False
+        demote_reason = BUS_ONLY_POLICY
+    elif existing.harness == "claude" and existing.mcp_channel_id:
         try:
             mcp_alive = claude_mod.mcp_channel_reachable(existing.mcp_channel_id, timeout=0.25)
         except ReachabilityProbeError as probe_exc:
