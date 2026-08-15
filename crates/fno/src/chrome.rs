@@ -156,8 +156,8 @@ pub struct BodyLine {
 
 impl BodyLine {
     /// A plain content line (family B's string, or a non-selectable body row).
-    #[allow(clippy::should_implement_trait)] // constructor, not std::str::FromStr
-    pub fn from_str(s: impl Into<String>) -> Self {
+    /// Not `FromStr`: this takes an owned/`Into<String>` value, never parses.
+    pub fn plain(s: impl Into<String>) -> Self {
         BodyLine {
             text: s.into(),
             ..Default::default()
@@ -526,7 +526,7 @@ mod tests {
     use super::*;
 
     fn bl(s: &str) -> BodyLine {
-        BodyLine::from_str(s)
+        BodyLine::plain(s)
     }
 
     #[test]
@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn hit_offsets_shift_past_the_left_border() {
-        let mut line = BodyLine::from_str("hello");
+        let mut line = BodyLine::plain("hello");
         line.hits.push((0, 0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn selected_body_cell_gets_the_sel_role() {
-        let mut line = BodyLine::from_str("hello");
+        let mut line = BodyLine::plain("hello");
         line.sel_span = Some((0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
