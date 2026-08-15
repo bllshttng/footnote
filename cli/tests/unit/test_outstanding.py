@@ -507,8 +507,9 @@ def test_capture_leg_prints_its_counting_rule_beside_the_count(capture_roots):
     assert res.exit_code == 0, res.output
     assert "Showing 2 of 2" in res.output, res.output
     assert (
-        "Count rule: unique open fu-* IDs from configured capture files; "
-        "shared files and duplicate IDs count once."
+        "Count rule: unique open fu-* IDs from each resolved capture file; "
+        "post_merge.parking_lot_path is used when configured, and shared "
+        "files or duplicate IDs count once."
     ) in res.output, res.output
 
 

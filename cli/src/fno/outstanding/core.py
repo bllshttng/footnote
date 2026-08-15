@@ -497,8 +497,9 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
         if ages:
             summary += f", oldest {_plural(max(ages), 'day')}"
         summary += (
-            ". Count rule: unique open fu-* IDs from configured capture files; "
-            "shared files and duplicate IDs count once."
+            ". Count rule: unique open fu-* IDs from each resolved capture file; "
+            "post_merge.parking_lot_path is used when configured, and shared "
+            "files or duplicate IDs count once."
         )
         lines.append(summary)
         lines.append("  Triage with: fno backlog triage, or fno backlog capture promote <fu-id>.")
