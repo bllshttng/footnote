@@ -123,6 +123,61 @@ def test_lint_cli_help_lists_promoted_flock_pattern() -> None:
     assert "provider-stderr-merge" in result.stdout
 
 
+def test_registry_lint_reports_all_three_buckets_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fno lint registry` (x-7bcd) end-to-end: only registry.py's own
+    write-time validation had test coverage before this. Nothing exercised
+    the CLI wrapper itself (the CHECKS entry, the --json flag, the three
+    output buckets), so a break here would have gone unnoticed."""
+    import fno.agents.registry as reg
+
+    ok_log = tmp_path / "ok.log"
+    ok_log.write_text("", encoding="utf-8")
+    rows = [
+        reg.AgentEntry(name="ghost", cwd="/tmp/x", log_path="", harness="claude"),
+        reg.AgentEntry(
+            name="stale", cwd="/tmp/x", log_path=str(tmp_path / "gone.log"), harness="claude"
+        ),
+        reg.AgentEntry(name="live", cwd="/tmp/x", log_path=str(ok_log), harness="claude"),
+    ]
+    monkeypatch.setattr(reg, "load_registry", lambda *a, **k: rows)
+
+    result = runner.invoke(app, ["registry"])
+
+    assert result.exit_code == 1
+    assert "no handle recorded: ghost" in result.stdout
+    assert "recorded but unresolvable: stale (recorded: log_path)" in result.stdout
+    assert "live" not in result.stdout
+    assert (
+        "fno lint registry: 1 no handle recorded, 1 recorded but unresolvable, 1 ok, 3 total"
+        in result.stdout
+    )
+
+
+def test_registry_lint_json_reports_the_same_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    import fno.agents.registry as reg
+
+    ok_log = tmp_path / "ok.log"
+    ok_log.write_text("", encoding="utf-8")
+    rows = [reg.AgentEntry(name="live", cwd="/tmp/x", log_path=str(ok_log), harness="claude")]
+    monkeypatch.setattr(reg, "load_registry", lambda *a, **k: rows)
+
+    result = runner.invoke(app, ["registry", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "total": 1,
+        "no_handle_recorded": [],
+        "recorded_but_unresolvable": [],
+        "ok": 1,
+    }
+
+
 def test_spawn_paths_lint_rejects_non_allowlisted_session_shape(tmp_path: Path) -> None:
     source = tmp_path / "cli" / "src" / "fno" / "new_spawn.py"
     source.parent.mkdir(parents=True)

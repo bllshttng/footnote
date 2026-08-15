@@ -221,6 +221,23 @@ def test_claude_create_path_creates_the_log_file_it_records(tmp_path: Path, monk
     )
 
 
+def test_touch_log_path_returns_none_on_a_failed_create(tmp_path: Path, monkeypatch) -> None:
+    """x-7bcd follow-up (code review on #874): a failed touch must yield
+    ``None``, not a path nothing backs and not an uncaught OSError — the
+    caller then records an empty log_path leg (a claim, not evidence, per
+    AC4) instead of one the write-time guard would wrongly treat as real."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.dispatch import _touch_log_path
+
+    def _raise_touch(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "touch", _raise_touch)
+
+    assert _touch_log_path("some-worker") is None
+
+
 # ---------------------------------------------------------------------------
 # AC1-ERR — input validation
 # ---------------------------------------------------------------------------
@@ -469,6 +486,48 @@ def test_dispatch_ask_preserves_lock_on_registry_failure(
     assert "agent_ask_failed" in body
     assert "registry-write" in body
     assert "7c5dcf5d" in body
+
+
+def test_dispatch_ask_converts_resolvable_handle_refusal_to_dispatch_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression (code review on #882): _touch_log_path now swallows a
+    failed touch and returns None instead of raising, deferring the failure
+    to _validate_resolvable_handle's ValueError inside update_registry. The
+    except clause around that call must catch ValueError too, or the
+    refusal escapes uncaught instead of becoming a clean DispatchAskError
+    with orphan-cleanup guidance."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _install_fake(tmp_path, monkeypatch)
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, _claude_create_path
+
+    def boom(updater, path=None):  # type: ignore[no-untyped-def]
+        raise ValueError("registry row 'doomed' carries no resolvable handle: ...")
+
+    monkeypatch.setattr(dispatch_mod, "update_registry", boom)
+
+    cwd = tmp_path / "w"
+    cwd.mkdir()
+
+    class _FakeLockHandle:
+        def detach(self) -> None:
+            pass
+
+    with pytest.raises(DispatchAskError) as exc_info:
+        _claude_create_path(
+            name="doomed",
+            message="hi",
+            cwd=cwd,
+            chosen="claude",
+            timeout=10,
+            yolo=False,
+            lock_handle=_FakeLockHandle(),
+        )
+
+    assert exc_info.value.exit_code == 12
+    assert "carries no resolvable handle" in str(exc_info.value)
 
 
 def test_claude_create_treats_identity_collision_as_registry_failure(

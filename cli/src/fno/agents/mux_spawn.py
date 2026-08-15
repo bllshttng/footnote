@@ -41,7 +41,7 @@ from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
     _capture_spawn_trigger,
-    _derive_log_path,
+    _touch_log_path,
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
@@ -52,6 +52,7 @@ from fno.agents.registry import (
     AgentStatus,
     RegistryVersionError,
     TERMINAL_STATUSES,
+    _has_resolvable_handle,
     load_registry,
     update_registry,
 )
@@ -2310,15 +2311,15 @@ def dispatch_spawn_pane(
             # log file so the row always has a resolvable handle and the
             # guard never refuses a live pane's registry write.
             final_log_path = death_log_path
-            if (
-                not final_log_path
-                and stored_session_uuid is None
-                and not (child_pid is not None and pid_start_time is not None)
+            if not _has_resolvable_handle(
+                pid=child_pid,
+                pid_start_time=pid_start_time,
+                log_path=final_log_path,
+                harness=provider,
+                harness_session_id=stored_session_uuid,
             ):
-                fallback_path = _derive_log_path(name)
-                fallback_path.parent.mkdir(parents=True, exist_ok=True)
-                fallback_path.touch(exist_ok=True)
-                final_log_path = str(fallback_path)
+                touched_log_path = _touch_log_path(name)
+                final_log_path = str(touched_log_path) if touched_log_path is not None else ""
             rows.append(
                 AgentEntry(
                     name=name,

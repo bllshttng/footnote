@@ -2777,15 +2777,20 @@ fn create(
     let session_uuid = resolve_session_uuid_at_spawn(claude_home, &short_id);
     // Create the file the row records (x-7bcd AC4): a log_path pointing at
     // nothing is a claim, not evidence, and the resolvable-handle guard only
-    // checks the field is non-empty, not that the file exists.
+    // checks the field is non-empty, not that the file exists. Record the
+    // path only if the touch actually succeeded (disk full, EROFS, a
+    // permission error) -- otherwise leave the leg unset so
+    // validate_resolvable_handle can still refuse the row when no other leg
+    // resolves, instead of writing a log_path that is a claim, not evidence.
     let log_path = derive_log_path(home, name);
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::OpenOptions::new()
+    let log_file_created = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_path);
+        .open(&log_path)
+        .is_ok();
     let new_entry = RegistryEntry {
         name: name.to_string(),
         // v9: the claude jobId is the unified transport key (was claude_short_id);
@@ -2811,7 +2816,7 @@ fn create(
         created_at: now_iso(),
         pid: None,
         pid_start_time: None,
-        log_path: Some(log_path.to_string_lossy().to_string()),
+        log_path: log_file_created.then(|| log_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
