@@ -95,13 +95,11 @@ The merge attempt yields one of these outcomes, written to the skill's state fil
 | Outcome | Meaning | State update | Blocks promise? |
 |---------|---------|-------------|----------------|
 | `merged` | PR merged successfully | append PR number to `merged_prs` | No |
-| `held` | Checks not green yet; merge not attempted (retry when green) | no state change | No |
+| `held` | Checks not green yet. Merge not attempted, retry when green | no state change | No |
 | `failed` | Merge attempt failed (protected branch, permissions, etc.) | append `{pr, reason}` to `merge_failed` | No |
 | `skipped` | Auto-merge disabled, or finalize already armed GitHub's queue | no state change | No |
 
-There is no `queued` outcome (x-9d11): `fno pr merge` executes and enforces
-`require_checks_pass` in-process, and GitHub's native auto-merge queue is armed by
-`fno-agents finalize` alone - the one arming path.
+There is no `queued` outcome (x-9d11): `fno pr merge` executes and enforces `require_checks_pass` in-process. GitHub's native auto-merge queue is armed by `fno-agents finalize` alone, the one arming path.
 
 A `failed` outcome does NOT block the promise or mark the session as failed. The PR was
 created successfully; the merge failure is post-hoc. The user can merge manually.
