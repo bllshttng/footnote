@@ -1338,17 +1338,25 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
+def _already_armed(pr_number: int, repo: str) -> bool:
+    """True when GitHub's native auto-merge queue owns this PR (finalize armed
+    it). ONE probe argv shared by every executor that must stand down (x-9d11
+    AC5-CON), so a probe-shape change cannot drift between merge paths."""
+    res = _gh(
+        ["pr", "view", str(pr_number), "--json", "autoMergeRequest",
+         "-q", ".autoMergeRequest.enabled"],
+        repo,
+    )
+    return res.ok and res.stdout.strip() == "true"
+
+
 def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # AC5-CON (x-9d11): exactly one arming path. finalize.rs owns GitHub's
     # auto-merge queue; if the PR is already armed there, merging here would
     # race the queue. Say so and stand down - the queue merges it when checks
     # pass, so the merge is not being lost, just not duplicated.
-    armed = _gh(
-        ["pr", "view", str(pr_number), "--json", "autoMergeRequest", "-q", ".autoMergeRequest.enabled"],
-        repo,
-    )
-    if armed.ok and armed.stdout.strip() == "true":
+    if _already_armed(pr_number, repo):
         _emit(
             pr_number,
             "skipped",

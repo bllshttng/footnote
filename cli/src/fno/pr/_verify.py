@@ -392,7 +392,8 @@ def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:
 def _bounded_remediation(
     pr_number: str, state_file: str, cwd: str, repo_root: str, sleep_fn
 ) -> int:
-    """Single gh pr merge --auto attempt + single 30s poll (anti-thrash)."""
+    """Single gh pr merge attempt + single 30s poll (anti-thrash; x-9d11: the
+    verb executes - no --auto, no --delete-branch)."""
     # Stacked-base guard: this arm reaches `gh pr merge` without passing through
     # `fno pr merge`, so it needs its own call - a guard on one of N reachable
     # merge paths is decorative. An unevaluated probe proceeds with a
@@ -430,12 +431,7 @@ def _bounded_remediation(
     # already armed GitHub's queue, stand down instead of racing it.
     from fno.pr import _merge as _merge_mod
 
-    _armed = _merge_mod._gh(
-        ["pr", "view", pr_number, "--json", "autoMergeRequest",
-         "-q", ".autoMergeRequest.enabled"],
-        cwd,
-    )
-    if _armed.ok and _armed.stdout.strip() == "true":
+    if _merge_mod._already_armed(int(pr_number), cwd):
         _emit_audit(
             repo_root, state_file, pr_number, "merge_attempt_did_not_complete",
             {"reason": "already armed in GitHub auto-merge queue"},

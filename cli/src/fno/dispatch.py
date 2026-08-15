@@ -574,7 +574,6 @@ def _dispatch_one(
     provenance = resolve_provenance(node_id, slug)
     if account:
         provenance["FNO_ACCOUNT"] = account
-    # x-9d11 mechanical refusal carrier: the flag in the message is the
     # A cutover replaces all three parts of the launch together (harness,
     # command, credential overlay); passing one without the others is the
     # wrong-billing / wrong-binary launch the selector exists to prevent.

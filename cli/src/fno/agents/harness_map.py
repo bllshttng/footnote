@@ -479,7 +479,23 @@ def resolve_dispatch(
 
     # 4. brief -> TARGET_BRIEF env only (never the command line). Byte-capped at
     # the 8 KB env budget; an oversized brief is an explicit error, not truncation.
+    # x-9d11 refusal carrier, at the ONE choke point every spawn surface resolves
+    # through (skill spawn.sh, dispatch.py pane, advance/recovery/keep_going bg):
+    # when the command carries the refusal, the env carries it too, so a worker
+    # that drops the flag post-compaction still folds the refusal at init. The
+    # legacy bare `no-merge` token (the pre-x-9d11 documented default in operator
+    # config.dispatch.command templates) is rewritten to the flag first - a
+    # spelling migration that preserves the template's semantics, never a
+    # posture change - because the fold and every env match key on `--no-merge`.
+    if " no-merge " in f" {resolved_command} ":
+        resolved_command = f" {resolved_command} ".replace(
+            " no-merge ", " --no-merge "
+        ).strip()
+        decision.append("command=legacy-no-merge->--no-merge")
     env: dict[str, str] = {}
+    if "--no-merge" in resolved_command:
+        env["TARGET_NO_MERGE"] = "1"
+        decision.append("no-merge->TARGET_NO_MERGE")
     if brief:
         n_bytes = len(brief.encode("utf-8"))
         if n_bytes > _BRIEF_MAX_BYTES:

@@ -347,7 +347,7 @@ FIELD_META: dict[str, Meta] = {
         question="Auto-merge PRs after external review passes?",
     ),
     "auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
-    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the branch after an auto-merge."),
+    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Executor paths only (`fno pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook."),
     "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
