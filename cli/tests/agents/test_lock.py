@@ -309,3 +309,108 @@ def test_hold_agent_lock_rejects_path_traversal(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             with hold_agent_lock(bad, registry_path):
                 pytest.fail("should not have entered context")
+
+
+# ---------------------------------------------------------------------------
+# Holder stamp (x-b281): a zero-byte lock is unfalsifiable by inspection
+# ---------------------------------------------------------------------------
+
+
+def _hold_via_api_in_child(
+    registry_path: str, name: str, hold_seconds: float, ready_path: str
+) -> None:
+    """Helper: hold the lock through hold_agent_lock, so the stamp is written."""
+    from pathlib import Path as _P
+
+    from fno.agents.lock import hold_agent_lock
+
+    with hold_agent_lock(name, _P(registry_path)):
+        _P(ready_path).write_text("held")
+        time.sleep(hold_seconds)
+
+
+def test_acquire_stamps_holder_and_file_does_not_grow(tmp_path: Path) -> None:
+    """The lock file carries one JSON line naming pid, name and acquire time."""
+    import json
+    import os
+
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_file = _agent_lock_path("stamped", registry_path)
+
+    sizes = []
+    for _ in range(3):
+        with hold_agent_lock("stamped", registry_path):
+            raw = lock_file.read_text()
+        sizes.append(len(raw))
+
+    assert raw.count("\n") == 1, f"lock file must stay one line: {raw!r}"
+    assert len(set(sizes)) == 1, f"lock file grew across acquires: {sizes}"
+
+    holder = json.loads(raw)
+    assert holder["pid"] == os.getpid()
+    assert holder["name"] == "stamped"
+    assert holder["acquired_at"].endswith("+00:00")
+
+
+def test_timeout_names_the_live_holder(tmp_path: Path) -> None:
+    """A waiter that gives up reports which pid holds the lock, and since when."""
+    from fno.agents.lock import AgentLockTimeout, hold_agent_lock
+
+    registry_path = tmp_path / "registry.json"
+    ready = tmp_path / "ready.txt"
+
+    proc = multiprocessing.Process(
+        target=_hold_via_api_in_child,
+        args=(str(registry_path), "named", 5.0, str(ready)),
+    )
+    proc.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "child did not acquire lock in time"
+
+        with pytest.raises(AgentLockTimeout) as exc_info:
+            with hold_agent_lock("named", registry_path, timeout=1):
+                pytest.fail("should not have acquired the lock")
+
+        assert exc_info.value.holder is not None
+        assert exc_info.value.holder["pid"] == proc.pid
+        assert f"held by pid {proc.pid} since " in str(exc_info.value)
+    finally:
+        proc.join(timeout=10)
+
+
+def test_timeout_degrades_when_lock_carries_no_stamp(tmp_path: Path) -> None:
+    """An unstamped or corrupt lock file yields the plain message, not a raise."""
+    from fno.agents.lock import AgentLockTimeout, hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_file = _agent_lock_path("bare", registry_path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    ready = tmp_path / "ready.txt"
+
+    # _hold_in_child uses a raw flock and writes nothing: the pre-x-b281 shape.
+    proc = multiprocessing.Process(
+        target=_hold_in_child,
+        args=(str(lock_file), 5.0, str(ready)),
+    )
+    proc.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+
+        with pytest.raises(AgentLockTimeout) as exc_info:
+            with hold_agent_lock("bare", registry_path, timeout=1):
+                pytest.fail("should not have acquired the lock")
+
+        assert exc_info.value.holder is None
+        assert str(exc_info.value) == "lock timeout for agent 'bare' after 1s"
+    finally:
+        proc.join(timeout=10)
