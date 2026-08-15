@@ -1001,7 +1001,7 @@ struct View {
     /// mutation guarded by `ConnectionsView::acting`.
     #[allow(clippy::type_complexity)]
     conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
-    /// The last `fno update --check --json` probe's outcome, or
+    /// The last `fno update --check` probe's outcome, or
     /// `None` before the first one lands. `build_sideline_menu` reads this
     /// directly rather than waiting on a fresh probe, so the menu always
     /// opens instantly (Locked Decision 4).
@@ -1877,7 +1877,7 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
-/// The client's view of `fno update --check --json`'s payload - only
+/// The client's view of `fno update --check`'s payload - only
 /// the fields the menu row and overlay render. `#[serde(default)]` on
 /// `changelog` tolerates an absent key rather than failing the whole parse;
 /// every other field is required, so a shape the Python resolver no longer
@@ -1893,7 +1893,7 @@ struct UpdateReadiness {
     degraded: Option<String>,
 }
 
-/// The result of one `fno update --check --json` probe: parsed
+/// The result of one `fno update --check` probe: parsed
 /// readiness, or a degraded reason (missing binary, non-zero exit, timeout,
 /// unparseable JSON). Mirrors `connections_view::ReadOutcome` (Locked
 /// Decision 4) - the TUI computes nothing beyond folding this into rows.
@@ -1911,14 +1911,19 @@ enum UpdateOutcome {
 /// that worst case rather than racing it.
 const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
 
-/// Run `fno update --check --json` off the UI loop and fold it into an
+/// Run `fno update --check` off the UI loop and fold it into an
 /// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
 /// Decision 4): the event loop never blocks on this subprocess: a
 /// timeout, non-zero exit, or unparseable JSON all degrade rather than hang
 /// or panic (AC6-EDGE).
+///
+/// `--check` already prints JSON on its own (`update` has no local `--json`
+/// option, and the global `--json` flag only applies before the verb) - do
+/// not add `--json` after `--check` here, it makes the CLI exit 2 and every
+/// probe degrade (P1, codex on PR #881).
 async fn probe_update_readiness() -> UpdateOutcome {
     let fut = tokio::process::Command::new(crate::server::fno_bin())
-        .args(["update", "--check", "--json"])
+        .args(["update", "--check"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -2904,6 +2909,27 @@ impl View {
         self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
         self.aux_esc.clear();
         self.update_probe_want = true;
+    }
+
+    /// Rebuild an already-open sideline MENU so a landing update probe shows
+    /// up (or clears a stale row) without the operator closing and reopening
+    /// it (P2, codex on PR #881). A no-op when the open aux is some other
+    /// popup (settings, kanban, the update overlay itself): `OpenKeybinds` is
+    /// pushed only by `build_sideline_menu`, so its presence is the marker.
+    /// Preserves selection the same way `reopen_settings_keeping_sel` does.
+    fn refresh_open_sideline_menu(&mut self) {
+        let Some(aux) = self.aux.as_ref() else {
+            return;
+        };
+        if !aux.actions.contains(&AuxAction::OpenKeybinds) {
+            return;
+        }
+        let anchor = aux.popup.anchor;
+        let sel = aux.popup.sel;
+        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
+        let n = menu.popup.targets().len();
+        menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
+        self.aux = Some(menu);
     }
 
     /// Build the settings modal (x-8ccf US5, x-f75e theme picker): a `general`
@@ -9169,6 +9195,7 @@ async fn attach_and_run(
                 // the moment this lands shows the fresh row immediately.
                 view.update_probe_inflight = false;
                 view.update_outcome = Some(outcome);
+                view.refresh_open_sideline_menu();
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -19683,7 +19710,7 @@ mod tests {
         assert!(!none_modal.popup.rows.is_empty());
     }
 
-    /// The client-side JSON contract with `fno update --check --json`'s
+    /// The client-side JSON contract with `fno update --check`'s
     /// payload shape (`cli/src/fno/update.py::update_readiness`).
     #[test]
     fn update_readiness_deserializes_the_real_payload_shape() {

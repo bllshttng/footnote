@@ -2335,10 +2335,10 @@ def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_p
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
-            {"name": "w1", "harness": "claude", "session_id": "s1"},
-            {"name": "w2", "harness": "claude", "session_id": "s2"},
-            {"name": "w3", "harness": "codex", "session_id": "s3"},
-            {"name": "w4", "harness": "claude", "session_id": None},
+            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "live"},
+            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "live"},
+            {"name": "w3", "harness": "codex", "session_id": "s3", "status": "live"},
+            {"name": "w4", "harness": "claude", "session_id": None, "status": "live"},
         ],
     )
 
@@ -2351,6 +2351,25 @@ def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_p
     assert "WIRE BUMP" in result["guidance"]
     assert "14" in result["guidance"]
     assert "2" in result["guidance"]
+
+
+def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path) -> None:
+    """P2 (codex on PR #881): a claude worker with a resumable session but a
+    non-live registry status was never actually orphaned by a restart, so it
+    must not inflate the `--revive` count - same candidate scope as
+    `_revive_orphans`' `pre_live` snapshot in restart.py."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
+        agent_rows=[
+            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "live"},
+            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "exited"},
+        ],
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["revivable"] == 1
 
 
 def test_update_readiness_not_ready_when_revs_match(monkeypatch, tmp_path) -> None:
@@ -2383,7 +2402,13 @@ def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> N
 
 def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path) -> None:
     """AC4-EDGE: `fno agents list --json` failing names an unknown revivable
-    count, not a false zero, even though mux ls itself succeeded."""
+    count, not a false zero, even though mux ls itself succeeded.
+
+    P2 (codex on PR #881): the wire itself was read successfully and matches
+    (source_wire=47 == the one live row's wire_version), so `wire.bump` is
+    correctly False - the degraded-input wording must say "wire unchanged",
+    not the "unknown, treated as a bump" line reserved for a genuinely
+    unreadable wire. A degraded `agents list` is unrelated to the wire."""
     _readiness_env(monkeypatch, tmp_path, source_wire=47)
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
@@ -2394,8 +2419,11 @@ def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path)
 
     assert result["degraded"] is not None
     assert "agents list" in result["degraded"]
+    assert result["wire"]["bump"] is False
     assert "unknown number of workers" in result["guidance"]
     assert "14 live shell(s)" in result["guidance"]
+    assert "wire unchanged" in result["guidance"]
+    assert "treated as a wire bump" not in result["guidance"]
 
 
 def test_update_readiness_degraded_when_source_wire_unreadable(monkeypatch, tmp_path) -> None:

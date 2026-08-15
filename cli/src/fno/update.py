@@ -601,6 +601,7 @@ def _build_update_guidance(
     update_ready: bool,
     revs_known: bool,
     source_rev: Optional[str],
+    wire_known: bool,
     wire_bump: bool,
     running_wires: list[int],
     source_wire: Optional[int],
@@ -617,7 +618,11 @@ def _build_update_guidance(
     a bump and, when the shell/worker count itself could not be read (a failed
     `mux ls`/`agents list`, not just an unreadable wire), says "unknown" rather
     than a false zero - a count fno never fetched is not evidence of an empty
-    fleet (AC4-EDGE)."""
+    fleet (AC4-EDGE). A degraded input unrelated to the wire (e.g. `agents
+    list` failing) must not override an actually-known wire status with
+    "unknown, treated as a bump" - that both contradicts the JSON payload's own
+    `wire.bump` field and, when the wire is known safe, wrongly tells the
+    operator a restart is destructive (P2, codex on PR #881)."""
     rev_label = (source_rev or "unknown")[:8]
     source_label = f"v{source_wire}" if source_wire is not None else "unknown"
 
@@ -632,10 +637,14 @@ def _build_update_guidance(
     if degraded_reason:
         shells_label = f"{shells} live shell(s)" if shells_known else "an unknown number of live shells"
         revivable_label = f"{revivable} worker(s)" if revivable_known else "an unknown number of workers"
+        wire_label = (
+            (f"WIRE BUMP {_wire_label(running_wires)} -> {source_label}" if wire_bump else "wire unchanged")
+            if wire_known
+            else "wire status unknown, treated as a wire bump"
+        )
         return (
-            f"update check degraded ({degraded_reason}) - wire status unknown, "
-            f"treated as a wire bump; {shells_label} at risk, "
-            f"--revive respawns {revivable_label}"
+            f"update check degraded ({degraded_reason}) - {wire_label}; "
+            f"{shells_label} at risk, --revive respawns {revivable_label}"
         )
 
     if not update_ready:
@@ -715,7 +724,12 @@ def update_readiness(
     if agent_rows is None:
         degraded.append("fno agents list --json failed")
         agent_rows = []
-    revivable = sum(1 for r in agent_rows if is_revivable(r))
+    # Same candidate scope as `_revive_orphans`' `pre_live` snapshot
+    # (restart.py): only a worker that is actually live now can be orphaned by
+    # a restart, so an exited or already-dead row never counts toward
+    # `--revive` even when `is_revivable` alone would accept it (P2, codex on
+    # PR #881).
+    revivable = sum(1 for r in agent_rows if r.get("status") == "live" and is_revivable(r))
 
     changelog: list[str] = []
     if resolved_source is not None and installed_rev and source_rev:
@@ -727,6 +741,7 @@ def update_readiness(
         update_ready=update_ready,
         revs_known=installed_rev is not None and source_rev is not None,
         source_rev=source_rev,
+        wire_known=shells_known and source_wire is not None,
         wire_bump=wire_bump,
         running_wires=running_wires,
         source_wire=source_wire,
