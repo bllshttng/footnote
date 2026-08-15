@@ -178,6 +178,30 @@ fn has_stamp(e: &serde_json::Value, field: &str) -> bool {
         .is_some_and(|s| !s.is_empty())
 }
 
+/// Whether a node's declared dependencies are satisfied, mirroring Python's
+/// `compute_readiness` (`cli/src/fno/graph/statuses.py`) - the file is the
+/// contract, and the Python side no longer persists `status: "blocked"` at
+/// write time, so this reader must derive it itself rather than trust the
+/// raw `status` field. Fails closed like the Python: a `blocked_by` id absent
+/// from `id_to_entry` counts as blocked, never as satisfied.
+fn has_open_dependency(
+    e: &serde_json::Value,
+    id_to_entry: &HashMap<&str, &serde_json::Value>,
+) -> bool {
+    let Some(blocked_by) = e.get("blocked_by").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    blocked_by.iter().any(|b| {
+        let Some(blocker_id) = b.as_str() else {
+            return false; // a malformed entry in the list is not evidence of a real blocker
+        };
+        match id_to_entry.get(blocker_id) {
+            None => true, // unknown dep: fail closed
+            Some(blocker) => !has_stamp(blocker, "completed_at"),
+        }
+    })
+}
+
 /// Parent ids whose work is underway: an epic with a done or claimed child.
 /// Mirrors `in_progress_epic_ids` in `graph/render.py` - sessions claim an epic's
 /// leaf CHILDREN, never the container, so an in-progress epic carries no claim of
@@ -217,13 +241,28 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
         .or_else(|| doc.get("nodes"))?
         .as_array()?;
     let underway = in_progress_epics(entries);
+    let id_to_entry: HashMap<&str, &serde_json::Value> = entries
+        .iter()
+        .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(|id| (id, e)))
+        .collect();
 
     // (project, is_unscoped, rank, prio, created_at, card) - the tuple carries
     // the sort keys so the comparator never re-reads the JSON.
     let mut rows: Vec<(String, bool, Option<f64>, u8, String, BacklogCard)> =
         Vec::with_capacity(entries.len().min(CARD_CAP * 2));
     for e in entries {
-        let status = node_status(e).unwrap_or("");
+        let raw_status = node_status(e).unwrap_or("");
+        // done/superseded/deferred/in_review are direct facts about THIS node
+        // and outrank blocked, exactly as in the Python overlay
+        // (_apply_graph_defaults) - everything else is a candidate for the
+        // blocked override, including idea/design, which `classify` would
+        // otherwise drop before a blocked reason ever gets a chance to show.
+        let terminal = matches!(raw_status, "done" | "superseded" | "deferred" | "in_review");
+        let status = if !terminal && has_open_dependency(e, &id_to_entry) {
+            "blocked"
+        } else {
+            raw_status
+        };
         let Some(state) = classify(status) else {
             continue;
         };
@@ -732,6 +771,52 @@ mod tests {
         assert_eq!(cards[0].state, CardState::InFlight);
         assert_eq!(cards[1].state, CardState::Ready);
         assert_eq!(cards[2].state, CardState::Blocked);
+    }
+
+    #[test]
+    fn open_blocked_by_overrides_a_persisted_ready_status() {
+        // The Python write path no longer persists `status: "blocked"` - it is
+        // a read-time-only overlay now - so a real graph.json carries a
+        // dependency-blocked node as `status: "ready"`/"idea"/etc with a
+        // non-empty `blocked_by`. This reader must derive blocked itself
+        // rather than trust the raw status, or the sideline silently drops
+        // the Blocked badge for every such node.
+        let raw = graph(
+            r#"{"id":"done","slug":"d","priority":"p2","status":"done","completed_at":"2026-01-01T00:00:00Z"},
+               {"id":"open","slug":"o","priority":"p2","status":"ready"},
+               {"id":"blocked-on-open","slug":"b1","priority":"p2","status":"ready","blocked_by":["open"]},
+               {"id":"blocked-on-unknown","slug":"b2","priority":"p2","status":"idea","blocked_by":["no-such-id"]},
+               {"id":"unblocked","slug":"u","priority":"p2","status":"ready","blocked_by":["done"]}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        let by_id = |id: &str| cards.iter().find(|c| c.id == id).map(|c| c.state);
+        assert_eq!(by_id("blocked-on-open"), Some(CardState::Blocked));
+        assert_eq!(
+            by_id("blocked-on-unknown"),
+            Some(CardState::Blocked),
+            "an unknown dependency id must fail closed to Blocked, never drop as idea"
+        );
+        assert_eq!(
+            by_id("unblocked"),
+            Some(CardState::Ready),
+            "a completed blocker must not hold the dependent as blocked"
+        );
+        assert_eq!(by_id("open"), Some(CardState::Ready));
+    }
+
+    #[test]
+    fn a_completed_node_stays_done_despite_an_open_blocked_by() {
+        // Terminal statuses are direct facts about the node itself and
+        // outrank the blocked overlay, exactly as in the Python overlay.
+        let raw = graph(
+            r#"{"id":"open","slug":"o","priority":"p2","status":"ready"},
+               {"id":"finished","slug":"f","priority":"p2","status":"done","completed_at":"2026-01-01T00:00:00Z","blocked_by":["open"]}"#,
+        );
+        let cards = derive_cards(&raw).unwrap();
+        assert!(
+            cards.iter().all(|c| c.id != "finished"),
+            "done nodes are not queue cards regardless of blocked_by"
+        );
     }
 
     #[test]
