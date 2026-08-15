@@ -1034,6 +1034,11 @@ pub struct BacklogCard {
     /// `_kanban_column` is the sole column authority; rank never changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<String>,
+    /// (v47) The node's `plan_path`, published by the graph reader so the open
+    /// plan menu item resolves without a subprocess. `None` for a node with no
+    /// plan (the item renders greyed, never a broken link).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_path: Option<String>,
     /// (v36) The head of the queue: the first Ready card in BOARD order. Marked
     /// explicitly so it reads as a fact rather than being inferred from row
     /// position, which lies once the section is scrolled or the top card is
@@ -1449,6 +1454,10 @@ pub enum BacklogVerb {
     /// the mux supplies one naming where the deferral came from; omitting it
     /// makes every defer exit with a missing-option error.
     Defer,
+    /// `fno backlog advance --epic <node> --stop` - end a mission (LD6: missions
+    /// are epics; "end" clears `mission_active` via the existing epic-stop path
+    /// and dispatches nothing, never a new `fno mission` verb).
+    EndMission,
 }
 
 /// The deferral reason the mux supplies (the CLI requires a non-blank one). It
@@ -1457,21 +1466,37 @@ pub enum BacklogVerb {
 pub const DEFER_REASON: &str = "deferred from the mux backlog sideline";
 
 impl BacklogVerb {
-    /// The `fno backlog` argv tail for this verb, `<node>` interpolated by the
-    /// caller. Fixed literals: nothing here is derived from operator text.
-    pub fn args(self, node: &str) -> Vec<String> {
+    /// The space-joined leaf path this verb invokes (e.g. `backlog rank`). It is
+    /// both the argv head and the token the baseline-membership test checks
+    /// against `scripts/ci/verb-baseline.txt`, so a leaf rename edits one place
+    /// and a removed leaf fails CI in the same PR.
+    pub fn leaf(self) -> &'static str {
         match self {
-            BacklogVerb::RankTop => {
-                vec!["backlog".into(), "rank".into(), node.into(), "--top".into()]
-            }
-            BacklogVerb::Defer => vec![
-                "backlog".into(),
-                "defer".into(),
-                node.into(),
-                "--reason".into(),
-                DEFER_REASON.into(),
-            ],
+            BacklogVerb::RankTop => "backlog rank",
+            BacklogVerb::Defer => "backlog defer",
+            BacklogVerb::EndMission => "backlog advance",
         }
+    }
+
+    /// The argv tail after the leaf tokens, with `node` where the verb takes it.
+    fn tail(self, node: &str) -> Vec<String> {
+        match self {
+            BacklogVerb::RankTop => vec![node.into(), "--top".into()],
+            BacklogVerb::Defer => vec![node.into(), "--reason".into(), DEFER_REASON.into()],
+            // `--epic` names the mission to deactivate; `--stop` clears
+            // mission_active and dispatches nothing. Both are on `backlog
+            // advance --help`.
+            BacklogVerb::EndMission => vec!["--epic".into(), node.into(), "--stop".into()],
+        }
+    }
+
+    /// The full `fno` argv for this verb on `node`: the leaf tokens plus the
+    /// per-verb tail. Built from `leaf()` so the argv head and the baseline token
+    /// cannot drift apart.
+    pub fn args(self, node: &str) -> Vec<String> {
+        let mut v: Vec<String> = self.leaf().split(' ').map(str::to_owned).collect();
+        v.extend(self.tail(node));
+        v
     }
 
     /// The verb's human label, for the menu entry and the outcome notice.
@@ -1479,7 +1504,128 @@ impl BacklogVerb {
         match self {
             BacklogVerb::RankTop => "float to top",
             BacklogVerb::Defer => "defer",
+            BacklogVerb::EndMission => "end mission",
         }
+    }
+}
+
+/// Every variant, so the baseline-membership test is exhaustive. The
+/// `all_backlog_verbs_const_covers_every_variant` test fails to compile when a
+/// variant is added without being listed here, which is the prompt to give it a
+/// leaf the baseline then checks.
+#[cfg(test)]
+const ALL_BACKLOG_VERBS: &[BacklogVerb] = &[
+    BacklogVerb::RankTop,
+    BacklogVerb::Defer,
+    BacklogVerb::EndMission,
+];
+
+#[cfg(test)]
+mod verb_baseline_tests {
+    use super::*;
+
+    /// The checked-in verb baseline, embedded at compile time. Each non-comment
+    /// line is a leaf path optionally carrying trailing `!--flag` tokens; strip
+    /// those so the set holds the bare leaf paths the ratchet names.
+    const BASELINE: &str = include_str!("../../../scripts/ci/verb-baseline.txt");
+
+    fn baseline_leaves() -> std::collections::HashSet<String> {
+        BASELINE
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                l.split_whitespace()
+                    .take_while(|tok| !tok.starts_with("!--"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    /// The checked-in collapse map, embedded at compile time. Its `current-leaf`
+    /// column is the true registry of tracked CLI verbs - a T1 verb collapses to
+    /// its group's bare command in `verb-baseline.txt` (a `backlog defer` row
+    /// never appears there on its own), so `baseline_leaves()` cannot tell a
+    /// genuinely tracked T1 leaf from a made-up one that merely shares the
+    /// group word. This is the source of truth `every_backlog_verb_leaf_is_in_
+    /// the_baseline` checks against instead.
+    const COLLAPSE_MAP: &str = include_str!("../../../scripts/ci/verb-collapse-map.tsv");
+
+    fn collapse_map_leaves() -> std::collections::HashSet<String> {
+        COLLAPSE_MAP
+            .lines()
+            .skip(1) // header row
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| l.split('\t').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn every_backlog_verb_leaf_is_in_the_baseline() {
+        let leaves = baseline_leaves();
+        // Positive control: the baseline parsed and carries a known leaf, so a
+        // miss below is a real missing leaf, not an unread baseline.
+        assert!(
+            leaves.contains("backlog advance"),
+            "baseline parsed; leaves: {leaves:?}"
+        );
+        let tracked = collapse_map_leaves();
+        assert!(
+            tracked.contains("backlog advance"),
+            "collapse map parsed; tracked: {tracked:?}"
+        );
+        for v in ALL_BACKLOG_VERBS {
+            let leaf = v.leaf();
+            // A T1-tier leaf (e.g. "backlog rank") collapses to its group's
+            // bare command in verb-baseline.txt, so its full string never
+            // appears there as its own line - only `verb-collapse-map.tsv`'s
+            // `current-leaf` column names every tracked leaf individually,
+            // T1 and KEEP alike. Checking the baseline directly would pass
+            // for any made-up "backlog whatever" leaf too, since the group's
+            // bare "backlog" line is permanently present; the collapse map is
+            // the only source that can tell a tracked leaf from an invented one.
+            assert!(
+                tracked.contains(leaf),
+                "BacklogVerb leaf {leaf:?} has no row in \
+                 scripts/ci/verb-collapse-map.tsv; \
+                 a menu item binds it, so the ratchet must list it"
+            );
+        }
+    }
+
+    #[test]
+    fn all_backlog_verbs_const_covers_every_variant() {
+        // Exhaustive match: a new variant fails this to compile until it is in
+        // the OR-pattern, and the body then requires it in ALL_BACKLOG_VERBS.
+        fn listed(v: BacklogVerb) -> bool {
+            match v {
+                BacklogVerb::RankTop | BacklogVerb::Defer | BacklogVerb::EndMission => {
+                    ALL_BACKLOG_VERBS.contains(&v)
+                }
+            }
+        }
+        for v in ALL_BACKLOG_VERBS {
+            assert!(
+                listed(*v),
+                "ALL_BACKLOG_VERBS lists {v:?} but the sync match does not"
+            );
+        }
+    }
+
+    #[test]
+    fn args_is_the_leaf_tokens_plus_the_tail() {
+        // The argv head is always leaf().split(' '), so the baseline token and
+        // the argv cannot disagree.
+        assert_eq!(
+            BacklogVerb::RankTop.args("x-1"),
+            vec!["backlog", "rank", "x-1", "--top"]
+        );
+        assert_eq!(
+            BacklogVerb::EndMission.args("x-9"),
+            vec!["backlog", "advance", "--epic", "x-9", "--stop"]
+        );
     }
 }
 
@@ -3017,6 +3163,7 @@ mod tests {
                         // (v36) attribution + on-deck ride the same frame.
                         project: Some("fno".into()),
                         lane: Some("in-progress".into()),
+                        plan_path: None,
                         head: false,
                     },
                     BacklogCard {
@@ -3029,6 +3176,7 @@ mod tests {
                         where_hint: None,
                         project: None,
                         lane: None,
+                        plan_path: None,
                         head: true,
                     },
                 ],

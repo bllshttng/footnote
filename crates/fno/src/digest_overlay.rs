@@ -440,37 +440,77 @@ fn repo_root_from(cwd: &Path) -> PathBuf {
     }
 }
 
-/// Resolve a `config: > mux: > <key>` string with the same file precedence as
+/// Resolve a `<section>.<key>` string with the same file precedence as
 /// `agents_config::mux_bool` ($FNO_CONFIG sole > project-local > global).
-fn mux_str(cwd: &Path, key: &str) -> Option<String> {
+/// Generalised from the mux-only reader so the open-plan helper reads
+/// `[obsidian]` from the same ladder the `[mux]` keys use.
+pub(crate) fn config_str(cwd: &Path, section: &str, key: &str) -> Option<String> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return read_mux_file(Path::new(&explicit), key);
+        return read_section_file(Path::new(&explicit), section, key);
     }
     for root in config_roots(cwd) {
-        if let Some(v) = read_mux_file(&root.join(".fno/config.toml"), key) {
+        if let Some(v) = read_section_file(&root.join(".fno/config.toml"), section, key) {
             return Some(v);
         }
     }
     let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
         .map(|p| PathBuf::from(p).with_file_name("config.toml"))
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml")));
-    global.and_then(|g| read_mux_file(&g, key))
+    global.and_then(|g| read_section_file(&g, section, key))
 }
 
-fn read_mux_file(path: &Path, key: &str) -> Option<String> {
-    read_mux_value(&std::fs::read_to_string(path).ok()?, key)
+/// `mux.<key>` from a config body, kept as a thin wrapper over the general
+/// ladder so existing call sites and tests are unchanged.
+fn mux_str(cwd: &Path, key: &str) -> Option<String> {
+    config_str(cwd, "mux", key)
 }
 
-/// Read `mux.<key>` from a flat config.toml body, returning the value as a raw
-/// string each caller re-coerces (bool -> "true"/"false", int -> its digits).
-fn read_mux_value(content: &str, key: &str) -> Option<String> {
+fn read_section_file(path: &Path, section: &str, key: &str) -> Option<String> {
+    read_value(&std::fs::read_to_string(path).ok()?, section, key)
+}
+
+/// Read `<section>.<key>` from a flat config.toml body, returning the value as a
+/// raw string each caller re-coerces (bool -> "true"/"false", int -> its digits).
+/// Widened from the mux-only `read_mux_value` so `[obsidian]` reads the same way.
+fn read_value(content: &str, section: &str, key: &str) -> Option<String> {
     let t = content.parse::<toml::Table>().ok()?;
-    match t.get("mux")?.as_table()?.get(key)? {
+    match t.get(section)?.as_table()?.get(key)? {
         toml::Value::String(s) => Some(s.clone()),
         toml::Value::Boolean(b) => Some(b.to_string()),
         toml::Value::Integer(i) => Some(i.to_string()),
         toml::Value::Float(f) => Some(f.to_string()),
         _ => None,
+    }
+}
+
+/// `mux.<key>` from a body; thin wrapper over [`read_value`], retained for the
+/// existing tests that exercise the pure reader directly.
+#[cfg(test)]
+fn read_mux_value(content: &str, key: &str) -> Option<String> {
+    read_value(content, "mux", key)
+}
+
+/// The mux's read of the `[obsidian]` block, for the open-plan helper. `enabled`
+/// defaults false (absence = off); `vault` is the raw config value (a bare name,
+/// an absolute path, or `~`-prefixed, all of which `link::plan_link` resolves).
+/// Never synthesises a vault: `enabled` true with no vault yields `vault: None`
+/// and the plan item stays unavailable rather than inventing a name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObsidianCfg {
+    pub enabled: bool,
+    pub vault: Option<String>,
+}
+
+impl ObsidianCfg {
+    pub fn read(cwd: &Path) -> Self {
+        ObsidianCfg {
+            enabled: config_str(cwd, "obsidian", "enabled")
+                .and_then(|v| parse_bool(&v))
+                .unwrap_or(false),
+            vault: config_str(cwd, "obsidian", "vault")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+        }
     }
 }
 

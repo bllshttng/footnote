@@ -315,6 +315,10 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
                 where_hint: None,
                 project: project.map(str::to_string),
                 lane: Some(lane.to_string()),
+                plan_path: e
+                    .get("plan_path")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 // Set below, once the board order is known.
                 head: false,
             },

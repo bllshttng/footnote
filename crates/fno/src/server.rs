@@ -12581,6 +12581,43 @@ mod tests {
     }
 
     #[test]
+    fn rename_squad_onto_a_taken_name_is_refused_with_a_notice() {
+        // Reported as "renaming a workspace to a name another workspace
+        // already carries fails silently". named_squad_taken already guards
+        // this - the invariant this test pins is that the rename never
+        // applies, so the operator's row keeps its old name rather than reading
+        // as a no-op when it is actually a name collision with nothing renamed.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/x".into()], Some("work".into()), leaf_tab(5, 1));
+        core.session
+            .add_squad(2, vec!["/y".into()], Some("scratch".into()), leaf_tab(6, 2));
+        let (tx, mut rx) = mpsc::channel(4);
+        core.clients.push(Client {
+            reliable_tx: tx,
+            ..client(1, 5, (24, 80), false)
+        });
+
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "scratch".into(),
+            },
+        );
+
+        assert_eq!(
+            core.session.squads[0].name.as_deref(),
+            Some("work"),
+            "a rename onto a taken name must not apply"
+        );
+        match rx.try_recv() {
+            Ok(ServerMsg::Notice { text }) => assert_eq!(text, "name taken"),
+            other => panic!("expected a name-taken notice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn remove_squad_reanchors_then_last_ends_the_session() {
         // AC2-HP / AC2-EDGE (server half): removing a squad drops it and re-
         // anchors active_squad; removing the last squad ends the session.
@@ -14638,6 +14675,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         };
         let backlog = [
@@ -15020,6 +15058,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         };
         let mut core = empty_core();
@@ -15091,6 +15130,7 @@ mod tests {
                 where_hint: None,
                 project: None,
                 lane: None,
+                plan_path: None,
                 head: false,
             },
             BacklogCard {
@@ -15103,6 +15143,7 @@ mod tests {
                 where_hint: None,
                 project: None,
                 lane: None,
+                plan_path: None,
                 head: false,
             },
         ];
@@ -15143,6 +15184,7 @@ mod tests {
             where_hint: None,
             project: None,
             lane: None,
+            plan_path: None,
             head: false,
         }];
         // Nothing known at all: the default copy.

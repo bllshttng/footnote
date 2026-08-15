@@ -186,7 +186,7 @@ crates/fno/src/clipboard.rs:2
 crates/fno/src/connections_view.rs:3
 crates/fno/src/digest_overlay.rs:1
 crates/fno/src/keys.rs:9
-crates/fno/src/link.rs:9
+crates/fno/src/link.rs:11
 crates/fno/src/needs_overlay.rs:1
 crates/fno/src/proto.rs:4
 crates/fno/src/pty.rs:1

@@ -54,6 +54,9 @@ pub enum Role {
     BodySel,
     /// A `PopupRow::Header` cell inside the body.
     BodyHead,
+    /// A disabled (greyed) body entry: present but inert to arrow, Enter, and
+    /// click. DIM under `terminal`, the theme's `dim` color under a named theme.
+    BodyDim,
     ScrollTrack,
     ScrollThumb,
 }
@@ -104,7 +107,11 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::BOLD,
             ),
-            Role::Subtitle | Role::Tab(false) | Role::Footer | Role::ScrollTrack => (
+            Role::BodyDim
+            | Role::Subtitle
+            | Role::Tab(false)
+            | Role::Footer
+            | Role::ScrollTrack => (
                 Color::Default,
                 Color::Default,
                 cell_flags::INVERSE | cell_flags::DIM,
@@ -128,6 +135,10 @@ pub fn cell_style(role: Role, t: &Theme) -> (Color, Color, u8) {
             Color::Default,
             cell_flags::INVERSE | cell_flags::BOLD,
         ),
+        // A disabled body entry: the theme's dim color, still on the inverse
+        // body block (matching Body/BodySel/BodyHead) so the row stays part of
+        // the block instead of punching a plain-background hole in it.
+        Role::BodyDim => (t.dim, Color::Default, cell_flags::INVERSE | cell_flags::DIM),
         Role::Border => (t.border, Color::Default, 0),
         Role::Title => (t.title, Color::Default, cell_flags::BOLD),
         Role::Chip => (t.chip, Color::Default, cell_flags::BOLD),
@@ -249,6 +260,7 @@ mod tests {
             Role::Body,
             Role::BodySel,
             Role::BodyHead,
+            Role::BodyDim,
             Role::ScrollTrack,
             Role::ScrollThumb,
         ] {
