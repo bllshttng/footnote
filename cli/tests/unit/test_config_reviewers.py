@@ -86,7 +86,12 @@ def test_code_review_is_self_servable():
     d = _RESOLVABLE_REVIEWERS["code-review"]
     assert d.kind == "local-attestation"
     assert d.requires == "none"
-    assert d.invocations == {"claude": "/code-review", "codex": "/review"}
+    # The claude value carries the arg grammar with the <level> placeholder;
+    # self_review_invocation substitutes a validated level (never ultra).
+    assert d.invocations == {
+        "claude": "/code-review <level> --comment --fix",
+        "codex": "/review",
+    }
 
 
 def test_descriptors_are_frozen():
