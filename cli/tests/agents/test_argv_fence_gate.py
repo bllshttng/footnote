@@ -65,10 +65,11 @@ VALUE_FORM_FLAGS = frozenset(
     }
 )
 
-# The container must be argv-shaped by name. Without this, any list named
-# e.g. ``dated`` or a list comprehension over ``message`` is flagged, and the
-# gate cries wolf on non-argv code.
-ARGV_VAR = re.compile(r"^(?:[A-Za-z_]*argv|cmd|command|args|base_cmd|full_cmd)s?$")
+# The container must be argv-shaped by name, with argv/cmd/args/command as a
+# stem (argv, argv_tail, full_cmd). Without this, any list named e.g.
+# ``dated`` or a list comprehension over ``message`` is flagged, and the gate
+# cries wolf on non-argv code.
+ARGV_VAR = re.compile(r"^[A-Za-z_]*(?:argv|cmd|args|command)[A-Za-z_]*$")
 
 
 def _literals(line: str) -> list:
