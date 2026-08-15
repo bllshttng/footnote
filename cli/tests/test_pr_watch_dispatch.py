@@ -734,6 +734,65 @@ class TestTickOrchestrator:
         assert receipt["swept_count"] == 1
         assert receipt["swept"] == {"owner/repo": [1]}
 
+    def test_batch_baseline_does_not_fire_on_preexisting_reviews(self, tmp_path):
+        """A first-seen batch baseline must not arm decide() to fire on review
+        activity that predates tracking (the old rich baseline captured
+        obs.latest_review_ts for exactly this reason)."""
+        from fno.pr_watch._dispatch import tick
+
+        store_path = tmp_path / "state.json"
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs_map = {1: _make_obs(1, "OPEN", latest_review_ts="2026-06-13T00:00:00Z")}
+        deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map)
+
+        for _ in range(2):
+            tick(
+                graph_path=tmp_path / "graph.json",
+                store_path=store_path,
+                discover_fn=deps["discover"],
+                read_pr_state_fn=deps["read_pr_state"],
+                fire_skill_fn=deps["fire_skill"],
+                emit=deps["emit"],
+                reviewers_for=deps["reviewers_for"],
+                claim=deps["claim"],
+                notify=deps["notify"],
+                post_merge_readiness_fn=deps["post_merge_readiness"],
+                now_iso="2026-06-14T12:00:00Z",
+            )
+
+        assert deps["fired"] == [], (
+            "a review that predates the baseline must not fire a check on the next tick; "
+            f"fired: {deps['fired']}"
+        )
+
+    def test_pruned_delivery_record_is_receipted(self, tmp_path):
+        """Removing a stale delivery record lands in the tick receipt, not a silent pop."""
+        from fno.pr_watch._dispatch import _delivery_state_path, tick
+
+        store_path = tmp_path / "state.json"
+        _delivery_state_path(store_path).write_text(json.dumps({
+            "owner/gone#9": {"retries": 3, "parked": "retries-exhausted"},
+        }))
+        deps = _make_tick_deps(tmp_path, candidates=[])
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["dropped"] == {"delivery-pruned": {"owner/gone": [9]}}
+        assert json.loads(_delivery_state_path(store_path).read_text()) == {}
+
     def test_tick_lock_held_returns_immediately(self, tmp_path):
         """AC-concurrency: if tick lock held, return without discovering/firing."""
         from fno.pr_watch._dispatch import tick

@@ -529,11 +529,24 @@ def _run_tick(
         except ValueError:
             continue
     normalization = store.normalize_keys(candidate_keys)
+    dropped = list(normalization.dropped)
     delivery_store = WatermarkStore(path=_delivery_state_path(store_path))
     delivery_state = delivery_store.load()
     for stale_key in set(delivery_state) - candidate_keys:
-        delivery_state.pop(stale_key, None)
-    dropped = list(normalization.dropped)
+        pruned = delivery_state.pop(stale_key, None)
+        if pruned is not None:
+            # A delivery record is the only persistence of a terminal PR's
+            # retry/parked facts; its removal needs the same receipt every
+            # other removal gets, or retries-exhausted merges vanish silently.
+            dropped.append(
+                {
+                    "key": stale_key,
+                    "reason": "delivery-pruned",
+                    "state": str(pruned.get("last_seen_state") or "UNKNOWN")
+                    if isinstance(pruned, dict)
+                    else "UNKNOWN",
+                }
+            )
     swept: set[str] = set()
     failed: set[str] = set()
 
@@ -572,8 +585,13 @@ def _run_tick(
                     failed.add(key)
         for key, current in sorted(batch_states.items()):
             if current == "OPEN" and key not in state:
+                # Stamp the baseline clock, not None: decide() treats a None
+                # review watermark as "never observed" and fires on any
+                # pre-existing review activity on the next rich read. now_iso
+                # suppresses exactly the activity that predates tracking,
+                # matching the first-seen discipline the rich baseline kept.
                 state[key] = {
-                    "last_review_ts": None,
+                    "last_review_ts": now_iso,
                     "last_seen_state": "OPEN",
                     "merge_dispatched": False,
                     "retries": 0,
