@@ -376,7 +376,22 @@ def test_drain_self_surfaces_job_mail_for_holder(runner, isolated, monkeypatch):
 
     res = runner.invoke(app, ["mail", "drain-self"])
     assert res.exit_code == 0, res.output
-    assert "reached the successor" in res.stdout
+    # CI-only failure triage (changed-smoke, ubuntu): when the job mail does
+    # not surface, dump the exact legs the scan depends on so the next red run
+    # names the broken one instead of an empty stdout.
+    from pathlib import Path as _P
+
+    from fno.agents.truth_status import resolve_truth_status as _rts
+
+    _diag = {
+        "claim": _rts("drain-abcd", manifest_cwd=str(_P.cwd())),
+        "manifest": ( _P.cwd() / ".fno" / "target-state.md").read_text()[:120]
+        if (_P.cwd() / ".fno" / "target-state.md").exists()
+        else "MISSING",
+        "claims_root": __import__("os").environ.get("FNO_CLAIMS_ROOT"),
+        "cwd": str(_P.cwd()),
+    }
+    assert "reached the successor" in res.stdout, f"diag={_diag}"
 
 
 def test_drain_self_skips_job_mail_when_not_holder(runner, isolated, monkeypatch):
