@@ -127,10 +127,19 @@ _WAKE_ATTEMPTS = 2
 _WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
 _WAKE_TARGET_STATUS = "Working"
 # A row already in one of these needs no wake: Working is the target itself,
-# and Idle is a live, reachable session that may hold unsubmitted composer
+# Idle is a live, reachable session that may hold unsubmitted composer
 # text — injecting keystrokes into it risks destroying that text for no
-# benefit, since the row isn't blocked or stopped in the first place.
-_WAKE_SKIP_STATUSES = frozenset({"Working", "Idle"})
+# benefit, since the row isn't blocked or stopped in the first place — and
+# Done is a terminal row that was never going to reach Working no matter how
+# many attempts run (visible here for the first time now that
+# `claude_agents_json` passes `--all`).
+_WAKE_SKIP_STATUSES = frozenset({"Working", "Idle", "Done"})
+# Lower-cased once for comparison: `_state_of()` compares case-insensitively
+# because a live_map producer that skips claude.py's own Title-Case
+# normalization has slipped an un-normalized status through before (see the
+# matching fix in read.py's live_status fill-in check) — an un-recognized
+# "idle" here must not be treated as blocked and get keystrokes injected.
+_WAKE_SKIP_STATUSES_LOWER = frozenset(s.lower() for s in _WAKE_SKIP_STATUSES)
 
 
 def _default_agents_state_fn() -> dict[str, dict]:
@@ -215,12 +224,16 @@ def _default_wake_fn(
     post-attempt state read (``_resume_claude_wake``) is the readiness
     signal this function itself does not have.
     """
-    from fno.agents.account_env import SCRUB_AUTH_VARS
-
     env = dict(os.environ)
-    for key in SCRUB_AUTH_VARS:
-        env.pop(key, None)
+    # Scrub only when there is something to restore, matching
+    # bg_create/headless_create (harnesses/claude.py): a route-less row (the
+    # common default-account case) keeps its ambient auth untouched rather
+    # than losing it with nothing put back.
     if route_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        for key in SCRUB_AUTH_VARS:
+            env.pop(key, None)
         env.update(route_env)
     env["FNO_WAKE_MSG"] = message
     script_cmd = (
@@ -319,7 +332,7 @@ def _resume_claude_wake(
     # needs the wake subprocess itself to poll and abort mid-sleep, which
     # would change the verified wake.sh recipe's timing; accepted as a
     # residual few-second race rather than risk that.
-    if before not in _WAKE_SKIP_STATUSES:
+    if before.lower() not in _WAKE_SKIP_STATUSES_LOWER:
         for _attempt in range(_WAKE_ATTEMPTS):
             try:
                 wake_fn(short_id, message=message, route_env=route_env)
@@ -334,7 +347,7 @@ def _resume_claude_wake(
             # timeout fires. Skipping this read on the exception path would
             # score a successful wake as failed.
             after = _state_of()
-            if after == _WAKE_TARGET_STATUS:
+            if after.lower() == _WAKE_TARGET_STATUS.lower():
                 break
 
     # A skipped row (before already Working/Idle) reports success on its
@@ -345,7 +358,10 @@ def _resume_claude_wake(
     # so emitting it unconditionally would misreport a wake that never
     # reached Working as a success, the same pre-fix shape a sigma review
     # already caught below for the exec-based harnesses' chdir failure.
-    if before not in _WAKE_SKIP_STATUSES and after != _WAKE_TARGET_STATUS:
+    if (
+        before.lower() not in _WAKE_SKIP_STATUSES_LOWER
+        and after.lower() != _WAKE_TARGET_STATUS.lower()
+    ):
         return ResumeResult(
             exit_code=16,
             stderr=(

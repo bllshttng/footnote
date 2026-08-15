@@ -2272,31 +2272,59 @@ fn should_delegate_claude_live_attach(
 /// `fno-agents resume <name> [--print-command]` -- resume an agent in its
 /// recorded cwd via the provider's resume CLI (`os.execvp` equivalent), or
 /// print the shell snippet with `--print-command`. Mirrors Python `resume_logic`.
-pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
+/// Pure parse of `resume`'s argv: `NAME [--print-command] [--message|-m VALUE]`.
+/// `--message`/`-m` (Python's `cmd_resume`) only matters on the claude
+/// live-attach delegation in `run_resume`, but it must be ACCEPTED here or
+/// every `fno agents resume <name> --message ...` invocation dies with exit 2
+/// before that delegation is ever reached -- resume auto-routes to this
+/// binary by default (`RUST_CLIENT_VERBS`), so this parser is the only door.
+/// Extracted as a pure function (mirrors `should_delegate_claude_live_attach`)
+/// so the flag grammar is unit-testable without an `AgentsHome`/registry
+/// fixture; on error it prints the same diagnostic `run_resume` used to print
+/// inline and returns the exit code to propagate.
+fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), i32> {
     let mut name: Option<String> = None;
     let mut print_command = false;
-    for a in rest {
+    let mut message: Option<String> = None;
+    let mut iter = rest.iter();
+    while let Some(a) = iter.next() {
         match a.as_str() {
             "--print-command" => print_command = true,
+            "--message" | "-m" => {
+                message = Some(match iter.next() {
+                    Some(v) => v.clone(),
+                    None => {
+                        eprintln!("fno-agents: {a} needs a value");
+                        return Err(2);
+                    }
+                });
+            }
             other if other.starts_with("--") => {
                 eprintln!("fno-agents: unknown resume flag: {other}");
-                return 2;
+                return Err(2);
             }
             other => {
                 if name.is_some() {
                     eprintln!("fno-agents: resume takes one NAME (got extra: {other})");
-                    return 2;
+                    return Err(2);
                 }
                 name = Some(other.to_string());
             }
         }
     }
-    let name = match name {
-        Some(n) => n,
+    match name {
+        Some(n) => Ok((n, print_command, message)),
         None => {
             eprintln!("fno-agents: resume needs a <name>");
-            return 2;
+            Err(2)
         }
+    }
+}
+
+pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
+    let (name, print_command, message) = match parse_resume_args(rest) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
 
     let entries = match read_registry_entries(&home.registry_json()) {
@@ -2451,9 +2479,24 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // and `fno-agents resume` still printing "Attaching..." and exiting,
     // which is the guard-on-one-of-N-paths trap this repo already tracks.
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
-        let status = std::process::Command::new("fno-py")
+        // Route through `fno` (the wrapper every install puts on PATH, which
+        // resolves the `fno-py` console script by absolute path -- see
+        // crates/fno/src/bootstrap.rs), not a bare `fno-py`: this binary has
+        // no PATH-robust resolver of its own, and a bare `fno-py` fails on a
+        // cargo-only install where only the mux (`fno`) is on PATH (the same
+        // gap cli/src/fno/_subprocess_util.py's `fno_py_cmd()` closes on the
+        // Python side). `FNO_AGENTS_RUNTIME=python` pins the child to Python
+        // dispatch, mirroring `token_helper_output` above -- without it,
+        // `resume` (in RUST_CLIENT_VERBS) would auto-route straight back into
+        // this same binary and loop.
+        let mut command = std::process::Command::new("fno");
+        command
             .args(["agents", "resume", &name])
-            .status();
+            .env("FNO_AGENTS_RUNTIME", "python");
+        if let Some(msg) = &message {
+            command.args(["--message", msg]);
+        }
+        let status = command.status();
         return match status {
             Ok(s) => s.code().unwrap_or(1),
             Err(e) => {
@@ -4164,6 +4207,51 @@ mod tests {
         ));
         // Every non-claude harness keeps its own provider resume CLI.
         assert!(!should_delegate_claude_live_attach("codex", &None, &None));
+    }
+
+    #[test]
+    fn resume_args_accept_message_flag_long_and_short() {
+        // code-review finding: --message/-m must not die with "unknown resume
+        // flag" -- resume auto-routes to this binary by default, so this
+        // parser is the only door the claude wake's --message option has.
+        let (name, print_command, message) = parse_resume_args(&[
+            "alpha".to_string(),
+            "--message".to_string(),
+            "continue please".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(name, "alpha");
+        assert!(!print_command);
+        assert_eq!(message.as_deref(), Some("continue please"));
+
+        let (name, _, message) =
+            parse_resume_args(&["-m".to_string(), "hi".to_string(), "beta".to_string()]).unwrap();
+        assert_eq!(name, "beta");
+        assert_eq!(message.as_deref(), Some("hi"));
+
+        // No --message given: still parses, message is None (unchanged
+        // pre-fix behavior for every other flag combination).
+        let (name, print_command, message) =
+            parse_resume_args(&["gamma".to_string(), "--print-command".to_string()]).unwrap();
+        assert_eq!(name, "gamma");
+        assert!(print_command);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn resume_args_message_flag_needs_a_value() {
+        assert_eq!(
+            parse_resume_args(&["alpha".to_string(), "--message".to_string()]),
+            Err(2)
+        );
+    }
+
+    #[test]
+    fn resume_args_still_rejects_unknown_flags() {
+        assert_eq!(
+            parse_resume_args(&["alpha".to_string(), "--bogus".to_string()]),
+            Err(2)
+        );
     }
 
     #[test]

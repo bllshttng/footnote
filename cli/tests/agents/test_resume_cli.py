@@ -723,6 +723,88 @@ def test_default_wake_fn_scrubs_ambient_auth_before_overlaying_the_route(
     assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/paas/v4"
 
 
+def test_default_wake_fn_leaves_ambient_auth_untouched_with_no_route(
+    monkeypatch,
+) -> None:
+    """code-review finding: a route-less row (the common default-account
+    case) must keep its ambient auth, matching bg_create/headless_create --
+    scrubbing with nothing to restore breaks auth mid-wake for an
+    api-key-authenticated account."""
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _default_wake_fn
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-operators-own-key")
+    seen: dict = {}
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _fake_popen(argv, *, env, **kwargs):
+        seen["env"] = env
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _fake_popen)
+
+    _default_wake_fn("deadbeef", message="continue", route_env=None)
+
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "sk-operators-own-key"
+
+
+def test_claude_resume_skips_waking_an_already_done_row() -> None:
+    """code-review finding: "Done" is a terminal status (KNOWN_LIVE_STATUSES
+    in harnesses/claude.py), newly visible via `--all` -- it must be
+    skip-eligible like Working/Idle rather than burning two ~60s wake
+    attempts trying to nudge a session that was never going to move."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Done"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+    assert res.output == "alpha (deadbeef): Done -> Done\n"
+
+
+def test_claude_resume_skip_check_is_case_insensitive() -> None:
+    """code-review finding: read.py's own diff fixed a lowercase-status miss
+    with .lower() in this same PR; the wake's skip/target comparisons must
+    apply the same normalization or an un-normalized "idle" gets keystrokes
+    injected into a live session."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "idle"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+
+
 def test_script_wrapped_attach_uses_bsd_form_on_darwin(monkeypatch) -> None:
     from fno.agents.resume_cli import _script_wrapped_attach
 
