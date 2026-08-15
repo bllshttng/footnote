@@ -6929,6 +6929,15 @@ def dispatch_send(
         # cannot do better than the same refusal, and a caller told to retry
         # loses nothing, unlike a message queued to a dead owner.
         timeout_entries, timeout_entry = _load_and_resolve_target(canonical_identity)
+
+        # Provider mismatch refuses BEFORE the queue. The locked path checks
+        # this and exits 2 without delivering, so lock contention must not turn
+        # a refused send into a delivered one.
+        try:
+            select_provider(name=timeout_entry.name, requested_provider=provider)
+        except ProviderMismatchError as mismatch:
+            raise DispatchAskError(str(mismatch), exit_code=2) from mismatch
+
         msg_id, durable_to = _queue_durable_fallback(
             timeout_entry,
             message,
@@ -6948,7 +6957,8 @@ def dispatch_send(
             file=sys.stderr,
         )
         raise DispatchAskError(
-            f"timed out waiting for agent {exc.name!r} lock (timeout={exc.timeout}s); "
+            f"timed out waiting for agent {exc.name!r} lock "
+            f"(timeout={exc.timeout}s){exc.holder_note()}; "
             f"message queued durable as {msg_id}",
             exit_code=11,
         ) from exc

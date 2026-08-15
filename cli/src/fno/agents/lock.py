@@ -92,15 +92,28 @@ class AgentLockTimeout(TimeoutError):
     def __init__(
         self, name: str, timeout: float, holder: Optional[dict] = None
     ) -> None:
-        message = f"lock timeout for agent {name!r} after {timeout}s"
-        if holder and holder.get("pid") is not None and holder.get("acquired_at"):
-            message += (
-                f" (held by pid {holder['pid']} since {holder['acquired_at']})"
-            )
-        super().__init__(message)
         self.name = name
         self.timeout = timeout
         self.holder = holder
+        super().__init__(
+            f"lock timeout for agent {name!r} after {timeout}s{self.holder_note()}"
+        )
+
+    def holder_note(self) -> str:
+        """`" (held by pid N since T)"`, or `""` when the lock carried no stamp.
+
+        One formatter, because every caller that rebuilds its own message from
+        `name` and `timeout` drops the holder otherwise, and the stamp then
+        reaches nobody on the path that matters.
+        """
+        holder = self.holder
+        if not holder:
+            return ""
+        pid = holder.get("pid")
+        acquired_at = holder.get("acquired_at")
+        if pid is None or not acquired_at:
+            return ""
+        return f" (held by pid {pid} since {acquired_at})"
 
 
 class _LockHandle:

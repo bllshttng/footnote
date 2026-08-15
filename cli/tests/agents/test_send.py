@@ -2062,3 +2062,76 @@ def test_dispatch_send_lock_timeout_keeps_sender_provenance(
     body = threads[0].messages[0].body
     # The immutable return address, not just the mutable alias.
     assert "beef5678" in body, f"sender session must survive the timeout: {body}"
+
+
+def test_dispatch_send_lock_timeout_refuses_provider_mismatch_before_queuing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Lock contention must not turn a refused send into a delivered one."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import _agent_lock_path
+    from fno.bus.log import bus_log_path
+
+    lock_path = _agent_lock_path("red", paths.agents_registry_path())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(DispatchAskError) as exc_info:
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider="codex",
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    assert exc_info.value.exit_code == 2
+    assert not bus_log_path().exists(), "a refused send must queue nothing"
+
+
+def test_dispatch_send_lock_timeout_error_names_the_holder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The stamp has to reach the user-facing error, not just the exception."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = paths.agents_registry_path()
+    lock_path = _agent_lock_path("red", registry_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Stamp the file the way a real holder does, then hold it from a second
+    # open so the send genuinely blocks.
+    with hold_agent_lock("red", registry_path):
+        stamped = lock_path.read_text()
+    assert "pid" in stamped
+
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(DispatchAskError) as exc_info:
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider=None,
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    assert "held by pid " in str(exc_info.value)
+    assert "message queued durable as msg-" in str(exc_info.value)

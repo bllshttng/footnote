@@ -797,44 +797,7 @@ fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// RAII per-agent flock (same primitive as `claude_ask::AgentLock`).
-struct AgentLock {
-    _file: std::fs::File,
-}
-
-impl AgentLock {
-    fn acquire(home: &AgentsHome, name: &str, timeout: Duration) -> Result<Self, ()> {
-        let locks_dir = home.root().join("locks");
-        let _ = std::fs::create_dir_all(&locks_dir);
-        let path = locks_dir.join(format!("{}.lock", name));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|_| ())?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(_) => {
-                    if Instant::now() >= deadline {
-                        return Err(());
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for AgentLock {
-    fn drop(&mut self) {
-        // std's inherent File::unlock (stable since Rust 1.89; the crate now
-        // pins rust-version = 1.89). Mirrors acquire()'s std locking.
-        let _ = self._file.unlock();
-    }
-}
+use crate::agent_lock::AgentLock;
 
 /// Outcome of `dispatch_codex_ask`.
 #[derive(Debug, Clone, PartialEq, Eq)]

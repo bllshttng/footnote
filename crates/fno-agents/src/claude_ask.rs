@@ -1912,76 +1912,7 @@ pub fn validate_spawn_inputs(name: &str, from_name: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// RAII per-agent flock at `<registry-dir>/locks/<name>.lock`, byte-compatible
-/// with Python's `_agent_lock_path` (`fcntl.flock` ⇄ `fs2`). Held for the
-/// duration of one ask so concurrent same-agent asks serialize (AC10).
-struct AgentLock {
-    _file: std::fs::File,
-}
-
-/// Write this process as the lock's holder, in the shape the Python reader
-/// (`fno.agents.lock._read_holder`) parses.
-///
-/// Both runtimes take this same flock, so a stamp on only one of them is
-/// decorative: the other's acquire leaves the previous holder's JSON in place
-/// and a waiter reports a dead pid as the live owner. Truncating is the
-/// load-bearing half - a holder that cannot write must still not leave a
-/// stale identity behind. Best-effort throughout; the flock is held either
-/// way and the stamp is diagnostic only.
-fn stamp_lock_holder(file: &std::fs::File, name: &str) {
-    use std::io::{Seek, SeekFrom, Write};
-
-    let mut handle = file;
-    if handle.set_len(0).is_err() {
-        return;
-    }
-    let _ = handle.seek(SeekFrom::Start(0));
-    let line = serde_json::json!({
-        "pid": std::process::id(),
-        "name": name,
-        "acquired_at": now_iso(),
-    });
-    let _ = writeln!(handle, "{}", line);
-    let _ = handle.flush();
-}
-
-impl AgentLock {
-    fn acquire(home: &AgentsHome, name: &str, timeout: Duration) -> Result<Self, ()> {
-        let locks_dir = home.root().join("locks");
-        let _ = std::fs::create_dir_all(&locks_dir);
-        let path = locks_dir.join(format!("{}.lock", name));
-        let file = match std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-        {
-            Ok(f) => f,
-            Err(_) => return Err(()),
-        };
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            match file.try_lock() {
-                Ok(()) => {
-                    stamp_lock_holder(&file, name);
-                    return Ok(Self { _file: file });
-                }
-                Err(_) => {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(());
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for AgentLock {
-    fn drop(&mut self) {
-        let _ = self._file.unlock();
-    }
-}
+use crate::agent_lock::AgentLock;
 
 /// Stable fno-side log path for `fno agents logs <name>` (`_derive_log_path`).
 fn derive_log_path(home: &AgentsHome, name: &str) -> PathBuf {
