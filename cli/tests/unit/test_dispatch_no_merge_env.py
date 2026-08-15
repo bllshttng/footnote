@@ -55,3 +55,17 @@ def test_prose_template_mentioning_no_merge_stays_literal():
     assert "no-merge" in dispatch["command"]
     assert "--no-merge" not in dispatch["command"]
     assert "TARGET_NO_MERGE" not in dispatch["env"]
+
+
+def test_non_target_slash_command_args_are_untouched():
+    """The rewrite and env carrier are scoped to /target-family commands
+    (review round 6): another slash verb's args are instruction text, not
+    merge posture."""
+    dispatch = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="/think summarize the no-merge posture {id}",
+        trigger="autonomous",
+    )
+    assert dispatch["command"] == "/think summarize the no-merge posture x-1"
+    assert "TARGET_NO_MERGE" not in dispatch["env"]

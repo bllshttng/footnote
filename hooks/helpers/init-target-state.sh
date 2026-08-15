@@ -357,6 +357,13 @@ if [[ "$AUTO_MERGE_SOURCE" == "default-off" ]] && declare -F get_config >/dev/nu
   _am_set="$(get_config "auto_merge.enabled" "" 2>/dev/null)"  # presence-probe: empty default distinguishes set from unset
   [[ -n "$_am_set" ]] && AUTO_MERGE_SOURCE="config"
 fi
+# The legacy interactive spelling gets a LOUD no-op, never a quiet one: prose
+# still manufactures nothing (that is x-9d11's whole point), but an operator
+# typing the pre-x-9d11 bare token deserves to learn their refusal did not
+# land rather than discover it from a merged PR. Warn-only by design.
+if [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
+  echo "[init-target-state] note: input contains a bare 'no-merge' token, which is no longer a control input - it set nothing. Pass --no-merge to 'fno target start/init' for the refusal posture." >&2
+fi
 
 # Auto-merge implies external review on.
 if _is_true "$AUTO_MERGE_APPROVED" && _is_true "$no_external"; then

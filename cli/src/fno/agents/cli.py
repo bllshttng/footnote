@@ -1147,6 +1147,13 @@ def cmd_spawn(
     from fno.agents.mux_spawn import resolve_provenance
 
     prov_env = resolve_provenance(node, slug, plan)
+    # x-9d11 refusal carrier, positive arm: the pane path consumes prov_env
+    # directly (it does not pass through the bg/headless export below), so a
+    # message-carried --no-merge must land here too. Clear-on-absent is the
+    # export block's job - the pane builder starts from this dict, not from a
+    # parent's inherited carrier.
+    if "--no-merge" in f" {message} ":
+        prov_env["TARGET_NO_MERGE"] = "1"
     node_reservation: tuple[str, str] | None = None
     if node is not None:
         guarded_node = prov_env.get("FNO_NODE")
@@ -1330,6 +1337,16 @@ def cmd_spawn(
         for _k in PROVENANCE_KEYS:
             os.environ.pop(_k, None)
         os.environ.update(prov_env)
+        # x-9d11 refusal carrier, CLI lane: the flag in the message is the
+        # carrier, the env the backstop - derived here so a direct
+        # `fno agents spawn "/target --no-merge <id>"` behaves like the skill
+        # lane. Set or CLEARED (the message is authoritative; an inherited
+        # carrier must not outlive it) and restored with the provenance keys.
+        prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
+        if "--no-merge" in f" {message} ":
+            os.environ["TARGET_NO_MERGE"] = "1"
+        else:
+            os.environ.pop("TARGET_NO_MERGE", None)
 
         try:
             result: SpawnResult = dispatch_spawn(

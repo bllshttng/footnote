@@ -483,23 +483,25 @@ def resolve_dispatch(
     # through (skill spawn.sh, dispatch.py pane, advance/recovery/keep_going bg):
     # when the command carries the refusal, the env carries it too, so a worker
     # that drops the flag post-compaction still folds the refusal at init.
-    # COMMAND templates only: a slash/$-led first token (/target, $fno:target).
-    # A PROSE template mentioning no-merge stays literal - rewriting its words
-    # would turn a sentence into a posture (review round 5).
-    # Within a command template, the legacy bare `no-merge` token (the
+    # /target-FAMILY commands only (the per-harness spellings normalize_command
+    # emits): rewriting args of some OTHER slash command would mutate its
+    # instruction text and arm a merge-posture env for a command with no merge
+    # semantics (review round 6). A PROSE template mentioning no-merge stays
+    # literal too - rewriting its words would turn a sentence into a posture.
+    # Within a /target-family command, the legacy bare `no-merge` token (the
     # pre-x-9d11 documented default in operator config.dispatch.command) is
     # rewritten to the flag - a spelling migration that preserves the
     # template's semantics, never a posture change - because the fold and every
     # env match key on `--no-merge`.
     _first_word = resolved_command.split(maxsplit=1)[0] if resolved_command else ""
-    _is_command_template = _first_word.startswith("/") or _first_word.startswith("$")
-    if _is_command_template and " no-merge " in f" {resolved_command} ":
+    _is_target_command = _first_word in ("/target", "/fno:target", "$fno:target")
+    if _is_target_command and " no-merge " in f" {resolved_command} ":
         resolved_command = f" {resolved_command} ".replace(
             " no-merge ", " --no-merge "
         ).strip()
         decision.append("command=legacy-no-merge->--no-merge")
     env: dict[str, str] = {}
-    if _is_command_template and "--no-merge" in resolved_command:
+    if _is_target_command and "--no-merge" in resolved_command:
         env["TARGET_NO_MERGE"] = "1"
         decision.append("no-merge->TARGET_NO_MERGE")
     if brief:
