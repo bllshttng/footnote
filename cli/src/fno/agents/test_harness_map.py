@@ -337,11 +337,12 @@ def test_brief_at_8kb_ok():
     assert out["env"]["TARGET_BRIEF"] == "x" * 8192
 
 
-def test_no_verb_leaves_default_and_empty_env():
-    """Verify 3 (regression): no dispatch fields -> /target no-merge <id>, env empty."""
+def test_no_verb_leaves_default_command_with_env_refusal():
+    """Verify 3 (regression, x-9d11): no dispatch fields -> /target --no-merge
+    <id>, and the env carries the refusal (TARGET_NO_MERGE), not briefs only."""
     out = _resolve(node_id="x-1")
     assert out["command"] == "/target --no-merge x-1"
-    assert out["env"] == {}
+    assert out["env"] == {"TARGET_NO_MERGE": "1"}
 
 
 def test_config_extends_allowlist():

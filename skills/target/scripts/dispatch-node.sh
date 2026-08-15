@@ -803,6 +803,16 @@ for id in "${NODES[@]}"; do
   # on the command line. Exported unconditionally (empty when the node has no
   # brief) so a prior loop iteration's brief can never leak into a later node.
   export TARGET_BRIEF="$TARGET_BRIEF_ENV"
+  # x-9d11 mechanical refusal carrier: derive from the FINAL command, not the
+  # resolver JSON - the allow-merge strip and the local claude build both
+  # rewrite the command after the resolve, and the env must match what the
+  # worker actually receives. Unset (not merely empty) when allowed, so a
+  # prior loop iteration's refusal can never leak into a later node.
+  if [[ " $tgt_cmd " == *" --no-merge "* ]]; then
+    export TARGET_NO_MERGE=1
+  else
+    unset TARGET_NO_MERGE 2>/dev/null || true
+  fi
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
   # errors on `"${arr[@]}"` for an empty array under `set -u`. node cwd ->

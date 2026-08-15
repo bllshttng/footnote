@@ -1,11 +1,13 @@
 """x-9d11: the dispatch refusal carrier rides resolve_dispatch's env.
 
-The choke point every spawn surface resolves through (skill spawn.sh, the
-dispatch.py pane, advance/recovery/keep_going's direct `fno agents spawn`)
-must set TARGET_NO_MERGE whenever the resolved command carries the refusal,
-and must rewrite the legacy bare `no-merge` token to the flag. Without this,
-a worker that drops the flag post-compaction folds no refusal at init and a
-configured auto-merge stands unrevoked.
+The choke point every spawn surface that consumes the resolver's tuple (skill
+spawn.sh, the dispatch.py pane, advance's `fno agents spawn`) must set
+TARGET_NO_MERGE whenever the resolved command carries the refusal, and must
+rewrite the legacy bare `no-merge` token to the flag. Lanes that shell
+`fno agents spawn` WITHOUT the resolver (recovery respawn, keep_going) set the
+env directly at their spawn sites. Without a carrier, a worker that drops the
+flag post-compaction folds no refusal at init and a configured auto-merge
+stands unrevoked.
 """
 
 from fno.agents.harness_map import resolve_dispatch

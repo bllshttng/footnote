@@ -195,8 +195,12 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
     else:
         cmd += ["--fresh"]
     cmd += ["--name", name, f"/target --no-merge {node_id}"]
+    # x-9d11: the env carrier backs the hardcoded flag - a worker that drops
+    # the flag post-compaction still folds the refusal at init (this lane does
+    # not route through resolve_dispatch, so nobody else sets it).
+    env = {**os.environ, "TARGET_NO_MERGE": "1"}
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
     except Exception as exc:  # noqa: BLE001 - spawn failure is never fatal
         _LOG.debug("keep_going: target spawn failed for %s: %s", node_id, exc)
         return False

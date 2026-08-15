@@ -67,8 +67,10 @@ class FakeGH:
             "statusCheckRollup" in a for a in cmd
         ) and "state,mergedAt,isDraft,reviewDecision,statusCheckRollup" not in cmd:
             return Result(0, json.dumps(self.checks) + "\n", "")
-        if cmd[:3] == ["gh", "pr", "view"] and cmd[-1] == ".headRefName":
-            return Result(0, "feature/x\n", "")
+        if cmd[:3] == ["gh", "pr", "view"] and "headRefName" in cmd[-1]:
+            # The x-9d11 fork guard renders "branch headRepo baseRepo" via jq;
+            # same-repo by default so the delete fires.
+            return Result(0, "feature/x owner/repo owner/repo\n", "")
         if cmd[:3] == ["gh", "pr", "merge"]:
             return self.gh_merge
         if cmd[:4] == ["gh", "repo", "view", "--json"]:

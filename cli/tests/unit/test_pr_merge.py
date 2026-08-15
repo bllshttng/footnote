@@ -31,6 +31,8 @@ class FakeRun:
         view_fails: bool = False,
         auto_merge_request: str = "null",
         head_ref: str = "feature/x",
+        head_repo: str = "owner/repo",
+        base_repo: str = "owner/repo",
         checks: dict | None = None,
     ) -> None:
         self.gh_merge = gh_merge or Result(0, "", "")
@@ -42,6 +44,8 @@ class FakeRun:
         self.behind_by = behind_by
         self.auto_merge_request = auto_merge_request
         self.head_ref = head_ref
+        self.head_repo = head_repo
+        self.base_repo = base_repo
         # require_checks_pass is enforced in-process now (x-9d11), so the
         # default fake serves a GREEN rollup; tests exercising refusal paths
         # pass their own.
@@ -76,6 +80,13 @@ class FakeRun:
                     # Models `-q .autoMergeRequest.enabled`: "true" armed,
                     # "false"/"null" not (jq prints null, not empty).
                     return Result(0, self.auto_merge_request + "\n", "")
+                if "headRefName" in cmd[-1] and "headRepository" in cmd[-1]:
+                    # x-9d11 fork guard: jq renders "branch headRepo baseRepo".
+                    return Result(
+                        0,
+                        f"{self.head_ref} {self.head_repo} {self.base_repo}\n",
+                        "",
+                    )
                 if cmd[-1] == ".headRefName":
                     return Result(0, self.head_ref + "\n", "")
                 if "baseRefName,headRefName" in cmd:
@@ -1147,6 +1158,32 @@ def test_remote_delete_failure_cannot_fail_the_merge(
     obj = _last_json(capsys)
     assert obj["outcome"] == "merged"
     assert obj.get("cleanup", "").startswith("failed")
+
+
+def test_fork_pr_skips_remote_delete(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """A fork PR's head branch lives on the fork, not this repo's origin: the
+    delete must never fire (it would destroy an unrelated same-named branch on
+    the base repo)."""
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+    )
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        head_repo="contributor/fork",
+        base_repo="owner/repo",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj.get("cleanup", "") == ""
+    assert not [c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]]
 
 
 def test_an_already_armed_pr_skips_naming_finalize(
