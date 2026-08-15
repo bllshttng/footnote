@@ -266,6 +266,9 @@ class TargetState(BaseModel):
     # Auto-merge
     auto_merge_enabled: bool = False
     auto_merge_approved: bool = False
+    # Which input set the posture (x-9d11). Closed enum, written by the init
+    # fold: config | flag-no-merge | env-target-auto-merge | default-off.
+    # None on pre-provenance manifests; render that as `unknown`, never a guess.
     auto_merge_source: Optional[str] = None
     # Scalar int lists: sole writer is scripts/lib/pr-merge.sh which emits PR numbers.
     merged_prs: List[int] = Field(default_factory=list)

@@ -27,7 +27,7 @@ def test_default_harness_is_claude_bg_with_bypass():
     out = _resolve(node_id="x-4d85")
     assert out["harness"] == "claude"
     assert out["substrate"] == "bg"
-    assert out["command"] == "/target no-merge x-4d85"
+    assert out["command"] == "/target --no-merge x-4d85"
     assert out["permission_bypass"] == ["--dangerously-skip-permissions"]
 
 
@@ -70,13 +70,13 @@ def test_template_without_node_is_literal():
     """No node id -> the template is returned verbatim ({id} unsubstituted).
     codex normalizes to its `$fno:` skill surface (x-a5e4)."""
     out = _resolve(harness="codex")
-    assert out["command"] == "$fno:target no-merge {id}"
+    assert out["command"] == "$fno:target --no-merge {id}"
 
 
 def test_bad_template_rejected_when_substituting():
     """A template lacking exactly one {id} cannot substitute a node id."""
     with pytest.raises(DispatchResolveError, match="{id}"):
-        _resolve(node_id="x-1", command="/target no-merge")
+        _resolve(node_id="x-1", command="/target --no-merge")
 
 
 def test_empty_explicit_harness_fails_loud():
@@ -120,19 +120,19 @@ def test_config_overlay_precedence():
 def test_config_command_normalized_per_harness():
     """x-f0e2: a slash-leading config template is normalized on the chosen
     harness, exactly like the builtin rung - config stops being literal."""
-    cfg = {"command": "/target no-merge {id}"}
+    cfg = {"command": "/target --no-merge {id}"}
     # codex: leading /verb -> $fno:verb
     assert resolve_dispatch(harness="codex", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ] == "$fno:target no-merge x-1234"
+    ] == "$fno:target --no-merge x-1234"
     # claude: byte-identical to today (slash surface normalizes to itself)
     assert resolve_dispatch(harness="claude", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ] == "/target no-merge x-1234"
+    ] == "/target --no-merge x-1234"
     # opencode: plugin-namespaced slash surface -> `/fno:target ...` (x-de43)
     assert resolve_dispatch(harness="opencode", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ] == "/fno:target no-merge x-1234"
+    ] == "/fno:target --no-merge x-1234"
 
 
 def test_explicit_command_normalized_per_harness():
@@ -143,8 +143,8 @@ def test_explicit_command_normalized_per_harness():
     # `[dispatch] substrate = "bg"` it resolved bg on codex and died
     # ("bg is claude-only") instead of testing the normalization it names.
     # Green in CI, red on a configured developer machine.
-    out = _resolve(command="/target no-merge {id}", harness="codex", node_id="x-1")
-    assert out["command"] == "$fno:target no-merge x-1"
+    out = _resolve(command="/target --no-merge {id}", harness="codex", node_id="x-1")
+    assert out["command"] == "$fno:target --no-merge x-1"
 
 
 def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
@@ -163,7 +163,7 @@ def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
     invocation `/fno:target ...` on the headless substrate - no prose brief."""
     out = _resolve(harness="opencode", node_id="x-4d85")
-    assert out["command"] == "/fno:target no-merge x-4d85"
+    assert out["command"] == "/fno:target --no-merge x-4d85"
     assert out["substrate"] == "headless"
     assert out["command_surface"] == "slash"
 
@@ -340,7 +340,7 @@ def test_brief_at_8kb_ok():
 def test_no_verb_leaves_default_and_empty_env():
     """Verify 3 (regression): no dispatch fields -> /target no-merge <id>, env empty."""
     out = _resolve(node_id="x-1")
-    assert out["command"] == "/target no-merge x-1"
+    assert out["command"] == "/target --no-merge x-1"
     assert out["env"] == {}
 
 
@@ -361,7 +361,7 @@ def test_node_verb_wins_over_config_command():
 def test_brief_without_verb_still_rides_env():
     """A brief on a default (/target) dispatch still travels via env."""
     out = _resolve(node_id="x-1", brief="ship carefully")
-    assert out["command"] == "/target no-merge x-1"
+    assert out["command"] == "/target --no-merge x-1"
     assert out["env"]["TARGET_BRIEF"] == "ship carefully"
 
 
@@ -447,7 +447,7 @@ def test_both_merge_posture_readers_default_to_deny():
     # harness_map: absent key, and a truthy non-boolean, both deny.
     assert resolve_dispatch(harness="claude", node_id="x-1", dispatch_cfg={})[
         "command"
-    ] == "/target no-merge x-1"
+    ] == "/target --no-merge x-1"
     assert resolve_dispatch(
         harness="claude", node_id="x-1", dispatch_cfg={"auto_merge": "true"}
-    )["command"] == "/target no-merge x-1"
+    )["command"] == "/target --no-merge x-1"

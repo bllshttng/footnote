@@ -834,11 +834,12 @@ esac
 # no-merge default for any native `/target`-family message (node-id build OR an
 # explicit /target passthrough): a fire-and-forget worker should land a PR for
 # review, not auto-merge to main from a fat-fingered tap. --allow-merge or an
-# already-present no-merge opts out. Covers claude `/target`, opencode
+# already-present --no-merge opts out. Covers claude `/target`, opencode
 # `/fno:target`, and codex `$fno:target`; a refused provider never reaches here.
 # ONLY build/passthrough get this: a verbatim seed or a handoff continuation seed
 # that happens to contain `/target` is NOT a build command (sigma-review finding
-# 4), so it must never be no-merge'd.
+# 4), so it must never be no-merge'd. The flag (never a free-text token) is the
+# carrier: the fold does not read prose (x-9d11).
 case "$payload_mode" in
   build|passthrough)
     # A native /target-family invocation (claude/agy `/target`, opencode
@@ -846,8 +847,8 @@ case "$payload_mode" in
     # literal so it is not read as a variable.
     case "$message" in
       /target\ *|/target|/fno:target\ *|/fno:target|'$fno:target '*|'$fno:target')
-        if [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" no-merge "* ]]; then
-          message="$message no-merge"
+        if [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then
+          message="$message --no-merge"
         fi
         ;;
     esac

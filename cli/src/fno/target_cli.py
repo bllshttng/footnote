@@ -1147,9 +1147,9 @@ def init(
         False,
         "--no-merge",
         help="Revoke auto-merge for this run (writes `auto_merge_approved: "
-        "false`). The deterministic carrier for the `no-merge` posture: it "
-        "survives `fno target start`, which forwards only the resolved node id "
-        "and so cannot pass the token through --input. There is deliberately no "
+        "false`). The sole carrier for the refusal posture: it survives "
+        "`fno target start`, which forwards only the resolved node id, and the "
+        "init fold reads no free text (x-9d11). There is deliberately no "
         "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
     ),
     deliverables: Optional[int] = typer.Option(
@@ -2585,9 +2585,9 @@ def start(
     ),
     no_merge: bool = typer.Option(
         False, "--no-merge",
-        help="Revoke auto-merge for this run (forwarded to init). Needed because "
-        "start resolves its argument to a bare node id, so a `no-merge` token in "
-        "the original invocation cannot reach init through --input.",
+        help="Revoke auto-merge for this run (forwarded to init). The sole "
+        "prose-level carrier: start resolves its argument to a bare node id, and "
+        "the init fold reads no free text (x-9d11).",
     ),
 ) -> None:
     """Cold-start a worktree-isolated target session in ONE verb.

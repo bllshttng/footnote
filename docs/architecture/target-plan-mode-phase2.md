@@ -26,7 +26,7 @@ You (planning session): /think + /blueprint  ->  node reaches status: ready
         v  /target bg ab-A ab-B          (or --all-ready)
    skills/target/scripts/dispatch-node.sh
      per node:  resolve status -> claim-guard -> fno agents ask --provider claude
-        |              (-> claude --bg --name target-<id>-<slug> "/target no-merge <node>")
+        |              (-> claude --bg --name target-<id>-<slug> "/target --no-merge <node>")
         v
    fresh bg worker per node = clean context; runs do->review->ship.
    You keep planning here; observe workers via `fno agents list/logs`.

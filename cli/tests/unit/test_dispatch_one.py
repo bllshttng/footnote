@@ -70,7 +70,7 @@ def test_launched_holds_a_lane(monkeypatch, tmp_path):
     assert v["node"] == "x-1"
     assert v["pane_id"] == 7
     assert calls[0]["session"] == "work"
-    assert calls[0]["message"] == "/target no-merge x-1"
+    assert calls[0]["message"] == "/target --no-merge x-1"
     assert active_lane_count() == 1  # slot held for the live lane
 
 

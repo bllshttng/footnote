@@ -37,11 +37,14 @@ def _patch_silent(
     *,
     settings: types.SimpleNamespace,
     missions: int = 0,
-    armed: int = 0,
+    armed: dict[str, int] | int = 0,
 ) -> None:
+    # `armed` accepts the real dict-by-source shape or a plain count (tests that
+    # do not care about the breakdown).
+    armed_value = armed if isinstance(armed, dict) else {"config": armed}
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
     monkeypatch.setattr(doctor, "_mission_active_count", lambda: missions)
-    monkeypatch.setattr(doctor, "_auto_merge_armed_manifests", lambda: armed)
+    monkeypatch.setattr(doctor, "_auto_merge_armed_manifests", lambda: armed_value)
     monkeypatch.setattr(doctor, "_read_posture_stamp", lambda: None)
 
 
@@ -88,7 +91,7 @@ def test_auto_merge_armed_named_as_irreversible(monkeypatch: pytest.MonkeyPatch)
     _patch_silent(
         monkeypatch,
         settings=_fake_settings(auto_merge=True, dispatch_am=True),
-        armed=3,
+        armed={"config": 2, "env-target-auto-merge": 1},
     )
     report = doctor._silent_switch_report()
     irreversible = [f for f in report["findings"] if f["direction"] == "irreversible"]
@@ -98,6 +101,8 @@ def test_auto_merge_armed_named_as_irreversible(monkeypatch: pytest.MonkeyPatch)
     assert "auto_merge_approved (worktree manifests)" in switches
     by_sw = {f["switch"]: f for f in irreversible}
     assert by_sw["auto_merge_approved (worktree manifests)"]["count"] == 3
+    assert "2 config" in by_sw["auto_merge_approved (worktree manifests)"]["count_label"]
+    assert "1 env-target-auto-merge" in by_sw["auto_merge_approved (worktree manifests)"]["count_label"]
     # Every irreversible finding carries a disarm command.
     for f in irreversible:
         assert "false" in f["command"]

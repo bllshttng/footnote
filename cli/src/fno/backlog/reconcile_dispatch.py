@@ -1,7 +1,7 @@
 """fno.backlog.reconcile_dispatch - G4 merge-triggered reconciliation dispatch.
 
 When a blocker's PR merges, its ``dep=contract`` dependents must NOT get a cold
-``/target no-merge`` dispatch: they already built optimistically and carry an
+``/target --no-merge`` dispatch: they already built optimistically and carry an
 open draft PR (advance_dependents deliberately skips a node with an open PR). G4
 routes them here instead:
 

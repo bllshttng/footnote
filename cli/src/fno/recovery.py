@@ -715,7 +715,7 @@ def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool
         proc = subprocess.run(
             [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", "claude",
              "--substrate", "bg", "--cwd", cwd, "--name", agent,
-             f"/target no-merge {node}"],
+             f"/target --no-merge {node}"],
             cwd=cwd, capture_output=True, timeout=60, check=False,
         )
         if proc.returncode != 0:

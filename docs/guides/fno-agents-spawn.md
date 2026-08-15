@@ -44,7 +44,7 @@ Routing is claude-only and reaches the `bg` and `headless` substrates only. The 
 ## Persistent claude peer (plain spawn)
 
 ```bash
-fno agents spawn "/target no-merge" --name frontend-worker --harness claude
+fno agents spawn "/target --no-merge" --name frontend-worker --harness claude
 ```
 
 This shells `claude --bg --name frontend-worker <message>` (the subscription lane - never `-p`/`--bare`, which would move billing to the API-credit pool and strip hooks). The peer persists; follow up later with `fno agents ask frontend-worker "..."`.

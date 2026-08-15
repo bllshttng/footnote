@@ -321,6 +321,11 @@ fi
 # ── Auto-merge inputs (read-only at init; no mutable tracking lists) ──
 AUTO_MERGE_ENABLED="false"
 AUTO_MERGE_APPROVED="false"
+# Which input set the posture (x-9d11): closed enum
+# config|flag-no-merge|env-target-auto-merge|default-off. Absent on
+# pre-provenance manifests; consumers must render that as `unknown`, never a
+# guessed origin.
+AUTO_MERGE_SOURCE="default-off"
 if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
   AUTO_MERGE_ENABLED="$(get_auto_merge_enabled 2>/dev/null)" || {
     echo "[init-target-state] warn: auto-merge config lookup failed; defaulting to disabled" >&2
@@ -329,21 +334,21 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
 fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
-elif [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
-  # Reads INITIAL_INPUT because TARGET_INPUT is unset by here; keying on that
-  # parses fine and silently never fires. Sits above the TARGET_AUTO_MERGE
-  # grant because nothing sets that var, so it can only arrive inherited, and
-  # an inherited grant must not beat a refusal typed into this run (the trap
-  # `fno target init` scrubs for TARGET_BEASTMODE). Space-padded = whole token.
-  AUTO_MERGE_APPROVED="false"
+  AUTO_MERGE_SOURCE="flag-no-merge"
 elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="true"
+  AUTO_MERGE_SOURCE="env-target-auto-merge"
 elif _is_true "$AUTO_MERGE_ENABLED"; then
   # The who-may-merge gate (allowed_invokers) was removed (x-04ab): auto-merge
   # is approved whenever it is `enabled`, gated further by the merge command's
   # own CI-green / external-review / stub-manifest guards.
   AUTO_MERGE_APPROVED="true"
+  AUTO_MERGE_SOURCE="config"
 fi
+# Posture is flag/env/config only (x-9d11): free text in INITIAL_INPUT is NOT a
+# control input. Grants were hardened against prose by x-51a3; refusals match
+# here. A brief that says no-merge must reach --no-merge on `fno target
+# start/init` to take effect - attributable, not parsed out of prose.
 
 # Auto-merge implies external review on.
 if _is_true "$AUTO_MERGE_APPROVED" && _is_true "$no_external"; then
@@ -1065,6 +1070,7 @@ advisory: $_advisory
 ${_authority_line}${_budget_lines}# Auto-merge inputs
 auto_merge_enabled: $AUTO_MERGE_ENABLED
 auto_merge_approved: $AUTO_MERGE_APPROVED
+auto_merge_source: $AUTO_MERGE_SOURCE
 # Mission context
 mission_id: $MISSION_ID_YAML
 mission_wave: $MISSION_WAVE_YAML

@@ -288,7 +288,7 @@ has  "delegated launches at repo root" "$(cat "$TMP/spawn-args")" "cwd $REPO_PHY
 mkdir -p "$REPO/src/deep"
 out16="$(HOME="$TMP" PATH="$STUBDIR:$PATH" SPAWN_ARGS_LOG="$TMP/spawn-args" \
   bash "$SPAWN" --name "spawn-deleg-build" --provider claude --payload-mode build \
-  --message "/target no-merge x-bld" --node "x-bld" --cwd "$REPO/src/deep" 2>"$TMP/err16")"
+  --message "/target --no-merge x-bld" --node "x-bld" --cwd "$REPO/src/deep" 2>"$TMP/err16")"
 err16="$(cat "$TMP/err16")"
 # from a SUBDIR: launching there would slug its own project dir, so the repo root
 # (not the caller cwd) is what gets passed through.

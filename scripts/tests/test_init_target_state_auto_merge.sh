@@ -86,6 +86,7 @@ assert_contains "AC1-HP: auto_merge_enabled field present" "auto_merge_enabled:"
 assert_contains "AC1-HP: auto_merge_approved field present" "auto_merge_approved:" "$STATE"
 assert_contains "AC1-HP: auto_merge_approved false when disabled" "auto_merge_approved: false" "$STATE"
 assert_contains "AC1-HP: auto_merge_enabled false when not set" "auto_merge_enabled: false" "$STATE"
+assert_contains "x-9d11: source default-off when nothing set" "auto_merge_source: default-off" "$STATE"
 
 rm -rf "$T"
 
@@ -102,6 +103,7 @@ STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
 assert_contains "AC2-HP: auto_merge_enabled true when set" "auto_merge_enabled: true" "$STATE"
 assert_contains "AC2-HP: auto_merge_approved true when enabled" "auto_merge_approved: true" "$STATE"
+assert_contains "x-9d11: source config when enabled" "auto_merge_source: config" "$STATE"
 
 rm -rf "$T"
 
@@ -117,17 +119,18 @@ run_init_in "$T" "TARGET_NO_MERGE=1"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
 assert_contains "AC3-ERR: auto_merge_approved false with TARGET_NO_MERGE=1" "auto_merge_approved: false" "$STATE"
+assert_contains "AC1-HP: source flag-no-merge with the flag carrier" "auto_merge_source: flag-no-merge" "$STATE"
 
 rm -rf "$T"
 
-# ---- Test 3b: a `no-merge` token in TARGET_INPUT forces approved false ----
-# The dispatch template bakes `no-merge` into the command string
-# (harness_map._AUTONOMOUS_COMMAND), where it reaches init only as TARGET_INPUT
-# prose. Before this branch existed the config fallthrough granted merge
-# authority against that prohibition.
+# ---- Test 3b: free text is NOT a control input (x-9d11 defect 2) ----
+# The fold no longer matches a `no-merge` token in TARGET_INPUT: prose can
+# manufacture neither a grant (x-51a3) nor a refusal. Posture arrives by flag
+# (TARGET_NO_MERGE, set from --no-merge), env, or config alone. An LLM-composed
+# brief containing the word no-merge therefore resolves from config.
 
 echo ""
-echo "test_no_merge_token_in_input_forces_approved_false"
+echo "test_free_text_no_merge_is_inert"
 
 T=$(setup_repo "[auto_merge]
 enabled = true")
@@ -135,7 +138,7 @@ enabled = true")
 run_init_in "$T" "TARGET_INPUT=no-merge x-e938"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
-assert_contains "no-merge token in input beats enabled=true" "auto_merge_approved: false" "$STATE"
+assert_contains "free-text no-merge reflects config alone" "auto_merge_approved: true" "$STATE"
 
 rm -rf "$T"
 
@@ -159,39 +162,40 @@ assert_contains "auto-merge token does NOT grant approval" "auto_merge_approved:
 
 rm -rf "$T"
 
-# ---- Test 3c2: the real dispatch string resolves to no-merge ----
-# harness_map._AUTONOMOUS_COMMAND is "/target no-merge {id}". This is the
-# verbatim shape every autonomous worker receives.
+# ---- Test 3c2: the dispatch string reaches the fold as prose only ----
+# harness_map._AUTONOMOUS_COMMAND is "/target --no-merge {id}". The worker
+# translates the flag onto `fno target start`, which sets TARGET_NO_MERGE -
+# the refusal is carried by the flag path (test 3), never by the fold reading
+# the command string. Prose that merely mentions the flag is inert here.
 
-echo "test_dispatch_command_string_forces_approved_false"
+echo "test_dispatch_command_string_is_prose_not_posture"
 
 T=$(setup_repo "[auto_merge]
 enabled = true")
 
-run_init_in "$T" "TARGET_INPUT=/target no-merge x-e938"
+run_init_in "$T" "TARGET_INPUT=/target --no-merge x-e938"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
-assert_contains "verbatim dispatch string resolves to false" "auto_merge_approved: false" "$STATE"
+assert_contains "dispatch string as prose reflects config" "auto_merge_approved: true" "$STATE"
 
 rm -rf "$T"
 
-# ---- Test 3d: explicit env still outranks the input string ----
+# ---- Test 3d: free text no longer defeats an env grant ----
 
 echo ""
-echo "test_no_merge_token_beats_inherited_auto_merge_grant"
+echo "test_free_text_no_merge_does_not_beat_inherited_auto_merge_grant"
 
 # No production code sets TARGET_AUTO_MERGE, so the only way it is ever set is
-# inheritance from an ancestor shell or spawning parent. An inherited grant must
-# not defeat a refusal typed into this run's invocation, or an autonomously
-# dispatched `/target no-merge <id>` worker merges anyway - the exact path this
-# guard exists to protect.
+# inheritance from an ancestor shell or spawning parent. Posture inputs are
+# flag/env/config only (x-9d11): an inherited grant now stands unless the
+# refusal arrives on its own carrier (TARGET_NO_MERGE, test 3d2).
 T=$(setup_repo "[auto_merge]
 enabled = true")
 
 run_init_in "$T" "TARGET_AUTO_MERGE=1" "TARGET_INPUT=no-merge x-e938"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
-assert_contains "no-merge token beats an inherited TARGET_AUTO_MERGE" "auto_merge_approved: false" "$STATE"
+assert_contains "free text does not defeat an inherited TARGET_AUTO_MERGE" "auto_merge_approved: true" "$STATE"
 
 rm -rf "$T"
 
@@ -219,6 +223,7 @@ run_init_in "$T" "TARGET_AUTO_MERGE=1" "TARGET_INPUT=x-e938"
 STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
 
 assert_contains "TARGET_AUTO_MERGE=1 grants when nothing refuses" "auto_merge_approved: true" "$STATE"
+assert_contains "x-9d11: source env-target-auto-merge on the env grant" "auto_merge_source: env-target-auto-merge" "$STATE"
 
 rm -rf "$T"
 

@@ -51,14 +51,13 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # maps it per-harness for the builtin `dispatch_command`, so the per-harness
 # spelling lives in ONE place (command_surface), not five literal strings.
 #
-# The `no-merge` token is the merge POSTURE, resolved from config.dispatch.auto_merge
-# rather than baked in. It was baked in until x-8e59, which made this the one
-# reader of that key that was deaf to it: the two callers that did honor it
-# (backlog/advance.py, skills/agent/scripts/normalize.sh) worked around the
-# builtin by passing an explicit command instead of fixing it, so an operator
-# who set the key still got `/target no-merge <id>` here, a manifest frozen at
-# auto_merge_approved: false, and a refusal from `fno pr merge`.
-_AUTONOMOUS_COMMAND = "/target no-merge {id}"
+# The `--no-merge` flag is the merge POSTURE, resolved from
+# config.dispatch.auto_merge rather than baked in. It was the free-text
+# `no-merge` token until x-8e59 (config-deaf) and x-9d11 (free text stopped
+# being a control input): the flag is the deterministic carrier that survives
+# `fno target start` resolving its argument to a bare node id, and unlike the
+# token it cannot be manufactured by prose an LLM wrote into a brief.
+_AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
 
@@ -180,11 +179,11 @@ def normalize_command(command: str, harness: str) -> str:
     """Translate a claude-syntax footnote slash command to ``harness``'s native
     invocation - the single normalizer both dispatch surfaces route through.
 
-    ``/target no-merge {id}`` becomes, per the harness ``command_surface``:
-      - ``slash`` (claude, agy, opencode) -> ``/[slash_prefix]target no-merge {id}``
+    ``/target --no-merge {id}`` becomes, per the harness ``command_surface``:
+      - ``slash`` (claude, agy, opencode) -> ``/[slash_prefix]target --no-merge {id}``
         (prefix ``""`` for claude/agy -> verbatim; ``"fno:"`` for opencode's
         plugin-namespaced palette + ``opencode run --command`` -> ``/fno:target``)
-      - ``codex-skill`` (codex)           -> ``$fno:target no-merge {id}`` (swap the
+      - ``codex-skill`` (codex)           -> ``$fno:target --no-merge {id}`` (swap the
         leading ``/verb`` for ``$fno:verb``; codex exec expands the plugin skill)
       - ``refused`` (gemini)              -> a loud :class:`DispatchResolveError`
         naming agy; the harness is deprecated and has no dispatch lane.
@@ -220,7 +219,7 @@ def normalize_command(command: str, harness: str) -> str:
 
 def dispatch_command(harness: str, allow_merge: bool = False) -> str:
     """Builtin autonomous dispatch command for ``harness``: the per-harness
-    normalization of ``/target no-merge {id}``, or of ``/target {id}`` when
+    normalization of ``/target --no-merge {id}``, or of ``/target {id}`` when
     ``allow_merge``. ``config.dispatch.command`` and a node ``dispatch_verb``
     override this in :func:`resolve_dispatch`, which is also where
     ``config.dispatch.auto_merge`` is read into ``allow_merge``.
@@ -302,7 +301,7 @@ def resolve_dispatch(
       substrate  : explicit > config.dispatch.substrate > per-harness default
       command    : explicit > node ``verb`` > config.dispatch.command > builtin
       merge      : builtin rung only; ``config.dispatch.auto_merge`` picks
-                   ``/target {id}`` over the default ``/target no-merge {id}``
+                   ``/target {id}`` over the default ``/target --no-merge {id}``
 
     ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
     (``config.dispatch.allowed_verbs`` > built-in ``/target``, ``/think``) and
@@ -427,7 +426,7 @@ def resolve_dispatch(
         template = f"{chosen_verb} {{id}}"
         decision.append(f"command=verb({chosen_verb})")
     else:
-        # Per-harness builtin (x-a5e4): the normalize of `/target no-merge {id}` -
+        # Per-harness builtin (x-a5e4): the normalize of `/target --no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
         # refused. config.dispatch.command overrides.
         #

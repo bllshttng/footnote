@@ -22,9 +22,9 @@ from fno.agents.harness_map import (
 @pytest.mark.parametrize(
     "harness,expected_prefix",
     [
-        ("claude", "/target no-merge "),
-        ("codex", "$fno:target no-merge "),
-        ("agy", "/target no-merge "),
+        ("claude", "/target --no-merge "),
+        ("codex", "$fno:target --no-merge "),
+        ("agy", "/target --no-merge "),
     ],
 )
 def test_skill_invoking_harnesses_get_native_command(harness, expected_prefix):
@@ -36,7 +36,7 @@ def test_opencode_gets_native_fno_slash_command():
     # opencode's fno plugin expands `/fno:verb` (palette + `run --command`), so
     # dispatch renders the native slash form, not a prose brief (x-de43).
     out = resolve_dispatch(harness="opencode", node_id="x-abcd")
-    assert out["command"] == "/fno:target no-merge x-abcd"
+    assert out["command"] == "/fno:target --no-merge x-abcd"
 
 
 def test_gemini_dispatch_refused_naming_agy():
@@ -169,23 +169,23 @@ def test_pane_capability_does_not_enable_codex_bg():
 @pytest.mark.parametrize(
     "harness,expected",
     [
-        ("claude", "/target no-merge {id}"),
-        ("agy", "/target no-merge {id}"),
-        ("codex", "$fno:target no-merge {id}"),
+        ("claude", "/target --no-merge {id}"),
+        ("agy", "/target --no-merge {id}"),
+        ("codex", "$fno:target --no-merge {id}"),
     ],
 )
 def test_normalize_command_slash_and_codex(harness, expected):
-    assert normalize_command("/target no-merge {id}", harness) == expected
+    assert normalize_command("/target --no-merge {id}", harness) == expected
 
 
 def test_normalize_command_opencode_namespaces():
     # opencode: `/verb` -> `/fno:verb` (plugin palette + `run --command`).
-    assert normalize_command("/target no-merge {id}", "opencode") == "/fno:target no-merge {id}"
+    assert normalize_command("/target --no-merge {id}", "opencode") == "/fno:target --no-merge {id}"
 
 
 def test_normalize_command_gemini_refused():
     with pytest.raises(DispatchResolveError, match="agy"):
-        normalize_command("/target no-merge {id}", "gemini")
+        normalize_command("/target --no-merge {id}", "gemini")
 
 
 @pytest.mark.parametrize(
@@ -205,7 +205,7 @@ def test_dispatch_command_builtin_matches_normalize():
     # The builtin is exactly the normalize of the canonical autonomous command.
     # gemini excluded: it refuses (test_normalize_command_gemini_refused).
     for h in ("claude", "codex", "agy", "opencode"):
-        assert dispatch_command(h) == normalize_command("/target no-merge {id}", h)
+        assert dispatch_command(h) == normalize_command("/target --no-merge {id}", h)
 
 
 def test_command_surface_is_reported():
@@ -256,7 +256,7 @@ def test_normalize_command_opencode_renders_any_verb():
 # x-8e59: the builtin rung reads config.dispatch.auto_merge
 #
 # x-4391 shipped the key to 2 of 3 dispatch paths. The builtin here was the
-# deaf one, so an operator who set the key still got `/target no-merge <id>`,
+# deaf one, so an operator who set the key still got `/target --no-merge <id>`,
 # a manifest frozen at auto_merge_approved: false, and a refused `fno pr merge`.
 # The two callers that honored it did so by passing an explicit command around
 # the builtin rather than fixing it.
@@ -283,7 +283,7 @@ def test_builtin_drops_no_merge_when_auto_merge_configured(harness, expected):
 def test_builtin_defaults_to_no_merge(harness):
     """No key, no grant. The default posture is unchanged for a fresh install."""
     out = resolve_dispatch(harness=harness, node_id="x-abcd", dispatch_cfg={})
-    assert " no-merge " in out["command"]
+    assert " --no-merge " in out["command"]
 
 
 @pytest.mark.parametrize("bad", ["true", "True", 1, [1], object()])
@@ -293,7 +293,7 @@ def test_non_boolean_auto_merge_never_grants_merge(bad):
     out = resolve_dispatch(
         harness="claude", node_id="x-abcd", dispatch_cfg={"auto_merge": bad}
     )
-    assert out["command"] == "/target no-merge x-abcd"
+    assert out["command"] == "/target --no-merge x-abcd"
 
 
 def test_unreadable_config_fails_safe_to_no_merge(monkeypatch):
@@ -304,7 +304,7 @@ def test_unreadable_config_fails_safe_to_no_merge(monkeypatch):
 
     monkeypatch.setattr(_config, "load_settings", _boom)
     out = resolve_dispatch(harness="claude", node_id="x-abcd")
-    assert out["command"] == "/target no-merge x-abcd"
+    assert out["command"] == "/target --no-merge x-abcd"
 
 
 def test_auto_merge_does_not_touch_an_explicit_command():
@@ -313,10 +313,10 @@ def test_auto_merge_does_not_touch_an_explicit_command():
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
-        command="/target no-merge --reconcile /tmp/m.md {id}",
+        command="/target --no-merge --reconcile /tmp/m.md {id}",
         dispatch_cfg={"auto_merge": True},
     )
-    assert out["command"] == "/target no-merge --reconcile /tmp/m.md x-abcd"
+    assert out["command"] == "/target --no-merge --reconcile /tmp/m.md x-abcd"
 
 
 def test_auto_merge_does_not_touch_the_verb_rung():
@@ -361,10 +361,10 @@ def test_settings_without_dispatch_section_yields_empty_cfg():
     assert _load_dispatch_cfg(types.SimpleNamespace()) == {}
 
 
-@pytest.mark.parametrize("allow,expected", [(True, "/target {id}"), (False, "/target no-merge {id}")])
+@pytest.mark.parametrize("allow,expected", [(True, "/target {id}"), (False, "/target --no-merge {id}")])
 def test_dispatch_command_posture_argument(allow, expected):
     assert dispatch_command("claude", allow_merge=allow) == expected
 
 
 def test_dispatch_command_defaults_to_no_merge():
-    assert dispatch_command("claude") == "/target no-merge {id}"
+    assert dispatch_command("claude") == "/target --no-merge {id}"
