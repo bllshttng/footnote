@@ -2221,6 +2221,42 @@ fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
 // resume
 // ---------------------------------------------------------------------------
 
+/// `fno mux pane run` exit code when the mux never answered the control read
+/// (crates/fno `EXIT_CONTROL_UNANSWERED`, x-c692). Duplicated here rather than
+/// imported: this crate does not depend on `fno`, and `fno mux pane run` is
+/// invoked as a subprocess, not a library call.
+const MUX_CONTROL_UNANSWERED: i32 = 20;
+
+/// Map a failed `fno mux pane run` (the resume launcher's subprocess) to its
+/// stderr message. Kept pure so the exit-code split is mechanically testable
+/// without mutating PATH or shelling out (parse_heal_token_output's pattern).
+///
+/// `EXIT_CONTROL_UNANSWERED` gets the truthful "may have started" message
+/// (x-c692 change 4): the verb REACHED the server, so "(no pane started)" is
+/// false for this code alone. Adoption stays in the Python spawn path's
+/// `_reconcile_unanswered_run` (one place owns candidate matching); this
+/// launcher only names the inspect command, on the same reasoning.
+fn mux_pane_run_failure_message(
+    name: &str,
+    session: &str,
+    status: std::process::ExitStatus,
+) -> String {
+    if status.code() == Some(MUX_CONTROL_UNANSWERED) {
+        return format!(
+            "fno agents resume: the mux never answered the run for {name}; a pane \
+             MAY have started. Check `fno mux pane ls --session {session}` before \
+             retrying."
+        );
+    }
+    format!(
+        "fno agents resume: mux pane run for {name} exited {} (no pane started)",
+        status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string())
+    )
+}
+
 /// `fno-agents resume <name> [--print-command]` -- resume an agent in its
 /// recorded cwd via the provider's resume CLI (`os.execvp` equivalent), or
 /// print the shell snippet with `--print-command`. Mirrors Python `resume_logic`.
@@ -2467,12 +2503,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
                 return 0;
             }
             Ok(s) => {
-                eprintln!(
-                    "fno agents resume: mux pane run for {name} exited {} (no pane started)",
-                    s.code()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "signal".to_string())
-                );
+                eprintln!("{}", mux_pane_run_failure_message(&name, session, s));
                 return 1;
             }
             Err(e) => {
@@ -4855,6 +4886,27 @@ mod tests {
         // terminated by a different signal (SIGTERM=15) is not a clean Ctrl-C;
         // there is no exit code so it falls through to 1.
         assert_eq!(follow_exit_code(ExitStatus::from_raw(libc::SIGTERM)), 1);
+    }
+
+    #[test]
+    fn mux_pane_run_failure_message_names_unanswered_not_absent() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        // exit 20 (EXIT_CONTROL_UNANSWERED): the verb reached the server, so
+        // the message must say a pane MAY have started - never the blanket
+        // "(no pane started)" the other codes get.
+        let msg = mux_pane_run_failure_message(
+            "worker-A",
+            "main",
+            ExitStatus::from_raw(MUX_CONTROL_UNANSWERED << 8),
+        );
+        assert!(msg.contains("MAY have started"), "{msg}");
+        assert!(msg.contains("pane ls --session main"), "{msg}");
+        assert!(!msg.contains("no pane started"), "{msg}");
+
+        // Every other non-zero code keeps the original, stronger claim.
+        let msg = mux_pane_run_failure_message("worker-A", "main", ExitStatus::from_raw(1 << 8));
+        assert!(msg.contains("no pane started"), "{msg}");
     }
 
     #[test]

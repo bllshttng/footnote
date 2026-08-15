@@ -3298,3 +3298,131 @@ def test_ac7_cli_refuses_passthrough_off_pane(
     )
     assert result.exit_code == 2, result.output
     assert "pane-only" in result.output
+
+
+# -- x-c692: an unanswered control read is reconciled, never asserted absent --
+#
+# `mux pane run` exiting `_MUX_CONTROL_UNANSWERED` means the verb reached the
+# server and the reply never came back - not that no pane was created. These
+# pin the Python side of that reconciliation: adopt the one pane that proves
+# it is this spawn, refuse (writing no row) on zero/many/unknown, and never
+# let a recovered pane earn its row without proving it actually started.
+
+
+def _far_future_start_time(_pid: object) -> int:
+    # Always "after" any spawn_started_ms sampled during the test, so the
+    # reconcile's freshness filter never rejects the fake pid on timing alone.
+    return 9_999_999_999
+
+
+def test_unanswered_run_recovers_the_single_matching_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import spawn_gate
+    from fno.agents.mux_spawn import _MUX_CONTROL_UNANSWERED
+
+    monkeypatch.setattr(spawn_gate, "_process_start_time", _far_future_start_time)
+    ls_stdout = json.dumps(
+        [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
+    )
+    runner = FakeRunner(
+        run_returncode=_MUX_CONTROL_UNANSWERED,
+        ls_stdout=ls_stdout,
+        # Non-empty read -> readiness "ready" (LD4's bar for a recovered pane).
+        read_stdout="$ ",
+    )
+
+    result, _ = _spawn(monkeypatch, tmp_path, runner=runner)
+
+    assert result.pane_id == 9
+    assert result.recovered is True
+
+
+def test_unanswered_run_with_no_matching_pane_refuses_cleanly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
+    from fno.agents.registry import load_registry
+
+    ls_stdout = json.dumps(
+        [{"pane_id": 3, "squad_id": 1, "tab_id": 1, "cwd": "/somewhere/else", "child_pid": 4242}]
+    )
+    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, runner=runner)
+
+    message = str(exc.value)
+    assert "no pane was created" in message
+    assert "--substrate bg" in message
+    assert load_registry() == []
+
+
+def test_unanswered_run_with_two_matching_panes_refuses_naming_both(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import spawn_gate
+    from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_process_start_time", _far_future_start_time)
+    ls_stdout = json.dumps(
+        [
+            {"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242},
+            {"pane_id": 10, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4343},
+        ]
+    )
+    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, runner=runner)
+
+    message = str(exc.value)
+    assert "9" in message and "10" in message
+    assert load_registry() == []
+
+
+def test_unanswered_run_with_empty_listing_is_unknown_not_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An empty `pane ls` after an unanswered run must never read as proof no
+    pane exists (`_pane_absent_from_listing`'s trap): the session socket also
+    prints `[]` and exits 0 when it is refused or absent."""
+    from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
+    from fno.agents.registry import load_registry
+
+    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout="[]")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, runner=runner)
+
+    message = str(exc.value)
+    assert "no pane was created" not in message
+    assert load_registry() == []
+
+
+def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """LD4: a recovered pane earns its row only by proving it started. This
+    one has no session id to show for itself (the default FakeRunner db/codex
+    seams both miss), so it must be reaped rather than written live-only the
+    way a NORMAL (non-recovered) codex miss is."""
+    from fno.agents import spawn_gate
+    from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_process_start_time", _far_future_start_time)
+    ls_stdout = json.dumps(
+        [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
+    )
+    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)
+
+    message = str(exc.value)
+    assert "pane 9" in message
+    assert "reaped" in message
+    assert load_registry() == []
+    assert runner.kill_calls, "an unproven recovered pane must be reaped"

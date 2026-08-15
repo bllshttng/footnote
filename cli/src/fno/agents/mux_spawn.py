@@ -135,6 +135,12 @@ class MuxSpawnResult:
     # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
     # + squad/tab the split landed in. None unless `--at` pinned the origin.
     placement: Optional[dict] = None
+    # LD5 (x-c692): true only when this pane was adopted after `pane run`'s
+    # control read went unanswered. A painted frame plus a captured session id
+    # proves the provider booted with the argv it was given; it does NOT prove
+    # the prompt was consumed (x-7ebd is the sibling failure for that). Callers
+    # must render this receipt as "recovered", never "spawned".
+    recovered: bool = False
 
 
 def _fno_bin() -> str:
@@ -1311,6 +1317,108 @@ def _lookup_child_pid(
 #: (crates/fno EXIT_WAIT_EXITED). The readiness gate treats it as launch failure.
 _WAIT_EXITED = 12
 
+#: `fno mux pane run` exit code when the mux never answered the control read
+#: (crates/fno EXIT_CONTROL_UNANSWERED). The verb REACHED the server, so
+#: unlike every other non-zero code this does not prove the pane is absent.
+#: x-c692's plan named 15, but that is EXIT_TARGET_NOT_IDLE (already taken by
+#: the block-pipe idle guard) - the Rust side lands the new code at 20, the
+#: next free slot after EXIT_NO_CLIENT.
+_MUX_CONTROL_UNANSWERED = 20
+
+
+def _reconcile_unanswered_run(
+    session: str,
+    cwd: Path,
+    spawn_started_ms: int,
+    claimed_pane_ids: set,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> int:
+    """After ``mux pane run`` exits ``_MUX_CONTROL_UNANSWERED``, decide whether a
+    pane exists rather than asserting it does not (LD2/LD3). Never retries the
+    run (LD1): the verb already reached the server, and re-sending it risks a
+    second pane and a second worker.
+
+    Enumerates the session's panes and looks for exactly one candidate that
+    matches this spawn: same cwd, a live child pid whose start time is at or
+    after ``spawn_started_ms``, and not already claimed by a registry row.
+    Zero, one, or many candidates get three different, honest answers. An
+    empty or unparseable listing is UNKNOWN, never proof of absence - see
+    ``_pane_absent_from_listing``'s docstring for why ``pane ls`` prints ``[]``
+    and exits 0 when the session socket is refused or absent.
+
+    Returns the adopted ``pane_id`` on exactly one candidate; raises
+    ``DispatchAskError`` (never a registry row) on every other outcome.
+    """
+    proc: Optional["subprocess.CompletedProcess[str]"] = None
+    detail = ""
+    try:
+        proc = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
+    except DispatchAskError as exc:
+        detail = str(exc)
+    else:
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip()
+
+    rows: Optional[list] = None
+    if proc is not None and proc.returncode == 0:
+        try:
+            parsed = json.loads(proc.stdout or "")
+        except (ValueError, TypeError):
+            detail = f"unparseable pane ls output: {(proc.stdout or '').strip()!r}"
+        else:
+            if isinstance(parsed, list):
+                rows = parsed
+            else:
+                detail = f"unexpected pane ls output: {(proc.stdout or '').strip()!r}"
+
+    if not rows:
+        # Covers the ls call failing outright, a non-zero exit, unparseable
+        # output, and a genuinely empty listing - all four read the same way
+        # here: the mux never answered the run AND could not be asked
+        # afterward, so whether a pane exists stays UNKNOWN, not disproven.
+        suffix = f" ({detail})" if detail else ""
+        raise DispatchAskError(
+            f"the mux never answered 'pane run' for session {session!r}, and "
+            f"'pane ls' could not confirm whether a pane exists{suffix}; a "
+            f"pane may be live - inspect with 'fno mux pane ls --session "
+            f"{session}' before retrying.",
+            exit_code=1,
+        )
+
+    from fno.agents.spawn_gate import _process_start_time
+
+    since_s = spawn_started_ms / 1000
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("cwd") != str(cwd):
+            continue
+        pid = row.get("child_pid")
+        if pid is None:
+            continue
+        start = _process_start_time(int(pid))
+        if start is None or start < since_s:
+            continue
+        if row.get("pane_id") in claimed_pane_ids:
+            continue
+        candidates.append(row)
+
+    if not candidates:
+        raise DispatchAskError(
+            f"no pane was created; the mux never answered and no pane in "
+            f"{session!r} matches this spawn. Retry, or use --substrate bg.",
+            exit_code=1,
+        )
+    if len(candidates) > 1:
+        ids = ", ".join(str(c.get("pane_id")) for c in candidates)
+        raise DispatchAskError(
+            f"the mux never answered and {len(candidates)} panes in "
+            f"{session!r} match this spawn ({ids}); cannot tell them apart - "
+            f"inspect with 'fno mux pane ls --session {session}' before "
+            "retrying.",
+            exit_code=1,
+        )
+    return int(candidates[0]["pane_id"])
+
 
 def _pane_absent_from_listing(
     mux: dict, runner, timeout: Optional[float] = None
@@ -2090,7 +2198,20 @@ def dispatch_spawn_pane(
             runner,
             env={**os.environ, "FNO_MUX_SHELL_INTEGRATION": _shell_integration()},
         )
-        if proc.returncode != 0:
+        placement_receipt: Optional[dict] = None
+        recovered = False
+        if proc.returncode == _MUX_CONTROL_UNANSWERED:
+            # The verb reached the server; only the reply did not come back
+            # (LD2). Reconcile instead of asserting no pane was created - the
+            # reconcile itself never retries the run (LD1).
+            claimed_pane_ids = {
+                e.mux.get("pane_id") for e in entries if isinstance(e.mux, dict)
+            }
+            pane_id = _reconcile_unanswered_run(
+                session, cwd, spawn_started_ms, claimed_pane_ids, runner
+            )
+            recovered = True
+        elif proc.returncode != 0:
             # G1 contract: non-zero exit == no pane was created, so refusing
             # here leaves no half-created state anywhere (AC1-ERR).
             detail = (proc.stderr or proc.stdout or "").strip()
@@ -2100,8 +2221,7 @@ def dispatch_spawn_pane(
                 "there is no daemon-PTY fallback)",
                 exit_code=1,
             )
-        placement_receipt: Optional[dict] = None
-        if exact:
+        elif exact:
             try:
                 payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
                 pane_id = int(payload["pane_id"])
@@ -2131,7 +2251,7 @@ def dispatch_spawn_pane(
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
 
-        if exact:
+        if exact or recovered:
             # Interactive readiness gate (x-6928): hold the registry row and the
             # success receipt until the provider proves it launched. An early
             # exit (AC5-ERR) reaps ONLY this pane - the mux's tree normalization
@@ -2140,7 +2260,16 @@ def dispatch_spawn_pane(
             readiness, readiness_detail = _await_interactive_readiness(
                 session, pane_id, runner
             )
-            if readiness == "failed":
+            # LD4: a recovered pane has no launch receipt behind it, so "alive
+            # and unpainted" (readiness == "live") is not enough proof - only
+            # "ready" (a painted frame) earns the row. A normal exact-placement
+            # spawn keeps its existing, weaker bar (live or ready both pass).
+            if readiness == "failed" or (recovered and readiness != "ready"):
+                if recovered and readiness != "failed":
+                    readiness_detail = (
+                        f"recovered pane never proved it started (readiness "
+                        f"{readiness!r}, not ready)"
+                    )
                 reaped, cleanup_detail = _reap_spawned_pane(
                     session, pane_id, runner
                 )
@@ -2269,6 +2398,38 @@ def dispatch_spawn_pane(
                 harness=provider,
                 cwd=str(cwd),
                 reason="happy owns the claude session id; awaiting SessionStart restamp",
+            )
+
+        # LD4: a recovered pane earns its row only by proving it started. The
+        # readiness gate above already required a painted frame (not merely a
+        # live child); this closes the other half. A non-happy claude spawn
+        # already has session_uuid minted up front (pin_session) and the happy
+        # route reaps on its own registration-wait failure below regardless of
+        # `recovered` - so only opencode/codex, whose ids are DISCOVERED, can
+        # reach here with a live pane and no proof of identity. The normal
+        # (non-recovered) path tolerates that miss and logs
+        # `agent_session_id_uncaptured` because the pane is known-good from its
+        # own launch receipt; a recovered pane has no such receipt, so the same
+        # miss here is the exact orphan this node exists to prevent.
+        if (
+            recovered
+            and not pane_died
+            and provider in ("codex", "opencode")
+            and session_uuid is None
+        ):
+            reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+            if reaped:
+                raise DispatchAskError(
+                    f"agent {name!r} recovered pane {pane_id} in session "
+                    f"{session!r} never proved a {provider} session id; pane "
+                    "reaped, no registry row written",
+                    exit_code=1,
+                )
+            raise DispatchAskError(
+                f"agent {name!r} recovered pane {pane_id} never proved a "
+                f"{provider} session id; pane may still exist in session "
+                f"{session!r} because cleanup failed: {cleanup_detail}",
+                exit_code=1,
             )
 
         # Crown stamp (US9): the grantor is the spawning session (the parent edge
@@ -2649,4 +2810,5 @@ def dispatch_spawn_pane(
         log_path=death_log_path,
         effective_message=effective_message,
         placement=placement_receipt,
+        recovered=recovered,
     )
