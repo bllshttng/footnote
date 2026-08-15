@@ -402,6 +402,16 @@ pub struct GcSummary {
     /// becomes the main path silently, and the corroboration gate it bypasses
     /// turns into decoration. Reported at every pass, including zero.
     pub reaped_backstop: Vec<String>,
+    /// Live rows removed on a positive done reading (idle past grace +
+    /// transcript tail classifies `done`). A THIRD count with its own meaning:
+    /// a finished turn, not a death; the reap event carries the resumable
+    /// handle for it. Separate from `reaped` for the same reason
+    /// `reaped_backstop` is.
+    pub reaped_dormant: Vec<String>,
+    /// `(row id, reason)` for every reaped row whose harness-session cascade
+    /// REFUSED or failed. Surfaced, never swallowed; the registry reap is not
+    /// rolled back for any of them.
+    pub cascade_refused: Vec<(String, String)>,
     /// Past-grace rows kept by the corroboration gate alone: no confirmed-dead
     /// pid, no positively-stale transcript, and a liveness surface still on
     /// record - short of the backstop horizon too (x-9de7 task 5). This is
@@ -542,6 +552,293 @@ fn transcript_fresh_probe(log_path: Option<&str>, now: i64, window_secs: i64) ->
         .ok()?
         .as_secs() as i64;
     Some(now.saturating_sub(secs) <= window_secs)
+}
+
+/// Every transcript file this row's harness store holds for its session id,
+/// keyed on the row's OWN harness. `None` means "cannot judge": no session id
+/// recorded, an unknown harness, or a store directory that cannot be read
+/// (AC5 fail-closed - an unreadable store has two explanations and only one of
+/// them is a dead session).
+///
+/// claude: `~/.claude/projects/*/<session_id>*.jsonl`, searched across EVERY
+/// project dir because a session's transcript can live in more than one
+/// (EnterWorktree re-keys it; the other dir keeps a stub). codex: the rollout
+/// jsonl under `~/.codex/sessions/` embedding the session id in its filename -
+/// the same shape `fno.agents.discover.codex_rollout_for_session` resolves.
+/// A harness a reaper cannot speak for is NEVER judged by another harness's
+/// store (AC3): a codex row has no claude transcript by construction, so a
+/// claude-keyed probe would reap every codex worker on the machine.
+fn harness_transcript_matches(
+    harness: &str,
+    session_id: Option<&str>,
+) -> Option<Vec<std::path::PathBuf>> {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    harness_transcript_matches_under(
+        &home.join(".claude").join("projects"),
+        &home.join(".codex").join("sessions"),
+        harness,
+        session_id,
+    )
+}
+
+/// The store-roots-injected core of [`harness_transcript_matches`], so the
+/// per-harness keying is unit-testable against temp trees instead of the
+/// developer's real `~/.claude` / `~/.codex`.
+fn harness_transcript_matches_under(
+    claude_root: &std::path::Path,
+    codex_root: &std::path::Path,
+    harness: &str,
+    session_id: Option<&str>,
+) -> Option<Vec<std::path::PathBuf>> {
+    let sid = session_id.filter(|s| !s.is_empty())?;
+    let root = match harness {
+        "claude" => claude_root.to_path_buf(),
+        "codex" => codex_root.to_path_buf(),
+        // Unknown/unsupported harness (gemini, opencode, ...): no store this
+        // reaper can read. Answer None, never another harness's store.
+        _ => return None,
+    };
+    let mut matches = Vec::new();
+    let mut read_ok = true;
+    // Bounded walk: claude is two levels (projects/<slug>/<file>.jsonl), codex
+    // is four (sessions/YYYY/MM/DD/rollout-*.jsonl). Depth 5 covers both.
+    fn walk(
+        dir: &std::path::Path,
+        sid: &str,
+        harness: &str,
+        depth: usize,
+        out: &mut Vec<std::path::PathBuf>,
+        ok: &mut bool,
+    ) {
+        if depth > 5 {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                *ok = false;
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                walk(&path, sid, harness, depth + 1, out, ok);
+            } else {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let hit = match harness {
+                    // `<uuid>.jsonl` and its stub artifacts (`<uuid>.orphaned-...`)
+                    // all prove the session still EXISTS in the store; which of
+                    // them carries conversation is a content question this
+                    // existence probe does not need to answer.
+                    "claude" => name.starts_with(sid) && name.ends_with(".jsonl"),
+                    "codex" => name.starts_with("rollout-") && name.contains(sid),
+                    _ => false,
+                };
+                if hit {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    walk(&root, sid, harness, 0, &mut matches, &mut read_ok);
+    if !read_ok {
+        return None;
+    }
+    Some(matches)
+}
+
+/// Does this row's session still exist in its OWN harness's store?
+/// `Some(true)` the store holds no entry (positive evidence the session ended -
+/// the `claude rm` case, where the harness record is gone while the registry
+/// row survives), `Some(false)` still present, `None` unjudgeable.
+fn harness_session_probe(e: &state::RegistryEntry) -> Option<bool> {
+    harness_transcript_matches(e.harness_name(), e.harness_session_id.as_deref())
+        .map(|m| m.is_empty())
+}
+
+/// Truth probes spent on live-idle rows per sweep. Bounded so a registry full
+/// of idle live rows cannot turn one sweep into an unbounded subprocess farm;
+/// the remainder is candidates on the next tick.
+const DORMANT_PROBE_CAP: usize = 8;
+/// Harness-session cascades per sweep, same rationale as DORMANT_PROBE_CAP.
+const CASCADE_CAP: usize = 10;
+/// Wall-clock bound for one harness removal subprocess. A hung removal must
+/// never wedge the sweep (the operator measured a 300s+ hang on a stuck row;
+/// the cascade cannot inherit it).
+const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long since this row last showed activity, in seconds. `None` when no
+/// activity signal can be read at all (no `last_message_at`, no stat-able
+/// transcript): idleness cannot be PROVEN then, and only a positive idle
+/// reading opens the dormant gate.
+fn row_idle_secs(
+    e: &state::RegistryEntry,
+    now: i64,
+    transcript_for: &dyn Fn(&state::RegistryEntry) -> Option<std::path::PathBuf>,
+) -> Option<i64> {
+    let msg = e
+        .last_message_at
+        .as_deref()
+        .and_then(state::rfc3339_like_to_secs)
+        .map(|s| s as i64);
+    let transcript = transcript_for(e)
+        .or_else(|| e.log_path.as_deref().map(std::path::PathBuf::from))
+        .and_then(|p| {
+            std::fs::metadata(p)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        });
+    let latest = [msg, transcript].into_iter().flatten().max()?;
+    Some(now.saturating_sub(latest))
+}
+
+/// Remove a reaped row's session from its OWN harness's store (AC6). Returns
+/// `Some((row_id, reason))` when the harness store still held the session and
+/// the removal REFUSED or failed; `None` on success or when there is nothing
+/// this reaper may touch (session already gone, no session id, or a harness
+/// whose removal contract is registry-only). The registry reap is already
+/// done and is never rolled back by anything here.
+///
+/// claude: `claude rm <short_id>` - the same surface `fno agents rm` shells
+/// out to, bounded here by CASCADE_TIMEOUT. codex: drop the session's entry
+/// from `~/.codex/session_index.jsonl` (transcript files stay; this is the
+/// index record, matching the Python rm teardown arm). opencode/gemini:
+/// registry-only by contract - nothing to cascade.
+fn cascade_harness_session(e: &state::RegistryEntry) -> Option<(String, String)> {
+    let row_id = if e.short_id.is_empty() {
+        e.name.clone()
+    } else {
+        e.short_id.clone()
+    };
+    match e.harness_name() {
+        "claude" => {
+            // Only cascade when the store still holds the session: a row whose
+            // session is already gone has nothing to remove, and re-running
+            // `claude rm` on a missing id would report a refusal for work that
+            // is already done.
+            if harness_session_probe(e) != Some(false) {
+                return None;
+            }
+            let short_id = if e.short_id.is_empty() {
+                return Some((row_id, "claude cascade needs a short id".to_string()));
+            } else {
+                e.short_id.clone()
+            };
+            let spawned = std::process::Command::new("claude")
+                .args(["rm", &short_id])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(err) => return Some((row_id, format!("claude rm failed to start: {err}"))),
+            };
+            // Bounded wait, mirroring the truth probe's loop: kill on deadline
+            // so a hung `claude rm` cannot wedge the sweep.
+            let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => return None,
+                    Ok(Some(status)) => {
+                        return Some((
+                            row_id,
+                            format!("claude rm exited {}", status.code().unwrap_or(-1)),
+                        ))
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Some((row_id, "claude rm timed out".to_string()));
+                    }
+                    Err(err) => return Some((row_id, format!("claude rm wait failed: {err}"))),
+                }
+            }
+        }
+        "codex" => {
+            let sid = e.harness_session_id.as_deref()?;
+            let index = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".codex")
+                .join("session_index.jsonl");
+            cascade_codex_index(&index, sid, &row_id)
+        }
+        // opencode (cascade would delete child sessions and message history),
+        // gemini (deprecated, registry-only), and anything unknown: registry
+        // removal is the whole contract for these rows.
+        _ => None,
+    }
+}
+
+/// The codex cascade core: drop this session's entry from the session index
+/// (the index RECORD, never the rollout transcript). Path-injected so the
+/// surgery is unit-testable against a temp index. `None` = nothing to do
+/// (missing index, or no matching entry); `Some((row_id, reason))` = refusal
+/// or failure to surface, never a swallowed error.
+fn cascade_codex_index(
+    index: &std::path::Path,
+    sid: &str,
+    row_id: &str,
+) -> Option<(String, String)> {
+    let text = match std::fs::read_to_string(index) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => return Some((row_id.to_string(), format!("codex index unreadable: {err}"))),
+    };
+    // Index line surgery: drop only lines whose parsed session id equals this
+    // row's. A line that fails to parse stays (never destroy the index to
+    // clean it).
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(
+            |line| match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(v) => v.get("session_id").and_then(|s| s.as_str()) != Some(sid),
+                Err(_) => true,
+            },
+        )
+        .collect();
+    if kept.len() == text.lines().count() {
+        return None; // no entry to drop: nothing to cascade
+    }
+    let mut rewritten = kept.join("\n");
+    if !rewritten.is_empty() {
+        rewritten.push('\n');
+    }
+    match std::fs::write(index, rewritten) {
+        Ok(()) => None,
+        Err(err) => Some((
+            row_id.to_string(),
+            format!("codex index write failed: {err}"),
+        )),
+    }
+}
+
+/// The transcript file the freshness probe should read for this row: the
+/// newest match in its own harness's store, so the freshness signal stops
+/// dying with fno's own log copies (routinely absent: 83 of 88 rows on the
+/// machine this was measured on had a missing `log_path`). `None` when the
+/// harness store cannot answer; the caller falls back to `log_path`.
+fn harness_transcript_path(e: &state::RegistryEntry) -> Option<std::path::PathBuf> {
+    let matches = harness_transcript_matches(e.harness_name(), e.harness_session_id.as_deref())?;
+    matches.into_iter().max_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    })
 }
 
 /// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
@@ -772,7 +1069,16 @@ pub fn gc_sweep(
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
 ) -> GcSummary {
-    gc_sweep_impl(home, emitter, grace_for_harness, false)
+    gc_sweep_impl(
+        home,
+        emitter,
+        grace_for_harness,
+        false,
+        &live_truth_tail_state,
+        &harness_session_probe,
+        &harness_transcript_path,
+        &cascade_harness_session,
+    )
 }
 
 /// `fno agents reap --dry-run` (x-9de7 task 5): classify the registry exactly
@@ -789,7 +1095,24 @@ pub fn gc_sweep_dry_run(
     // Never emitted to in dry-run mode (the whole write+emit tail is skipped
     // below), so an unused placeholder path satisfies the shared signature.
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
-    gc_sweep_impl(home, &emitter, grace_for_harness, true)
+    gc_sweep_impl(
+        home,
+        &emitter,
+        grace_for_harness,
+        true,
+        &live_truth_tail_state,
+        &harness_session_probe,
+        &harness_transcript_path,
+        &cascade_harness_session,
+    )
+}
+
+/// The dormant gate's transcript-tail read, as production runs it: the shared
+/// truth probe (`fno agents truth <handle> --json`, bounded at 5s), lowered to
+/// the state string alone. Injected into [`gc_sweep_impl`] so the decision
+/// path is unit-testable without shelling out to a real `fno`.
+fn live_truth_tail_state(handle: &str) -> Option<String> {
+    crate::claude_ask::family1_truth_probe(handle).map(|p| p.state)
 }
 
 fn gc_sweep_impl(
@@ -797,6 +1120,15 @@ fn gc_sweep_impl(
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
     dry_run: bool,
+    truth_tail_state: &dyn Fn(&str) -> Option<String>,
+    // The two harness-store reads, injected for the same reason as
+    // `truth_tail_state`: a sweep-level test must not pass or fail depending
+    // on what happens to live in the developer's real ~/.claude / ~/.codex.
+    session_gone: &dyn Fn(&state::RegistryEntry) -> Option<bool>,
+    transcript_for: &dyn Fn(&state::RegistryEntry) -> Option<std::path::PathBuf>,
+    // The post-reap harness-store cascade, injected for the same reason: a
+    // test must be able to stage a refusal without mutating PATH/HOME.
+    cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
@@ -817,6 +1149,13 @@ fn gc_sweep_impl(
     // Rows in `to_reap` that got there on age alone, keyed by registry name.
     let mut backstop_ids: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
+    // Rows in `to_reap` that got there on a live-but-done reading, keyed by
+    // registry name. Reported separately (a death and a finished turn must stay
+    // distinguishable) and carrying a resumable handle in the reap event.
+    let mut dormant_ids: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    // Truth probes spent on live-idle rows this sweep (see DORMANT_PROBE_CAP).
+    let mut dormant_probes: usize = 0;
     let mut to_stamp: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     let mut to_clear: std::collections::BTreeMap<String, String> =
@@ -845,17 +1184,61 @@ fn gc_sweep_impl(
         // Probe the worktree only for a row that could actually be reaped this
         // pass (dead + terminal + past grace + owns a worktree). Keeps git off the
         // hot path: steady state has no such rows, so no subprocess runs.
-        let terminal_or_dead = matches!(e.status, AgentStatus::Exited | AgentStatus::PermanentDead)
-            || pid_confirmed_dead;
+        // The terminal set comes from the POLICY's one spelling: gating probes
+        // on a narrower local copy strands exactly the rows the policy would
+        // remove (the Orphaned drift).
+        let terminal_or_dead = crate::gc::status_is_terminal(e.status) || pid_confirmed_dead;
         let past_grace = matches!(exited_at, Some(t) if now.saturating_sub(t) > grace_secs);
         // The second signal, read whenever a reap is otherwise on the table.
         // Cheap (one stat), and it is the discrimination `status` cannot make:
         // an idle-but-resumable bg thread keeps touching its transcript.
-        let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
-            transcript_fresh_probe(e.log_path.as_deref(), now, grace_secs)
+        // Repointed at the harness's own transcript: fno's log copies are
+        // routinely absent (83 of 88 rows on the machine this was measured
+        // on), which used to kill the freshness signal outright - it read
+        // `None` (unknown) and fail-closed to Keep for want of a file nobody
+        // writes anymore. `log_path` remains the fallback for a row with no
+        // session id.
+        let harness_session_gone = if !is_live && terminal_or_dead && past_grace {
+            session_gone(e)
         } else {
             None
         };
+        let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
+            let harness_path = transcript_for(e);
+            match harness_path
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .or_else(|| e.log_path.as_deref())
+            {
+                Some(path) => transcript_fresh_probe(Some(path), now, grace_secs),
+                None => None,
+            }
+        } else {
+            None
+        };
+        // Live-but-done (the third eviction route): a live row idle past the
+        // grace window whose transcript tail POSITIVELY classifies done
+        // (promise emitted). A credential-dead worker reads live too, and
+        // neither alive nor dead; only the positive done reading evicts.
+        // Bounded: only idle rows are probed, and at most DORMANT_PROBE_CAP
+        // truth probes run per sweep, so a large registry cannot turn the
+        // sweep into a subprocess farm.
+        let mut dormant_done = false;
+        if is_live && dormant_probes < DORMANT_PROBE_CAP {
+            if let Some(idle) = row_idle_secs(e, now, transcript_for) {
+                if idle > grace_secs {
+                    let handle = if e.short_id.is_empty() {
+                        e.name.as_str()
+                    } else {
+                        e.short_id.as_str()
+                    };
+                    if let Some(state) = truth_tail_state(handle) {
+                        dormant_probes += 1;
+                        dormant_done = state == "done";
+                    }
+                }
+            }
+        }
         // Built with `worktree_clean` unset so the probe decision can ask the
         // policy itself. Filled in below, before any verdict is read from it.
         let mut row = crate::gc::GcRow {
@@ -868,6 +1251,8 @@ fn gc_sweep_impl(
             // hiding behind an identity that was never recorded.
             liveness_surface: e.pid.is_some() || !e.short_id.is_empty(),
             transcript_fresh,
+            harness_session_gone,
+            dormant_done,
             worktree_clean: None,
         };
         // The probe condition MIRRORS the removal condition, asked through the
@@ -899,6 +1284,10 @@ fn gc_sweep_impl(
             crate::gc::GcAction::ReapBackstop => {
                 to_reap.insert(e.name.clone(), e.created_at.clone());
                 backstop_ids.insert(e.name.clone(), id.clone());
+            }
+            crate::gc::GcAction::ReapDormant => {
+                to_reap.insert(e.name.clone(), e.created_at.clone());
+                dormant_ids.insert(e.name.clone(), id.clone());
             }
             crate::gc::GcAction::StampExit => {
                 to_stamp.insert(e.name.clone(), e.created_at.clone());
@@ -953,6 +1342,8 @@ fn gc_sweep_impl(
             };
             if backstop_ids.contains_key(&e.name) {
                 summary.reaped_backstop.push(id);
+            } else if dormant_ids.contains_key(&e.name) {
+                summary.reaped_dormant.push(id);
             } else {
                 summary.reaped.push(id);
             }
@@ -964,6 +1355,8 @@ fn gc_sweep_impl(
     // Names actually removed under the lock (identity still matched), so the emit
     // + summary report only what really happened (AC1-ERR / no phantom reaps).
     let mut reaped_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Harness-store cascades performed this sweep (see CASCADE_CAP).
+    let mut cascaded: usize = 0;
     let write = state::update_registry(&home.registry_json(), |r| {
         // `created_at` guard: apply each mutation only if the row under the lock is
         // still the SAME session we evaluated. A stale name whose row was
@@ -994,6 +1387,24 @@ fn gc_sweep_impl(
             // lock (a stale candidate whose identity changed is not a reap).
             for e in &registry.entries {
                 if reaped_names.contains(&e.name) {
+                    // CASCADE (AC6): two stores, act on both, report both. The
+                    // row is gone from the registry; if the harness's own store
+                    // still holds the session, remove it via the harness's own
+                    // removal surface. A refusal or failure is SURFACED in the
+                    // reap report and event (`cascade_refused`), never
+                    // swallowed, and never rolls back the registry reap - but
+                    // an unknown harness store (probe None) is a skip, not a
+                    // refusal: registry-only rows are the opencode/gemini
+                    // contract, not a failure. Bounded per sweep so a large
+                    // batch cannot turn the write tail into a subprocess farm.
+                    let mut cascade_refused: Option<(String, String)> = None;
+                    if cascaded < CASCADE_CAP {
+                        cascaded += 1;
+                        cascade_refused = cascade(e);
+                    }
+                    if let Some((id, reason)) = &cascade_refused {
+                        summary.cascade_refused.push((id.clone(), reason.clone()));
+                    }
                     let node_id = dispatch_node_id(&e.name);
                     let mut target_session_id = None;
                     let mut termination_event = false;
@@ -1057,6 +1468,24 @@ fn gc_sweep_impl(
                                 target_session_id.map_or(Value::Null, Value::String),
                             ),
                             ("termination_event", Value::Bool(termination_event)),
+                            ("harness", Value::String(e.harness_name().to_string())),
+                            (
+                                "harness_session_id",
+                                e.harness_session_id
+                                    .clone()
+                                    .map_or(Value::Null, Value::String),
+                            ),
+                            // A dormant reap is a finished turn, not a death:
+                            // the resumable handle (harness + session id above)
+                            // is the whole point of recording it.
+                            ("resumable", Value::Bool(dormant_ids.contains_key(&e.name))),
+                            (
+                                "cascade_refused",
+                                match &cascade_refused {
+                                    Some((id, reason)) => json!({"id": id, "reason": reason}),
+                                    None => Value::Null,
+                                },
+                            ),
                         ]),
                     );
                     let reaped_id = if e.short_id.is_empty() {
@@ -1066,9 +1495,12 @@ fn gc_sweep_impl(
                     };
                     // A backstop removal is counted ONLY in its own list, never
                     // in both. Two totals that overlap cannot be compared, and
-                    // comparing them is the point.
+                    // comparing them is the point. A dormant reap likewise: it
+                    // is a third count with its own meaning.
                     if backstop_ids.contains_key(&e.name) {
                         summary.reaped_backstop.push(reaped_id);
+                    } else if dormant_ids.contains_key(&e.name) {
+                        summary.reaped_dormant.push(reaped_id);
                     } else {
                         summary.reaped.push(reaped_id);
                     }
@@ -1081,11 +1513,13 @@ fn gc_sweep_impl(
                 &json!({"op": "gc_sweep", "error": err.to_string()}),
             );
             // Nothing was removed; report no reaps (no event/disk divergence).
-            // BOTH lists, or the next writer that populates them earlier leaves
-            // this path claiming zero ordinary reaps beside phantom backstop
-            // ones - two counts that disagree about the same failed sweep.
+            // ALL THREE lists, or the next writer that populates them earlier
+            // leaves this path claiming zero ordinary reaps beside phantom
+            // backstop or dormant ones - counts that disagree about the same
+            // failed sweep.
             summary.reaped.clear();
             summary.reaped_backstop.clear();
+            summary.reaped_dormant.clear();
         }
     }
     summary
@@ -5840,6 +6274,339 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // The row itself is untouched (still on disk, unstamped-differently).
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.iter().any(|e| e.name == "stuck"));
+    }
+
+    // -- The harness-store corroboration seam (AC1 / AC3 / AC5) -------------
+
+    #[test]
+    fn harness_store_keying_never_judges_one_harness_by_anothers_store() {
+        // THE AC3 SPECIMEN: a codex worker has no claude transcript by
+        // construction. Judged by claude's store it reads "session gone" and
+        // reaps; judged by its own (empty) codex store it also reads gone -
+        // but the keying is what makes each answer belong to the right row,
+        // and an unknown harness must answer None (unjudgeable), never borrow
+        // either store.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let claude_root = dir.path().join("claude-projects");
+        let codex_root = dir.path().join("codex-sessions");
+        let project = claude_root.join("-proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sid-1234.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(&codex_root).unwrap();
+
+        let claude =
+            harness_transcript_matches_under(&claude_root, &codex_root, "claude", Some("sid-1234"))
+                .expect("claude store is readable, so it answers");
+        assert_eq!(claude.len(), 1, "the session exists in claude's own store");
+
+        let codex =
+            harness_transcript_matches_under(&claude_root, &codex_root, "codex", Some("sid-1234"))
+                .expect("codex store is readable, so it answers");
+        assert!(
+            codex.is_empty(),
+            "the codex store holds no such session: its own answer, independent of claude's"
+        );
+
+        for unknown in ["gemini", "opencode", "agy", ""] {
+            assert!(
+                harness_transcript_matches_under(
+                    &claude_root,
+                    &codex_root,
+                    unknown,
+                    Some("sid-1234")
+                )
+                .is_none(),
+                "an unknown harness ({unknown}) is unjudgeable, never judged by another store"
+            );
+        }
+        // No session id on the row: unjudgeable even for a known harness.
+        assert!(
+            harness_transcript_matches_under(&claude_root, &codex_root, "claude", None).is_none()
+        );
+    }
+
+    /// AC1 end-to-end: an exited row past grace whose harness session is gone
+    /// from its own store reaps, with the event carrying harness + session id
+    /// (the resumable/diagnostic handle), and the registry reap is never
+    /// blocked by a cascade that finds nothing to remove.
+    #[test]
+    fn gc_sweep_reaps_on_a_gone_harness_session_and_records_the_handle() {
+        let home = tmp_home("gc-harness-gone");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("gone-session", Some(exited_at.as_str()));
+            e.short_id = "gonesess".into(); // liveness surface, no live socket
+            e.log_path = None; // the dead-evidence file that no longer exists
+            e.harness = Some("claude".into());
+            e.harness_session_id = Some("80e70ab4-1111".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None, // truth tail: no live rows to probe
+            &|e| (e.name == "gone-session").then_some(true), // session gone from its store
+            &|_| None, // no harness transcript to read
+            &|_| None, // cascade: store holds nothing to remove
+        );
+
+        assert_eq!(summary.reaped, vec!["gonesess".to_string()]);
+        assert!(summary.cascade_refused.is_empty());
+        // POSITIVE MARKER: the row is absent from the registry after the call,
+        // not merely absent from the error output.
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(
+            reg.entries.iter().all(|e| e.name != "gone-session"),
+            "the reap must be observable in the registry itself"
+        );
+        // The event carries the resumable handle fields.
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(
+            events.contains("\"harness_session_id\"") && events.contains("80e70ab4-1111"),
+            "agent_row_reaped must record the harness session handle"
+        );
+    }
+
+    /// AC4 end-to-end: an Orphaned row earns an exit stamp on first sight and
+    /// reaps once past grace with corroboration - the immortal-row mechanism.
+    #[test]
+    fn gc_sweep_orphaned_row_stamps_then_reaps() {
+        let home = tmp_home("gc-orphaned");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+
+        // First pass: unstamped Orphaned -> StampExit, nothing removed.
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("orph", None);
+            e.status = AgentStatus::Orphaned;
+            e.short_id = "orph".into();
+            e.log_path = None;
+            r.entries.push(e);
+        })
+        .unwrap();
+        let first = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+        );
+        assert!(first.reaped.is_empty(), "first sight stamps, never reaps");
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let stamped = reg
+            .entries
+            .iter()
+            .find(|e| e.name == "orph")
+            .expect("row survives the stamping pass")
+            .exited_at
+            .clone();
+        assert!(
+            stamped.is_some(),
+            "an unreachable probe is an observation: the clock starts"
+        );
+
+        // Backdate past grace, corroborate, sweep again: reaped.
+        state::update_registry(&home.registry_json(), |r| {
+            for e in r.entries.iter_mut() {
+                if e.name == "orph" {
+                    e.exited_at = Some(exited_at.clone());
+                }
+            }
+        })
+        .unwrap();
+        let second = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|e| (e.name == "orph").then_some(true),
+            &|_| None,
+            &|_| None,
+        );
+        assert_eq!(second.reaped, vec!["orph".to_string()]);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().all(|e| e.name != "orph"));
+    }
+
+    /// AC7 end-to-end: a LIVE row idle past grace whose tail reads done leaves
+    /// as a dormant reap (resumable: true in the event); one whose tail reads
+    /// anything else stays. The credential-dead worker is the second case.
+    #[test]
+    fn gc_sweep_live_done_row_leaves_as_dormant_and_other_tails_stay() {
+        let home = tmp_home("gc-dormant");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let idle_since = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        // Live rows: our own pid, bare-existence live (the fixture pattern the
+        // keeps_live test uses), idle two hours against a 1h grace.
+        state::update_registry(&home.registry_json(), |r| {
+            let mut done = ask_row("bg-done", None);
+            done.status = AgentStatus::Live;
+            done.short_id = "bgdone".into();
+            done.last_message_at = Some(idle_since.clone());
+            done.pid = Some(std::process::id());
+            r.entries.push(done);
+            let mut watching = ask_row("bg-watch", None);
+            watching.status = AgentStatus::Live;
+            watching.short_id = "bgwatch".into();
+            watching.last_message_at = Some(idle_since.clone());
+            watching.pid = Some(std::process::id());
+            r.entries.push(watching);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|handle| match handle {
+                "bgdone" => Some("done".to_string()),
+                _ => Some("watching".to_string()), // the credential-dead shape
+            },
+            &|_| None,
+            &|_| None,
+            &|_| None,
+        );
+
+        assert_eq!(summary.reaped_dormant, vec!["bgdone".to_string()]);
+        assert!(summary.reaped.is_empty(), "a finished turn is not a death");
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(
+            events.contains("\"resumable\":true"),
+            "the dormant reap must record resumability for the dormant distinction"
+        );
+        // POSITIVE MARKER: only the done row left the registry.
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().all(|e| e.name != "bg-done"));
+        assert!(
+            reg.entries.iter().any(|e| e.name == "bg-watch"),
+            "a live row whose tail is not done stays, whatever its idle age"
+        );
+    }
+
+    /// AC6: a reaped row whose harness session refuses removal keeps the
+    /// refusal in the report (surfaced, never swallowed), and the registry reap
+    /// is NOT rolled back. Cascade injected so the staged refusal is
+    /// deterministic - no PATH/HOME games against a parallel test run.
+    #[test]
+    fn gc_sweep_cascade_refusal_is_surfaced_and_never_undoes_the_reap() {
+        let home = tmp_home("gc-cascade");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("pid-dead", Some(exited_at.as_str()));
+            e.short_id = "piddead".into();
+            e.log_path = None;
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("sid-cascade".into());
+            e.pid = Some(999_999_999); // no such process: confirmed dead
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+            // The cascade refuses for this row: the harness store would not
+            // give the session up.
+            &|e| {
+                (e.name == "pid-dead").then(|| {
+                    (
+                        "piddead".to_string(),
+                        "cascade refused (staged)".to_string(),
+                    )
+                })
+            },
+        );
+
+        assert_eq!(summary.reaped, vec!["piddead".to_string()]);
+        assert_eq!(
+            summary.cascade_refused,
+            vec![(
+                "piddead".to_string(),
+                "cascade refused (staged)".to_string()
+            )],
+            "the refusal is surfaced with its reason"
+        );
+        // POSITIVE MARKER: the registry itself no longer holds the row - the
+        // refusal never rolled back the reap.
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().all(|e| e.name != "pid-dead"));
+    }
+
+    /// The codex cascade core: index surgery drops only the matching session's
+    /// entry, keeps unparsable lines, and reports nothing to remove as a no-op.
+    #[test]
+    fn codex_index_cascade_drops_only_the_matching_entry() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let index = dir.path().join("session_index.jsonl");
+        std::fs::write(
+            &index,
+            concat!(
+                "{\"session_id\":\"aaa\"}\n",
+                "not-json-at-all\n",
+                "{\"session_id\":\"bbb\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(cascade_codex_index(&index, "missing", "row"), None);
+        let after_noop = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            after_noop.lines().count(),
+            3,
+            "no match: byte-for-byte no-op"
+        );
+
+        // Dropping IS the success path: success also answers None, so the
+        // proof is the file, not the return.
+        assert_eq!(cascade_codex_index(&index, "aaa", "row"), None);
+        let after = std::fs::read_to_string(&index).unwrap();
+        assert!(!after.contains("\"aaa\""), "the matching entry is gone");
+        assert!(after.contains("\"bbb\""), "other entries stay");
+        assert!(
+            after.contains("not-json-at-all"),
+            "an unparsable line is never destroyed"
+        );
+
+        // A missing index is a no-op, not a refusal.
+        assert_eq!(
+            cascade_codex_index(&dir.path().join("nope.jsonl"), "aaa", "row"),
+            None
+        );
     }
 
     /// `--dry-run` (x-9de7 task 5): the same classification as a real sweep,

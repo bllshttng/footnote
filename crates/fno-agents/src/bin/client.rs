@@ -1401,11 +1401,18 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             .iter()
             .map(|(id, path)| json!({"id": id, "worktree": path}))
             .collect();
+        let refused: Vec<Value> = summary
+            .cascade_refused
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         return format!(
             "{}\n",
             json!({
                 "reaped": summary.reaped,
                 "reaped_backstop": summary.reaped_backstop,
+                "reaped_dormant": summary.reaped_dormant,
+                "cascade_refused": refused,
                 "kept_dirty": kept,
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "dry_run": dry_run,
@@ -1414,9 +1421,10 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
     }
     let verb = if dry_run { "would reap" } else { "reaped" };
     let mut out = format!(
-        "{verb} {} row(s) ({} by the age backstop)\n",
+        "{verb} {} row(s) ({} by the age backstop, {} dormant done)\n",
         summary.reaped.len(),
-        summary.reaped_backstop.len()
+        summary.reaped_backstop.len(),
+        summary.reaped_dormant.len()
     );
     for id in &summary.reaped {
         out.push_str(&format!("  {verb} {id}\n"));
@@ -1426,12 +1434,22 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             "  {verb} {id} (age backstop: nothing corroborated it)\n"
         ));
     }
+    for id in &summary.reaped_dormant {
+        out.push_str(&format!(
+            "  {verb} {id} (dormant: transcript tail read done; resumable handle in the event)\n"
+        ));
+    }
+    for (id, reason) in &summary.cascade_refused {
+        out.push_str(&format!(
+            "  harness session kept {id} (cascade refused: {reason})\n"
+        ));
+    }
     for (id, path) in &summary.kept_dirty {
         out.push_str(&format!("  kept {id} (dirty worktree: {path})\n"));
     }
     for id in &summary.kept_uncorroborated {
         out.push_str(&format!(
-            "  kept {id} (uncorroborated: no confirmed-dead pid, no positively-stale transcript yet)\n"
+            "  kept {id} (uncorroborated: no confirmed-dead pid, no positively-stale transcript, no gone harness session yet)\n"
         ));
     }
     if dry_run {
