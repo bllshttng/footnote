@@ -265,8 +265,8 @@ def test_ac1_hp_profile_field_injected_by_verb_key():
     assert "--model" in out and out[out.index("--model") + 1] == "fable"
     assert "--effort" in out and out[out.index("--effort") + 1] == "high"
     msg = err.getvalue()
-    assert "model=agents.profiles.blueprint" in msg
-    assert "effort=agents.defaults" in msg
+    assert "model=fable (agents.profiles.blueprint.model)" in msg
+    assert "effort=high (agents.defaults.effort)" in msg
 
 
 def test_ac2_hp_substrate_and_permission_from_profile():
@@ -558,7 +558,7 @@ def test_route_field_injected_as_flag():
     )
     assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
     msg = err.getvalue()
-    assert "route=agents.defaults" in msg  # provenance names the rung
+    assert "route=zai/glm-5.2[1m] (agents.defaults.route)" in msg  # axis, value, source
 
 
 def test_account_field_injected_as_flag():
@@ -771,3 +771,95 @@ def test_autonomous_dispatch_explicit_flag_beats_profile():
     )
     assert out.count("--model") == 0  # only the explicit -m
     assert "fable" not in out
+
+
+# --------------------------------------------------------------------------- #
+# The receipt names the AXIS the field feeds, plus the route-collision
+# refusal - a cross-axis collision (a profile-filled harness makes an
+# already-typed route unusable), never a precedence bug.
+# --------------------------------------------------------------------------- #
+
+def test_ac1_hp_receipt_names_harness_axis_not_provider_field():
+    # AC1-HP: `provider=agents.profiles.target` used to read as though a
+    # provider was set to a profile. The real coordinate is the harness axis.
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err,
+        profiles={"target": {"provider": "codex", "effort": "high"}},
+    )
+    msg = err.getvalue()
+    assert "harness=codex (agents.profiles.target.provider)" in msg
+    assert "effort=high (agents.profiles.target.effort)" in msg
+    assert "provider=agents.profiles.target" not in msg
+
+
+def test_ac2_hp_route_collision_refused_before_injection_dash_p_form():
+    # The king's exact scenario: -P zai --model glm-5.3 under a profile that
+    # fills a non-claude harness. Refuse BEFORE anything is injected.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "t-x3ab0", "-P", "zai", "--model", "glm-5.3",
+             "--substrate", "bg", "/fno:target x-1"],
+            err=err, profiles={"target": {"provider": "codex"}},
+        )
+    assert exc.value.code == 2
+    msg = err.getvalue()
+    assert "agents.profiles.target.provider = 'codex'" in msg
+    assert "HARNESS axis" in msg
+    assert "-P zai --model glm-5.3" in msg
+    assert "-H claude" in msg
+    assert "clear agents.profiles.target.provider" in msg
+    assert "--harness" not in msg.split("\n")[0]  # nothing injected pre-refusal
+
+
+def test_ac2_hp_route_collision_names_explicit_route_flag_not_dash_p():
+    # AC5-HP twin: when the route came from --route, name --route, not -P.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "--route", "zai/glm-5.3", "/fno:target x-1"],
+            err=err, profiles={"target": {"provider": "codex"}},
+        )
+    assert exc.value.code == 2
+    msg = err.getvalue()
+    assert "--route zai/glm-5.3" in msg
+    assert "-P zai" not in msg  # boilerplate still explains the -P axis; the caller's own flags do not name it
+
+
+def test_ac4_edge_bare_vendor_no_model_is_not_route_shaped():
+    # AC4-EDGE: -P with no --model is not yet a route; no collision refusal.
+    out = _inject(
+        ["spawn", "--name", "w", "-P", "zai", "/fno:target x-1"],
+        profiles={"target": {"provider": "codex"}},
+    )
+    assert "--harness" in out and out[out.index("--harness") + 1] == "codex"
+
+
+def test_ac2_hp_route_shaped_but_profile_harness_is_claude_no_refusal():
+    # The profile's harness CAN carry the route: no cross-axis collision.
+    out = _inject(
+        ["spawn", "--name", "w", "-P", "zai", "--model", "glm-5.3", "/fno:target x-1"],
+        profiles={"target": {"provider": "claude"}},
+    )
+    assert "--harness" in out and out[out.index("--harness") + 1] == "claude"
+
+
+def test_ac3_hp_explicit_wins_every_injectable_field():
+    # Per-field explicit-wins matrix: an explicit flag survives, the differing
+    # profile value appears nowhere in the final argv, for every field.
+    cases = [
+        (["--harness", "codex"], {"provider": "claude"}, "claude"),
+        (["--model", "explicit-model"], {"model": "profile-model"}, "profile-model"),
+        (["--harness", "claude", "--effort", "high"], {"effort": "low"}, "low"),
+        (["--substrate", "pane"], {"substrate": "bg"}, "bg"),
+        (["--permission-mode", "bypassPermissions"], {"permission_mode": "acceptEdits"}, "acceptEdits"),
+        (["--route", "zai/glm-5.3"], {"route": "zai/other-model"}, "zai/other-model"),
+        (["--harness", "claude", "--account", "primary"], {"account": "secondary"}, "secondary"),
+    ]
+    for explicit_flags, profile_fields, forbidden_value in cases:
+        out = _inject(
+            ["spawn", "--name", "w", *explicit_flags, "/fno:target x-1"],
+            profiles={"target": profile_fields},
+        )
+        assert forbidden_value not in out, (explicit_flags, profile_fields)

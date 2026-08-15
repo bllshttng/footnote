@@ -731,6 +731,12 @@ def cmd_spawn(
     # dispatch_spawn kwarg and the receipt key every consumer parses, so the wire
     # name outranks the tidier local one.
     provider = harness
+    # The caller's own spelling of the route, for refusal messages further
+    # down: a route only the claude harness can carry may get refused after
+    # the vendor+model collapse below, and naming the collapsed `--route`
+    # form there would send the operator looking for a flag they never typed
+    # (AC5-HP).
+    route_spelling = f"--route {route}" if route is not None else None
     if vendor is not None:
         vendor = vendor.strip()
         # The historical confusion, refused by name rather than silently launching
@@ -759,6 +765,7 @@ def cmd_spawn(
         # The model belongs to the route from here: it reaches the worker as the
         # routed ANTHROPIC_MODEL, never as a `claude --model` token (which would
         # hand the claude CLI a vendor model id it cannot resolve).
+        route_spelling = f"--provider {vendor} --model {model}"
         route, model = f"{vendor}/{model}", None
 
     # --provider is optional: resolve it (explicit > invoking harness > claude)
@@ -814,7 +821,7 @@ def cmd_spawn(
         raise typer.Exit(code=2)
     if monitor == "happy" and provider != "claude":
         print(
-            f"--monitor happy requires the claude harness; got {provider!r}",
+            f"--monitor happy requires the claude harness; got harness {provider!r}",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -1012,8 +1019,8 @@ def cmd_spawn(
                 raise typer.Exit(code=2)
         if provider != "claude":
             print(
-                "--route requires the claude harness; "
-                f"got provider {provider!r} substrate {substrate!r}.",
+                f"{route_spelling} requires the claude harness; "
+                f"got harness {provider!r} substrate {substrate!r}.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)

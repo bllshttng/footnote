@@ -1352,7 +1352,7 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
     assert receipt["bound"] == bool(receipt["short_id"])
     # AC5: no -P/--route on this spawn -> provider (vendor) and model keys are
     # ABSENT, not defaulted to the harness. A provider key holding a harness
-    # literal is the four-axis defect this receipt shape corrects.
+    # literal is the axis defect this receipt shape corrects.
     assert "provider" not in receipt
     assert "model" not in receipt
     pane_run = next(call for call in fake_runner.calls if call[1:4] == ["mux", "pane", "run"])

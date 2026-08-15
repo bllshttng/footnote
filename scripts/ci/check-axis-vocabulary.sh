@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Enforce the four-axis vocabulary in two independent scans:
+# Enforce the axis vocabulary in three independent scans:
 #   contents - no identifier, dict/JSON key, or env var named for one axis
 #              (provider / harness / model) may hold a literal from another;
+#   effort   - no line may attribute an effort spelling (thinking.type,
+#              reasoning.effort, ...) to the wrong harness;
 #   names    - no DIRECTORY named for one axis may hold another axis's
 #              implementation, judged against the DECLARED_PATH_AXIS map below.
-# Only the contents scan is baselined. See docs/architecture/four-axis-vocabulary.md
-# for the axis definitions this guards.
+# Only the contents and effort scans are baselined. See
+# docs/architecture/axis-vocabulary.md for the axis definitions this guards.
 set -euo pipefail
 
 MODE="baseline"
@@ -197,13 +199,25 @@ root_arg = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 baseline_path = Path(sys.argv[3])
 
-# --- Axis definitions (mirror docs/architecture/four-axis-vocabulary.md) -------
+# --- Axis definitions (mirror docs/architecture/axis-vocabulary.md) -------
 # Harness values unambiguous enough to auto-flag under a provider name. gemini is
 # deliberately excluded: it names a harness, a provider, and a model family, so
 # auto-flagging fires on correct code. gemini sites are reviewed via the allowlist.
 # opencode is flagged but allowlistable.
 HARNESS_LITERALS = ("claude", "codex", "agy", "opencode")
 VENDOR_LITERALS = ("anthropic", "openai", "zai", "deepseek", "google")
+
+# One reasoning-effort spelling per harness that owns it. A line
+# attributing a spelling to a harness that does not own it is the same
+# conflation shape as HARNESS_LITERALS/VENDOR_LITERALS, just on the effort
+# axis instead of the provider axis. See docs/architecture/axis-vocabulary.md
+# ("Effort: one axis, three harness spellings").
+EFFORT_SPELLINGS = {
+    "thinking.type": "claude",
+    "output_config.effort": "claude",
+    "reasoning.effort": "codex",
+    "model_reasoning_effort": "codex",
+}
 
 # --- Declared axis for axis-NAMED directories ---------------------------------
 # The content scan above reads what the code says. It cannot read what the code
@@ -382,6 +396,34 @@ def _findings_for_line(rel: str, lineno: int, line: str):
             continue
         seen.add(key)
         out.append(f'{rel}:{lineno}: {name}="{literal}" ({desc})')
+    return out
+
+
+def _effort_spelling_findings(rel: str, lineno: int, line: str):
+    """Finding strings for an effort spelling attributed to the wrong harness.
+
+    Fires only when the line names EXACTLY ONE effort spelling: a line naming
+    two (or more) is teaching the contrast correctly and must stay silent. For
+    the one spelling on the line, any harness literal that does not own it
+    (bounded the same way _findings_for_line reads a literal, so it never
+    matches a sub-token) is a wrong attribution.
+    """
+    spellings_on_line = {s for s in EFFORT_SPELLINGS if s in line}
+    if len(spellings_on_line) != 1:
+        return []
+    spelling = next(iter(spellings_on_line))
+    owner = EFFORT_SPELLINGS[spelling]
+    out = []
+    seen = set()
+    for m in _literal_in.finditer(line):
+        literal = m.group(1).lower()
+        if literal not in HARNESS_LITERALS or literal == owner or literal in seen:
+            continue
+        seen.add(literal)
+        out.append(
+            f'{rel}:{lineno}: {spelling} attributed to "{literal}" '
+            f"(effort spelling belongs to {owner})"
+        )
     return out
 
 
@@ -570,6 +612,7 @@ def scan(root: Path):
                     observed_by_ext[ext] = observed_by_ext.get(ext, 0) + 1
                     reached = True
                 findings.extend(_findings_for_line(rel, i, line))
+                findings.extend(_effort_spelling_findings(rel, i, line))
     return sorted(set(findings)), observed_by_ext, axis_dirs, probes_reached
 
 
@@ -1081,6 +1124,31 @@ def _self_test():
                 )
                 failures += 1
 
+    # Effort spelling attribution: a line naming exactly one effort
+    # spelling together with a harness literal that does not own it is a wrong
+    # attribution. A line naming two spellings is teaching the contrast
+    # correctly and must stay silent - plant a violation and its correct twin
+    # in one file and assert the first is caught, the second is not.
+    d = Path(tempfile.mkdtemp(prefix="axis-effort-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)  # own repo root
+    (d / "v.md").write_text(
+        "| codex | thinking.type |\n"
+        "| claude | thinking.type |\n",
+        encoding="utf-8",
+    )
+    found, _, _, _ = scan(d)
+    caught = [f for f in found if 'thinking.type attributed to "codex"' in f]
+    silent = [f for f in found if 'thinking.type attributed to "claude"' in f]
+    if caught and not silent:
+        print("caught planted effort-spelling violation, correct twin silent ok")
+    else:
+        print(
+            f"FAILED effort-spelling specimen: caught={len(caught)} (want >=1), "
+            f"silent-twin-findings={len(silent)} (want 0)",
+            file=sys.stderr,
+        )
+        failures += 1
+
     return 1 if failures else 0
 
 
@@ -1209,7 +1277,7 @@ if name_violations:
         print(f"  {v}", file=sys.stderr)
     print(
         "A directory named for one axis may not hold another axis's "
-        "implementation; see docs/architecture/four-axis-vocabulary.md",
+        "implementation; see docs/architecture/axis-vocabulary.md",
         file=sys.stderr,
     )
     # Not in write-baseline mode. The header promises the two scans are
@@ -1394,14 +1462,14 @@ if mode == "write-baseline":
         )
         sys.exit(2)
     header = [
-        "# Known four-axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).",
+        "# Known axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).",
         "# Each entry is exact: file, line, the binding, the literal, and the axis collision.",
         "# A binding named for one axis (provider/harness/model) may not hold a literal from another.",
         "# Remove an entry only in the same PR that removes the violation. Convert a genuinely",
         "# correct ambiguous site (opencode/gemini) by copying its row below, appending",
         "# `| <one-line justification>`, and prefixing it with `allowlist: `. The entry",
         "# suppresses that one finding and nothing else, and the gate fails once it matches",
-        "# nothing. See docs/architecture/four-axis-vocabulary.md.",
+        "# nothing. See docs/architecture/axis-vocabulary.md.",
         "# Regenerate: bash scripts/ci/check-axis-vocabulary.sh --write-baseline",
         "",
     ]
@@ -1425,7 +1493,7 @@ if mode == "strict":
             print(f"  {f}", file=sys.stderr)
         print(
             "No identifier/key/env named for one axis may hold a literal from "
-            "another; see docs/architecture/four-axis-vocabulary.md",
+            "another; see docs/architecture/axis-vocabulary.md",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1454,7 +1522,11 @@ non_comment = [s.strip() for s in raw if s.strip() and not s.lstrip().startswith
 allowlist_lines = [s for s in non_comment if s.startswith("allowlist:")]
 baseline = [s for s in non_comment if not s.startswith("allowlist:")]
 finding_pat = re.compile(
-    r"^.+?:\d+: .+?=\"(?:claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\" \(.+\)$"
+    r"^.+?:\d+: (?:"
+    r".+?=\"(?:claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\" \(.+\)"
+    r"|"
+    r".+? attributed to \"(?:claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\" \(.+\)"
+    r")$"
 )
 bad_allowlist = [s for s in allowlist_lines if not _ALLOWLIST_RE.match(s)]
 malformed = [e for e in baseline if not finding_pat.match(e)] + bad_allowlist

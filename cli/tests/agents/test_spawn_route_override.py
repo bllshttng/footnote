@@ -103,6 +103,60 @@ def test_route_unknown_provider_refused(monkeypatch: pytest.MonkeyPatch) -> None
     assert result.exit_code == 2, result.output
 
 
+def test_route_on_non_claude_harness_names_harness_not_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # AC5-HP: the refusal says "harness 'codex'", never "provider 'codex'",
+    # and names the caller's own --route flag.
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="claude", short_id="x"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg",
+         "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "harness 'codex'" in result.output
+    assert "provider 'codex'" not in result.output
+    assert "--route zai,glm-5.2" in result.output
+
+
+def test_route_via_dash_p_on_non_claude_harness_names_dash_p_not_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # AC5-HP twin: when the route came from -P/--model, name those flags
+    # rather than the collapsed --route spelling the caller never typed.
+    from fno.agents import dispatch, spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.agents.dispatch.dispatch_spawn",
+        lambda **kw: dispatch.SpawnResult(
+            kind="created", name=kw["name"], provider="claude", short_id="x"
+        ),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--substrate", "bg",
+         "-P", "zai", "--model", "glm-5.2"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "harness 'codex'" in result.output
+    assert "provider 'codex'" not in result.output
+    assert "--provider zai --model glm-5.2" in result.output
+
+
 def test_route_allowed_on_capability_enabled_pane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
