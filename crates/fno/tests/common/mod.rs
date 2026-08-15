@@ -105,6 +105,13 @@ impl Scratch {
     pub fn main_sock(&self) -> PathBuf {
         self.0.join("main.sock")
     }
+
+    /// The isolated HOME dir, as a cwd string for client attaches and stored
+    /// squads. Everything the server spawns resolves inside the scratch.
+    #[allow(dead_code)]
+    pub fn home_cwd(&self) -> String {
+        self.0.join("home").to_string_lossy().into_owned()
+    }
 }
 
 impl Drop for Scratch {

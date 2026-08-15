@@ -1083,6 +1083,125 @@ pub fn overlay_truth_badges(rows: &mut [RegistryAgent], truth: &TruthBadges) {
     }
 }
 
+/// Process start time in the REGISTRY'S own units (x-caef): macOS folds
+/// `proc_bsdinfo` to microseconds, Linux keeps the raw `/proc/<pid>/stat`
+/// starttime ticks. Deliberately NOT `process_create_time_ms`: the registry's
+/// `pid_start_time` is a per-host, per-boot quantity compared only for
+/// equality against a value captured for the SAME pid, so it must be read
+/// with the same units `fno-agents`' registry writer used (daemon.rs
+/// `process_start_time`), not converted to epoch ms.
+#[cfg(target_os = "macos")]
+fn registry_start_time(pid: u32) -> Option<u64> {
+    use std::mem;
+    let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::pid_t,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(target_os = "linux")]
+fn registry_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn registry_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// POSITIVE falsification of one non-terminal row's liveness by its own
+/// recorded pid (x-caef). A machine restart writes nothing to the registry,
+/// so every row keeps the status it last had on disk - including "working"
+/// for workers that died with the reboot. `restore_squads` reads that set to
+/// decide which members to respawn, so an unverified status read respawns
+/// `claude attach` into sessions that no longer exist. Falsified ONLY on
+/// positive evidence, never on an inability to check:
+///
+/// - a recorded pid that is provably invalid (0, 1, or out of `pid_t` range -
+///   no real worker ever holds one), or
+/// - a recorded pid whose process is gone (`kill(pid, 0)` -> ESRCH), or
+/// - a recorded `(pid, pid_start_time)` pair whose live process now starts at
+///   a different time (the pid was reused after the worker died).
+///
+/// A row with no recorded pid, an unparsable document, an EPERM (alive but
+/// not ours to signal), or an unreadable start time keeps its status-field
+/// verdict - the fail-safe posture everywhere else in this file.
+fn row_falsified(row: &serde_json::Value, status: &str) -> bool {
+    if matches!(status, "exited" | "permanent-dead" | "permanent_dead") {
+        return false; // already terminal; nothing to falsify
+    }
+    let Some(pid) = row.get("pid").and_then(|v| v.as_u64()) else {
+        return false; // no recorded pid: the status field stays the verdict
+    };
+    if pid <= 1 || pid > i32::MAX as u64 {
+        return true; // a recorded pid no worker can hold is corruption, not liveness
+    }
+    // SAFETY: signal 0 performs no delivery, only an existence/permission probe.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    // Alive: only a start-time mismatch (a reused pid) may still falsify.
+    match (
+        row.get("pid_start_time").and_then(|v| v.as_u64()),
+        registry_start_time(pid as u32),
+    ) {
+        (Some(recorded), Some(now)) => recorded != now,
+        _ => false, // no basis to prove reuse -> trust existence
+    }
+}
+
+/// The attach-ids (`short_id`s) of claude rows whose claimed-live status
+/// their own recorded pid falsifies (see [`row_falsified`]). The restore-time
+/// liveness read subtracts this set so a reboot's stale "working" rows read
+/// dead instead of respawning. Tolerant of a malformed document: it
+/// contributes nothing, exactly like `derive_rows`.
+pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String> {
+    let mut stale = std::collections::HashSet::new();
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(reg_raw) else {
+        return stale;
+    };
+    let Some(rows) = doc
+        .get("agents")
+        .or_else(|| doc.get("entries"))
+        .and_then(|v| v.as_array())
+    else {
+        return stale;
+    };
+    for row in rows {
+        let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let is_claude = row
+            .get("harness")
+            .or_else(|| row.get("provider"))
+            .and_then(|v| v.as_str())
+            == Some("claude");
+        let attach_id = row
+            .get("short_id")
+            .or_else(|| row.get("claude_short_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if is_claude && row_falsified(row, status) {
+            if let Some(id) = attach_id {
+                stale.insert(id.to_string());
+            }
+        }
+    }
+    stale
+}
+
 /// Derive the sideline row set from raw registry JSON at `now_secs`. Pure so
 /// the whole lattice derivation is unit-testable without a file or a clock.
 /// A malformed document yields `None` (the caller keeps its last-good rows -
@@ -1692,6 +1811,91 @@ mod tests {
     }
 
     const NOW: u64 = 1_800_000_000; // 2027-01-15T08:00:00Z-ish
+
+    // -- x-caef: restore liveness must not trust a status string the row's
+    //    own pid falsifies -----------------------------------------------
+
+    /// A claude row with a recorded pid that ESRCHs must land in the stale
+    /// set - the reboot case, the exact respawn the fix removes.
+    #[test]
+    fn stale_live_attach_ids_flags_a_dead_pid_claiming_working() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let raw = reg(&format!(
+            r#"{{"name":"ghost","cwd":"/w","status":"working","harness":"claude",
+                 "short_id":"deadbeef","pid":{pid},"pid_start_time":99887766}}"#
+        ));
+        let stale = stale_live_attach_ids(&raw);
+        assert!(
+            stale.contains("deadbeef"),
+            "a reaped pid ({pid}) with a working status must read stale"
+        );
+    }
+
+    /// A LIVE pid whose recorded start time matches stays live; the same pid
+    /// with a mismatched recorded start (a reuse) reads stale.
+    #[test]
+    fn stale_live_attach_ids_reuses_start_time_equality_not_existence() {
+        let pid = std::process::id();
+        let Some(start) = registry_start_time(pid) else {
+            return; // platform without start-time support; existence arm only
+        };
+        let matching = reg(&format!(
+            r#"{{"name":"me","cwd":"/w","status":"working","harness":"claude",
+                 "short_id":"aaaaaaaa","pid":{pid},"pid_start_time":{start}}}"#
+        ));
+        assert!(
+            !stale_live_attach_ids(&matching).contains("aaaaaaaa"),
+            "a live pid with a matching start time is not stale"
+        );
+        let reused = reg(&format!(
+            r#"{{"name":"me","cwd":"/w","status":"working","harness":"claude",
+                 "short_id":"aaaaaaaa","pid":{pid},"pid_start_time":{}}}"#,
+            start + 1
+        ));
+        assert!(
+            stale_live_attach_ids(&reused).contains("aaaaaaaa"),
+            "a live pid with a mismatched start time is a reused pid, not the worker"
+        );
+    }
+
+    /// The fail-safe arms: no recorded pid, a non-claude row, a terminal
+    /// status, and a malformed document all keep the status-field verdict and
+    /// contribute nothing to the stale set.
+    #[test]
+    fn stale_live_attach_ids_fails_safe_without_positive_evidence() {
+        let no_pid = reg(
+            r#"{"name":"a","cwd":"/w","status":"working","harness":"claude","short_id":"aaaaaaaa"}"#,
+        );
+        assert!(
+            stale_live_attach_ids(&no_pid).is_empty(),
+            "no pid -> not stale"
+        );
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let codex = reg(&format!(
+            r#"{{"name":"b","cwd":"/w","status":"working","harness":"codex",
+                 "short_id":"bbbbbbbb","pid":{pid}}}"#
+        ));
+        assert!(
+            stale_live_attach_ids(&codex).is_empty(),
+            "a non-claude short_id is not an attach target"
+        );
+        let terminal = reg(&format!(
+            r#"{{"name":"c","cwd":"/w","status":"exited","harness":"claude",
+                 "short_id":"cccccccc","pid":{pid}}}"#
+        ));
+        assert!(
+            stale_live_attach_ids(&terminal).is_empty(),
+            "a terminal row is dead by status; nothing to falsify"
+        );
+        assert!(
+            stale_live_attach_ids("{not json").is_empty(),
+            "a malformed document contributes nothing"
+        );
+    }
 
     #[test]
     fn agent_rows_badge_lattice_derives_from_registry() {

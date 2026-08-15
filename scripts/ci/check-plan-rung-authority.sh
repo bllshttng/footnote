@@ -178,7 +178,7 @@ crates/fno-agents/src/subprocess_ask.rs:6
 crates/fno-agents/src/verify_evidence.rs:9
 crates/fno-agents/src/wait.rs:4
 crates/fno/build.rs:2
-crates/fno/src/agents_view.rs:73
+crates/fno/src/agents_view.rs:94
 crates/fno/src/backlog_view.rs:91
 crates/fno/src/bootstrap.rs:11
 crates/fno/src/client.rs:56
@@ -190,7 +190,7 @@ crates/fno/src/link.rs:11
 crates/fno/src/needs_overlay.rs:1
 crates/fno/src/proto.rs:4
 crates/fno/src/pty.rs:1
-crates/fno/src/server.rs:20
+crates/fno/src/server.rs:22
 crates/fno/src/squad.rs:6
 crates/fno/src/view_store.rs:2
 crates/fno/src/web.rs:1"

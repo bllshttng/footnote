@@ -38,13 +38,15 @@ use crate::backlog_view;
 use crate::proto::{
     bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
     AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg,
-    Command, ControlVerb, Frame, LayoutScope, LayoutSpec, MouseButton, MouseEvent, MouseKind,
-    PaneInfo, PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError,
-    ResolvedPlacement, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta,
-    TabInfo, TabLayout, TabMeta, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
+    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
+    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
+    SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
+    TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
+use crate::squad_store::StoredTabTree;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
@@ -1292,6 +1294,16 @@ struct Core {
     /// it so a second client attach does not re-materialize the persisted
     /// squads.
     restored: bool,
+    /// (x-caef) A topology mutation landed (`push_layout(true)`) whose tree
+    /// capture has not been written yet. Set on every layout-changing pass,
+    /// flushed by [`Core::flush_topology`] when the debounce window is past or
+    /// the last client is leaving - a ratio drag emits continuously, and an
+    /// undebounced per-event persist would contend the store's flock past its
+    /// retry budget and silently drop writes (the exact gesture that generates
+    /// the most events). Core-loop-owned like every other `Core` field.
+    topology_dirty: bool,
+    /// (x-caef) When the last topology flush ran, for the debounce window.
+    last_topology_flush: Option<Instant>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -1382,6 +1394,131 @@ fn wheel_gate(
     }
 }
 
+/// Capture-side pane -> slot naming (x-caef). Slot names are decided at
+/// CAPTURE, never at restore, so two snapshots of one session agree on which
+/// pane is which: a pane with an fno id names its slot that id and binds
+/// `Fno(id)` (restore re-attaches it); a pane without one names itself
+/// `p<ordinal>` and binds `Shell`. A duplicate attach id (the mirroring-ready
+/// case `PaneLocation` documents) gets a `#2` suffix rather than colliding.
+struct SlotCapture<'a> {
+    pane_owner: &'a HashMap<u64, &'a str>,
+    slots: Vec<LayoutSlot>,
+    by_pane: HashMap<u64, String>,
+    ordinal: usize,
+}
+
+impl<'a> SlotCapture<'a> {
+    fn new(pane_owner: &'a HashMap<u64, &str>) -> Self {
+        SlotCapture {
+            pane_owner,
+            slots: Vec::new(),
+            by_pane: HashMap::new(),
+            ordinal: 0,
+        }
+    }
+
+    /// The live tree -> the persisted spec. Weights are renormalized on the
+    /// way out rather than trusted: `tree::check_invariants` requires branch
+    /// ratios summing to 1.0, but a stored document is untrusted input and
+    /// geometry divides by the sum.
+    fn node_to_spec(&mut self, node: &Node) -> LayoutTreeSpec {
+        match node {
+            Node::Leaf(p) => LayoutTreeSpec::Slot(self.name_leaf(*p)),
+            Node::Branch { axis, children } => {
+                let weights: Vec<f32> = children.iter().map(|(w, _)| w.max(0.0)).collect();
+                let sum: f32 = weights.iter().sum();
+                let even = 1.0 / children.len() as f32;
+                let children = children
+                    .iter()
+                    .zip(weights)
+                    .map(|((_, n), w)| LayoutTreeChild {
+                        weight: if sum > 0.0 { w / sum } else { even },
+                        tree: self.node_to_spec(n),
+                    })
+                    .collect();
+                LayoutTreeSpec::Split {
+                    axis: *axis,
+                    children,
+                }
+            }
+        }
+    }
+
+    fn name_leaf(&mut self, pane: u64) -> String {
+        let base = match self.pane_owner.get(&pane) {
+            Some(id) => id.to_string(),
+            None => {
+                self.ordinal += 1;
+                format!("p{}", self.ordinal)
+            }
+        };
+        let mut name = base.clone();
+        let mut n = 2;
+        while self.slots.iter().any(|s| s.name == name) {
+            name = format!("{base}#{n}");
+            n += 1;
+        }
+        let binding = match self.pane_owner.get(&pane) {
+            Some(id) => LayoutBinding::Fno(id.to_string()),
+            None => LayoutBinding::Shell,
+        };
+        self.slots.push(LayoutSlot {
+            name: name.clone(),
+            binding,
+        });
+        self.by_pane.insert(pane, name.clone());
+        name
+    }
+
+    /// The slot name capture gave `pane` (for the persisted focus marker).
+    fn slot_of(&self, pane: u64) -> Option<String> {
+        self.by_pane.get(&pane).cloned()
+    }
+}
+
+/// The persisted spec -> a live tree (x-caef restore). `resolve` maps a slot
+/// name to a pane id (`None` = the slot's pane is unavailable and the caller
+/// substitutes). `None` from THIS function means the document is malformed (a
+/// one-child split, or a dangling slot ref) and the tab must fall back, never
+/// half-build - the same refusal posture `apply_spec` holds.
+fn spec_to_node(tree: &LayoutTreeSpec, resolve: &dyn Fn(&str) -> Option<u64>) -> Option<Node> {
+    match tree {
+        LayoutTreeSpec::Slot(name) => resolve(name).map(Node::Leaf),
+        LayoutTreeSpec::Split { axis, children } => {
+            if children.len() < 2 {
+                return None;
+            }
+            let children = children
+                .iter()
+                .map(|c| Some((c.weight, spec_to_node(&c.tree, resolve)?)))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Node::Branch {
+                axis: *axis,
+                children,
+            })
+        }
+    }
+}
+
+/// The cwd to spawn a restored member's pane at (x-caef case 2/3), and the
+/// stored path to name in a fallback notice when it no longer resolves. Pure
+/// over an injected `is_dir` so the policy is unit-testable without touching
+/// the filesystem, like `live_ids_from`. `stored.is_none()` (a pre-x-caef
+/// member) and a stored path that fails `is_dir` both fall back to `cwd0` -
+/// the two-path notice (member wants -> where it actually landed) is the
+/// caller's job, since only the caller knows the member's identity to name.
+fn restore_member_cwd(
+    stored: Option<&str>,
+    cwd0: &str,
+    is_dir: impl Fn(&str) -> bool,
+) -> (String, Option<String>) {
+    match stored {
+        Some(path) if is_dir(path) => (path.to_string(), None),
+        Some(path) => (cwd0.to_string(), Some(path.to_string())),
+        None => (cwd0.to_string(), None),
+    }
+}
+
 /// The set of attach-ids live NOW, from the raw registry + roster contents
 /// (x-8f11). Pure so restore's liveness read is unit-testable without files or
 /// env, like `agents_view::derive_rows`: a non-exited registry row's
@@ -1421,6 +1558,16 @@ pub(crate) fn live_attach_ids_snapshot() -> HashSet<String> {
     let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
     let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
     let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
+    // (x-caef) A reboot writes nothing to the registry, so a row can claim a
+    // non-terminal status for a worker whose pid died with the machine.
+    // Subtract the rows their own recorded pid POSITIVELY falsifies before
+    // restore trusts the set: an unverified read here respawns `claude
+    // attach` into sessions that no longer exist. Rows with no recorded pid
+    // keep their status-field verdict (fail-safe, `row_falsified`).
+    if let Some(raw) = reg.as_deref() {
+        let stale = agents_view::stale_live_attach_ids(raw);
+        live.retain(|id| !stale.contains(id));
+    }
     for (_account, path) in agents_view::isolated_roster_paths() {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             for w in agents_view::parse_roster(&raw).into_iter().flatten() {
@@ -3997,10 +4144,123 @@ impl Core {
                     m.tab_name = tab_name;
                 }
             }
+            // (x-caef) Re-derive each live member's pane cwd the same way: only
+            // a resolvable live pane overwrites, so a tombstone or a transient
+            // miss keeps the last-known cwd rather than erasing it. This is what
+            // lets restore spawn a worktree worker back into its own worktree
+            // instead of the squad's `origins[0]` (server.rs restore_squads).
+            for m in list.iter_mut() {
+                if let Some(cwd) = self
+                    .attached
+                    .get(&m.attach_id)
+                    .and_then(|pid| self.panes.get(pid))
+                    .map(|p| p.cwd.clone())
+                    .filter(|c| !c.is_empty())
+                {
+                    m.cwd = Some(cwd);
+                }
+            }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
             self.persist_degraded(&e);
+        }
+        self.persist_tab_trees(sid, &name, &key, &origins);
+    }
+
+    /// Capture squad `sid`'s whole tab topology into store shape (x-caef) -
+    /// EVERY tab, hand-split and template alike, ending the three gates
+    /// (template-only, named-squad-only, named-tab-only) that left the
+    /// operator's real layouts unpersisted. A mission squad is synthetic and
+    /// never captured. `None` when the squad is gone.
+    fn stored_tab_trees(&self, sid: u64) -> Option<(Vec<StoredTabTree>, usize)> {
+        let sq = self.session.squad(sid)?;
+        if crate::proto::is_mission_squad(sid) {
+            return None;
+        }
+        // Reverse the attach join so a pane with an fno id names its slot that
+        // id (stable across restarts); anything else is an ordinal shell.
+        let pane_owner: HashMap<u64, &str> = self
+            .attached
+            .iter()
+            .map(|(id, p)| (*p, id.as_str()))
+            .collect();
+        let mut trees = Vec::with_capacity(sq.tabs.len());
+        for t in &sq.tabs {
+            let mut capture = SlotCapture::new(&pane_owner);
+            let tree = capture.node_to_spec(&t.root);
+            let focus = capture.slot_of(t.focus);
+            trees.push(StoredTabTree {
+                tab_name: t.name.clone(),
+                tree,
+                slots: capture.slots,
+                focus,
+            });
+        }
+        Some((trees, sq.active_tab))
+    }
+
+    /// Write the topology lane for `sid` beside its membership row. A write
+    /// failure degrades persistence only (the live layout stands), the same
+    /// posture as every other persist here.
+    fn persist_tab_trees(&mut self, sid: u64, name: &str, key: &str, origins: &[String]) {
+        let Some((trees, active_tab)) = self.stored_tab_trees(sid) else {
+            return;
+        };
+        if let Err(e) =
+            crate::squad_store::set_tab_trees(name, key, origins, &trees, Some(active_tab))
+        {
+            self.persist_degraded(&e);
+        }
+    }
+
+    /// How long a topology mutation stays dirty before the tick flushes it.
+    /// One write per gesture, not one per drag event.
+    const TOPOLOGY_DEBOUNCE: Duration = Duration::from_secs(2);
+
+    /// Mark the topology dirty (called from every `push_layout(true)`, the one
+    /// funnel every layout mutation crosses) and flush immediately when the
+    /// debounce window is already past, so an isolated mutation does not wait
+    /// for the next tick.
+    ///
+    /// A no-op before `self.restored` flips true: `attach()`'s FIRST
+    /// `push_layout(true)` (server.rs, the freshly-minted home squad's own
+    /// initial layout push) fires before `restore_squads` runs a few lines
+    /// later in the same call. Capturing there would persist the brand-new
+    /// squad, and `restore_squads` would then read its own just-written row
+    /// back as a "restored" lane matching this squad's origin and home-merge
+    /// a second pane into it - the session observing its own bootstrap as a
+    /// restart. Once `self.restored` is true this can never happen again (the
+    /// gate is one-shot for the server's lifetime), so every later mutation
+    /// captures exactly as before.
+    fn mark_topology_dirty(&mut self) {
+        if !self.restored {
+            return;
+        }
+        self.topology_dirty = true;
+        let due = self
+            .last_topology_flush
+            .is_none_or(|t| t.elapsed() >= Self::TOPOLOGY_DEBOUNCE);
+        if due {
+            self.flush_topology();
+        }
+    }
+
+    /// Write the tree capture of every persistable squad when dirty (the
+    /// AgentRows-tick flush and the leaving-clients flush). Membership is
+    /// re-persisted with it: `persist_squad` is the one funnel that derives a
+    /// squad's durable identity, so the tree lane can never key differently
+    /// than the row it belongs to. ponytail: one store mutation per squad per
+    /// flush; batch into a single locked write if the flock ever shows it.
+    fn flush_topology(&mut self) {
+        if !self.topology_dirty {
+            return;
+        }
+        self.topology_dirty = false;
+        self.last_topology_flush = Some(Instant::now());
+        let sids: Vec<u64> = self.session.squads.iter().map(|s| s.id).collect();
+        for sid in sids {
+            self.persist_squad(sid);
         }
     }
 
@@ -4020,6 +4280,7 @@ impl Core {
                 attach_id: id.to_string(),
                 tombstone: false,
                 tab_name: None,
+                cwd: None,
             }),
         }
         self.persist_squad(sid);
@@ -4252,8 +4513,14 @@ impl Core {
                 .cloned()
                 .unwrap_or_else(|| home_cwd.clone());
             let mut members: Vec<crate::squad_store::StoredMember> = Vec::new();
-            // (tab, optional (attach_id, pid)) for each pane we build.
-            let mut tabs: Vec<(Tab, Option<(String, u64)>)> = Vec::new();
+            // The tabs we build, in final order. Attach mappings are inserted at
+            // spawn time (x-caef; the tree lane binds panes into trees before
+            // any tab exists, so the mapping cannot ride the tab list).
+            let mut tabs: Vec<Tab> = Vec::new();
+            // (x-caef) Live member panes spawned but not yet placed in a tab:
+            // (attach_id, pane, stored tab name). The tree lane places them by
+            // slot; the legacy lane gives each its own tab.
+            let mut member_panes: Vec<(String, u64, Option<String>)> = Vec::new();
             // (x-c4d4) The zero-live-member fallback shell tab, if we create one;
             // a deferred template restore removes it once real template tabs land.
             let mut fallback_tid: Option<TabId> = None;
@@ -4281,6 +4548,7 @@ impl Core {
                         attach_id: m.attach_id.clone(),
                         tombstone: true,
                         tab_name: m.tab_name.clone(),
+                        cwd: m.cwd.clone(),
                     });
                     continue;
                 }
@@ -4289,30 +4557,36 @@ impl Core {
                     Some((a, d)) => (Some(a.as_str()), Some(d.as_path())),
                     None => (None, None),
                 };
+                // (x-caef case 2/3) Spawn at the member's OWN stored cwd when it
+                // still exists - a worktree worker restores into its worktree,
+                // not the squad's `origins[0]`. A gone cwd (an archived worktree)
+                // falls back to `origins[0]` with a two-path notice so the
+                // operator learns where it landed rather than discovering it
+                // silently mid-edit.
+                let (spawn_cwd, fallback_notice) =
+                    restore_member_cwd(m.cwd.as_deref(), &cwd0, |p| {
+                        std::path::Path::new(p).is_dir()
+                    });
+                if let Some(gone) = fallback_notice {
+                    self.notice_all(format!(
+                        "restore: {}'s directory {gone} is gone; restored at {cwd0} instead",
+                        m.attach_id
+                    ));
+                }
                 let argv = attach_argv(&m.attach_id, acct, cd);
-                match self.spawn_pane_cmd(&argv, rows, cols, &cwd0) {
+                match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(pid) => {
                         // (x-ed59) Title the restored pane from its registered name
                         // (the roster, the sidepane's source) so it matches the
                         // fresh-spawn label across reattach/restart.
                         self.name_attached_pane(pid, &m.attach_id, cd);
-                        let tid = self.session.mint_tab_id();
-                        tabs.push((
-                            Tab {
-                                // (x-0f9d US4) Re-derive the tab's chosen name
-                                // so a named tab survives the restart; a member
-                                // with no stored name restores unnamed as before.
-                                name: m.tab_name.clone(),
-                                id: tid,
-                                root: Node::Leaf(pid),
-                                focus: pid,
-                            },
-                            Some((m.attach_id.clone(), pid)),
-                        ));
+                        self.attached.insert(m.attach_id.clone(), pid);
+                        member_panes.push((m.attach_id.clone(), pid, m.tab_name.clone()));
                         members.push(crate::squad_store::StoredMember {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
                             tab_name: m.tab_name.clone(),
+                            cwd: m.cwd.clone(),
                         });
                     }
                     Err(e) => {
@@ -4323,8 +4597,118 @@ impl Core {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
                             tab_name: m.tab_name.clone(),
+                            cwd: m.cwd.clone(),
                         });
                     }
+                }
+            }
+            // (x-caef) The tree lane: stored full topologies rebuild the exact
+            // shape - hand splits, arbitrary weights, tab order, focus - instead
+            // of one flat tab per member. Every slot is resolved BEFORE the tree
+            // is built (shells and unbound fno ids spawn their substitute panes
+            // up front), so a malformed document refuses the whole tab before
+            // half of one exists, per-tab, without touching the others.
+            let mut placed: HashSet<u64> = HashSet::new();
+            if !ps.tab_trees.is_empty() {
+                let pane_by_id: HashMap<&str, u64> = member_panes
+                    .iter()
+                    .map(|(id, pid, _)| (id.as_str(), *pid))
+                    .collect();
+                for st in &ps.tab_trees {
+                    let mut slot_pane: HashMap<&str, u64> = HashMap::new();
+                    let mut missing: Vec<&str> = Vec::new();
+                    for slot in &st.slots {
+                        let pane = match &slot.binding {
+                            LayoutBinding::Fno(id) => match pane_by_id.get(id.as_str()) {
+                                Some(p) => Some(*p),
+                                // The worker did not come back. NEVER auto-relaunch
+                                // a dead worker (a claude session costs money and
+                                // may re-enter a loop it was killed out of):
+                                // substitute a shell, keep the shape, name it.
+                                None => {
+                                    missing.push(id.as_str());
+                                    None
+                                }
+                            },
+                            LayoutBinding::Shell | LayoutBinding::Anchor => None,
+                        };
+                        match pane {
+                            Some(p) => {
+                                slot_pane.insert(slot.name.as_str(), p);
+                            }
+                            None => match self.spawn_pane(rows, cols, &cwd0) {
+                                Ok(p) => {
+                                    slot_pane.insert(slot.name.as_str(), p);
+                                }
+                                Err(e) => {
+                                    self.notice_all(format!(
+                                        "restore: tab {}: could not open shell: {e}",
+                                        st.tab_name.as_deref().unwrap_or("?")
+                                    ));
+                                }
+                            },
+                        }
+                    }
+                    let lookup = |name: &str| slot_pane.get(name).copied();
+                    match spec_to_node(&st.tree, &lookup) {
+                        Some(root) => {
+                            let leaves = tree::leaves(&root);
+                            // Every slot pane was minted for THIS tab, so a
+                            // resolved focus pane is always one of its leaves.
+                            let focus = st
+                                .focus
+                                .as_deref()
+                                .and_then(|f| slot_pane.get(f).copied())
+                                .or_else(|| leaves.first().copied())
+                                .unwrap_or(leaves[0]);
+                            let tid = self.session.mint_tab_id();
+                            placed.extend(leaves.iter().copied());
+                            tabs.push(Tab {
+                                name: st.tab_name.clone(),
+                                id: tid,
+                                root,
+                                focus,
+                            });
+                            if !missing.is_empty() {
+                                self.notice_all(format!(
+                                    "restore: {} worker(s) did not come back (tab {}): {} - resume with `fno agents resume <name>`",
+                                    missing.len(),
+                                    st.tab_name.as_deref().unwrap_or("?"),
+                                    missing.join(", ")
+                                ));
+                            }
+                        }
+                        None => self.notice_all(format!(
+                            "restore: tab {} has a malformed stored tree; restoring flat",
+                            st.tab_name.as_deref().unwrap_or("?")
+                        )),
+                    }
+                }
+                // A live member pane no tree placed (recruited after the last
+                // capture, or every tree refused) still gets its own tab - a
+                // live pane must never be left dangling without one.
+                for (_id, pid, tab_name) in member_panes {
+                    if !placed.contains(&pid) {
+                        let tid = self.session.mint_tab_id();
+                        tabs.push(Tab {
+                            name: tab_name,
+                            id: tid,
+                            root: Node::Leaf(pid),
+                            focus: pid,
+                        });
+                    }
+                }
+            } else {
+                // The legacy lane: one tab per live member, named from the
+                // member's stored tab name (x-0f9d US4).
+                for (_id, pid, tab_name) in member_panes {
+                    let tid = self.session.mint_tab_id();
+                    tabs.push(Tab {
+                        name: tab_name,
+                        id: tid,
+                        root: Node::Leaf(pid),
+                        focus: pid,
+                    });
                 }
             }
             // >=1-tab invariant (AC1-EDGE zero-live, or every attach spawn
@@ -4336,15 +4720,12 @@ impl Core {
                     Ok(pid) => {
                         let tid = self.session.mint_tab_id();
                         fallback_tid = Some(tid);
-                        tabs.push((
-                            Tab {
-                                name: None,
-                                id: tid,
-                                root: Node::Leaf(pid),
-                                focus: pid,
-                            },
-                            None,
-                        ));
+                        tabs.push(Tab {
+                            name: None,
+                            id: tid,
+                            root: Node::Leaf(pid),
+                            focus: pid,
+                        });
                     }
                     Err(e) => {
                         // Cannot even open a shell: skip this squad entirely, the
@@ -4354,20 +4735,17 @@ impl Core {
                     }
                 }
             }
-            // Register the squad with its first tab, push the rest, record the
-            // attach mappings so agent_rows reconciles the panes and member_ctx
-            // resolves them. A home-merge lane folds its tabs + members INTO the
-            // freshly-minted home squad rather than adding a duplicate.
+            // Register the squad with its first tab, push the rest, so
+            // agent_rows reconciles the panes and member_ctx resolves them. A
+            // home-merge lane folds its tabs + members INTO the freshly-minted
+            // home squad rather than adding a duplicate.
             let sid = if home_match {
-                for (tab, map) in tabs {
+                for tab in tabs {
                     self.session
                         .squad_mut(home_sid)
                         .expect("home squad live")
                         .tabs
                         .push(tab);
-                    if let Some((id, pid)) = map {
-                        self.attached.insert(id, pid);
-                    }
                 }
                 self.squad_members
                     .entry(home_sid)
@@ -4383,31 +4761,34 @@ impl Core {
                 let sid = self.next_squad_id;
                 self.next_squad_id += 1;
                 let mut it = tabs.into_iter();
-                let (first_tab, first_map) = it.next().expect("tabs is non-empty above");
+                let first_tab = it.next().expect("tabs is non-empty above");
                 self.session
                     .add_squad(sid, ps.origins.clone(), restore_name, first_tab);
                 // Adopt the persisted key so the rebuilt squad keeps its identity.
                 if let Some(s) = self.session.squad_mut(sid) {
                     s.key = restore_key;
+                    // (x-caef) The active tab is part of the captured shape; a
+                    // stored index is clamped, never trusted to be in range.
+                    if !ps.tab_trees.is_empty() {
+                        if let Some(idx) = ps.active_tab {
+                            let n = s.tabs.len().max(1);
+                            s.active_tab = idx.min(n - 1);
+                        }
+                    }
                 }
-                if let Some((id, pid)) = first_map {
-                    self.attached.insert(id, pid);
-                }
-                for (tab, map) in it {
+                for tab in it {
                     self.session
                         .squad_mut(sid)
                         .expect("just added")
                         .tabs
                         .push(tab);
-                    if let Some((id, pid)) = map {
-                        self.attached.insert(id, pid);
-                    }
                 }
                 self.squad_members.insert(sid, members);
                 sid
             };
             // Persist the reconciled membership (members dead at restore are now
-            // tombstoned in the store).
+            // tombstoned in the store) plus the just-restored tree capture, so a
+            // second restart restores the same shape.
             self.persist_squad(sid);
             // (x-c4d4 US8) DEFER the template rebuild: at restore the off-loop
             // registry reader has not populated `self.agents`, so applying now
@@ -4416,7 +4797,10 @@ impl Core {
             // AgentRows tick once the sessions register - the re-apply then pulls
             // each restored pane into the template topology and empties its member
             // tab. A slot whose session never returns degrades to a shell.
-            if !ps.tab_specs.is_empty() {
+            // (x-caef) Skipped when trees restored: the tree capture is uniform
+            // over every tab (template tabs included), so re-applying the
+            // template lane on top would build every template tab a second time.
+            if !ps.tab_specs.is_empty() && ps.tab_trees.is_empty() {
                 self.pending_template_restores.push(PendingRestore {
                     sid,
                     specs: ps.tab_specs.clone(),
@@ -4967,6 +5351,14 @@ impl Core {
     /// quiet-pane frame has no other copy). Unviewed tabs are untouched: grids keep
     /// feeding, geometry keeps its last size, nothing crosses the wire.
     fn push_layout(&mut self, reemit: bool) {
+        // (x-caef) `reemit` marks a layout-changing pass, and every topology
+        // mutation (split, close, drag, tab create/rename/reorder, focus)
+        // funnels through here regardless of which command path drove it - so
+        // this is the one capture hook. Debounced inside; a persist here never
+        // blocks the geometry pass below beyond its own flock budget.
+        if reemit {
+            self.mark_topology_dirty();
+        }
         // Geometry pass: each distinct viewed tab, once, at its view-scoped
         // smallest-client clamp (Locked 1/5). The applied area is cached so
         // the tab keeps it when its last viewer leaves.
@@ -7590,8 +7982,10 @@ impl Core {
                         crate::squad_store::StoredMember {
                             attach_id: id.clone(),
                             tombstone: false,
-                            // persist_squad below re-derives the hosting tab name.
+                            // persist_squad below re-derives the hosting tab name
+                            // and the pane cwd.
                             tab_name: None,
+                            cwd: None,
                         },
                     );
                     recruited += 1;
@@ -8088,6 +8482,12 @@ impl Core {
                 // socket death take the identical path.
                 e2e_log(format_args!("client {id} gone"));
                 self.clients.retain(|c| c.id != id);
+                if self.clients.is_empty() {
+                    // (x-caef) The last client just left: the push_layout below
+                    // must flush the topology unconditionally, not on the
+                    // debounce - there may be no later tick before shutdown.
+                    self.last_topology_flush = None;
+                }
                 self.push_layout(true);
                 Flow::Continue
             }
@@ -8433,6 +8833,10 @@ impl Core {
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                // (x-caef) The debounce flush for topology captures: a drag's
+                // events mark dirty without writing; the 1s registry tick is
+                // the coalescing timer that turns them into one store write.
+                self.flush_topology();
                 // (x-c4d4) The registry just refreshed: a queued template restore
                 // whose fno bindings now resolve gets applied here, binding live
                 // sessions instead of shells.
@@ -8711,6 +9115,8 @@ async fn serve(
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
+        topology_dirty: false,
+        last_topology_flush: None,
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -9221,6 +9627,11 @@ async fn serve(
         core.publish_client_count();
     };
     if flow == Flow::Shutdown {
+        // (x-caef) The server is going down: write any dirty topology capture
+        // now - this is the "ending fno" moment whose loss is the operator's
+        // whole symptom. SIGTERM and the idle exit land here; a -9 cannot be
+        // caught, which is what the tick flush (<= ~3s of lag) bounds.
+        core.flush_topology();
         core.bye_all("session ended");
         // Give writer tasks a beat to flush the Byes; a lost Bye reads as
         // "session ended (server closed)" client-side, so this is best-effort.
@@ -15274,6 +15685,7 @@ mod tests {
                 attach_id: attach.into(),
                 tombstone: false,
                 tab_name: None,
+                cwd: None,
             }],
         );
         core.attached.insert(attach.into(), pid);
@@ -15284,7 +15696,38 @@ mod tests {
             attach_id: id.into(),
             tombstone,
             tab_name: None,
+            cwd: None,
         }
+    }
+
+    #[test]
+    fn restore_member_cwd_prefers_the_stored_cwd_when_it_still_exists() {
+        // x-caef case 2: a worktree worker restores into its own worktree, not
+        // the squad's origins[0].
+        let (cwd, notice) = restore_member_cwd(Some("/worktrees/x-caef"), "/repo", |p| {
+            p == "/worktrees/x-caef"
+        });
+        assert_eq!(cwd, "/worktrees/x-caef");
+        assert!(notice.is_none(), "no fallback happened, no notice");
+    }
+
+    #[test]
+    fn restore_member_cwd_falls_back_and_names_the_gone_path_on_a_vanished_worktree() {
+        // x-caef case 3: an archived worktree is not silently swallowed - the
+        // pane still lands (at origins[0]) and the caller gets both paths to
+        // notice, not just a bare fallback.
+        let (cwd, notice) = restore_member_cwd(Some("/worktrees/archived"), "/repo", |_| false);
+        assert_eq!(cwd, "/repo", "falls back to cwd0");
+        assert_eq!(notice.as_deref(), Some("/worktrees/archived"));
+    }
+
+    #[test]
+    fn restore_member_cwd_falls_back_silently_for_a_pre_xcaef_member() {
+        // A member persisted before this field existed has no stored cwd at
+        // all - that is not a vanished path, so no notice.
+        let (cwd, notice) = restore_member_cwd(None, "/repo", |_| true);
+        assert_eq!(cwd, "/repo");
+        assert!(notice.is_none());
     }
 
     #[test]
@@ -16167,6 +16610,7 @@ mod tests {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
                 tab_name: Some("old".into()),
+                cwd: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -16290,6 +16734,7 @@ mod tests {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
                 tab_name: Some("home".into()),
+                cwd: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -16347,6 +16792,7 @@ mod tests {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
                 tab_name: Some("src".into()),
+                cwd: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -16726,6 +17172,8 @@ mod tests {
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,
+            topology_dirty: false,
+            last_topology_flush: None,
         }
     }
 
