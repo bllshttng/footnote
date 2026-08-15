@@ -1421,6 +1421,16 @@ pub(crate) fn live_attach_ids_snapshot() -> HashSet<String> {
     let reg = std::fs::read_to_string(agents_view::registry_path()).ok();
     let roster = std::fs::read_to_string(agents_view::roster_path()).ok();
     let mut live = live_ids_from(reg.as_deref(), roster.as_deref(), now);
+    // (x-caef) A reboot writes nothing to the registry, so a row can claim a
+    // non-terminal status for a worker whose pid died with the machine.
+    // Subtract the rows their own recorded pid POSITIVELY falsifies before
+    // restore trusts the set: an unverified read here respawns `claude
+    // attach` into sessions that no longer exist. Rows with no recorded pid
+    // keep their status-field verdict (fail-safe, `row_falsified`).
+    if let Some(raw) = reg.as_deref() {
+        let stale = agents_view::stale_live_attach_ids(raw);
+        live.retain(|id| !stale.contains(id));
+    }
     for (_account, path) in agents_view::isolated_roster_paths() {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             for w in agents_view::parse_roster(&raw).into_iter().flatten() {
