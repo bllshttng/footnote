@@ -287,6 +287,10 @@ fi
 # the retired `ask` verb and `handoff` are. The node-id check mirrors the tier-1
 # detection below (inline here because node detection runs after this); a tier-2
 # candidate is scanned on the SKILL's re-normalize pass, once it matches tier 1.
+# `--no-merge` is NOT in the vocabulary: it is part of the /target-family command
+# grammar itself (the merge-posture carrier the injection block below appends,
+# and harness_map's builtin renders into pre-built messages), so refusing it
+# here would reject the canonical autonomous command, not a mangled flag.
 _scan_ft="${msg%%[[:space:]]*}"
 if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; }; then
   set -f
@@ -297,7 +301,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
       "$ENDASH"*) scan_cano="--${scan_cano#"$ENDASH"}" ;;
     esac
     case "$scan_cano" in
-      -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|-P|--model|--effort|-C|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
+      -y|--yes|-m|--allow-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|-P|--model|--effort|-C|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
         emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Through a slash command the trailing grammar is dashless: write 'model opus', 'bg', 'yolo', 'merge', or 'as <name>' rather than a flag glued into the text. Calling the CLI directly, pass it as a real flag (-y / -m / -n N) separate from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash). If the token is genuinely part of the task text, quote or rephrase it."
         ;;
     esac

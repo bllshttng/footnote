@@ -287,11 +287,6 @@ get_auto_merge_strategy() {
     esac
 }
 
-# Usage: get_auto_merge_delete_branch  → "true" or "false"
-get_auto_merge_delete_branch() {
-    get_config "auto_merge.delete_branch_on_merge" "true"
-}
-
 # Usage: get_auto_merge_require_checks  → "true" or "false"
 get_auto_merge_require_checks() {
     get_config "auto_merge.require_checks_pass" "true"

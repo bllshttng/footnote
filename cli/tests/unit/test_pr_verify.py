@@ -13,6 +13,7 @@ import pytest
 
 from fno.config import AutoMergeBlock
 from fno.pr import _verify
+from fno.pr import _merge
 from fno.pr._proc import Result
 
 
@@ -28,7 +29,8 @@ class FakeGH:
     """Dispatch gh/git results by command signature."""
 
     def __init__(self, *, toplevel, pr_states=None, gh_merge=None, repo="o/r",
-                 reviews=None, author="me", issue_comments=None, review_comments=None):
+                 reviews=None, author="me", issue_comments=None, review_comments=None,
+                 checks=None):
         self.toplevel = toplevel
         self.pr_states = list(pr_states or [])
         self.gh_merge = gh_merge or Result(0, "", "")
@@ -37,6 +39,15 @@ class FakeGH:
         self.author = author
         self.issue_comments = issue_comments if issue_comments is not None else []
         self.review_comments = review_comments if review_comments is not None else []
+        # x-9d11: remediation enforces require_checks_pass in-process, so the
+        # default serves a GREEN rollup (state,statusCheckRollup,headRefOid).
+        self.checks = checks if checks is not None else {
+            "state": "OPEN",
+            "headRefOid": "deadbeefcafe",
+            "statusCheckRollup": [
+                {"name": "c0", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+        }
         self.calls = []
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
@@ -52,6 +63,12 @@ class FakeGH:
             if nxt is None:
                 return Result(1, "", "gh: could not reach api.github.com")
             return Result(0, json.dumps(nxt), "")
+        if cmd[:3] == ["gh", "pr", "view"] and any(
+            "statusCheckRollup" in a for a in cmd
+        ) and "state,mergedAt,isDraft,reviewDecision,statusCheckRollup" not in cmd:
+            return Result(0, json.dumps(self.checks) + "\n", "")
+        if cmd[:3] == ["gh", "pr", "view"] and cmd[-1] == ".headRefName":
+            return Result(0, "feature/x\n", "")
         if cmd[:3] == ["gh", "pr", "merge"]:
             return self.gh_merge
         if cmd[:4] == ["gh", "repo", "view", "--json"]:
@@ -93,6 +110,7 @@ def test_merged_records_and_exits_0(tmp_path, gh_on, monkeypatch):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "MERGED", "mergedAt": "2026-06-13T00:00:00Z"}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 0
     content = open(sf).read()
     assert "merged_prs: [42]" in content
@@ -103,6 +121,7 @@ def test_closed_blocks_exit_1_and_audits(tmp_path, gh_on, monkeypatch):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "CLOSED"}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     events = (tmp_path / ".fno" / "events.jsonl").read_text()
     assert "pr_closed_without_merge" in events
@@ -112,6 +131,7 @@ def test_draft_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "isDraft": True}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     assert "pr_is_draft" in capsys.readouterr().out
 
@@ -120,6 +140,7 @@ def test_changes_requested_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "reviewDecision": "CHANGES_REQUESTED"}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     assert "review_changes_requested" in capsys.readouterr().out
 
@@ -129,6 +150,7 @@ def test_failing_required_check_blocks_exit_1(tmp_path, gh_on, monkeypatch, caps
     rollup = [{"name": "ci/build", "isRequired": True, "conclusion": "FAILURE"}]
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "statusCheckRollup": rollup}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     assert "required_checks_failing" in capsys.readouterr().out
 
@@ -141,6 +163,7 @@ def test_remediation_verify_only_blocks_exit_1(tmp_path, monkeypatch, capsys):
     )
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN"}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     assert "remediation_disabled" in capsys.readouterr().out
 
@@ -153,6 +176,7 @@ def test_bounded_remediation_merges_exit_0(tmp_path, gh_on, monkeypatch):
         gh_merge=Result(0, "", ""),
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     slept = []
     rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: slept.append(s))
     assert rc == 0
@@ -170,6 +194,7 @@ def test_bounded_remediation_stays_single_poll(tmp_path, gh_on, monkeypatch):
         gh_merge=Result(0, "", ""),
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     slept = []
     rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: slept.append(s))
     assert rc == 1
@@ -179,10 +204,11 @@ def test_bounded_remediation_stays_single_poll(tmp_path, gh_on, monkeypatch):
 
 
 @pytest.mark.parametrize("delete_branch", [True, False])
-def test_bounded_remediation_honors_delete_branch(tmp_path, monkeypatch, delete_branch):
-    """This path honored merge_strategy but never passed --delete-branch, so a
-    PR merged here kept a branch the same PR merged via `fno pr merge` deleted.
-    """
+def test_bounded_remediation_cleanup_split_from_merge(tmp_path, monkeypatch, delete_branch):
+    """x-9d11: the remediation merge carries no --delete-branch (gh's local
+    delete is the worktree false-failure shape) and no --auto (one arming
+    path); when delete_branch_on_merge is set, the REMOTE ref is deleted as a
+    warn-only post-merge step, exactly like `fno pr merge`."""
     sf = _state_file(tmp_path)
     monkeypatch.setattr(_verify, "_gh_available", lambda: True)
     monkeypatch.setattr(
@@ -196,9 +222,16 @@ def test_bounded_remediation_honors_delete_branch(tmp_path, monkeypatch, delete_
         gh_merge=Result(0, "", ""),
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None) == 0
     merge_cmd = [c for c in fake.calls if c[:3] == ["gh", "pr", "merge"]][0]
-    assert ("--delete-branch" in merge_cmd) is delete_branch, merge_cmd
+    assert "--delete-branch" not in merge_cmd, merge_cmd
+    assert "--auto" not in merge_cmd, merge_cmd
+    assert "--match-head-commit" in merge_cmd, merge_cmd
+    remote_deletes = [
+        c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]
+    ]
+    assert (len(remote_deletes) == 1) is delete_branch
 
 
 def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on, monkeypatch, capsys):
@@ -222,6 +255,7 @@ def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on
         ),
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None)
     assert rc == 0
     assert "verify-pr-merged" in capsys.readouterr().out
@@ -241,6 +275,7 @@ def test_unreadable_state_after_merge_error_is_substrate_failure(tmp_path, gh_on
         gh_merge=Result(1, "", "failed to delete remote branch: remote: error: internal"),
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None)
     assert rc == 2
     out = capsys.readouterr().out
@@ -252,6 +287,7 @@ def test_unknown_state_degrades_open(tmp_path, gh_on, monkeypatch):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "WEIRD"}])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 0
 
 
@@ -263,6 +299,7 @@ def test_reviews_no_reviewers_exit_0(tmp_path, monkeypatch):
     monkeypatch.setattr(_verify, "_gh_available", lambda: True)
     fake = FakeGH(toplevel=str(tmp_path), reviews=[])
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_reviews("42", sf, cwd=str(tmp_path)) == 0
 
 
@@ -276,6 +313,7 @@ def test_reviews_qualifying_reply_within_24h_exit_0(tmp_path, monkeypatch):
         issue_comments=[{"login": "me", "created_at": "2026-06-13T01:00:00Z", "body": "fixed"}],
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_reviews("42", sf, cwd=str(tmp_path)) == 0
 
 
@@ -289,6 +327,7 @@ def test_reviews_no_qualifying_reply_flips_exit_1(tmp_path, monkeypatch, capsys)
         issue_comments=[],  # no reply at all
     )
     monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
     rc = _verify.run_verify_reviews("42", sf, cwd=str(tmp_path))
     assert rc == 1
     out = capsys.readouterr().out

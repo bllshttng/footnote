@@ -697,8 +697,13 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     res = _git(["push", "origin", "--delete", branch], repo)
     if res.ok:
         return ""
+    # An already-gone remote ref is the requested end state (repo-side
+    # "delete head branches" beat us to it), not a cleanup failure.
+    _out = (res.stderr or res.stdout or "")
+    if "does not exist" in _out or "not found" in _out.lower():
+        return ""
     return "failed: remote branch delete: {}".format(
-        (res.stderr or res.stdout or "").splitlines()[0][:160] if (res.stderr or res.stdout or "").strip() else "no error output"
+        _out.splitlines()[0][:160] if _out.strip() else "no error output"
     )
 
 
@@ -1340,10 +1345,10 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
     # race the queue. Say so and stand down - the queue merges it when checks
     # pass, so the merge is not being lost, just not duplicated.
     armed = _gh(
-        ["pr", "view", str(pr_number), "--json", "autoMergeRequest", "-q", ".autoMergeRequest"],
+        ["pr", "view", str(pr_number), "--json", "autoMergeRequest", "-q", ".autoMergeRequest.enabled"],
         repo,
     )
-    if armed.ok and armed.stdout.strip() not in ("", "null"):
+    if armed.ok and armed.stdout.strip() == "true":
         _emit(
             pr_number,
             "skipped",

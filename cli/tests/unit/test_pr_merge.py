@@ -73,6 +73,8 @@ class FakeRun:
                         return Result(1, "", "gh: could not reach api.github.com")
                     return Result(0, self.merged_at + "\n", "")
                 if "autoMergeRequest" in cmd:
+                    # Models `-q .autoMergeRequest.enabled`: "true" armed,
+                    # "false"/"null" not (jq prints null, not empty).
                     return Result(0, self.auto_merge_request + "\n", "")
                 if cmd[-1] == ".headRefName":
                     return Result(0, self.head_ref + "\n", "")
@@ -1155,7 +1157,7 @@ def test_an_already_armed_pr_skips_naming_finalize(
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(
         gh_merge=Result(0, "Merged pull request", ""),
-        auto_merge_request='{"enabled":true}',
+        auto_merge_request="true",
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)

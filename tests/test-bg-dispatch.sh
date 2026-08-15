@@ -167,9 +167,9 @@ case "$sub $verb" in
     else
       # builtin (no verb): mirrors harness_map dispatch_command (x-567d, x-de43).
       case "$h" in
-        claude|agy) cmd='/target no-merge {id}' ;;
-        codex)      cmd='$fno:target no-merge {id}' ;;
-        opencode)   cmd='/fno:target no-merge {id}' ;;
+        claude|agy) cmd='/target --no-merge {id}' ;;
+        codex)      cmd='$fno:target --no-merge {id}' ;;
+        opencode)   cmd='/fno:target --no-merge {id}' ;;
         *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
       esac
     fi
@@ -256,7 +256,7 @@ if grep -Eq -- "(^| )(--bare|-p)( |$)" "$MOCKSTATE/ask.log"; then
 else
   pass "AC5-HP: never --bare/-p (subscription lane only)"
 fi
-grep -q "/target no-merge ab-aaaa1111" "$MOCKSTATE/ask.log" \
+grep -q "/target --no-merge ab-aaaa1111" "$MOCKSTATE/ask.log" \
   && pass "AC5-HP: no-merge injected by default" \
   || fail "AC5-HP: no-merge not injected (ask.log: $(cat "$MOCKSTATE/ask.log"))"
 
@@ -299,7 +299,7 @@ fi
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo codex/headless > "$MOCKSTATE/resolve_pair"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-grep -q 'fno:target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
+grep -q 'fno:target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
   && pass "x-4391 AC1-HP: default posture keeps no-merge on codex builtin" \
   || fail "x-4391 codex default: $(cat "$MOCKSTATE/ask.log")"
 
@@ -307,7 +307,7 @@ grep -q 'fno:target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo True > "$MOCKSTATE/cfg_auto_merge"
 out="$(bash "$DISPATCH" --no-merge ab-aaaa1111 2>&1)"
-grep -q '/target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
+grep -q '/target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
   && pass "x-4391 AC3-HP: --no-merge beats config auto_merge=true" \
   || fail "x-4391 --no-merge override: $(cat "$MOCKSTATE/ask.log")"
 
@@ -315,7 +315,7 @@ grep -q '/target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 touch "$MOCKSTATE/cfg_auto_merge_err"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-grep -q '/target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
+grep -q '/target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
   && pass "x-4391 AC1-ERR: config read failure degrades to no-merge" \
   || fail "x-4391 config err degrade: $(cat "$MOCKSTATE/ask.log")"
 
@@ -325,6 +325,8 @@ grep -q '/target no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
 eval "$(sed -n '/^strip_no_merge() {/,/^}/p' "$DISPATCH")"
 [[ "$(strip_no_merge '/target no-merge x-1')" == '/target x-1' ]] \
   && pass "x-4391 AC1-EDGE: standalone no-merge stripped" || fail "AC1-EDGE standalone: $(strip_no_merge '/target no-merge x-1')"
+[[ "$(strip_no_merge '/target --no-merge x-1')" == '/target x-1' ]] \
+  && pass "x-9d11 AC1-EDGE: the --no-merge flag is stripped under allow posture" || fail "AC1-EDGE flag: $(strip_no_merge '/target --no-merge x-1')"
 [[ "$(strip_no_merge '/target no-merger-x')" == '/target no-merger-x' ]] \
   && pass "x-4391 AC1-EDGE: no-merge substring preserved" || fail "AC1-EDGE substring: $(strip_no_merge '/target no-merger-x')"
 [[ "$(strip_no_merge '$fno:target no-merge x-1')" == '$fno:target x-1' ]] \
@@ -351,7 +353,7 @@ reset_mock
 projC="$TMP/projC"; mkdir -p "$projC/.fno"   # no auto_merge file -> project default
 set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projC"
 out="$(bash "$DISPATCH" ab-bbbb2222 2>&1)"
-grep -q '/target no-merge ab-bbbb2222' "$MOCKSTATE/ask.log" \
+grep -q '/target --no-merge ab-bbbb2222' "$MOCKSTATE/ask.log" \
   && pass "x-4391 AC2-EDGE: no cross-project posture leak (node project opts out)" \
   || fail "x-4391 posture leak: $(cat "$MOCKSTATE/ask.log")"
 
@@ -562,13 +564,13 @@ echo "$out" | grep -q "session=DRY-RUN" && [[ "$(ask_count)" -eq 0 ]] \
   && pass "coverage: --dry-run previews without dispatching" \
   || fail "coverage: --dry-run wrong: $out (asks=$(ask_count))"
 
-# ---- --flags carrying no-merge does NOT double-inject it ----
+# ---- --flags carrying --no-merge does NOT double-inject it ----
 reset_mock; set_status ab-aaaa1111 ready
-bash "$DISPATCH" --flags "M no-merge" ab-aaaa1111 >/dev/null 2>&1
-nm="$(grep -o "no-merge" "$MOCKSTATE/ask.log" 2>/dev/null | wc -l | tr -d ' ')"
+bash "$DISPATCH" --flags "M --no-merge" ab-aaaa1111 >/dev/null 2>&1
+nm="$(grep -o -e "--no-merge" "$MOCKSTATE/ask.log" 2>/dev/null | wc -l | tr -d ' ')"
 [[ "$nm" -eq 1 ]] \
-  && pass "coverage: --flags '...no-merge' not double-injected (exactly one)" \
-  || fail "coverage: no-merge injected $nm times (expected 1)"
+  && pass "coverage: --flags '...--no-merge' not double-injected (exactly one)" \
+  || fail "coverage: --no-merge injected $nm times (expected 1)"
 
 # ---- --allow-merge yields a command with NO no-merge (positive assertion) ----
 reset_mock; set_status ab-aaaa1111 ready
@@ -666,7 +668,7 @@ echo "$out" | grep -q -- "--harness codex --substrate headless" \
   && pass "x-567d AC1-EDGE: dispatch resolves --harness codex --substrate headless" \
   || fail "x-567d AC1-EDGE: wrong harness/substrate: $out"
 # codex gets its NATIVE skill invocation, not a literal claude /target (P1 #1).
-echo "$out" | grep -qF "'\$fno:target no-merge ab-aaaa1111'" \
+echo "$out" | grep -qF "'\$fno:target --no-merge ab-aaaa1111'" \
   && pass "x-567d P1: codex worker gets the native \$fno:target invocation" \
   || fail "x-567d P1: codex command not \$fno:target: $out"
 # Non-claude carries NO --role build (would route Python-owned -> unknown provider; P1 #2).
@@ -680,7 +682,7 @@ echo "$out" | grep -q -- "--role build" \
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo "opencode/headless" > "$MOCKSTATE/resolve_pair"
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-if echo "$out" | grep -qF "/fno:target no-merge ab-aaaa1111" \
+if echo "$out" | grep -qF "/fno:target --no-merge ab-aaaa1111" \
    && ! echo "$out" | grep -qF "Implement footnote backlog node"; then
   pass "x-de43: opencode worker gets /fno:target (plugin palette), not a prose brief"
 else
@@ -695,7 +697,7 @@ reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo "codex/headless" > "$MOCKSTATE/resolve_pair"
 echo "/target" > "$MOCKSTATE/verb_ab-aaaa1111"
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-echo "$out" | grep -qF "'\$fno:target no-merge ab-aaaa1111'" \
+echo "$out" | grep -qF "'\$fno:target --no-merge ab-aaaa1111'" \
   && pass "x-a5e4 P1: no-merge injected into a codex \$fno:target verb-path command" \
   || fail "x-a5e4 P1: no-merge NOT injected into \$fno:target verb path: $out"
 

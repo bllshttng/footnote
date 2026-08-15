@@ -6,8 +6,9 @@ review gates, ported from bash to gh-api subprocess + native JSON parsing.
 verify --kind merged  (verify-pr-merged.sh):
     GitHub merge-state audit. Records the merge into the state-file frontmatter
     when MERGED; blocks with a specific reason when the merge cannot happen;
-    runs ONE bounded remediation (single gh pr merge --auto + single 30s poll,
-    anti-thrash) when OPEN + all-clean under remediation: attempt.
+    runs ONE bounded remediation (single merge attempt + single 30s poll,
+    anti-thrash; x-9d11: no --auto and no --delete-branch - checks enforced
+    in-process, cleanup split from the merge) when OPEN + all-clean: attempt.
     Exit 0 merged/degrade-open, 1 blocked-with-reason, 2 substrate failure.
 
 verify --kind reviews (verify-review-replies.sh):
@@ -373,6 +374,21 @@ def _failing_required(rollup: Sequence[dict]) -> List[str]:
     return failing
 
 
+def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:
+    """Post-merge remote-branch delete (x-9d11), warn-only: reuses the merge
+    verb's helper so both executors treat cleanup identically and neither can
+    fail its merge with a cleanup result."""
+    if not getattr(auto_merge, "delete_branch_on_merge", False):
+        return
+    from fno.pr import _merge as _merge_mod
+
+    note = _merge_mod._post_merge_remote_delete(int(pr_number), cwd, auto_merge)
+    if note:
+        sys.stderr.write(
+            f"verify-pr-merged: post-merge cleanup {note} (non-fatal)\n"
+        )
+
+
 def _bounded_remediation(
     pr_number: str, state_file: str, cwd: str, repo_root: str, sleep_fn
 ) -> int:
@@ -405,12 +421,31 @@ def _bounded_remediation(
 
     auto_merge = _auto_merge()
     strategy = auto_merge.merge_strategy
-    cmd = ["gh", "pr", "merge", pr_number, f"--{strategy}", "--auto"]
-    # Third of the three sites that build this argv, after `_do_merge` and
-    # `finalize::arm_auto_merge`. All three now read both keys, so a repo that
-    # keeps its branches gets the same treatment whichever path merges the PR.
-    if auto_merge.delete_branch_on_merge:
-        cmd.append("--delete-branch")
+    cmd = ["gh", "pr", "merge", pr_number, f"--{strategy}"]
+    # x-9d11: no --auto (one arming path - finalize owns the queue; an executor
+    # reads the checks and merges green itself) and no --delete-branch (gh's
+    # local delete is the worktree false-failure shape). require_checks_pass is
+    # enforced here with the shared verdict helper, head-pinned like _do_merge.
+    if auto_merge.require_checks_pass:
+        from fno.pr import _merge as _merge_mod
+
+        verdict, _counts, head_read = _merge_mod._checks_verdict(pr_number, cwd)
+        if verdict != "green":
+            _emit_audit(
+                repo_root,
+                state_file,
+                pr_number,
+                "merge_attempt_did_not_complete",
+                {"checks": verdict},
+            )
+            sys.stdout.write(
+                f"merge_attempt_did_not_complete: PR #{pr_number} checks are "
+                f"{verdict}; require_checks_pass forbids merging without green "
+                f"(retry when green)\n"
+            )
+            return 1
+        if head_read:
+            cmd += ["--match-head-commit", head_read]
     res = run(cmd, cwd=cwd)
     gh_stderr = res.stderr or ""
     if res.ok:
@@ -421,6 +456,7 @@ def _bounded_remediation(
             if state == "MERGED":
                 merged_at = (pr_json or {}).get("mergedAt") or ""
                 _record_merge(state_file, pr_number, merged_at)
+                _remote_delete_cleanup(pr_number, cwd, auto_merge)
                 sys.stdout.write(f"verify-pr-merged: PR #{pr_number} MERGED at {merged_at}\n")
                 return 0
             if attempt == 0:
@@ -431,7 +467,7 @@ def _bounded_remediation(
         )
         sys.stdout.write(
             f"merge_attempt_did_not_complete: PR #{pr_number} still "
-            f"{(pr_json or {}).get('state') or ''} after gh pr merge --auto + 30s poll\n"
+            f"{(pr_json or {}).get('state') or ''} after merge attempt + 30s poll\n"
         )
         return 1
 
@@ -448,6 +484,7 @@ def _bounded_remediation(
     if (pr_json or {}).get("state") == "MERGED":
         merged_at = (pr_json or {}).get("mergedAt") or ""
         _record_merge(state_file, pr_number, merged_at)
+        _remote_delete_cleanup(pr_number, cwd, auto_merge)
         sys.stdout.write(f"verify-pr-merged: PR #{pr_number} MERGED at {merged_at}\n")
         return 0
     # The re-read itself failed (`_fetch_pr_state` returns None on a gh error or

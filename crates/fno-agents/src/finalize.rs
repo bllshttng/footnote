@@ -2215,7 +2215,10 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
                     "finalize: PR {number} already merged (another path landed it); \
                      nothing to arm - auto-merge goal already met"
                 );
-                return (true, Some("already merged".to_string()));
+                // Not a withheld: the goal is met, so no blocked_reason. The
+                // tuple's second slot is `auto_merge_blocked_reason`, and a
+                // success-shaped note there would read as withheld in the event.
+                return (true, None);
             }
             eprintln!(
                 "finalize: auto-merge arm failed for PR {number} with --{strategy} \

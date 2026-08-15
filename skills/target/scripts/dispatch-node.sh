@@ -143,13 +143,16 @@ resolve_node_posture() {
   [[ "$am" == "true" ]] && printf '1' || printf '0'
 }
 
-# x-4391: remove a single standalone `no-merge` token from a /target-family
+# x-4391: remove the standalone merge-refusal flag from a /target-family
 # command under allow posture. The resolver builtin (_AUTONOMOUS_COMMAND) and
-# config.dispatch.command can bake `no-merge` into the resolved command, so
+# config.dispatch.command can bake the refusal into the resolved command, so
 # skipping injection alone would leave it live and make auto_merge=true silently
-# dead. Space-delimited replacement (AC1-EDGE: never a substring - a pathological
-# id like `no-merger-x` is untouched); guarded to /target|$fno:target so a
-# non-/target command or a prose brief's text is never mangled.
+# dead. Both spellings are stripped: the `--no-merge` flag (the carrier since
+# free text stopped being a control input) and the legacy bare `no-merge` token
+# an old config template can still carry. Space-delimited replacement
+# (AC1-EDGE: never a substring - a pathological id like `no-merger-x` is
+# untouched); guarded to /target|$fno:target so a non-/target command or a
+# prose brief's text is never mangled.
 strip_no_merge() {
   local cmd="$1"
   case "$cmd" in
@@ -157,7 +160,8 @@ strip_no_merge() {
     *) printf '%s' "$cmd"; return ;;
   esac
   local padded=" $cmd "
-  padded="${padded/ no-merge / }"            # first standalone token only
+  padded="${padded/ --no-merge / }"          # first standalone flag only
+  padded="${padded/ no-merge / }"            # then the legacy bare token
   padded="${padded#"${padded%%[![:space:]]*}"}"   # ltrim the pad
   padded="${padded%"${padded##*[![:space:]]}"}"   # rtrim the pad
   printf '%s' "$padded"
@@ -687,8 +691,8 @@ for id in "${NODES[@]}"; do
       rest="${tgt_cmd#"$tgt_prefix"}"
       inject=""
       [[ -n "$FLAGS" ]] && inject="$FLAGS "
-      if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" no-merge "* && " $rest " != *" no-merge "* ]]; then
-        inject="${inject}no-merge "
+      if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" --no-merge "* && " $rest " != *" --no-merge "* ]]; then
+        inject="${inject}--no-merge "
       elif [[ "$node_allow_merge" -eq 1 ]]; then
         # allow posture: strip a resolver-/template-baked no-merge from rest. A
         # no-merge in --flags is per-run explicit (rung 1) and rides in $inject,
@@ -699,12 +703,13 @@ for id in "${NODES[@]}"; do
       tgt_cmd="${tgt_prefix}${inject}${rest}"
     fi
   elif [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
-    # claude native /target, built locally: /target [FLAGS] [no-merge] <id>
-    # (Locked Decision 4; --allow-merge opts out). Byte-identical to before.
+    # claude native /target, built locally: /target [FLAGS] [--no-merge] <id>
+    # (Locked Decision 4; --allow-merge opts out). The flag, never the bare
+    # token: free text is not a control input at the init fold.
     tgt_cmd="/target"
     [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
-    if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" no-merge "* ]]; then
-      tgt_cmd="$tgt_cmd no-merge"
+    if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" --no-merge "* ]]; then
+      tgt_cmd="$tgt_cmd --no-merge"
     fi
     tgt_cmd="$tgt_cmd $id"
   elif [[ -n "$DISPATCH_COMMAND" ]]; then

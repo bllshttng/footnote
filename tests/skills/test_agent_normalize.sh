@@ -83,7 +83,7 @@ fi
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" NODE_SLUG_RESOLVER="$STUB_SLUG" bash "$NORM" --input "ab-deadbeef" --provider claude)"
 if [[ "$(field "$OUT" node)" == "ab-deadbeef" ]] \
    && [[ "$(field "$OUT" name)" == "spawn-ab-deadbeef-dashless-spawn" ]] \
-   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef no-merge" ]]; then
+   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef --no-merge" ]]; then
   pass "AC4-EDGE node id -> node captured + spawn-<full-id>-<slug> name + /target message"
 else
   fail "AC4-EDGE node derivation: $OUT"
@@ -154,18 +154,18 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/check-pr 
 # The advertised plugin-qualified spelling is already namespaced. Codex swaps
 # the surface marker only; it must not double-prefix the skill name.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "/fno:target x-81ad")"
-[[ "$(field "$OUT" message)" == '$fno:target x-81ad no-merge' ]] \
+[[ "$(field "$OUT" message)" == '$fno:target x-81ad --no-merge' ]] \
   && pass "codex qualified passthrough stays single-prefixed" \
   || fail "codex qualified passthrough idempotency: $OUT"
 
-# --- explicit /target ... keeps no-merge default applied once (idempotent) ---
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/target L ab-deadbeef no-merge")"
-[[ "$(field "$OUT" message)" == "/target L ab-deadbeef no-merge" ]] && pass "explicit /target no-merge not duplicated" || fail "idempotent no-merge: $OUT"
+# --- explicit /target ... keeps --no-merge default applied once (idempotent) ---
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/target L ab-deadbeef --no-merge")"
+[[ "$(field "$OUT" message)" == "/target L ab-deadbeef --no-merge" ]] && pass "explicit /target --no-merge not duplicated" || fail "idempotent --no-merge: $OUT"
 
 # --- explicit /target command exposes its node id (so it gets validated) -----
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/target ab-deadbeef")"
 [[ "$(field "$OUT" node)" == "ab-deadbeef" ]] && pass "node extracted from explicit /target command" || fail "node-in-/target: $OUT"
-OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/target L ab-deadbeef no-merge")"
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/target L ab-deadbeef --no-merge")"
 [[ "$(field "$OUT" node)" == "ab-deadbeef" ]] && pass "node extracted from /target with size+flags" || fail "node-in-/target flags: $OUT"
 # A non-/target explicit command carries no node (no spurious extraction).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "/check-pr 42")"
@@ -277,7 +277,7 @@ fi
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider codex --input "ab-deadbeef")"
 MSG="$(field "$OUT" message)"
 if [[ "$(field "$OUT" payload_mode)" == "build" ]] \
-   && [[ "$MSG" == '$fno:target ab-deadbeef no-merge' ]]; then
+   && [[ "$MSG" == '$fno:target ab-deadbeef --no-merge' ]]; then
   pass "build: codex node -> \$fno:target + no-merge (native skill)"
 else
   fail "codex node build: $OUT"
@@ -285,8 +285,8 @@ fi
 
 # agy is also a slash surface (like claude): native /target, not a prose brief.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider agy --input "ab-deadbeef")"
-if [[ "$(field "$OUT" message)" == "/target ab-deadbeef no-merge" ]]; then
-  pass "build: agy -> /target + no-merge (slash surface)"
+if [[ "$(field "$OUT" message)" == "/target ab-deadbeef --no-merge" ]]; then
+  pass "build: agy -> /target + --no-merge (slash surface)"
 else
   fail "agy build: $OUT"
 fi
@@ -310,8 +310,8 @@ OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" PATH="$FBIN:$PATH" bash "$NORM" 
 # claude build is unchanged: /target wrap + no-merge (payload_mode=build).
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "ab-deadbeef")"
 if [[ "$(field "$OUT" payload_mode)" == "build" ]] \
-   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef no-merge" ]]; then
-  pass "build: claude -> /target + no-merge (unchanged)"
+   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef --no-merge" ]]; then
+  pass "build: claude -> /target + --no-merge"
 else
   fail "claude build unchanged: $OUT"
 fi
@@ -319,10 +319,10 @@ fi
 # claude passthrough that is a /target command still gets no-merge.
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --provider claude --input "/target ab-deadbeef")"
 if [[ "$(field "$OUT" payload_mode)" == "passthrough" ]] \
-   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef no-merge" ]]; then
-  pass "passthrough: claude /target -> no-merge injected"
+   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef --no-merge" ]]; then
+  pass "passthrough: claude /target -> --no-merge injected"
 else
-  fail "claude /target passthrough no-merge: $OUT"
+  fail "claude /target passthrough --no-merge: $OUT"
 fi
 
 # ===========================================================================
@@ -336,7 +336,7 @@ ENDASH=$(printf '\342\200\223')   # U+2013
 OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "ab-deadbeef" --provider claude "${EMDASH}yes")"
 if [[ "$(field "$OUT" status)" == "ok" ]] \
    && [[ "$(field "$OUT" yes)" == "1" ]] \
-   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef no-merge" ]] \
+   && [[ "$(field "$OUT" message)" == "/target ab-deadbeef --no-merge" ]] \
    && [[ "$(field "$OUT" message)" != *"yes"* ]]; then
   pass "AC1-HP em-dash argv flag -> --yes canonicalized (yes=1, no flag text in message)"
 else
@@ -485,7 +485,7 @@ OUT="$(norm_gen 'x-2aad bg')"
 if [[ "$(field "$OUT" node)" == "x-2aad" ]] \
    && [[ "$(field "$OUT" payload_mode)" == "build" ]] \
    && [[ "$(field "$OUT" substrate)" == "bg" ]] \
-   && [[ "$(field "$OUT" message)" == "/target x-2aad no-merge" ]]; then
+   && [[ "$(field "$OUT" message)" == "/target x-2aad --no-merge" ]]; then
   pass "configured-prefix id builds via /target"
 else
   fail "configured-prefix build: $OUT"

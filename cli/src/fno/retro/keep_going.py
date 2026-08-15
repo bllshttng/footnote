@@ -173,8 +173,8 @@ def _dispatch_think(node_id: str, cwd: Optional[str]) -> bool:
 
 
 def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
-    """Fire-and-forget bg ``/target <node> no-merge`` worker (the next loop
-    iteration). ``no-merge`` because an autonomous worker lands a PR for review,
+    """Fire-and-forget bg ``/target --no-merge <node>`` worker (the next loop
+    iteration). ``--no-merge`` because an autonomous worker lands a PR for review,
     never an auto-merge. Mirrors ``spawn_think._spawn_think_worker``: the slash
     command rides as the prompt, ``--substrate bg`` is the detached claude thread
     (never ``-p``). Returns True on a spawn receipt (a short_id), False otherwise.
@@ -194,7 +194,7 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
         cmd += ["--cwd", cwd]
     else:
         cmd += ["--fresh"]
-    cmd += ["--name", name, f"/target {node_id} no-merge"]
+    cmd += ["--name", name, f"/target --no-merge {node_id}"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except Exception as exc:  # noqa: BLE001 - spawn failure is never fatal
