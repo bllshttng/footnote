@@ -328,18 +328,13 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
                 Ok(()) => Ok(()),
                 Err(m) => Err(BootErr::new(
                     1,
-                    format!(
-                        "uv reported success but the install does not verify: {m}"
-                    ),
+                    format!("uv reported success but the install does not verify: {m}"),
                 )),
             };
         }
         last_code = out.status.code().unwrap_or(1);
         if !stderr_is_enotempty(&stderr) || attempt == INSTALL_ATTEMPTS {
-            return Err(BootErr::new(
-                last_code,
-                install_failure_message(source),
-            ));
+            return Err(BootErr::new(last_code, install_failure_message(source)));
         }
         // Give the racing importer a moment to finish its pass before the
         // next removal walk starts under it.
@@ -1199,8 +1194,12 @@ mod tests {
         // Near-misses that must NOT retry: wrong errno, no errno, unrelated.
         assert!(!stderr_is_enotempty("Directory not empty (os error 39)"));
         assert!(!stderr_is_enotempty("Directory not empty"));
-        assert!(!stderr_is_enotempty("error: failed to remove directory: os error 66"));
-        assert!(!stderr_is_enotempty("No solution found when resolving dependencies"));
+        assert!(!stderr_is_enotempty(
+            "error: failed to remove directory: os error 66"
+        ));
+        assert!(!stderr_is_enotempty(
+            "No solution found when resolving dependencies"
+        ));
     }
 
     #[test]
@@ -1227,7 +1226,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let tool_dir = root.join("tools");
         fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
-        fs::create_dir_all(tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__")).unwrap();
+        fs::create_dir_all(tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__"))
+            .unwrap();
         fs::write(
             tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__/x.pyc"),
             "",
