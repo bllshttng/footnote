@@ -23,7 +23,7 @@ The implementation is a Python package (`cli/src/fno/pr_watch/`) split along a p
 ### One poll cycle (a tick)
 
 1. **Normalize and sweep tracked state.** Watermark keys normalize to `owner/repo#number`. A bare-number key collapses into its unique qualified twin. An ambiguous bare key is discarded. Every tracked record is then re-read from GitHub. Parked, merge-dispatched, and graph-orphaned records are included. The read is one batched query per repository. A record GitHub reports MERGED or CLOSED is evicted on that tick. A failed read is named in the receipt. A remembered OPEN is never preserved as current truth. The heartbeat names swept and dropped records with matching counts.
-2. **Discover open PRs** from the global graph: backlog nodes with no `completed_at` carrying a `pr_number`. Each node's own `cwd` field resolves its local checkout; a PR whose repo is not checked out locally is skipped (a headless skill needs a working tree).
+2. **Discover open PRs** from the global graph: backlog nodes with no `completed_at` carrying a `pr_number`. Each node's own `cwd` field resolves its local checkout. A PR whose repo is not checked out locally is skipped. A headless skill needs a working tree.
 3. **Read PR state** per PR with `gh` (state + reviews/comments, handling the `[bot]` login suffix).
 4. **Decide** (at most one action per PR per tick), in precedence order:
    - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno pr ritual <n> --autonomous` (warm-inject into the live origin if reachable, else the cold subprocess). The verb owns its own conditional headless judgment leg. The watcher adds no model layer of its own and creates no background thread.
