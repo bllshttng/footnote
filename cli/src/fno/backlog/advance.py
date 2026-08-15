@@ -1139,7 +1139,14 @@ def _spawn_worker(
     # here too, so `--provider <harness>` selects the CLI while extra_env selects
     # the account (x-0676; --provider never carries a record id).
     merged_env = {**spawn_env, **(extra_env or {})}
-    run_env = {**os.environ, **merged_env} if merged_env else None
+    # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so the
+    # inherited TARGET_NO_MERGE never survives into a successor the resolver just
+    # granted allow-merge (this verb runs as a subprocess of the prior no-merge
+    # worker, whose exported carrier would otherwise silently kill the config's
+    # auto-merge posture - review round 5). Dropped from the base BEFORE the
+    # merge so the resolver's own value (either way) is the only one that lands.
+    base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
+    run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )

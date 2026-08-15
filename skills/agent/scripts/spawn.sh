@@ -411,6 +411,7 @@ cmd+=(--name "$NAME")
 # layer). The flag stays the attributable carrier; the env is the backstop.
 case " $MESSAGE " in
   *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
+  *) unset TARGET_NO_MERGE 2>/dev/null || true ;;  # message is authoritative; an inherited carrier must not outlive it
 esac
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"

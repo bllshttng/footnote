@@ -687,14 +687,17 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     """
     if not getattr(auto_merge, "delete_branch_on_merge", False):
         return ""
+    # Tab separator: a nameWithOwner never contains one, and a NULL
+    # headRepository (deleted fork repo) renders as an EMPTY field rather than
+    # collapsing the columns together the way a space join would.
     ref = _gh(
         ["pr", "view", str(pr_number), "--json",
          "headRefName,headRepository,baseRepository",
-         "-q", '.headRefName + " " + (.headRepository.nameWithOwner // "") '
-              '+ " " + (.baseRepository.nameWithOwner // "")'],
+         "-q", r'.headRefName + "\t" + (.headRepository.nameWithOwner // "") '
+              r'+ "\t" + (.baseRepository.nameWithOwner // "")'],
         repo,
     )
-    fields = ref.stdout.strip().split(" ") if ref.ok else []
+    fields = ref.stdout.strip().split("\t") if ref.ok else []
     branch = fields[0] if fields else ""
     if not branch:
         return f"failed: remote branch name unreadable: {(ref.stderr or '').splitlines()[0][:120] if ref.stderr.strip() else 'no error output'}"
@@ -702,12 +705,13 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     base_repo = fields[2] if len(fields) > 2 else ""
     # A fork PR's head branch lives on the fork, not on this repo's origin:
     # `git push origin --delete <branch>` would delete an unrelated SAME-NAMED
-    # branch on the base repo (or error on a nonexistent one). Skip forks;
-    # same-repo branches only.
-    if head_repo and base_repo and head_repo != base_repo:
+    # branch on the base repo (or error on a nonexistent one). Delete only on a
+    # POSITIVE same-repo confirmation; a fork, an unreadable repo pair, or a
+    # deleted head repo all skip (fail safe).
+    if not (head_repo and base_repo and head_repo == base_repo):
         sys.stderr.write(
             f"pr-merge: skipping remote branch delete for PR #{pr_number}: "
-            f"head {head_repo} is a fork of {base_repo}\n"
+            f"head repo {head_repo or '<unreadable>'} is not {base_repo or '<the base repo>'} (fork or deleted head repo)\n"
         )
         return ""
     res = _git(["push", "origin", "--delete", branch], repo)

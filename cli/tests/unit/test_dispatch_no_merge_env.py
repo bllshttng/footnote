@@ -41,3 +41,17 @@ def test_merge_allowed_command_has_no_env_refusal():
         trigger="autonomous",
     )
     assert "TARGET_NO_MERGE" not in dispatch["env"]
+
+
+def test_prose_template_mentioning_no_merge_stays_literal():
+    """A non-slash prose template passes through literally: rewriting its
+    words would turn a sentence into a merge posture (review round 5)."""
+    dispatch = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="Discuss the no-merge rollout plan for {id}",
+        trigger="autonomous",
+    )
+    assert "no-merge" in dispatch["command"]
+    assert "--no-merge" not in dispatch["command"]
+    assert "TARGET_NO_MERGE" not in dispatch["env"]

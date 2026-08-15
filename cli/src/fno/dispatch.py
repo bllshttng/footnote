@@ -591,6 +591,18 @@ def _dispatch_one(
     # x-9d11 mechanical refusal carrier: the flag in the message is the
     # attributable carrier; the pane env is the backstop, so a worker that
     # never passes the flag through still folds the refusal at init.
+    if not message:
+        # _cutover_command's contract: empty = stage nothing. An unresolvable
+        # target command must never spawn a billed pane with an empty prompt
+        # (review round 5) - release both holds so the node stays grabbable.
+        release_lane_slot(node_id)
+        release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
+        return {
+            "outcome": "failed",
+            "node": node_id,
+            "slug": slug or "",
+            "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
+        }
     if "--no-merge" in message:
         provenance["TARGET_NO_MERGE"] = "1"
     try:

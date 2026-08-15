@@ -81,10 +81,11 @@ class FakeRun:
                     # "false"/"null" not (jq prints null, not empty).
                     return Result(0, self.auto_merge_request + "\n", "")
                 if "headRefName" in cmd[-1] and "headRepository" in cmd[-1]:
-                    # x-9d11 fork guard: jq renders "branch headRepo baseRepo".
+                    # x-9d11 fork guard: jq renders "branch\theadRepo\tbaseRepo"
+                    # (tab separators; an empty head repo = deleted fork).
                     return Result(
                         0,
-                        f"{self.head_ref} {self.head_repo} {self.base_repo}\n",
+                        f"{self.head_ref}\t{self.head_repo}\t{self.base_repo}\n",
                         "",
                     )
                 if cmd[-1] == ".headRefName":
@@ -1183,6 +1184,30 @@ def test_fork_pr_skips_remote_delete(
     obj = _last_json(capsys)
     assert obj["outcome"] == "merged"
     assert obj.get("cleanup", "") == ""
+    assert not [c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]]
+
+
+def test_deleted_fork_head_repo_skips_remote_delete(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """A null headRepository (deleted fork repo) renders as an empty field:
+    the guard must still skip - never fall through to a delete against the
+    base repo's origin."""
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+    )
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        head_repo="",
+        base_repo="owner/repo",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys).get("cleanup", "") == ""
     assert not [c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]]
 
 
