@@ -110,11 +110,45 @@ def _drive_peer(repo: Path) -> None:
 
 
 def _drive_code_review(repo: Path) -> None:
-    """Feed the PostToolUse(ReportFindings) hook the exact clean-pass payload
-    the harness sends: an empty findings array is "no finding survived
-    verification" - the harness-documented clean-pass signal."""
+    """Feed the SubagentStop trigger the exact clean-pass shape the harness
+    actually produces for a Skill-tool self-invocation of `/code-review`.
+
+    `Skill(skill="code-review", ...)` runs the skill as a FORKED subagent
+    (confirmed live by running this PR's own `/code-review medium --fix`
+    self-review, x-e97b): inside a fork the skill's own instructions forbid
+    calling ReportFindings ("this review's output contract is the JSON
+    block above"), so the PostToolUse(ReportFindings) surface below is
+    reachable on some invocation shapes but NOT this one - the one the
+    ship-and-promise self-review instruction actually drives. This is the
+    primary driver; test_report_findings_path_also_emits below covers the
+    other reachable path.
+    """
     payload = json.dumps(
         {
+            "hook_event_name": "SubagentStop",
+            "description": "/code-review medium --fix",
+            "last_assistant_message": "## Review findings\n\n```json\n[]\n```\n",
+            "cwd": str(repo),
+        }
+    )
+    r = subprocess.run(
+        ["bash", str(_HOOK)],
+        input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_report_findings_path_also_emits(tmp_path: Path) -> None:
+    """The OTHER reachable path: a foreground pass that does call
+    ReportFindings directly. A guard on only one of the two paths that can
+    produce a clean code-review verdict is decorative (AGENTS.md pitfalls
+    corpus) - this is the second path, not a duplicate of the SubagentStop
+    driver above."""
+    repo = _temp_git_repo(tmp_path)
+    head = _head(repo)
+    payload = json.dumps(
+        {
+            "hook_event_name": "PostToolUse",
             "tool_name": "ReportFindings",
             "tool_input": {"findings": []},
             "cwd": str(repo),
@@ -125,6 +159,52 @@ def _drive_code_review(repo: Path) -> None:
         input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
+    events = [e for e in _events(repo) if e.get("type") == "review_attestation"]
+    assert len(events) == 1, events
+    assert events[0]["data"]["reviewer"] == "code-review"
+    assert events[0]["data"]["head_sha"] == head
+
+
+def test_subagent_stop_ignores_a_non_code_review_description(tmp_path: Path) -> None:
+    """A SubagentStop from an unrelated subagent must never attest - the
+    description match is the ONLY thing standing between this hook and
+    attesting on someone else's forked task."""
+    repo = _temp_git_repo(tmp_path)
+    payload = json.dumps(
+        {
+            "hook_event_name": "SubagentStop",
+            "description": "some other subagent task",
+            "last_assistant_message": "```json\n[]\n```",
+            "cwd": str(repo),
+        }
+    )
+    r = subprocess.run(
+        ["bash", str(_HOOK)],
+        input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert _events(repo) == []
+
+
+def test_subagent_stop_with_findings_emits_nothing(tmp_path: Path) -> None:
+    repo = _temp_git_repo(tmp_path)
+    payload = json.dumps(
+        {
+            "hook_event_name": "SubagentStop",
+            "description": "/code-review medium --fix",
+            "last_assistant_message": (
+                '## Review findings\n\n```json\n[{"file": "a.py", "summary": "x", '
+                '"failure_scenario": "y"}]\n```\n'
+            ),
+            "cwd": str(repo),
+        }
+    )
+    r = subprocess.run(
+        ["bash", str(_HOOK)],
+        input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert _events(repo) == []
 
 
 _SURFACES = {
@@ -169,6 +249,7 @@ def test_a_non_empty_findings_report_emits_nothing() -> None:
         repo = _temp_git_repo(Path(td))
         payload = json.dumps(
             {
+                "hook_event_name": "PostToolUse",
                 "tool_name": "ReportFindings",
                 "tool_input": {
                     "findings": [{"file": "a.py", "summary": "x", "failure_scenario": "y"}]
@@ -189,7 +270,14 @@ def test_a_different_tool_report_emits_nothing() -> None:
 
     with tempfile.TemporaryDirectory() as td:
         repo = _temp_git_repo(Path(td))
-        payload = json.dumps({"tool_name": "Read", "tool_input": {}, "cwd": str(repo)})
+        payload = json.dumps(
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Read",
+                "tool_input": {},
+                "cwd": str(repo),
+            }
+        )
         r = subprocess.run(
             ["bash", str(_HOOK)],
             input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
