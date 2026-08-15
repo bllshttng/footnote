@@ -174,7 +174,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # orphan, linking a revived session to its node. Set by the Rust adopt verb from
 # the matched target manifest; None otherwise. Same additive-optional shape and
 # forward-compat rationale as v12.
-SCHEMA_VERSION = 13
+# v14 (x-e21e): additive `delivery_policy` - a recipient's mail delivery
+# policy ("bus-only": never prompt-line inject, always durable bus). Same
+# additive-optional shape and same forward-compat rationale as v12/v13: asdict
+# emits the key on every written row, so a pre-v14 reader must reject the
+# store rather than TypeError on the unknown kwarg.
+SCHEMA_VERSION = 14
 
 
 class RegistryVersionError(RuntimeError):
@@ -373,6 +378,18 @@ class AgentEntry:
     # linkage only; never read for liveness or ownership. Rust mirrors it as
     # additive-optional passthrough so the daemon's read-modify-write keeps it.
     fno_id: Optional[str] = None
+    # v14 (x-e21e): this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
+    # mail to this session never prompt-line injects and always takes the
+    # durable bus (the recipient surfaces it at its turn boundary via
+    # ``fno mail notify-self``); ``None`` is the default injectable policy every
+    # worker keeps. A DELIVERY-POLICY fact, never a liveness verdict - the same
+    # distinction that renamed NOT_INJECTABLE off "not-live"
+    # (crates/fno-agents/src/mail_inject.rs): a bus-only session may be alive
+    # and mid-turn, it just belongs on the bus. Stamped by the session itself
+    # (``fno agents register --delivery-policy bus-only``); Rust's RegistryEntry
+    # mirrors it as additive-optional passthrough so the daemon's
+    # read-modify-write keeps it.
+    delivery_policy: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:

@@ -91,7 +91,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // (recoverable even if the worktree moves). Same X3 passthrough rationale: a
 // Python-only field would be dropped on the daemon's read-modify-write.
 // Accepted set widens to 1..=13.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 13;
+//
+// v14 (x-e21e) adds `delivery_policy` - a recipient's mail delivery policy
+// ("bus-only": never prompt-line inject, always the durable bus). A
+// DELIVERY-POLICY fact, never a liveness verdict (mail_inject.rs documents the
+// not-live misnomer that misled readers twice). Same X3 passthrough rationale:
+// a Python-only field would be dropped on the daemon's read-modify-write.
+// Accepted set widens to 1..=14.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 14;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -536,6 +543,18 @@ pub struct RegistryEntry {
     /// claim and the manifest). Same X3 passthrough as `route_settings_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fno_id: Option<String>,
+    /// Mail delivery policy (x-e21e, v14): `Some("bus-only")` means mail to
+    /// this recipient never prompt-line injects and always takes the durable
+    /// bus; `None` is the default injectable policy every worker keeps. A
+    /// DELIVERY-POLICY fact, never a liveness verdict - the same distinction
+    /// that renamed `NOT_INJECTABLE` off "not-live" (`mail_inject.rs`): a
+    /// bus-only session may be alive and mid-turn, it just belongs on the bus.
+    /// Stamped by the session itself via `fno agents register
+    /// --delivery-policy bus-only`; the Python-side send path is the reader and
+    /// the gate. Same X3 passthrough as `fno_id`: without this mirror the
+    /// daemon's read-modify-write would drop a Python-stamped policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_policy: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1394,6 +1413,7 @@ mod tests {
             crown_grantor: None,
             route_settings_path: None,
             fno_id: None,
+            delivery_policy: None,
             legacy_claude_short_id: None,
         }
     }
@@ -1880,6 +1900,36 @@ mod tests {
     }
 
     #[test]
+    fn delivery_policy_survives_a_daemon_read_modify_write() {
+        // v14 (x-e21e): Python stamps the policy at register time and the
+        // Python send path gates on it. The daemon touches the same rows, so if
+        // it dropped this field on write-back the gate would silently revert a
+        // bus-only recipient to injectable - the defect again, one daemon tick
+        // later. Same passthrough assertion shape as route_settings_path (v12).
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("leader"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        // (a) An unmarked row OMITS the key (Python's AgentEntry(**row) gains
+        // no unexpected kwarg; every worker keeps the default policy).
+        assert!(wire["agents"][0].get("delivery_policy").is_none());
+
+        // (b) A pre-v14 row (key absent) reads as no-policy, not corrupt.
+        let reg: Registry = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(reg.entries[0].delivery_policy, None);
+
+        // (c) The daemon must re-emit a stamped policy, not drop it.
+        wire["agents"][0]["delivery_policy"] = serde_json::Value::from("bus-only");
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(reg.entries[0].delivery_policy.as_deref(), Some("bus-only"));
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            back["agents"][0]["delivery_policy"], "bus-only",
+            "the daemon must re-emit a Python-stamped delivery policy, not drop it"
+        );
+    }
+
+    #[test]
     fn screen_state_cross_language_round_trip_parity() {
         // v7: the additive `screen_state` verdict must round-trip both
         // directions across the Rust<->Python registry boundary, exactly like
@@ -2213,7 +2263,7 @@ mod tests {
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":15,"agents":[]}"#).unwrap();
         assert!(
             load_registry(&path).is_ok(),
             "a newer writer must not brick this reader"
@@ -2236,7 +2286,7 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":14,"agents":[
+            r#"{"schema_version":15,"agents":[
                 {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
                  "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
                 {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
@@ -2262,7 +2312,7 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":14,"agents":[
+            r#"{"schema_version":15,"agents":[
                 {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
                  "status":{"state":"live","since":1},"created_at":"2026-01-01T00:00:00Z"},
                 {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
@@ -2286,7 +2336,7 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":13,"agents":[
+            r#"{"schema_version":14,"agents":[
                 {"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
                  "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}
             ]}"#,
@@ -2303,12 +2353,12 @@ mod tests {
         let dir = tmpdir("version-write-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        let newer = r#"{"schema_version":14,"agents":[]}"#;
+        let newer = r#"{"schema_version":15,"agents":[]}"#;
         std::fs::write(&path, newer).unwrap();
 
         match update_registry(&path, |reg| reg.entries.clear()) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 14);
+                assert_eq!(found, 15);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
