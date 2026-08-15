@@ -448,7 +448,7 @@ def _bounded_remediation(
         return 1
 
     if auto_merge.require_checks_pass:
-        verdict, _counts, head_read = _merge_mod._checks_verdict(pr_number, cwd)
+        verdict, _counts, head_read = _merge_mod._checks_verdict(int(pr_number), cwd)
         if verdict != "green":
             _emit_audit(
                 repo_root,
