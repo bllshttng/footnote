@@ -538,10 +538,12 @@ def check_verification_evidence(
                 allow_equivalent
                 and not decision["satisfied"]
                 and not discovery_errors
-                # A failed verdict for HEAD itself is authoritative: the same
-                # patches can fail against a newer main, so an older green for
-                # a patch-equal ancestor must never override a fresh red.
-                and decision.get("result") != "failed"
+                # A failed or still-running verdict for HEAD itself is
+                # authoritative: the same patches can fail against a newer
+                # main, so an older green for a patch-equal ancestor must
+                # never override a fresh red, and an unfinished attempt
+                # (result "pending") deserves the same protection.
+                and decision.get("result") not in ("failed", "pending")
                 # The strict path refuses on incomplete coverage; equivalence
                 # must not relax that (malformed lines, unreadable journals).
                 and decision["coverage"].get("complete")
@@ -571,12 +573,14 @@ def _patch_identity(
     """Sorted patch identity of the commits ``sha`` adds over its merge-base.
 
     ``None`` on any failure (unresolvable ref, git error, empty id set); None
-    never matches anything, so every failure mode refuses. Two keys must both
-    match: stable patch ids (a rebase preserves them, a conflict resolution
-    changes them) and the cumulative ``git diff --raw`` blob lines over the
-    same range. The blob lines are load-bearing: patch-id strips whitespace,
-    so without them a re-indent that changes Python semantics would hash
-    identically.
+    never matches anything, so every failure mode refuses. The key is
+    ``git patch-id --verbatim`` over ``merge-base..sha``: verbatim ids survive
+    a clean rebase (line numbers and base-side context outside the hunks are
+    normalized away) while counting whitespace, so a re-indent that changes
+    Python semantics hashes differently. The default ``--stable`` strips
+    whitespace and would hash a re-indent identically to the original. A git
+    older than 2.45 lacks ``--verbatim`` and the call fails into ``None``,
+    which refuses rather than falling back to the weaker key.
     """
     try:
         mb = _git(["merge-base", base_ref, sha], cwd)
@@ -585,11 +589,8 @@ def _patch_identity(
         log = _git(["log", "--no-merges", "-p", f"{mb.stdout.strip()}..{sha}"], cwd)
         if log.returncode != 0:
             return None
-        ids = run(["git", "patch-id", "--stable"], cwd=cwd, input_text=log.stdout)
+        ids = run(["git", "patch-id", "--verbatim"], cwd=cwd, input_text=log.stdout)
         if ids.returncode != 0:
-            return None
-        raw = _git(["diff", "--raw", "--no-abbrev", mb.stdout.strip(), sha], cwd)
-        if raw.returncode != 0:
             return None
     except ToolMissing:
         return None
@@ -598,9 +599,6 @@ def _patch_identity(
         parts = line.split()
         if parts:
             found.add(f"patch-id:{parts[0]}")
-    for line in raw.stdout.splitlines():
-        if line.startswith(":"):
-            found.add(f"blob:{line}")
     return tuple(sorted(found)) or None
 
 
@@ -682,7 +680,7 @@ def rebase_equivalent_evidence(
                     "coverage": {
                         **decision.get("coverage", {}),
                         "matched_sha": sha,
-                        "equivalence": "patch-id+blob",
+                        "equivalence": "patch-id-verbatim",
                     },
                 }
     return None

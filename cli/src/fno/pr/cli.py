@@ -178,8 +178,8 @@ def base_lineage_check(
         "Require a newest exact-HEAD full/passed verification receipt across "
         "project, global, and known delivery-root event journals. "
         "--allow-rebase-equivalent also accepts a full/passed receipt for an "
-        "earlier commit whose patch ids and file blobs match HEAD (a rebase "
-        "with no code change; never a rescue of a failed receipt for HEAD "
+        "earlier commit whose verbatim patch ids match HEAD (a rebase with no "
+        "code change; never a rescue of a failed or pending receipt for HEAD "
         "itself); review entry opts in, the attestation reuse path never does."
     ),
 )
