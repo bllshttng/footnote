@@ -154,6 +154,8 @@ def emit_paths_sh(*, use_defaults: bool = False) -> str:
     lines.append(f"export WORKTREES_BASE={_bash_quote(_state_subpath(cfg.paths.worktrees_base, 'worktrees'))}")
     lines.append(f"export MEMORY_DIR={_bash_quote(_state_subpath(cfg.paths.memory_dir, 'memory'))}")
     lines.append(f"export HOOK_LOGS_DIR={_bash_quote(_state_subpath(cfg.paths.hook_logs_dir, 'hook-logs'))}")
+    # No config override: latches_dir() tracks state_dir by design.
+    lines.append(f"export LATCHES_DIR={_bash_quote(_state_subpath(None, 'latches'))}")
 
     # PLANS_DIR: project-relative by default.
     # Template-containing values are resolved at codegen time.

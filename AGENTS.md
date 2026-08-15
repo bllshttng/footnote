@@ -151,7 +151,7 @@ NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / 
 | `.fno/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | project-relative | Wave progress / completion / strategy | /do, operator, /blueprint |
 | `{plan_path}.artifacts/` | plan-relative | Quick-plan sidecar | target stop hook |
 
-Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno config doctor`. [path-config](docs/path-config.md).
+Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno config doctor`. [path-config](docs/path-config.md). A state-root TOP-LEVEL write needs an owner + lifetime in [state-root-inventory](docs/state-root-inventory.md); session-keyed files go in a subfolder.
 
 ### Ship vocabulary
 

@@ -875,6 +875,18 @@ def postmortems_dir() -> Path:
     return state_dir() / "postmortems"
 
 
+def latches_dir() -> Path:
+    """Return the session-latch directory (default: ``~/.fno/latches/``).
+
+    Holds the short-lived per-session, per-band sentinel files hooks use to
+    fire a nudge at most once. Deliberately has no ``config.paths`` override:
+    the whole point of the directory is that it tracks ``state_dir`` instead
+    of becoming another independently-placed path. The writing hook owns
+    deletion - a latch keyed to a dead session has no reader.
+    """
+    return state_dir() / "latches"
+
+
 def worktrees_base() -> Path:
     """Return the worktrees base directory."""
     settings = _settings()

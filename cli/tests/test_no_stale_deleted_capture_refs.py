@@ -19,10 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SCAN_DIRS = ["cli/src/fno", "scripts", "hooks", "crates"]
 
-# scripts/prune-fno-dir.sh intentionally names these deleted basenames in its
-# disposition table (they are its DELETE_TARGETS), and cli/src/fno/doctor.py
-# names them in its orphan-file detector - both are the janitor doing its
-# job, not a stale reference.
+# cli/src/fno/doctor.py names these deleted basenames in its orphan-file
+# detector - the janitor doing its job, not a stale reference. The other
+# entry here used to be scripts/prune-fno-dir.sh, deleted for cause: it was
+# never invoked, its table was frozen for four months, and two of its
+# delete targets had become live files.
 #
 # cli/src/fno/cost/_session_cost.py keeps "tasks.json"/"tasks.md" in its own
 # docstrings and --help text: those describe the (unrenamed) function family
@@ -30,7 +31,6 @@ SCAN_DIRS = ["cli/src/fno", "scripts", "hooks", "crates"]
 # paths.ledger_json() internally (ab-58645f63) - renaming the functions
 # themselves is a separate refactor, out of scope for this GC pass.
 ALLOWLIST_FILES = {
-    "scripts/prune-fno-dir.sh",
     "cli/src/fno/doctor.py",
     "cli/src/fno/cost/_session_cost.py",
 }

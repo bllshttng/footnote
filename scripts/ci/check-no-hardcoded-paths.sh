@@ -131,29 +131,41 @@ add_violation "Python bare Path.home() / \".fno\" violations in cli/src/fno/:" "
 # (which never matches, since every line starts with the file path). A bare
 # anchor silently disabled comment exclusion and let a $HOME/.fno example in a
 # comment fail the gate.
+#
+# The pattern must match BOTH spellings and must NOT require a trailing slash.
+# The old `\$HOME/\.fno/` missed twice over: `${HOME}/.fno` escaped it on the
+# brace form, and the trailing slash excused a bare directory assignment. That
+# is exactly how `hooks/context-nudge.sh` came to write four latch files per
+# session per band into the state-dir top level while this gate scanned the
+# file on every CI run and stayed green. A guard on one of N spellings of the
+# same literal reads as protection and covers nothing. The exclusion filter has
+# to use the same widened pattern, or the sanctioned `${VAR:-$HOME/.fno}`
+# fallback form starts failing.
 # ---------------------------------------------------------------------------
 
+BARE_STATE_DIR_RE='\$\{?HOME\}?/\.fno'
+
 HOOKS_SH_HITS=$(
-    grep -rn '\$HOME/\.fno/' \
+    grep -rnE "$BARE_STATE_DIR_RE" \
         "$REPO_ROOT/hooks/" \
         --include='*.sh' \
         2>/dev/null \
-    | grep -v ':-.*\$HOME/\.fno' \
+    | grep -vE ":-.*$BARE_STATE_DIR_RE" \
     | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
-add_violation "hooks/ bare \$HOME/.fno/ violations:" "$HOOKS_SH_HITS"
+add_violation "hooks/ bare \$HOME/.fno violations:" "$HOOKS_SH_HITS"
 
 SKILLS_SH_HITS=$(
-    grep -rn '\$HOME/\.fno/' \
+    grep -rnE "$BARE_STATE_DIR_RE" \
         "$REPO_ROOT/skills/" \
         --include='*.sh' \
         2>/dev/null \
-    | grep -v ':-.*\$HOME/\.fno' \
+    | grep -vE ":-.*$BARE_STATE_DIR_RE" \
     | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
-add_violation "skills/ bare \$HOME/.fno/ violations:" "$SKILLS_SH_HITS"
+add_violation "skills/ bare \$HOME/.fno violations:" "$SKILLS_SH_HITS"
 
 # ---------------------------------------------------------------------------
 # handoffs/ path joins: the canon handoff doc location is configured via
@@ -178,18 +190,18 @@ add_violation "skills/ + hooks/ hardcoded handoffs/ joins (use 'fno paths handof
 # scripts/ directory: exclude scripts/tests/ (sandboxed) and scripts/ci/ (this script)
 # also exclude scripts/lib/paths.sh
 SCRIPTS_SH_HITS=$(
-    grep -rn '\$HOME/\.fno/' \
+    grep -rnE "$BARE_STATE_DIR_RE" \
         "$REPO_ROOT/scripts/" \
         --include='*.sh' \
         2>/dev/null \
     | grep -v 'scripts/tests/' \
     | grep -v 'scripts/ci/' \
     | grep -v 'scripts/lib/paths\.sh' \
-    | grep -v ':-.*\$HOME/\.fno' \
+    | grep -vE ":-.*$BARE_STATE_DIR_RE" \
     | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
-add_violation "scripts/ bare \$HOME/.fno/ violations (excluding tests/ and ci/):" "$SCRIPTS_SH_HITS"
+add_violation "scripts/ bare \$HOME/.fno violations (excluding tests/ and ci/):" "$SCRIPTS_SH_HITS"
 
 # ---------------------------------------------------------------------------
 # Report
