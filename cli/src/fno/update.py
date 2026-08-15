@@ -855,6 +855,58 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     return outcome
 
 
+_UV_INSTALL_ATTEMPTS = 3
+
+
+def _uv_retry_sh(cmd: list[str]) -> str:
+    """Shell snippet running the uv install with ONE retried failure.
+
+    Retried: only the ENOTEMPTY signature (uv's removal walk racing a
+    concurrent importer's bytecode rewrite; docs/architecture/cli-lazy-imports.md).
+    Any other failure exits immediately with uv's own code, uv's stderr
+    re-printed verbatim. Bounded at ``_UV_INSTALL_ATTEMPTS``. Success is
+    accepted only via a positive marker - the ``fno-py`` console script plus
+    shipped bytecode under the tool venv - never the exit code alone.
+
+    This lives as a shell string (not a Python loop) because the Unix install
+    path execs it: uv must be free to replace the venv this interpreter may
+    itself be running from, which an in-process ``subprocess.run`` loop would
+    reintroduce as a race.
+
+    uv-only: the marker reads ``uv tool dir``, so wrapping the pip fallback
+    here would refuse a perfectly good pip install on the very machines that
+    have no uv. Callers gate on ``cmd[0] == "uv"``.
+    """
+    c = shlex.join(cmd)
+    verify = (
+        '__td=$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null) && '
+        '[ -n "$__td" ] && [ -x "$__td/fno/bin/fno-py" ] && '
+        '[ -n "$(find "$__td/fno/lib" -name "*.pyc" -print -quit 2>/dev/null)" ]'
+    )
+    return (
+        f'__n=0; __e=$(mktemp) || exit 1; '
+        f'while :; do __n=$((__n+1)); '
+        f'if {c} 2>"$__e"; then rm -f "$__e"; '
+        # break, not exit 0: callers chain `&& marker-write && refresh` after
+        # this snippet, and an exit here would skip both on every success.
+        f'if {verify}; then break; '
+        f'else echo "fno: uv exited 0 but the install does not verify '
+        f'(no fno-py script or no shipped bytecode under the tool venv)" >&2; exit 1; fi; '
+        f'else __rc=$?; cat "$__e" >&2; '
+        # __sig is the signature verdict for THIS attempt. It gates the race
+        # message too: a non-signature failure that happens to land on the
+        # last attempt (auth on attempt 3 after two real races) must not send
+        # the operator off to kill fno processes.
+        f'if grep -q "Directory not empty" "$__e" && grep -q "os error 66" "$__e"; '
+        f'then __sig=1; else __sig=0; fi; rm -f "$__e"; '
+        f'if [ "$__sig" = 1 ] && [ "$__n" -lt {_UV_INSTALL_ATTEMPTS} ]; then sleep 1; else '
+        # Same words the fno.sh / postinstall twins die with, so every
+        # provisioning path explains the capped race identically.
+        f'if [ "$__sig" = 1 ]; then echo "fno: uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run." >&2; fi; '
+        f'exit "$__rc"; fi; fi; done'
+    )
+
+
 def _install_then_mark(
     install_cmd: list[str],
     rev: str,
@@ -863,6 +915,7 @@ def _install_then_mark(
     pid: int,
     post_install: Optional[str] = None,
     await_binary: Optional[str] = None,
+    install_sh: Optional[str] = None,
 ) -> str:
     """Build a shell line that installs, then writes the marker iff install succeeds.
 
@@ -893,7 +946,10 @@ def _install_then_mark(
         f"printf '%s\\n' {q(rev)} > {q(str(tmp))} && "
         f"mv {q(str(tmp))} {q(str(marker))}"
     )
-    line = f"{shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
+    # install_sh overrides the plain join when the caller wrapped the install
+    # in its own shell logic (the uv retry/verify wrapper at the real call
+    # site); the && gating is identical either way.
+    line = f"{install_sh or shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
     if post_install:
         line += f" && {{ {_await_binary(post_install, await_binary)} }}"
     return line
@@ -1021,7 +1077,14 @@ def update_command(
         # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
         # stale cached wheel that predates newly-added modules, so `fno restart`
         # etc. crash with ModuleNotFoundError even after `fno update`.
-        cmd = ["uv", "tool", "install", "--reinstall", "--refresh", str(resolved)]
+        # --compile-bytecode: ship the venv's own .pyc so no later process
+        # writes into a tree a reinstall may be deleting
+        # (docs/architecture/cli-lazy-imports.md).
+        cmd = [
+            "uv", "tool", "install",
+            "--reinstall", "--refresh", "--compile-bytecode",
+            str(resolved),
+        ]
     elif shutil.which("pip"):
         cmd = [
             sys.executable,
@@ -1036,10 +1099,18 @@ def update_command(
         typer.echo("Neither `uv` nor `pip` is available on PATH.", err=True)
         raise typer.Exit(1)
 
+    # The retry/verify wrapper reads `uv tool dir`, so it applies to the uv
+    # command only; the pip fallback runs bare, or its success would be
+    # refused by a marker no pip install can produce. None = run bare.
+    install_sh = _uv_retry_sh(cmd) if cmd[0] == "uv" else None
+
     if dry_run:
         # shlex.join shell-escapes each arg so the printed command is safe to
         # paste into a terminal even when the source path contains spaces.
-        typer.echo(f"Would run: {shlex.join(cmd)}")
+        # The uv path prints the retry snippet, not the bare command: that is
+        # what the exec below actually runs, and a receipt that understates it
+        # sends an operator back into the unretried failure.
+        typer.echo(f"Would run: {install_sh or shlex.join(cmd)}")
         _cache_source_path(resolved)
         return
 
@@ -1112,6 +1183,7 @@ def update_command(
                 _install_then_mark(
                     cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
                     post_install=post_install, await_binary=_await_bin,
+                    install_sh=install_sh,
                 ),
             ],
         )
@@ -1121,7 +1193,10 @@ def update_command(
         os.execvp(
             "/bin/sh",
             ["/bin/sh", "-c",
-             f"{shlex.join(cmd)} && {{ {_await_binary(post_install, _await_bin)} }}"],
+             f"{install_sh or shlex.join(cmd)} && "
+             f"{{ {_await_binary(post_install, _await_bin)} }}"],
         )
+    elif install_sh:
+        os.execvp("/bin/sh", ["/bin/sh", "-c", install_sh])
     else:
         os.execvp(cmd[0], cmd)

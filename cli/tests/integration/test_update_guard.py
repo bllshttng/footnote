@@ -46,6 +46,13 @@ def _isolate(
 ) -> Generator[None, None, None]:
     """Pin repo root + stub away the real install logic before each test."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    # resolve_repo_root caches on first call and freezes the env var then, so
+    # an earlier resolution in this process (import-time config discovery, a
+    # prior test) would shadow the pin above and the guard would read the
+    # checkout's own target-state.md instead of tmp_path's.
+    from fno.paths import resolve_repo_root
+
+    resolve_repo_root.cache_clear()
     # Stub the real install so tests never execute uv/pip.
     # We patch _discover_source to return a sentinel Path, and os.execvp + subprocess.run
     # to be no-ops. Monkeypatch BEFORE invoking the command (memory: feedback_default_arg_breaks_monkeypatch_isolation).
@@ -71,6 +78,7 @@ def _isolate(
         lambda *a, **kw: fake_result,
     )
     yield
+    resolve_repo_root.cache_clear()
 
 
 def _write_state(tmp_path: Path, content: str) -> None:
@@ -257,11 +265,12 @@ def test_update_without_source_rev_skips_marker_chain(
     assert "pr-watch refresh" in joined
 
 
-def test_update_without_source_rev_execs_plain_install_when_no_refresh(
+def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no rev AND no refresh resolvable, exec the plain installer directly
-    (no /bin/sh wrapper) - the original no-rev fast path."""
+    """With no rev AND no refresh resolvable, still exec the install through
+    the /bin/sh retry wrapper: the ENOTEMPTY race retry and the marker verify
+    live in the exec'd shell line, so no path may bypass them."""
     import fno.update as update_mod
 
     monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
@@ -282,7 +291,42 @@ def test_update_without_source_rev_execs_plain_install_when_no_refresh(
 
     result = runner.invoke(app, ["update"])
     assert result.exit_code == 0
-    assert captured["file"] != "/bin/sh"  # plain installer, no shell wrapper
+    assert captured["file"] == "/bin/sh"  # the retry wrapper needs the shell
+    line = captured["args"][2]
+    assert "Directory not empty" in line, "retry signature match must be present"
+    assert "fno-py" in line, "marker verify must be present"
+
+
+def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No uv on PATH -> the pip fallback execs bare. The retry wrapper's
+    success marker reads `uv tool dir`, so wrapping pip would refuse a
+    perfectly good install on exactly the machines that have no uv."""
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
+    import fno.pr_watch.cli as pw_cli
+    monkeypatch.setattr(
+        pw_cli, "_resolve_fno_binary",
+        lambda: (_ for _ in ()).throw(RuntimeError("no binary")),
+    )
+    monkeypatch.setattr(
+        update_mod.shutil, "which", lambda name: None if name == "uv" else f"/usr/bin/{name}"
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_execvp(file: str, args: list[str]) -> None:
+        captured["file"] = file
+        captured["args"] = args
+
+    monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
+
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert captured["file"] != "/bin/sh", "pip must not go through the uv wrapper"
+    assert "pip" in captured["args"]
 
 
 # ---------------------------------------------------------------------------
