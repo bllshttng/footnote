@@ -381,7 +381,7 @@ def cmd_spawn(
         help=(
             "The model VENDOR the harness talks to: zai, or any "
             "model_routing.providers name. Pairs with --model to name the route "
-            "(--provider zai --model glm-5.2 == --route zai,glm-5.2). This is NOT "
+            "(--provider zai --model glm-5.3 == --route zai,glm-5.3). This is NOT "
             "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
         ),
     ),
@@ -476,7 +476,7 @@ def cmd_spawn(
         "--route",
         help=(
             "Explicit per-dispatch model route as provider/model (e.g. "
-            "zai/glm-5.2; legacy comma zai,glm-5.2 also accepted). Bypasses the "
+            "zai/glm-5.3; legacy comma zai,glm-5.3 also accepted). Bypasses the "
             "--role table and guard (explicit intent "
             "is not auto-routing) and wins over any configured lane. FAILS CLOSED: "
             "an unknown provider, non-anthropic protocol, or missing key refuses "
@@ -758,7 +758,7 @@ def cmd_spawn(
         if not model:
             print(
                 f"--provider {vendor!r} names a vendor, not a model; add --model "
-                "(the vendor's own model id, e.g. --model glm-5.2)",
+                "(the vendor's own model id, e.g. --model glm-5.3)",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -1330,8 +1330,8 @@ def cmd_spawn(
             # the routed one: mux_spawn/dispatch pass it as the harness's own
             # `--model` flag, which wins over the route's ANTHROPIC_MODEL.
             # Reporting only route_model here would re-introduce the
-            # receipt-can-lie defect: a `--route zai,glm-5.2 --model opus` spawn
-            # would name glm-5.2 in the receipt while the worker runs opus.
+            # receipt-can-lie defect: a `--route zai,glm-5.3 --model opus` spawn
+            # would name glm-5.3 in the receipt while the worker runs opus.
             if route_provider is not None:
                 receipt_obj["provider"] = route_provider
             receipt_model = model or route_model

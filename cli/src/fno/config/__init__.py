@@ -993,7 +993,7 @@ class ReviewBlock(BaseModel):
         # carrier. A per-entry or shared identity remains an explicit opt-in to
         # the legacy GitHub-posting carrier.
         # A `claude` peer is only a real cross-model reviewer when it names a
-        # model route (e.g. {provider: claude, model: "zai,glm-5.2"}): the claude
+        # model route (e.g. {provider: claude, model: "zai,glm-5.3"}): the claude
         # CLI is only transport, and the routed model (GLM) is genuinely distinct
         # from the Claude author. A bare `claude` peer (no route) IS the author's
         # own model, which defeats the "distinct model" trust invariant - reject
@@ -1030,7 +1030,7 @@ class ReviewBlock(BaseModel):
             if len(parts) != 2 or not parts[0] or not parts[1]:
                 raise ValueError(
                     "config.review.peers has a claude peer with no valid model "
-                    'route (need "route_provider,route_model", e.g. "zai,glm-5.2"); '
+                    'route (need "route_provider,route_model", e.g. "zai,glm-5.3"); '
                     "a bare claude peer is the same model as the author, breaking "
                     f"the distinct-model trust invariant: {e!r}"
                 )

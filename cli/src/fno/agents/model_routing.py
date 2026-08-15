@@ -248,7 +248,7 @@ def is_anthropic_model(model: str) -> bool:
     Pinning a tier to a specific Anthropic model
     (``ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-1``) is a supported Claude
     Code customization, not a vendor conflict: endpoint and model still agree.
-    Only a FOREIGN vendor's id (``glm-5.2[1m]``, ``deepseek-...``) creates the
+    Only a FOREIGN vendor's id (``glm-5.3[1m]``, ``deepseek-...``) creates the
     split this module guards against.
     """
     name = model.strip().lower()
@@ -423,12 +423,12 @@ def _parse_target(raw: str) -> Optional[tuple[str, str]]:
     """Parse a ``"provider/model"`` (or legacy ``"provider,model"``) target into
     (provider, model).
 
-    Slash is the canonical, ecosystem-standard form (``zai/glm-5.2[1m]``); comma
+    Slash is the canonical, ecosystem-standard form (``zai/glm-5.3[1m]``); comma
     is still accepted for the existing peer-lane / built-in values and any config
     written before the switch, so nothing already configured breaks. A comma, if
     present, wins as the separator (it never appears inside a model id, so it is
     unambiguous); otherwise the FIRST slash splits, which keeps a namespaced model
-    id intact (``zai/z-ai/glm-5.2`` -> provider ``zai``, model ``z-ai/glm-5.2``).
+    id intact (``zai/z-ai/glm-5.3`` -> provider ``zai``, model ``z-ai/glm-5.3``).
 
     Returns None for a malformed value (fail-safe; caller degrades to primary)."""
     raw = raw.strip()
@@ -645,7 +645,7 @@ def resolve_explicit_route(
     """Resolve the routed ``ANTHROPIC_*`` env for an explicit ``provider,model``.
 
     The peer lane (``config.review.peers`` entry ``{provider: claude, model:
-    "zai,glm-5.2"}``) names its route directly rather than via a role, so it
+    "zai,glm-5.3"}``) names its route directly rather than via a role, so it
     bypasses both the role->target lookup AND the ``PROTECTED_ROLES`` / global
     ``enabled`` role-auto-routing policy (an explicit peer opt-in is not
     auto-routing). It reuses the SAME provider-registry key/env logic as
