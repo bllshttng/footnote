@@ -64,7 +64,7 @@ def test_dispatch_prompts_carry_increment_plus_full_context() -> None:
     assert "since the last reviewed head: ${changedFiles}" in window
     assert "${fullDiffFiles}" in window
     assert window.count("context only") >= 2
-    assert "trace the error handling across the boundary" in window
+    assert "Trace the error handling across the boundary" in window
 
 
 def test_carry_forward_revalidates_prior_findings_before_verdict() -> None:
