@@ -195,6 +195,36 @@ def _settings_for(project_root: Optional[Path]):
     return load_settings()
 
 
+def _think_spawn_resolve(
+    *,
+    project_root: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> tuple[bool, str]:
+    """Resolve born-with-why /think spawn's armed state AND the precedence
+    rank that supplied it, mirroring advance._auto_continue_resolve.
+
+    Precedence (highest first):
+      1. ``FNO_THINK_SPAWN`` env override (explicit force on/off) -> rank "env".
+      2. ``config.think_spawn.enabled`` from the node's repo settings
+         (``project_root`` when given, else the ambient cwd; local>global)
+         -> rank "config".
+      3. default False -> rank "default".
+
+    Fail-safe (AC4-ERR): ANY exception reading settings degrades to
+    (False, "default") rather than raising into the node-birth pipeline.
+    """
+    environ = os.environ if env is None else env
+    override = environ.get(_ENV_OVERRIDE)
+    if override is not None:
+        return override.strip().lower() in _TRUTHY, "env"
+
+    try:
+        return bool(_settings_for(project_root).think_spawn.enabled), "config"
+    except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC4-ERR)
+        _LOG.debug("think_spawn_enabled: settings read failed, defaulting off: %s", exc)
+        return False, "default"
+
+
 def think_spawn_enabled(
     *,
     project_root: Optional[Path] = None,
@@ -202,25 +232,10 @@ def think_spawn_enabled(
 ) -> bool:
     """Resolve whether born-with-why /think spawn is armed.
 
-    Precedence (highest first), mirroring advance.auto_continue_enabled:
-      1. ``FNO_THINK_SPAWN`` env override (explicit force on/off).
-      2. ``config.think_spawn.enabled`` from the node's repo settings
-         (``project_root`` when given, else the ambient cwd; local>global).
-      3. default False.
-
-    Fail-safe (AC4-ERR): ANY exception reading settings degrades to False
-    rather than raising into the node-birth pipeline.
+    See :func:`_think_spawn_resolve` for the precedence chain. This wrapper
+    drops the rank for callers that only need the boolean.
     """
-    environ = os.environ if env is None else env
-    override = environ.get(_ENV_OVERRIDE)
-    if override is not None:
-        return override.strip().lower() in _TRUTHY
-
-    try:
-        return bool(_settings_for(project_root).think_spawn.enabled)
-    except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC4-ERR)
-        _LOG.debug("think_spawn_enabled: settings read failed, defaulting off: %s", exc)
-        return False
+    return _think_spawn_resolve(project_root=project_root, env=env)[0]
 
 
 def _max_per_run(project_root: Optional[Path]) -> int:
@@ -1238,11 +1253,17 @@ def maybe_spawn_think(
     rs = run_state if run_state is not None else RunState()
     node_id = node.get("id")
 
+    # 0. Gate. Off => complete no-op: no event, no spawn (AC4-HP). Resolved
+    # once so the granting rank (AC3-HP) can ride every event emitted below.
+    armed, rank = _think_spawn_resolve(project_root=project_root, env=environ)
+    if not armed:
+        return ThinkSpawnResult("noop", None, reason="disabled", node_id=node_id)
+
     def skip(skip_reason: str, **extra) -> ThinkSpawnResult:
         # ``reason`` (event key) stays the SKIP reason for back-compat; the
         # trigger reason rides as ``trigger`` so no consumer of the existing
         # schema breaks (AC1-UI: one event, non-null reason+node_id).
-        data: dict = {"reason": skip_reason, "trigger": reason}
+        data: dict = {"reason": skip_reason, "trigger": reason, "rank": rank}
         if node_id:
             data["node_id"] = node_id
         for k, v in extra.items():
@@ -1254,10 +1275,6 @@ def maybe_spawn_think(
             presence=extra.get("presence"), resolved=extra.get("resolved"),
             detail=extra.get("detail"),
         )
-
-    # 0. Gate. Off => complete no-op: no event, no spawn (AC4-HP).
-    if not think_spawn_enabled(project_root=project_root, env=environ):
-        return ThinkSpawnResult("noop", None, reason="disabled", node_id=node_id)
 
     # 1. Eligibility: a node must have a usable id.
     if not node_id:
@@ -1356,7 +1373,7 @@ def maybe_spawn_think(
         _emit(
             EVENT_OFFERED,
             {"node_id": node_id, "trigger": reason, "presence": presence,
-             "resolved": seed.resolved, "offer_line": seed.offer_line},
+             "resolved": seed.resolved, "offer_line": seed.offer_line, "rank": rank},
             ev_path,
         )
         return ThinkSpawnResult(
@@ -1427,7 +1444,8 @@ def maybe_spawn_think(
         {"node_id": node_id, "trigger": reason, "think_session": short_id,
          "presence": presence, "resolved": seed.resolved,
          "output_path": seed.output_path or None,
-         "agent_name": _worker_agent_name(node_id, node_slug, reason, invocation_suffix)},
+         "agent_name": _worker_agent_name(node_id, node_slug, reason, invocation_suffix),
+         "rank": rank},
         ev_path,
     )
     return ThinkSpawnResult(

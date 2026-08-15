@@ -52,13 +52,13 @@ from fno.provenance import autobrief as _autobrief
 
 _LOG = logging.getLogger(__name__)
 
-# Campaign-arm + override knobs (Claude's Discretion #4: the campaign arm is a
-# per-project STATE FILE, not an env var, because an env var set by a live
-# /megawalk does NOT survive to the later, detached SessionStart reconcile that
-# observes the web merge. The env var is retained only as a highest-precedence
-# explicit override (tests + same-process force-enable/disable).
+# Override knob (Claude's Discretion #4: retained as the highest-precedence
+# explicit override for tests + same-process force-enable/disable). The
+# campaign-arm marker file rank (`.fno/.auto-continue-armed`) was removed
+# 2026-08 (x-aaaf wave 1): its documented writer, "/megawalk auto-continue",
+# no longer exists (skills/megawalk is deleted), so the rank had no writer and
+# no expiry while silently outranking the live config key.
 _ENV_OVERRIDE = "FNO_AUTO_CONTINUE"
-_ARM_MARKER_REL = Path(".fno") / ".auto-continue-armed"
 
 # Mirror handoff.sh / dispatch-node.sh: a 3-minute TTL bridge token covers the
 # spawn->worker-init boot window. TTL (not PID) liveness is mandatory so the
@@ -68,45 +68,61 @@ _DISPATCH_TTL_MS = 180_000  # 3m
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
-def auto_continue_enabled(
-    project: Optional[str] = None,
+def _auto_continue_resolve(
     project_root: Optional[Path] = None,
-) -> bool:
-    """Resolve whether auto-continue is armed for this project.
+) -> tuple[bool, str]:
+    """Resolve auto-continue's armed state AND which precedence rank supplied it.
 
-    Precedence (highest first), mirroring config.auto_merge's local>global idea:
-      1. ``FNO_AUTO_CONTINUE`` env override (explicit force on/off).
-      2. campaign-arm marker file ``.fno/.auto-continue-armed`` (written
-         by ``/megawalk auto-continue``; survives the merge->reconcile boundary).
-      3. ``config.auto_continue.enabled`` from settings.yaml (local>global via
-         load_settings deep-merge).
-      4. default False.
+    Precedence (highest first):
+      1. ``FNO_AUTO_CONTINUE`` env override (explicit force on/off) -> rank "env".
+      2. ``config.auto_continue.enabled`` from settings.yaml (local>global via
+         load_settings deep-merge) -> rank "config".
+      3. default False -> rank "default".
 
-    Fail-safe (AC2-ERR): ANY exception reading settings degrades to False rather
-    than raising into the merge ritual.
+    The rank is stamped onto every dispatch decision event (x-aaaf wave 1,
+    AC3-HP) so "what armed this" is answerable from the log instead of by
+    inference - the gap that made the 2026-06-20 to 06-26 event window
+    unattributable.
+
+    Fail-safe (AC2-ERR): ANY exception reading settings degrades to
+    (False, "default") rather than raising into the merge ritual.
     """
     env = os.environ.get(_ENV_OVERRIDE)
     if env is not None:
-        return env.strip().lower() in _TRUTHY
-
-    root = Path(project_root) if project_root is not None else Path.cwd()
-    try:
-        if (root / _ARM_MARKER_REL).exists():
-            return True
-    except OSError:
-        pass
+        return env.strip().lower() in _TRUTHY, "env"
 
     try:
         from fno.config import load_settings
 
-        return bool(load_settings().auto_continue.enabled)
+        return bool(load_settings().auto_continue.enabled), "config"
     except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC2-ERR)
         # Diagnosable without changing the safety posture: false-disabled is
         # strictly safer than false-enabled for a background dispatcher, but a
         # silent swallow would hide a genuinely-broken settings load from an
         # operator wondering why the chain never advances.
         _LOG.debug("auto_continue_enabled: settings read failed, defaulting off: %s", exc)
-        return False
+        return False, "default"
+
+
+def auto_continue_enabled(
+    project: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> bool:
+    """Resolve whether auto-continue is armed for this project.
+
+    See :func:`_auto_continue_resolve` for the precedence chain. This wrapper
+    drops the rank for callers that only need the boolean.
+    """
+    return _auto_continue_resolve(project_root)[0]
+
+
+def auto_continue_rank(
+    project: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> str:
+    """Return which precedence rank ("env" | "config" | "default") supplied
+    the current auto-continue value, for stamping onto decision events."""
+    return _auto_continue_resolve(project_root)[1]
 
 
 # Decision-event kinds (registered in cli/src/fno/events/schema.yaml).
@@ -1729,6 +1745,9 @@ def advance(
     and the host op continues.
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
+    # AC3-HP: resolved once, stamped on every decision event below so "what
+    # armed this" is answerable from the log rather than by inference.
+    rank = auto_continue_rank(project=project, project_root=project_root)
 
     def skip(
         reason: str,
@@ -1738,7 +1757,7 @@ def advance(
         provider: Optional[str] = None,
         retry_at: Optional[float] = None,
     ) -> AdvanceResult:
-        data: dict = {"reason": reason}
+        data: dict = {"reason": reason, "rank": rank}
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         if node_id:
@@ -1755,7 +1774,7 @@ def advance(
         )
 
     def failed(node_id: str, error: str) -> AdvanceResult:
-        data = {"node_id": node_id, "error": error[:200]}
+        data = {"node_id": node_id, "error": error[:200], "rank": rank}
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
@@ -1937,6 +1956,7 @@ def advance(
             "short_id": short_id,
             "agent_name": _worker_agent_name(node_id, node.get("slug") or node.get("title")),
             "brief": _brief_tag,
+            "rank": rank,
             **({"closed_node_id": closed_node_id} if closed_node_id else {}),
         },
         ev_path,
@@ -2108,6 +2128,7 @@ def _converge_one(
     closed_node_id: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    rank: Optional[str] = None,
 ) -> AdvanceResult:
     """The one shared converge-dispatch core: dedup, reserve, spawn, one receipt.
 
@@ -2136,6 +2157,8 @@ def _converge_one(
             data["closed_node_id"] = closed_node_id
         if mission:
             data["mission"] = mission
+        if rank:
+            data["rank"] = rank
         return data
 
     def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
@@ -2234,6 +2257,7 @@ def _converge_one(
 def _dispatch_one_dependent(
     dep: dict, closed_node_id: str, ev_path: Path, verbose: bool,
     *, model: Optional[str] = None, provider: Optional[str] = None,
+    rank: Optional[str] = None,
 ) -> AdvanceResult:
     """Resolve one dependent's own project root, then converge-dispatch it.
 
@@ -2250,6 +2274,8 @@ def _dispatch_one_dependent(
 
     def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
         data: dict = {"reason": reason, "node_id": node_id, "closed_node_id": closed_node_id}
+        if rank:
+            data["rank"] = rank
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -2283,7 +2309,7 @@ def _dispatch_one_dependent(
     return _converge_one(
         dep, root, ev_path, verbose,
         cross_project=cross_project, closed_node_id=closed_node_id,
-        model=model, provider=provider,
+        model=model, provider=provider, rank=rank,
     )
 
 
@@ -2312,7 +2338,8 @@ def advance_dependents(
     # Same opt-in gate as advance(); resolved against the closed node's project
     # context. advance() already recorded the disabled/walker-live decision for
     # this merge event, so we add no duplicate event here - just no-op.
-    if not auto_continue_enabled(project_root=project_root):
+    armed, rank = _auto_continue_resolve(project_root)
+    if not armed:
         return []
     if _claim_is_live(_walker_key()):
         return []
@@ -2328,7 +2355,7 @@ def advance_dependents(
     if not closed_project:
         _emit(
             EVENT_SKIPPED,
-            {"reason": "closed-project-unknown", "closed_node_id": closed_node_id},
+            {"reason": "closed-project-unknown", "closed_node_id": closed_node_id, "rank": rank},
             ev_path,
         )
         return [AdvanceResult("skipped", EVENT_SKIPPED, reason="closed-project-unknown")]
@@ -2338,7 +2365,12 @@ def advance_dependents(
     except Exception as exc:  # noqa: BLE001 - never guess on a read error
         _emit(
             EVENT_SKIPPED,
-            {"reason": "dependents-error", "closed_node_id": closed_node_id, "detail": str(exc)[:200]},
+            {
+                "reason": "dependents-error",
+                "closed_node_id": closed_node_id,
+                "detail": str(exc)[:200],
+                "rank": rank,
+            },
             ev_path,
         )
         return [AdvanceResult("skipped", EVENT_SKIPPED, reason="dependents-error", detail=str(exc))]
@@ -2350,7 +2382,7 @@ def advance_dependents(
 
     return [
         _dispatch_one_dependent(
-            dep, closed_node_id, ev_path, verbose, model=model, provider=provider
+            dep, closed_node_id, ev_path, verbose, model=model, provider=provider, rank=rank
         )
         for dep in deps
     ]
@@ -2580,11 +2612,12 @@ def advance_epic(
     # standalone epic verb has no paired advance() call to record the decision, so
     # emit the skip receipt here or a gated epic advance is silent in the event stream
     # (codex P2 - LD#12 parity).
-    if not auto_continue_enabled(project_root=project_root):
-        _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon}, ev_path)
+    armed, rank = _auto_continue_resolve(project_root)
+    if not armed:
+        _emit(EVENT_SKIPPED, {"reason": "disabled", "mission": canon, "rank": rank}, ev_path)
         return AdvanceEpicResult(canon, error="disabled")
     if _claim_is_live(_walker_key()):
-        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon}, ev_path)
+        _emit(EVENT_SKIPPED, {"reason": "walker-live", "mission": canon, "rank": rank}, ev_path)
         return AdvanceEpicResult(canon, error="walker-live")
 
     # All descendants already done -> mission complete: verify the cascade closed
@@ -2623,7 +2656,7 @@ def advance_epic(
     except Exception as exc:  # noqa: BLE001 - never guess on a read error
         _emit(
             EVENT_SKIPPED,
-            {"reason": "children-error", "mission": canon, "detail": str(exc)[:200]},
+            {"reason": "children-error", "mission": canon, "detail": str(exc)[:200], "rank": rank},
             ev_path,
         )
         return AdvanceEpicResult(
@@ -2651,7 +2684,7 @@ def advance_epic(
         if not proj:
             _emit(
                 EVENT_SKIPPED,
-                {"reason": "no-project", "node_id": child["id"], "mission": canon},
+                {"reason": "no-project", "node_id": child["id"], "mission": canon, "rank": rank},
                 ev_path,
             )
             results.append(
@@ -2665,7 +2698,7 @@ def advance_epic(
 
         root = project_root_from_settings(proj)
         if not root:
-            results.append(_converge_skip_unmapped(child, proj, canon, ev_path))
+            results.append(_converge_skip_unmapped(child, proj, canon, ev_path, rank=rank))
             continue
         # Per-project max_lanes cap (0 = paused project; skip). Counts live workers
         # + this pass's dispatches.
@@ -2673,7 +2706,7 @@ def advance_epic(
             _emit(
                 EVENT_SKIPPED,
                 {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
-                 "detail": f"{proj}: max_lanes={max_lanes}"},
+                 "detail": f"{proj}: max_lanes={max_lanes}", "rank": rank},
                 ev_path,
             )
             results.append(
@@ -2682,7 +2715,7 @@ def advance_epic(
             continue
         res = _converge_one(
             child, root, ev_path, verbose,
-            cross_project=True, mission=canon, model=model, provider=provider,
+            cross_project=True, mission=canon, model=model, provider=provider, rank=rank,
         )
         results.append(res)
         if res.decision == "dispatched":
@@ -2697,16 +2730,15 @@ def advance_epic(
 
 
 def _converge_skip_unmapped(
-    child: dict, project: str, mission: str, ev_path: Path
+    child: dict, project: str, mission: str, ev_path: Path, *, rank: Optional[str] = None
 ) -> AdvanceResult:
     """Emit the loud unmapped-project skip for one epic-advance child (names the key)."""
     detail = f"{project} (add config.work.workspaces.<ws>.projects[].path)"
-    _emit(
-        EVENT_SKIPPED,
-        {"reason": "unmapped-project", "node_id": child["id"], "mission": mission,
-         "detail": detail},
-        ev_path,
-    )
+    data = {"reason": "unmapped-project", "node_id": child["id"], "mission": mission,
+            "detail": detail}
+    if rank:
+        data["rank"] = rank
+    _emit(EVENT_SKIPPED, data, ev_path)
     return AdvanceResult(
         "skipped", EVENT_SKIPPED, reason="unmapped-project",
         node_id=child["id"], detail=detail,

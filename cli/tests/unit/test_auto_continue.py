@@ -127,14 +127,19 @@ def test_resolver_env_override_false(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert _resolver()(project_root=tmp_path) is False
 
 
-def test_resolver_marker_file_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A campaign-arm marker file enables even with default settings."""
+def test_resolver_marker_file_no_longer_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x-aaaf wave 1: the campaign-arm marker rank is removed. A present
+    marker file must NOT arm anything now that config is the sole non-env
+    source of truth (its writer, "/megawalk auto-continue", no longer
+    exists, so the rank had no owner and no expiry)."""
     monkeypatch.delenv("FNO_AUTO_CONTINUE", raising=False)
     _load(tmp_path, monkeypatch, "schema_version: 1\n")
     marker = tmp_path / ".fno" / ".auto-continue-armed"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("", encoding="utf-8")
-    assert _resolver()(project_root=tmp_path) is True
+    assert _resolver()(project_root=tmp_path) is False
 
 
 def test_resolver_never_raises_on_bad_settings(
