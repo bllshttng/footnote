@@ -1847,3 +1847,98 @@ def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypa
     assert len(envs) == 1
     assert envs[0].meta.get("owner") == "wake-daemon"
     assert envs[0].meta.get("ttl_at")  # derived from the owner class
+
+
+# ---------------------------------------------------------------------------
+# x-b281: an agent-lock timeout must queue the message, never lose it
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_send_agent_lock_timeout_queues_durable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real held flock times the send out, and the message still lands.
+
+    The positive marker is the thread on the bus. Asserting only the non-zero
+    exit would pass on a send that wrote nothing, which is the defect.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import _agent_lock_path
+    from fno.inbox.store import read_all_threads
+
+    lock_path = _agent_lock_path("red", paths.agents_registry_path())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(DispatchAskError) as exc_info:
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider=None,
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    assert exc_info.value.exit_code == 11
+    text = str(exc_info.value)
+    assert "timed out waiting for agent 'red' lock" in text
+    assert "message queued durable as msg-" in text
+
+    threads = read_all_threads("abcd1234")
+    assert len(threads) == 1, f"the message must survive the timeout: {threads}"
+    assert "hello" in threads[0].messages[0].body
+
+
+def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A timeout that cannot queue names the loss instead of implying a receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="red",
+            harness="claude",
+            harness_session_id=None,
+            cwd="/tmp",
+            log_path="/tmp/red.log",
+            short_id="abcd1234",
+            status="live",
+        )
+    ])
+
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import _agent_lock_path
+    from fno.bus.log import bus_log_path
+
+    lock_path = _agent_lock_path("red", paths.agents_registry_path())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(DispatchAskError) as exc_info:
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider=None,
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    assert exc_info.value.exit_code == 12
+    assert "no durable envelope was written" in str(exc_info.value)
+    assert not bus_log_path().exists()

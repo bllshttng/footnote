@@ -6370,6 +6370,101 @@ def _registered_family1_state(entry: "AgentEntry") -> str:
     return str(result.get("state") or "unknown")
 
 
+def _queue_durable_fallback(
+    entry: "AgentEntry",
+    message: str,
+    from_name: str,
+    entries: "list[AgentEntry]",
+    *,
+    msg_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> str:
+    """Write the <fno_mail> envelope to the durable bus. Returns the msg_id.
+
+    Raises DispatchAskError(12) when the row has no harness_session_id, or
+    when the bus write fails; both messages say that no durable envelope
+    was written, so a caller cannot mistake the failure for a receipt.
+    """
+    from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
+    from fno.mail.envelope import wrap_fno_mail
+
+    durable_recipient = (
+        canonical_handle(entry.harness_session_id)
+        if entry.harness_session_id
+        else None
+    )
+    if durable_recipient is None:
+        events.emit(
+            "agent_send_failed",
+            stage="durable-address",
+            name=entry.name,
+            msg_id=msg_id,
+            reason="missing_harness_session_id",
+            caller_reason=reason,
+        )
+        raise DispatchAskError(
+            f"cannot queue durable mail for {entry.name!r}: registry row has "
+            "no full harness session id; no durable envelope was written",
+            exit_code=12,
+        )
+
+    msg_id = msg_id or generate_msg_id()
+    sender_entry = next((e for e in entries if e.name == from_name), None)
+    from_session = provider_from = None
+    if sender_entry is not None:
+        provider_from = sender_entry.harness
+        # Defensive getattr so a partial / future entry that lacks one of
+        # these fields degrades to None rather than crashing the send.
+        from_session = (
+            getattr(sender_entry, "harness_session_id", None)
+            or getattr(sender_entry, "short_id", None)
+        )
+    mail_ctx = _build_mail_ctx(
+        from_name,
+        from_session,
+        provider_from,
+        to=(durable_recipient or entry.short_id or None),
+        id=msg_id,
+    )
+    durable_body = message
+    if mail_ctx is not None:
+        durable_body = wrap_fno_mail(
+            message,
+            from_=mail_ctx.from_,
+            harness=mail_ctx.harness,
+            model=mail_ctx.model,
+            node=mail_ctx.node,
+            to=mail_ctx.to,
+            id=mail_ctx.id,
+        )
+    try:
+        write_new_thread(
+            recipient=durable_recipient,
+            sender=from_name,
+            kind="send",
+            body=durable_body,
+            msg_id=msg_id,
+            to_kind="session",
+            provider_to=entry.harness,
+            provider_from=provider_from,
+            from_session=from_session,
+            owner=DurableOwner.WAKE_DAEMON.value,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        events.emit(
+            "agent_send_failed",
+            stage="envelope-write",
+            name=entry.name,
+            msg_id=msg_id,
+            caller_reason=reason,
+        )
+        raise DispatchAskError(
+            f"durable envelope write failed: {exc}; no durable envelope was written",
+            exit_code=12,
+        ) from exc
+    return msg_id
+
+
 def dispatch_send(
     name: str,
     message: str,
@@ -6598,11 +6693,7 @@ def dispatch_send(
             # exclusion falls back to the always-present from_ name. from_model is
             # NOT set on the durable envelope (AgentEntry has no model field; we do
             # not fabricate one -- LD11 forward-compat).
-            from fno.inbox.store import (
-                DurableOwner,
-                generate_msg_id,
-                write_new_thread,
-            )
+            from fno.inbox.store import generate_msg_id
 
             sender_entry = next((e for e in entries if e.name == from_name), None)
             from_session = provider_from = None
@@ -6641,68 +6732,11 @@ def dispatch_send(
                 not land. The jsonl bus is the fallback tier now, not a peer to the
                 live path (node x-1f23). Drain-on-wake semantics are unchanged.
 
-                The body is stored <fno_mail>-wrapped, the SAME envelope the live
-                path injects, so a delivered message carries one consistent wire
-                form everywhere and `grep <fno_mail>` reconstructs durable history
-                too (codex peer P1). The wrapped body round-trips through the
-                thread render unchanged (no unwrap, so mark_thread_read does not
-                strip it); summaries surface the open tag, which identifies the
-                message as a2a from its `from` sender."""
-                if durable_recipient is None:
-                    events.emit(
-                        "agent_send_failed",
-                        stage="durable-address",
-                        name=name,
-                        msg_id=msg_id,
-                        reason="missing_harness_session_id",
-                    )
-                    raise DispatchAskError(
-                        f"cannot queue durable mail for {name!r}: registry row has "
-                        "no full harness session id",
-                        exit_code=12,
-                    )
-                durable_body = message
-                if mail_ctx is not None:
-                    from fno.mail.envelope import wrap_fno_mail
-
-                    durable_body = wrap_fno_mail(
-                        message,
-                        from_=mail_ctx.from_,
-                        harness=mail_ctx.harness,
-                        model=mail_ctx.model,
-                        node=mail_ctx.node,
-                        to=mail_ctx.to,
-                        id=mail_ctx.id,
-                    )
-                try:
-                    write_new_thread(
-                        recipient=durable_recipient,
-                        sender=from_name,
-                        kind="send",
-                        body=durable_body,
-                        msg_id=msg_id,
-                        to_kind="session",
-                        provider_to=existing.harness,
-                        provider_from=provider_from,
-                        from_session=from_session,
-                        # US6: a registered-agent send reaches this durable
-                        # fallback only after the live inject missed, so the
-                        # recipient is asleep-but-resumable (it drains its inbox
-                        # on its next turn). The sweep escalates to dead-letter
-                        # if it sits unread past the wake-daemon horizon.
-                        owner=DurableOwner.WAKE_DAEMON.value,
-                    )
-                except (OSError, ValueError, RuntimeError) as exc:
-                    events.emit(
-                        "agent_send_failed",
-                        stage="envelope-write",
-                        name=name,
-                        msg_id=msg_id,
-                    )
-                    raise DispatchAskError(
-                        f"durable envelope write failed: {exc}",
-                        exit_code=12,
-                    ) from exc
+                Delegates to :func:`_queue_durable_fallback`, the same helper the
+                lock-timeout handler below uses, so a message queued from inside
+                the lock and one queued after failing to acquire it share one
+                envelope-construction and error path."""
+                _queue_durable_fallback(existing, message, from_name, entries, msg_id=msg_id)
 
             # 4d/4e. Live-inject-first, durable fallback. The context stash ensures
             # started/done share one request_id + caller attribution (mirrors the
@@ -6861,13 +6895,29 @@ def dispatch_send(
             return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
     except AgentLockTimeout as exc:
+        # A lock timeout must never lose the message (x-b281): `initial` was
+        # resolved before the lock attempt, so the durable address is already
+        # known and this queue needs no lock. When it too fails (no
+        # harness_session_id, or the bus write itself errors), the raised
+        # DispatchAskError(12) propagates unchanged and says so explicitly.
+        msg_id = _queue_durable_fallback(
+            initial, message, from_name, [initial], reason="agent-lock-timeout"
+        )
         events.emit(
             "agent_send_failed",
             stage="lock-timeout",
             name=name,
+            msg_id=msg_id,
+            delivery="durable",
+        )
+        print(
+            f"{msg_id} queued (durable) for "
+            f"{canonical_handle(initial.harness_session_id)} [agent-lock-timeout]",
+            file=sys.stderr,
         )
         raise DispatchAskError(
-            f"timed out waiting for agent {exc.name!r} lock (timeout={exc.timeout}s)",
+            f"timed out waiting for agent {exc.name!r} lock (timeout={exc.timeout}s); "
+            f"message queued durable as {msg_id}",
             exit_code=11,
         ) from exc
 
