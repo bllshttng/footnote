@@ -2032,7 +2032,7 @@ event_types:
     consumers: [operator]
 
   - name: operator_question
-    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno outstanding` and rendered in the SessionStart block; the field names match what a future needs.rs fold arm (NeedKind::Decision) would read unchanged."
+    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno outstanding` and rendered in the SessionStart block; read unchanged by the `crates/fno-agents/src/needs.rs` fold arm that maps this to NeedKind::Decision in the mux needs-me queue."
     sources: [target, hook, subagent, daemon, test]
     data:
       required: [question_id, question]
@@ -2052,7 +2052,7 @@ event_types:
         node:
           type: string
           description: "Optional. The backlog node the question is about, when the asking session has one bound."
-    consumers: [operator]
+    consumers: [operator, fno-agents needs]
 
   - name: operator_question_closed
     description: "An operator_question was answered or withdrawn. Explicit close only: there is no auto-expiry and no transcript-derived auto-resolution, because peek.Record carries role and text but no timestamp, so answering 'is there a user turn newer than this question' would need a new timestamped reader in every harness arm. An explicit clear costs nothing and never lies about whether an answer actually arrived. A question going quiet with age is the exact failure being fixed, so age never closes one. Append-only with a last-writer-wins fold: a double close is a no-op, not an error."
@@ -2069,7 +2069,7 @@ event_types:
         closed_by:
           type: string
           description: "Optional. Session id that closed it, which need not be the session that asked."
-    consumers: [operator]
+    consumers: [operator, fno-agents needs]
 
   - name: operator_decision
     description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Folded by `fno decide list` through the graph projection on the subject node, which inherits the archive read-through."
