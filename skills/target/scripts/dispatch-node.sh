@@ -104,7 +104,10 @@ ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all-ready)  ALL_READY=1; shift ;;
-    --flags)      FLAGS="${2:-}"; shift 2 ;;
+    # x-9d11: migrate the legacy bare `no-merge` token to the flag at parse, so
+    # the no-merge guards downstream match one spelling and a bare token in
+    # --flags cannot double-spell (bare + appended flag) into $tgt_cmd.
+    --flags)      FLAGS="$(printf ' %s ' "${2:-}" | sed -e 's/ no-merge / --no-merge /g' -e 's/^ //' -e 's/ $//')"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift ;;
     --no-merge)   ALLOW_MERGE=0; shift ;;
     --max)        MAX="${2:-0}"; shift 2 ;;

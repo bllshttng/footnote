@@ -1728,7 +1728,7 @@ class AutoContinueBlock(BaseModel):
 
     The opt-in for merge-triggered auto-continue (node ab-3cd195b6): when
     enabled, a merge-detector (``fno backlog reconcile`` / the /pr merged skill)
-    dispatches a fresh background ``/target no-merge`` worker for the next
+    dispatches a fresh background ``/target --no-merge`` worker for the next
     now-unblocked backlog node after a PR merges, so a merge-gated epic walks
     itself group-by-group with no manual re-invocation.
 

@@ -412,6 +412,9 @@ cmd+=(--name "$NAME")
 # Scoped to /target-family first tokens (same vocabulary as harness_map's
 # message_carries_no_merge): a /think or /review prompt that MENTIONS the flag
 # arms nothing, and the message is authoritative over any inherited carrier.
+# A non-family message clears NOTHING: an operator's exported TARGET_NO_MERGE is
+# a documented control input, and a leaked carrier surviving a prose worker errs
+# toward refusing merges, the safe side (round 8; mirrors the cli.py edit).
 case "${MESSAGE%% *}" in
   /target|/fno:target|\$fno:target)
     case " $MESSAGE " in
@@ -419,7 +422,6 @@ case "${MESSAGE%% *}" in
       *) unset TARGET_NO_MERGE 2>/dev/null || true ;;
     esac
     ;;
-  *) unset TARGET_NO_MERGE 2>/dev/null || true ;;
 esac
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"

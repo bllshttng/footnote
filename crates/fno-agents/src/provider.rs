@@ -1001,9 +1001,9 @@ pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
         // `/fno:target --no-merge x` -> --command fno:target, then the args as
         // separate WORDS behind a `--` separator: one "--no-merge x" element
         // after `--command <cmd>` starts with a dash, and the CLI's own argv
-        // parser reads a leading-'--' positional as an unknown flag (x-9d11
-        // round 7; live-verify against the pinned opencode version on the next
-        // real dispatch).
+        // parser reads a leading-'--' positional as an unknown flag. VERIFIED
+        // live against opencode v1.14.50 (`run --command x -- a b` parses; the
+        // help names `--command` "use message for args").
         if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
             let mut argv_tail = vec!["--command".to_string(), cmd.to_string()];
             if let Some(msg_args) = parts.next().filter(|a| !a.is_empty()) {

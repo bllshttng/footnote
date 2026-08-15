@@ -452,3 +452,33 @@ def test_both_merge_posture_readers_default_to_deny():
     assert resolve_dispatch(
         harness="claude", node_id="x-1", dispatch_cfg={"auto_merge": "true"}
     )["command"] == "/target --no-merge x-1"
+
+
+def test_is_target_family_pins_the_carrier_vocabulary():
+    """The refusal carrier judges only /target-family first tokens (x-9d11).
+
+    Direct pins for the predicate trio every spawn lane shares: the family
+    gate, the word-padded flag match, and the legacy token rewrite. A drift
+    here re-opens either the prose-manufactures-a-refusal defect or the
+    family-scoping regression (rounds 6/8)."""
+    from fno.agents.harness_map import is_target_family
+
+    assert is_target_family("/target x-1")
+    assert is_target_family("/fno:target x-1")
+    assert is_target_family("$fno:target x-1")
+    assert not is_target_family("")
+    assert not is_target_family("prose about /target")
+    assert not is_target_family("/think /target-adjacent words")
+
+
+def test_message_carries_no_merge_is_word_padded():
+    from fno.agents.harness_map import message_carries_no_merge
+
+    assert message_carries_no_merge("/target --no-merge x-1")
+    assert message_carries_no_merge("$fno:target x-1 --no-merge")
+    # Round 8, angle A: a different flag is not the carrier.
+    assert not message_carries_no_merge("/target --no-merge-guard x-1")
+    # Non-family messages that mention the flag arm nothing.
+    assert not message_carries_no_merge("/think use --no-merge for x-1")
+    assert not message_carries_no_merge("please do not merge")
+    assert not message_carries_no_merge("")

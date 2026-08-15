@@ -1153,6 +1153,7 @@ def cmd_spawn(
     # migrated to the flag (receipts show the effective message), and the env
     # arm stays scoped to the family: prose and other verbs arm nothing.
     from fno.agents.harness_map import (
+        is_target_family,
         message_carries_no_merge,
         normalize_legacy_no_merge,
     )
@@ -1223,11 +1224,18 @@ def cmd_spawn(
     # x-9d11 set-or-clear BEFORE any substrate branch: the pane transport
     # inherits os.environ directly, so an inherited carrier must be cleared
     # here too, not only on the bg/headless export path (review round 7). The
-    # message is authoritative in both directions.
+    # message is authoritative in both directions - but only for
+    # /target-family messages, the one vocabulary that can carry the flag. A
+    # prose spawn clears NOTHING: an operator's exported TARGET_NO_MERGE is a
+    # documented control input, and a leaked carrier surviving a prose worker
+    # errs toward refusing merges, the safe side (round 8).
     prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
-    if (prov_env or {}).get("TARGET_NO_MERGE") == "1":
+    if message_carries_no_merge(message) or (prov_env or {}).get("TARGET_NO_MERGE") == "1":
         os.environ["TARGET_NO_MERGE"] = "1"
-    else:
+    elif is_target_family(message):
+        # A family message WITHOUT the flag clears the carrier: the flag is the
+        # authority. A non-family (prose/other-verb) message clears NOTHING - see
+        # the comment above.
         os.environ.pop("TARGET_NO_MERGE", None)
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps

@@ -77,6 +77,13 @@ def normalize_legacy_no_merge(command: str) -> str:
     return command
 
 
+def is_target_family(message: str) -> bool:
+    """True when the message's first token is a /target-family command
+    spelling - the one vocabulary that can carry merge-posture flags."""
+    first = message.split(maxsplit=1)[0] if message else ""
+    return first in _TARGET_FAMILY
+
+
 def message_carries_no_merge(message: str) -> bool:
     """True when a /target-family message carries the ``--no-merge`` flag.
 
@@ -84,8 +91,7 @@ def message_carries_no_merge(message: str) -> bool:
     the flag arms no env carrier, and neither does prose. The word-padded
     match is too: ``--no-merge-guard`` (a different flag) is not the carrier
     (round 8, angle A)."""
-    first = message.split(maxsplit=1)[0] if message else ""
-    return first in _TARGET_FAMILY and " --no-merge " in f" {message} "
+    return is_target_family(message) and " --no-merge " in f" {message} "
 
 
 def _refused_reason(harness: str) -> str:
