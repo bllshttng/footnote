@@ -25,16 +25,6 @@ decide_app = typer.Typer(
 )
 
 
-def _session_id() -> "str | None":
-    from fno.carveout.core import resolve_session_id
-    from fno.paths import resolve_repo_root
-
-    try:
-        return resolve_session_id(resolve_repo_root())
-    except Exception:  # noqa: BLE001 - an unresolvable session is not an error here
-        return None
-
-
 @decide_app.callback(invoke_without_command=True)
 def record(
     ctx: typer.Context,
@@ -70,7 +60,6 @@ def record(
 
     from fno.decide import record_decision
 
-    session = _session_id()
     try:
         result = record_decision(
             decision=decision,
