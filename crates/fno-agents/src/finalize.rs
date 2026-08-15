@@ -300,9 +300,7 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             // Provenance (x-9d11): same untrusted-line rule as the posture
             // itself - prose inside the `input` scalar must not be able to
             // claim an origin either. Advisory, so no separate trust gate.
-            "auto_merge_source" if !line_untrusted => {
-                set(&mut m.auto_merge_source, v)
-            }
+            "auto_merge_source" if !line_untrusted => set(&mut m.auto_merge_source, v),
             _ => {}
         }
     }
@@ -2159,10 +2157,11 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
         ),
     }
     let strategy = crate::agents_config::auto_merge_strategy(cwd);
-    // No --delete-branch here (x-9d11): gh exits right after queueing, GitHub's
-    // server-side auto-merge deletes nothing, and the flag's LOCAL delete
-    // attempt is the x-7267 false-failure shape. Remote cleanup runs after the
-    // server-side merge lands, not at arm time.
+    // No --delete-branch here (x-9d11): the flag's LOCAL delete attempt is the
+    // x-7267 false-failure shape. KNOWN GAP: nothing deletes the remote ref
+    // when the queue later lands the merge (the executor-side
+    // _post_merge_remote_delete never runs on that path). Repos wanting the
+    // ref gone should enable GitHub's own delete-head-branches setting.
     let mut args = vec![
         "pr".to_string(),
         "merge".to_string(),
@@ -2215,10 +2214,11 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
                     "finalize: PR {number} already merged (another path landed it); \
                      nothing to arm - auto-merge goal already met"
                 );
-                // Not a withheld: the goal is met, so no blocked_reason. The
-                // tuple's second slot is `auto_merge_blocked_reason`, and a
-                // success-shaped note there would read as withheld in the event.
-                return (true, None);
+                // No queue entry exists, so armed=false; the blocked_reason
+                // names the state so the event can neither claim a phantom arm
+                // (armed=true for an arm that never happened) nor read as an
+                // unexplained decline.
+                return (false, Some("already merged".to_string()));
             }
             eprintln!(
                 "finalize: auto-merge arm failed for PR {number} with --{strategy} \

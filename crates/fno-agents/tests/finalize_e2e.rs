@@ -1290,7 +1290,10 @@ fn finalize_arms_when_configured_optional_app_reviewed() {
     let event = finalized_event(&env, "S-optional-reviewed");
     assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
     // x-9d11: the terminal event names which input set the posture.
-    assert_eq!(event.pointer("/data/auto_merge_source"), Some(&"config".into()));
+    assert_eq!(
+        event.pointer("/data/auto_merge_source"),
+        Some(&"config".into())
+    );
     assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
 }
 
@@ -1302,7 +1305,10 @@ fn finalize_event_source_reads_unknown_on_pre_provenance_manifest() {
     let out = run_finalize_shimmed(&env, "DoneAdvisory", GH_PR_358_LOGGING);
     assert!(out.status.success());
     let event = finalized_event(&env, "S-nosource");
-    assert_eq!(event.pointer("/data/auto_merge_source"), Some(&"unknown".into()));
+    assert_eq!(
+        event.pointer("/data/auto_merge_source"),
+        Some(&"unknown".into())
+    );
 }
 
 #[test]

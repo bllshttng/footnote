@@ -1475,7 +1475,7 @@ class DispatchBlock(BaseModel):
     (`fno.agents.harness_map`): the shared `fno dispatch resolve` resolver reads
     these as the config rung between an explicit flag and the built-in default.
     All three are empty ("") = unset, so a fresh install resolves exactly as the
-    built-ins (harness=claude, per-harness substrate, `/target no-merge {id}`).
+    built-ins (harness=claude, per-harness substrate, `/target --no-merge {id}`).
 
     No value validation here (config stays a leaf module, x-7fdd): the resolver
     validates the harness against the map and the substrate against the harness's

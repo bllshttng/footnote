@@ -349,6 +349,14 @@ fi
 # control input. Grants were hardened against prose by x-51a3; refusals match
 # here. A brief that says no-merge must reach --no-merge on `fno target
 # start/init` to take effect - attributable, not parsed out of prose.
+# An EXPLICIT config refusal is still `config`, not `default-off`: the operator
+# set the key, so "which layer said no" must answer config, not "nothing set".
+# get_auto_merge_enabled cannot distinguish unset from false (both read
+# "false"), so the raw key is read with an empty default here.
+if [[ "$AUTO_MERGE_SOURCE" == "default-off" ]] && declare -F get_config >/dev/null 2>&1; then
+  _am_set="$(get_config "auto_merge.enabled" "" 2>/dev/null)"
+  [[ -n "$_am_set" ]] && AUTO_MERGE_SOURCE="config"
+fi
 
 # Auto-merge implies external review on.
 if _is_true "$AUTO_MERGE_APPROVED" && _is_true "$no_external"; then

@@ -256,7 +256,7 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
     ``--plan-path`` wins; otherwise the ``--input`` is tokenized and each token
     is matched (exact, case-insensitive, format-agnostic) against a graph entry
     id. This covers modifier-prefixed node inputs - the auto-continue path
-    builds ``/target no-merge <id>`` and passes the original arg to
+    builds ``/target --no-merge <id>`` and passes the original arg to
     ``fno target init`` - while a free-text feature description (no token equals
     an id) simply skips. Exactly one distinct node match is required; zero or
     ambiguous (>=2) -> skip. No fuzzy title guessing, so a description never

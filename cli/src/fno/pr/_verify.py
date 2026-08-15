@@ -426,9 +426,28 @@ def _bounded_remediation(
     # reads the checks and merges green itself) and no --delete-branch (gh's
     # local delete is the worktree false-failure shape). require_checks_pass is
     # enforced here with the shared verdict helper, head-pinned like _do_merge.
-    if auto_merge.require_checks_pass:
-        from fno.pr import _merge as _merge_mod
+    # x-9d11 AC5-CON: same one-arming-path rule as _do_merge - if finalize
+    # already armed GitHub's queue, stand down instead of racing it.
+    from fno.pr import _merge as _merge_mod
 
+    _armed = _merge_mod._gh(
+        ["pr", "view", pr_number, "--json", "autoMergeRequest",
+         "-q", ".autoMergeRequest.enabled"],
+        cwd,
+    )
+    if _armed.ok and _armed.stdout.strip() == "true":
+        _emit_audit(
+            repo_root, state_file, pr_number, "merge_attempt_did_not_complete",
+            {"reason": "already armed in GitHub auto-merge queue"},
+        )
+        sys.stdout.write(
+            f"merge_attempt_did_not_complete: PR #{pr_number} already armed "
+            "in GitHub's auto-merge queue (fno-agents finalize); the queue "
+            "merges it when checks pass\n"
+        )
+        return 1
+
+    if auto_merge.require_checks_pass:
         verdict, _counts, head_read = _merge_mod._checks_verdict(pr_number, cwd)
         if verdict != "green":
             _emit_audit(
@@ -444,8 +463,21 @@ def _bounded_remediation(
                 f"(retry when green)\n"
             )
             return 1
-        if head_read:
-            cmd += ["--match-head-commit", head_read]
+        if not head_read:
+            # Same fail-closed rule as _do_merge: green but unpinnable is not
+            # mergeable - an unpinned merge could land a head the verdict never
+            # described.
+            _emit_audit(
+                repo_root, state_file, pr_number, "merge_attempt_did_not_complete",
+                {"checks": "green, head unreadable"},
+            )
+            sys.stdout.write(
+                f"merge_attempt_did_not_complete: PR #{pr_number} checks read "
+                "green but the head SHA was unreadable; refusing to merge a "
+                "head the verdict cannot be pinned to\n"
+            )
+            return 1
+        cmd += ["--match-head-commit", head_read]
     res = run(cmd, cwd=cwd)
     gh_stderr = res.stderr or ""
     if res.ok:

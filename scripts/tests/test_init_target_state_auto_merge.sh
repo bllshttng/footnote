@@ -90,6 +90,21 @@ assert_contains "x-9d11: source default-off when nothing set" "auto_merge_source
 
 rm -rf "$T"
 
+# ---- Test 1b: an explicit config refusal reads source config, not default-off ----
+
+echo ""
+echo "test_explicit_config_false_reads_source_config"
+
+T=$(setup_repo "[auto_merge]
+enabled = false")
+
+run_init_in "$T"
+STATE=$(cat "$T/.fno/target-state.md" 2>/dev/null || echo "")
+
+assert_contains "explicit enabled=false reads source config" "auto_merge_source: config" "$STATE"
+
+rm -rf "$T"
+
 # ---- Test 2: AC2-HP auto_merge_approved true when enabled + target allowed ----
 
 echo ""

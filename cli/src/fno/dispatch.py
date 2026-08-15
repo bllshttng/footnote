@@ -574,6 +574,7 @@ def _dispatch_one(
     provenance = resolve_provenance(node_id, slug)
     if account:
         provenance["FNO_ACCOUNT"] = account
+    # x-9d11 mechanical refusal carrier: the flag in the message is the
     # A cutover replaces all three parts of the launch together (harness,
     # command, credential overlay); passing one without the others is the
     # wrong-billing / wrong-binary launch the selector exists to prevent.
@@ -588,6 +589,11 @@ def _dispatch_one(
         message = cutover_command
         account_env = cutover.account_env
         provenance["FNO_ACCOUNT"] = cutover.record_id or ""
+    # x-9d11 mechanical refusal carrier: the flag in the message is the
+    # attributable carrier; the pane env is the backstop, so a worker that
+    # never passes the flag through still folds the refusal at init.
+    if "--no-merge" in message:
+        provenance["TARGET_NO_MERGE"] = "1"
     try:
         result = dispatch_spawn_pane(
             name=_worker_agent_name(node_id, slug),

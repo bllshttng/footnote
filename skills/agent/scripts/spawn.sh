@@ -404,6 +404,14 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
 cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
+# x-9d11 mechanical refusal carrier: when the spawn message itself carries the
+# --no-merge posture flag (normalize.sh or harness_map injected it), export the
+# env var too so the worker's init folds the refusal even if it never passes
+# the flag through to `fno target start/init` (post-compaction, thin skill
+# layer). The flag stays the attributable carrier; the env is the backstop.
+case " $MESSAGE " in
+  *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
+esac
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"
 # EXIT trap guarantees cleanup even if interrupted (SIGINT) mid-spawn; the manual
