@@ -851,6 +851,19 @@ def _derive_log_path(name: str) -> Path:
     return paths.state_dir() / "agents" / "logs" / f"{name}.log"
 
 
+def _touch_log_path(name: str) -> Path:
+    """Create (or reuse) the log file a mint site is about to record as a
+    registry row's ``log_path`` (x-7bcd AC4): a ``log_path`` pointing at
+    nothing is a claim, not evidence, so the file must exist before the row
+    does. Shared by every mint site (dispatch.py, mux_spawn.py) so the
+    mkdir+touch idiom lives in exactly one place.
+    """
+    log_path = _derive_log_path(name)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch(exist_ok=True)
+    return log_path
+
+
 def _codex_output_path(name: str) -> Path:
     """Tee target for the codex provider's JSONL stream (Locked Decision 8).
 
@@ -1468,9 +1481,7 @@ def _claude_create_path(
     # log_path pointing at nothing is a claim, not evidence, and the
     # resolvable-handle guard only checks the field is non-empty, not that
     # the file exists.
-    log_path = _derive_log_path(name)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.touch(exist_ok=True)
+    log_path = _touch_log_path(name)
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),

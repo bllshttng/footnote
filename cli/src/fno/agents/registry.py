@@ -854,6 +854,26 @@ def _existing_row_names(raw: Optional[dict]) -> set[str]:
     return {a["name"] for a in agents if isinstance(a, dict) and isinstance(a.get("name"), str)}
 
 
+def _has_resolvable_handle(
+    *,
+    pid: Optional[int] = None,
+    pid_start_time: Optional[float] = None,
+    log_path: Optional[str] = None,
+    harness: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
+) -> bool:
+    """The three-leg resolvable-handle predicate (x-7bcd), factored out of
+    ``_validate_resolvable_handle`` so a mint site that must decide WHETHER a
+    fallback handle is needed (``mux_spawn.py``) can call the same source of
+    truth instead of re-deriving the leg logic inline, where a future change
+    to a leg's definition could otherwise drift between the two copies.
+    """
+    leg1 = pid is not None and pid_start_time is not None
+    leg2 = bool(log_path)
+    leg3 = bool(harness) and bool(harness_session_id)
+    return leg1 or leg2 or leg3
+
+
 def _validate_resolvable_handle(entry: AgentEntry) -> None:
     """The resolvable-handle invariant (x-7bcd, mirrors Rust
     ``validate_resolvable_handle``): at creation, every registry row carries
@@ -866,10 +886,13 @@ def _validate_resolvable_handle(entry: AgentEntry) -> None:
     file. Scoped to NEW rows only by the caller (AC3-FR); this function does
     no I/O and makes no new-vs-existing distinction itself.
     """
-    leg1 = entry.pid is not None and entry.pid_start_time is not None
-    leg2 = bool(entry.log_path)
-    leg3 = bool(entry.harness) and bool(entry.harness_session_id)
-    if leg1 or leg2 or leg3:
+    if _has_resolvable_handle(
+        pid=entry.pid,
+        pid_start_time=entry.pid_start_time,
+        log_path=entry.log_path,
+        harness=entry.harness,
+        harness_session_id=entry.harness_session_id,
+    ):
         return
     raise ValueError(
         f"registry row {entry.name!r} carries no resolvable handle: needs one of "
