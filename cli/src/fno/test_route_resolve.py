@@ -31,10 +31,10 @@ def test_tier_high_empty_degrades_and_records_chain():
     """AC3-FR: no model clears the high floor -> degrade to best available, spawn."""
     snap = _snap([
         {"name": "glm-4.7", "coding_percentile": 55},
-        {"name": "glm-5.2", "coding_percentile": 75},
+        {"name": "glm-5.3", "coding_percentile": 75},
     ])
     model, chain = rr.resolve_tier("high", snapshot=snap)
-    assert model == "glm-5.2"  # best available below the floor
+    assert model == "glm-5.3"  # best available below the floor
     assert any("degrade" in step for step in chain)
 
 
