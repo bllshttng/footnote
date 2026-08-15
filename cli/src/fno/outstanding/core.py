@@ -336,15 +336,24 @@ def read_open_captures(root: Path) -> "list[Capture]":
         except (OSError, UnicodeDecodeError):
             continue
         project = _store_label(path, roots)
-        # Canonical checkouts (a real .git dir) front the events lookup: a
-        # worktree-local events journal is not the one the capture verbs
-        # wrote to, and a worktree directory names a branch, not a project.
+        # Canonical checkouts (a real .git dir) lead the events lookup. Fold
+        # every distinct journal because projects can share one configured
+        # capture file while writing capture events to separate journals.
         roots = sorted(roots, key=lambda r: not (r / ".git").is_dir())
         added: "dict[str, str]" = {}
+        seen_journals: "set[Path]" = set()
         for r in roots:
-            added.update(_capture_added_at(r))
-            if added:
-                break
+            try:
+                journal = events_path(r).resolve()
+            except OSError:
+                continue
+            if journal in seen_journals:
+                continue
+            seen_journals.add(journal)
+            for fu_id, ts in _capture_added_at(r).items():
+                previous = added.get(fu_id)
+                if previous is None or ts < previous:
+                    added[fu_id] = ts
         for item in parse_items(text):
             if item["id"] in seen_ids:
                 continue

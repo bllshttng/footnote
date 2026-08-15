@@ -421,6 +421,43 @@ def test_capture_leg_reports_oldest_age_from_capture_add_events(capture_roots):
     assert "oldest 62 days" in res.output, res.output
 
 
+def test_capture_age_folds_every_distinct_project_journal(
+    capture_roots, monkeypatch: pytest.MonkeyPatch
+):
+    """One project's event history must not hide an older sibling capture."""
+    this, other = capture_roots
+    shared = this / "shared-parking-lot.md"
+    shared.write_text(
+        "- [ ] fu-aaaaaa - alpha\n- [ ] fu-bbbbbb - beta\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "fno.paths.inbox_path", lambda project_root=None: shared
+    )
+    old = (datetime.now(timezone.utc) - timedelta(days=80)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    def added_at(project: Path) -> dict[str, str]:
+        if project.name == "this":
+            return {"fu-aaaaaa": old}
+        if project.name == "other":
+            return {"fu-bbbbbb": recent}
+        return {}
+
+    monkeypatch.setattr("fno.outstanding.core._capture_added_at", added_at)
+    monkeypatch.setattr(
+        "fno.outstanding.core.events_path", lambda project: project / ".fno/events.jsonl"
+    )
+
+    res = runner.invoke(outstanding_app, [])
+
+    assert res.exit_code == 0, res.output
+    assert "oldest 80 days" in res.output, res.output
+
+
 def test_unreadable_inbox_contributes_zero_and_never_raises(capture_roots):
     """A missing or unreadable sibling inbox contributes zero captures
     and the other projects still report."""
