@@ -850,6 +850,8 @@ def test_real_relay_descendant_releases_captured_receipt_pipes(
         ]
     )
     relay_marker = tmp_path / "relay-started"
+    relay_release = tmp_path / "relay-release"
+    relay_finished = tmp_path / "relay-finished"
     script = """
 import os
 import time
@@ -861,7 +863,11 @@ dispatch._registered_family1_state = lambda _entry: "working"
 
 def run_relay(*_args, **_kwargs):
     Path(os.environ["FNO_TEST_RELAY_MARKER"]).write_text("started")
-    time.sleep(4)
+    release = Path(os.environ["FNO_TEST_RELAY_RELEASE"])
+    deadline = time.monotonic() + 8
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    Path(os.environ["FNO_TEST_RELAY_FINISHED"]).write_text("finished")
 
 dispatch._run_relay_loop = run_relay
 dispatch._daemon_rpc = lambda *_args, **_kwargs: {
@@ -900,7 +906,8 @@ print(f"{result.msg_id} delivered ({result.delivery})")
 """
     env = os.environ.copy()
     env["FNO_TEST_RELAY_MARKER"] = str(relay_marker)
-    started = time.monotonic()
+    env["FNO_TEST_RELAY_RELEASE"] = str(relay_release)
+    env["FNO_TEST_RELAY_FINISHED"] = str(relay_finished)
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -910,7 +917,6 @@ print(f"{result.msg_id} delivered ({result.delivery})")
         check=False,
     )
 
-    assert time.monotonic() - started < 2.5
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(result.stdout.splitlines()) == 1
     assert result.stdout.strip().endswith("delivered (hosted)")
@@ -919,6 +925,12 @@ print(f"{result.msg_id} delivered ({result.delivery})")
     while not relay_marker.exists() and time.monotonic() < marker_deadline:
         time.sleep(0.01)
     assert relay_marker.read_text() == "started"
+    assert not relay_finished.exists(), "relay finished before the CLI receipt returned"
+    relay_release.write_text("release")
+    finished_deadline = time.monotonic() + 2.0
+    while not relay_finished.exists() and time.monotonic() < finished_deadline:
+        time.sleep(0.01)
+    assert relay_finished.read_text() == "finished"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:

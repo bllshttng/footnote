@@ -14,7 +14,8 @@ Entry schema per key::
     }
 
 Key format: ``"{repo_slug}#{pr_number}"`` (globally unique across repos).
-Fall back to ``str(pr_number)`` when slug is None.
+Legacy bare-number keys are normalized or discarded on the next tick; new
+writes require a repository slug.
 
 Baseline discipline:
     A PR with NO existing entry is first-seen.  The caller (tick) records
@@ -22,14 +23,17 @@ Baseline discipline:
     A corrupt/missing store resets to empty, and tick re-baselines all
     candidates from current gh state rather than mass-firing.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fno.paths import state_dir
 
@@ -41,15 +45,84 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+_QUALIFIED_KEY_RE = re.compile(
+    r"^(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*)$"
+)
+
+
 def make_watermark_key(*, repo_slug: Optional[str], pr_number: int) -> str:
     """Return the watermark dict key for a single PR.
 
-    Uses ``"{slug}#{n}"`` when slug is available; falls back to ``str(n)``
-    when the slug is None (e.g. unparseable PR URL).
+    A repository slug is required because a bare PR number is not globally
+    unique. Callers with an unparseable PR URL must skip the record rather than
+    persist an ambiguous key.
     """
-    if repo_slug:
-        return f"{repo_slug}#{pr_number}"
-    return str(pr_number)
+    if not repo_slug:
+        raise ValueError("repo_slug is required for a PR watermark key")
+    key = f"{repo_slug.lower()}#{pr_number}"
+    if parse_watermark_key(key) is None:
+        raise ValueError(f"invalid PR watermark key: {key}")
+    return key
+
+
+def parse_watermark_key(key: str) -> Optional[tuple[str, int]]:
+    """Return ``(owner/repo, number)`` for a qualified watermark key."""
+    if not isinstance(key, str):
+        return None
+    match = _QUALIFIED_KEY_RE.fullmatch(key)
+    if match is None:
+        return None
+    return (
+        f"{match.group('owner')}/{match.group('repo')}".lower(),
+        int(match.group("number")),
+    )
+
+
+@dataclass(frozen=True)
+class KeyNormalization:
+    """Receipt for legacy key repair performed during a store load."""
+
+    normalized: list[dict[str, str]]
+    dropped: list[dict[str, Any]]
+
+
+def _as_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_entries(legacy: dict, canonical: dict) -> dict:
+    """Collapse duplicate watermark values without losing dispatched work."""
+    merged = dict(legacy)
+    merged.update(canonical)
+    timestamps = [
+        value
+        for value in (legacy.get("last_review_ts"), canonical.get("last_review_ts"))
+        if isinstance(value, str) and value
+    ]
+    merged["last_review_ts"] = max(timestamps) if timestamps else None
+    # The blanket update above lets one twin's last_seen_state silently win.
+    # A terminal observation must not read back OPEN from its duplicate, so a
+    # terminal value on either side wins; otherwise the canonical side is kept.
+    if (
+        merged.get("last_seen_state") not in ("MERGED", "CLOSED")
+        and "last_seen_state" in legacy
+    ):
+        for terminal in ("MERGED", "CLOSED"):
+            if legacy.get("last_seen_state") == terminal:
+                merged["last_seen_state"] = terminal
+                break
+    merged["merge_dispatched"] = bool(
+        legacy.get("merge_dispatched") or canonical.get("merge_dispatched")
+    )
+    merged["retries"] = max(
+        _as_nonnegative_int(legacy.get("retries")),
+        _as_nonnegative_int(canonical.get("retries")),
+    )
+    merged["parked"] = canonical.get("parked") or legacy.get("parked")
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +199,81 @@ class WatermarkStore:
         self.load()  # ensure _data is initialised
         assert self._data is not None
         self._data[key] = entry
+        self._persist()
+
+    def normalize_keys(self) -> KeyNormalization:
+        """Rewrite legacy keys to globally-qualified keys in memory.
+
+        A bare number is recoverable only when exactly one qualified twin
+        already exists in the store. Anything else - ambiguous, orphaned, or
+        matched only by a same-numbered current candidate - is discarded
+        rather than guessed: a candidate from a different repository would
+        otherwise inherit a transplanted parked or merge_dispatched record
+        and be silently suppressed forever. The caller persists once after
+        the measured sweep, avoiding one full-file rewrite per record.
+        """
+        data = self.load()
+        qualified_by_number: dict[int, set[str]] = {}
+        for raw_key in data:
+            parsed = parse_watermark_key(raw_key)
+            if parsed is None:
+                continue
+            slug, number = parsed
+            canonical_key = make_watermark_key(repo_slug=slug, pr_number=number)
+            qualified_by_number.setdefault(number, set()).add(canonical_key)
+
+        normalized: list[dict[str, str]] = []
+        dropped: list[dict[str, Any]] = []
+        rebuilt: dict[str, dict] = {}
+        bare: list[tuple[str, Any]] = []
+
+        for raw_key, entry in data.items():
+            parsed = parse_watermark_key(raw_key)
+            if parsed is None:
+                bare.append((raw_key, entry))
+                continue
+            if not isinstance(entry, dict):
+                dropped.append({"key": raw_key, "reason": "invalid-entry", "state": "UNKNOWN"})
+                continue
+            slug, number = parsed
+            canonical_key = make_watermark_key(repo_slug=slug, pr_number=number)
+            if canonical_key in rebuilt:
+                rebuilt[canonical_key] = _merge_entries(entry, rebuilt[canonical_key])
+                normalized.append({"from": raw_key, "to": canonical_key})
+            else:
+                rebuilt[canonical_key] = dict(entry)
+                if raw_key != canonical_key:
+                    normalized.append({"from": raw_key, "to": canonical_key})
+
+        for raw_key, entry in bare:
+            if not isinstance(entry, dict):
+                dropped.append({"key": raw_key, "reason": "invalid-entry", "state": "UNKNOWN"})
+                continue
+            if isinstance(raw_key, str) and raw_key.isdigit() and int(raw_key) > 0:
+                targets = sorted(qualified_by_number.get(int(raw_key), set()))
+                if len(targets) == 1:
+                    target = targets[0]
+                    rebuilt[target] = _merge_entries(entry, rebuilt.get(target, {}))
+                    normalized.append({"from": raw_key, "to": target})
+                    continue
+                reason = "ambiguous-key" if len(targets) > 1 else "unresolvable-key"
+            else:
+                reason = "invalid-key"
+            dropped.append(
+                {
+                    "key": raw_key,
+                    "reason": reason,
+                    "state": str(entry.get("last_seen_state") or "UNKNOWN"),
+                }
+            )
+
+        data.clear()
+        data.update(rebuilt)
+        return KeyNormalization(normalized=normalized, dropped=dropped)
+
+    def persist(self) -> None:
+        """Persist the current in-memory snapshot atomically."""
+        self.load()
         self._persist()
 
     # ------------------------------------------------------------------
