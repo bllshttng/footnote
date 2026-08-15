@@ -239,11 +239,34 @@ def test_default_acquire_resume_attach_claim_refuses_a_second_writer(tmp_path) -
 
     err = _default_acquire_resume_attach_claim(short_id, root=tmp_path)
     assert err is not None
-    assert "held live by another writer" in err
-    assert "other-writer" in err
+    exit_code, msg = err
+    assert exit_code == 11
+    assert "held live by another writer" in msg
+    assert "other-writer" in msg
 
     # A different short_id: an unrelated row's wake is never blocked.
     assert _default_acquire_resume_attach_claim("other-id", root=tmp_path) is None
+
+
+def test_default_acquire_resume_attach_claim_maps_other_errors_to_exit_12(monkeypatch) -> None:
+    """code-review finding: only ClaimHeldByOther was caught, so a
+    validation error or a filesystem failure (disk full, EACCES) from
+    acquire_claim propagated as a raw traceback out of the standalone entry
+    point this claim guard exists to protect. Rust's parity path maps its
+    own AcquireOutcome::Error to exit 12; match it here."""
+    import fno.claims.core as claims_core_mod
+    from fno.agents.resume_cli import _default_acquire_resume_attach_claim
+
+    def _raise(*a, **kw):
+        raise claims_core_mod.ClaimValidationError("key too long")
+
+    monkeypatch.setattr(claims_core_mod, "acquire_claim", _raise)
+
+    err = _default_acquire_resume_attach_claim("deadbeef")
+    assert err is not None
+    exit_code, msg = err
+    assert exit_code == 12
+    assert "could not claim session deadbeef" in msg
 
 
 def test_claude_resume_refuses_when_claim_held_by_another_writer() -> None:
@@ -260,7 +283,7 @@ def test_claude_resume_refuses_when_claim_held_by_another_writer() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
-        claim_fn=lambda _s: "fno agents resume: session deadbeef is held live by another writer",
+        claim_fn=lambda _s: (11, "fno agents resume: session deadbeef is held live by another writer"),
         wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
         agents_state_fn=lambda: (_ for _ in ()).throw(AssertionError("must not verify")),
     )
