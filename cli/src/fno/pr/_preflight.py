@@ -26,7 +26,7 @@ import stat
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Mapping, Optional, Tuple
+from typing import Iterator, Mapping, Optional, Tuple
 
 from fno.pr._proc import ToolMissing, run
 
@@ -626,63 +626,84 @@ def rebase_equivalent_evidence(
     head_ids = _patch_identity(candidate_sha, cwd=cwd, base_ref=base_ref)
     if head_ids is None:
         return None
-    seen_paths: set[str] = set()
-    for raw_path in event_paths:
-        path = Path(raw_path).expanduser()
-        try:
-            path_key = str(path.resolve())
-        except OSError:
-            path_key = os.path.abspath(path)
-        if path_key in seen_paths:
-            continue
-        seen_paths.add(path_key)
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError):
-            continue
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+
+    def _validated_events() -> "Iterator[dict]":
+        seen_paths: set[str] = set()
+        for raw_path in event_paths:
+            path = Path(raw_path).expanduser()
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
+                path_key = str(path.resolve())
+            except OSError:
+                path_key = os.path.abspath(path)
+            if path_key in seen_paths:
                 continue
-            if (
-                not isinstance(event, dict)
-                or event.get("type") != "verification_receipt"
-            ):
-                continue
+            seen_paths.add(path_key)
             try:
-                validate(event)
-            except ValidationError:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
                 continue
-            parsed_ts = _event_timestamp(event.get("ts"))
-            if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
-                continue
-            data = event.get("data")
-            if not isinstance(data, dict):
-                continue
-            if data.get("mode") != "full" or data.get("result") != "passed":
-                continue
-            if not _trusted_preflight_producer(event):
-                continue
-            sha = data.get("candidate_sha")
-            if not isinstance(sha, str) or sha.lower() == candidate_sha.lower():
-                continue
-            if _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd).returncode != 0:
-                continue
-            if _patch_identity(sha, cwd=cwd, base_ref=base_ref) == head_ids:
-                return {
-                    **decision,
-                    "satisfied": True,
-                    "result": "equivalent",
-                    "coverage": {
-                        **decision.get("coverage", {}),
-                        "matched_sha": sha,
-                        "equivalence": "patch-id-verbatim",
-                    },
-                }
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    not isinstance(event, dict)
+                    or event.get("type") != "verification_receipt"
+                ):
+                    continue
+                try:
+                    validate(event)
+                except ValidationError:
+                    continue
+                parsed_ts = _event_timestamp(event.get("ts"))
+                if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
+                    continue
+                yield event
+
+    # First pass, everywhere: the no-rescue rule enforced inside the walk
+    # itself. The aggregate decision's result can be masked (canonical-
+    # required, mirror-ahead) while a failed or unfinished attempt for this
+    # HEAD lives in a non-canonical journal; wherever it lives, it outranks
+    # an ancestor's green, so the scan must complete before any match.
+    for event in _validated_events():
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        head_sha_event = data.get("candidate_sha")
+        if (
+            isinstance(head_sha_event, str)
+            and head_sha_event.lower() == candidate_sha.lower()
+            and data.get("result") in ("failed", "pending")
+        ):
+            return None
+    for event in _validated_events():
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        if data.get("mode") != "full" or data.get("result") != "passed":
+            continue
+        if not _trusted_preflight_producer(event):
+            continue
+        sha = data.get("candidate_sha")
+        if not isinstance(sha, str) or sha.lower() == candidate_sha.lower():
+            continue
+        if _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd).returncode != 0:
+            continue
+        if _patch_identity(sha, cwd=cwd, base_ref=base_ref) == head_ids:
+            return {
+                **decision,
+                "satisfied": True,
+                "result": "equivalent",
+                "coverage": {
+                    **decision.get("coverage", {}),
+                    "matched_sha": sha,
+                    "equivalence": "patch-id-verbatim",
+                },
+            }
     return None
 
 

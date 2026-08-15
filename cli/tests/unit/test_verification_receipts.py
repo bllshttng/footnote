@@ -905,9 +905,13 @@ def test_equivalence_refused_after_a_code_change(tmp_path: Path) -> None:
 def test_equivalence_refused_after_a_whitespace_only_edit(tmp_path: Path) -> None:
     """The default ``patch-id --stable`` strips whitespace, so the identity
     keys on ``--verbatim`` ids: a re-indent that changes Python semantics
-    must not borrow the old receipt."""
+    must not borrow the old receipt. The edit amends the rebased commit so
+    HEAD stays a single patch-equal commit; adding a second commit would
+    refuse on commit count alone and stay green under ``--stable``."""
     repo, journal, _sha_a = _rebase_fixture(tmp_path)
-    _commit(repo, "re-indent", "a.txt", "   a\n")
+    (repo / "a.txt").write_text("   a\n")
+    _git_ok(repo, "add", "a.txt")
+    _git_ok(repo, "commit", "-q", "--amend", "-m", "re-indent")
 
     decision = check_verification_evidence(
         cwd=str(repo), event_paths=[journal], allow_equivalent=True
@@ -998,6 +1002,27 @@ def test_equivalence_never_rescues_a_failed_receipt_for_head(
 
     assert decision["satisfied"] is False
     assert decision["result"] == "failed"
+
+
+def test_equivalence_never_rescues_a_failed_receipt_masked_by_canonical_required(
+    tmp_path: Path,
+) -> None:
+    """The aggregate decision can read stale while a failed exact-HEAD
+    receipt lives only in a non-canonical journal. The no-rescue rule must
+    hold inside the walk, wherever the failed receipt lives."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    head = _git_ok(repo, "rev-parse", "HEAD")
+    mirror = tmp_path / "mirror.jsonl"
+    write(
+        mirror,
+        receipt(candidate_sha=head, ts="2026-07-26T03:02:04Z", result="failed"),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal, mirror], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
 
 
 def test_equivalence_blocked_by_incomplete_journal_coverage(
