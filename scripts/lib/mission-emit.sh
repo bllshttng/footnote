@@ -263,7 +263,10 @@ emit_mission_complete_if_needed() {
 
     commit_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")
     completed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    fleet_root="${HOME}/.fno/fleet"
+    # FLEET_DIR, not this file's own STATE_DIR (that name means the
+    # project-local .fno/ here, per the header doc) - reusing it would
+    # point fleet_root at the wrong directory.
+    fleet_root="${FLEET_DIR:-$HOME/.fno/fleet}"
     target_dir="${fleet_root}/${mission_slug}/completions/wave-${mission_wave}"
     target_path="${target_dir}/${project}.json"
 
