@@ -26,7 +26,7 @@ The implementation is a Python package (`cli/src/fno/pr_watch/`) split along a p
 2. **Discover open PRs** from the global graph: backlog nodes with no `completed_at` carrying a `pr_number`. Each node's own `cwd` field resolves its local checkout. A PR whose repo is not checked out locally is skipped. A headless skill needs a working tree.
 3. **Read PR state** per PR with `gh` (state + reviews/comments, handling the `[bot]` login suffix).
 4. **Decide** (at most one action per PR per tick), in precedence order:
-   - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno pr ritual <n> --autonomous` (warm-inject into the live origin if reachable, else the cold subprocess). The verb owns its own conditional headless judgment leg. The watcher adds no model layer of its own and creates no background thread.
+   - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno pr ritual <n> --autonomous`. The route is warm-inject into a live origin, else the cold subprocess. The verb owns its own conditional headless judgment leg. The watcher adds no model layer of its own and creates no background thread.
    - closed-without-merge, or open past the max-age window -> park (poll it no further).
    - a configured reviewer posted activity newer than the watermark -> fire `/fno:pr check`.
    - otherwise no-op.
