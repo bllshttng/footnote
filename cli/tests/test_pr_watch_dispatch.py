@@ -176,11 +176,33 @@ class TestWatermarkStore:
         }))
         store = WatermarkStore(path)
 
-        receipt = store.normalize_keys([])
+        receipt = store.normalize_keys()
 
         assert sorted(store.load()) == ["owner/one#316", "owner/two#316"]
         assert receipt.dropped == [
             {"key": "316", "reason": "ambiguous-key", "state": "OPEN"}
+        ]
+
+    def test_bare_key_never_collapses_into_a_candidate_only_twin(self, tmp_path):
+        """A same-numbered current candidate is not identity evidence.
+
+        Collapsing bare 316 into a candidate from another repository would
+        transplant its parked record onto that live PR and suppress it
+        forever, so the bare key is dropped instead.
+        """
+        from fno.pr_watch._state import WatermarkStore
+
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps({
+            "316": {"last_seen_state": "OPEN", "parked": "retries-exhausted"},
+        }))
+        store = WatermarkStore(path)
+
+        receipt = store.normalize_keys()
+
+        assert store.load() == {}
+        assert receipt.dropped == [
+            {"key": "316", "reason": "unresolvable-key", "state": "OPEN"}
         ]
 
 

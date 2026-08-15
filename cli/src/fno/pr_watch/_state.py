@@ -33,7 +33,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from fno.paths import state_dir
 
@@ -190,17 +190,20 @@ class WatermarkStore:
         self._data[key] = entry
         self._persist()
 
-    def normalize_keys(self, candidate_keys: Iterable[str]) -> KeyNormalization:
+    def normalize_keys(self) -> KeyNormalization:
         """Rewrite legacy keys to globally-qualified keys in memory.
 
-        Bare numbers are recoverable only when exactly one qualified twin or
-        current candidate identifies their repository. Ambiguous and orphaned
-        bare keys are discarded rather than guessed. The caller persists once
-        after the measured sweep, avoiding one full-file rewrite per record.
+        A bare number is recoverable only when exactly one qualified twin
+        already exists in the store. Anything else - ambiguous, orphaned, or
+        matched only by a same-numbered current candidate - is discarded
+        rather than guessed: a candidate from a different repository would
+        otherwise inherit a transplanted parked or merge_dispatched record
+        and be silently suppressed forever. The caller persists once after
+        the measured sweep, avoiding one full-file rewrite per record.
         """
         data = self.load()
         qualified_by_number: dict[int, set[str]] = {}
-        for raw_key in [*data, *candidate_keys]:
+        for raw_key in data:
             parsed = parse_watermark_key(raw_key)
             if parsed is None:
                 continue
