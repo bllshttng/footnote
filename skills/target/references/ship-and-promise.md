@@ -1,5 +1,7 @@
 # Ship and promise: draining reviews before `<promise>`
 
+<!-- style-exception: this file's per-reviewer bullets under "Run the configured local review gate" are established dense single-line paragraphs joining several clauses with semicolons and dashes, a convention used throughout the file. Rewriting that file-wide convention is out of scope for x-e97b, which only touches the `code-review` clause of one such bullet. -->
+
 Read this when the PR is up and you are deciding whether to promise. It is the operational detail behind the spine's "drain reviews FIRST" rule: what to read, in what order, and which checks gate the promise. The three-way turn-ending contract itself stays in SKILL.md ("How to end every turn").
 
 <IMPORTANT>

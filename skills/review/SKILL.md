@@ -9,6 +9,8 @@ requires:
     - "git >= 2.0"
 ---
 
+<!-- style-exception: this file's producer bullets under "The attestation surface" are established dense single-line paragraphs joining several clauses with semicolons and dashes, a convention used throughout the file. Rewriting that file-wide convention is out of scope for x-e97b, which only touches one such bullet's body to name the new PostToolUse hook. -->
+
 # Review
 
 **One verb on a diff.** `/review` routes to the right reviewer set for the diff in front of you.
