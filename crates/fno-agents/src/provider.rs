@@ -1335,7 +1335,14 @@ mod tests {
         let argv = ClaudeProvider.create_argv(&create_ctx());
         assert_eq!(
             argv,
-            vec!["claude", "--bg", "--name", "worker-A", "--", "build feature X"]
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "worker-A",
+                "--",
+                "build feature X"
+            ]
         );
         assert!(!argv.iter().any(|a| a == "-p"), "LD38: never claude -p");
     }
@@ -1351,7 +1358,14 @@ mod tests {
         };
         assert_eq!(
             ClaudeProvider.resume_argv(&ctx),
-            vec!["claude", "--resume", "7c5dcf5d", "--print", "--", "follow up"]
+            vec![
+                "claude",
+                "--resume",
+                "7c5dcf5d",
+                "--print",
+                "--",
+                "follow up"
+            ]
         );
     }
 

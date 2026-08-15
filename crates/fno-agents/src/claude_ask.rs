@@ -3357,7 +3357,16 @@ mod tests {
         };
         assert_eq!(
             build_argv("a", "hi", false, None, None, None, only_dir),
-            vec!["claude", "--bg", "--name", "a", "--add-dir", "/work", "--", "hi"]
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "a",
+                "--add-dir",
+                "/work",
+                "--",
+                "hi"
+            ]
         );
     }
 
