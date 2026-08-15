@@ -480,6 +480,42 @@ def test_claude_resume_refuses_when_route_cannot_be_restored() -> None:
     assert "gone.json" in res.stderr
 
 
+def test_claude_resume_skips_a_broken_route_on_an_already_skip_eligible_row() -> None:
+    """code-review finding: route restore ran before the skip check, so an
+    already-Working row with a stale route file got refused with exit 2
+    instead of reporting the no-op success it actually was -- nothing was
+    ever going to be woken, so the route was never going to be used."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/gone.json"  # type: ignore[attr-defined]
+
+    import fno.agents.model_routing as model_routing_mod
+
+    def _raise(path):
+        raise model_routing_mod.RouteRestoreError(f"{path} is unreadable")
+
+    orig = model_routing_mod.read_route_settings
+    model_routing_mod.read_route_settings = _raise
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            cwd_checker=lambda _c: True,
+            execvp=_no_exec,
+            wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+            agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+        )
+    finally:
+        model_routing_mod.read_route_settings = orig
+
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Working -> Working\n"
+
+
 # ---------------------------------------------------------------------------
 # x-b84f - claude pane row: canonical id fallback + safe refusal
 # ---------------------------------------------------------------------------
@@ -704,10 +740,12 @@ def test_print_command_uses_shlex_quote_for_special_chars() -> None:
 def test_stale_cwd_exits_13_with_rm_hint() -> None:
     """sigma-review H2: missing cwd at chdir-time must NOT emit success.
 
-    Pre-fix: emit_event("agent_resumed", ...) ran BEFORE os.chdir; a stale
-    cwd produced a misleading success record then crashed. Post-fix: chdir
-    runs first, OSError converts to exit 13 with the fno-agents-rm hint,
-    and the event is never emitted on the failure path.
+    The real (default) cwd_checker -- os.path.isdir -- catches this stale
+    path first, before the os.chdir branch below is ever reached; see
+    test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13 for that
+    branch specifically. This test still exercises the real, non-mocked cwd
+    validation end to end, and no agent_resumed event fires on the
+    failure path either way.
     """
     from fno.agents.resume_cli import resume_logic
 
@@ -718,21 +756,49 @@ def test_stale_cwd_exits_13_with_rm_hint() -> None:
     )
     events_seen: list[dict] = []
 
-    # Use real os.chdir/execvp=None so chdir actually runs. Inject a
-    # path_checker that allows the codex binary and an emit_event we
-    # can spy on.
+    # Use the real cwd_checker/execvp=None so the full cwd-validation path
+    # actually runs. Inject a path_checker that allows the codex binary and
+    # an emit_event we can spy on.
     res = resume_logic(
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
-        # NOTE: execvp=None means the real os.execvp would be called,
-        # but chdir fails first so we never reach it.
         execvp=None,
     )
     assert res.exit_code == 13
     assert "fno agents rm alpha" in res.stderr
     # Critically: no agent_resumed event was emitted on the failure path.
+    assert events_seen == []
+
+
+def test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13() -> None:
+    """code-review finding: the cwd_checker gate added for the claude
+    reachability fix now intercepts every stale-cwd test before os.chdir's
+    own OSError branch runs, leaving that branch covered only by a
+    production TOCTOU race rather than by CI. Force cwd_checker to pass so
+    the real os.chdir call is what fails -- a directory deleted between the
+    isdir check and the chdir call, not merely a directory that never
+    existed."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="codex",
+        cwd="/this/path/almost/certainly/does/not/exist/" + ("x" * 40),
+        harness_session_id="sess-1",
+    )
+    events_seen: list[dict] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
+        execvp=None,
+    )
+    assert res.exit_code == 13
+    assert "fno agents rm alpha" in res.stderr
     assert events_seen == []
 
 

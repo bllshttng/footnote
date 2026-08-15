@@ -45,7 +45,7 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | Is it alive? | `fno agents peek <handle>` |
 | Who is actually running | `fno agents top` |
 | The loop-wedge fold | `fno-agents needs --json` (review_wedged / budget_stop; NOT pane completion) |
-| Wake an idle teammate | `fno agents resume <handle>` (then re-send) |
+| Wake a blocked/stopped teammate | `fno agents resume <handle>` (then re-send) |
 | Close a teammate pane | `fno mux pane kill` (a mux row's short_id is empty, so `fno agents stop` refuses it) |
 | End a bg/daemon worker | `fno agents stop <name>` |
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |

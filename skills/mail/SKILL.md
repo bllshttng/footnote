@@ -59,7 +59,7 @@ re-send is how you double-deliver. Check first, then act:
 
 ```bash
 fno agents peek <short-id>     # did the turn actually land? is it alive?
-fno agents resume <short-id>   # idle -> live, then re-send
+fno agents resume <short-id>   # wakes a blocked/stopped claude session, then re-send
 fno agents attach <short-id>   # drive it yourself (claude)
 ```
 

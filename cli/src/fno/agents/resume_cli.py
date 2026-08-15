@@ -307,23 +307,6 @@ def _resume_claude_wake(
     can exit 0 having done nothing; the verification read is what makes
     that detectable instead of a lie.
     """
-    route_env: Optional[dict[str, str]] = None
-    if route_settings_path:
-        from fno.agents.model_routing import RouteRestoreError, read_route_settings
-
-        try:
-            route_env = read_route_settings(route_settings_path)
-        except RouteRestoreError as exc:
-            return ResumeResult(
-                exit_code=2,
-                stderr=(
-                    f"fno agents resume: agent {name!r} was launched on the "
-                    f"route recorded at {route_settings_path}, and it cannot "
-                    f"be restored ({exc}). Refusing to wake it onto the "
-                    f"default account.\n"
-                ),
-            )
-
     def _state_of() -> str:
         row = agents_state_fn().get(short_id) or {}
         return str(row.get("live_status") or "unknown")
@@ -348,6 +331,29 @@ def _resume_claude_wake(
     # silently reintroduce the exact misreport bug the surrounding comments
     # already describe as fixed once.
     skipped = before.lower() in _WAKE_SKIP_STATUSES_LOWER
+
+    route_env: Optional[dict[str, str]] = None
+    # Gated on `not skipped`: route_env only feeds the wake attempts below,
+    # which never run for a skip-eligible row. Restoring it unconditionally
+    # meant a row that needed no wake at all (already Working/Idle/Done) but
+    # happened to carry a stale route file got refused with exit 2 instead
+    # of reporting the no-op success it actually was.
+    if not skipped and route_settings_path:
+        from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+        try:
+            route_env = read_route_settings(route_settings_path)
+        except RouteRestoreError as exc:
+            return ResumeResult(
+                exit_code=2,
+                stderr=(
+                    f"fno agents resume: agent {name!r} was launched on the "
+                    f"route recorded at {route_settings_path}, and it cannot "
+                    f"be restored ({exc}). Refusing to wake it onto the "
+                    f"default account.\n"
+                ),
+            )
+
     if not skipped:
         for _attempt in range(_WAKE_ATTEMPTS):
             try:
