@@ -1,0 +1,50 @@
+name: review-invocation-single-source
+
+# The sized code-review invocation has one builder
+# (self_review_invocation, cli/src/fno/review_capability.py); every other
+# surface defers with the <level> placeholder. scripts/ci/check-review-
+# invocation-single-source.sh fails on any concrete level spelled outside its
+# allowlist. The regrowth vector is PROSE (a skill template or doc example
+# restating the string), so the trigger covers the surfaces that carry prose,
+# not just code paths.
+
+on:
+  pull_request:
+    paths:
+      - cli/**
+      - crates/**
+      - skills/**
+      - docs/**
+      - hooks/**
+      - agents/**
+      - commands/**
+      - scripts/ci/check-review-invocation-single-source.sh
+      - .github/workflows/review-invocation-single-source.yml
+  push:
+    branches: [main]
+    paths:
+      - cli/**
+      - crates/**
+      - skills/**
+      - docs/**
+      - hooks/**
+      - agents/**
+      - commands/**
+
+concurrency:
+  group: review-invocation-single-source-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Review invocation single-source check
+        run: bash scripts/ci/check-review-invocation-single-source.sh

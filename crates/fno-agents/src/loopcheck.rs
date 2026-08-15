@@ -1100,13 +1100,12 @@ struct PrInfo {
 /// The fourth element encodes per-harness verb overrides as
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
 /// rendering. The self-review verb is the one case: `/code-review <level>
-/// --comment --fix` on claude (the `<level>` placeholder is sized from the
-/// diff by the Python builder; `ultra` is not in the grammar anywhere - it is
-/// billed separately), `/review` bare on codex. The codex value must stay
-/// bare - prose after the verb flips codex to a no-merge-base review target -
-/// so a no-whitespace check on the codex value is a unit test, not a
-/// convention. Kept honest against the Python descriptor's `invocations` map
-/// by check-reviewer-descriptor-parity.sh.
+/// --comment --fix` on claude (the Python builder sizes `<level>` from the
+/// diff; `ultra` is not issuable), `/review` bare on codex. The codex value
+/// must stay bare - prose after the verb flips codex to a no-merge-base review
+/// target - so a no-whitespace check on it is a unit test. Kept honest against
+/// the Python descriptor's `invocations` map by
+/// check-reviewer-descriptor-parity.sh.
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review sigma", false, ""),
     (
