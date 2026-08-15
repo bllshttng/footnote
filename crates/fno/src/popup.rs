@@ -678,10 +678,7 @@ mod tests {
             "disabled row has no hit target"
         );
         assert!(
-            disabled_line
-                .roles
-                .iter()
-                .any(|&role| role == Role::BodyDim),
+            disabled_line.roles.contains(&Role::BodyDim),
             "disabled row greys via BodyDim"
         );
         // Every non-border cell on the disabled row is BodyDim: it carries no

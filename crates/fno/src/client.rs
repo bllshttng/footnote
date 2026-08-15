@@ -7867,7 +7867,7 @@ fn draw_lines_overlay<S: AsRef<str>>(
     };
     let body: Vec<chrome::BodyLine> = lines[start..start + take]
         .iter()
-        .map(|l| chrome::BodyLine::from_str(l.as_ref()))
+        .map(|l| chrome::BodyLine::plain(l.as_ref()))
         .collect();
     let framed = chrome::frame(&body, chrome, body_w, scroll);
     let box_h = framed.lines.len().min(content_rows);
