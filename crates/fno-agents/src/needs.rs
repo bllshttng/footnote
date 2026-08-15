@@ -32,6 +32,14 @@ const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
 /// that never changes); a hidden `--fires-floor` overrides it for tests.
 const DEFAULT_FIRES_FLOOR: u64 = 2;
 
+/// Below this age, a pile of unharvested carve-outs or stale claims is not yet
+/// a needs-me item - only a pile that has actually gone stale belongs in the
+/// queue (x-801b measured 44 carve-out rows, oldest 29 days; x-e3be measured
+/// 573 claim files, oldest specimens 56-75 days). Both legs are "somebody
+/// should look at this pile" signals, read from durable on-disk state rather
+/// than a recent event, so neither is windowed by `since` at all.
+const DECISION_STALE_FLOOR_SECS: u64 = 7 * 24 * 60 * 60;
+
 /// One reason a session needs a human, resolved and ready to render. `kind` is
 /// a stable string (`review_wedged` | `budget_stop`) the client maps to its own
 /// severity enum; the fold does not rank (the client owns the full 6-kind
@@ -144,6 +152,12 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     // per-recipient accumulator (latest (epoch, seq) wins) and render
     // squadless-live in the client.
     let mut mail_escalations: HashMap<String, (u64, usize, NeedItem)> = HashMap::new();
+    // operator_question / operator_question_closed, keyed by question_id (not
+    // per-recipient-latest-wins like mail_escalation above): several distinct
+    // decisions can be open on the operator at once, so every open question_id
+    // gets its own row. Mirrors `outstanding/core.py::read_open_questions`.
+    let mut questions: HashMap<String, (u64, usize, NeedItem)> = HashMap::new();
+    let mut closed_questions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in events_raw.lines() {
         if line.trim().is_empty() {
@@ -153,10 +167,61 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             continue; // torn/malformed tail line: skip, never abort (digest precedent)
         };
         let ts = event_ts(&v);
-        if !in_window(ts, since) {
+        let kind = event_kind(&v);
+        // operator_question/_closed are exempt from the `since` window: a
+        // question does not expire (no auto-close, x-99dc), so time-windowing
+        // it here would silently resurrect the exact failure that node fixed
+        // for the SessionStart block - just inside the mux queue instead.
+        let windowed = !matches!(
+            kind,
+            Some("operator_question") | Some("operator_question_closed")
+        );
+        if windowed && !in_window(ts, since) {
             continue;
         }
-        let kind = event_kind(&v);
+        if kind == Some("operator_question") {
+            let Some(qid) = str_field(&v, "question_id") else {
+                continue;
+            };
+            let question = str_field(&v, "question").unwrap_or("");
+            let node = str_field(&v, "node").map(str::to_string);
+            let name = node
+                .clone()
+                .or_else(|| str_field(&v, "cwd").map(|c| basename(c).to_string()));
+            let session_id = str_field(&v, "session_id").unwrap_or(qid).to_string();
+            let epoch = to_epoch_lenient(ts).unwrap_or(0);
+            seq += 1;
+            if questions
+                .get(qid)
+                .is_none_or(|(e, s, _)| (epoch, seq) >= (*e, *s))
+            {
+                questions.insert(
+                    qid.to_string(),
+                    (
+                        epoch,
+                        seq,
+                        NeedItem {
+                            kind: "operator_question".to_string(),
+                            session_id,
+                            node,
+                            name,
+                            title: None,
+                            ts: ts.to_string(),
+                            evidence: question.to_string(),
+                            // Stamped always-live by stamp_liveness (no node claim).
+                            live: false,
+                        },
+                    ),
+                );
+            }
+            continue;
+        }
+        if kind == Some("operator_question_closed") {
+            if let Some(qid) = str_field(&v, "question_id") {
+                closed_questions.insert(qid.to_string());
+            }
+            continue;
+        }
         // mail_escalation is folded before the session gate: it carries no
         // session_id (it is mail between agents), so the gate below would drop
         // it. One NeedItem (kind mail_question) per recipient, latest wins.
@@ -269,6 +334,12 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         }
     }
     for (_, (_, _, item)) in mail_escalations {
+        items.push(item);
+    }
+    for (qid, (_, _, item)) in questions {
+        if closed_questions.contains(&qid) {
+            continue;
+        }
         items.push(item);
     }
     items.sort_by(|a, b| {
@@ -480,7 +551,13 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
         // squadless-render branch would drop it -- the silent eat this closes.
         // The live bit here is an honest "surface this with no roster row"
         // label, not a session-liveness claim.
-        if item.kind == "mail_question" {
+        // Same reasoning for operator_question (no node claim behind a
+        // question either) and for the aggregate carveout_stale/stale_claims
+        // rows (no single node owns a pile of carve-outs or claims).
+        if matches!(
+            item.kind.as_str(),
+            "mail_question" | "operator_question" | "carveout_stale" | "stale_claims"
+        ) {
             item.live = true;
             continue;
         }
@@ -495,12 +572,150 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
     items
 }
 
+/// One unharvested-carve-out summary row, when the pile has actually gone
+/// stale (>= [`DECISION_STALE_FLOOR_SECS`] since the oldest entry). Reads
+/// `.fno/carveouts.jsonl` directly (one JSON object per line, same append-only
+/// convention as `events.jsonl`) rather than the events fold: a carve-out has
+/// no natural expiry, so this is never windowed by `since` at all.
+///
+/// One aggregate row, not one per carve-out: x-801b measured 44 rows at once,
+/// and a needs-me queue flooded with individual rows would just get truncated
+/// by the client's worst-first cap anyway. "N carve-outs, oldest Xd" is what
+/// actually answers "should I go clean this up."
+pub fn carveout_age_item(carveouts_raw: &str, now: u64) -> Option<NeedItem> {
+    let mut count = 0u64;
+    let mut oldest: Option<(u64, String)> = None;
+    for line in carveouts_raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            continue; // malformed line: skip, never abort
+        };
+        let Some(ts) = v.get("ts").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let Some(epoch) = to_epoch_lenient(ts) else {
+            continue;
+        };
+        count += 1;
+        if oldest.as_ref().is_none_or(|(e, _)| epoch < *e) {
+            oldest = Some((epoch, ts.to_string()));
+        }
+    }
+    let (oldest_epoch, oldest_ts) = oldest?;
+    let age = now.saturating_sub(oldest_epoch);
+    if age < DECISION_STALE_FLOOR_SECS {
+        return None;
+    }
+    Some(NeedItem {
+        kind: "carveout_stale".to_string(),
+        // No target session; this is a pile-level signal. A stable constant
+        // key so the client's cursor re-anchor (keyed on session_id) does not
+        // drift row identity across folds.
+        session_id: "carveouts".to_string(),
+        node: None,
+        name: None,
+        title: None,
+        ts: oldest_ts,
+        evidence: format!(
+            "{count} unharvested carve-out(s), oldest {}d - fno retro sweep-carveouts --apply",
+            age / 86_400
+        ),
+        live: false, // stamped true by stamp_liveness
+    })
+}
+
+/// A claim's identity + age, read by the IO layer from the claims directory
+/// (mirrors what `client_verbs::claim_sweep_payload` already scans) and handed
+/// to [`stale_claim_item`], which stays pure and testable.
+pub struct ClaimAge {
+    pub key: String,
+    pub holder: String,
+    pub acquired_at_ms: i64,
+    pub state: crate::claims::ClaimState,
+}
+
+/// One stale-claim summary row, when the oldest `Stale` claim has actually
+/// gone stale for a while (>= [`DECISION_STALE_FLOOR_SECS`]). A `Stale` claim
+/// (dead pid, TTL expired) that is minutes old is normal churn; one that is
+/// weeks old is an orphaned lock nobody cleaned up (x-e3be measured 573 claim
+/// files, 570 dead pids, oldest specimens 56-75 days).
+///
+/// One aggregate row, not one per claim, for the same reason as
+/// [`carveout_age_item`]: 570 individual rows would just be truncated by the
+/// client's worst-first cap.
+pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
+    let oldest = claims
+        .iter()
+        .filter(|c| matches!(c.state, crate::claims::ClaimState::Stale))
+        .min_by_key(|c| c.acquired_at_ms)?;
+    let stale_count = claims
+        .iter()
+        .filter(|c| matches!(c.state, crate::claims::ClaimState::Stale))
+        .count();
+    let age_secs = ((now_ms - oldest.acquired_at_ms).max(0) / 1000) as u64;
+    if age_secs < DECISION_STALE_FLOOR_SECS {
+        return None;
+    }
+    Some(NeedItem {
+        kind: "stale_claims".to_string(),
+        session_id: "claims".to_string(),
+        node: None,
+        name: None,
+        title: None,
+        ts: String::new(),
+        evidence: format!(
+            "{stale_count} stale claim(s), oldest {}d ({}, holder {})",
+            age_secs / 86_400,
+            oldest.key,
+            oldest.holder
+        ),
+        live: false, // stamped true by stamp_liveness
+    })
+}
+
 /// Current epoch seconds; `0` if the clock is somehow before the epoch.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Scan `dir` for `node:` claim files and their age, for [`stale_claim_item`].
+/// Reuses the same read primitives `client_verbs::claim_sweep_payload`
+/// already scans the claims dir with. Fail-open: a missing/unreadable dir or
+/// an unparseable lockfile yields fewer entries, never an error - same
+/// posture as `claim_sweep_payload`.
+fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
+    let node_pfx = crate::claims::encode_key("node:");
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.ends_with(".lock") || !name.starts_with(&node_pfx) {
+            continue;
+        }
+        let Ok(rec) = crate::claims::read_claim_file(&entry.path()) else {
+            continue; // gone-away or corrupted: skip, never abort
+        };
+        if !rec.key.starts_with("node:") {
+            continue; // filename lied about its own key: exclude like the sweep does
+        }
+        let state = crate::claims::classify(&rec, None);
+        out.push(ClaimAge {
+            key: rec.key,
+            holder: rec.holder,
+            acquired_at_ms: rec.acquired_at,
+            state,
+        });
+    }
+    out
 }
 
 /// The `fno-agents needs` verb. Read-only; exits 0 on empty/corrupt input (only
@@ -537,7 +752,25 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     let since = args
         .since_epoch
         .unwrap_or_else(|| now_secs().saturating_sub(DEFAULT_WINDOW_SECS));
-    let items = stamp_liveness(fold(&events_raw, &ledger_raw, since, args.fires_floor));
+    let mut items = fold(&events_raw, &ledger_raw, since, args.fires_floor);
+
+    // Carve-out-age and stale-claim legs: durable on-disk state, not events,
+    // so they are read directly here (IO layer) rather than folded from
+    // `events_raw`, and never windowed by `since` (see the doc comments on
+    // `carveout_age_item` / `stale_claim_item`).
+    let carveouts_raw =
+        std::fs::read_to_string(PathBuf::from(".fno").join("carveouts.jsonl")).unwrap_or_default();
+    if let Some(item) = carveout_age_item(&carveouts_raw, now_secs()) {
+        items.push(item);
+    }
+    if let Some(dir) = crate::claims::claims_dir_for(None) {
+        let ages = scan_claim_ages(&dir);
+        if let Some(item) = stale_claim_item(&ages, crate::claims::now_ms()) {
+            items.push(item);
+        }
+    }
+
+    let items = stamp_liveness(items);
 
     if args.json {
         println!(
@@ -993,5 +1226,191 @@ mod tests {
         assert_eq!(items[0].node, None);
         assert_eq!(items[0].name, None);
         assert_eq!(items[0].session_id, "ghost");
+    }
+
+    // --- operator_question (x-e3be: NeedKind::Decision producer) --------------
+
+    fn operator_question(ts: &str, qid: &str, question: &str, node: Option<&str>) -> String {
+        let node_field = node
+            .map(|n| format!(r#","node":"{n}""#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"ts":"{ts}","type":"operator_question","source":"target","data":{{"question_id":"{qid}","question":"{question}"{node_field}}}}}"#
+        )
+    }
+
+    fn operator_question_closed(ts: &str, qid: &str) -> String {
+        format!(
+            r#"{{"ts":"{ts}","type":"operator_question_closed","source":"target","data":{{"question_id":"{qid}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn open_operator_question_folds_to_decision_producer_kind() {
+        let events = operator_question(
+            "2026-07-03T02:00:00Z",
+            "q-abc",
+            "auto-merge or hold?",
+            Some("x-e3be"),
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "operator_question");
+        assert_eq!(items[0].node.as_deref(), Some("x-e3be"));
+        assert!(items[0].evidence.contains("auto-merge or hold?"));
+    }
+
+    #[test]
+    fn closed_operator_question_is_dropped() {
+        let events = [
+            operator_question("2026-07-03T02:00:00Z", "q-abc", "auto-merge or hold?", None),
+            operator_question_closed("2026-07-03T03:00:00Z", "q-abc"),
+        ]
+        .join("\n");
+        assert!(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR).is_empty());
+    }
+
+    #[test]
+    fn operator_question_survives_a_56_day_old_since_window() {
+        // The defect this leg closes: a 24h-windowed fold hides a question
+        // that has been open for weeks. `since` here is "now" (2099), so a
+        // windowed kind would be excluded - operator_question must not be.
+        let events = operator_question("2026-06-01T00:00:00Z", "q-old", "still waiting", None);
+        let since = crate::state::rfc3339_like_to_secs("2099-01-01T00:00:00Z").unwrap();
+        let items = fold(&events, "", since, DEFAULT_FIRES_FLOOR);
+        assert_eq!(
+            items.len(),
+            1,
+            "operator_question bypasses the since window"
+        );
+        assert_eq!(items[0].kind, "operator_question");
+    }
+
+    #[test]
+    fn multiple_open_questions_each_get_their_own_row() {
+        // Unlike mail_escalation's latest-per-recipient fold, several distinct
+        // decisions can be outstanding on the operator at once.
+        let events = [
+            operator_question("2026-07-03T02:00:00Z", "q-1", "decision one", None),
+            operator_question("2026-07-03T02:05:00Z", "q-2", "decision two", None),
+        ]
+        .join("\n");
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn loop_check_stays_windowed_when_operator_question_is_exempt() {
+        // The window-bypass restructure must not accidentally widen the window
+        // for the existing kinds - only operator_question/_closed are exempt.
+        let events = loop_check(
+            "2026-07-03T02:00:00Z",
+            "s",
+            "block",
+            "SUCCESS",
+            "OPEN",
+            false,
+            5,
+        );
+        let future = crate::state::rfc3339_like_to_secs("2099-01-01T00:00:00Z").unwrap();
+        assert!(fold(&events, "", future, DEFAULT_FIRES_FLOOR).is_empty());
+    }
+
+    #[test]
+    fn operator_question_always_live_with_no_node() {
+        let events = operator_question("2026-07-03T02:00:00Z", "q-abc", "which?", None);
+        let items = stamp_liveness(fold(&events, "", ALL, DEFAULT_FIRES_FLOOR));
+        assert!(items[0].live, "operator_question is always-live");
+    }
+
+    // --- carveout_age_item ------------------------------------------------
+
+    fn carveout(ts: &str, kind: &str) -> String {
+        format!(r#"{{"ts":"{ts}","kind":"{kind}","id":"c-1"}}"#)
+    }
+
+    #[test]
+    fn stale_carveout_pile_produces_one_aggregate_item() {
+        let raw = [
+            carveout("2026-06-01T00:00:00Z", "oos-bug"),
+            carveout("2026-06-15T00:00:00Z", "deferred"),
+        ]
+        .join("\n");
+        let now = crate::state::rfc3339_like_to_secs("2026-07-15T00:00:00Z").unwrap();
+        let item = carveout_age_item(&raw, now).expect("29-day-old pile is stale");
+        assert_eq!(item.kind, "carveout_stale");
+        assert!(item.evidence.contains("2 unharvested"));
+        assert!(item.evidence.contains("44d"));
+    }
+
+    #[test]
+    fn fresh_carveout_pile_produces_no_item() {
+        let raw = carveout("2026-07-14T12:00:00Z", "oos-bug");
+        let now = crate::state::rfc3339_like_to_secs("2026-07-15T00:00:00Z").unwrap();
+        assert!(carveout_age_item(&raw, now).is_none());
+    }
+
+    #[test]
+    fn empty_carveout_ledger_produces_no_item() {
+        let now = crate::state::rfc3339_like_to_secs("2026-07-15T00:00:00Z").unwrap();
+        assert!(carveout_age_item("", now).is_none());
+    }
+
+    // --- stale_claim_item ---------------------------------------------------
+
+    fn claim_age(
+        key: &str,
+        holder: &str,
+        acquired_at_ms: i64,
+        state: crate::claims::ClaimState,
+    ) -> ClaimAge {
+        ClaimAge {
+            key: key.to_string(),
+            holder: holder.to_string(),
+            acquired_at_ms,
+            state,
+        }
+    }
+
+    #[test]
+    fn old_stale_claim_produces_one_aggregate_item() {
+        let now_ms = 1_800_000_000_000_i64; // an arbitrary "now"
+        let fifty_six_days_ms = 56 * 24 * 60 * 60 * 1000;
+        let claims = vec![claim_age(
+            "node:x-orphan",
+            "dead-holder",
+            now_ms - fifty_six_days_ms,
+            crate::claims::ClaimState::Stale,
+        )];
+        let item = stale_claim_item(&claims, now_ms).expect("56-day-old stale claim");
+        assert_eq!(item.kind, "stale_claims");
+        assert!(item.evidence.contains("node:x-orphan"));
+        assert!(item.evidence.contains("dead-holder"));
+        assert!(item.evidence.contains("56d"));
+    }
+
+    #[test]
+    fn live_claim_never_counts_toward_staleness() {
+        let now_ms = 1_800_000_000_000_i64;
+        let fifty_six_days_ms = 56 * 24 * 60 * 60 * 1000;
+        let claims = vec![claim_age(
+            "node:x-active",
+            "live-holder",
+            now_ms - fifty_six_days_ms,
+            crate::claims::ClaimState::Live,
+        )];
+        assert!(stale_claim_item(&claims, now_ms).is_none());
+    }
+
+    #[test]
+    fn recently_stale_claim_produces_no_item() {
+        let now_ms = 1_800_000_000_000_i64;
+        let claims = vec![claim_age(
+            "node:x-recent",
+            "h",
+            now_ms - 60_000,
+            crate::claims::ClaimState::Stale,
+        )];
+        assert!(stale_claim_item(&claims, now_ms).is_none());
     }
 }
