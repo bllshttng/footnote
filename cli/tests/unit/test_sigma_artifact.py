@@ -219,6 +219,8 @@ def test_read_last_head_returns_stored_head(tmp_path: Path) -> None:
         reviewed_head="head-b",
         current_head="head-b",
         round_id="round-b",
+        scope_base="head-a",
+        scope_reason="incremental",
     )
 
     result = read_sigma_last_head(
@@ -229,6 +231,34 @@ def test_read_last_head_returns_stored_head(tmp_path: Path) -> None:
     )
     assert result.status == "found"
     assert result.head_sha == "head-b"
+
+
+def test_read_last_head_ignores_unscoped_artifacts(tmp_path: Path) -> None:
+    from fno.review.artifact import publish_sigma_artifact, read_sigma_last_head
+
+    reviews_root = tmp_path / "reviews"
+    publish_sigma_artifact(
+        _report(tmp_path / "report.md", "single-commit panel"),
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        reviewed_head="head-b",
+        current_head="head-b",
+        round_id="round-b",
+    )
+
+    result = read_sigma_last_head(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+    )
+    # No scope fields means the writer did not resolve cumulative scope (the
+    # internal single-commit panel publishes this artifact too); its head must
+    # never narrow a later round, so it reads as no prior head.
+    assert result.status == "unscoped"
+    assert result.head_sha is None
 
 
 def test_read_last_head_missing_artifact_is_not_found(tmp_path: Path) -> None:
@@ -316,6 +346,10 @@ def test_cli_sigma_last_head_prints_bare_sha(tmp_path: Path) -> None:
             "head-b",
             "--sigma-round",
             "round-b",
+            "--sigma-scope-base",
+            "head-a",
+            "--sigma-scope-reason",
+            "incremental",
             "--sigma-project",
             "fno",
             "--sigma-reviews-root",
@@ -360,6 +394,58 @@ def test_cli_sigma_last_head_prints_bare_sha(tmp_path: Path) -> None:
     assert absent.exit_code != 0
     assert absent.stdout.strip() == ""
     assert "sigma last head unavailable" in absent.stderr
+
+
+def test_publish_carries_scope_into_frontmatter(tmp_path: Path) -> None:
+    from fno.review.artifact import publish_sigma_artifact
+
+    result = publish_sigma_artifact(
+        _report(tmp_path / "report.md", "incremental"),
+        reviews_root=tmp_path / "reviews",
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        reviewed_head="head-b",
+        current_head="head-b",
+        round_id="round-b",
+        scope_base="head-a",
+        scope_reason="incremental",
+    )
+    front = _frontmatter(result.current_path)
+    assert front["scope_base"] == "head-a"
+    assert front["scope_reason"] == "incremental"
+
+
+def test_publish_rejects_half_and_unknown_scope(tmp_path: Path) -> None:
+    import pytest
+
+    from fno.review.artifact import publish_sigma_artifact
+
+    with pytest.raises(ValueError, match="both base and reason"):
+        publish_sigma_artifact(
+            _report(tmp_path / "report.md", "half"),
+            reviews_root=tmp_path / "reviews",
+            project="fno",
+            node="x-bfbb",
+            pr_number=42,
+            reviewed_head="head-b",
+            current_head="head-b",
+            round_id="round-b",
+            scope_reason="incremental",
+        )
+    with pytest.raises(ValueError, match="invalid sigma artifact scope reason"):
+        publish_sigma_artifact(
+            _report(tmp_path / "report.md", "unknown reason"),
+            reviews_root=tmp_path / "reviews",
+            project="fno",
+            node="x-bfbb",
+            pr_number=42,
+            reviewed_head="head-b",
+            current_head="head-b",
+            round_id="round-b",
+            scope_base="head-a",
+            scope_reason="totally-fine",
+        )
 
 
 def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> None:

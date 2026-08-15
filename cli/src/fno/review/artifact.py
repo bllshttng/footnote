@@ -14,6 +14,13 @@ import yaml
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
 
+SCOPE_REASONS = (
+    "first-round",
+    "incremental",
+    "rules-changed",
+    "history-rewritten",
+)
+
 
 @dataclass(frozen=True)
 class PublishResult:
@@ -54,8 +61,10 @@ def _render(
     pr_number: int,
     reviewed_head: str,
     round_id: str,
+    scope_base: str | None = None,
+    scope_reason: str | None = None,
 ) -> str:
-    metadata = {
+    metadata: dict[str, object] = {
         "schema": "sigma-review/v1",
         "node": node,
         "pr_number": pr_number,
@@ -65,6 +74,9 @@ def _render(
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
     }
+    if scope_base is not None and scope_reason is not None:
+        metadata["scope_base"] = scope_base
+        metadata["scope_reason"] = scope_reason
     return (
         "---\n"
         + yaml.safe_dump(metadata, default_flow_style=False, sort_keys=False)
@@ -97,6 +109,8 @@ def publish_sigma_artifact(
     reviewed_head: str,
     current_head: str | None,
     round_id: str,
+    scope_base: str | None = None,
+    scope_reason: str | None = None,
 ) -> PublishResult:
     """Retain a completed round and publish it only when its head is current."""
     project = _component(project, "project")
@@ -105,6 +119,12 @@ def publish_sigma_artifact(
     reviewed_head = _component(reviewed_head, "head")
     if current_head is not None:
         current_head = _component(current_head, "current head")
+    if (scope_base is None) != (scope_reason is None):
+        raise ValueError("sigma artifact scope requires both base and reason")
+    if scope_base is not None:
+        scope_base = _component(scope_base, "scope base")
+    if scope_reason is not None and scope_reason not in SCOPE_REASONS:
+        raise ValueError(f"invalid sigma artifact scope reason: {scope_reason!r}")
     if pr_number < 1:
         raise ValueError("sigma artifact PR number must be positive")
 
@@ -120,6 +140,8 @@ def publish_sigma_artifact(
         pr_number=pr_number,
         reviewed_head=reviewed_head,
         round_id=round_id,
+        scope_base=scope_base,
+        scope_reason=scope_reason,
     )
     node_dir = Path(reviews_root) / project / "reviews" / node
     round_path = node_dir / "rounds" / f"{round_id}.md"
@@ -207,6 +229,15 @@ def read_sigma_last_head(
     ]
     if mismatches:
         return LastHeadResult("rejected", None, "; ".join(mismatches))
+
+    # Only a scope-aware round proves cumulative coverage up to its head: the
+    # internal single-commit panel publishes this artifact too, and an artifact
+    # without scope fields could narrow a later round past files never reviewed.
+    reason = metadata.get("scope_reason")
+    if reason not in SCOPE_REASONS:
+        return LastHeadResult(
+            "unscoped", None, f"artifact carries no valid scope reason: {reason!r}"
+        )
 
     head = metadata.get("head_sha")
     # Same grammar the writer enforces: never surface a partial or placeholder

@@ -776,6 +776,8 @@ def review(
     sigma_head: Optional[str] = typer.Option(None, "--sigma-head", hidden=True),
     sigma_current_head: Optional[str] = typer.Option(None, "--sigma-current-head", hidden=True),
     sigma_round: Optional[str] = typer.Option(None, "--sigma-round", hidden=True),
+    sigma_scope_base: Optional[str] = typer.Option(None, "--sigma-scope-base", hidden=True),
+    sigma_scope_reason: Optional[str] = typer.Option(None, "--sigma-scope-reason", hidden=True),
     sigma_project: Optional[str] = typer.Option(None, "--sigma-project", hidden=True),
     sigma_reviews_root: Optional[Path] = typer.Option(None, "--sigma-reviews-root", hidden=True),
     json_output: bool = typer.Option(
@@ -878,6 +880,10 @@ def review(
                 )
                 if value is None
             )
+            if (sigma_scope_base is None) != (sigma_scope_reason is None):
+                missing.append(
+                    "--sigma-scope-base and --sigma-scope-reason (both or neither)"
+                )
         if missing:
             typer.echo(f"error: sigma artifact metadata missing: {', '.join(missing)}", err=True)
             raise typer.Exit(code=2)
@@ -913,6 +919,8 @@ def review(
                 reviewed_head=sigma_head,
                 current_head=sigma_current_head,
                 round_id=sigma_round,
+                scope_base=sigma_scope_base,
+                scope_reason=sigma_scope_reason,
             )
             payload = {
                 "published": publish_result.published,
