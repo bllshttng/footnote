@@ -151,11 +151,11 @@ crates/fno-agents/src/client.rs:25
 crates/fno-agents/src/client_verbs.rs:72
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:147
+crates/fno-agents/src/daemon.rs:152
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:49
-crates/fno-agents/src/gc.rs:22
+crates/fno-agents/src/gc.rs:31
 crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
 crates/fno-agents/src/lib.rs:12
