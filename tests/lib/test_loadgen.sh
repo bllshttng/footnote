@@ -65,10 +65,9 @@ fi
 # the sweep's own predicate is what makes `fno agents orphans` a net for a
 # generator whose creator died before the bound fired.
 SWEEP_SHAPE="$(ps -o command= -p "$FIRST_PID" 2>/dev/null | awk '{print $1}')"
-python3 - "$SWEEP_SHAPE" <<'EOF' && pass "names satisfy the sweep's attribution (argv[0], renamed)" \
+PYTHONPATH="$REPO_ROOT/cli/src" python3 - "$SWEEP_SHAPE" <<'EOF' && pass "names satisfy the sweep's attribution (argv[0], renamed)" \
   || fail "sweep attribution rejected the emitted name: $SWEEP_SHAPE"
 import sys
-sys.path.insert(0, "cli/src")
 from fno.agents import orphans
 argv0 = sys.argv[1]
 info = {"cmdline": [argv0], "name": "yes", "exe": "/bin/yes"}

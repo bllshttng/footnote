@@ -33,7 +33,8 @@
 # list: prints pid and name per live generator, then a count. The count is only
 #   printed under the listing, so a zero can never masquerade as a scan.
 #
-# Exit codes: 0 ok, 2 bad usage (missing/malformed label, seconds, or count).
+# Exit codes: 0 ok, 2 bad usage (missing/malformed label, seconds, or count),
+# 1 list only - zero generators live, the grep convention for "nothing found".
 
 set -uo pipefail
 
