@@ -5951,6 +5951,79 @@ fn floor_stand_down_spends_no_graphql() {
     }
 }
 
+/// The primary floor is blind to GitHub's secondary (burst/concurrency)
+/// limit by construction: a live specimen showed core 4922/5000 and graphql
+/// 1392/5000 - both healthy - while a call was refused anyway. A fire must
+/// also stand down on an OBSERVED secondary refusal in the last 5 minutes,
+/// never only on advertised quota headroom.
+#[test]
+fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-2ndary", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+    // A prior fire's forensic trail: a secondary-limit refusal 90s ago, well
+    // inside the 5-minute window, for THIS session.
+    fs::write(
+        &events_path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "loop_check_gh_error",
+                "ts": "2026-06-05T00:28:30Z",
+                "data": {
+                    "session_id": "sess-2ndary",
+                    "read": "pulls_comments",
+                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    // 4922 remaining, well above GRAPHQL_FLOOR (200): the primary floor alone
+    // would NOT trigger here. Only the observed refusal should.
+    let gh = quota_gh(cwd, 4922, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("standing down"), "got: {}", d.message);
+    assert!(
+        d.message.contains("secondary"),
+        "must name the secondary limit, not just the primary floor: {}",
+        d.message
+    );
+    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
+    assert!(
+        !calls.contains("pr view"),
+        "no GraphQL spend on a secondary-refusal stand-down: {calls}"
+    );
+}
+
 /// Item 4's other half: the floor belongs to the merge guard, so a
 /// promise-intent fire proceeds below it.
 #[test]
@@ -6075,6 +6148,80 @@ fn exhaustion_named_on_read_failure() {
     assert!(
         !d.message.contains("retrying next fire"),
         "exhaustion must not be advised to retry: {}",
+        d.message
+    );
+}
+
+/// A secondary (burst/concurrency) refusal must NOT be named as primary
+/// quota exhaustion, even when the read that failed IS a GraphQL read: the
+/// two failure modes clear on completely different timescales (seconds vs
+/// up to an hour), and misnaming one as the other sends the caller to wait
+/// for a reset that was never the actual limiter.
+#[test]
+fn secondary_refusal_is_named_distinctly_from_primary_exhaustion() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-2nderr", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // rate_limit reports HEALTHY (both buckets), but the actual pr_view call
+    // fails with a secondary-limit stderr - the live specimen's exact shape.
+    let calls_log = cwd.join("calls.log");
+    let gh = make_script(
+        cwd,
+        "gh",
+        &format!(
+            r#"echo "$*" >> "{calls}"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if [ "$1" = api ] && [ "$2" = rate_limit ]; then
+  echo '{{"resources":{{"core":{{"remaining":4922,"reset":9999999999}},"graphql":{{"remaining":1392,"reset":9999999999}}}}}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  echo "HTTP 403: You have exceeded a secondary rate limit" >&2
+  exit 1
+fi
+exit 1"#,
+            calls = calls_log.display(),
+        ),
+    );
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("SECONDARY"),
+        "must name the secondary limit: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("GraphQL quota exhausted"),
+        "must not misname a secondary refusal as primary exhaustion: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("resets in ~"),
+        "must not point at the primary reset horizon for a secondary refusal: {}",
         d.message
     );
 }
