@@ -163,17 +163,6 @@ impl BodyLine {
             ..Default::default()
         }
     }
-
-    /// Old name for [`Self::plain`]. `fno` publishes this crate, so a bare
-    /// rename would break any downstream caller on a patch bump; kept as a
-    /// forwarding alias instead. The clippy allow is deliberate - this is
-    /// the exact `should_implement_trait` shape the rename existed to fix,
-    /// kept only for the deprecation path.
-    #[deprecated(note = "use `BodyLine::plain` instead")]
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: impl Into<String>) -> Self {
-        Self::plain(s)
-    }
 }
 
 /// A laid-out, framed line: its text, one [`Role`] per char, and the hit spans
@@ -537,7 +526,7 @@ mod tests {
     use super::*;
 
     fn bl(s: &str) -> BodyLine {
-        BodyLine::plain(s)
+        BodyLine::from_str(s)
     }
 
     #[test]
@@ -639,7 +628,7 @@ mod tests {
 
     #[test]
     fn hit_offsets_shift_past_the_left_border() {
-        let mut line = BodyLine::plain("hello");
+        let mut line = BodyLine::from_str("hello");
         line.hits.push((0, 0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
@@ -682,7 +671,7 @@ mod tests {
 
     #[test]
     fn selected_body_cell_gets_the_sel_role() {
-        let mut line = BodyLine::plain("hello");
+        let mut line = BodyLine::from_str("hello");
         line.sel_span = Some((0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
