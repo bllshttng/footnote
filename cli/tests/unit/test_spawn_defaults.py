@@ -774,7 +774,7 @@ def test_autonomous_dispatch_explicit_flag_beats_profile():
 
 
 # --------------------------------------------------------------------------- #
-# x-596e: the receipt names the AXIS the field feeds, plus the route-collision
+# The receipt names the AXIS the field feeds, plus the route-collision
 # refusal - a cross-axis collision (a profile-filled harness makes an
 # already-typed route unusable), never a precedence bug.
 # --------------------------------------------------------------------------- #

@@ -207,7 +207,7 @@ baseline_path = Path(sys.argv[3])
 HARNESS_LITERALS = ("claude", "codex", "agy", "opencode")
 VENDOR_LITERALS = ("anthropic", "openai", "zai", "deepseek", "google")
 
-# One reasoning-effort spelling per harness that owns it (x-596e). A line
+# One reasoning-effort spelling per harness that owns it. A line
 # attributing a spelling to a harness that does not own it is the same
 # conflation shape as HARNESS_LITERALS/VENDOR_LITERALS, just on the effort
 # axis instead of the provider axis. See docs/architecture/axis-vocabulary.md
@@ -1124,7 +1124,7 @@ def _self_test():
                 )
                 failures += 1
 
-    # Effort spelling attribution (x-596e): a line naming exactly one effort
+    # Effort spelling attribution: a line naming exactly one effort
     # spelling together with a harness literal that does not own it is a wrong
     # attribution. A line naming two spellings is teaching the contrast
     # correctly and must stay silent - plant a violation and its correct twin
