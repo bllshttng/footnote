@@ -156,6 +156,7 @@ pub struct BodyLine {
 
 impl BodyLine {
     /// A plain content line (family B's string, or a non-selectable body row).
+    #[allow(clippy::should_implement_trait)] // constructor, not std::str::FromStr
     pub fn from_str(s: impl Into<String>) -> Self {
         BodyLine {
             text: s.into(),

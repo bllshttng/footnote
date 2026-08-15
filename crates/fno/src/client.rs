@@ -1001,6 +1001,19 @@ struct View {
     /// mutation guarded by `ConnectionsView::acting`.
     #[allow(clippy::type_complexity)]
     conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
+    /// (x-b1cc) The last `fno update --check --json` probe's outcome, or
+    /// `None` before the first one lands. `build_sideline_menu` reads this
+    /// directly rather than waiting on a fresh probe, so the menu always
+    /// opens instantly (Locked Decision 4).
+    update_outcome: Option<UpdateOutcome>,
+    /// (x-b1cc) An update-readiness probe is wanted; the run loop spawns it
+    /// at loop top and clears this. Set once after the first server frame
+    /// lands, and again every time the sideline menu opens, so a menu opened
+    /// an hour later is not showing an hour-old answer.
+    update_probe_want: bool,
+    /// (x-b1cc) An update-readiness probe is in flight; bounds concurrent
+    /// probes to one, mirroring `conn_inflight`.
+    update_probe_inflight: bool,
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -1777,6 +1790,10 @@ enum AuxAction {
     OpenKeybinds,
     OpenSettings,
     OpenConnections,
+    /// (x-b1cc) Open the update-readiness overlay: version pair, changelog,
+    /// and the one computed guidance line. Only offered by the menu when the
+    /// last probe reported ready (or degraded) - see `build_sideline_menu`.
+    OpenUpdate,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -1860,35 +1877,142 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
+/// (x-b1cc) The client's view of `fno update --check --json`'s payload - only
+/// the fields the menu row and overlay render. `#[serde(default)]` on
+/// `changelog` tolerates an absent key rather than failing the whole parse;
+/// every other field is required, so a shape the Python resolver no longer
+/// emits degrades the probe instead of silently rendering stale/zeroed data.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct UpdateReadiness {
+    update_ready: bool,
+    installed_rev: Option<String>,
+    source_rev: Option<String>,
+    #[serde(default)]
+    changelog: Vec<String>,
+    guidance: String,
+    degraded: Option<String>,
+}
+
+/// (x-b1cc) The result of one `fno update --check --json` probe: parsed
+/// readiness, or a degraded reason (missing binary, non-zero exit, timeout,
+/// unparseable JSON). Mirrors `connections_view::ReadOutcome` (Locked
+/// Decision 4) - the TUI computes nothing beyond folding this into rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateOutcome {
+    Ok(UpdateReadiness),
+    Degraded(String),
+}
+
+/// Generous relative to the Connections read timeout (1.5s): `--check` shells
+/// out to `mux ls`/`agents list`/`git log` itself, so it carries more
+/// subprocess latency than a single accounts read.
+const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// Run `fno update --check --json` off the UI loop and fold it into an
+/// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
+/// Decision 4, x-b1cc): the event loop never blocks on this subprocess: a
+/// timeout, non-zero exit, or unparseable JSON all degrade rather than hang
+/// or panic (AC6-EDGE).
+async fn probe_update_readiness() -> UpdateOutcome {
+    let fut = tokio::process::Command::new(crate::server::fno_bin())
+        .args(["update", "--check", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = match tokio::time::timeout(UPDATE_PROBE_TIMEOUT, fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return UpdateOutcome::Degraded(format!("update --check: {e}")),
+        Err(_) => return UpdateOutcome::Degraded("update --check: timed out".into()),
+    };
+    if !output.status.success() {
+        return UpdateOutcome::Degraded(format!(
+            "update --check: exit {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    match serde_json::from_slice::<UpdateReadiness>(&output.stdout) {
+        Ok(r) => UpdateOutcome::Ok(r),
+        Err(e) => UpdateOutcome::Degraded(format!("update --check: unparseable output ({e})")),
+    }
+}
+
 /// Build the sideline MENU popup (US4), anchored at the footer's menu cell:
-/// keybinds / settings / detach. `reload config` is intentionally absent - there
-/// is no config-reload machinery to route it to (a net-new capability, not a
-/// re-route), so the menu advertises only what actually works.
-fn build_sideline_menu(anchor: Anchor) -> AuxPopup {
+/// an update row (only when the last probe has landed and is ready or
+/// degraded), then keybinds / settings / detach. `reload config` is
+/// intentionally absent - there is no config-reload machinery to route it to
+/// (a net-new capability, not a re-route), so the menu advertises only what
+/// actually works.
+fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
         hint: String::new(),
         enabled: true,
     };
+    let mut rows = vec![PopupRow::Header("menu".into()), PopupRow::Rule];
+    let mut actions = Vec::new();
+    // (x-b1cc) A probe still in flight (or never fired yet) builds the menu
+    // WITHOUT an update row rather than waiting - the menu opens instantly.
+    match update {
+        Some(UpdateOutcome::Ok(r)) if r.update_ready => {
+            rows.push(entry("⬆", "update ready"));
+            actions.push(AuxAction::OpenUpdate);
+        }
+        Some(UpdateOutcome::Degraded(_)) => {
+            rows.push(entry("⬆", "update check failed"));
+            actions.push(AuxAction::OpenUpdate);
+        }
+        _ => {}
+    }
+    rows.push(entry("⌨", "keybinds"));
+    rows.push(entry("⚙", "settings"));
+    rows.push(entry("⇄", "connections"));
+    rows.push(entry("⏏", "detach"));
+    actions.push(AuxAction::OpenKeybinds);
+    actions.push(AuxAction::OpenSettings);
+    actions.push(AuxAction::OpenConnections);
+    actions.push(AuxAction::Detach);
     AuxPopup {
-        popup: Popup::new(
-            vec![
-                PopupRow::Header("menu".into()),
-                PopupRow::Rule,
-                entry("⌨", "keybinds"),
-                entry("⚙", "settings"),
-                entry("⇄", "connections"),
-                entry("⏏", "detach"),
-            ],
-            anchor,
-        ),
-        actions: vec![
-            AuxAction::OpenKeybinds,
-            AuxAction::OpenSettings,
-            AuxAction::OpenConnections,
-            AuxAction::Detach,
-        ],
+        popup: Popup::new(rows, anchor),
+        actions,
+    }
+}
+
+/// (x-b1cc) Build the update-readiness overlay from the last probe outcome:
+/// version pair, up to ten changelog subjects, a rule, then the one computed
+/// guidance line - or, for a degraded probe, the degraded reason in the
+/// guidance line's place. Never an empty body (AC5-HP/AC6-EDGE): `outcome`
+/// is only `None` if this is somehow opened before any probe ever ran, which
+/// `build_sideline_menu` never offers as a way in.
+fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
+    let mut rows = vec![PopupRow::Header("update".into()), PopupRow::Rule];
+    match outcome {
+        Some(UpdateOutcome::Ok(r)) => {
+            let installed = r.installed_rev.as_deref().unwrap_or("unknown");
+            let source = r.source_rev.as_deref().unwrap_or("unknown");
+            rows.push(PopupRow::Header(format!("{installed} -> {source}")));
+            if !r.changelog.is_empty() {
+                rows.push(PopupRow::Rule);
+                for subject in &r.changelog {
+                    rows.push(PopupRow::Header(subject.clone()));
+                }
+            }
+            rows.push(PopupRow::Rule);
+            rows.push(PopupRow::Header(r.guidance.clone()));
+        }
+        Some(UpdateOutcome::Degraded(reason)) => {
+            rows.push(PopupRow::Header(format!("update check failed: {reason}")));
+        }
+        None => {
+            rows.push(PopupRow::Header("update check has not run yet".into()));
+        }
+    }
+    AuxPopup {
+        popup: Popup::new(rows, Anchor::Center)
+            .title("update")
+            .footer("esc close"),
+        actions: Vec::new(),
     }
 }
 
@@ -1998,6 +2122,9 @@ impl View {
             conn_inflight: false,
             conn_gen: 0,
             conn_action: None,
+            update_outcome: None,
+            update_probe_want: false,
+            update_probe_inflight: false,
         }
     }
 
@@ -2757,11 +2884,15 @@ impl View {
             .map(|(t, _, _)| *t)
     }
 
-    /// Open the sideline MENU popup anchored at `anchor` (x-8ccf US4).
+    /// Open the sideline MENU popup anchored at `anchor` (x-8ccf US4). Also
+    /// re-arms the update-readiness probe (x-b1cc) so a menu opened long
+    /// after the last probe is never showing a stale answer; the menu itself
+    /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu(anchor));
+        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
         self.aux_esc.clear();
+        self.update_probe_want = true;
     }
 
     /// Build the settings modal (x-8ccf US5, x-f75e theme picker): a `general`
@@ -7637,6 +7768,7 @@ fn abbrev_home_in(p: &str, home: Option<&str>) -> String {
 /// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
 /// viewport's `(rows, cols)` (status row excluded). The framed block is centered
 /// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
+#[allow(clippy::too_many_arguments)] // one shared framer for all family-B overlays; see doc above
 fn draw_lines_overlay<S: AsRef<str>>(
     cells: &mut [Cell],
     rows: usize,
@@ -8581,6 +8713,11 @@ async fn attach_and_run(
         bool, // is_login: keep the pending notice on success, no acting flip
     )>();
 
+    // x-b1cc: the update-readiness probe runs off the UI loop and reports back
+    // here. Untagged (unlike conn_rx) - there is no per-open state to
+    // invalidate, just a last-outcome-wins cache the menu/overlay read from.
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
+
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
@@ -8595,6 +8732,12 @@ async fn attach_and_run(
         .map(|s| s.canonical_cwd.clone())
         .unwrap_or_default();
     view.digest = crate::digest_overlay::on_attach(&view.session, &focused_cwd).await;
+
+    // x-b1cc: arm the ONE post-attach update-readiness probe now that the
+    // first server frame has landed. A flag set, not an await - the actual
+    // subprocess spawns off the UI loop at loop top, so this costs the first
+    // paint nothing.
+    view.update_probe_want = true;
 
     // LAST thing before the first paint, deliberately. The deadline is an
     // absolute instant, so every await it is stamped ahead of is lifetime the
@@ -8649,6 +8792,18 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let result = crate::connections_view::run_verb_env(argv, env).await;
                 let _ = tx.send((gen, result, is_login));
+            });
+        }
+        // x-b1cc: kick a wanted update-readiness probe off the UI loop, at
+        // most one in flight. The select loop never blocks on it - the menu
+        // and overlay render whatever is already in `view.update_outcome`.
+        if view.update_probe_want && !view.update_probe_inflight {
+            view.update_probe_want = false;
+            view.update_probe_inflight = true;
+            let tx = update_tx.clone();
+            tokio::spawn(async move {
+                let outcome = probe_update_readiness().await;
+                let _ = tx.send(outcome);
             });
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
@@ -8995,6 +9150,16 @@ async fn attach_and_run(
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
+                }
+            }
+            Some(outcome) = update_rx.recv() => {
+                // x-b1cc: no gen guard needed - this is a last-outcome-wins
+                // cache, not a stateful modal read. Redraw so a menu open at
+                // the moment this lands shows the fresh row immediately.
+                view.update_probe_inflight = false;
+                view.update_outcome = Some(outcome);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             _ = winch.recv() => {
@@ -11016,6 +11181,9 @@ async fn execute_aux_action(
             view.open_keys_modal();
         }
         AuxAction::OpenSettings => view.aux = Some(view.build_settings_modal()),
+        AuxAction::OpenUpdate => {
+            view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
+        }
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
@@ -19349,7 +19517,7 @@ mod tests {
         // Centered (Full): keys modal, sideline MENU, settings.
         assert_chrome(&build_keys_modal().popup, chrome::Level::Full);
         assert_chrome(
-            &build_sideline_menu(Anchor::Center).popup,
+            &build_sideline_menu(Anchor::Center, None).popup,
             chrome::Level::Full,
         );
         let v = two_pane_view();
