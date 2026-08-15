@@ -114,9 +114,10 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
     // app-server `review/start` RPC is the codex counterpart of claude's
-    // `--raw /code-review` (codex's turn/start lane is not a keystroke path, so
-    // --raw refuses it). Structured targets + an outcome receipt (a Turn + a
-    // reviewThreadId), strictly better than keystroke faking. Same `matches!`
+    // `--raw /code-review` (the Python raw router sends exact review verbs here;
+    // codex's turn/start lane still cannot parse arbitrary slash payloads).
+    // Structured targets + an outcome receipt (a Turn + a reviewThreadId),
+    // strictly better than keystroke faking. Same `matches!`
     // treatment as `mail-inject`/`codex-loaded-threads` so it stays out of
     // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard - no advertised
     // fno verb is added. The socket round-trip needs the user's daemon.
