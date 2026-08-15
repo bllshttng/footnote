@@ -19530,6 +19530,144 @@ mod tests {
         );
     }
 
+    /// AC5-HP (x-b1cc): a ready outcome puts the update row above keybinds.
+    #[test]
+    fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
+        let outcome = UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: true,
+            installed_rev: Some("aaa1111".into()),
+            source_rev: Some("bbb2222".into()),
+            changelog: vec!["fix(x): thing".into()],
+            guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
+            degraded: None,
+        });
+        let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+        let labels: Vec<&str> = menu
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Entry { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels[0], "update ready");
+        assert_eq!(labels[1], "keybinds");
+        assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
+    }
+
+    /// AC3-HP mirrored client-side: not-ready builds the menu with no row.
+    #[test]
+    fn sideline_menu_omits_update_row_when_not_ready() {
+        let outcome = UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: Some("same".into()),
+            source_rev: Some("same".into()),
+            changelog: vec![],
+            guidance: "up to date at same - no update pending, 0 shell(s) unaffected".into(),
+            degraded: None,
+        });
+        let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+        assert!(!menu.actions.contains(&AuxAction::OpenUpdate));
+    }
+
+    /// AC6-EDGE: no probe yet, and a degraded probe, both build a menu that
+    /// stays interactive - no missing keybinds row, no panic.
+    #[test]
+    fn sideline_menu_handles_missing_and_degraded_probe() {
+        let none_menu = build_sideline_menu(Anchor::Center, None);
+        assert!(!none_menu.actions.contains(&AuxAction::OpenUpdate));
+        assert!(none_menu.actions.contains(&AuxAction::OpenKeybinds));
+
+        let degraded = UpdateOutcome::Degraded("update --check: exit 1".into());
+        let degraded_menu = build_sideline_menu(Anchor::Center, Some(&degraded));
+        let labels: Vec<&str> = degraded_menu
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Entry { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels[0], "update check failed");
+        assert_eq!(degraded_menu.actions[0], AuxAction::OpenUpdate);
+    }
+
+    /// AC5-HP: the overlay carries the version pair, changelog, and guidance.
+    #[test]
+    fn update_modal_renders_version_pair_changelog_and_guidance() {
+        let outcome = UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: true,
+            installed_rev: Some("aaa1111".into()),
+            source_rev: Some("bbb2222".into()),
+            changelog: vec!["fix(x): thing".into(), "feat(y): other thing".into()],
+            guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
+            degraded: None,
+        });
+        let modal = build_update_modal(Some(&outcome));
+        let headers: Vec<&str> = modal
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Header(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(headers.iter().any(|h| *h == "aaa1111 -> bbb2222"));
+        assert!(headers.iter().any(|h| *h == "fix(x): thing"));
+        assert!(headers.iter().any(|h| *h == "feat(y): other thing"));
+        assert!(headers
+            .iter()
+            .any(|h| h.contains("14 shells survive")));
+    }
+
+    /// AC6-EDGE: a degraded probe renders the reason, never an empty body.
+    #[test]
+    fn update_modal_renders_degraded_reason_never_empty() {
+        let degraded = UpdateOutcome::Degraded("update --check: timed out".into());
+        let modal = build_update_modal(Some(&degraded));
+        assert!(!modal.popup.rows.is_empty());
+        let headers: Vec<&str> = modal
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Header(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(headers.iter().any(|h| h.contains("timed out")));
+
+        // No probe run yet: still a non-empty, non-panicking body.
+        let none_modal = build_update_modal(None);
+        assert!(!none_modal.popup.rows.is_empty());
+    }
+
+    /// The client-side JSON contract with `fno update --check --json`'s
+    /// payload shape (`cli/src/fno/update.py::update_readiness`).
+    #[test]
+    fn update_readiness_deserializes_the_real_payload_shape() {
+        let json = r#"{
+            "update_ready": true,
+            "installed_rev": "aaa1111", "source_rev": "bbb2222",
+            "wire": {"running": [47], "source": 48, "bump": true},
+            "shells": 14, "shells_ended": 14, "sessions": 2,
+            "revivable": 9,
+            "changelog": ["fix(bootstrap): thing"],
+            "guidance": "update ready bbb2222 - WIRE BUMP v47 -> v48 - ends 14 shells",
+            "degraded": null
+        }"#;
+        let r: UpdateReadiness = serde_json::from_str(json).unwrap();
+        assert!(r.update_ready);
+        assert_eq!(r.installed_rev.as_deref(), Some("aaa1111"));
+        assert_eq!(r.source_rev.as_deref(), Some("bbb2222"));
+        assert_eq!(r.changelog, vec!["fix(bootstrap): thing".to_string()]);
+        assert!(r.guidance.contains("14 shells"));
+        assert!(r.degraded.is_none());
+    }
+
     #[tokio::test]
     async fn peek_from_right_click_esc_returns_to_pane_not_selector() {
         // US2 review fix: peek opened standalone (right-click a row, selector
