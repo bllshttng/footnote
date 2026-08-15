@@ -3239,6 +3239,52 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe)
 }
 
+/// The attention window this surface orders by. Session-truth's stall window
+/// is 7200s and correct FOR REAPING; for display it is exactly the gap a
+/// dead-under-two-hours worker hides in, so the ordering window is ten
+/// minutes. Mirrors `session_truth.STALE_ATTENTION_S` and the mux client's
+/// constant - the three cannot share code (the crates do not link), so the
+/// shared fixture in schemas/ is what pins them together.
+const STALE_ATTENTION_S: f64 = 600.0;
+
+/// One row's list-lane attention key: evidence tier, then longest-silent
+/// first, then name so consecutive lists never shuffle equal rows. Only
+/// fields that carry their evidence with them (`basis`,
+/// `last_activity_age_s`) - never `status`, never a bare verdict. A row with
+/// no probe answer (all three null) lands in the neutral tier with age 0:
+/// absence of a reading is not urgency.
+/// `to_bits` is order-preserving for non-negative f64 (and an age is a
+/// duration, always non-negative), which is what lets a float age ride an
+/// `Ord` tuple key.
+fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
+    let basis = row.get("basis").and_then(|v| v.as_str());
+    let age = row
+        .get("last_activity_age_s")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let tier = if matches!(basis, Some("process-gone") | Some("pane-gone"))
+        || row.get("reachability").and_then(|v| v.as_str()) == Some("unreachable")
+    {
+        5
+    } else if basis == Some("transcript") && age >= STALE_ATTENTION_S {
+        0
+    } else if basis == Some("silent") {
+        1
+    } else if basis == Some("no-evidence") {
+        2
+    } else {
+        4
+    };
+    (
+        tier,
+        std::cmp::Reverse(age.to_bits()),
+        row.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
     F: Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
@@ -3353,7 +3399,7 @@ where
             (e, rendered_status, observed_model, evidence)
         })
         .collect();
-    let entries: Vec<Value> = classified
+    let mut entries: Vec<Value> = classified
         .into_iter()
         .filter(|(_e, rendered_status, _observed, _evidence)| {
             if let Some(ref st) = filter_status {
@@ -3509,6 +3555,14 @@ where
             })
         })
         .collect();
+    // Attention order: evidence of neglect first, the same order the mux
+    // table and the Python list lane apply (all three assert against one
+    // shared fixture). Registry insertion order said nothing about who needs
+    // the operator; the row's own `status` word is a low-pass filter that
+    // reads `live` for a worker dead under two hours, so it is barred from
+    // the key. The needs-me fold rank does not ride this surface (it is a
+    // mux-client concept); rows sort on their evidence alone.
+    entries.sort_by(|a, b| attention_sort_key(a).cmp(&attention_sort_key(b)));
     // Echo the filters the daemon applied so `list --json` self-describes its
     // query, matching Python `read.list_agents`'s `filters_applied` (sigma-review:
     // the client previously always fell back to an all-null block because the
@@ -8142,6 +8196,38 @@ done
     /// The row reports the model the worker is ACTUALLY answering as, taken
     /// from the same family-1 probe that produced `status`.
     ///
+    /// The projection orders rows by evidence of neglect, pinned to the
+    /// shared fixture: the same file the mux ranker (crates/fno) and the
+    /// Python serializer (cli) assert against. The three cannot share code -
+    /// the crates do not link and the CLI is Python - so this file is the
+    /// contract that keeps the three orders identical. `include_str!` is
+    /// compile-time, so deleting or moving the fixture breaks the build
+    /// rather than silently disarming the check.
+    #[test]
+    fn list_rows_sort_in_the_shared_attention_order() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/agents-attention-order.json"
+        ));
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+        let mut rows: Vec<Value> = fixture["rows"]
+            .as_array()
+            .expect("rows is an array")
+            .clone();
+        rows.sort_by(|a, b| attention_sort_key(a).cmp(&attention_sort_key(b)));
+        let got: Vec<&str> = rows
+            .iter()
+            .map(|r| r["name"].as_str().expect("row has a name"))
+            .collect();
+        let expected: Vec<&str> = fixture["expected_order"]
+            .as_array()
+            .expect("expected_order is an array")
+            .iter()
+            .map(|v| v.as_str().expect("order entry is a string"))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
     /// Both list emitters derive this from ONE resolver -- Python's
     /// `session_truth.observed_model`, which the daemon reaches through the
     /// `fno agents truth --json` probe it already runs per row -- so neither

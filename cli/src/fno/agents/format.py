@@ -17,12 +17,50 @@ import shutil
 from typing import Optional
 
 from fno.agents.registry import AgentEntry
+from fno.agents.session_truth import STALE_ATTENTION_S
 
 # Bumped when the JSON output shape changes in a breaking way.
 # Distinct from registry SCHEMA_VERSION (storage substrate).
 # v2 (ab-098967b4): adds the additive ``discovered_sessions`` /
 # ``discovered_count`` keys for the P1 live-session lane.
 JSON_SCHEMA_VERSION = 2
+
+# Basis values that are falsifiers rather than evidence: a positive
+# measurement that the worker is gone, which no other reading outranks.
+_FALSIFIER_BASES = {"process-gone", "pane-gone"}
+
+
+def attention_rank(row: dict) -> int:
+    """Evidence tier for one serialized row: 0 needs the operator most.
+
+    Built only from fields that carry their evidence with them (``basis``,
+    ``last_activity_age_s``) - never from ``status`` or a bare verdict word,
+    both of which read healthy for a worker dead under two hours. Mirrors the
+    daemon's ``attention_sort_key`` tier set; the shared fixture in
+    ``schemas/agents-attention-order.json`` is what pins the two together.
+    """
+    basis = row.get("basis")
+    if basis in _FALSIFIER_BASES or row.get("reachability") == "unreachable":
+        return 5
+    age = row.get("last_activity_age_s") or 0
+    if basis == "transcript" and age >= STALE_ATTENTION_S:
+        return 0
+    if basis == "silent":
+        return 1
+    if basis == "no-evidence":
+        return 2
+    return 4
+
+
+def attention_sort_key(row: dict) -> tuple:
+    """Attention order: evidence tier, then longest-silent first, then name.
+
+    An absent age counts as 0 (youngest): an absent reading has two
+    explanations and a sort cannot tell them apart, so it must never float a
+    row to the top.
+    """
+    age = row.get("last_activity_age_s") or 0
+    return (attention_rank(row), -age, str(row.get("name") or ""))
 
 
 def row_address(
@@ -154,8 +192,12 @@ def render_json(
     cleanly either way (AC3-UI). ``discovered`` is the P1 live-session lane
     (host-local, un-adopted Claude Code sessions); always present so a
     consumer can distinguish "no discovered sessions" from "an older shape".
+    Rows render in attention order - the same order the daemon projection
+    and the mux table apply - so a reader scanning the list top-down meets
+    the row that needs them first.
     """
     discovered = discovered or []
+    rows = sorted(rows, key=attention_sort_key)
     payload = {
         "agents": rows,
         "count": len(rows),
@@ -283,8 +325,13 @@ def render_table(
     When ``discovered`` is non-empty, a visually distinct "DISCOVERED LIVE
     SESSIONS" section is appended below the registered-agents table (AC1-UI),
     so live un-adopted sessions never blend into the registry rows.
+
+    Rows render in attention order, same as ``render_json`` - an operator
+    reading the plain TTY table top-down meets the row that needs them first,
+    not whatever order the registry happened to return.
     """
     width = terminal_width or _terminal_width()
+    rows = sorted(rows, key=attention_sort_key)
 
     # Compute display fields once, then size columns from the actual data.
     display_rows = []
