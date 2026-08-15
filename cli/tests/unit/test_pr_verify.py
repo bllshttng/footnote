@@ -250,9 +250,12 @@ def test_bounded_remediation_cleanup_split_from_merge(tmp_path, monkeypatch, del
     assert "--auto" not in merge_cmd, merge_cmd
     assert "--match-head-commit" in merge_cmd, merge_cmd
     remote_deletes = [
-        c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]
+        c for c in fake.calls if "DELETE" in c and "/git/refs/heads/" in c[-1]
     ]
     assert (len(remote_deletes) == 1) is delete_branch
+    if delete_branch:
+        # Against the PR's verified base repo, never `git push origin`.
+        assert remote_deletes[0][-1] == "repos/owner/repo/git/refs/heads/feature/x"
 
 
 def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on, monkeypatch, capsys):
