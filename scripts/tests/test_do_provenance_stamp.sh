@@ -51,6 +51,11 @@ export PATH="$T/bin:$PATH" CAPTURE="$T/capture.txt" HOME="$T/home"
 
 cd "$T/repo" || exit 1
 git init -q . && git config user.email t@t && git config user.name t
+# .fno/ and plan.md are harness scratch (the synthetic manifest and plan
+# stub below), not authored work. Ignore them so finalize's WIP-rescue
+# (x-cdc7) never sweeps them into a commit and manufactures fake work
+# evidence, which would defeat every "no authored work" (G4) assertion here.
+printf '.fno/\nplan.md\n' > .gitignore
 # Commits change a file: work evidence requires a content change, so an
 # --allow-empty fixture would exercise a case the guard deliberately rejects.
 commit_at() {  # msg author_epoch committer_epoch

@@ -612,6 +612,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     };
 
+    // ── ALWAYS: rescue uncommitted work at the only terminal a worker gets
+    //    (x-cdc7 HALF ONE) ──────────────────────────────────────────────────
+    // A provider 429 (or any other hard stop) gives a worker no future
+    // stop-hook fire to save it - this fire, whatever `reason` is, is the only
+    // one it gets. A dirty worktree here is one GC/orphan sweep from gone
+    // (measured: 950 insertions across 11 files, zero commits, rescued by
+    // hand). `git commit` is cheap and reversible; losing the diff is not.
+    let wip_commit_sha = commit_wip_if_dirty(&cwd, &reason);
+
     // ── SHIP ONLY: stamp (+ graduate for advisory) + handoff ───────────────
     // For a CODE ship (DonePRGreen) the plan is stamped `in_review` only: done now
     // means MERGED (x-f34f), and the `in_review -> done` flip happens at merge via
@@ -777,6 +786,29 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
+    // ── STUCK ONLY: file an unanswered operator question (x-32f3 HALF TWO) ──
+    // A worker that idles on an unanswered question and then dies (measured:
+    // 7h idle, "awaiting operator's terminal/mux info", `fno outstanding`
+    // empty the whole time) takes the diagnosis it already completed down
+    // with it. The verb (`fno outstanding ask`) already exists; nothing
+    // forced the filing. Mechanical, not instructional: the same STUCK bucket
+    // that gets a postmortem, with an operator-directed question in its last
+    // message and nothing already filed for this session, gets it filed here.
+    let mut outstanding_filed = false;
+    if STUCK_REASONS.contains(&reason.as_str()) {
+        let question = a
+            .transcript
+            .as_deref()
+            .and_then(last_assistant_text)
+            .as_deref()
+            .and_then(extract_operator_question);
+        if let Some(q) = question {
+            if !session_already_filed(&cwd, &session_id) {
+                outstanding_filed = file_outstanding_question(&cwd, &q, m.graph_node_id.as_deref());
+            }
+        }
+    }
+
     // ── bg worker terminal-stop marker (x-fcbf) ────────────────────────────
     // A fire-and-forget `claude --bg` /target|/think worker parks at its idle
     // prompt on a terminal loop decision and never exits (the stop hook allows
@@ -880,6 +912,11 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // Re-homed from `fno worker ship`'s return dict (x-1951): the fact now
         // belongs to the terminal that authorized it, not to PR creation.
         "auto_merge_armed": auto_merge_armed,
+        // x-cdc7 HALF ONE: the sha of the rescue commit, or null on a clean
+        // tree / non-git dir / commit failure.
+        "wip_commit_sha": wip_commit_sha,
+        // x-32f3 HALF TWO: whether an operator question was auto-filed this fire.
+        "outstanding_filed": outstanding_filed,
     });
     if let Some(blocked) = auto_merge_blocked_reason {
         data["auto_merge_blocked_reason"] = json!(blocked);
@@ -1763,7 +1800,7 @@ fn gh_pr_url(cwd: &Path) -> Option<String> {
 /// Resolve the branch's open PR as `(number, url)` for the node<->PR backstop
 /// stamp (x-280d). Returns None when gh fails/rate-limits, no PR exists, or the
 /// JSON is malformed - all of which the caller treats as "nothing to stamp".
-fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
+pub(crate) fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
     let out = Command::new("gh")
         .args(["pr", "view", "--json", "number,url"])
         .current_dir(cwd)
@@ -2290,7 +2327,7 @@ fn parse_utc_epoch(ts: &str) -> Option<i64> {
 }
 
 /// Run `git <args>` in cwd, returning trimmed stdout on success.
-fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -2300,6 +2337,193 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+// ── WIP rescue commit (x-cdc7 HALF ONE) ────────────────────────────────────
+
+/// If `cwd`'s worktree is dirty, commit everything as a clearly-labeled WIP
+/// commit naming the terminal reason and what landed. Returns the new commit
+/// sha, or `None` on a clean tree / non-git dir / commit failure.
+///
+/// `git add -A` is deliberate here, unlike the stale-base-rebase case this
+/// repo otherwise warns off `-A` for (AGENTS.md pitfalls corpus): this is the
+/// SAME worker's own in-flight work, not a merge in progress (checked below,
+/// not assumed), and only `-A` reliably captures new untracked files alongside
+/// modifications - the exact shape of the measured near-miss (950 insertions,
+/// 11 files, none staged).
+fn commit_wip_if_dirty(cwd: &Path, reason: &str) -> Option<String> {
+    if !cwd.join(".git").exists() {
+        return None; // not a git worktree at all
+    }
+    // Refuse to touch a tree mid-merge/mid-rebase/mid-cherry-pick: `git add -A`
+    // would stage conflicted files (still holding `<<<<<<<` markers) as
+    // "resolved", and `git commit` would silently finish the operation on
+    // garbage content. `git rev-parse --git-path` resolves worktree-relative
+    // (a linked worktree's real gitdir lives under `.git/worktrees/<name>/`,
+    // not `<cwd>/.git/`), unlike a bare `cwd.join(".git")` check.
+    let in_progress = [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+    ]
+    .iter()
+    .any(|marker| {
+        // `--git-path` prints a path relative to the git invocation's cwd
+        // (the worktree, via `current_dir(cwd)` inside `git_capture`), so
+        // it must be re-joined onto `cwd` before checking existence - this
+        // process's own cwd is unrelated.
+        git_capture(cwd, &["rev-parse", "--git-path", marker]).is_some_and(|p| cwd.join(p).exists())
+    });
+    if in_progress {
+        eprintln!("finalize: worktree is mid-merge/rebase; skipping WIP rescue commit ({reason})");
+        return None;
+    }
+    let status = git_capture(cwd, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return None; // clean tree, nothing to rescue
+    }
+    let files: Vec<&str> = status.lines().collect();
+    let shown: Vec<&str> = files.iter().take(20).copied().collect();
+    let mut landed = shown.join("; ");
+    if files.len() > shown.len() {
+        landed.push_str(&format!("; +{} more", files.len() - shown.len()));
+    }
+    let message = format!(
+        "WIP: session terminated ({reason}) with uncommitted work\n\n\
+         Auto-committed by the terminal WIP-commit gate (x-cdc7) so a killed \
+         worker never loses in-flight work. Not reviewed, not tested - treat \
+         as a checkpoint, not a finished change.\n\n\
+         Landed:\n{landed}"
+    );
+    let add_ok = Command::new("git")
+        .current_dir(cwd)
+        .args(["add", "-A"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !add_ok {
+        eprintln!("finalize: WIP git add failed; leaving worktree dirty");
+        return None;
+    }
+    // Try the repo's own commit hooks + signing config first; a hook
+    // rejection or an unavailable gpg key must never be the reason in-flight
+    // work is lost, so fall back to skipping both rather than leaving the
+    // tree uncommitted. This rescue commit is clearly labeled WIP, never
+    // mistaken for an authored, reviewed change.
+    let committed = Command::new("git")
+        .current_dir(cwd)
+        .args(["commit", "-q", "-m", &message])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        || Command::new("git")
+            .current_dir(cwd)
+            .args([
+                "commit",
+                "-q",
+                "--no-verify",
+                "-c",
+                "commit.gpgsign=false",
+                "-m",
+                &message,
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if !committed {
+        eprintln!("finalize: WIP git commit failed");
+        return None;
+    }
+    let sha = git_capture(cwd, &["rev-parse", "HEAD"]);
+    if let Some(sha) = &sha {
+        eprintln!("finalize: WIP commit {sha} saved uncommitted work ({reason})");
+    }
+    sha
+}
+
+// ── unanswered-question filing (x-32f3 HALF TWO) ────────────────────────────
+
+/// Positive-marker detector for an operator-directed question left in a
+/// worker's last message: matches the phrase, never an absence (AGENTS.md
+/// pitfalls corpus: "assert a positive marker, never an absence"). Narrow and
+/// specimen-derived over "any text with a question mark" - a false positive
+/// costs a redundant outstanding row, a false negative loses the question,
+/// and the second failure mode is the one this fix exists for.
+const OPERATOR_QUESTION_MARKERS: &[&str] = &[
+    "awaiting operator",
+    "waiting for operator",
+    "waiting on operator",
+    "need the operator",
+    "need operator",
+    "ask the operator",
+    "operator's",
+    "operator to",
+    "need you to",
+    "need your",
+    "please advise",
+    "please confirm",
+    "need confirmation",
+];
+
+fn extract_operator_question(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !OPERATOR_QUESTION_MARKERS.iter().any(|m| lower.contains(m)) {
+        return None;
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Cap length: this becomes a CLI argument and an `outstanding` report line.
+    const MAX_CHARS: usize = 600;
+    if trimmed.chars().count() > MAX_CHARS {
+        Some(trimmed.chars().take(MAX_CHARS).collect::<String>() + "…")
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Has this session already filed an open question? Read via the same `fno
+/// outstanding --json` an operator would run, so dedup can never drift from
+/// what is actually on record (never re-derived state).
+fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
+    let out = match Command::new("fno")
+        .current_dir(cwd)
+        .args(["outstanding", "--json"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false, // unreadable -> fail toward filing, never toward silence
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else {
+        return false;
+    };
+    v.get("questions")
+        .and_then(|q| q.as_array())
+        .is_some_and(|qs| {
+            qs.iter()
+                .any(|q| q.get("session_id").and_then(|s| s.as_str()) == Some(session_id))
+        })
+}
+
+fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
+    let mut cmd = Command::new("fno");
+    cmd.current_dir(cwd).args(["outstanding", "ask", question]);
+    if let Some(n) = node {
+        cmd.args(["--node", n]);
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => true,
+        Ok(s) => {
+            eprintln!("finalize: outstanding ask exited {:?}", s.code());
+            false
+        }
+        Err(e) => {
+            eprintln!("finalize: outstanding ask spawn failed: {e}");
+            false
+        }
+    }
 }
 
 // ── completion eval artifact, every terminal but NoWork (ab-1a92b677, x-8fc0) ──
@@ -2683,6 +2907,126 @@ mod tests {
 
     fn head_of(dir: &Path) -> String {
         git_capture(dir, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    // ── x-cdc7 HALF ONE: WIP-commit at every terminal ───────────────────────
+
+    #[test]
+    fn commit_wip_if_dirty_rescues_a_dirty_tree() {
+        // The specimen this fix exists for: a worker dies mid-flight holding
+        // uncommitted work. Assert the work is ON THE BRANCH afterward, not
+        // just that the function returns something.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let before = head_of(d);
+        std::fs::write(d.join("in_flight.txt"), "950 insertions worth").unwrap();
+        std::fs::write(d.join("new_untracked.txt"), "never staged").unwrap();
+
+        let sha = commit_wip_if_dirty(d, "NoProgress");
+
+        assert!(sha.is_some(), "a dirty tree must produce a rescue commit");
+        assert_ne!(sha.as_deref(), Some(before.as_str()));
+        assert_eq!(
+            git_capture(d, &["status", "--porcelain"]),
+            Some(String::new())
+        );
+        let log = git_capture(d, &["log", "-1", "--format=%s"]).unwrap();
+        assert!(log.contains("WIP") && log.contains("NoProgress"));
+        // The untracked file must be captured too - that is the whole point
+        // of `git add -A` over a partial `git add -u`.
+        let tracked = git_capture(d, &["show", "--stat", "HEAD"]).unwrap_or_default();
+        assert!(tracked.contains("new_untracked.txt"));
+    }
+
+    #[test]
+    fn commit_wip_if_dirty_is_a_noop_on_a_clean_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base", 1000, 1000);
+        let before = head_of(d);
+
+        assert_eq!(commit_wip_if_dirty(d, "DonePRGreen"), None);
+        assert_eq!(head_of(d), before, "a clean tree must not gain a commit");
+    }
+
+    #[test]
+    fn commit_wip_if_dirty_is_a_noop_outside_a_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(commit_wip_if_dirty(tmp.path(), "Budget"), None);
+    }
+
+    #[test]
+    fn commit_wip_if_dirty_refuses_a_tree_mid_merge_conflict() {
+        // The specimen this guard exists for: a worker dies with an unresolved
+        // merge conflict on disk. `git add -A` would stage the conflicted file
+        // as "resolved" and commit garbage, silently finishing the merge.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git_fixture(d);
+        commit_at(d, "base on main", 1000, 1000);
+        Command::new("git")
+            .args(["checkout", "-qb", "other"])
+            .current_dir(d)
+            .status()
+            .unwrap();
+        std::fs::write(d.join("in_flight.txt"), "other side").unwrap();
+        commit_at(d, "other side", 1001, 1001);
+        Command::new("git")
+            .args(["checkout", "-q", "-"])
+            .current_dir(d)
+            .status()
+            .unwrap();
+        std::fs::write(d.join("in_flight.txt"), "main side").unwrap();
+        commit_at(d, "main side", 1002, 1002);
+        // Provoke a real conflict: silently ignore the failing merge exit code.
+        let _ = Command::new("git")
+            .args(["merge", "-q", "--no-edit", "other"])
+            .current_dir(d)
+            .status();
+        assert!(
+            d.join(".git/MERGE_HEAD").exists(),
+            "fixture must actually be mid-conflict"
+        );
+        let before = head_of(d);
+
+        let sha = commit_wip_if_dirty(d, "NoProgress");
+
+        assert_eq!(sha, None, "a mid-merge tree must never be auto-committed");
+        assert_eq!(head_of(d), before, "HEAD must not move");
+        assert!(
+            d.join(".git/MERGE_HEAD").exists(),
+            "the merge must still be in progress, not silently finished"
+        );
+    }
+
+    // ── x-32f3 HALF TWO: mandatory outstanding-question filing ─────────────
+
+    #[test]
+    fn extract_operator_question_matches_the_measured_specimen() {
+        let text = "mouse-mode root cause identified; awaiting operator's terminal/mux info";
+        assert_eq!(extract_operator_question(text).as_deref(), Some(text));
+    }
+
+    #[test]
+    fn extract_operator_question_ignores_ordinary_status_text() {
+        // A false negative loses a real question; a false positive is a
+        // redundant outstanding row. This asserts the positive-marker list
+        // does not fire on prose that merely happens to end a sentence.
+        assert_eq!(
+            extract_operator_question("implemented the fix and pushed a commit"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_operator_question_truncates_long_text() {
+        let long = "need you to ".to_string() + &"x".repeat(1000);
+        let out = extract_operator_question(&long).unwrap();
+        assert!(out.chars().count() <= 601);
+        assert!(out.ends_with('…'));
     }
 
     #[test]

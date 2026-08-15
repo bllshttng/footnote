@@ -154,7 +154,7 @@ crates/fno-agents/src/codex_inject.rs:3
 crates/fno-agents/src/daemon.rs:145
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
-crates/fno-agents/src/finalize.rs:35
+crates/fno-agents/src/finalize.rs:48
 crates/fno-agents/src/gc.rs:22
 crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
@@ -169,6 +169,7 @@ crates/fno-agents/src/paths.rs:3
 crates/fno-agents/src/protocol.rs:5
 crates/fno-agents/src/provider.rs:6
 crates/fno-agents/src/readiness.rs:13
+crates/fno-agents/src/roster_progress.rs:7
 crates/fno-agents/src/scrape.rs:10
 crates/fno-agents/src/spawn_gate.rs:12
 crates/fno-agents/src/state.rs:43

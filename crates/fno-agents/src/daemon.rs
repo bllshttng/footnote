@@ -21,7 +21,7 @@ use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{UnixListener, UnixStream};
@@ -4588,6 +4588,37 @@ fn run_reconcile_sweep(
             "reconcile computed {} change(s) but the registry write failed: {err}",
             changes.len()
         ));
+    }
+
+    // Roster-progress refresh (x-cdc7 SECOND HALF): the same per-tick set the
+    // reconcile sweep just probed - but this loop's own git/gh subprocess
+    // calls are NOT covered by the probe loop's budget check above (that one
+    // stops feeding `plan_reconcile` new entries; it does not bound what runs
+    // after). Re-check the SAME `start`/`RECONCILE_SWEEP_BUDGET` clock here so
+    // a large changed-row set cannot extend a sweep that runs synchronously at
+    // daemon startup and blocks `accept()` on every `reconcile` RPC. Remaining
+    // rows are simply deferred to the next tick, the same fairness the probe
+    // loop itself relies on. Best-effort and non-fatal otherwise: an I/O
+    // failure here must never fail the sweep that already wrote the registry.
+    let progress_path = home.roster_progress_json();
+    for ch in &changes {
+        if start.elapsed() >= RECONCILE_SWEEP_BUDGET {
+            break;
+        }
+        let Some(e) = entries.iter().find(|e| e.name == ch.name) else {
+            continue;
+        };
+        if e.cwd.is_empty() {
+            continue;
+        }
+        if let Err(err) =
+            crate::roster_progress::refresh_row(&progress_path, &e.name, Path::new(&e.cwd), &now)
+        {
+            eprintln!(
+                "reconcile: roster-progress refresh failed for {}: {err}",
+                e.name
+            );
+        }
     }
 
     for (name, reason) in &outcome.inconsistent {
