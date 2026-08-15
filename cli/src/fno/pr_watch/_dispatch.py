@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from fno import _subprocess_util
+from fno.events import MAX_DATA_BYTES as _EVENT_MAX_DATA_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -69,8 +70,6 @@ class TickResult:
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
 # from schema.yaml), leaving envelope headroom, so the two budgets move together.
-from fno.events import MAX_DATA_BYTES as _EVENT_MAX_DATA_BYTES
-
 _INLINE_RECEIPT_MAX_BYTES = _EVENT_MAX_DATA_BYTES - _EVENT_MAX_DATA_BYTES // 4
 
 
