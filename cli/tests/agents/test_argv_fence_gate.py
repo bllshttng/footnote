@@ -47,6 +47,14 @@ PY_CONCAT = re.compile(r"^\s*([\w.]+)\s*=\s*[\w.]+\s*\+\s*\[(.*)\]")
 PY_EXTEND = re.compile(r"^\s*([\w.]+)\.extend\(\[(.*)\]\)\s*$")
 PY_APPEND = re.compile(r"^\s*([\w.]+)\.append\((.*)\)\s*$")
 PY_APPEND_OPEN = re.compile(r"^\s*([\w.]+)\.append\(\s*$")
+# One-off subprocess calls carrying an inline argv list are seams too - the
+# most common shape a NEW leak actually takes (synthesize.py pre-fix).
+PY_SUBPROC = re.compile(
+    r"^\s*subprocess\.(?:run|Popen|check_output|check_call|call)\(\s*\[(.*)\]"
+)
+PY_SUBPROC_OPEN = re.compile(
+    r"^\s*subprocess\.(?:run|Popen|check_output|check_call|call)\(\s*$"
+)
 RS_PUSH = re.compile(r"^\s*([\w.]+)\.push\((.*)\);?\s*$")
 RS_VEC = re.compile(r"vec!\[(.*)\]\s*;?\s*$")
 RS_ELEMENT = re.compile(r"^\s*(?:(?:ctx\.)?\w+\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\)\.to_string\(\))\s*,\s*$")
@@ -127,9 +135,13 @@ def _list_opener_line(lines: list, idx: int) -> str:
                 if depth == 0:
                     if ch == "[":
                         return lines[j]
-                    # A multi-line .append( call is a seed site too; any
-                    # other "(" is an ordinary call argument, not scanned.
-                    return lines[j] if PY_APPEND_OPEN.match(lines[j]) else ""
+                    # A multi-line .append( call or subprocess.( call is a
+                    # seed site too; any other "(" is an ordinary argument.
+                    if PY_APPEND_OPEN.match(lines[j]) or PY_SUBPROC_OPEN.match(
+                        lines[j]
+                    ):
+                        return lines[j]
+                    return ""
                 depth -= 1
         # A def/return line with no open bracket context ends the search: the
         # bare name is a statement, not an element.
@@ -150,7 +162,12 @@ def _exempt(lines: list, idx: int, is_rust: bool) -> bool:
     skip = RS_COMMENT if is_rust else PY_COMMENT
     opener = re.compile(r"^\s*[\w.]+\s*(?:\+=|=[^=]|\+)\s*\[\s*$")
     j = idx - 1
-    while j >= 0 and (skip.match(lines[j]) or opener.match(lines[j])):
+    while j >= 0 and (
+        skip.match(lines[j])
+        or opener.match(lines[j])
+        or PY_APPEND_OPEN.match(lines[j])
+        or PY_SUBPROC_OPEN.match(lines[j])
+    ):
         if "argv-fence: exempt" in lines[j]:
             return True
         j -= 1
@@ -233,6 +250,11 @@ def scan_file(path: Path, is_rust: bool) -> list:
                     kind = _classify_inline(m.group(2))
                     pushed = line.strip()
             if kind is None:
+                m = PY_SUBPROC.match(line)
+                if m and HAS_MESSAGE.search(_seed_text(m.group(1))):
+                    kind = _classify_inline(m.group(1))
+                    pushed = line.strip()
+            if kind is None:
                 m = PY_APPEND.match(line)
                 if (
                     m
@@ -252,9 +274,10 @@ def scan_file(path: Path, is_rust: bool) -> list:
                 if opener:
                     om = re.match(r"^\s*([\w.]+)\s*(?:\+=|=[^=]|\+)\s*\[", opener)
                     am = PY_APPEND_OPEN.match(opener)
+                    sm = PY_SUBPROC_OPEN.match(opener)
                     if (om and _argv_named(om.group(1))) or (
                         am and _argv_named(am.group(1))
-                    ):
+                    ) or sm:
                         seed_index = None
                         for t_i, tok in enumerate(t.strip() for t in line.split(",")):
                             if HAS_MESSAGE.search(_seed_text(tok)):
@@ -331,9 +354,10 @@ def test_scanner_still_sees_the_known_seams() -> None:
     assert counts.get("fenced", 0) >= 20, counts
     assert counts.get("value-form", 0) >= 4, counts
     # A floor AND a ceiling on exemptions: each new exempt marker must be a
-    # visible test edit, never a silent gate bypass. Ten standing exemptions:
-    # the agy arms (no clean end-of-options, probed), the deprecated-gemini
-    # arms, and the hermes -q value form.
-    assert counts.get("exempt", 0) == 10, counts
+    # visible test edit, never a silent gate bypass. Eleven standing
+    # exemptions: the agy arms (no clean end-of-options, probed), the
+    # deprecated-gemini arms, the hermes -q value form, and the notify-send
+    # body (a toast, not a worker seed).
+    assert counts.get("exempt", 0) == 11, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts

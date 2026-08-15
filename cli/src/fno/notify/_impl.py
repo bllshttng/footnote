@@ -63,6 +63,8 @@ def send_notification(title: str, message: str) -> tuple[int, str]:
         # notify-send takes argv directly (no shell/AppleScript injection vector),
         # but still bound it with a timeout and swallow failures for parity.
         try:
+            # argv-fence: exempt (a notification body, not a spawn seed: a
+            # leading-dash body drops one toast, it never idles a worker).
             subprocess.run(
                 ["notify-send", title, message],
                 check=False,

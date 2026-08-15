@@ -142,11 +142,12 @@ _SLUG_NOUN = (
 def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:
     """Return the substrate value if pinned by an explicit flag, else None.
 
-    Stops at the ``--argv`` payload boundary like the other spawn scans.
+    Stops at the ``--argv`` payload boundary and at a bare ``--`` seed fence
+    like the other spawn scans: fenced tokens are prompt text, never flags.
     """
     it = iter(toks)
     for t in it:
-        if t == "--argv":
+        if t in ("--argv", "--"):
             break
         if t in _EXPLICIT_SUBSTRATE_BOOLS:
             return "headless"
@@ -158,7 +159,11 @@ def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:
 
 
 def _positional_indices(toks: Sequence[str]) -> List[int]:
-    """Indices of positional tokens (NAME, MESSAGE), skipping flags + their values."""
+    """Indices of positional tokens (NAME, MESSAGE), skipping flags + their values.
+
+    Past a bare ``--`` seed fence every token is positional prompt text, even
+    when flag-shaped (click and the Rust client both treat it so).
+    """
     idxs: List[int] = []
     i = 0
     n = len(toks)
@@ -166,6 +171,9 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
         t = toks[i]
         if t == "--argv":
             break
+        if t == "--":
+            idxs.extend(range(i + 1, n))
+            return idxs
         if t.startswith("-"):
             if "=" not in t and t in _SPAWN_VALUE_FLAGS:
                 i += 2  # skip the flag and its value
@@ -371,12 +379,15 @@ _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
     """The MESSAGE seed: the ``--message`` value, else the sole positional (the
-    name rides ``--name``). Stops at the ``--argv`` payload boundary."""
+    name rides ``--name``). A bare ``--`` fence makes the first token after it
+    the seed, even when flag-shaped. Stops at the ``--argv`` payload boundary."""
     i = 0
     while i < len(toks):
         t = toks[i]
         if t == "--argv":
             break
+        if t == "--":
+            return toks[i + 1] if i + 1 < len(toks) else None
         if t == "--message":
             return toks[i + 1] if i + 1 < len(toks) else None
         if t.startswith("--message="):
@@ -448,14 +459,15 @@ def _has_permission_mode(toks: Sequence[str]) -> bool:
 
 
 def _spawn_tokens(toks: Sequence[str]):
-    """Yield ``(index, token)`` from ``toks`` up to the ``--argv`` boundary,
-    skipping any token that is another value-flag's consumed VALUE - so a
-    literal occurrence of one flag can never be misread out of a different
-    flag's value (e.g. ``--session-id --route`` names a session id of
-    ``--route``, not a ``--route`` flag)."""
+    """Yield ``(index, token)`` from ``toks`` up to the ``--argv`` boundary and
+    any bare ``--`` seed fence (fenced tokens are prompt text), skipping any
+    token that is another value-flag's consumed VALUE - so a literal occurrence
+    of one flag can never be misread out of a different flag's value (e.g.
+    ``--session-id --route`` names a session id of ``--route``, not a
+    ``--route`` flag)."""
     it = enumerate(toks)
     for i, t in it:
-        if t == "--argv":
+        if t in ("--argv", "--"):
             break
         yield i, t
         if t in _SPAWN_VALUE_FLAGS and "=" not in t:
