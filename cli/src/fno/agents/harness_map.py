@@ -69,18 +69,24 @@ _TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
 
 def normalize_legacy_no_merge(command: str) -> str:
     """Rewrite the legacy bare ``no-merge`` token to the flag in a
-    /target-family command (the pre-x-9d11 documented spelling, the token
-    directly after the verb: ``/target no-merge <arg>``). Position-scoped on
-    purpose: a /target argument is free text (``/target fix the no-merge
-    carrier bug`` is a real feature description), and rewriting the word
-    anywhere in the message would mutate prompt text the operator typed and
-    arm a refusal from prose (round 10). Everything else - other positions,
-    other slash verbs, prose - is returned unchanged."""
+    /target-family command. Scoped to the two positions the legacy injectors
+    actually produced (round 12): the token directly after the verb
+    (``/target no-merge <arg>``, the documented spelling) or trailing
+    (``/target <arg> no-merge``, the old normalize.sh append and keep_going
+    build). A MID-STRING token is left alone on purpose: a /target argument is
+    free text (``/target fix the no-merge carrier bug`` is a real feature
+    description), and rewriting the word anywhere would mutate prompt text the
+    operator typed and arm a refusal from prose (round 10)."""
     parts = command.split()
-    if len(parts) >= 2 and parts[0] in _TARGET_FAMILY and parts[1] == "no-merge":
+    if not parts or parts[0] not in _TARGET_FAMILY:
+        return command
+    if len(parts) >= 2 and parts[1] == "no-merge":
         parts[1] = "--no-merge"
-        return " ".join(parts)
-    return command
+    elif len(parts) >= 3 and parts[-1] == "no-merge":
+        parts[-1] = "--no-merge"
+    else:
+        return command
+    return " ".join(parts)
 
 
 def is_target_family(message: str) -> bool:

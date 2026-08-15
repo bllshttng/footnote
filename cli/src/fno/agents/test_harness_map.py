@@ -485,16 +485,20 @@ def test_message_carries_no_merge_is_word_padded():
 
 
 def test_legacy_token_rewrite_is_position_scoped():
-    """Only the documented legacy position (the token directly after the verb)
-    is migrated. A /target argument is free text: ``/target fix the no-merge
-    carrier bug`` is a real feature description, and rewriting the word
-    anywhere would mutate prompt text and arm a refusal from prose (round 10)."""
+    """Only the two legacy positions (directly after the verb, or trailing -
+    the old normalize.sh append) are migrated. A /target argument is free
+    text: ``/target fix the no-merge carrier bug`` is a real feature
+    description, and rewriting the word mid-string would mutate prompt text
+    and arm a refusal from prose (rounds 10/12)."""
     from fno.agents.harness_map import (
         message_carries_no_merge,
         normalize_legacy_no_merge,
     )
 
     assert normalize_legacy_no_merge("/target no-merge x-1") == "/target --no-merge x-1"
+    # The end-position legacy spelling (pre-x-9d11 normalize.sh append).
+    assert normalize_legacy_no_merge("/target x-1 no-merge") == "/target x-1 --no-merge"
+    assert message_carries_no_merge(normalize_legacy_no_merge("/target x-1 no-merge"))
     untouched = "/target fix the no-merge carrier bug x-1"
     assert normalize_legacy_no_merge(untouched) == untouched
     assert not message_carries_no_merge(untouched)

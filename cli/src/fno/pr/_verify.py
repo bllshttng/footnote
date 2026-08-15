@@ -35,10 +35,8 @@ from typing import Any, List, Optional, Sequence
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 from fno.pr._proc import ToolMissing, run
 
-# Required-check states that count as "not failing" (jq parity).
-_PASS_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-# Not-yet-decided states: not green, but not failing either (round 10).
-_PENDING_STATES = {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}
+# Check classification lives in fno.pr._status (_classify + _latest_per_name),
+# shared with the merge verb so the two surfaces never disagree (round 12).
 
 
 # ---------------------------------------------------------------------------
@@ -372,19 +370,19 @@ def run_verify_merged(
 
 
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Failing checks (whole rollup): decided and not in a success/neutral/
-    skipped state. PENDING is NOT failing - a still-running check is not-green,
-    which the remediation path reports without the "failing" label.
-
+    """Failing checks (whole rollup), classified by the SAME truth table the
+    merge verb uses - a second hand-built state table is how verify ends up
+    refusing what `fno pr merge` merges (round 12). _latest_per_name drops
+    superseded runs; _classify reads pass/fail/pending with the shared
+    semantics (a REQUESTED or empty-conclusion check is pending, not failing).
     No isRequired filter - `gh pr view` never emits that key (see
     _merge._checks_verdict), so with require_checks_pass every check counts."""
+    from fno.pr._status import _classify, _latest_per_name
+
     failing: List[str] = []
-    for c in rollup:
-        state = str(_alt(c.get("conclusion"), c.get("state"), c.get("status"), "PENDING")).upper()
-        name = _alt(c.get("name"), c.get("context"), "unnamed")
-        if state in _PASS_STATES or state in _PENDING_STATES:
-            continue
-        failing.append(str(name))
+    for c in _latest_per_name(rollup):
+        if _classify(c) == "fail":
+            failing.append(str(_alt(c.get("name"), c.get("context"), "unnamed")))
     return failing
 
 

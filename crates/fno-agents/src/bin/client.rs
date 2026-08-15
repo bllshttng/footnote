@@ -846,6 +846,20 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     use fno_agents::opencode_ask::dispatch_opencode_once;
     use fno_agents::state::load_registry;
 
+    // x-9d11 refusal carrier, Rust lane: the front door execs this binary for
+    // bg/headless spawns, so cmd_spawn's set-or-clear never runs here - without
+    // this, a flag-carrying /target dispatch arms the env carrier only on the
+    // Python-routed lanes (the guard-on-one-of-N-paths shape). Same vocabulary
+    // as harness_map's message_carries_no_merge; this is the fourth copy, and
+    // single-sourcing it is x-8151's whole scope. Clear-side parity is
+    // deliberately absent: an operator export surviving a flag-less family
+    // spawn errs toward refusing merges, the safe side (round 8 ruling).
+    fn message_carries_no_merge(message: &str) -> bool {
+        const FAMILY: [&str; 3] = ["/target", "/fno:target", "$fno:target"];
+        let first = message.split_whitespace().next().unwrap_or("");
+        FAMILY.contains(&first) && format!(" {message} ").contains(" --no-merge ")
+    }
+
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     // `substrate` is a CLIENT-ONLY routing key: build_request validates and
     // inserts it (default `pane`) for the spawn verb and this is its sole
@@ -1101,6 +1115,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
         ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
+            // The message-derived refusal carrier (see message_carries_no_merge
+            // above) rides extra_env so a worker that drops the flag
+            // post-compaction still folds the refusal at init.
+            let no_merge_env: Vec<(&str, &str)> = if message_carries_no_merge(message) {
+                vec![("TARGET_NO_MERGE", "1")]
+            } else {
+                Vec::new()
+            };
             let outcome = dispatch_claude_spawn(
                 home,
                 &claude_home,
@@ -1110,7 +1132,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 &cwd,
                 yolo,
                 timeout,
-                &[],
+                &no_merge_env,
                 model,
                 permission_mode,
                 effort,

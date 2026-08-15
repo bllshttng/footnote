@@ -100,6 +100,10 @@ DRY_RUN=0
 HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of --fresh)
 PERMISSION_MODE=""  # x-dfa4: forwarded as --permission-mode to each worker spawn
 ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed)
+# The operator's exported refusal, captured before the loop arms/unsets the
+# carrier per node, so non-family dispatches restore it rather than a prior
+# iteration's value (round 12).
+_OPERATOR_NO_MERGE="${TARGET_NO_MERGE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,7 +111,10 @@ while [[ $# -gt 0 ]]; do
     # x-9d11: migrate the legacy bare `no-merge` token to the flag at parse, so
     # the no-merge guards downstream match one spelling and a bare token in
     # --flags cannot double-spell (bare + appended flag) into $tgt_cmd.
-    --flags)      FLAGS="$(printf ' %s ' "${2:-}" | sed -e 's/ no-merge / --no-merge /g' -e 's/^ //' -e 's/ $//')"; shift 2 ;;
+    # Start-anchored, single replace (round 12): the legacy spelling was the
+    # whole --flags value (or its leading token), and a GLOBAL rewrite would
+    # mutate free text in --flags into the refusal flag.
+    --flags)      FLAGS="$(printf ' %s ' "${2:-}" | sed -e 's/^ no-merge / --no-merge /' -e 's/^ //' -e 's/ $//')"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift ;;
     --no-merge)   ALLOW_MERGE=0; shift ;;
     --max)        MAX="${2:-0}"; shift 2 ;;
@@ -821,7 +828,17 @@ for id in "${NODES[@]}"; do
         unset TARGET_NO_MERGE 2>/dev/null || true
       fi
       ;;
-    *) unset TARGET_NO_MERGE 2>/dev/null || true ;;
+    *)
+      # Non-family (prose, /think): no posture to derive. Restore the
+      # OPERATOR's exported value, not a prior iteration's - loop hygiene
+      # without dropping a documented control input (round 12; mirrors
+      # cmd_spawn, which clears nothing for non-family messages).
+      if [[ -n "$_OPERATOR_NO_MERGE" ]]; then
+        export TARGET_NO_MERGE=1
+      else
+        unset TARGET_NO_MERGE 2>/dev/null || true
+      fi
+      ;;
   esac
   spawn_err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/dispatch-node-$$.err")"
   # Three explicit branches (NOT an optional-flag array): bash 3.2 (macOS)
