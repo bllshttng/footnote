@@ -213,13 +213,64 @@ def node_id_hex_width() -> int:
         return LEGACY_HEX
 
 
+_ARCHIVE_ID_MEMO: dict = {"key": None, "ids": frozenset()}
+
+
+def _archived_id_pool() -> set[str]:
+    """The archive's node ids, memoized on (path, mtime_ns, size).
+
+    mint_node_id fires on nearly every node creation while holding the graph
+    lock, and the archive only grows, so an unmemoized read re-parses a
+    multi-MB file under the flock on every mint. A re-stat per call keeps the
+    memo correct: every archive writer (archive, unarchive, dedupe) writes
+    under the same lock, and a write bumps mtime/size before the next mint
+    can observe it. Tests get distinct tmp paths, so the path half of the key
+    separates fixtures.
+
+    A raw parse, not `read_graph` (x-f69b regression): `read_graph`'s
+    corrupt-JSON path prints a stderr warning AND copies a `.bak` backup as a
+    side effect before raising - fine for a deliberate `fno doctor`/`archive`
+    invocation, but this call is an invisible side channel inside a hot path,
+    and that print leaked into unrelated commands' captured output the first
+    time a corrupt archive fixture was left behind in a shared test session.
+    """
+    try:
+        import json as _json
+
+        from fno.paths import graph_archive_json
+
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            _ARCHIVE_ID_MEMO["key"] = None
+            return set()
+        st = archive_path.stat()
+        key = (str(archive_path), st.st_mtime_ns, st.st_size)
+        if _ARCHIVE_ID_MEMO["key"] != key:
+            data = _json.loads(archive_path.read_text())
+            raw_entries = data.get("entries", []) if isinstance(data, dict) else []
+            _ARCHIVE_ID_MEMO["key"] = key
+            _ARCHIVE_ID_MEMO["ids"] = frozenset(
+                nid for e in raw_entries
+                if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+            )
+        return set(_ARCHIVE_ID_MEMO["ids"])
+    except Exception:  # noqa: BLE001 - archive is advisory; a bad read must not block minting
+        return set()
+
+
 def mint_node_id(existing_ids) -> str:
     """Mint a fresh, collision-free node id using the configured scheme.
 
     ``<prefix><hex>`` where prefix/width come from config (legacy fallback).
     Retries on collision against ``existing_ids`` (any container of current
-    graph keys), bounded by ``_MINT_MAX_ATTEMPTS``; raises RuntimeError when the
-    ID space is near exhaustion rather than looping forever (AC2-EDGE).
+    graph keys) UNION the archive's ids, bounded by ``_MINT_MAX_ATTEMPTS``;
+    raises RuntimeError when the ID space is near exhaustion rather than
+    looping forever (AC2-EDGE).
+
+    The archive read is best-effort (x-f69b): a sweep frees a working-graph id
+    for reuse, so minting against the working graph alone reissues an id that
+    still names a different node in graph-archive.json. A bad archive read
+    degrades to the working-graph-only pool rather than blocking every mint.
 
     MUST be called inside ``locked_mutate_graph`` so ``existing_ids`` is a
     consistent snapshot and two concurrent mints cannot collide (AC2-FR).
@@ -227,14 +278,16 @@ def mint_node_id(existing_ids) -> str:
     import uuid
     prefix = node_id_prefix()
     width = node_id_hex_width()
+    archive_ids = _archived_id_pool()
     for _ in range(_MINT_MAX_ATTEMPTS):
         candidate = f"{prefix}{uuid.uuid4().hex[:width]}"
-        if candidate not in existing_ids:
+        if candidate not in existing_ids and candidate not in archive_ids:
             return candidate
     count = len(existing_ids) if hasattr(existing_ids, "__len__") else "?"
     raise RuntimeError(
         f"node-ID space near exhaustion: {_MINT_MAX_ATTEMPTS} mint attempts at "
-        f"prefix {prefix!r} width {width} all collided ({count} existing ids). "
+        f"prefix {prefix!r} width {width} all collided ({count} existing ids, "
+        f"{len(archive_ids)} archived). "
         "Increase config.backlog.id_hex_width."
     )
 

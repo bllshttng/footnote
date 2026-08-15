@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import date, datetime, timezone
@@ -170,6 +171,24 @@ def _mechanical_legs(age: int) -> list[tuple[str, list[str]]]:
     ]
 
 
+_ARCHIVE_MOVED_RE = re.compile(r"^Archived (\d+) terminal node\(s\)", re.MULTILINE)
+_ARCHIVE_HELD_RE = re.compile(r"^  held back \([\w-]+\): (\d+)$", re.MULTILINE)
+
+
+def _archive_leg_outcome(stdout: str) -> str:
+    """Turn the archive leg's stdout into a receipt that names counts.
+
+    Bare "ok" cannot tell a run that archived 500 nodes apart from one that
+    archived zero (x-a023) - exactly the ambiguity that let "archive: ok"
+    read green every day since 2026-07-20 while 532 done nodes accumulated in
+    the working graph, almost all of them held back rather than moved.
+    """
+    moved_match = _ARCHIVE_MOVED_RE.search(stdout)
+    moved = int(moved_match.group(1)) if moved_match else 0
+    held = sum(int(n) for n in _ARCHIVE_HELD_RE.findall(stdout))
+    return f"ok (archived {moved}, held back {held})"
+
+
 def _run_mechanical(age: int) -> dict[str, str]:
     """Run every mechanical leg best-effort; return a per-leg outcome map.
 
@@ -189,7 +208,9 @@ def _run_mechanical(age: int) -> dict[str, str]:
             results[name] = f"failed: {type(exc).__name__}: {str(exc)[:120]}"
             continue
         if proc.returncode == 0:
-            results[name] = "ok"
+            results[name] = (
+                _archive_leg_outcome(proc.stdout or "") if name == "archive" else "ok"
+            )
             continue
         detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
         label = "partial" if proc.returncode == _PARTIAL_EXIT else "failed"
@@ -198,7 +219,12 @@ def _run_mechanical(age: int) -> dict[str, str]:
 
 
 def _leg_trouble(mechanical: dict[str, str]) -> list[str]:
-    return sorted(name for name, outcome in mechanical.items() if outcome != "ok")
+    # Prefix match, not equality: the archive leg's success outcome carries
+    # counts ("ok (archived N, held back M)"); an equality test would flag
+    # every green pass as degraded and bury the real signal.
+    return sorted(
+        name for name, outcome in mechanical.items() if not outcome.startswith("ok")
+    )
 
 
 def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:

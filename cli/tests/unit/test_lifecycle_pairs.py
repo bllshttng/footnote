@@ -87,7 +87,7 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
 # accept that it lands in the derived non-transition set.
 KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
-        "add", "advance", "archive", "bases", "batch",
+        "add", "advance", "album", "archive", "archive-dedupe-ids", "bases", "batch",
         "capture", "collisions", "cost", "decompose", "defer",
         "dispatch-lanes", "done", "epic", "find", "get", "groom",
         "idea", "intake", "lane-fill", "lanes", "maintain", "new",

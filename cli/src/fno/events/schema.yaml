@@ -810,6 +810,46 @@ event_types:
           description: "The gh-reported state of the PR at force-close time (OPEN/CLOSED/MERGED/UNKNOWN)."
     consumers: [operator]
 
+  - name: graph_archive_swept
+    description: "One archive sweep ran to completion (fno backlog archive --apply), whether invoked directly or from the daily groom pass. Moved and every held-back bucket are always present, so a run that moves nothing still reports why: 'ok' with no count is indistinguishable from a sweep that never ran."
+    sources: [backlog]
+    data:
+      required: [moved, held_referenced, held_related, held_too_recent, held_no_timestamp, older_than_days]
+      properties:
+        moved:
+          type: integer
+          description: "Terminal nodes actually moved into graph-archive.json this run."
+        held_referenced:
+          type: integer
+          description: "Terminal nodes held back because an open node still references them (blocker/parent/supersede/related/origin)."
+        held_related:
+          type: integer
+          description: "Terminal nodes held back because a related peer is staying behind (moving one side of a symmetric edge would strand the other)."
+        held_too_recent:
+          type: integer
+          description: "Terminal nodes held back because they are younger than the age gate."
+        held_no_timestamp:
+          type: integer
+          description: "Terminal nodes held back because no parseable terminal timestamp was found."
+        older_than_days:
+          type: integer
+          description: "The age gate this sweep used (--older-than-days)."
+    consumers: [operator]
+
+  - name: graph_archive_ids_reminted
+    description: "One archive id-repair ran to completion (fno backlog archive-dedupe-ids --apply). A distinct type from graph_archive_swept: recording a repair as a zeroed sweep corrupts both 'did the daily sweep run' and per-gate hold statistics."
+    sources: [backlog]
+    data:
+      required: [remint_count]
+      properties:
+        remint_count:
+          type: integer
+          description: "Archive-side ids reminted to resolve a collision with a working-graph id."
+        remap:
+          type: object
+          description: "Map of old id to new id for every entry reminted this run."
+    consumers: [operator]
+
   - name: style_refusal
     description: "A mail body was refused by the six-rule style gate before delivery. The retry rate (a refusal followed by a passing send in the same session) is a query over events.jsonl."
     sources: [target, subagent, test]

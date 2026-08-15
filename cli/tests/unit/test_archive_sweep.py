@@ -12,7 +12,12 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.graph.archive import merge_into_archive, partition_for_archive
+from fno.graph.archive import (
+    merge_into_archive,
+    partition_for_archive,
+    remint_archive_collisions,
+    stamp_archived_at,
+)
 
 runner = CliRunner()
 NOW = datetime(2026, 7, 8, tzinfo=timezone.utc)
@@ -183,3 +188,291 @@ def test_roadmap_archive_guards_across_roadmaps(tmp_path, monkeypatch):
     assert not archive.exists() or "ab-dep00001" not in {
         e["id"] for e in json.loads(archive.read_text())["entries"]
     }
+
+
+def test_roadmap_restricted_held_counts_only_that_roadmap(tmp_path, monkeypatch):
+    """A --roadmap-id run's receipt describes what THAT run considered; other
+    roadmaps' too-recent nodes are not this run's holds."""
+    g, _archive = _route(tmp_path, monkeypatch)
+    _seed(g, [
+        {"id": "ab-old0001", "roadmap_id": "rm-A", "completed_at": "2020-01-01T00:00:00Z"},
+        {"id": "ab-new0001", "roadmap_id": "rm-B", "completed_at": "2026-08-01T00:00:00Z"},
+    ])
+    r = runner.invoke(
+        app, ["backlog", "archive", "--apply", "--older-than-days", "30", "--roadmap-id", "rm-A"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "held back (too-recent): 0" in r.output  # rm-B's node is not this run's hold
+
+
+def test_receipt_passes_through_an_unknown_skip_reason():
+    from fno.graph.cli import _archive_bucket_counts, _receipt_reason_order
+
+    held = _archive_bucket_counts([{"_skip": "some-future-reason"}])
+    assert held["some-future-reason"] == 1
+    assert held["too-recent"] == 0  # zero-fill holds for the known four
+    assert "some-future-reason" in _receipt_reason_order(held)
+
+
+# -- receipt: bucket breakdown + archived_at (x-a023) -----------------------
+
+
+def _with_events(tmp_path, monkeypatch):
+    import fno.paths as p
+
+    monkeypatch.setattr(p, "state_dir", lambda: tmp_path)
+    return tmp_path / "events.jsonl"
+
+
+def _events_of_type(events_path: Path, type_name: str) -> list[dict]:
+    if not events_path.exists():
+        return []
+    out = []
+    for line in events_path.read_text().splitlines():
+        ev = json.loads(line)
+        if ev.get("type") == type_name:
+            out.append(ev)
+    return out
+
+
+def test_dry_run_prints_all_four_buckets_zero_filled(tmp_path, monkeypatch):
+    g, _archive = _route(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-open0001", "plan_path": "p.md"}])  # nothing terminal
+    r = runner.invoke(app, ["backlog", "archive"])
+    assert r.exit_code == 0, r.output
+    for reason in (
+        "referenced-by-open-node", "related-peer-not-archived",
+        "too-recent", "no-parseable-timestamp",
+    ):
+        assert f"held back ({reason}): 0" in r.output
+
+
+def test_apply_stamps_archived_at(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-done0001", "completed_at": _old(40)}])
+    r = runner.invoke(app, ["backlog", "archive", "--apply", "--older-than-days", "30"])
+    assert r.exit_code == 0, r.output
+    entry = json.loads(archive.read_text())["entries"][0]
+    assert entry["id"] == "ab-done0001"
+    assert entry.get("archived_at")  # stamped, not just moved
+
+
+def test_apply_emits_swept_event_with_moved_and_held_counts(tmp_path, monkeypatch):
+    # cmd_archive computes `now` live (datetime.now()), unlike the pure
+    # partition_for_archive tests above which inject the fixed NOW -- so the
+    # age offsets here are relative to the REAL clock, not the NOW constant.
+    real_now = datetime.now(timezone.utc)
+
+    def _real_old(days: int) -> str:
+        return (real_now - timedelta(days=days)).isoformat()
+
+    g, _archive = _route(tmp_path, monkeypatch)
+    events_path = _with_events(tmp_path, monkeypatch)
+    _seed(g, [
+        {"id": "ab-done0001", "completed_at": _real_old(40)},
+        {"id": "ab-done0002", "completed_at": _real_old(5)},  # too-recent, held
+    ])
+    r = runner.invoke(app, ["backlog", "archive", "--apply", "--older-than-days", "30"])
+    assert r.exit_code == 0, r.output
+    evs = _events_of_type(events_path, "graph_archive_swept")
+    assert len(evs) == 1
+    data = evs[0]["data"]
+    assert data["moved"] == 1
+    assert data["held_too_recent"] == 1
+    assert data["held_referenced"] == 0
+    assert data["older_than_days"] == 30
+
+
+def test_apply_with_nothing_to_move_still_emits_zero_moved_event(tmp_path, monkeypatch):
+    g, _archive = _route(tmp_path, monkeypatch)
+    events_path = _with_events(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-open0001", "plan_path": "p.md"}])
+    r = runner.invoke(app, ["backlog", "archive", "--apply"])
+    assert r.exit_code == 0, r.output
+    evs = _events_of_type(events_path, "graph_archive_swept")
+    assert len(evs) == 1
+    assert evs[0]["data"]["moved"] == 0
+
+
+# -- remint_archive_collisions (x-f69b) --------------------------------------
+
+
+def test_remint_no_collision_is_noop():
+    archive_entries = [{"id": "ab-arch0001", "completed_at": "2026-01-01T00:00:00Z"}]
+    patched, remap = remint_archive_collisions({"ab-live0001"}, archive_entries)
+    assert remap == {}
+    assert patched == archive_entries
+
+
+def test_remint_reissues_colliding_archive_entry_and_keeps_previous_id():
+    archive_entries = [
+        {"id": "ab-dup00001", "title": "old archived node", "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-other001", "completed_at": "2026-01-01T00:00:00Z"},
+    ]
+    patched, remap = remint_archive_collisions({"ab-dup00001"}, archive_entries)
+    assert list(remap.keys()) == ["ab-dup00001"]
+    new_id = remap["ab-dup00001"]
+    reminted = next(e for e in patched if e.get("previous_id") == "ab-dup00001")
+    assert reminted["id"] == new_id
+    assert reminted["title"] == "old archived node"
+    # The untouched entry passes through unchanged.
+    other = next(e for e in patched if e["id"] == "ab-other001")
+    assert "previous_id" not in other
+
+
+def test_stamp_archived_at_sets_field_without_mutating_input():
+    entries = [{"id": "ab-1"}, {"id": "ab-2", "archived_at": "old"}]
+    stamped = stamp_archived_at(entries, "2026-08-14T00:00:00Z")
+    assert [e["archived_at"] for e in stamped] == ["2026-08-14T00:00:00Z"] * 2
+    assert "archived_at" not in entries[0]  # input untouched
+
+
+# -- fno backlog get resolves a reminted id via previous_id (x-f69b) --------
+
+
+def test_get_resolves_reminted_archive_entry_via_previous_id(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-newid001", "previous_id": "ab-oldid001", "slug": "reminted",
+         "title": "Reminted Node", "completed_at": "2026-01-01T00:00:00Z"}
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "get", "ab-oldid001"])
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["id"] == "ab-newid001"
+    assert out["_archived"] is True
+
+
+# -- fno backlog archive-dedupe-ids (x-f69b) ---------------------------------
+
+
+def test_dedupe_ids_dry_run_reports_without_writing(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-dup00001", "plan_path": "p.md"}])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-dup00001", "completed_at": "2026-01-01T00:00:00Z"}
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "archive-dedupe-ids"])
+    assert r.exit_code == 0, r.output
+    assert "would remint 1 archive id(s)" in r.output
+    assert "ab-dup00001" in json.loads(archive.read_text())["entries"][0]["id"]  # unwritten
+
+
+def test_dedupe_ids_apply_writes_and_keeps_previous_id(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    events_path = _with_events(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-dup00001", "plan_path": "p.md"}])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-dup00001", "title": "old", "completed_at": "2026-01-01T00:00:00Z"}
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "archive-dedupe-ids", "--apply"])
+    assert r.exit_code == 0, r.output
+    entries = json.loads(archive.read_text())["entries"]
+    assert len(entries) == 1
+    assert entries[0]["previous_id"] == "ab-dup00001"
+    assert entries[0]["id"] != "ab-dup00001"
+    evs = _events_of_type(events_path, "graph_archive_ids_reminted")
+    assert len(evs) == 1
+    assert evs[0]["data"]["remint_count"] == 1
+    assert evs[0]["data"]["remap"]["ab-dup00001"] == entries[0]["id"]
+    # A repair is not a sweep: it must never be recorded as one.
+    assert _events_of_type(events_path, "graph_archive_swept") == []
+
+
+def test_dedupe_ids_apply_with_no_collision_writes_nothing(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-live0001", "plan_path": "p.md"}])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-arch0001", "completed_at": "2026-01-01T00:00:00Z"}
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "archive-dedupe-ids", "--apply"])
+    assert r.exit_code == 0, r.output
+    assert "No colliding archive ids found." in r.output
+
+
+# -- fno backlog album (x-a023 browse surface) -------------------------------
+
+
+def test_album_empty_archive_says_so(tmp_path, monkeypatch):
+    g, _archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    r = runner.invoke(app, ["backlog", "album"])
+    assert r.exit_code == 0, r.output
+    assert "The album is empty." in r.output
+
+
+def test_album_sorts_newest_first_and_shows_the_gift(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-old00001", "title": "Old One", "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-new00001", "title": "New One", "completed_at": "2026-06-01T00:00:00Z",
+         "pr_url": "https://github.com/x/y/pull/1"},
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "album"])
+    assert r.exit_code == 0, r.output
+    lines = [line for line in r.output.splitlines() if line.strip()]
+    assert lines[0].startswith("2026-06-01")
+    assert "-> https://github.com/x/y/pull/1" in lines[0]
+    assert lines[1].startswith("2026-01-01")
+    assert "(no gift)" in lines[1]
+
+
+def test_album_project_filter(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-p1", "title": "P1", "completed_at": "2026-01-01T00:00:00Z", "project": "alpha"},
+        {"id": "ab-p2", "title": "P2", "completed_at": "2026-01-02T00:00:00Z", "project": "beta"},
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "album", "--project", "alpha"])
+    assert r.exit_code == 0, r.output
+    assert "ab-p1" in r.output
+    assert "ab-p2" not in r.output
+
+
+def test_album_json_output_and_limit(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    archive.write_text(json.dumps({"entries": [
+        {"id": f"ab-{i:04d}", "completed_at": f"2026-01-{i:02d}T00:00:00Z"}
+        for i in range(1, 6)
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "album", "--limit", "2", "--json"])
+    assert r.exit_code == 0, r.output
+    hits = json.loads(r.output)
+    assert len(hits) == 2
+    assert hits[0]["id"] == "ab-0005"  # newest first
+
+
+def test_album_reports_overflow_count(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    archive.write_text(json.dumps({"entries": [
+        {"id": f"ab-{i:04d}", "completed_at": f"2026-01-{i:02d}T00:00:00Z"}
+        for i in range(1, 6)
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "album", "--limit", "2"])
+    assert r.exit_code == 0, r.output
+    assert "3 more" in r.output
+
+
+# -- entries_with_archive never returns duplicate ids (x-f69b VERIFY ask) ---
+
+
+def test_entries_with_archive_never_returns_duplicate_ids(tmp_path, monkeypatch):
+    from fno.graph.store import entries_with_archive
+    import fno.paths as p
+
+    archive_path = tmp_path / "graph-archive.json"
+    archive_path.write_text(json.dumps({"entries": [
+        {"id": "x-dup", "title": "archived version"}
+    ]}) + "\n")
+    monkeypatch.setattr(p, "graph_archive_json", lambda: archive_path)
+
+    working = [{"id": "x-dup", "title": "live version"}]
+    merged = entries_with_archive(working)
+    ids = [e["id"] for e in merged]
+    assert ids.count("x-dup") == 1  # working entry wins; archived duplicate dropped
+    assert next(e for e in merged if e["id"] == "x-dup")["title"] == "live version"

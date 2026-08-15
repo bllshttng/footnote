@@ -4488,8 +4488,18 @@ def cmd_get(
         # miss below rather than erroring, so keep the soft reader here.
         archived = read_graph(archive_path)
         amatch = resolve_node(id, archived)
-        if amatch.kind == "exact":
-            e = dict(amatch.candidates[0])
+        matched_entry = amatch.candidates[0] if amatch.kind == "exact" else None
+        if matched_entry is None:
+            # x-f69b: an archive-side id collision with the working graph gets
+            # reminted, and the old id is kept as `previous_id` so a reference
+            # made before the remint (a doc, a mail thread, a stale branch
+            # name) still resolves instead of reading as a plain miss.
+            matched_entry = next(
+                (e for e in archived if isinstance(e, dict) and e.get("previous_id") == id),
+                None,
+            )
+        if matched_entry is not None:
+            e = dict(matched_entry)
             e["_archived"] = True
             if field:
                 value = e.get(field)
@@ -9636,6 +9646,35 @@ def cmd_rank(
 
 # -- archive --
 
+_ARCHIVE_SKIP_REASONS = (
+    "referenced-by-open-node",
+    "related-peer-not-archived",
+    "too-recent",
+    "no-parseable-timestamp",
+)
+
+
+def _archive_bucket_counts(skipped: list) -> dict[str, int]:
+    """Tally ``skipped`` by ``_skip`` reason, zero-filled for every known reason.
+
+    Zero-filled so the receipt always names all four buckets (x-a023): a run
+    that holds back 0 for a reason reads as "checked, none held", not as an
+    absent line a reader has to interpret as either "zero" or "not measured".
+    A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
+    stdout receipt prints it, so a new ``_skip`` reason reads in the receipt
+    (and in groom's regex sum over these lines) instead of vanishing.
+    """
+    held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
+    for s in skipped:
+        held[s["_skip"]] = held.get(s["_skip"], 0) + 1
+    return held
+
+
+def _receipt_reason_order(held: dict[str, int]) -> list[str]:
+    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
+    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
+
+
 @cli.command(
     "archive",
     hidden=True,
@@ -9659,6 +9698,11 @@ def cmd_archive(
     ``--apply`` mutates under the graph lock (archive written first, then the
     working graph, so a crash duplicates rather than loses). Never archives a
     node an OPEN node still references (blocker, parent, or supersede target).
+
+    Every run's receipt names all four held-back buckets, not just the moved
+    count: a leg that runs daily and reports bare "ok" is indistinguishable
+    from one that never ran (x-a023) - the count that matters is often the
+    held-back one, not the moved one.
     """
     from datetime import datetime, timezone
 
@@ -9670,7 +9714,7 @@ def cmd_archive(
         locked_mutate_graph,
         GraphCorruptError,
     )
-    from fno.graph.archive import partition_for_archive, merge_into_archive
+    from fno.graph.archive import partition_for_archive, merge_into_archive, stamp_archived_at
 
     now = datetime.now(timezone.utc)
 
@@ -9683,9 +9727,40 @@ def cmd_archive(
         )
         if roadmap_id:
             to_archive = [e for e in to_archive if e.get("roadmap_id") == roadmap_id]
+            # `skipped` is restricted with the same predicate so the receipt's
+            # held counts describe what THIS run considered; the full-graph
+            # guard above already protects to_archive from cross-roadmap
+            # references, and counting other roadmaps' holds here would pin
+            # them on this run's gate in the receipt and the swept event.
+            skipped = [e for e in skipped if e.get("roadmap_id") == roadmap_id]
         arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
         remaining = [e for e in entries if e.get("id") not in arch_ids]
         return to_archive, remaining, skipped
+
+    def _echo_receipt(moved: int, held: dict[str, int]) -> None:
+        for reason in _receipt_reason_order(held):
+            typer.echo(f"  held back ({reason}): {held[reason]}")
+
+    def _emit_swept_event(moved: int, held: dict[str, int]) -> None:
+        try:
+            from fno.events import _build, append_event
+            from fno.paths import state_dir
+
+            event = _build(
+                "graph_archive_swept",
+                "backlog",
+                {
+                    "moved": moved,
+                    "held_referenced": held["referenced-by-open-node"],
+                    "held_related": held["related-peer-not-archived"],
+                    "held_too_recent": held["too-recent"],
+                    "held_no_timestamp": held["no-parseable-timestamp"],
+                    "older_than_days": older_than_days,
+                },
+            )
+            append_event(event, state_dir() / "events.jsonl")
+        except Exception:  # noqa: BLE001 - the sweep itself must not fail on a bad event write
+            pass
 
     if not apply:
         to_archive, _rem, skipped = _split(read_graph(_graph_path()))
@@ -9693,21 +9768,18 @@ def cmd_archive(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
             f"older than {older_than_days}d to {_archive_path()}"
         )
-        held: dict[str, int] = {}
-        for s in skipped:
-            held[s["_skip"]] = held.get(s["_skip"], 0) + 1
-        for reason, n in sorted(held.items()):
-            typer.echo(f"  held back ({reason}): {n}")
+        _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
         typer.echo("Re-run with --apply to move them.")
         return
 
-    archived_count: list = [0]
+    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([])}
 
     def mutator(entries):
-        to_archive, remaining, _skipped = _split(entries)
+        to_archive, remaining, skipped = _split(entries)
+        receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
             return entries
-        archived_count[0] = len(to_archive)
+        receipt["moved"] = len(to_archive)
 
         # Archive-first: append (deduped) and write the archive BEFORE returning
         # `remaining` for the graph write, so a crash leaves a duplicate (healed
@@ -9719,14 +9791,172 @@ def cmd_archive(
             typer.echo(f"Warning: {archive_path} corrupt, starting fresh archive", err=True)
             existing = []
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(merge_into_archive(existing, to_archive), archive_path)
+        stamped = stamp_archived_at(to_archive, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        _write_json(merge_into_archive(existing, stamped), archive_path)
         return remaining
 
     locked_mutate_graph(_graph_path(), mutator)
-    if archived_count[0]:
-        typer.echo(f"Archived {archived_count[0]} terminal node(s) to {_archive_path()}")
+    if receipt["moved"]:
+        typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
+    _echo_receipt(receipt["moved"], receipt["held"])
+    _emit_swept_event(receipt["moved"], receipt["held"])
+
+
+@cli.command(
+    "archive-dedupe-ids",
+    hidden=True,
+    epilog="The id generator once checked only the working graph, so a freed "
+    "id could be reminted while the archive still held a different node under "
+    "it. mint_node_id now reads the archive too; this repairs what predates "
+    "that fix.",
+)
+def cmd_archive_dedupe_ids(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Remint the colliding archive entries (default: dry-run, report only).",
+    ),
+) -> None:
+    """Remint archive-side ids that collide with a live working-graph id.
+
+    Reminting the working-graph side would break every open reference to it
+    today (blockers, parents, branches, worktrees, open PRs); the archived
+    side is passive history, so IT moves, keeping its old id as
+    ``previous_id`` -- `fno backlog get <old-id>` still resolves it after.
+    """
+    from fno.graph.store import (
+        _apply_graph_defaults,
+        _read_json,
+        _write_json,
+        read_graph,
+        locked_mutate_graph,
+        GraphCorruptError,
+    )
+    from fno.graph.archive import remint_archive_collisions
+
+    archive_path = _archive_path()
+
+    def _read_archive_or_exit() -> list:
+        try:
+            return _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
+        except GraphCorruptError:
+            typer.echo(f"Error: {archive_path} is corrupt", err=True)
+            raise typer.Exit(code=1)
+
+    if not apply:
+        working_ids = {
+            nid for e in read_graph(_graph_path())
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+        }
+        _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
+        typer.echo(f"[dry-run] would remint {len(remap)} archive id(s):")
+        for old, new in sorted(remap.items()):
+            typer.echo(f"  {old} -> {new}")
+        if remap:
+            typer.echo("Re-run with --apply to write it.")
+        return
+
+    remap_holder: dict = {}
+
+    def mutator(entries):
+        # Never mutates the working graph; runs under its lock only to
+        # serialize the archive read-modify-write against a concurrent
+        # `archive --apply`, which also writes archive.json under this same
+        # lock. Reading the archive HERE (not before the lock) is load-bearing:
+        # a pre-lock read would go stale under that race and the write below
+        # would clobber whatever the concurrent sweep just archived.
+        working_ids = {
+            nid for e in entries
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+        }
+        patched, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
+        remap_holder.update(remap)
+        if remap:
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(patched, archive_path)
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    if not remap_holder:
+        typer.echo("No colliding archive ids found.")
+        return
+    typer.echo(f"Reminted {len(remap_holder)} archive id(s):")
+    for old, new in sorted(remap_holder.items()):
+        typer.echo(f"  {old} -> {new}")
+
+    try:
+        from fno.events import _build, append_event
+        from fno.paths import state_dir
+
+        # Its own event type, not a zeroed graph_archive_swept: a repair run
+        # recorded as a sweep with age gate 0 corrupts both "did the daily
+        # sweep run" and per-gate hold statistics - the structured channel
+        # lying the same way the bare "ok" stdout did.
+        event = _build(
+            "graph_archive_ids_reminted",
+            "backlog",
+            {"remint_count": len(remap_holder), "remap": remap_holder},
+        )
+        append_event(event, state_dir() / "events.jsonl")
+    except Exception:  # noqa: BLE001 - the repair itself must not fail on a bad event write
+        pass
+
+
+@cli.command(
+    "album",
+    hidden=True,
+    epilog="Read-only browse over graph-archive.json. `fno backlog get <id>` "
+    "still resolves one archived node by id; `fno backlog unarchive <id>` "
+    "brings one back into the working graph.",
+)
+def cmd_album(
+    limit: int = typer.Option(20, "--limit", help="Max cards to print, newest first."),
+    project: Optional[str] = typer.Option(None, "--project", help="Filter to one project."),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Full entries as a JSON array instead of cards."
+    ),
+) -> None:
+    """Browse shipped work: the archive as a collection, newest first.
+
+    Every archive reader before this was a fallback on a lookup miss - given
+    an id you could retrieve one archived node, but nothing let you page
+    through what shipped. This is that one read verb, and it adds nothing to
+    the archive's shape: the sweep already writes every field a card shows.
+    """
+    from fno.graph.store import read_graph
+
+    archive_path = _archive_path()
+    entries = read_graph(archive_path) if archive_path.exists() else []
+    if project:
+        entries = [e for e in entries if e.get("project") == project]
+
+    def _sort_key(e: dict) -> str:
+        return e.get("completed_at") or e.get("updated") or e.get("created_at") or ""
+
+    entries.sort(key=_sort_key, reverse=True)
+    page = entries[:limit]
+
+    if json_output:
+        typer.echo(json.dumps(page, indent=2))
+        return
+
+    if not page:
+        typer.echo("The album is empty.")
+        return
+
+    for e in page:
+        ts = _sort_key(e)
+        date = ts[:10] if ts else "?"
+        title = e.get("title") or e.get("slug") or e.get("id")
+        gift = f" -> {e['pr_url']}" if e.get("pr_url") else " (no gift)"
+        typer.echo(f"{date}  {e.get('id')}  {title}{gift}")
+
+    remaining = len(entries) - len(page)
+    if remaining > 0:
+        typer.echo(f"... {remaining} more. Raise --limit or narrow with --project.")
 
 
 @cli.command(
@@ -9815,6 +10045,20 @@ def cmd_unarchive(
         # probe `reopen` uses: an exact compare made the short id form fail, and
         # `reopen`'s refusal prints this verb as the remedy.
         row = _find_node(archived, task_id)
+        if row is None:
+            # Same previous_id fallback cmd_get uses: a reminted archive entry
+            # keeps its old id as previous_id, and the operator holding the
+            # old id must recover the node, not read a plain miss. Without
+            # this, `get` resolved the id one command earlier and `unarchive`
+            # - the remedy the dedupe verb names - refused it.
+            row = next(
+                (
+                    e
+                    for e in archived
+                    if isinstance(e, dict) and e.get("previous_id") == task_id
+                ),
+                None,
+            )
         if row is None:
             typer.echo(
                 f"Error: {task_id} is in neither the working graph nor {archive_path}",

@@ -294,9 +294,55 @@ def test_relatedness_builds_last_over_the_post_groom_graph():
 
 def test_quiet_night_legs_are_ok(monkeypatch):
     # The quiet paths all exit 0: reconcile prints "Backlog is in sync." and
-    # returns, archive/maintain report nothing to do and return.
+    # returns, archive/maintain report nothing to do and return. The archive
+    # leg's own outcome carries a count (x-a023), everything else stays "ok".
     monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
-    assert set(REAL_MECHANICAL(14).values()) == {"ok"}
+    results = REAL_MECHANICAL(14)
+    assert results["archive"] == "ok (archived 0, held back 0)"
+    assert results["reconcile"] == results["maintain"] == results["relatedness"] == "ok"
+
+
+def test_archive_leg_names_moved_and_held_counts(monkeypatch):
+    # x-a023: "archive: ok" reported green for weeks with no signal on what it
+    # actually moved. The leg outcome must name both, not just exit success.
+    archive_stdout = (
+        "Archived 4 terminal node(s) to /home/.fno/graph-archive.json\n"
+        "  held back (referenced-by-open-node): 251\n"
+        "  held back (related-peer-not-archived): 34\n"
+        "  held back (too-recent): 297\n"
+        "  held back (no-parseable-timestamp): 0\n"
+    )
+
+    def _fake_run(cmd, **k):
+        if "archive" in cmd:
+            return _Proc(returncode=0, stdout=archive_stdout)
+        return _Proc(returncode=0)
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    assert REAL_MECHANICAL(14)["archive"] == "ok (archived 4, held back 582)"
+
+
+def test_green_archive_leg_is_not_trouble(monkeypatch):
+    # The counted outcome "ok (archived N, ...)" is a SUCCESS: an equality
+    # test against "ok" here flagged every fully-green pass as a degraded
+    # archive leg, crying wolf nightly and burying real leg failures.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
+    assert G._leg_trouble(REAL_MECHANICAL(14)) == []
+    assert G._leg_trouble(
+        {"archive": "ok (archived 4, held back 582)", "reconcile": "ok"}
+    ) == []
+
+
+def test_archive_leg_outcome_parses_zero_moved():
+    assert G._archive_leg_outcome("No terminal nodes eligible to archive.\n") == (
+        "ok (archived 0, held back 0)"
+    )
+
+
+def test_archive_leg_outcome_degrades_on_unparseable_stdout():
+    # A future receipt-format change must never crash the pass; it just loses
+    # the count fidelity and reports zero rather than raising.
+    assert G._archive_leg_outcome("something unexpected") == "ok (archived 0, held back 0)"
 
 
 def test_exit_4_is_partial_not_ok(monkeypatch):
