@@ -1392,7 +1392,15 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
     # auto-merge queue; if the PR is already armed there, merging here would
     # race the queue. Say so and stand down - the queue merges it when checks
     # pass, so the merge is not being lost, just not duplicated.
-    if _already_armed(pr_number, repo):
+    try:
+        armed = _already_armed(pr_number, repo)
+    except ToolMissing:
+        # _already_armed calls _gh, which can raise ToolMissing same as the
+        # sibling checks/merge calls below - it owes the same handler (review
+        # round 12).
+        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
+        return 127
+    if armed:
         _emit(
             pr_number,
             "skipped",
