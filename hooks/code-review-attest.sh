@@ -45,14 +45,33 @@ case "$event" in
     [[ "$findings" == "[]" ]] && is_clean=1
     ;;
   SubagentStop)
-    # The subagent's task description names the invocation. Try every field
-    # name this repo's own hooks have observed a subagent's task carried
-    # under (target-subagent-guard.sh's same fallback chain), so a harness
-    # version that renames the field does not silently stop matching.
-    description="$(printf '%s' "$input" | jq -r '.agent_name // .description // .subagent_description // empty' 2>/dev/null || true)"
-    [[ "$description" =~ ^/?code-review([[:space:]]|$) ]] || exit 0
     message="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
     [[ -n "$message" ]] || exit 0
+
+    # Two INDEPENDENT signals identify this as a code-review completion,
+    # either is sufficient - a second self-review of this exact PR found the
+    # first commit trusted only the description field, and a harness whose
+    # SubagentStop payload names the field differently (undocumented; only
+    # `agent_type` is confirmed by Claude Code's docs, and that field is a
+    # generic fork type like "general-purpose", not skill-specific) would
+    # silently never match.
+    #
+    # 1. The subagent's task description names the invocation. Try every
+    #    field name this repo's own hooks have observed a subagent's task
+    #    carried under (target-subagent-guard.sh's same fallback chain).
+    description="$(printf '%s' "$input" | jq -r '.agent_name // .description // .subagent_description // empty' 2>/dev/null || true)"
+    described=0
+    [[ "$description" =~ ^/?code-review([[:space:]]|$) ]] && described=1
+
+    # 2. The message's own shape: "## Review findings" is the code-review
+    #    skill's own output heading, observed verbatim across two live
+    #    self-reviews of this PR (x-e97b) - distinctive enough that an
+    #    unrelated subagent producing it by coincidence is not a real risk,
+    #    and it needs no field-name guess at all.
+    shaped=0
+    printf '%s' "$message" | grep -q '^## Review findings' && shaped=1
+
+    [[ "$described" == "1" || "$shaped" == "1" ]] || exit 0
     findings="$(printf '%s' "$message" | python3 -c '
 import json, re, sys
 text = sys.stdin.read()

@@ -166,9 +166,9 @@ def test_report_findings_path_also_emits(tmp_path: Path) -> None:
 
 
 def test_subagent_stop_ignores_a_non_code_review_description(tmp_path: Path) -> None:
-    """A SubagentStop from an unrelated subagent must never attest - the
-    description match is the ONLY thing standing between this hook and
-    attesting on someone else's forked task."""
+    """A SubagentStop from an unrelated subagent must never attest - neither
+    identification signal (description, or the code-review skill's own
+    "## Review findings" heading) is present here."""
     repo = _temp_git_repo(tmp_path)
     payload = json.dumps(
         {
@@ -184,6 +184,33 @@ def test_subagent_stop_ignores_a_non_code_review_description(tmp_path: Path) -> 
     )
     assert r.returncode == 0, r.stderr
     assert _events(repo) == []
+
+
+def test_subagent_stop_identifies_by_message_shape_alone(tmp_path: Path) -> None:
+    """A second self-review of this exact PR (x-e97b) found the description
+    field was a guess: Claude Code's docs confirm only a generic `agent_type`
+    field, not a code-review-specific one. The content shape - the skill's
+    own "## Review findings" heading, observed verbatim across two live
+    self-reviews of this PR - must identify a clean pass on its own, with no
+    description match at all."""
+    repo = _temp_git_repo(tmp_path)
+    head = _head(repo)
+    payload = json.dumps(
+        {
+            "hook_event_name": "SubagentStop",
+            "description": "a generic fork type, not a skill name",
+            "last_assistant_message": "## Review findings\n\n```json\n[]\n```\n",
+            "cwd": str(repo),
+        }
+    )
+    r = subprocess.run(
+        ["bash", str(_HOOK)],
+        input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    events = [e for e in _events(repo) if e.get("type") == "review_attestation"]
+    assert len(events) == 1, events
+    assert events[0]["data"]["head_sha"] == head
 
 
 def test_subagent_stop_with_findings_emits_nothing(tmp_path: Path) -> None:
