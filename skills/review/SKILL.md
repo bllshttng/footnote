@@ -9,6 +9,8 @@ requires:
     - "git >= 2.0"
 ---
 
+<!-- style-exception: this file's producer bullets under "The attestation surface" are established dense single-line paragraphs joining several clauses with semicolons and dashes, a convention used throughout the file. Rewriting that file-wide convention is out of scope for x-e97b, which only touches one such bullet's body to name the new PostToolUse hook. -->
+
 # Review
 
 **One verb on a diff.** `/review` routes to the right reviewer set for the diff in front of you.
@@ -113,7 +115,7 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 - **sigma** emits `sigma` when the panel returns with no unaddressed blocking finding (see [sigma.md](references/sigma.md)).
 - **peer** emits `peer` only after `consume-peer-verdict.sh` validates an explicit clean cross-model verdict with zero blocking findings.
-- **code-review** emits `code-review` when a `/code-review` pass completes on the current HEAD (the operator runs the helper after the pass). The same label can be emitted by a spawned reviewer citizen, a separate session the author launches to run `/code-review` in its own worktree, which is the one path that yields an `other_session` origin rather than `self_attested`; see the spawned-reviewer lane in the review-lanes architecture doc.
+- **code-review** emits `code-review` on a clean `/code-review` pass (an empty findings report) via `hooks/code-review-attest.sh`, wired on TWO events because the verb reaches a clean pass through two reachable paths: `PostToolUse(ReportFindings)` when the pass reports through that tool, and `SubagentStop` for the Skill-tool self-invocation shape (a Skill-tool self-invocation of `/code-review` runs it as a forked subagent, and inside a fork the skill's own instructions route its verdict through its final text instead) - so a clean self-review reads covered with no second step on either path. The operator-run helper (`skills/review/scripts/emit-attestation.sh code-review`) remains the manual fallback for a harness with neither hook (codex `/review`) and for the registered-reviewer case at [ship-and-promise.md](../target/references/ship-and-promise.md). The same label can be emitted by a spawned reviewer citizen, a separate session the author launches to run `/code-review` in its own worktree, which is the one path that yields an `other_session` origin rather than `self_attested`; see the spawned-reviewer lane in the review-lanes architecture doc.
 - **declare** emits `declare` via Step 5 above.
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).

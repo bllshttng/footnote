@@ -297,9 +297,16 @@ The gate under-reports coverage and holds. It never over-reports and merges.
 
 It proves a commit was pinned. It does not prove a review happened.
 
-`/target` runs the review verb, then runs `skills/review/scripts/emit-attestation.sh`.
-That script records the reviewer name and verdict it is PASSED.
-The review itself emits nothing.
+Every producer bottoms out in the same script, `skills/review/scripts/emit-attestation.sh`. It records the reviewer name and the verdict PASSED.
+
+sigma calls the script itself, from inside its own skill, on a clean pass. On Claude Code, `hooks/code-review-attest.sh` calls it for `/code-review` too.
+
+That hook is wired on two events, because `/code-review` reaches a clean pass two different ways. A `PostToolUse(ReportFindings)` pass fires the hook directly. A Skill-tool self-invocation runs `/code-review` as a forked subagent, whose verdict never reaches ReportFindings, only its final text. A `SubagentStop` trigger reads that text instead, so the second path also fires the hook.
+
+Either trigger fires the moment the verb reports an empty findings array. The caller runs no second command.
+
+When neither hook can fire - codex `/review`, or the registered-reviewer case - the script still gets called directly. `/target` runs the review verb, then runs the helper by hand.
+
 Nothing in the producer can tell a real review from a caller that typed the arguments.
 The freshness half of the protocol is sound and is only half.
 
