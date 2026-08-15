@@ -34,6 +34,13 @@ class InspectResult:
     round_id: str | None
 
 
+@dataclass(frozen=True)
+class LastHeadResult:
+    status: str
+    head_sha: str | None
+    reason: str
+
+
 def _component(value: str, label: str) -> str:
     if not value or not _SAFE_COMPONENT.fullmatch(value):
         raise ValueError(f"invalid sigma artifact {label}: {value!r}")
@@ -160,6 +167,53 @@ def _split_artifact(text: str) -> tuple[dict[str, object], str]:
     if not isinstance(metadata, dict):
         raise ValueError("invalid sigma artifact frontmatter")
     return metadata, pieces[2].lstrip()
+
+
+def read_sigma_last_head(
+    *,
+    reviews_root: Path,
+    project: str,
+    node: str,
+    pr_number: int,
+) -> LastHeadResult:
+    """Read the stored head of the current artifact without expecting one.
+
+    The inverse of inspect_sigma_artifact: that validates a caller-supplied
+    head, while this answers "what head is stored?". Any non-found status is
+    a normal input meaning "review everything", never an exception.
+    """
+    path = (
+        Path(reviews_root)
+        / _component(project, "project")
+        / "reviews"
+        / _component(node, "node")
+        / "sigma.md"
+    )
+    if not path.exists():
+        return LastHeadResult("missing", None, "artifact does not exist")
+    try:
+        metadata, _body = _split_artifact(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return LastHeadResult("rejected", None, str(exc))
+
+    mismatches = [
+        f"{key}={metadata.get(key)!r} (expected {value!r})"
+        for key, value in (
+            ("schema", "sigma-review/v1"),
+            ("node", node),
+            ("pr_number", pr_number),
+        )
+        if metadata.get(key) != value
+    ]
+    if mismatches:
+        return LastHeadResult("rejected", None, "; ".join(mismatches))
+
+    head = metadata.get("head_sha")
+    # Same grammar the writer enforces: never surface a partial or placeholder
+    # SHA, which a caller would narrow review scope against.
+    if not isinstance(head, str) or not _SAFE_COMPONENT.fullmatch(head):
+        return LastHeadResult("rejected", None, f"head_sha is missing or invalid: {head!r}")
+    return LastHeadResult("found", head, "current artifact")
 
 
 def inspect_sigma_artifact(

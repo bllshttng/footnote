@@ -206,6 +206,162 @@ def test_clean_report_headings_are_not_counted_as_findings(tmp_path: Path) -> No
     assert inspected.finding_count == 0
 
 
+def test_read_last_head_returns_stored_head(tmp_path: Path) -> None:
+    from fno.review.artifact import publish_sigma_artifact, read_sigma_last_head
+
+    reviews_root = tmp_path / "reviews"
+    publish_sigma_artifact(
+        _report(tmp_path / "report.md", "current"),
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        reviewed_head="head-b",
+        current_head="head-b",
+        round_id="round-b",
+    )
+
+    result = read_sigma_last_head(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+    )
+    assert result.status == "found"
+    assert result.head_sha == "head-b"
+
+
+def test_read_last_head_missing_artifact_is_not_found(tmp_path: Path) -> None:
+    from fno.review.artifact import read_sigma_last_head
+
+    result = read_sigma_last_head(
+        reviews_root=tmp_path / "reviews",
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+    )
+    assert result.status == "missing"
+    assert result.head_sha is None
+    assert result.reason
+
+
+def test_read_last_head_rejects_corrupt_frontmatter(tmp_path: Path) -> None:
+    from fno.review.artifact import read_sigma_last_head
+
+    path = tmp_path / "reviews/fno/reviews/x-bfbb/sigma.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("no frontmatter at all\n", encoding="utf-8")
+    result = read_sigma_last_head(
+        reviews_root=tmp_path / "reviews",
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+    )
+    assert result.status == "rejected"
+    assert result.head_sha is None
+    assert result.reason
+
+
+def test_read_last_head_rejects_node_or_pr_mismatch(tmp_path: Path) -> None:
+    from fno.review.artifact import publish_sigma_artifact, read_sigma_last_head
+
+    reviews_root = tmp_path / "reviews"
+    publish_sigma_artifact(
+        _report(tmp_path / "report.md", "current"),
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+        reviewed_head="head-b",
+        current_head="head-b",
+        round_id="round-b",
+    )
+
+    wrong_node = read_sigma_last_head(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-other",
+        pr_number=42,
+    )
+    wrong_pr = read_sigma_last_head(
+        reviews_root=reviews_root,
+        project="fno",
+        node="x-bfbb",
+        pr_number=99,
+    )
+    # A wrong node resolves to a different artifact path, so it reads as
+    # missing rather than mismatched; both are "no prior head" to a caller.
+    assert wrong_node.status == "missing"
+    assert wrong_node.head_sha is None
+    assert wrong_pr.status == "rejected"
+    assert wrong_pr.head_sha is None
+
+
+def test_cli_sigma_last_head_prints_bare_sha(tmp_path: Path) -> None:
+    report = _report(tmp_path / "report.md", "current")
+    reviews_root = tmp_path / "internal"
+    published = CliRunner().invoke(
+        app,
+        [
+            "review",
+            "--publish-sigma",
+            str(report),
+            "--sigma-node",
+            "x-bfbb",
+            "--sigma-pr",
+            "42",
+            "--sigma-head",
+            "head-b",
+            "--sigma-current-head",
+            "head-b",
+            "--sigma-round",
+            "round-b",
+            "--sigma-project",
+            "fno",
+            "--sigma-reviews-root",
+            str(reviews_root),
+        ],
+    )
+    assert published.exit_code == 0, published.output
+
+    found = CliRunner().invoke(
+        app,
+        [
+            "review",
+            "--sigma-last-head",
+            "--sigma-node",
+            "x-bfbb",
+            "--sigma-pr",
+            "42",
+            "--sigma-project",
+            "fno",
+            "--sigma-reviews-root",
+            str(reviews_root),
+        ],
+    )
+    assert found.exit_code == 0, found.output
+    assert found.stdout.strip() == "head-b"
+
+    absent = CliRunner().invoke(
+        app,
+        [
+            "review",
+            "--sigma-last-head",
+            "--sigma-node",
+            "x-nope",
+            "--sigma-pr",
+            "42",
+            "--sigma-project",
+            "fno",
+            "--sigma-reviews-root",
+            str(reviews_root),
+        ],
+    )
+    assert absent.exit_code != 0
+    assert absent.stdout.strip() == ""
+    assert "sigma last head unavailable" in absent.stderr
+
+
 def test_cli_publish_and_inspect_share_the_artifact_writer(tmp_path: Path) -> None:
     report = _report(tmp_path / "report.md", "current")
     reviews_root = tmp_path / "internal"
