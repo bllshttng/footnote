@@ -658,12 +658,28 @@ def list_cmd(
     include_stale: bool = typer.Option(False, "--include-stale"),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Enumerate claims under the claims directory."""
-    results = list_claims(
-        prefix=prefix or None,
-        include_stale=include_stale,
-        root=_node_aware_root(prefix),
-    )
+    """Enumerate claims under the claims directory.
+
+    Merges the global root (node:/dispatch:/session:/groom: claims live at
+    ~/.fno/claims by default) with the resolved local root. A caller with no
+    --prefix (the common case) has no way to name which root to search, and
+    most claims in practice are global, so scanning only the local root - a
+    near-always-empty directory - silently hid every global claim: 573 files
+    on disk read as "no claims" (measured 2026-08-14). An explicit global
+    --prefix (e.g. node:) already resolved correctly and scans the same root
+    twice here; the seen-key dedup below makes that a no-op.
+    """
+    from .io import global_claims_root
+
+    seen: "set[str]" = set()
+    results = []
+    for root in (global_claims_root(), _node_aware_root(prefix)):
+        for r in list_claims(prefix=prefix or None, include_stale=include_stale, root=root):
+            if r["key"] in seen:
+                continue
+            seen.add(r["key"])
+            results.append(r)
+    results.sort(key=lambda r: r["key"])
     if json_output:
         typer.echo(json.dumps(results))
     else:
