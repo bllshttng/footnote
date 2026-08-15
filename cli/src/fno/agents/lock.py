@@ -32,7 +32,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
+import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -66,13 +69,38 @@ _POLL_INTERVAL_SECONDS = 0.05
 _detached_handles: list[object] = []
 
 
+def _read_holder(lock_file: Path) -> Optional[dict]:
+    """Best-effort read of the holder JSON stamped into `lock_file`.
+
+    Returns None on any read or parse failure — an empty, missing, or
+    corrupt lock file degrades to the unstamped timeout message rather
+    than raising."""
+    try:
+        with open(lock_file, "r") as fh:
+            line = fh.readline()
+        if not line.strip():
+            return None
+        data = json.loads(line)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 class AgentLockTimeout(TimeoutError):
     """Raised when `hold_agent_lock` cannot acquire the flock within timeout."""
 
-    def __init__(self, name: str, timeout: float) -> None:
-        super().__init__(f"lock timeout for agent {name!r} after {timeout}s")
+    def __init__(
+        self, name: str, timeout: float, holder: Optional[dict] = None
+    ) -> None:
+        message = f"lock timeout for agent {name!r} after {timeout}s"
+        if holder and holder.get("pid") is not None and holder.get("acquired_at"):
+            message += (
+                f" (held by pid {holder['pid']} since {holder['acquired_at']})"
+            )
+        super().__init__(message)
         self.name = name
         self.timeout = timeout
+        self.holder = holder
 
 
 class _LockHandle:
@@ -135,10 +163,10 @@ def hold_agent_lock(
     lock_file = _agent_lock_path(name, registry_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Open append-mode so we don't truncate any sentinel a peer process
-    # may have written. The flock contract treats the file as a pure
-    # sentinel for the OS lock and never reads or writes its contents,
-    # so append vs write is purely about avoiding accidental truncation.
+    # Open append-mode so acquiring the flock never truncates a sentinel a
+    # peer process may currently hold; the holder JSON is only written
+    # (via explicit truncate) once this process actually wins the flock,
+    # below.
     fh = open(lock_file, "a")
     handle = _LockHandle()
     on_wait_fired = False
@@ -155,7 +183,9 @@ def hold_agent_lock(
 
             now = time.monotonic()
             if now >= deadline:
-                raise AgentLockTimeout(name=name, timeout=timeout)
+                raise AgentLockTimeout(
+                    name=name, timeout=timeout, holder=_read_holder(lock_file)
+                )
 
             if (
                 not on_wait_fired
@@ -166,6 +196,26 @@ def hold_agent_lock(
                 on_wait_fired = True
 
             time.sleep(_POLL_INTERVAL_SECONDS)
+
+        # Stamp the holder now that the flock is ours. A zero-byte lock is
+        # unfalsifiable by inspection, which is how a live 30s wait read to
+        # two observers as a 31-hour-old corpse. Truncate first so repeated
+        # acquires keep the file at one line instead of growing it.
+        try:
+            fh.truncate(0)
+            fh.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "name": name,
+                        "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                + "\n"
+            )
+            fh.flush()
+        except OSError:
+            pass  # the flock is held either way; the stamp is diagnostic only
 
         try:
             yield handle
