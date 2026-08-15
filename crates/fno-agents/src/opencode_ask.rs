@@ -416,7 +416,13 @@ mod tests {
         // Matches OpencodeProvider::create_argv (confirmed vs opencode v1.14.50).
         assert_eq!(
             build_opencode_argv("do X", None),
-            vec!["opencode", "run", "--dangerously-skip-permissions", "--", "do X"]
+            vec![
+                "opencode",
+                "run",
+                "--dangerously-skip-permissions",
+                "--",
+                "do X"
+            ]
         );
     }
 
