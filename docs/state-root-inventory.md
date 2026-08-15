@@ -2,9 +2,9 @@
 
 Every writer that targets the top level of the state root (`config.state_dir`, default `~/.fno/`), with an owner and a lifetime.
 
-A file nobody deletes is a file nobody owns. This page exists so that a new root writer has somewhere to declare itself, and so the next person who finds an unexplained file at the root can look up whether anyone meant it.
+A file nobody deletes is a file nobody owns. This page exists so a new root writer has somewhere to declare itself. It also lets the next person who finds an unexplained file look up whether anyone meant it.
 
-Measured 2026-08-13 against one real install: 527 top-level entries, 395 of them context-nudge latches written by a hook that had landed six days earlier and deleted nothing. That is the failure this page is meant to prevent a second time.
+Measured 2026-08-13 against one real install: 527 top-level entries, 395 of them context-nudge latches. The hook had landed six days earlier and deleted nothing. That is the failure this page is meant to prevent a second time.
 
 ## The rule
 
@@ -97,13 +97,13 @@ If you are cleaning up an install and hit one of these, find the writer first. I
 
 ## Foreign and cwd-relative debris
 
-A `.fno/`, `.claude/`, `.abilities/`, or `.impeccable/` directory nested *inside* the state root is not a root writer. Each holds project-relative paths written by a process whose working directory happened to be the state root. `paths.resolve_repo_root()` falls back to `Path.cwd()` when `FNO_REPO_ROOT` is unset and `git rev-parse` fails, and foreign plugins do the same with their own literals.
+A `.fno/`, `.claude/`, `.abilities/`, or `.impeccable/` directory nested *inside* the state root is not a root writer. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes --> Each holds project-relative paths written by a process whose working directory happened to be the state root. When `FNO_REPO_ROOT` is unset and `git rev-parse` fails, `paths.resolve_repo_root()` falls back to `Path.cwd()`. Foreign plugins do the same with their own literals.
 
-Leave them. The finding is the cwd fallback, not the directories it produced. `.abilities` is the pre-rename state-root name, so anything under it predates the rename.
+Leave them. The finding is the cwd fallback, not the directories it produced. `.abilities` is the pre-rename state-root name, so anything under it predates the rename. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
 
 ## Adding a new root writer
 
 1. Prefer a subfolder. Reach for the root only for one durable file named after itself.
-2. Add the accessor to `cli/src/fno/paths.py` so the location follows `config.state_dir`. Export it from `cli/src/fno/setup/emit_shell.py` when a bash caller needs it, then regenerate `scripts/lib/paths.sh`.
-3. Name the deleter. Ephemeral state gets its lifetime in the code that writes it, not in a separate janitor. A janitor drifts from the writer and goes unrun; `scripts/prune-fno-dir.sh` was deleted for exactly that, having never once been invoked while every file on its delete list sat in the root.
+2. Add the accessor to `cli/src/fno/paths.py` so the location follows `config.state_dir`. When a bash caller needs it, export it from `cli/src/fno/setup/emit_shell.py`, then regenerate `scripts/lib/paths.sh`.
+3. Name the deleter. Ephemeral state gets its lifetime in the code that writes it, not in a separate janitor. A janitor drifts from the writer and goes unrun. `scripts/prune-fno-dir.sh` was deleted for exactly that: never once invoked, while every file on its delete list sat in the root.
 4. Add a row above.
