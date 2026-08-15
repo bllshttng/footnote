@@ -1942,3 +1942,123 @@ def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
     assert exc_info.value.exit_code == 12
     assert "no durable envelope was written" in str(exc_info.value)
     assert not bus_log_path().exists()
+
+
+def test_dispatch_send_lock_timeout_refuses_a_changed_recipient(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A row that changes owners while we wait must not be queued from the snapshot.
+
+    We never held the lock, so the pre-lock snapshot is unverified. Queuing it
+    strands the message in the former session's mailbox. The locked path
+    refuses an owner change; this one refuses identically.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import AgentEntry, _agent_lock_path, write_registry
+    from fno.inbox.store import read_all_threads
+
+    lock_path = _agent_lock_path("red", paths.agents_registry_path())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    real_on_wait = dispatch_mod.hold_agent_lock
+
+    def _reclaim_then_wait(*args, **kwargs):
+        # Same name, different session: a reclaim landing while we block.
+        write_registry([
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="99999999-1111-7222-8333-444455556666",
+                cwd="/tmp",
+                log_path="/tmp/red.log",
+                short_id="99999999",
+                status="live",
+            )
+        ])
+        return real_on_wait(*args, **kwargs)
+
+    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _reclaim_then_wait)
+
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(DispatchAskError) as exc_info:
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider=None,
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    assert exc_info.value.exit_code == 2
+    assert "retry the send" in str(exc_info.value)
+    # Neither mailbox gets a stray copy.
+    assert read_all_threads("abcd1234") == []
+    assert read_all_threads("99999999") == []
+
+
+def test_dispatch_send_lock_timeout_keeps_sender_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The timeout envelope carries the same return address as the normal path."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="red",
+            harness="claude",
+            harness_session_id="abcd1234-1111-7222-8333-444455556666",
+            cwd="/tmp",
+            log_path="/tmp/red.log",
+            short_id="abcd1234",
+            status="live",
+        ),
+        AgentEntry(
+            name="blue",
+            harness="codex",
+            harness_session_id="beef5678-1111-7222-8333-444455556666",
+            cwd="/tmp",
+            log_path="/tmp/blue.log",
+            short_id="beef5678",
+            status="live",
+        ),
+    ])
+
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import _agent_lock_path
+    from fno.inbox.store import read_all_threads
+
+    lock_path = _agent_lock_path("red", paths.agents_registry_path())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(DispatchAskError):
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider=None,
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                    from_name="blue",
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    threads = read_all_threads("abcd1234")
+    assert len(threads) == 1
+    body = threads[0].messages[0].body
+    # The immutable return address, not just the mutable alias.
+    assert "beef5678" in body, f"sender session must survive the timeout: {body}"

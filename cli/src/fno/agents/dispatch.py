@@ -6922,8 +6922,19 @@ def dispatch_send(
         # known and this queue needs no lock. When it too fails (no
         # harness_session_id, or the bus write itself errors), the raised
         # DispatchAskError(12) propagates unchanged and says so explicitly.
+        # Re-resolve before queuing. We never held the lock, so the row can
+        # have changed owners while we waited, and queuing from the pre-lock
+        # snapshot strands the message in the former session's mailbox. The
+        # locked path refuses an owner change with exit 2; an unlocked read
+        # cannot do better than the same refusal, and a caller told to retry
+        # loses nothing, unlike a message queued to a dead owner.
+        timeout_entries, timeout_entry = _load_and_resolve_target(canonical_identity)
         msg_id, durable_to = _queue_durable_fallback(
-            initial, message, from_name, [initial], reason="agent-lock-timeout"
+            timeout_entry,
+            message,
+            from_name,
+            timeout_entries,
+            reason="agent-lock-timeout",
         )
         events.emit(
             "agent_send_failed",

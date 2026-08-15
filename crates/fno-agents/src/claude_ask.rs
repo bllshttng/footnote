@@ -1919,6 +1919,32 @@ struct AgentLock {
     _file: std::fs::File,
 }
 
+/// Write this process as the lock's holder, in the shape the Python reader
+/// (`fno.agents.lock._read_holder`) parses.
+///
+/// Both runtimes take this same flock, so a stamp on only one of them is
+/// decorative: the other's acquire leaves the previous holder's JSON in place
+/// and a waiter reports a dead pid as the live owner. Truncating is the
+/// load-bearing half - a holder that cannot write must still not leave a
+/// stale identity behind. Best-effort throughout; the flock is held either
+/// way and the stamp is diagnostic only.
+fn stamp_lock_holder(file: &std::fs::File, name: &str) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut handle = file;
+    if handle.set_len(0).is_err() {
+        return;
+    }
+    let _ = handle.seek(SeekFrom::Start(0));
+    let line = serde_json::json!({
+        "pid": std::process::id(),
+        "name": name,
+        "acquired_at": now_iso(),
+    });
+    let _ = writeln!(handle, "{}", line);
+    let _ = handle.flush();
+}
+
 impl AgentLock {
     fn acquire(home: &AgentsHome, name: &str, timeout: Duration) -> Result<Self, ()> {
         let locks_dir = home.root().join("locks");
@@ -1936,7 +1962,10 @@ impl AgentLock {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
+                Ok(()) => {
+                    stamp_lock_holder(&file, name);
+                    return Ok(Self { _file: file });
+                }
                 Err(_) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(());
@@ -2915,6 +2944,41 @@ fn create(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Both runtimes take this flock, so the Rust half must stamp too. A
+    /// Python waiter that times out reads this file to name the holder. When
+    /// acquire leaves an earlier holder's JSON in place, it reports a dead pid
+    /// as the live owner, which is the exact lie the stamp exists to remove.
+    #[test]
+    fn acquire_replaces_any_earlier_holder_stamp() {
+        let dir = std::env::temp_dir().join(format!("fno-lock-stamp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("locks")).unwrap();
+        let lock_path = dir.join("locks").join("red.lock");
+        fs::write(
+            &lock_path,
+            "{\"pid\": 999999, \"name\": \"red\", \"acquired_at\": \"1999-01-01T00:00:00Z\"}\n",
+        )
+        .unwrap();
+
+        let home = crate::paths::AgentsHome::at(&dir);
+        {
+            let _lock = AgentLock::acquire(&home, "red", Duration::from_secs(2)).unwrap();
+            let raw = fs::read_to_string(&lock_path).unwrap();
+            assert_eq!(raw.lines().count(), 1, "stamp must stay one line: {raw}");
+            let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+            assert_eq!(
+                parsed["pid"].as_u64().unwrap(),
+                u64::from(std::process::id())
+            );
+            assert_eq!(parsed["name"].as_str().unwrap(), "red");
+            assert_ne!(
+                parsed["acquired_at"].as_str().unwrap(),
+                "1999-01-01T00:00:00Z"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// `resume` matches on the STATE, so the verdict has to reach it through
     /// that channel or the falsifier is decorative on this path: a session whose
