@@ -5931,6 +5931,24 @@ fn floor_stand_down_spends_no_graphql() {
         !calls.contains("pr view"),
         "no GraphQL spend below floor: {calls}"
     );
+    // A stand-down fire verifies no PR state, so it has no real fingerprint.
+    // It must NOT be recorded as a "loop_check" event: read_prior_fires scans
+    // for that exact type and treats a missing fingerprint as an empty
+    // string, which never matches current_fp and truncates the reverse-scan
+    // the instant it hits this row - one stand-down silently breaks the
+    // consecutive-unchanged streak for every earlier fire in the session.
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"type\":\"loop_check_graphql_standdown\"")
+            || events.contains("\"type\": \"loop_check_graphql_standdown\""),
+        "stand-down must emit its own event type, not loop_check: {events}"
+    );
+    for line in events.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v.get("type").and_then(|t| t.as_str()) == Some("loop_check") {
+            panic!("a stand-down fire must never be recorded as loop_check (breaks the fingerprint streak scan): {line}");
+        }
+    }
 }
 
 /// Item 4's other half: the floor belongs to the merge guard, so a

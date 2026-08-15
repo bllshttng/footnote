@@ -1559,7 +1559,9 @@ fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
     format!(
         "GraphQL quota exhausted ({} remaining, resets in ~{}m). `gh pr view` / \
          `gh pr checks` cannot succeed until the reset: stop retrying them this \
-         window. `fno pr status <n>` still answers on the REST budget.",
+         window. `fno pr status <n>` still answers its CI verdict on the REST \
+         budget (the optional review-thread check inside it is still GraphQL, \
+         coalesced under its own TTL cache so a repeat poll costs nothing).",
         q.remaining, mins
     )
 }
@@ -5534,7 +5536,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if let Intent::Watching {
                 ref reason,
                 ref timeout,
-                ..
+                ref pr,
             } = intent
             {
                 if harness_can_idle(
@@ -5553,11 +5555,23 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         _ => false,
                     };
                     if renewed {
+                        // The tag's own `pr=`/`reason=` attributes are the only
+                        // source here (the stand-down verifies nothing), so
+                        // `blocker` is only as trustworthy as the agent's tag:
+                        // pass the declared reason through when it is one of
+                        // the two real classes, else the honest "unknown"
+                        // (schema-valid, x-9715) rather than guessing.
+                        let blocker = match reason.as_str() {
+                            "ci" => "ci",
+                            "review" => "review",
+                            _ => "unknown",
+                        };
                         emit(
                             "loop_check_watch_idle",
                             serde_json::json!({
                                 "session_id": session_id,
-                                "blocker": "unknown",
+                                "pr": pr.as_deref().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+                                "blocker": blocker,
                                 "declared_timeout": timeout.clone().unwrap_or_default(),
                                 "reason": reason,
                                 "lease_ms": window_ms,
@@ -5586,8 +5600,17 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // through to the stand-down block below.
                 }
             }
+            // A dedicated type, not "loop_check": this fire verified nothing
+            // (that is the point of standing down), so it has no real
+            // fingerprint. Emitting it AS a loop_check gave read_prior_fires an
+            // empty-string fingerprint that never matches current_fp, breaking
+            // the reverse-scan the instant it hit this row - one stand-down
+            // fire silently truncated the whole consecutive-unchanged streak
+            // for the session. loop_check_gh_error/_config are already
+            // siblings of loop_check for exactly this reason: an event whose
+            // fields do not fit the fingerprint contract does not overload it.
             emit(
-                "loop_check",
+                "loop_check_graphql_standdown",
                 serde_json::json!({
                     "session_id": session_id,
                     "decision": "block",
@@ -5598,9 +5621,6 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         Intent::None => "none",
                     },
                     "intent_source": intent_source,
-                    "pr_state": "unknown",
-                    "ci": "unknown",
-                    "reviewed": false,
                     "standing_down": true,
                     "graphql_remaining": q.remaining,
                     "graphql_floor": GRAPHQL_FLOOR
@@ -5615,7 +5635,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "standing down: GraphQL remaining {} is below the floor of {} \
                          reserved for the merge guard, so this fire spends no GraphQL - \
                          `gh pr view` / `gh pr checks` are SKIPPED, not retried. \
-                         `fno pr status <n>` still answers on the REST budget. The next \
+                         `fno pr status <n>` still answers its CI verdict on the REST \
+                         budget (a cache hit skips the review-thread read too). The next \
                          fire re-probes; a promise intent always proceeds.",
                         q.remaining, GRAPHQL_FLOOR
                     ),
@@ -6733,8 +6754,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fp_read_failed": true
                     }),
                 );
+                // pulls_comments(_parse) and pr_commits share this error arm but
+                // are not all GraphQL: pulls_comments is a REST endpoint (x-9715
+                // read 4, `gh api .../pulls/N/comments`). A zero-remaining probe
+                // must not blame GraphQL for a REST read's own failure - that
+                // reads as "stop retrying gh pr view" advice for a call that was
+                // never gh pr view and might succeed on the very next fire.
+                let is_graphql_read = matches!(
+                    failed_read.as_str(),
+                    "pr_view" | "pr_checks" | "pr_checks_parse" | "pr_reviews" | "pr_commits"
+                );
                 let reason = match &quota {
-                    Some(q) if q.remaining == 0 => graphql_exhausted_reason(q),
+                    Some(q) if q.remaining == 0 && is_graphql_read => graphql_exhausted_reason(q),
                     _ => format!(
                         "gh read '{failed_read}' failed; retrying next fire. {failed_stderr}"
                     ),
