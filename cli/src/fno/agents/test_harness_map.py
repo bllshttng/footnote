@@ -482,3 +482,19 @@ def test_message_carries_no_merge_is_word_padded():
     assert not message_carries_no_merge("/think use --no-merge for x-1")
     assert not message_carries_no_merge("please do not merge")
     assert not message_carries_no_merge("")
+
+
+def test_legacy_token_rewrite_is_position_scoped():
+    """Only the documented legacy position (the token directly after the verb)
+    is migrated. A /target argument is free text: ``/target fix the no-merge
+    carrier bug`` is a real feature description, and rewriting the word
+    anywhere would mutate prompt text and arm a refusal from prose (round 10)."""
+    from fno.agents.harness_map import (
+        message_carries_no_merge,
+        normalize_legacy_no_merge,
+    )
+
+    assert normalize_legacy_no_merge("/target no-merge x-1") == "/target --no-merge x-1"
+    untouched = "/target fix the no-merge carrier bug x-1"
+    assert normalize_legacy_no_merge(untouched) == untouched
+    assert not message_carries_no_merge(untouched)

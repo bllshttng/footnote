@@ -159,6 +159,23 @@ def test_failing_required_check_blocks_exit_1(tmp_path, gh_on, monkeypatch, caps
     assert "required_checks_failing" in capsys.readouterr().out
 
 
+def test_pending_check_flows_to_remediation_not_failing(tmp_path, gh_on, monkeypatch, capsys):
+    """A still-running check is not-green, not failing: verify must not label
+    it required_checks_failing (that would refuse what `fno pr merge` holds
+    under a different name, round 10). It flows into remediation reporting."""
+    sf = _state_file(tmp_path)
+    rollup = [
+        {"name": "ci/build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "annotate", "status": "IN_PROGRESS", "conclusion": ""},
+    ]
+    fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "statusCheckRollup": rollup}])
+    monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "required_checks_failing" not in out
+
+
 def test_remediation_verify_only_blocks_exit_1(tmp_path, monkeypatch, capsys):
     sf = _state_file(tmp_path)
     monkeypatch.setattr(_verify, "_gh_available", lambda: True)

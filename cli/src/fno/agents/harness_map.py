@@ -69,11 +69,17 @@ _TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
 
 def normalize_legacy_no_merge(command: str) -> str:
     """Rewrite the legacy bare ``no-merge`` token to the flag in a
-    /target-family command (the pre-x-9d11 documented spelling). Everything
-    else - other slash verbs, prose - is returned unchanged."""
-    first = command.split(maxsplit=1)[0] if command else ""
-    if first in _TARGET_FAMILY and " no-merge " in f" {command} ":
-        return f" {command} ".replace(" no-merge ", " --no-merge ").strip()
+    /target-family command (the pre-x-9d11 documented spelling, the token
+    directly after the verb: ``/target no-merge <arg>``). Position-scoped on
+    purpose: a /target argument is free text (``/target fix the no-merge
+    carrier bug`` is a real feature description), and rewriting the word
+    anywhere in the message would mutate prompt text the operator typed and
+    arm a refusal from prose (round 10). Everything else - other positions,
+    other slash verbs, prose - is returned unchanged."""
+    parts = command.split()
+    if len(parts) >= 2 and parts[0] in _TARGET_FAMILY and parts[1] == "no-merge":
+        parts[1] = "--no-merge"
+        return " ".join(parts)
     return command
 
 
@@ -520,8 +526,9 @@ def resolve_dispatch(
     # normalize_legacy_no_merge / message_carries_no_merge so every spawn lane
     # (including direct `fno agents spawn` messages that never reach this
     # resolver) judges the SAME vocabulary.
-    if resolved_command != normalize_legacy_no_merge(resolved_command):
-        resolved_command = normalize_legacy_no_merge(resolved_command)
+    normalized = normalize_legacy_no_merge(resolved_command)
+    if normalized != resolved_command:
+        resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
     env: dict[str, str] = {}
     if message_carries_no_merge(resolved_command):

@@ -37,6 +37,8 @@ from fno.pr._proc import ToolMissing, run
 
 # Required-check states that count as "not failing" (jq parity).
 _PASS_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+# Not-yet-decided states: not green, but not failing either (round 10).
+_PENDING_STATES = {"PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED", "WAITING", ""}
 
 
 # ---------------------------------------------------------------------------
@@ -338,15 +340,21 @@ def run_verify_merged(
         )
         return 1
 
-    failing = _failing_required(pr_json.get("statusCheckRollup") or [])
-    if failing:
-        failing_csv = ",".join(failing)
-        _emit_audit(
-            repo_root, state_file, pr_number, "required_checks_failing",
-            {"failing_checks": failing_csv},
-        )
-        sys.stdout.write(f"required_checks_failing: {failing_csv}\n")
-        return 1
+    # Same posture as the merge verb (round 10): the checks precondition applies
+    # only when require_checks_pass is on, and PENDING is not failing - a
+    # still-running check flows into _bounded_remediation, which reports
+    # not-green without the misleading "failing" label. Judging pending here
+    # would make verify refuse what `fno pr merge` merges.
+    if _auto_merge().require_checks_pass:
+        failing = _failing_required(pr_json.get("statusCheckRollup") or [])
+        if failing:
+            failing_csv = ",".join(failing)
+            _emit_audit(
+                repo_root, state_file, pr_number, "required_checks_failing",
+                {"failing_checks": failing_csv},
+            )
+            sys.stdout.write(f"required_checks_failing: {failing_csv}\n")
+            return 1
 
     # All preconditions clean.
     if remediation == "verify_only":
@@ -364,7 +372,9 @@ def run_verify_merged(
 
 
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Failing checks (whole rollup): not in a success/neutral/skipped state.
+    """Failing checks (whole rollup): decided and not in a success/neutral/
+    skipped state. PENDING is NOT failing - a still-running check is not-green,
+    which the remediation path reports without the "failing" label.
 
     No isRequired filter - `gh pr view` never emits that key (see
     _merge._checks_verdict), so with require_checks_pass every check counts."""
@@ -372,8 +382,9 @@ def _failing_required(rollup: Sequence[dict]) -> List[str]:
     for c in rollup:
         state = str(_alt(c.get("conclusion"), c.get("state"), c.get("status"), "PENDING")).upper()
         name = _alt(c.get("name"), c.get("context"), "unnamed")
-        if state not in _PASS_STATES:
-            failing.append(str(name))
+        if state in _PASS_STATES or state in _PENDING_STATES:
+            continue
+        failing.append(str(name))
     return failing
 
 

@@ -1230,7 +1230,10 @@ def cmd_spawn(
     # documented control input, and a leaked carrier surviving a prose worker
     # errs toward refusing merges, the safe side (round 8).
     prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
-    if message_carries_no_merge(message) or (prov_env or {}).get("TARGET_NO_MERGE") == "1":
+    if message_carries_no_merge(message):
+        # The only other writer of prov_env["TARGET_NO_MERGE"] (above) keys on
+        # the same predicate over the same message, so one check here decides
+        # every substrate (round 10 review).
         os.environ["TARGET_NO_MERGE"] = "1"
     elif is_target_family(message):
         # A family message WITHOUT the flag clears the carrier: the flag is the
