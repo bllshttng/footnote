@@ -607,9 +607,18 @@ def detect_stale_ready(
 def detect_stale_ideas(
     entries: list[dict], staleness_days: int, now: Optional[datetime] = None
 ) -> list[StaleIdea]:
-    """Idea-status nodes STRICTLY older than ``staleness_days`` (no movement).
+    """Idea-status nodes STRICTLY older than ``staleness_days`` since last
+    curation touch (or birth), with no movement.
 
-    Boundary: an idea exactly ``staleness_days`` old is NOT stale (strictly
+    Age is read from ``touched_at`` (the last time a curation field -
+    status/priority/rank/parent/blocked_by/size - actually changed), falling
+    back to ``created_at`` for a node that has never had a post-creation
+    curation change. ``touched_at`` is only ever written at or after
+    ``created_at``, so the fallback is a max without needing one (x-7dcb): a
+    deliberate undefer hours ago resets the clock even though the node was
+    created weeks earlier, so it reads as fresh instead of stale.
+
+    Boundary: a node exactly ``staleness_days`` old is NOT stale (strictly
     older-than, per Failure Modes). Returns candidates for a reversible
     ``defer`` proposal; never mutates.
     """
@@ -622,12 +631,116 @@ def detect_stale_ideas(
         nid = e.get("id")
         if not isinstance(nid, str):
             continue
-        created = _parse_ts(e.get("created_at"))
-        if created is None:
+        if node_has_movement(e, now, staleness_days):
             continue
-        age_days = (now - created).days
+        touched = _parse_ts(e.get("touched_at")) or _parse_ts(e.get("created_at"))
+        if touched is None:
+            continue
+        age_days = (now - touched).days
         if age_days > staleness_days:
             out.append(StaleIdea(node_id=nid, age_days=age_days))
+    return out
+
+
+# The `30` is illustrative only: the real reason string (cli.py's drain
+# command) interpolates the configured `staleness_days`, which is not
+# always 30. Matching a hardcoded "30d" here would silently stop finding
+# any drain on a project configured with a different threshold.
+_STALE_IDEAS_DEFERRED_REASON_RE = re.compile(r"^stale >\d+d, drained by maintain")
+
+
+@dataclass
+class SuspectRevert:
+    node_id: str
+    title: str
+    priority: str
+    deferred_at: str
+    signal: str
+
+
+def detect_suspect_reverts(entries: list[dict], events: Optional[list[dict]] = None) -> list[SuspectRevert]:
+    """Nodes the stale-ideas drain deferred despite evidence a human curated
+    them (x-7dcb retro sweep).
+
+    Read-only: surfaces, never mutates and never emits an undefer command.
+    Reverting a human decision is the defect this node fixes; reverting it a
+    SECOND time, even back to the human's own choice, is the same class of
+    move and is left to the operator.
+
+    Candidate set: every node whose ``deferred_reason`` matches
+    ``_STALE_IDEAS_DEFERRED_REASON_RE`` (the drain reason, at any configured
+    ``staleness_days``). A node qualifies on any one
+    signal: an undefer event preceding its own ``deferred_at`` (the exact
+    reversal shape), a non-default p0/p1 priority, a curated (non-null)
+    ``rank``, session history, progress notes, or having reached planning
+    (``plan_path``) or delivery (``pr_number``).
+    """
+    if events is None:
+        from fno.graph.failure import read_events
+
+        events = read_events()
+    # Earliest node_undeferred ts per node id; a later reversal is still
+    # evidence, but the earliest one is the one closest to the drain that
+    # (per the incident) fired hours afterward.
+    undeferred_at: dict[str, str] = {}
+    for rec in events:
+        if not isinstance(rec, dict):
+            continue
+        if (rec.get("type") or rec.get("kind")) != "node_undeferred":
+            continue
+        nid = rec.get("unit_id") or rec.get("node_id")
+        ts = rec.get("ts")
+        if not isinstance(nid, str) or not isinstance(ts, str):
+            continue
+        if nid not in undeferred_at or ts < undeferred_at[nid]:
+            undeferred_at[nid] = ts
+
+    out: list[SuspectRevert] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        reason = e.get("deferred_reason")
+        if not isinstance(reason, str) or not _STALE_IDEAS_DEFERRED_REASON_RE.match(reason):
+            continue
+        nid = e.get("id")
+        if not isinstance(nid, str):
+            continue
+
+        signal: Optional[str] = None
+        deferred_at = e.get("deferred_at") or ""
+        # Parsed, not compared as raw strings: the event log stamps ts with a
+        # "Z" suffix (emit_undefer_boundary) while deferred_at is a
+        # datetime.isoformat() "+00:00" suffix - lexicographic comparison of
+        # the two formats can misorder timestamps that fall in the same
+        # second.
+        undef_dt = _parse_ts(undeferred_at.get(nid))
+        deferred_dt = _parse_ts(deferred_at)
+        if undef_dt is not None and deferred_dt is not None and undef_dt < deferred_dt:
+            signal = "undeferred before this defer"
+        elif e.get("priority") in ("p0", "p1"):
+            signal = f"priority {e.get('priority')} (non-default ranking)"
+        elif e.get("rank") is not None:
+            signal = "curated board rank"
+        elif e.get("sessions"):
+            signal = "session history"
+        elif e.get("progress_notes"):
+            signal = "progress notes"
+        elif e.get("plan_path"):
+            signal = "reached planning (plan_path set)"
+        elif e.get("pr_number"):
+            signal = "reached delivery (pr_number set)"
+
+        if signal is None:
+            continue
+        out.append(
+            SuspectRevert(
+                node_id=nid,
+                title=str(e.get("title") or ""),
+                priority=str(e.get("priority") or ""),
+                deferred_at=str(deferred_at),
+                signal=signal,
+            )
+        )
     return out
 
 

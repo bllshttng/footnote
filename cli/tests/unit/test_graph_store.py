@@ -210,6 +210,103 @@ def test_ac1_hp_locked_mutate_graph(tmp_path):
     assert any(e.get("id") == "ab-newnode0" for e in result)
 
 
+def test_touched_at_stamped_on_curation_change(tmp_path):
+    """Positive control (x-7dcb): a priority change DOES stamp touched_at.
+    Without this, AC4-EDGE's negative case proves nothing - a guard that
+    never fires and a guard that always fires both pass a cwd-only test."""
+    path = _make_graph(tmp_path, [{"id": "ab-1", "title": "T", "priority": "p2"}])
+
+    def mutator(entries):
+        for e in entries:
+            if e["id"] == "ab-1":
+                e["priority"] = "p1"
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    result = _read_json(path)
+    node = next(e for e in result if e["id"] == "ab-1")
+    assert node.get("touched_at")
+
+
+def test_touched_at_unchanged_on_non_curation_write(tmp_path):
+    """AC4-EDGE: a mutator that changes only cwd (janitorial rescope) must
+    never stamp touched_at - a curation-blind write freezing the drain
+    forever is the failure this test exists to catch.
+
+    ``status`` is set to the value recompute_statuses would independently
+    derive for this shape (no plan_path/pr_number/completed_at/deferred_at
+    -> "idea"), matching a real persisted node: on disk, status was already
+    written by a prior recompute_statuses cycle, so this fixture's raw
+    default of "ready" would spuriously look like a curation change on the
+    very first mutation - a test-fixture artifact, not a real bug (caught by
+    this test failing before the fixture was corrected)."""
+    path = _make_graph(
+        tmp_path,
+        [{"id": "ab-1", "title": "T", "priority": "p2", "status": "idea", "touched_at": "2020-01-01T00:00:00+00:00"}],
+    )
+
+    def mutator(entries):
+        for e in entries:
+            if e["id"] == "ab-1":
+                e["cwd"] = "/new/path"
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    result = _read_json(path)
+    node = next(e for e in result if e["id"] == "ab-1")
+    assert node.get("touched_at") == "2020-01-01T00:00:00+00:00"
+
+
+def test_touched_at_null_on_new_node(tmp_path):
+    """A node absent from the pre-mutator image is new: created_at already
+    carries that date, so touched_at is left null rather than double-stamped."""
+    path = _make_graph(tmp_path, [])
+
+    def mutator(entries):
+        entries.append({"id": "ab-brand-new", "title": "New", "priority": "p2"})
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    result = _read_json(path)
+    node = next(e for e in result if e["id"] == "ab-brand-new")
+    assert node.get("touched_at") is None
+
+
+def test_touched_at_unchanged_on_blocked_node_unrelated_write(tmp_path):
+    """Regression (x-7dcb): a blocked node's read-time readiness overlay
+    (`_apply_readiness_overlay`, applied by every `_apply_graph_defaults`
+    call) stamps `status: "blocked"` into the pre-mutator snapshot, but
+    `recompute_statuses` never derives "blocked" - so an unguarded
+    comparison would misread EVERY mutation on a blocked node as a status
+    change, even one that only edits an unrelated field. The blocker here
+    stays unresolved across the mutation, so the overlay is unchanged too;
+    touched_at must not move."""
+    path = _make_graph(
+        tmp_path,
+        [
+            {"id": "ab-blocker", "title": "Blocker", "status": "ready"},
+            {
+                "id": "ab-blocked",
+                "title": "Blocked",
+                "status": "idea",
+                "blocked_by": ["ab-blocker"],
+                "touched_at": "2020-01-01T00:00:00+00:00",
+            },
+        ],
+    )
+
+    def mutator(entries):
+        for e in entries:
+            if e["id"] == "ab-blocked":
+                e["details"] = "unrelated edit"
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    result = _read_json(path)
+    blocked = next(e for e in result if e["id"] == "ab-blocked")
+    assert blocked.get("touched_at") == "2020-01-01T00:00:00+00:00"
+
+
 def test_mutate_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
     """A malformed settings file that makes vault_root() raise must not crash a
     graph mutation (Codex P2 on PR #430): graph.json is already written, so the

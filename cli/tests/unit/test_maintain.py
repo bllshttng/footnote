@@ -275,6 +275,183 @@ def test_detect_stale_ideas_strictly_older_than():
     assert stale[0].age_days == 40
 
 
+def test_detect_stale_ideas_reads_touched_at_not_created_at():
+    """AC1-HP: an idea created 40 days ago but touched (undeferred) just now
+    is absent from the stale result. Groom must not re-defer a node a human
+    just curated, even though it was minted a month ago."""
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    old = (now - timedelta(days=40)).isoformat()
+    entries = [
+        _n("ab-just-touched", status="idea", created_at=old, touched_at=now.isoformat()),
+    ]
+    stale = m.detect_stale_ideas(entries, 30, now=now)
+    assert stale == []
+
+
+def test_detect_stale_ideas_no_touched_at_falls_back_to_created_at():
+    """AC3-EDGE: an idea with no touched_at at all is still stale off
+    created_at. The existing drained pile (no touched_at anywhere) must not
+    un-drain itself the moment this ships."""
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    old = (now - timedelta(days=40)).isoformat()
+    entries = [_n("ab-never-touched", status="idea", created_at=old)]
+    stale = m.detect_stale_ideas(entries, 30, now=now)
+    assert [s.node_id for s in stale] == ["ab-never-touched"]
+
+
+def test_detect_stale_ideas_touched_at_boundary_strictly_older_than():
+    """AC5-EDGE: touched_at exactly staleness_days old is NOT stale, matching
+    the existing created_at boundary."""
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    exactly = (now - timedelta(days=30)).isoformat()
+    older = (now - timedelta(days=31)).isoformat()
+    entries = [
+        _n("ab-edge-touched", status="idea", created_at=exactly, touched_at=exactly),
+        _n("ab-older-touched", status="idea", created_at=older, touched_at=older),
+    ]
+    stale = m.detect_stale_ideas(entries, 30, now=now)
+    assert [s.node_id for s in stale] == ["ab-older-touched"]
+
+
+def test_detect_stale_ideas_skips_node_with_movement():
+    """The docstring has always claimed 'no movement'; detect_stale_ideas
+    never actually checked it. An idea node with a live session was
+    drainable despite the guard existing two functions above it."""
+    now = datetime(2026, 6, 8, tzinfo=timezone.utc)
+    old = (now - timedelta(days=40)).isoformat()
+    entries = [
+        _n("ab-live-session", status="idea", created_at=old, sessions=[{"phase": "do"}]),
+    ]
+    stale = m.detect_stale_ideas(entries, 30, now=now)
+    assert stale == []
+
+
+# --- suspect-reverts retro sweep --------------------------------------------
+
+
+def test_detect_suspect_reverts_undefer_event_before_defer():
+    """AC2-HP: a node undeferred (per the events log) before its own
+    deferred_at carries the exact reversal shape and must be surfaced."""
+    entries = [
+        _n(
+            "ab-reverted",
+            status="deferred",
+            deferred_reason="stale >30d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    events = [
+        {"type": "node_undeferred", "unit_id": "ab-reverted", "ts": "2026-08-14T10:00:00Z"},
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=events)
+    assert len(reverts) == 1
+    assert reverts[0].node_id == "ab-reverted"
+    assert "undeferred" in reverts[0].signal
+
+
+def test_detect_suspect_reverts_undefer_signal_survives_mixed_timestamp_formats():
+    """The event log stamps ts with a bare 'Z' suffix (emit_undefer_boundary)
+    while deferred_at is a datetime.isoformat() '+00:00' suffix with
+    microseconds. A raw string comparison of the two can misorder timestamps
+    that fall in the same wall-clock second - '51Z' sorts after '51.5+00:00'
+    lexicographically even though 51.5s is later than 51s. Parsed comparison
+    must still catch this as a real reversal."""
+    entries = [
+        _n(
+            "ab-same-second",
+            status="deferred",
+            deferred_reason="stale >30d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51.500000+00:00",
+        ),
+    ]
+    events = [
+        {"type": "node_undeferred", "unit_id": "ab-same-second", "ts": "2026-08-14T18:19:51Z"},
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=events)
+    assert len(reverts) == 1
+    assert "undeferred" in reverts[0].signal
+
+
+def test_detect_suspect_reverts_priority_signal():
+    entries = [
+        _n(
+            "ab-p1",
+            status="deferred",
+            priority="p1",
+            deferred_reason="stale >30d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=[])
+    assert len(reverts) == 1
+    assert "p1" in reverts[0].signal
+
+
+def test_detect_suspect_reverts_ignores_plain_drain():
+    """A node deferred with the drain reason but no curation signal at all
+    (default priority, no rank, no sessions, never planned) is a genuine
+    drain, not a reversal, and must not appear in the report."""
+    entries = [
+        _n(
+            "ab-genuine",
+            status="deferred",
+            deferred_reason="stale >30d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=[])
+    assert reverts == []
+
+
+def test_detect_suspect_reverts_ignores_other_defer_reasons():
+    """A node deferred for an unrelated reason is out of scope for this
+    sweep even if it carries every human-curation signal there is."""
+    entries = [
+        _n(
+            "ab-other-reason",
+            status="deferred",
+            priority="p1",
+            deferred_reason="operator call: superseded by ab-2",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=[])
+    assert reverts == []
+
+
+def test_detect_suspect_reverts_matches_non_default_staleness_days():
+    """The drain reason interpolates the configured staleness_days (cli.py),
+    not always 30. A hardcoded '30d' match would silently find nothing on a
+    project configured with a different threshold."""
+    entries = [
+        _n(
+            "ab-p1",
+            status="deferred",
+            priority="p1",
+            deferred_reason="stale >45d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    reverts = m.detect_suspect_reverts(entries, events=[])
+    assert len(reverts) == 1
+    assert reverts[0].node_id == "ab-p1"
+
+
+def test_detect_suspect_reverts_never_mutates_input():
+    entries = [
+        _n(
+            "ab-p1",
+            status="deferred",
+            priority="p1",
+            deferred_reason="stale >30d, drained by maintain",
+            deferred_at="2026-08-14T18:19:51+00:00",
+        ),
+    ]
+    before = json.loads(json.dumps(entries))
+    m.detect_suspect_reverts(entries, events=[])
+    assert entries == before
+
+
 # --- leg 5: cap Now --------------------------------------------------------
 
 

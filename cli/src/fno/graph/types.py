@@ -130,6 +130,11 @@ class Entry(BaseModel):
     # from deferred to done.
     deferred_at: Optional[str] = None
     deferred_reason: Optional[str] = None
+    # Last time a curation field (status/priority/rank/parent/blocked_by/size)
+    # actually changed value, stamped by locked_mutate_graph. Null on a node
+    # that has never had a post-creation curation change; a janitorial
+    # rewrite that touches no curation field leaves this alone.
+    touched_at: Optional[str] = None
     has_brief: bool = False
     roadmap_id: Optional[str] = None
     vision_path: Optional[str] = None
