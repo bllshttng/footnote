@@ -528,8 +528,11 @@ def test_the_positional_and_body_flag_agree(runner, mailbox, monkeypatch, tmp_pa
     """
     import re
 
+    from fno.mail.envelope import FNO_MAIL_TRAILER
+
     def _payload(body: str) -> str:
-        return re.sub(r"^<fno_mail[^>]*>|</fno_mail>$", "", body.strip()).strip()
+        stripped = re.sub(r"^<fno_mail[^>]*>|</fno_mail>$", "", body.strip()).strip()
+        return stripped.removesuffix(FNO_MAIL_TRAILER).strip()
 
     msg_a, r_a = _seeded_reply(runner, monkeypatch, tmp_path, ["ack"])
     via_positional = _payload([m for m in _bus_msgs() if m.in_reply_to == msg_a][0].body)
