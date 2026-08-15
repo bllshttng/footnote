@@ -40,6 +40,7 @@ One file per install. These belong at the root.
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
 | `plugin-root` | `hooks/session-start.sh` | permanent |
 | `pr-watcher-state.json` | `pr_watch/_state.py` | permanent |
+| `pr-watcher-state-delivery.json` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
 
 `paths.locks_dir()` hardcodes `Path.home() / ".fno" / "locks"` on purpose, and a `config.state_dir` override deliberately does not move it. The config-free plan-stamp path and the config-loading append path have to agree on one directory, and moving it desyncs them. Its docstring says so. Do not "fix" it to match the rest of this page.
 
