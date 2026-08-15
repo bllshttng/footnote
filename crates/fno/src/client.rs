@@ -1391,6 +1391,13 @@ enum MenuAction {
     TabReorder(i32),
     TabJoin(Dir),
     TabClose,
+    /// (x-92d3 6.2) Respawn an exited row - the menu twin of peek `r`, the
+    /// same `Command::RespawnAgent`.
+    Resume,
+    /// (x-92d3 6.2) Mail this agent - opens the SAME peek overlay and its
+    /// free-text composer (`peek_input`) that peek `m` opens, never a second
+    /// input surface.
+    Mail,
 }
 
 /// What the numbered move picker is relocating: a whole tab (selector `m`) or a
@@ -1422,6 +1429,15 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         hint: String::new(),
         enabled: true,
     };
+    // (x-92d3 6.2) An entry whose action has a prefix binding: the hint is the
+    // LIVE glyph from `key_for`, never a literal chord. An unbound or unknown
+    // id resolves to nothing, which is the honest hint (LD9 / AC8).
+    let entry_kb = |glyph: &str, label: &str, id: &str| PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: crate::keys::key_for(id).unwrap_or_default(),
+        enabled: true,
+    };
     let cell = |glyph: &str, label: &str| GridCell {
         glyph: glyph.into(),
         label: label.into(),
@@ -1431,6 +1447,9 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     if agent.exited {
         add(entry("✕", "Remove"), &[MenuAction::Remove]);
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        // Resume above the rule (AC7): the menu twin of peek `r`, on the row
+        // state `r` accepts - an exited row.
+        add(entry("↻", "Resume"), &[MenuAction::Resume]);
     } else if agent.pane_id.is_some() {
         // Live pane row: already placed, so re-placement is a MOVE of the live
         // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
@@ -1438,6 +1457,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         // the operations do (move a running pane vs. place a new one).
         add(entry("→", "Focus"), &[MenuAction::Focus]);
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(PopupRow::Rule, &[]);
         add(
             PopupRow::FullWidth("▭ New Tab".into()),
@@ -1487,17 +1507,19 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         );
         add(PopupRow::Rule, &[]);
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     } else {
         // A live row that is neither pane-hosted nor attachable here.
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     }
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
     // one - and a finished worker's diff is the one you most want to read.
     add(PopupRow::Rule, &[]);
-    add(entry("±", "Diff"), &[MenuAction::Diff]);
+    add(entry_kb("±", "Diff", "diff-pane"), &[MenuAction::Diff]);
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Agent(AgentIdent::of(agent)),
@@ -10661,6 +10683,39 @@ async fn execute_row_menu_action(
                 None => view.set_notice("agent is no longer here".into()),
             }
         }
+        // (x-92d3 6.2) Resume: the same command peek `r` sends, re-checked
+        // against the row's LIVE state - a row that restarted on its own
+        // between open and pick must not be respawned again.
+        MenuAction::Resume => {
+            if a.exited {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::Command(Command::RespawnAgent {
+                        name: a.name.clone(),
+                    }),
+                )
+                .await
+                .map_err(|e| format!("respawn send failed: {e}"))?;
+            } else {
+                view.set_notice("only an exited row can resume".into());
+            }
+        }
+        // (x-92d3 6.2) Mail: peek the row, then arm the SAME free-text
+        // composer peek `m` opens - one input surface, two doors.
+        MenuAction::Mail => {
+            let idx = view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
+            match idx {
+                Some(idx) => {
+                    fetch_peek(view, idx, a.name.clone(), sock_w).await?;
+                    view.peek_input = Some((a.name.clone(), String::new()));
+                    view.peek_input_esc.clear();
+                }
+                None => view.set_notice("agent is no longer here".into()),
+            }
+        }
         // Unreachable: the crossed-pair guard above returns before an agent
         // target ever reaches a Backlog verb. Kept as a visible refusal rather
         // than a silent no-op, so a future miswiring says something.
@@ -18667,9 +18722,155 @@ mod tests {
         assert!(v.notice.is_some(), "and surfaces a notice");
     }
 
+    #[test]
+    fn menu_hints_resolve_the_live_keymap_and_never_invent_one() {
+        // AC8-EDGE: bound actions show the LIVE glyph (diff-pane, the tab
+        // verbs); actions with no prefix binding - peek, mail, resume, stop,
+        // remove, focus - show NO hint, and no builder carries a literal chord.
+        let exited = {
+            let mut r = pane_hosted_row("dead", 0);
+            r.pane_id = None;
+            r.exited = true;
+            r
+        };
+        let row = super::build_row_menu(&exited, Anchor::Center);
+        let hint_of = |menu: &RowMenu, label: &str| {
+            menu.popup
+                .rows
+                .iter()
+                .find_map(|r| match r {
+                    PopupRow::Entry { label: l, hint, .. } if l == label => Some(hint.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no entry labelled {label}"))
+        };
+        // Diff is the one row-menu action a prefix chord names.
+        assert_eq!(
+            hint_of(&row, "Diff"),
+            crate::keys::key_for("diff-pane").unwrap_or_default()
+        );
+        for label in ["Remove", "Peek", "Resume"] {
+            assert_eq!(hint_of(&row, label), "", "{label} has no prefix binding");
+        }
+        // Tab menu: every bound verb resolves live; the join grid carries no
+        // hint slot at all, so nothing can hardcode a chord there either.
+        let tabs = squad_tabs(&view_with_agents(vec![]), 1);
+        let tab = super::build_tab_menu(0, &tabs[0], Anchor::Center);
+        for (label, id) in [
+            ("New tab", "new-tab"),
+            ("Rename", "rename-tab"),
+            ("Move left", "move-tab-left"),
+            ("Move right", "move-tab-right"),
+            ("Close tab", "close-tab"),
+        ] {
+            assert_eq!(
+                hint_of(&tab, label),
+                crate::keys::key_for(id).unwrap_or_default(),
+                "{label} mirrors key_for({id})"
+            );
+        }
+        for r in tab.popup.rows.iter().chain(row.popup.rows.iter()) {
+            if let PopupRow::Entry { hint, .. } = r {
+                assert!(
+                    !hint.contains('^'),
+                    "a literal chord in a menu hint is the LD9 lie: {hint}"
+                );
+            }
+        }
+    }
 
+    #[test]
+    fn row_menu_entries_gate_resume_and_mail_by_row_state() {
+        // AC7-HP shape: resume appears on an EXITED row only, mail on LIVE
+        // rows only, both above the rule that fronts the destructive tail.
+        let mk = |name: &str, pane_id: Option<u64>, exited: bool| {
+            let mut r = pane_hosted_row(name, pane_id.unwrap_or(0));
+            r.pane_id = pane_id;
+            r.exited = exited;
+            r
+        };
+        let dead = super::build_row_menu(&mk("d", None, true), Anchor::Center);
+        assert!(dead.actions.contains(&super::MenuAction::Resume));
+        assert!(!dead.actions.contains(&super::MenuAction::Mail));
+        let live = super::build_row_menu(&mk("p", Some(9), false), Anchor::Center);
+        assert!(live.actions.contains(&super::MenuAction::Mail));
+        assert!(!live.actions.contains(&super::MenuAction::Resume));
+        // Resume sits above the common rule; Stop/Diff ordering untouched.
+        let labels = menu_labels(&dead);
+        let (resume, rule) = (
+            labels.iter().position(|l| l == "Resume").unwrap(),
+            dead.popup
+                .rows
+                .iter()
+                .rposition(|r| matches!(r, PopupRow::Rule))
+                .unwrap(),
+        );
+        let resume_row = dead
+            .popup
+            .rows
+            .iter()
+            .position(|r| matches!(r, PopupRow::Entry { label, .. } if label == "Resume"))
+            .unwrap();
+        assert!(
+            resume_row < rule,
+            "resume is above the rule ({resume} < {rule})"
+        );
+    }
 
+    #[tokio::test]
+    async fn row_menu_resume_sends_respawn_and_refuses_a_live_row() {
+        // The menu twin of peek `r`: RespawnAgent on an exited row, re-checked
+        // LIVE at execute - a row that came back on its own is not respawned.
+        let mut dead = pane_hosted_row("dead", 0);
+        dead.pane_id = None;
+        dead.exited = true;
+        let mut v = view_with_agents(vec![dead.clone()]);
+        // A lone exited row makes the squad majority-exited -> LiveOnly, which
+        // hides the very row under test; pin Expanded so it renders.
+        v.section_view.insert(
+            SectionKey::Squad("/code/footnote".into()),
+            SectionView::Expanded,
+        );
+        let idx = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == "dead"))
+            .unwrap();
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        match menu_command_for(&mut v, super::MenuAction::Resume).await {
+            Command::RespawnAgent { name } => assert_eq!(name, "dead"),
+            other => panic!("expected RespawnAgent, got {other:?}"),
+        }
+        // The menu stayed open from the DEAD row; the row is live NOW. The
+        // pinned entry must refuse rather than respawn a live session.
+        let mut v2 = view_with_agents(vec![dead.clone()]);
+        v2.row_menu = Some(super::build_row_menu(&dead, Anchor::Center));
+        v2.layout.agents[0].exited = false;
+        let mut buf: Vec<u8> = Vec::new();
+        menu_select(&mut v2, super::MenuAction::Resume).await;
+        row_menu_execute_selected(&mut v2, &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a live row is not respawned");
+        assert!(v2.notice.is_some());
+    }
 
+    #[tokio::test]
+    async fn row_menu_mail_opens_the_same_peek_composer() {
+        // AC7-HP: mail routes into the EXISTING peek overlay + free-text
+        // composer that peek `m` opens - no second input surface is grown.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "bg-claude");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        let mut buf: Vec<u8> = Vec::new();
+        menu_select(&mut v, super::MenuAction::Mail).await;
+        row_menu_execute_selected(&mut v, &mut buf).await.unwrap();
+        // fetch_peek writes its request; the composer is the client-side state.
+        assert!(v.peek.is_some(), "peek opened");
+        assert_eq!(
+            v.peek_input,
+            Some(("bg-claude".into(), String::new())),
+            "the SAME peek m composer is armed"
+        );
+    }
 
     /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
     fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
