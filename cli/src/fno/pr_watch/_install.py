@@ -657,7 +657,9 @@ def _parked_prs(state_path: Optional[Path]) -> dict:
         except Exception:
             return {}
 
-    delivery_path = state_path.with_name(f"{state_path.stem}-delivery{state_path.suffix}")
+    from fno.pr_watch._dispatch import _delivery_state_path
+
+    delivery_path = _delivery_state_path(state_path)
     parked = {}
     for path, label in ((state_path, ""), (delivery_path, " [delivery]")):
         if not path.exists():
