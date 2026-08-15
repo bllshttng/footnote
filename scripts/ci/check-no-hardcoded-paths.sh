@@ -190,18 +190,18 @@ add_violation "skills/ + hooks/ hardcoded handoffs/ joins (use 'fno paths handof
 # scripts/ directory: exclude scripts/tests/ (sandboxed) and scripts/ci/ (this script)
 # also exclude scripts/lib/paths.sh
 SCRIPTS_SH_HITS=$(
-    grep -rn '\$HOME/\.fno/' \
+    grep -rnE "$BARE_STATE_DIR_RE" \
         "$REPO_ROOT/scripts/" \
         --include='*.sh' \
         2>/dev/null \
     | grep -v 'scripts/tests/' \
     | grep -v 'scripts/ci/' \
     | grep -v 'scripts/lib/paths\.sh' \
-    | grep -v ':-.*\$HOME/\.fno' \
+    | grep -vE ":-.*$BARE_STATE_DIR_RE" \
     | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
     || true
 )
-add_violation "scripts/ bare \$HOME/.fno/ violations (excluding tests/ and ci/):" "$SCRIPTS_SH_HITS"
+add_violation "scripts/ bare \$HOME/.fno violations (excluding tests/ and ci/):" "$SCRIPTS_SH_HITS"
 
 # ---------------------------------------------------------------------------
 # Report
