@@ -887,7 +887,7 @@ def test_rebase_equivalent_receipt_satisfies_only_with_the_flag(
     assert equivalent["satisfied"] is True
     assert equivalent["result"] == "equivalent"
     assert equivalent["coverage"]["matched_sha"] == sha_a
-    assert equivalent["coverage"]["equivalence"] == "patch-id"
+    assert equivalent["coverage"]["equivalence"] == "patch-id-verbatim"
 
 
 def test_equivalence_refused_after_a_code_change(tmp_path: Path) -> None:
@@ -900,6 +900,148 @@ def test_equivalence_refused_after_a_code_change(tmp_path: Path) -> None:
 
     assert decision["satisfied"] is False
     assert decision["result"] == "stale"
+
+
+def test_equivalence_refused_after_a_whitespace_only_edit(tmp_path: Path) -> None:
+    """The default ``patch-id --stable`` strips whitespace, so the identity
+    keys on ``--verbatim`` ids: a re-indent that changes Python semantics
+    must not borrow the old receipt. The edit amends the rebased commit so
+    HEAD stays a single patch-equal commit; adding a second commit would
+    refuse on commit count alone and stay green under ``--stable``."""
+    repo, journal, _sha_a = _rebase_fixture(tmp_path)
+    (repo / "a.txt").write_text("   a\n")
+    _git_ok(repo, "add", "a.txt")
+    _git_ok(repo, "commit", "-q", "--amend", "-m", "re-indent")
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "stale"
+
+
+def test_equivalence_survives_a_rebase_where_main_touched_the_same_file(
+    tmp_path: Path,
+) -> None:
+    """The identity must key on per-commit patch ids, not net-diff blobs: a
+    clean rebase over a main that edited the same file outside the hunk
+    context still borrows the pre-rebase receipt."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-q")
+    _git_ok(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git_ok(repo, "config", "user.email", "t@example.com")
+    _git_ok(repo, "config", "user.name", "t")
+    base_lines = [f"l{i}\n" for i in range(1, 21)]
+    _commit(repo, "base", "f.txt", "".join(base_lines))
+    _git_ok(repo, "checkout", "-q", "-b", "feature")
+    feat_lines = list(base_lines)
+    feat_lines[0] = "CHANGED\n"
+    sha_a = _commit(repo, "feature", "f.txt", "".join(feat_lines))
+    journal = tmp_path / "events.jsonl"
+    write(journal, receipt(candidate_sha=sha_a))
+    _git_ok(repo, "checkout", "-q", "main")
+    main_lines = list(base_lines)
+    main_lines[19] = "BY-MAIN\n"
+    _commit(repo, "main-side edit far from the hunk", "f.txt", "".join(main_lines))
+    _git_ok(
+        repo,
+        "update-ref",
+        "refs/remotes/origin/main",
+        _git_ok(repo, "rev-parse", "HEAD"),
+    )
+    _git_ok(repo, "checkout", "-q", "feature")
+    _git_ok(repo, "rebase", "main")
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is True
+    assert decision["coverage"]["matched_sha"] == sha_a
+
+
+def test_equivalence_never_rescues_a_pending_receipt_for_head(
+    tmp_path: Path,
+) -> None:
+    """An unfinished verification attempt for HEAD deserves the same
+    protection as a fresh red: an interrupted run leaves result pending."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    head = _git_ok(repo, "rev-parse", "HEAD")
+    write(
+        journal,
+        receipt(candidate_sha=sha_a, ts="2026-07-26T01:02:04Z"),
+        receipt(candidate_sha=head, ts="2026-07-26T02:02:04Z", result="pending"),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "pending"
+
+
+def test_equivalence_never_rescues_a_failed_receipt_for_head(
+    tmp_path: Path,
+) -> None:
+    """A fresh red for HEAD outranks an older green for a patch-equal
+    ancestor: the same patches can fail against a newer main."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    head = _git_ok(repo, "rev-parse", "HEAD")
+    write(
+        journal,
+        receipt(candidate_sha=sha_a, ts="2026-07-26T01:02:04Z"),
+        receipt(candidate_sha=head, ts="2026-07-26T02:02:04Z", result="failed"),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "failed"
+
+
+def test_equivalence_never_rescues_a_failed_receipt_masked_by_canonical_required(
+    tmp_path: Path,
+) -> None:
+    """The aggregate decision can read stale while a failed exact-HEAD
+    receipt lives only in a non-canonical journal. The no-rescue rule must
+    hold inside the walk, wherever the failed receipt lives."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    head = _git_ok(repo, "rev-parse", "HEAD")
+    mirror = tmp_path / "mirror.jsonl"
+    write(
+        mirror,
+        receipt(candidate_sha=head, ts="2026-07-26T03:02:04Z", result="failed"),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal, mirror], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+
+
+def test_equivalence_blocked_by_incomplete_journal_coverage(
+    tmp_path: Path,
+) -> None:
+    """The strict path refuses on malformed journal lines; the equivalence
+    path must not relax that fail-closed rule."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    journal.write_text(
+        json.dumps(receipt(candidate_sha=sha_a)) + "\nnot-json\n",
+        encoding="utf-8",
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["coverage"]["complete"] is False
 
 
 def test_equivalence_refused_when_borrowed_sha_does_not_resolve(

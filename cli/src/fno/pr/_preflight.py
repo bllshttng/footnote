@@ -26,7 +26,7 @@ import stat
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Mapping, Optional, Tuple
+from typing import Iterator, Mapping, Optional, Tuple
 
 from fno.pr._proc import ToolMissing, run
 
@@ -538,6 +538,15 @@ def check_verification_evidence(
                 allow_equivalent
                 and not decision["satisfied"]
                 and not discovery_errors
+                # A failed or still-running verdict for HEAD itself is
+                # authoritative: the same patches can fail against a newer
+                # main, so an older green for a patch-equal ancestor must
+                # never override a fresh red, and an unfinished attempt
+                # (result "pending") deserves the same protection.
+                and decision.get("result") not in ("failed", "pending")
+                # The strict path refuses on incomplete coverage; equivalence
+                # must not relax that (malformed lines, unreadable journals).
+                and decision["coverage"].get("complete")
             ):
                 equivalent = rebase_equivalent_evidence(
                     cwd=repo,
@@ -561,12 +570,17 @@ def check_verification_evidence(
 def _patch_identity(
     sha: str, *, cwd: str, base_ref: str = BASE_DEFAULT
 ) -> Optional[Tuple[str, ...]]:
-    """Sorted stable patch ids of the commits ``sha`` adds over its merge-base.
+    """Sorted patch identity of the commits ``sha`` adds over its merge-base.
 
     ``None`` on any failure (unresolvable ref, git error, empty id set); None
-    never matches anything, so every failure mode refuses. Patch ids are the
-    right key for rebase equivalence and nothing weaker is: a rebase preserves
-    them, a conflict resolution or any code edit changes them.
+    never matches anything, so every failure mode refuses. The key is
+    ``git patch-id --verbatim`` over ``merge-base..sha``: verbatim ids survive
+    a clean rebase (line numbers and base-side context outside the hunks are
+    normalized away) while counting whitespace, so a re-indent that changes
+    Python semantics hashes differently. The default ``--stable`` strips
+    whitespace and would hash a re-indent identically to the original. A git
+    older than 2.45 lacks ``--verbatim`` and the call fails into ``None``,
+    which refuses rather than falling back to the weaker key.
     """
     try:
         mb = _git(["merge-base", base_ref, sha], cwd)
@@ -575,7 +589,7 @@ def _patch_identity(
         log = _git(["log", "--no-merges", "-p", f"{mb.stdout.strip()}..{sha}"], cwd)
         if log.returncode != 0:
             return None
-        ids = run(["git", "patch-id", "--stable"], cwd=cwd, input_text=log.stdout)
+        ids = run(["git", "patch-id", "--verbatim"], cwd=cwd, input_text=log.stdout)
         if ids.returncode != 0:
             return None
     except ToolMissing:
@@ -584,7 +598,7 @@ def _patch_identity(
     for line in ids.stdout.splitlines():
         parts = line.split()
         if parts:
-            found.add(parts[0])
+            found.add(f"patch-id:{parts[0]}")
     return tuple(sorted(found)) or None
 
 
@@ -598,76 +612,98 @@ def rebase_equivalent_evidence(
 ) -> Optional[dict]:
     """Satisfy a refused strict decision from a receipt whose patches match.
 
-    Runs only when the strict exact-HEAD decision is unsatisfied (typically a
-    rebase rewrote HEAD after a full green run). Walks the already-discovered
-    receipts for a full/passed one that clears the trusted-producer test,
-    whose commit still resolves, and whose patch ids equal HEAD's. On a match
-    returns the strict decision with ``satisfied``, ``result:
-    "equivalent"``, and the borrowed commit named in coverage; no match
-    returns ``None`` and the refusal stands.
+    Runs only when the strict exact-HEAD decision is unsatisfied and the
+    refusal is not itself a failed HEAD verdict (typically a rebase rewrote
+    HEAD after a full green run). Walks the already-discovered receipts for a
+    full/passed one that clears the trusted-producer test, whose commit still
+    resolves, and whose patch identity equals HEAD's. On a match returns the
+    strict decision with ``satisfied``, ``result: "equivalent"``, and the
+    borrowed commit named in coverage; no match returns ``None`` and the
+    refusal stands.
     """
     from fno.events import ValidationError, validate
 
     head_ids = _patch_identity(candidate_sha, cwd=cwd, base_ref=base_ref)
     if head_ids is None:
         return None
-    seen_paths: set[str] = set()
-    for raw_path in event_paths:
-        path = Path(raw_path).expanduser()
-        try:
-            path_key = str(path.resolve())
-        except OSError:
-            path_key = os.path.abspath(path)
-        if path_key in seen_paths:
-            continue
-        seen_paths.add(path_key)
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError):
-            continue
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+
+    def _validated_events() -> "Iterator[dict]":
+        seen_paths: set[str] = set()
+        for raw_path in event_paths:
+            path = Path(raw_path).expanduser()
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
+                path_key = str(path.resolve())
+            except OSError:
+                path_key = os.path.abspath(path)
+            if path_key in seen_paths:
                 continue
-            if (
-                not isinstance(event, dict)
-                or event.get("type") != "verification_receipt"
-            ):
-                continue
+            seen_paths.add(path_key)
             try:
-                validate(event)
-            except ValidationError:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
                 continue
-            parsed_ts = _event_timestamp(event.get("ts"))
-            if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
-                continue
-            data = event.get("data")
-            if not isinstance(data, dict):
-                continue
-            if data.get("mode") != "full" or data.get("result") != "passed":
-                continue
-            if not _trusted_preflight_producer(event):
-                continue
-            sha = data.get("candidate_sha")
-            if not isinstance(sha, str) or sha.lower() == candidate_sha.lower():
-                continue
-            if _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd).returncode != 0:
-                continue
-            if _patch_identity(sha, cwd=cwd, base_ref=base_ref) == head_ids:
-                return {
-                    **decision,
-                    "satisfied": True,
-                    "result": "equivalent",
-                    "coverage": {
-                        **decision.get("coverage", {}),
-                        "matched_sha": sha,
-                        "equivalence": "patch-id",
-                    },
-                }
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    not isinstance(event, dict)
+                    or event.get("type") != "verification_receipt"
+                ):
+                    continue
+                try:
+                    validate(event)
+                except ValidationError:
+                    continue
+                parsed_ts = _event_timestamp(event.get("ts"))
+                if parsed_ts is None or parsed_ts > dt.datetime.now(dt.timezone.utc):
+                    continue
+                yield event
+
+    # First pass, everywhere: the no-rescue rule enforced inside the walk
+    # itself. The aggregate decision's result can be masked (canonical-
+    # required, mirror-ahead) while a failed or unfinished attempt for this
+    # HEAD lives in a non-canonical journal; wherever it lives, it outranks
+    # an ancestor's green, so the scan must complete before any match.
+    for event in _validated_events():
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        head_sha_event = data.get("candidate_sha")
+        if (
+            isinstance(head_sha_event, str)
+            and head_sha_event.lower() == candidate_sha.lower()
+            and data.get("result") in ("failed", "pending")
+        ):
+            return None
+    for event in _validated_events():
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        if data.get("mode") != "full" or data.get("result") != "passed":
+            continue
+        if not _trusted_preflight_producer(event):
+            continue
+        sha = data.get("candidate_sha")
+        if not isinstance(sha, str) or sha.lower() == candidate_sha.lower():
+            continue
+        if _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd).returncode != 0:
+            continue
+        if _patch_identity(sha, cwd=cwd, base_ref=base_ref) == head_ids:
+            return {
+                **decision,
+                "satisfied": True,
+                "result": "equivalent",
+                "coverage": {
+                    **decision.get("coverage", {}),
+                    "matched_sha": sha,
+                    "equivalence": "patch-id-verbatim",
+                },
+            }
     return None
 
 
