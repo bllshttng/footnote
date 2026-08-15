@@ -2257,6 +2257,18 @@ fn mux_pane_run_failure_message(
     )
 }
 
+/// True for the one `claude_resume_argv_with_truth` arm that returns
+/// `(["claude", "attach", short_id], None)`: a live, short_id-addressable
+/// claude row with no mux ref. `claim_uuid` is `Some` only on the dead-relaunch
+/// arm; every other arm already returns `Err` before this is checked.
+fn should_delegate_claude_live_attach(
+    harness: &str,
+    claim_uuid: &Option<String>,
+    mux_session: &Option<String>,
+) -> bool {
+    harness == "claude" && claim_uuid.is_none() && mux_session.is_none()
+}
+
 /// `fno-agents resume <name> [--print-command]` -- resume an agent in its
 /// recorded cwd via the provider's resume CLI (`os.execvp` equivalent), or
 /// print the shell snippet with `--print-command`. Mirrors Python `resume_logic`.
@@ -2426,6 +2438,29 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
         }
         return 0;
+    }
+
+    // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
+    // this arm (the dead-relaunch arm above sets Some(uuid); the two error
+    // arms already returned). A bare `claude attach` exec here has no pty,
+    // no route-settings restore, and no post-exec verification -- the same
+    // gap the Python fallback (`resume_cli.py::_resume_claude_wake`) closed.
+    // Delegating to it rather than re-deriving that pty/bracketed-paste/
+    // retry recipe natively keeps ONE implementation instead of two: a fix
+    // landed only here would leave `fno agents resume` (this binary) fixed
+    // and `fno-agents resume` still printing "Attaching..." and exiting,
+    // which is the guard-on-one-of-N-paths trap this repo already tracks.
+    if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
+        let status = std::process::Command::new("fno-py")
+            .args(["agents", "resume", &name])
+            .status();
+        return match status {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("fno agents resume: failed to delegate {name} to fno-py: {e}");
+                1
+            }
+        };
     }
 
     // Validate cwd for BOTH paths before claiming or launching. A deleted
@@ -4105,6 +4140,34 @@ mod tests {
                 None, // live attach arm claims nothing
             )
         );
+    }
+
+    #[test]
+    fn live_claude_attach_delegates_dead_and_non_claude_and_mux_do_not() {
+        // The live-attach arm ((["claude","attach",short_id], None)) is the one
+        // this binary used to exec bare, with no pty/route/verification. It is
+        // the only combination that should delegate to `fno-py agents resume`.
+        assert!(should_delegate_claude_live_attach(
+            "claude",
+            &None,
+            &None,
+        ));
+        // Dead-relaunch arm carries Some(uuid) -> Rust already restores the
+        // route and relaunches itself; must not also delegate.
+        assert!(!should_delegate_claude_live_attach(
+            "claude",
+            &Some("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".to_string()),
+            &None,
+        ));
+        // A mux-hosted row relaunches through the pane path; must not delegate
+        // even if some future change ever paired it with claim_uuid == None.
+        assert!(!should_delegate_claude_live_attach(
+            "claude",
+            &None,
+            &Some("session-1".to_string()),
+        ));
+        // Every non-claude harness keeps its own provider resume CLI.
+        assert!(!should_delegate_claude_live_attach("codex", &None, &None));
     }
 
     #[test]
