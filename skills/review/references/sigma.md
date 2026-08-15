@@ -303,7 +303,7 @@ bash "${SKILL_DIR}/scripts/emit-attestation.sh" sigma
 This is what lets a solo / claude-only harness (no GitHub App bot) express a real, auditable review gate. Rules:
 - **Never emit on a blocking finding:** a failing or blocked panel emits nothing. Absence holds the gate. That is fail closed. A carried-forward finding that still validates at the current head (Step 3c) is a blocking finding of this round.
 - **Head-pinned, and cumulative in meaning.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma. The old attestation no longer counts. Loop-check discards a `head_sha` that is not the current HEAD. An attestation asserts coverage **cumulative across rounds up to this head**. Every file in the diff was reviewed in some round at or before this head. Every prior blocking finding was re-validated at this head by Step 3c. It does NOT assert that the full diff was re-reviewed in one pass.
-- **Advisory when not gating:** if no `reviewers` entry names `sigma`, the event is harmless telemetry. Loop-check only reads it when the gate is configured.
+- **Advisory when not gating:** with no `reviewers` entry naming `sigma`, the event is harmless telemetry. Loop-check reads it only under a configured gate.
 
 ### Step 6d: Persist the report before deciding whether to comment
 
