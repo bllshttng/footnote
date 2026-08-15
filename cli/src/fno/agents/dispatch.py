@@ -6396,8 +6396,12 @@ def _queue_durable_fallback(
     *,
     msg_id: Optional[str] = None,
     reason: Optional[str] = None,
-) -> str:
-    """Write the <fno_mail> envelope to the durable bus. Returns the msg_id.
+) -> "tuple[str, str]":
+    """Write the <fno_mail> envelope to the durable bus.
+
+    Returns ``(msg_id, durable_recipient)``. The recipient rides back so a
+    caller's receipt line names the handle this actually wrote to, without
+    re-deriving it from an Optional field the refusal below already narrowed.
 
     Raises DispatchAskError(12) when the row has no harness_session_id, or
     when the bus write fails; both messages say that no durable envelope
@@ -6480,7 +6484,7 @@ def _queue_durable_fallback(
             f"durable envelope write failed: {exc}; no durable envelope was written",
             exit_code=12,
         ) from exc
-    return msg_id
+    return msg_id, durable_recipient
 
 
 def dispatch_send(
@@ -6918,7 +6922,7 @@ def dispatch_send(
         # known and this queue needs no lock. When it too fails (no
         # harness_session_id, or the bus write itself errors), the raised
         # DispatchAskError(12) propagates unchanged and says so explicitly.
-        msg_id = _queue_durable_fallback(
+        msg_id, durable_to = _queue_durable_fallback(
             initial, message, from_name, [initial], reason="agent-lock-timeout"
         )
         events.emit(
@@ -6929,8 +6933,7 @@ def dispatch_send(
             delivery="durable",
         )
         print(
-            f"{msg_id} queued (durable) for "
-            f"{canonical_handle(initial.harness_session_id)} [agent-lock-timeout]",
+            f"{msg_id} queued (durable) for {durable_to} [agent-lock-timeout]",
             file=sys.stderr,
         )
         raise DispatchAskError(
