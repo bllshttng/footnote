@@ -444,7 +444,16 @@ def _bounded_remediation(
         return 1
 
     if auto_merge.require_checks_pass:
-        verdict, _counts, head_read = _merge_mod._checks_verdict(int(pr_number), cwd)
+        try:
+            verdict, _counts, head_read = _merge_mod._checks_verdict(
+                int(pr_number), cwd
+            )
+        except ToolMissing:
+            # _checks_verdict deliberately propagates it (the module contract
+            # reserves 127 for a missing gh); this third call site owes the
+            # same handler its siblings have (review round 7).
+            sys.stderr.write("verify-pr-merged: gh CLI not installed\n")
+            return 127
         if verdict != "green":
             _emit_audit(
                 repo_root,

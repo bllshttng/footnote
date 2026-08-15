@@ -1147,12 +1147,18 @@ def cmd_spawn(
     from fno.agents.mux_spawn import resolve_provenance
 
     prov_env = resolve_provenance(node, slug, plan)
-    # x-9d11 refusal carrier, positive arm: the pane path consumes prov_env
-    # directly (it does not pass through the bg/headless export below), so a
-    # message-carried --no-merge must land here too. Clear-on-absent is the
-    # export block's job - the pane builder starts from this dict, not from a
-    # parent's inherited carrier.
-    if "--no-merge" in f" {message} ":
+    # x-9d11 refusal carrier: a direct `fno agents spawn` message never passes
+    # through resolve_dispatch, so the SAME vocabulary the resolver judges is
+    # applied here. The legacy bare token in a /target-family message is
+    # migrated to the flag (receipts show the effective message), and the env
+    # arm stays scoped to the family: prose and other verbs arm nothing.
+    from fno.agents.harness_map import (
+        message_carries_no_merge,
+        normalize_legacy_no_merge,
+    )
+
+    message = normalize_legacy_no_merge(message)
+    if message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
     node_reservation: tuple[str, str] | None = None
     if node is not None:
@@ -1214,6 +1220,15 @@ def cmd_spawn(
     # Prior values of the provenance keys the bg/headless arm exports below, so
     # the finally can put the process env back.
     prov_prev: dict[str, "str | None"] = {}
+    # x-9d11 set-or-clear BEFORE any substrate branch: the pane transport
+    # inherits os.environ directly, so an inherited carrier must be cleared
+    # here too, not only on the bg/headless export path (review round 7). The
+    # message is authoritative in both directions.
+    prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
+    if prov_env.get("TARGET_NO_MERGE") == "1":
+        os.environ["TARGET_NO_MERGE"] = "1"
+    else:
+        os.environ.pop("TARGET_NO_MERGE", None)
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
@@ -1337,16 +1352,9 @@ def cmd_spawn(
         for _k in PROVENANCE_KEYS:
             os.environ.pop(_k, None)
         os.environ.update(prov_env)
-        # x-9d11 refusal carrier, CLI lane: the flag in the message is the
-        # carrier, the env the backstop - derived here so a direct
-        # `fno agents spawn "/target --no-merge <id>"` behaves like the skill
-        # lane. Set or CLEARED (the message is authoritative; an inherited
-        # carrier must not outlive it) and restored with the provenance keys.
-        prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
-        if "--no-merge" in f" {message} ":
-            os.environ["TARGET_NO_MERGE"] = "1"
-        else:
-            os.environ.pop("TARGET_NO_MERGE", None)
+        # TARGET_NO_MERGE was set-or-cleared above, before the substrate
+        # branch, so both the pane transport and this export path see the
+        # message-authoritative value; prov_prev restores it in the finally.
 
         try:
             result: SpawnResult = dispatch_spawn(

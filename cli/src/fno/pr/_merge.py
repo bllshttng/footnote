@@ -1354,7 +1354,26 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
         return _miss("gh returned unparseable JSON")
-    verdict, _exit, counts = verdict_for(data.get("statusCheckRollup") or [])
+    rollup = data.get("statusCheckRollup") or []
+    # GitHub's own queue waits only for REQUIRED checks (review round 7): a
+    # slow optional check (isRequired=false, e.g. a coverage-annotate or
+    # nightly job pending on every PR) must not hold a merge forever the way a
+    # pending required one legitimately does. When the rollup carries the
+    # annotation on any entry, judge the required subset - which is green when
+    # everything is optional. A payload with no annotations at all (older
+    # shapes) stays whole.
+    if any("isRequired" in c for c in rollup):
+        required = [c for c in rollup if c.get("isRequired") is True]
+        if not required:
+            # Everything optional: nothing to wait for (GitHub's queue merges
+            # in this shape too). Counts report the required subset - zero.
+            return (
+                "green",
+                {"total": 0, "pass": 0, "fail": 0, "pending": 0},
+                (data.get("headRefOid") or "").strip(),
+            )
+        rollup = required
+    verdict, _exit, counts = verdict_for(rollup)
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
@@ -1413,20 +1432,24 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
             return 127
         verified_head = head_read
         if verdict != "green":
+            # pending = wait for required checks (retry when green). unknown =
+            # no rollup at all (gh failure, or a repo with no CI): retry-later,
+            # never a failed-ship stamp - a PR with no checks configured needs
+            # require_checks_pass=false, not a red graph status (round 7).
             _emit(
                 pr_number,
-                "held" if verdict == "pending" else "failed",
+                "held" if verdict in ("pending", "unknown") else "failed",
                 f"checks are {verdict} ({counts}); "
                 f"require_checks_pass forbids merging without green",
                 strategy,
-                err=verdict not in ("pending",),
+                err=verdict not in ("pending", "unknown"),
             )
-            if verdict != "pending":
+            if verdict not in ("pending", "unknown"):
                 # Match the pre-existing failure path: a node left reading
                 # `queued` from an earlier attempt would otherwise stay queued
                 # after a red refusal, and the scoreboard consumes that field.
                 _sync_graph_merge_status("failed", pr_number)
-            return 2 if verdict == "pending" else 1
+            return 2 if verdict in ("pending", "unknown") else 1
         if not verified_head:
             _emit(
                 pr_number,
@@ -1533,8 +1556,13 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
             "-f",
             f"merge_method={strategy}",
         ]
-        if verified_head:
-            api_args += ["-f", f"sha={verified_head}"]
+        # covered_head first: the review lane sets it when require_checks_pass
+        # is off, leaving verified_head empty - dropping it here (round 7)
+        # reopened the x-0eaf TOCTOU on exactly the worktree path every run
+        # takes.
+        _pinned_head = covered_head or verified_head
+        if _pinned_head:
+            api_args += ["-f", f"sha={_pinned_head}"]
         api = _gh(api_args, repo)
         if api.ok:
             _git(["fetch", "origin"], repo)

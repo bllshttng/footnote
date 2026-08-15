@@ -60,6 +60,31 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 _AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
+# The /target-family first tokens (the per-harness spellings normalize_command
+# emits). The refusal carrier's vocabulary is scoped to these: rewriting the
+# args of another slash verb would mutate its instruction text, and prose is
+# not a control input (x-9d11).
+_TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
+
+
+def normalize_legacy_no_merge(command: str) -> str:
+    """Rewrite the legacy bare ``no-merge`` token to the flag in a
+    /target-family command (the pre-x-9d11 documented spelling). Everything
+    else - other slash verbs, prose - is returned unchanged."""
+    first = command.split(maxsplit=1)[0] if command else ""
+    if first in _TARGET_FAMILY and " no-merge " in f" {command} ":
+        return f" {command} ".replace(" no-merge ", " --no-merge ").strip()
+    return command
+
+
+def message_carries_no_merge(message: str) -> bool:
+    """True when a /target-family message carries the ``--no-merge`` flag.
+
+    The family gate is load-bearing: a /think or /review prompt that MENTIONS
+    the flag arms no env carrier, and neither does prose."""
+    first = message.split(maxsplit=1)[0] if message else ""
+    return first in _TARGET_FAMILY and "--no-merge" in f" {message} "
+
 
 def _refused_reason(harness: str) -> str:
     """The loud-refusal message for a deprecated harness with no dispatch lane -
@@ -483,25 +508,15 @@ def resolve_dispatch(
     # through (skill spawn.sh, dispatch.py pane, advance/recovery/keep_going bg):
     # when the command carries the refusal, the env carries it too, so a worker
     # that drops the flag post-compaction still folds the refusal at init.
-    # /target-FAMILY commands only (the per-harness spellings normalize_command
-    # emits): rewriting args of some OTHER slash command would mutate its
-    # instruction text and arm a merge-posture env for a command with no merge
-    # semantics (review round 6). A PROSE template mentioning no-merge stays
-    # literal too - rewriting its words would turn a sentence into a posture.
-    # Within a /target-family command, the legacy bare `no-merge` token (the
-    # pre-x-9d11 documented default in operator config.dispatch.command) is
-    # rewritten to the flag - a spelling migration that preserves the
-    # template's semantics, never a posture change - because the fold and every
-    # env match key on `--no-merge`.
-    _first_word = resolved_command.split(maxsplit=1)[0] if resolved_command else ""
-    _is_target_command = _first_word in ("/target", "/fno:target", "$fno:target")
-    if _is_target_command and " no-merge " in f" {resolved_command} ":
-        resolved_command = f" {resolved_command} ".replace(
-            " no-merge ", " --no-merge "
-        ).strip()
+    # The /target-family gate and the legacy-token rewrite live in
+    # normalize_legacy_no_merge / message_carries_no_merge so every spawn lane
+    # (including direct `fno agents spawn` messages that never reach this
+    # resolver) judges the SAME vocabulary.
+    if resolved_command != normalize_legacy_no_merge(resolved_command):
+        resolved_command = normalize_legacy_no_merge(resolved_command)
         decision.append("command=legacy-no-merge->--no-merge")
     env: dict[str, str] = {}
-    if _is_target_command and "--no-merge" in resolved_command:
+    if message_carries_no_merge(resolved_command):
         env["TARGET_NO_MERGE"] = "1"
         decision.append("no-merge->TARGET_NO_MERGE")
     if brief:

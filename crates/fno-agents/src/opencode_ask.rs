@@ -429,7 +429,10 @@ mod tests {
     #[test]
     fn argv_routes_footnote_slash_command_via_command_flag() {
         // A rendered `/fno:verb` rides `--command` so opencode expands the plugin
-        // command instead of running it as prose (x-de43 / codex P1).
+        // command instead of running it as prose (x-de43 / codex P1). The args
+        // ride as separate WORDS behind a `--` separator: a single
+        // "--no-merge x" element would read as an unknown flag to the CLI's
+        // argv parser (x-9d11 round 7).
         assert_eq!(
             build_opencode_argv("/fno:target --no-merge x-abcd", None),
             vec![
@@ -439,7 +442,8 @@ mod tests {
                 "--command",
                 "fno:target",
                 "--",
-                "no-merge x-abcd"
+                "--no-merge",
+                "x-abcd"
             ]
         );
     }

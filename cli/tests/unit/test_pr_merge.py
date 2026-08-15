@@ -997,18 +997,77 @@ def test_auto_merge_unsupported_repo_holds_on_pending_checks(
     assert len(fake.merge_cmds) == 0
 
 
-def test_auto_merge_unsupported_repo_fails_closed_on_an_unreadable_rollup(
+def test_auto_merge_unsupported_repo_holds_on_an_unreadable_rollup(
     enabled, monkeypatch, capsys, tmp_path
 ):
-    """No verdict is not a green light."""
+    """No verdict is not a green light, and not a failed ship either: an
+    empty rollup (gh failure, or a repo with no CI) is retry-later. A repo
+    with no checks configured needs require_checks_pass=false, not a red
+    node status (round 7)."""
     (tmp_path / ".fno").mkdir()
     _checks_enabled(monkeypatch)
     fake = _AutoMergeRejectingRun(rollup={}, toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
 
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
-    assert "unknown" in _last_json(capsys, stream="err")["reason"]
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    held = _last_json(capsys)
+    assert "unknown" in held["reason"]
+    assert held["outcome"] == "held"
     assert len(fake.merge_cmds) == 0
+
+
+def test_slow_optional_check_does_not_hold_the_merge(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """GitHub's queue waits only for REQUIRED checks: a pending optional
+    check must not hold the merge forever (round 7)."""
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True),
+    )
+    rollup = {
+        "state": "OPEN",
+        "headRefOid": "deadbeefcafe",
+        "statusCheckRollup": [
+            {"name": "required-ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+             "isRequired": True},
+            {"name": "nightly-annotate", "status": "IN_PROGRESS", "conclusion": "",
+             "isRequired": False},
+        ],
+    }
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), checks=rollup,
+                   toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_optional_only_rollup_merges(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Everything optional = nothing to wait for: GitHub merges in this shape
+    and so does the in-process gate."""
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True),
+    )
+    rollup = {
+        "state": "OPEN",
+        "headRefOid": "deadbeefcafe",
+        "statusCheckRollup": [
+            {"name": "annotate", "status": "IN_PROGRESS", "conclusion": "",
+             "isRequired": False},
+        ],
+    }
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), checks=rollup,
+                   toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
 
 
 def test_a_genuine_merge_failure_is_not_retried_without_auto(
@@ -1255,9 +1314,12 @@ def test_a_degraded_checks_read_names_why_it_could_not_tell(
     fake = _BadRollup(toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
 
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
-    reason = _last_json(capsys, stream="err")["reason"]
-    assert "unparseable" in reason, reason
+    # held, not failed (round 7): an unreadable rollup is retry-later, never a
+    # failed-ship stamp on the node.
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    held = _last_json(capsys)
+    assert held["outcome"] == "held"
+    assert "unparseable" in held["reason"], held["reason"]
 
 
 def test_a_missing_gh_during_the_checks_read_keeps_exit_127(

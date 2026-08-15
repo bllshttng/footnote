@@ -998,14 +998,21 @@ impl ProviderWithPty for AgyProvider {
 pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
     if let Some(rest) = message.strip_prefix('/') {
         let mut parts = rest.splitn(2, ' ');
-        // `/fno:target --no-merge x` -> --command fno:target, args "--no-merge x".
+        // `/fno:target --no-merge x` -> --command fno:target, then the args as
+        // separate WORDS behind a `--` separator: one "--no-merge x" element
+        // after `--command <cmd>` starts with a dash, and the CLI's own argv
+        // parser reads a leading-'--' positional as an unknown flag (x-9d11
+        // round 7; live-verify against the pinned opencode version on the next
+        // real dispatch).
         if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
             let mut argv_tail = vec!["--command".to_string(), cmd.to_string()];
             if let Some(msg_args) = parts.next().filter(|a| !a.is_empty()) {
                 // Behind `--` (probed: yargs accepts it after --command's
-                // value): flag-shaped verb args ride as the message.
+                // value): flag-shaped verb args ride as separate argv words,
+                // not one joined string (a single element would land as one
+                // literal argv token instead of parseable flags).
                 argv_tail.push("--".to_string());
-                argv_tail.push(msg_args.to_string());
+                argv_tail.extend(msg_args.split_whitespace().map(str::to_string));
             }
             return argv_tail;
         }
@@ -1696,7 +1703,8 @@ mod tests {
                 "--command",
                 "fno:target",
                 "--",
-                "no-merge x-abcd"
+                "--no-merge",
+                "x-abcd"
             ]
         );
     }

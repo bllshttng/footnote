@@ -409,9 +409,17 @@ cmd+=(--name "$NAME")
 # env var too so the worker's init folds the refusal even if it never passes
 # the flag through to `fno target start/init` (post-compaction, thin skill
 # layer). The flag stays the attributable carrier; the env is the backstop.
-case " $MESSAGE " in
-  *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
-  *) unset TARGET_NO_MERGE 2>/dev/null || true ;;  # message is authoritative; an inherited carrier must not outlive it
+# Scoped to /target-family first tokens (same vocabulary as harness_map's
+# message_carries_no_merge): a /think or /review prompt that MENTIONS the flag
+# arms nothing, and the message is authoritative over any inherited carrier.
+case "${MESSAGE%% *}" in
+  /target|/fno:target|\$fno:target)
+    case " $MESSAGE " in
+      *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
+      *) unset TARGET_NO_MERGE 2>/dev/null || true ;;
+    esac
+    ;;
+  *) unset TARGET_NO_MERGE 2>/dev/null || true ;;
 esac
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"

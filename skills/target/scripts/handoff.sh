@@ -599,6 +599,11 @@ SPAWN_FLAGS=""
 if [ "$AUTO_MERGE_APPROVED" != "true" ]; then
   SPAWN_FLAGS="--no-merge"
   export TARGET_NO_MERGE=1
+else
+  # Clear-on-absent like every sibling setter (review round 7): a carrier
+  # leaked into this session's env must not outlive a manifest that granted
+  # merge authority.
+  unset TARGET_NO_MERGE
 fi
 if [ -n "$TARGET_SIZE" ]; then
   SPAWN_FLAGS="$SPAWN_FLAGS $TARGET_SIZE"

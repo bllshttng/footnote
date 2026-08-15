@@ -603,7 +603,9 @@ def _dispatch_one(
             "slug": slug or "",
             "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
         }
-    if "--no-merge" in message:
+    from fno.agents.harness_map import message_carries_no_merge
+
+    if message_carries_no_merge(message):
         provenance["TARGET_NO_MERGE"] = "1"
     try:
         result = dispatch_spawn_pane(
