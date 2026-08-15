@@ -1514,6 +1514,115 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
+/// The GraphQL bucket's state, from `gh api rate_limit`.
+///
+/// That endpoint is REST and primary-exempt, so the probe is free even while
+/// GraphQL sits at 0 - which is its whole job: it distinguishes "the call
+/// cannot succeed for N minutes" from "gh blipped", the two outcomes a bare
+/// read failure conflates. None on any failure: a failed probe must never
+/// fabricate an exhaustion verdict (a false "resets in 40m" would stall a
+/// healthy session for no reason).
+struct GraphqlQuota {
+    remaining: i64,
+    reset_epoch: i64,
+}
+
+/// Below this GraphQL remaining count, a no-promise fire stands down entirely:
+/// the last of the budget belongs to the operation that
+/// ships. Code default, named in the PR body - never the operator's config.
+const GRAPHQL_FLOOR: i64 = 200;
+
+fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
+    let out = Command::new(gh_bin)
+        .args(["api", "rate_limit"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let g = v.get("resources")?.get("graphql")?;
+    Some(GraphqlQuota {
+        remaining: g.get("remaining").and_then(|x| x.as_i64())?,
+        reset_epoch: g.get("reset").and_then(|x| x.as_i64())?,
+    })
+}
+
+/// GitHub's secondary (burst/concurrency) limit is a DIFFERENT thing from the
+/// primary hourly quota `probe_graphql_quota` reads: a 403 whose body names
+/// "secondary rate limit" can fire with both the core and graphql buckets
+/// reporting thousands remaining (measured live: core 4922/5000, graphql
+/// 1392/5000, a call refused anyway). `gh api rate_limit` cannot see it -
+/// there is no bucket for it - so it is detected only from a refusal's own
+/// stderr, never from advertised remaining. Mirrors `_SECONDARY` in
+/// `cli/src/fno/pr/_rest.py`; keep the two patterns in sync.
+fn is_secondary_limit_stderr(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("secondary rate limit")
+}
+
+/// Whether ANY session on this machine hit the secondary limit recently.
+/// The secondary limit is per-USER, not per-session: a fleet of concurrent
+/// sessions shares one burst budget, so a refusal scoped to the reading
+/// session alone means every other session keeps sending against a budget
+/// one of them just proved is refusing - each of those sends is itself a
+/// call against the shared limiter. Scans the MACHINE-WIDE `global_events`
+/// log (every session's `loop_check_gh_error` rows already land there via
+/// `emit_to_both`, so this reuses an existing write path rather than adding
+/// one) with no session filter, by design.
+/// The primary-quota floor (`GRAPHQL_FLOOR`) is blind to this failure mode by
+/// construction - advertised remaining looks healthy while calls are being
+/// refused - so a fire must ALSO stand down on observed refusals, not only
+/// on advertised headroom, or the floor never fires when it is most needed.
+fn recent_secondary_refusal(events_path: &Path, now: DateTime<Utc>, window_secs: i64) -> bool {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return false;
+    };
+    for line in content.lines().rev() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("loop_check_gh_error") {
+            continue;
+        }
+        let Some(ts) = val
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+        else {
+            continue;
+        };
+        if (now - ts).num_seconds() > window_secs {
+            break;
+        }
+        let tail = val
+            .pointer("/data/stderr_tail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if is_secondary_limit_stderr(tail) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The self-teaching exhaustion message. A session that reads it must stop
+/// retrying the GraphQL reads this window and know where the answer still
+/// lives - anything less and it burns a fire every tick on a call that
+/// cannot succeed until the reset.
+fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
+    let now = Utc::now().timestamp();
+    let mins = ((q.reset_epoch - now) / 60).max(0);
+    format!(
+        "GraphQL quota exhausted ({} remaining, resets in ~{}m). `gh pr view` / \
+         `gh pr checks` cannot succeed until the reset: stop retrying them this \
+         window. `fno pr status <n>` still answers its CI verdict on the REST \
+         budget (the optional review-thread check inside it is still GraphQL, \
+         coalesced under its own TTL cache so a repeat poll costs nothing).",
+        q.remaining, mins
+    )
+}
+
 /// A configured local reviewer with no head-pinned `pass` attestation.
 #[derive(Debug, Clone, PartialEq)]
 struct UnattestedReviewer {
@@ -5455,6 +5564,174 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let git_bin = &parsed.git_bin;
     let head_sha = git_head_sha(git_bin, &cwd);
 
+    // ── reserve a GraphQL floor for the merge guard ────────────────────────
+    // The GraphQL quota is per-USER and shared by every session on the machine;
+    // an idle fire's fingerprint reads are the unbounded low-value consumer that
+    // starves the bounded high-value one (the promise/merge evaluation). Below
+    // the floor, a fire carrying no promise intent STANDS DOWN: it spends no
+    // GraphQL at all rather than politely spending less. A promise-intent fire
+    // always proceeds - the floor belongs to it. The probe itself is REST and
+    // primary-exempt; a failed probe (None) changes nothing.
+    let quota_probe = probe_graphql_quota(gh_bin, &cwd);
+    // The primary-quota floor is blind to GitHub's SECONDARY (burst/
+    // concurrency) limit by construction: advertised `remaining` can read
+    // thousands healthy while a call is refused, because there is no bucket
+    // for it in `gh api rate_limit` (measured live: core 4922/5000, graphql
+    // 1392/5000, a 403 anyway). A floor keyed only on advertised remaining
+    // never fires when THAT is the limiter, so a fire also stands down on an
+    // observed secondary refusal in the last 5 minutes, independent of what
+    // the probe reports (and independent of whether the probe itself
+    // succeeded). Reads `global_events`, not `project_events`: the limit is
+    // per-USER, shared by every session on the machine, so a refusal any one
+    // of them observed must stand every fleet member down, not just the one
+    // that hit it.
+    let secondary_refusal = recent_secondary_refusal(&global_events, now, 300);
+    let below_primary_floor = quota_probe
+        .as_ref()
+        .map(|q| q.remaining < GRAPHQL_FLOOR)
+        .unwrap_or(false);
+    if below_primary_floor || secondary_refusal {
+        // Aborted is exempt too: honoring a cancel spends no GraphQL (the
+        // Aborted terminal in done() reads nothing), so blocking it here
+        // would trap a cancelled session behind the floor for a whole reset
+        // window - the operator's cancel outranks the reserve.
+        if !matches!(intent, Intent::Promise | Intent::Aborted { .. }) {
+            let remaining_field = quota_probe.as_ref().map(|q| q.remaining);
+            let remaining_display = remaining_field
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "unknown (probe failed)".to_string());
+            let cause = if secondary_refusal {
+                "a recent gh read hit GitHub's secondary (burst/concurrency) limit - the \
+                 advertised quota cannot see this, so it stays standing down until 5 \
+                 minutes pass with no further refusal"
+            } else {
+                "GraphQL primary quota"
+            };
+            // Lease-only exemption for a WATCHING fire (review finding on the
+            // floor): the watch-idle branch below is unreachable from here, so
+            // without this a quota window converts every watching fire into a
+            // "continue working" block - killing watch-idle exactly when quota
+            // is low - and the claim lease never renews. The wait class itself
+            // CANNOT be verified (that needs the reads we are refusing to
+            // spend), so this idles on the tag + lease alone, only on a
+            // harness that self-wakes, and the message says the state was not
+            // verified. The watcher's exit re-evaluates with fresh quota.
+            if let Intent::Watching {
+                ref reason,
+                ref timeout,
+                ref pr,
+            } = intent
+            {
+                if harness_can_idle(
+                    author_harness.as_deref(),
+                    std::env::var("FNO_DRIVER_LIB").is_ok(),
+                ) {
+                    let window_ms = watch_window_ms(timeout.as_deref());
+                    let renewed = match (
+                        scan_manifest_field(&manifest_content, "target_claim_key"),
+                        scan_manifest_field(&manifest_content, "target_claim_holder"),
+                    ) {
+                        (Some(key), Some(holder)) => matches!(
+                            crate::claims::renew(&key, &holder, window_ms, None),
+                            Ok(true)
+                        ),
+                        _ => false,
+                    };
+                    if renewed {
+                        // The tag's own `pr=`/`reason=` attributes are the only
+                        // source here (the stand-down verifies nothing), so
+                        // `blocker` is only as trustworthy as the agent's tag:
+                        // pass the declared reason through when it is one of
+                        // the two real classes, else the honest "unknown"
+                        // (schema-valid) rather than guessing.
+                        let blocker = match reason.as_str() {
+                            "ci" => "ci",
+                            "review" => "review",
+                            _ => "unknown",
+                        };
+                        emit(
+                            "loop_check_watch_idle",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "pr": pr.as_deref().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+                                "blocker": blocker,
+                                "declared_timeout": timeout.clone().unwrap_or_default(),
+                                "reason": reason,
+                                "lease_ms": window_ms,
+                                "stand_down": true,
+                                "graphql_remaining": remaining_field,
+                                "secondary_refusal": secondary_refusal
+                            }),
+                        );
+                        return (
+                            0,
+                            allow_output(
+                                "allow",
+                                None,
+                                &format!(
+                                    "watching under GraphQL stand-down ({cause}, remaining \
+                                     {remaining_display}): idling until the watcher fires. \
+                                     This fire verified NO PR state - the lease is renewed \
+                                     for the window and the watcher's exit re-evaluates."
+                                ),
+                                0,
+                                None,
+                            ),
+                        );
+                    }
+                    // renewal failed -> never idle without a lease: fall
+                    // through to the stand-down block below.
+                }
+            }
+            // A dedicated type, not "loop_check": this fire verified nothing
+            // (that is the point of standing down), so it has no real
+            // fingerprint. Emitting it AS a loop_check gave read_prior_fires an
+            // empty-string fingerprint that never matches current_fp, breaking
+            // the reverse-scan the instant it hit this row - one stand-down
+            // fire silently truncated the whole consecutive-unchanged streak
+            // for the session. loop_check_gh_error/_config are already
+            // siblings of loop_check for exactly this reason: an event whose
+            // fields do not fit the fingerprint contract does not overload it.
+            emit(
+                "loop_check_graphql_standdown",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "decision": "block",
+                    "intent": match &intent {
+                        Intent::Promise => "promise",
+                        Intent::Aborted { .. } => "aborted",
+                        Intent::Watching { .. } => "watching",
+                        Intent::None => "none",
+                    },
+                    "intent_source": intent_source,
+                    "standing_down": true,
+                    "graphql_remaining": remaining_field,
+                    "graphql_floor": GRAPHQL_FLOOR,
+                    "secondary_refusal": secondary_refusal
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "block",
+                    None,
+                    &format!(
+                        "standing down: {cause} (remaining {remaining_display}, floor \
+                         {GRAPHQL_FLOOR}), so this fire spends no GraphQL - `gh pr view` / \
+                         `gh pr checks` are SKIPPED, not retried. `fno pr status <n>` still \
+                         answers its CI verdict on the REST budget (a cache hit skips the \
+                         review-thread read too, and REST shares the same secondary limit \
+                         as GraphQL, so porting a read to REST alone does not escape a \
+                         burst refusal). The next fire re-probes; a promise intent always \
+                         proceeds."
+                    ),
+                    0,
+                    None,
+                ),
+            );
+        }
+    }
+
     // Compute fingerprint from a quick PR state read (or "none" if no PR)
     // We do a lightweight fingerprint computation even when intent is None,
     // to check backstop.
@@ -6524,12 +6801,25 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // still the binding ceiling, not budget. AC4-EDGE holds only in
                 // the sense that budget is checked before any gh read, so a gh
                 // outage alone never makes a session immortal from fno's side.
+                // Name the real reason when the quota is the reason.
+                // "retrying next fire" is the right advice for a blip and
+                // the worst possible advice for an exhausted quota: it burns a
+                // fire every tick for the whole reset window on a call that
+                // cannot succeed. The probe is REST and primary-exempt, so it
+                // still answers while GraphQL is at 0; a failed probe keeps
+                // the transient wording rather than guessing.
+                // Reuse the fire-start probe; re-probe only if it failed, so a
+                // blip at the top still gets its one retry without a second
+                // `gh api rate_limit` on every error fire (request-rate cost).
+                let quota = quota_probe.or_else(|| probe_graphql_quota(gh_bin, &cwd));
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
                         "session_id": session_id,
                         "read": failed_read,
-                        "stderr_tail": failed_stderr
+                        "stderr_tail": failed_stderr,
+                        "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                        "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
                     }),
                 );
                 emit(
@@ -6549,17 +6839,46 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "fp_read_failed": true
                     }),
                 );
-                return (
-                    0,
-                    allow_output(
-                        "block",
-                        None,
-                        &format!(
+                // pulls_comments(_parse) and pr_commits share this error arm but
+                // are not all GraphQL: pulls_comments is a REST endpoint
+                // (`gh api .../pulls/N/comments`). A zero-remaining probe
+                // must not blame GraphQL for a REST read's own failure - that
+                // reads as "stop retrying gh pr view" advice for a call that was
+                // never gh pr view and might succeed on the very next fire.
+                let is_graphql_read = matches!(
+                    failed_read.as_str(),
+                    "pr_view" | "pr_checks" | "pr_checks_parse" | "pr_reviews" | "pr_commits"
+                );
+                // Checked BEFORE the primary-quota branch and independent of
+                // it: a secondary (burst/concurrency) refusal has its OWN
+                // stderr signature and can fire with the primary quota
+                // reading thousands remaining (measured live: core 4922/5000,
+                // graphql 1392/5000, refused anyway). Naming it as primary
+                // exhaustion sends the caller to wait for a reset that can be
+                // 40 minutes away for a limit that actually clears in
+                // seconds - the exact "assert a positive marker, never an
+                // absence" trap this whole diagnosis exists to avoid.
+                let reason = if is_secondary_limit_stderr(&failed_stderr) {
+                    format!(
+                        "gh read '{failed_read}' hit GitHub's SECONDARY rate limit (burst/\
+                         concurrency, not the hourly quota - `gh api rate_limit` can read \
+                         thousands remaining here and still be wrong about this). Back off \
+                         briefly and retry; do not wait for a primary-quota reset, it can \
+                         clear in seconds. {failed_stderr}"
+                    )
+                } else {
+                    match &quota {
+                        Some(q) if q.remaining == 0 && is_graphql_read => {
+                            graphql_exhausted_reason(q)
+                        }
+                        _ => format!(
                             "gh read '{failed_read}' failed; retrying next fire. {failed_stderr}"
                         ),
-                        this_fire,
-                        Some(fingerprint),
-                    ),
+                    }
+                };
+                return (
+                    0,
+                    allow_output("block", None, &reason, this_fire, Some(fingerprint)),
                 );
             }
         }
@@ -6587,7 +6906,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `gh pr checks <N> --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & wait $w`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `i=0; while [ $i -lt 30 ]; do fno pr status <N> 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` - REST, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -6738,17 +7057,22 @@ fn short_sha(s: &str) -> String {
 /// returns - left alive, it wakes 30m later and kills whatever now holds that
 /// recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
-    // The watcher must WAIT on the actual blocker. `gh pr checks --watch` exits
-    // the instant CI has no pending checks, so on a review wait (CI already
-    // green) it returns immediately and the session just re-blocks - the review
-    // path needs a watcher that polls REVIEW state, not checks (codex P2).
+    // The watcher must WAIT on the actual blocker (codex P2): a review wait
+    // has CI already green, so a checks watcher returns instantly and the
+    // session just re-blocks. Both recipes poll on REST at a 60s interval:
+    // `gh pr checks --watch` / `gh pr view` are GraphQL, and
+    // a fleet of 60s GraphQL watchers is exactly what exhausts the per-USER
+    // quota the merge guard needs. The CI recipe greps for the POSITIVE
+    // settled marker, never for an absence: a rate-limited read answers
+    // `settled: false`, so an exhausted window keeps the watcher waiting
+    // instead of reading as "nothing pending".
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `n=$(gh pr view {pr_number} --json reviews --jq '.reviews|length'); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh pr view {pr_number} --json reviews --jq '.reviews|length')\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m)"
+            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api \"repos/$r/pulls/{pr_number}/reviews?per_page=100\" --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api \"repos/$r/pulls/{pr_number}/reviews?per_page=100\" --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m; per_page=100 because gh api fetches ONE page - at the default 30 the count saturates and a 31st review never wakes it)"
         )
     } else {
         format!(
-            "background Bash `gh pr checks {pr_number} --watch & w=$!; (sleep 1800; kill $w 2>/dev/null) & k=$!; wait $w; kill $k 2>/dev/null`"
+            "background Bash `i=0; while [ $i -lt 30 ]; do fno pr status {pr_number} 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` (wakes when CI settles - green or red - or after ~30m)"
         )
     };
     format!(
@@ -7896,12 +8220,18 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 );
                 return (4, data.to_string());
             }
+            // The emitted unknown row above is schema-gated, so the exhaustion
+            // diagnosis rides this stdout-only branch (and the stop hook's own
+            // block reason); it must not fork the event contract.
+            let quota = probe_graphql_quota(&gh_bin, &cwd);
             (
                 4,
                 serde_json::json!({
                     "error": format!("gh read failed: {read}"),
                     "detail": tail,
                     "emitted": false,
+                    "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                    "graphql_exhausted": quota.as_ref().map(|q| q.remaining == 0),
                 })
                 .to_string(),
             )
@@ -9388,7 +9718,10 @@ mod tests {
         let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("<watching"), "got: {reason}");
         assert!(reason.contains("timeout"), "got: {reason}");
-        assert!(reason.contains("gh pr checks"), "got: {reason}");
+        // The taught watcher is the REST status poll, never the
+        // GraphQL `gh pr checks --watch` this assertion used to pin.
+        assert!(reason.contains("fno pr status"), "got: {reason}");
+        assert!(!reason.contains("gh pr checks"), "got: {reason}");
         assert!(!reason.contains("wait silently"), "got: {reason}");
     }
 
@@ -10484,15 +10817,185 @@ mod tests {
     }
 
     #[test]
+    fn graphql_exhausted_reason_names_reset_and_rest_lane() {
+        // The message must make a session STOP retrying and say where the
+        // answer still lives; "retrying next fire" is the advice it replaces.
+        let q = GraphqlQuota {
+            remaining: 0,
+            reset_epoch: Utc::now().timestamp() + 40 * 60 + 5,
+        };
+        let msg = graphql_exhausted_reason(&q);
+        assert!(msg.contains("GraphQL quota exhausted"), "got: {msg}");
+        assert!(msg.contains("~40m"), "got: {msg}");
+        assert!(msg.contains("fno pr status"), "got: {msg}");
+        assert!(!msg.contains("retrying next fire"), "got: {msg}");
+    }
+
+    #[test]
+    fn graphql_exhausted_reason_never_reports_a_past_reset() {
+        let q = GraphqlQuota {
+            remaining: 0,
+            reset_epoch: Utc::now().timestamp() - 120,
+        };
+        assert!(graphql_exhausted_reason(&q).contains("~0m"));
+    }
+
+    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn probe_graphql_quota_parses_the_graphql_bucket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(
+            tmp.path(),
+            "gh",
+            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+             echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000}}}' && exit 0\n\
+             exit 1\n",
+        );
+        // Retry the spawn a few times: under a loaded CI runner (this crate's
+        // suite forks hundreds of fake `gh`/`git` subprocesses in parallel),
+        // `Command::output()` has measured an intermittent fork/exec failure
+        // that has nothing to do with the parser under test - probe_graphql_
+        // quota's own `.ok()?` already treats that as "unavailable, degrade
+        // gracefully" in production, so retrying here absorbs the same
+        // transient blip instead of failing the build on an infra hiccup.
+        let mut q = None;
+        for _ in 0..5 {
+            q = probe_graphql_quota(gh.to_str().unwrap(), tmp.path());
+            if q.is_some() {
+                break;
+            }
+        }
+        let q = q.expect("gh spawn kept failing across 5 retries - a real regression, not a blip");
+        assert_eq!(q.remaining, 0);
+        assert_eq!(q.reset_epoch, 1750000000);
+    }
+
+    #[test]
+    fn probe_graphql_quota_failure_is_none_not_a_false_exhaustion() {
+        // A failed probe must degrade to the transient wording, never
+        // fabricate an exhaustion verdict that stalls a healthy session.
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 1\n");
+        assert!(probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).is_none());
+    }
+
+    #[test]
+    fn is_secondary_limit_stderr_matches_ghs_real_wording_case_insensitively() {
+        assert!(is_secondary_limit_stderr(
+            "You have exceeded a secondary rate limit. Please wait a few minutes."
+        ));
+        assert!(is_secondary_limit_stderr("SECONDARY RATE LIMIT hit"));
+        assert!(!is_secondary_limit_stderr(
+            "API rate limit exceeded for user ID 1."
+        ));
+        assert!(!is_secondary_limit_stderr(""));
+    }
+
+    #[test]
+    fn recent_secondary_refusal_finds_a_matching_gh_error_within_the_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check_gh_error",
+                    "ts": "2026-06-05T00:28:00Z",
+                    "data": {
+                        "session_id": "sess-sec",
+                        "read": "pulls_comments",
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        assert!(recent_secondary_refusal(&events, now, 300));
+        // Outside the window (5 minutes = 300s; this row is 130s old, so still
+        // in-window - shrink the window to prove the cutoff actually applies).
+        assert!(!recent_secondary_refusal(&events, now, 60));
+    }
+
+    #[test]
+    fn recent_secondary_refusal_is_fleet_wide_not_scoped_to_the_reading_session() {
+        // The secondary limit is per-USER: a refusal observed by session A
+        // must stand session B down too, or a 29-session fleet only quiets
+        // one member at a time while the other 28 keep tripping the guard.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check_gh_error",
+                    "ts": "2026-06-05T00:28:00Z",
+                    "data": {
+                        "session_id": "sess-a",
+                        "read": "pulls_comments",
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        assert!(recent_secondary_refusal(&events, now, 300));
+    }
+
+    #[test]
+    fn recent_secondary_refusal_ignores_a_primary_quota_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check_gh_error",
+                    "ts": "2026-06-05T00:29:30Z",
+                    "data": {
+                        "session_id": "sess-prim",
+                        "read": "pr_view",
+                        "stderr_tail": "API rate limit exceeded for user ID 1."
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        assert!(!recent_secondary_refusal(&events, now, 300));
+    }
+
+    #[test]
     fn unwatched_async_nudge_review_uses_review_aware_watcher() {
         // codex P2: the review-wait watcher must poll REVIEW state, not
-        // `gh pr checks --watch` (which exits instantly when CI is green).
+        // checks. It must also poll on REST - the GraphQL
+        // reviews read is part of what exhausts the shared quota.
         let hint = arm_watch_hint(404, "review");
-        assert!(hint.contains("--json reviews"), "got: {hint}");
-        assert!(!hint.contains("gh pr checks"), "got: {hint}");
-        // The CI-wait watcher still uses checks --watch.
+        assert!(hint.contains("pulls/404/reviews"), "got: {hint}");
+        assert!(hint.contains("gh api"), "got: {hint}");
+        assert!(!hint.contains("gh pr view"), "got: {hint}");
+        assert!(hint.contains("sleep 60"), "got: {hint}");
+        // The CI-wait watcher polls the REST status chokepoint for the
+        // POSITIVE settled marker, never `gh pr checks --watch` (GraphQL).
         let ci_hint = arm_watch_hint(404, "ci");
-        assert!(ci_hint.contains("gh pr checks"), "got: {ci_hint}");
+        assert!(ci_hint.contains("fno pr status 404"), "got: {ci_hint}");
+        assert!(!ci_hint.contains("gh pr checks"), "got: {ci_hint}");
+        assert!(ci_hint.contains("'\"settled\": true'"), "got: {ci_hint}");
+        assert!(ci_hint.contains("sleep 60"), "got: {ci_hint}");
     }
 
     #[test]

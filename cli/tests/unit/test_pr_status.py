@@ -421,45 +421,6 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
     ]
 
 
-def test_rate_limit_reason_names_the_graphql_bucket():
-    # The trap this message exists for: `gh pr view` spends GraphQL, while the
-    # obvious check reports CORE and can read full at the same moment.
-    res = Result(
-        returncode=1,
-        stdout="",
-        stderr="GraphQL: API rate limit already exceeded for user ID 1.",
-    )
-    reason = _status._fetch_reason(res)
-    assert "graphql" in reason.lower()
-    assert "resources.graphql" in reason
-
-
-def test_rate_limit_reason_survives_a_trailing_hint():
-    # gh appends a hint after the error. Reading only the last line handed the
-    # caller the hint and dropped the clause naming the bucket.
-    res = Result(
-        returncode=1,
-        stdout="",
-        stderr=(
-            "GraphQL: API rate limit already exceeded for user ID 1.\n"
-            "Try authenticating with: gh auth login\n"
-        ),
-    )
-    reason = _status._fetch_reason(res)
-    assert "resources.graphql" in reason
-    assert reason.startswith("GraphQL: API rate limit")
-
-
-def test_fetch_reason_passes_an_ordinary_failure_through():
-    res = Result(returncode=1, stdout="", stderr="could not resolve to a PullRequest")
-    assert _status._fetch_reason(res) == "could not resolve to a PullRequest"
-
-
-def test_fetch_reason_never_returns_empty_on_a_silent_failure():
-    # An empty reason would rebuild the unactionable verdict this replaces.
-    assert _status._fetch_reason(Result(returncode=1, stdout="", stderr="")).strip()
-
-
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
     monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: (None, "quota gone"))
     assert _status.run_status("99") == 4

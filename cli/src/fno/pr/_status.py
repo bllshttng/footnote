@@ -2,10 +2,11 @@
 
 Agents kept re-deriving CI-green from `statusCheckRollup` by hand (or trusting
 `gh pr checks`, which disagrees with the rollup). This computes a single
-settled/green/red verdict from `gh pr view --json statusCheckRollup`, handling
+settled/green/red verdict from the check rollup, handling
 the in-progress case (a CheckRun with `status != COMPLETED` has an empty
 `conclusion` and must read as *pending*, never red) and the no-checks case
-(verdict `unknown`, never red).
+(verdict `unknown`, never red). The rollup arrives over REST (`fno.pr._rest`)
+so the read spends the idle core budget, never the shared GraphQL one.
 
 Exit codes (so a caller can branch without re-parsing the JSON):
     0  green    - settled, every check passed
@@ -20,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional, Sequence
 
-from fno.pr._proc import ToolMissing, run
+from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
     _UNKNOWN_COVERAGE,
     read_optional_review_state,
@@ -139,52 +140,15 @@ def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
     is unactionable. The cause is always on gh's stderr and used to be discarded
     here, so a caller saw the same four fields for a deleted PR, a network
     failure, and an exhausted API quota.
+
+    The reads are REST: `gh pr view` spends the per-USER GraphQL quota
+    that every watcher on the machine shares, and its exhaustion blinded the
+    stop hook for whole reset windows while core REST sat untouched. See
+    ``fno.pr._rest``; the GraphQL reader this replaced lived inline here.
     """
-    res = run(
-        # headRefOid rides along so the coverage recompute can pin its emitted
-        # row to the PR head, not the local checkout's HEAD.
-        ["gh", "pr", "view", pr, "--json", "state,statusCheckRollup,headRefOid"],
-        cwd=cwd,
-    )
-    if res.ok and not res.stdout.strip():
-        # gh did not fail here, so `_fetch_reason` would read an empty stderr and
-        # answer "gh pr view failed with no message", which is the opposite of
-        # what happened. This whole function exists to make `verdict: error`
-        # actionable, and a wrong cause is worse than a vague one.
-        return None, "gh pr view succeeded but returned empty output"
-    if not res.ok:
-        return None, _fetch_reason(res)
-    try:
-        return json.loads(res.stdout), ""
-    except json.JSONDecodeError:
-        return None, "gh returned output that is not JSON"
+    from fno.pr._rest import fetch_pr_rest
 
-
-def _fetch_reason(res) -> str:
-    """Explain a failed gh read, and name the right bucket on a quota block.
-
-    A rate-limit block gets the extra clause because the obvious check disagrees
-    with it. ``gh pr view`` spends the GRAPHQL quota, while ``gh api rate_limit``
-    reports its top-level ``rate`` and ``resources.core`` bucket, which can read
-    5000 remaining at the same moment GraphQL sits at 0. An agent that polls in a
-    loop exhausts GraphQL first, then reads a clean bill of health and keeps
-    polling. Naming the bucket is what makes the wait end.
-    """
-    lines = [ln.strip() for ln in (getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
-    # The WHOLE stderr is scanned for the quota line, never just the last one.
-    # gh often appends a hint after the error, and reading only the final line
-    # handed the caller the hint and dropped the clause that names the bucket.
-    quota = next((ln for ln in lines if "rate limit" in ln.lower()), "")
-    detail = quota or (lines[-1] if lines else "gh pr view failed with no message")
-    if quota:
-        return (
-            detail
-            + " | this is the GraphQL quota. `gh api rate_limit` reports the CORE"
-            " bucket and can read 5000 remaining while GraphQL is at 0, so check"
-            " `gh api rate_limit --jq .resources.graphql` and wait for its reset"
-            " rather than retrying."
-        )
-    return detail
+    return fetch_pr_rest(pr, cwd)
 
 
 def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
@@ -335,7 +299,13 @@ def main(argv: Sequence[str]) -> int:
         sys.stderr.write("usage: fno pr status <pr-number>\n")
         return 2
     try:
-        return run_status(str(argv[0]))
+        from fno.pr._cache import cached_status
+
+        # The CLI chokepoint goes through the coalescing cache: N sessions
+        # polling one PR issue one network read per TTL. The
+        # library entry (run_status) stays uncached for programmatic callers
+        # and tests.
+        return cached_status(str(argv[0]))
     except ToolMissing:
         import sys
 

@@ -2164,6 +2164,38 @@ event_types:
           description: "Last few lines of gh stderr, or empty string if unavailable."
     consumers: [operator]
 
+  - name: loop_check_graphql_standdown
+    description: "Emitted when a fire stands down instead of blocking via loop_check: below the primary GraphQL floor, on an observed secondary (burst/concurrency) refusal in the last 5 minutes, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
+    sources: [hook]
+    data:
+      required: [session_id, decision, standing_down, graphql_remaining, graphql_floor]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        decision:
+          type: string
+          description: "Always 'block': the fire spends no GraphQL and retries next tick."
+        intent:
+          type: string
+          description: "The detected intent for this fire: promise, aborted, watching, or none."
+        intent_source:
+          type: string
+          description: "Where the intent was detected (transcript tag, etc)."
+        standing_down:
+          type: boolean
+          description: "Always true; distinguishes this from a normal block."
+        graphql_remaining:
+          type: [integer, "null"]
+          description: "GraphQL quota remaining at the top-of-fire probe, or null if the probe itself failed (a secondary refusal can still trigger stand-down with no probe reading)."
+        graphql_floor:
+          type: integer
+          description: "The configured floor (GRAPHQL_FLOOR) this remaining count fell below."
+        secondary_refusal:
+          type: boolean
+          description: "True when a recent gh read on this session hit GitHub's secondary (burst/concurrency) limit - a failure mode the advertised quota cannot see, so this is the only signal for it."
+    consumers: [operator]
+
   - name: loop_check_config
     description: "Emitted once on the first loop-check fire of a session, recording the resolved CLAUDE_CODE_STOP_HOOK_BLOCK_CAP so a run force-ended by the harness override (blocks meeting the cap, then silence) is distinguishable from a budget end (a terminal budget decision)."
     sources: [hook]
@@ -2196,8 +2228,8 @@ event_types:
           description: "PR number the session is watching."
         blocker:
           type: string
-          enum: [ci, review]
-          description: "The async blocker being waited on: 'ci' (checks pending) or 'review' (a bot review outstanding)."
+          enum: [ci, review, unknown]
+          description: "The async blocker being waited on: 'ci' (checks pending), 'review' (a bot review outstanding), or 'unknown' (a GraphQL-floor stand-down idled on the tag alone, with no read to classify the wait)."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
@@ -2207,6 +2239,15 @@ event_types:
         lease_ms:
           type: integer
           description: "The claim-lease window (ms) the fire renewed to cover the watch: declared timeout clamped to [5m,2h] plus slack."
+        stand_down:
+          type: boolean
+          description: "Optional. True when this idle was reached via a GraphQL stand-down (primary floor or a secondary refusal) rather than a normal verified async wait."
+        graphql_remaining:
+          type: [integer, "null"]
+          description: "Optional. GraphQL quota remaining at the top-of-fire probe, present on a stand-down idle; null if the probe itself failed."
+        secondary_refusal:
+          type: boolean
+          description: "Optional. True when this idle's stand-down was triggered by an observed secondary (burst/concurrency) refusal rather than (or in addition to) the primary floor."
     consumers: [operator]
 
   - name: loop_advisory_mode

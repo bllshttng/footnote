@@ -370,6 +370,17 @@ fn fire(args: &[&str]) -> (i32, Decision) {
     // by the bash e2e harness, which controls HOME per case).
     args_owned.push("--global-settings".to_string());
     args_owned.push("/nonexistent/global-settings.yaml".to_string());
+    // Hermeticity, third door: recent_secondary_refusal reads global_events,
+    // which defaults to the developer's real ~/.fno/events.jsonl. This very
+    // suite runs under a live footnote session whose own stop-hook fires
+    // write secondary-refusal rows to that real file all session long, so an
+    // unisolated test silently inherits an unrelated stand-down. A case that
+    // wants to test the secondary-refusal path passes its own
+    // `--global-events`, and this skips.
+    if !args.iter().any(|a| a.starts_with("--global-events")) {
+        args_owned.push("--global-events".to_string());
+        args_owned.push("/nonexistent/global-events.jsonl".to_string());
+    }
     // Hermeticity, second door: the author harness came from ambient env
     // markers, so these cases passed in CI (no marker) and failed under
     // `cargo test` run from inside Claude Code, where the marker floors a
@@ -5852,4 +5863,508 @@ fn line_bucket(line: &str, label: &str) -> usize {
         .collect::<String>()
         .parse()
         .unwrap_or_else(|_| panic!("no digits after {label:?} in {line}"))
+}
+
+// ── GraphQL quota floor + exhaustion naming ───────────────────────────────
+
+/// A gh mock that answers ONLY `api rate_limit` (GraphQL bucket per `remaining`
+/// in the script body) and `--version`, fails everything else, and logs every
+/// invocation to `calls.log` so a test can prove which reads a fire spent.
+fn quota_gh(dir: &Path, remaining: i64, green_pr_view: bool) -> PathBuf {
+    let reset = chrono::Utc::now().timestamp() + 40 * 60;
+    let pr_view_body = if green_pr_view {
+        r#"if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}'
+  exit 0
+fi"#
+    } else {
+        "true"
+    };
+    make_script(
+        dir,
+        "gh",
+        &format!(
+            r#"echo "$*" >> "{calls}"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if [ "$1" = api ] && [ "$2" = rate_limit ]; then
+  echo '{{"resources":{{"graphql":{{"remaining":{remaining},"reset":{reset}}}}}}}'
+  exit 0
+fi
+{pr_view_body}
+exit 1"#,
+            calls = dir.join("calls.log").display(),
+            remaining = remaining,
+            reset = reset,
+            pr_view_body = pr_view_body,
+        ),
+    )
+}
+
+/// Item 4: below the floor and carrying no promise intent, a fire spends NO
+/// GraphQL at all - the stand-down must precede every `gh pr view`.
+#[test]
+fn floor_stand_down_spends_no_graphql() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floor", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+
+    let gh = quota_gh(cwd, 50, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("standing down"), "got: {}", d.message);
+    assert!(d.message.contains("floor"), "got: {}", d.message);
+    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
+    assert!(calls.contains("api rate_limit"), "probe must run: {calls}");
+    assert!(
+        !calls.contains("pr view"),
+        "no GraphQL spend below floor: {calls}"
+    );
+    // A stand-down fire verifies no PR state, so it has no real fingerprint.
+    // It must NOT be recorded as a "loop_check" event: read_prior_fires scans
+    // for that exact type and treats a missing fingerprint as an empty
+    // string, which never matches current_fp and truncates the reverse-scan
+    // the instant it hits this row - one stand-down silently breaks the
+    // consecutive-unchanged streak for every earlier fire in the session.
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"type\":\"loop_check_graphql_standdown\"")
+            || events.contains("\"type\": \"loop_check_graphql_standdown\""),
+        "stand-down must emit its own event type, not loop_check: {events}"
+    );
+    for line in events.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v.get("type").and_then(|t| t.as_str()) == Some("loop_check") {
+            panic!("a stand-down fire must never be recorded as loop_check (breaks the fingerprint streak scan): {line}");
+        }
+    }
+}
+
+/// The primary floor is blind to GitHub's secondary (burst/concurrency)
+/// limit by construction: a live specimen showed core 4922/5000 and graphql
+/// 1392/5000 - both healthy - while a call was refused anyway. A fire must
+/// also stand down on an OBSERVED secondary refusal in the last 5 minutes,
+/// never only on advertised quota headroom.
+#[test]
+fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let global_dir = tmp.path().join("global_fno");
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::create_dir_all(&global_dir).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    let global_events_path = global_dir.join("events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-2ndary", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+    // A prior fire's forensic trail: a secondary-limit refusal 90s ago, well
+    // inside the 5-minute window, on the MACHINE-WIDE log (`emit_to_both`'s
+    // destination for every session's rows, this session's included).
+    fs::write(
+        &global_events_path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "loop_check_gh_error",
+                "ts": "2026-06-05T00:28:30Z",
+                "data": {
+                    "session_id": "sess-2ndary",
+                    "read": "pulls_comments",
+                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    // 4922 remaining, well above GRAPHQL_FLOOR (200): the primary floor alone
+    // would NOT trigger here. Only the observed refusal should.
+    let gh = quota_gh(cwd, 4922, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+        "--global-events",
+        global_events_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("standing down"), "got: {}", d.message);
+    assert!(
+        d.message.contains("secondary"),
+        "must name the secondary limit, not just the primary floor: {}",
+        d.message
+    );
+    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
+    assert!(
+        !calls.contains("pr view"),
+        "no GraphQL spend on a secondary-refusal stand-down: {calls}"
+    );
+}
+
+/// The fleet-wide half of the same guard: the secondary limit is per-USER,
+/// so a refusal recorded by ANOTHER session on this machine must stand THIS
+/// session down too, not just one that refused itself. 29 live workers were
+/// on this machine the night the guard was designed; a per-session refusal
+/// record would have let 28 of them keep sending against a budget the 29th
+/// had already proven refused.
+#[test]
+fn floor_stands_down_on_another_sessions_secondary_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let global_dir = tmp.path().join("global_fno");
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::create_dir_all(&global_dir).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    let global_events_path = global_dir.join("events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-quiet", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+    // A DIFFERENT session's refusal, in the shared machine-wide log. This
+    // session's own project-local log has no such row.
+    fs::write(
+        &global_events_path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "loop_check_gh_error",
+                "ts": "2026-06-05T00:28:30Z",
+                "data": {
+                    "session_id": "sess-loud",
+                    "read": "pulls_comments",
+                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let gh = quota_gh(cwd, 4922, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+        "--global-events",
+        global_events_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("secondary"),
+        "another session's refusal must stand this one down too: {}",
+        d.message
+    );
+}
+
+/// Item 4's other half: the floor belongs to the merge guard, so a
+/// promise-intent fire proceeds below it.
+#[test]
+fn floor_never_blocks_a_promise() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floor2", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // Exhausted (0 remaining) AND green: the promise must still be evaluated.
+    let gh = quota_gh(cwd, 0, true);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert!(!d.message.contains("standing down"), "got: {}", d.message);
+    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
+    assert!(calls.contains("pr view"), "promise reads proceed: {calls}");
+    assert_eq!(code, 0);
+}
+
+/// The floor's other exemption: honoring a cancel spends no GraphQL, so an
+/// aborted fire below the floor must still terminate - blocking it would trap
+/// a cancelled session behind the reserve for a whole reset window.
+#[test]
+fn floor_never_blocks_an_abort() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floor-abort", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_aborted()).unwrap();
+
+    let gh = quota_gh(cwd, 50, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert!(!d.message.contains("standing down"), "got: {}", d.message);
+    assert_eq!(d.decision, "allow");
+    assert_eq!(d.termination_reason.as_deref(), Some("Aborted"));
+}
+
+/// Item 2: an exhausted quota turns the bare read failure into the exhaustion
+/// name with a reset horizon, and drops the "retrying next fire" advice.
+#[test]
+fn exhaustion_named_on_read_failure() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-exh", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // remaining 0 with a FAILING pr view: the done() read errors and the
+    // reason must name the bucket, not just "retrying next fire".
+    let gh = quota_gh(cwd, 0, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("GraphQL quota exhausted"),
+        "got: {}",
+        d.message
+    );
+    assert!(d.message.contains("resets in ~"), "got: {}", d.message);
+    assert!(d.message.contains("fno pr status"), "got: {}", d.message);
+    assert!(
+        !d.message.contains("retrying next fire"),
+        "exhaustion must not be advised to retry: {}",
+        d.message
+    );
+}
+
+/// A secondary (burst/concurrency) refusal must NOT be named as primary
+/// quota exhaustion, even when the read that failed IS a GraphQL read: the
+/// two failure modes clear on completely different timescales (seconds vs
+/// up to an hour), and misnaming one as the other sends the caller to wait
+/// for a reset that was never the actual limiter.
+#[test]
+fn secondary_refusal_is_named_distinctly_from_primary_exhaustion() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-2nderr", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // rate_limit reports HEALTHY (both buckets), but the actual pr_view call
+    // fails with a secondary-limit stderr - the live specimen's exact shape.
+    let calls_log = cwd.join("calls.log");
+    let gh = make_script(
+        cwd,
+        "gh",
+        &format!(
+            r#"echo "$*" >> "{calls}"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if [ "$1" = api ] && [ "$2" = rate_limit ]; then
+  echo '{{"resources":{{"core":{{"remaining":4922,"reset":9999999999}},"graphql":{{"remaining":1392,"reset":9999999999}}}}}}'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  echo "HTTP 403: You have exceeded a secondary rate limit" >&2
+  exit 1
+fi
+exit 1"#,
+            calls = calls_log.display(),
+        ),
+    );
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("SECONDARY"),
+        "must name the secondary limit: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("GraphQL quota exhausted"),
+        "must not misname a secondary refusal as primary exhaustion: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("resets in ~"),
+        "must not point at the primary reset horizon for a secondary refusal: {}",
+        d.message
+    );
+}
+
+/// The floor's watching exemption must NEVER idle without a lease: a watching
+/// fire below floor whose claim cannot be renewed falls through to the
+/// stand-down block (and never crashes on the exemption path itself).
+#[test]
+fn floor_watching_fire_without_lease_still_blocks() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-floorw", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    // A newest-entry <watching> tag (no claim fields in the manifest, so the
+    // lease renewal cannot succeed).
+    let msg = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": "<watching reason=\"ci\" pr=\"1\" timeout=\"30m\">"
+        }
+    });
+    fs::write(
+        &transcript_path,
+        serde_json::to_string(&msg).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let gh = quota_gh(cwd, 50, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(d.message.contains("standing down"), "got: {}", d.message);
+    assert!(
+        !d.message.contains("watching under GraphQL stand-down"),
+        "an unleased watching fire must not idle: {}",
+        d.message
+    );
 }
