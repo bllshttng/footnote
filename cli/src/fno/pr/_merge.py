@@ -663,7 +663,7 @@ def _on_confirmed_merge(pr_number: int, cwd: str = "") -> None:
     Sync merge_status + stamp ship provenance (``_sync_graph_merge_status``), then
     close the node (``_reconcile_merged_pr_node``). The three merged code paths
     call this ONE function so the node-close can never be forgotten on one of
-    them; the queued/failed paths keep calling ``_sync_graph_merge_status`` alone.
+    them; the failure paths keep calling ``_sync_graph_merge_status`` alone.
     """
     _sync_graph_merge_status("merged", pr_number, cwd)
     _reconcile_merged_pr_node(pr_number, cwd)
