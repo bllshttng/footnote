@@ -77,7 +77,7 @@ def test_claude_pane_permission_mode_passthrough():
 def test_claude_pane_yolo_maps_to_bypass_permissions():
     """AC4-HP: claude --yolo now means bypassPermissions (was a no-op)."""
     argv = build_pane_argv("claude", "hi", CWD, True, "uuid", None)
-    assert argv[-3:] == ["--permission-mode", "bypassPermissions", "hi"]
+    assert argv[-4:] == ["--permission-mode", "bypassPermissions", "--", "hi"]
 
 
 def test_codex_pane_colon_two_axis_form():
@@ -284,7 +284,7 @@ def test_claude_python_build_argv_threads_permission_mode():
 
     argv = _build_argv("w1", "hi", False, None, "acceptEdits")
     assert argv == ["claude", "--bg", "--name", "w1", "--permission-mode",
-                    "acceptEdits", "hi"]
+                    "acceptEdits", "--", "hi"]
     assert _build_argv("w1", "hi", False, None, None) == _build_argv("w1", "hi", False)
 
 

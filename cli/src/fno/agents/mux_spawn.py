@@ -852,7 +852,10 @@ def build_pane_argv(
             argv += effort_tokens("claude", effort)
         argv += tier3
         if message:
-            argv.append(message)
+            # The seed rides behind `--` so a leading-flag seed ("--model x
+            # ...") reaches claude as the prompt positional instead of dying
+            # in its flag parser (verified against the real CLI).
+            argv += ["--", message]
         return argv
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
@@ -879,7 +882,10 @@ def build_pane_argv(
             argv += effort_tokens("codex", effort)
         argv += tier3
         if message:
-            argv.append(message)
+            # Same fence as the claude arm: clap itself prescribes `--` ("to
+            # pass ... as a value, use '-- ...'"), so a leading-flag seed is
+            # the PROMPT, not a flag.
+            argv += ["--", message]
         return argv
     if provider == "gemini":
         if effort:
@@ -916,6 +922,9 @@ def build_pane_argv(
             argv += ["--model", model]
         argv += tier3
         if message:
+            # Deliberately unfenced: agy is closed-source and its `--` support
+            # is unverified, so fencing blind could break every agy pane. A
+            # leading-flag seed fails loudly at agy's own parser either way.
             argv.append(message)
         return argv
     if provider == "opencode":

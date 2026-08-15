@@ -663,7 +663,10 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     assert tail[claude_at + 2] == result.session_uuid
     assert tail[claude_at + 3] == "--name"
     assert tail[claude_at + 4] == "peer"
-    assert tail[claude_at + 5] == "hello"
+    # The seed rides behind its own `--` fence: a leading-flag seed must reach
+    # claude as the prompt positional, never its flag parser.
+    assert tail[claude_at + 5] == "--"
+    assert tail[claude_at + 6] == "hello"
 
     assert result.pane_id == 7
     assert result.session == "main"
@@ -788,11 +791,13 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     from fno.agents.mux_spawn import build_pane_argv
 
     claude = build_pane_argv("claude", "task", tmp_path, False, "uuid-1")
-    assert claude == ["claude", "--session-id", "uuid-1", "task"]
+    assert claude == ["claude", "--session-id", "uuid-1", "--", "task"]
 
     codex = build_pane_argv("codex", "task", tmp_path, False, None)
     assert codex[:3] == ["codex", "-C", str(tmp_path)]
     assert "--sandbox" in codex and codex[-1] == "task"
+    # The codex seed rides behind clap's own end-of-options fence.
+    assert codex[-2] == "--"
     codex_yolo = build_pane_argv("codex", "", tmp_path, True, None)
     assert "--dangerously-bypass-approvals-and-sandbox" in codex_yolo
 
@@ -2920,6 +2925,7 @@ def test_claude_pane_argv_carries_the_worker_name(tmp_path: Path) -> None:
         "uuid-1",
         "--name",
         "target-x-e4bf-ca-enf",
+        "--",
         "task",
     ]
 
@@ -2929,6 +2935,7 @@ def test_claude_pane_argv_carries_the_worker_name(tmp_path: Path) -> None:
         "claude",
         "--session-id",
         "uuid-1",
+        "--",
         "task",
     ]
 
