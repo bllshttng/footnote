@@ -53,7 +53,7 @@ def _resolve_fno(explicit: str | None) -> str:
     binary = shutil.which("fno")
     if not binary:
         print("error: 'fno' binary not on PATH", file=sys.stderr)
-        print("  install with: uv tool install <fno-repo>/cli", file=sys.stderr)
+        print("  install with: uv tool install --compile-bytecode <fno-repo>/cli", file=sys.stderr)
         sys.exit(2)
     return binary
 

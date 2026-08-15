@@ -891,7 +891,11 @@ def _uv_retry_sh(cmd: list[str]) -> str:
         f'else __rc=$?; cat "$__e" >&2; '
         f'if ! grep -q "Directory not empty" "$__e" '
         f'|| ! grep -q "os error 66" "$__e" '
-        f'|| [ "$__n" -ge {_UV_INSTALL_ATTEMPTS} ]; then rm -f "$__e"; exit "$__rc"; fi; '
+        f'|| [ "$__n" -ge {_UV_INSTALL_ATTEMPTS} ]; then rm -f "$__e"; '
+        # Same words the fno.sh / postinstall twins die with, so every
+        # provisioning path explains the capped race identically.
+        f'if [ "$__n" -ge {_UV_INSTALL_ATTEMPTS} ]; then echo "fno: uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run." >&2; fi; '
+        f'exit "$__rc"; fi; '
         f'rm -f "$__e"; sleep 1; fi; done'
     )
 

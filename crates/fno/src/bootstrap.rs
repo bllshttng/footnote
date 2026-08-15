@@ -210,8 +210,8 @@ fn locate_failure_message(
         }
         None => msg.push_str(
             "\nInstall it manually to see uv's own error: \
-             `uv tool install --force fno`, or from a checkout: \
-             `uv tool install --force --from <repo>/cli fno`",
+             `uv tool install --force --compile-bytecode fno`, or from a checkout: \
+             `uv tool install --force --compile-bytecode --from <repo>/cli fno`",
         ),
     }
     msg
@@ -633,7 +633,7 @@ fn stale_wheel_message(pre_rename_script: bool, installed_version: Option<&str>)
     Some(format!(
         "{head} - it has no fno-py script.\n\
          A newer fno release must be published; meanwhile install from source:\n\
-         uv tool install --force --from <repo>/cli fno"
+         uv tool install --force --compile-bytecode --from <repo>/cli fno"
     ))
 }
 
@@ -1031,7 +1031,7 @@ mod tests {
         assert!(m.contains("(0.2.1)"), "{m}");
         assert!(m.contains("no fno-py script"), "{m}");
         assert!(
-            m.contains("uv tool install --force --from <repo>/cli fno"),
+            m.contains("uv tool install --force --compile-bytecode --from <repo>/cli fno"),
             "{m}"
         );
     }

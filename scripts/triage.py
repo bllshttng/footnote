@@ -51,7 +51,7 @@ def _forward(argv: list[str]) -> int:
         from fno.graph.triage import cli as triage_app  # type: ignore[import-not-found]
     except ImportError:
         sys.stderr.write(
-            f"error: fno CLI not found. Install with: uv tool install '{_repo_root / 'cli'}'\n"
+            f"error: fno CLI not found. Install with: uv tool install --compile-bytecode '{_repo_root / 'cli'}'\n"
             "       (or run from a repo where cli/src is on PYTHONPATH)\n"
         )
         return 3
