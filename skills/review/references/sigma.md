@@ -129,7 +129,7 @@ If the head advances during review, Step 6d retains the completed round without 
 
 ### Step 1b: Resolve Review Scope (MANDATORY - the single changed-files producer)
 
-Every diff-derived "which files changed" read in this pass resolves from this step: tier detection, change-type detection, dispatch prompts, and plan-drift detection. Never compute a second changed-files list anywhere else in the pass. A second producer scanning a different base makes a round report narrow while scanning wide (or the reverse), which is a silent coverage lie. The static checks (typecheck, lint, build, anti-pattern scan) stay project-wide by design and are NOT diff-derived; the report names them as unscoped so a reader can tell.
+Every diff-derived "which files changed" read in this pass resolves from this step. Tier detection, change-type detection, dispatch prompts, and plan-drift detection all consume it. Never compute a second changed-files list anywhere else in the pass. A second producer scanning a different base reports narrow but scans wide, or the reverse. That is a silent coverage lie. The static checks stay project-wide by design: typecheck, lint, build, and the anti-pattern scan are not diff-derived. The report names them as unscoped so a reader can tell.
 
 The scope narrows only to the increment since the last reviewed head, read from the durable artifact via the read-only accessor. Full scope is the fail-open default: any doubt about the prior head, the artifact, or the rules produces MORE review, never less.
 
@@ -162,7 +162,7 @@ CHANGED_FILES=$(git diff --name-only "$SCOPE_BASE..HEAD")
 FULL_DIFF_FILES=$(git diff --name-only "$MERGE_BASE..HEAD")
 
 # An empty increment (empty commit) must never reach dispatch as a zero-file
-# vacuous pass; reset to the fail-open full scope instead.
+# vacuous pass. Reset to the fail-open full scope instead.
 if [ "$SCOPE_REASON" = "incremental" ] && [ -z "$CHANGED_FILES" ]; then
   SCOPE_BASE="$MERGE_BASE"
   SCOPE_REASON="first-round"
@@ -177,9 +177,9 @@ Fallback semantics, each mapping to full scope:
 | No artifact, no PR, accessor error | `first-round` | Nothing was ever reviewed here |
 | Prior head not an ancestor of HEAD | `history-rewritten` | The old head no longer names reachable state |
 | Increment touches `CLAUDE.md`, `AGENTS.md`, or `.claude/rules/` (at any depth) | `rules-changed` | A new rule can condemn already-cleared code |
-| Increment is empty | resets to `first-round` | A zero-file dispatch would pass vacuously |
+| Increment is empty | resets to `first-round` | A zero-file dispatch passes vacuously |
 
-`PRIOR_HEAD` is a snapshot from an artifact, not proof the commit is still reachable - the `git merge-base --is-ancestor` check is the verification, and it is not optional. A non-zero exit from `fno review --sigma-last-head` is a normal, expected input meaning "review everything"; it must never raise into the pass.
+`PRIOR_HEAD` is a snapshot from an artifact, not proof the commit is still reachable. The `git merge-base --is-ancestor` check is the verification, and it is not optional. A non-zero exit from `fno review --sigma-last-head` is a normal, expected input meaning "review everything". It must never raise into the pass.
 
 ### Step 2: Run Base Agents (MANDATORY - Always Run)
 
@@ -209,9 +209,9 @@ For CLAUDE.md-related issues: validator must verify the CLAUDE.md actually calls
 
 ### Step 3c: Carry Forward Unresolved Prior Findings (MANDATORY on incremental rounds)
 
-On every `incremental` round, run this step between the panel results and the verdict. Today a full re-review is what makes "no unaddressed blocking finding" mean anything: the fresh full-diff findings re-derive every prior blocker, so an unfixed one resurfaces on its own. Narrowing the scope removes that mechanism, and without a replacement an incremental round over a one-file increment would report zero findings while round 1's blocker is still live - the gate would clear over an unfixed defect. This step is the replacement, and 2.x scope narrowing is unsafe to ship without it.
+On every `incremental` round, run this step between the panel results and the verdict. Today the full re-review is the resolution mechanism: the fresh full-diff findings re-derive every prior blocker. An unfixed one resurfaces on its own. Narrowing the scope removes that mechanism. Without a replacement, an incremental round over a one-file increment reports zero findings while round 1's blocker is still live. The gate then clears over an unfixed defect. This step is the replacement. Scope narrowing is unsafe to ship without it.
 
-**Unaddressed now has a checkable definition:** a prior blocking finding is unaddressed when its cited quote still validates at the current head.
+**Unaddressed now has a checkable definition.** When its cited quote still validates at the current head, a prior blocking finding is unaddressed.
 
 1. Read the prior round's report. `PRIOR_HEAD` satisfies the inspect validator's expected head by construction, so the existing read surface returns the body:
 
@@ -220,13 +220,13 @@ On every `incremental` round, run this step between the panel results and the ve
      --sigma-head "$PRIOR_HEAD" --json 2>/dev/null || true)
    ```
 
-   An empty `PRIOR_REPORT` is not an error; it means there is nothing to carry, so the round proceeds on its own findings alone.
+   An empty `PRIOR_REPORT` is not an error. It means there is nothing to carry. The round proceeds on its own findings alone.
 
-2. For each **critical** or **high** finding in the prior body (the severities that block), spawn the same Haiku cite-or-drop validator as Step 3b, against the CURRENT head:
-   - quote still matches at the cited `file:line` -> the finding is **unresolved**; carry it verbatim into this round's report (under Critical/High Issues, tagged `carried from round <id>`) and into the verdict.
-   - quote is gone or no longer supports the claim -> it scores in the 0-25 abstain band, falls below 80, and drops out. Resolution is decided by the same rubric that decided admission, never by a separate "addressed" flag or a cached verdict.
+2. For each **critical** or **high** finding in the prior body, spawn the same Haiku cite-or-drop validator as Step 3b. Run it against the CURRENT head. Those two severities are the ones that block.
+   - quote still matches at the cited `file:line` -> the finding is **unresolved**. Carry it verbatim into this round's report and verdict. Tag it `carried from round <id>` under Critical/High Issues.
+   - quote is gone or no longer supports the claim -> it lands in the 0-25 abstain band. It falls below 80 and drops out. The same rubric that decided admission decides resolution. No separate "addressed" flag and no cached verdict exist.
 
-3. A carried finding counts as a blocking finding of THIS round: the verdict cannot be `ready-to-merge` while any carried finding is unresolved, and Step 6c emits no attestation over it.
+3. A carried finding counts as a blocking finding of THIS round. While any carried finding is unresolved, the verdict cannot be `ready-to-merge`. Step 6c emits no attestation over it.
 
 Every round's report is therefore the union of findings newly derived from the incremental scope and carried findings that still validate at the current head. The cost is one Haiku validation per prior blocking finding, which is far below re-running the panel over the whole diff.
 
@@ -267,7 +267,7 @@ After the report is durable, deduplicate only on the explicit marker for this re
 
 Load [report-template.md](report-template.md) for the structured output format.
 Render the complete report once to a temporary file as well as to the user-facing response; this exact file is the input to the shared artifact writer in Step 6d.
-The report header carries the **Review Scope** line from Step 1b (`$SCOPE_REASON`, and `$SCOPE_BASE` with the changed-file count when incremental); a narrowed round that reads as full coverage is a silent coverage lie.
+The report header carries the **Review Scope** line from Step 1b: `$SCOPE_REASON`, plus `$SCOPE_BASE` and the changed-file count on an incremental round. A narrowed round that reads as full coverage is a silent coverage lie.
 
 #### Goal Relevance (if config.toml has goals)
 
@@ -282,7 +282,7 @@ If `.fno/target-state.md` exists and has `input_type: plan`:
 
 1. Read the plan's 00-INDEX.md `## Files Modified` section
 2. Parse expected files and their task attributions
-3. Get actual changes: `$FULL_DIFF_FILES`, resolved once by the Step 1b producer (never a second `git diff` against a possibly-stale local `main`)
+3. Get actual changes: `$FULL_DIFF_FILES` from the Step 1b producer. Never run a second `git diff` against a possibly-stale local `main`
 4. Compare:
    - Files in diff but NOT in plan → **DRIFT** warning
    - Files in plan but NOT in diff → **MISSING** warning
@@ -321,7 +321,7 @@ fno review --publish-sigma "$REPORT_FILE" \
   --sigma-scope-base "$SCOPE_BASE" --sigma-scope-reason "$SCOPE_REASON"
 ```
 
-The scope pair is what makes a later round trust this artifact's head as a narrowing base: an artifact without it is treated as no prior head. Omit these two flags and the next round reviews the full diff again - fail-open by construction.
+The scope pair is what makes a later round trust this artifact's head as a narrowing base. An artifact without it is treated as no prior head. Omit these two flags and the next round reviews the full diff again. That is fail-open by construction.
 
 Treat a publication error as a failed review handoff and surface it; never claim the report is durable.
 The command prints the primary path, reviewed head, and whether compare-and-publish accepted it.

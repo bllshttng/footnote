@@ -9,9 +9,9 @@ run regardless of tier.
 
 ```bash
 # Count lines changed (insertions + deletions) across the review scope.
-# $SCOPE_BASE comes from sigma.md Step 1b, the single changed-files producer:
-# the merge base on a full round, the last reviewed head on an incremental one.
-# The fallback keeps this snippet runnable standalone.
+# $SCOPE_BASE comes from sigma.md Step 1b, the single changed-files producer.
+# It is the merge base on a full round and the last reviewed head on an
+# incremental one. The fallback keeps this snippet runnable standalone.
 SCOPE_BASE="${SCOPE_BASE:-origin/main}"
 DIFF_LINES=$(git diff --stat "$SCOPE_BASE..HEAD" | tail -1 | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | awk '{sum += $1} END {print sum+0}')
 
@@ -51,8 +51,8 @@ fi
 ## Step 2: Detect Change Type
 
 ```bash
-# Get changed files. $CHANGED_FILES is resolved once by sigma.md Step 1b
-# (the single changed-files producer); recompute only when running standalone.
+# Get changed files. $CHANGED_FILES is resolved once by sigma.md Step 1b,
+# the single changed-files producer. Recompute it only for a standalone run.
 CHANGED="${CHANGED_FILES:-$(git diff --name-only "${SCOPE_BASE:-origin/main}..HEAD")}"
 
 # Detect categories
@@ -87,7 +87,7 @@ fi
 
 ## Base Agents (Always Run)
 
-`${changedFiles}` below is the review scope from sigma.md Step 1b: the increment since the last reviewed head on an incremental round, the full diff otherwise. `${fullDiffFiles}` is always the whole PR, passed as context. Narrowing the analyzed set is not a blindfold: agents keep `Read`/`Grep` and must open any prior-reviewed file when an invariant spans it.
+`${changedFiles}` below is the review scope from sigma.md Step 1b. On an incremental round it is the increment since the last reviewed head. Otherwise it is the full diff. `${fullDiffFiles}` is always the whole PR, passed as context. Narrowing the analyzed set is not a blindfold. Agents keep `Read`/`Grep`. When an invariant spans the increment, they must open the prior-reviewed file.
 
 ```typescript
 // ALWAYS run these two agents
@@ -95,7 +95,7 @@ Task({
   subagent_type: "fno:silent-failure-hunter",
   prompt: `Hunt for silent failures in the files changed since the last reviewed head: ${changedFiles}
 The rest of this PR, already reviewed in a prior round (context only): ${fullDiffFiles}
-Swallowed errors often live on the call path OUTSIDE the increment: when a changed file calls, or is called by, a file in the full list, open that file and trace the error handling across the boundary.`,
+Swallowed errors often live on the call path OUTSIDE the increment. When a changed file calls, or is called by, a file in the full list, open that file. Trace the error handling across the boundary.`,
   description: "Hunt silent failures"
 })
 
@@ -103,7 +103,7 @@ Task({
   subagent_type: "fno:code-reviewer",
   prompt: `Review code quality in the files changed since the last reviewed head: ${changedFiles}
 The rest of this PR, already reviewed in a prior round (context only): ${fullDiffFiles}
-Check the changed code against CLAUDE.md and .claude/rules/*; open any file in the full list when a rule or an invariant spans the increment.`,
+Check the changed code against CLAUDE.md and .claude/rules/*. When a rule or an invariant spans the increment, open the file in the full list.`,
   description: "Review code quality"
 })
 ```
