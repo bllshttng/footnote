@@ -240,12 +240,17 @@ def _default_wake_fn(
         # it. Finish the job by matching the unique short_id in its command
         # line instead of by process-group membership; best-effort (no
         # match is the common case when the process already exited on its
-        # own after stdin closed).
-        subprocess.run(
-            ["pkill", "-f", f"claude attach {short_id}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # own after stdin closed). Best-effort in full: a missing `pkill`
+        # binary must not swallow the pending re-raise below, which is what
+        # tells the caller this attempt timed out.
+        try:
+            subprocess.run(
+                ["pkill", "-f", f"claude attach {short_id}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
         raise
 
 
@@ -322,9 +327,6 @@ def _resume_claude_wake(
             if after == _WAKE_TARGET_STATUS:
                 break
 
-    if emit_event is None:
-        from fno.agents import events as events_mod
-        emit_event = events_mod.emit
     try:
         emit_event(
             "agent_resumed",
@@ -526,6 +528,9 @@ def resume_logic(
         # resume wakes the session headlessly and verifies the state moved,
         # rather than exec'ing into an attach that (run non-interactively)
         # would print "Attaching..." and exit having done nothing.
+        if emit_event is None:
+            from fno.agents import events as events_mod
+            emit_event = events_mod.emit
         return _resume_claude_wake(
             name=name,
             short_id=session_id or "",
