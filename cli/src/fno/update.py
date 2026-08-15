@@ -1091,7 +1091,11 @@ def update_command(
     if dry_run:
         # shlex.join shell-escapes each arg so the printed command is safe to
         # paste into a terminal even when the source path contains spaces.
-        typer.echo(f"Would run: {shlex.join(cmd)}")
+        # The uv path prints the retry snippet, not the bare command: that is
+        # what the exec below actually runs, and a receipt that understates it
+        # sends an operator back into the unretried failure.
+        shown = _uv_retry_sh(cmd) if cmd[0] == "uv" else shlex.join(cmd)
+        typer.echo(f"Would run: {shown}")
         _cache_source_path(resolved)
         return
 

@@ -120,7 +120,10 @@ if command -v uv >/dev/null 2>&1; then
   fi
 
   log "preferring the published PyPI wheel: uv tool install fno (by name)..."
-  if uv_tool_install_retry fno >/dev/null 2>&1; then
+  # stdout only is silenced: the retry wrapper's stderr (uv's verbatim error,
+  # the verify refusal, the three-attempts race message) is the diagnostic
+  # surface and must reach the user.
+  if uv_tool_install_retry fno >/dev/null; then
     INSTALLED="$(uv_installed_fno_version)"
     if [[ -n "$SRC_VERSION" && "$INSTALLED" == "$SRC_VERSION" ]]; then
       log "installed binary-complete fno $INSTALLED from PyPI (CLI + all three Rust binaries on PATH)."
