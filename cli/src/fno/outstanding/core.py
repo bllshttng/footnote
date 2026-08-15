@@ -488,7 +488,11 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
         summary = f"  Showing {len(shown)} of {total}"
         if ages:
             summary += f", oldest {_plural(max(ages), 'day')}"
-        lines.append(summary + ".")
+        summary += (
+            ". Count rule: unique open fu-* IDs from configured capture files; "
+            "shared files and duplicate IDs count once."
+        )
+        lines.append(summary)
         lines.append("  Triage with: fno backlog triage, or fno backlog capture promote <fu-id>.")
 
     return "\n".join(lines).rstrip() + "\n"

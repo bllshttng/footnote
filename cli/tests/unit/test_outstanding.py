@@ -432,6 +432,29 @@ def test_capture_render_caps_rows_but_keeps_the_true_count(capture_roots):
     assert f"Showing {RENDER_CAP} of 10" in res.output, res.output
 
 
+def test_capture_leg_prints_its_counting_rule_beside_the_count(capture_roots):
+    """The total is auditable when three plausible counting methods disagree."""
+    this, other = capture_roots
+    _write_inbox(
+        this,
+        [
+            "- [ ] fu-aaaaaa - alpha",
+            "- [ ] fu-aaaaaa - duplicate id",
+            "- [ ] ab-11111111 - filed node is not a capture",
+        ],
+    )
+    _write_inbox(other, ["- [ ] fu-bbbbbb - beta"])
+
+    res = runner.invoke(outstanding_app, [])
+
+    assert res.exit_code == 0, res.output
+    assert "Showing 2 of 2" in res.output, res.output
+    assert (
+        "Count rule: unique open fu-* IDs from configured capture files; "
+        "shared files and duplicate IDs count once."
+    ) in res.output, res.output
+
+
 # --- 2.5 the SessionStart block ---------------------------------------------
 
 def test_hook_block_is_silent_on_zero(root: Path):
