@@ -24,6 +24,10 @@ from fno.paths_testing import use_tmpdir
 
 BUS_SID = "7c19d2e4-0b3f-4c5a-9e88-2ad4f0c81b97"
 WORKER_SID = "3f8a51c0-6d22-4b7e-b1a4-90ce7d3f25aa"
+# register_existing_session's axis-legacy kwarg still spells `provider`; pass
+# the harness through a name (the production caller's `provider=harness`
+# pattern) so no provider-named binding holds a harness literal.
+HARNESS = "claude"
 
 
 @pytest.fixture
@@ -253,7 +257,7 @@ def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch)
     )
 
     entry = register_existing_session(
-        provider="claude",
+        provider=HARNESS,
         session_id=BUS_SID,
         cwd="/tmp/x",
         origin="operator",
@@ -265,7 +269,7 @@ def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch)
     # A re-firing SessionStart hook (no policy kwarg) must not clobber the
     # stamp -- the operator would silently revert to injectable.
     entry = register_existing_session(
-        provider="claude", session_id=BUS_SID, cwd="/tmp/x", origin="operator"
+        provider=HARNESS, session_id=BUS_SID, cwd="/tmp/x", origin="operator"
     )
     assert entry.delivery_policy == "bus-only", (
         "a flagless re-register reverted a bus-only stamp"
@@ -273,7 +277,7 @@ def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch)
 
     # The explicit clear.
     entry = register_existing_session(
-        provider="claude",
+        provider=HARNESS,
         session_id=BUS_SID,
         cwd="/tmp/x",
         origin="operator",
@@ -283,7 +287,7 @@ def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch)
 
     # The stamp round-trips through the store.
     register_existing_session(
-        provider="claude",
+        provider=HARNESS,
         session_id=BUS_SID,
         cwd="/tmp/x",
         origin="operator",
