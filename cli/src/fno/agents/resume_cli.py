@@ -3,32 +3,45 @@
 Task 3.4 from 2026-05-22-fno-agents-observability.md.
 
 Resolves an agent name to its provider + session id + cwd from the
-registry and replaces the current process (``os.execvp``) with the
-provider's resume CLI in the recorded cwd. ``--print-command`` dumps a
+registry and resumes it in the recorded cwd. ``--print-command`` dumps a
 shell-pasteable one-liner instead, useful inside Claude Code (which
 can't host an interactive TUI from inside a subprocess).
 
-Provider resume substrates (Locked Decision #6):
+Provider resume substrates (Locked Decision #6, claude arm updated by
+x-c136):
 
 - ``codex`` → ``codex resume <codex_session_id>`` (bypasses the
-  exec-source picker filter via direct UUID argument).
-- ``claude`` → ``claude attach <short_id>`` (reuses the existing
-  attach surface).
-- ``gemini`` → ``gemini --resume <gemini_session_id>``.
+  exec-source picker filter via direct UUID argument), via
+  ``os.execvp`` — hands the terminal to the provider CLI.
+- ``claude`` → woken headlessly: a pty (``script -q /dev/null``), the
+  row's own routed env restored from ``route_settings_path``, the
+  message injected as three separate bracketed-paste-safe writes
+  (clear / text / submit), and the live state verified to have moved to
+  Working. Never execs — ``fno agents attach`` is the interactive
+  hand-off; this is the unattended counterpart, and every step in the
+  recipe can exit 0 having done nothing, so verification is what makes
+  a no-op detectable instead of a lie.
+- ``gemini`` / ``opencode`` → exec into the provider's own resume CLI,
+  same as codex.
 
 Exit codes:
-- 0   — success (only reachable via ``--print-command``; on direct
-  resume, ``os.execvp`` replaces the process and the Python interpreter
-  is gone).
+- 0   — success (``--print-command``; a non-claude direct resume, where
+  ``os.execvp`` replaces the process and the Python interpreter is
+  gone; or a claude resume that verified Working).
+- 2   — a claude row's recorded route could not be restored; refused
+  rather than waking it onto the default account.
 - 13  — name not in registry / missing cwd / missing session_id /
   unsupported provider.
 - 14  — provider CLI not on ``$PATH``.
+- 16  — claude wake attempts ran but the live state never reached
+  Working.
 """
 from __future__ import annotations
 
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -101,6 +114,166 @@ def _build_resume_argv(
     return None
 
 
+_DEFAULT_WAKE_MESSAGE = "continue"
+_WAKE_ATTEMPTS = 2
+_WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
+_WAKE_TARGET_STATUS = "Working"
+
+
+def _default_agents_state_fn() -> dict[str, dict]:
+    """Live-status map keyed by short_id, `--all` included (x-c136 finding 6).
+
+    `claude agents --json` alone omits stopped/completed rows, so a
+    verification read against that narrower view can never observe a
+    blocked session (state "Needs input") land on "Working" -- the same
+    blind spot that made every reap sweep report success over an empty set.
+    """
+    from fno.agents.harnesses.claude import claude_agents_json
+
+    live_map, _warnings = claude_agents_json()
+    return live_map
+
+
+def _default_wake_fn(
+    short_id: str,
+    *,
+    message: str,
+    route_env: Optional[dict[str, str]],
+    timeout: float = _WAKE_ATTEMPT_TIMEOUT_SEC,
+) -> None:
+    """One wake attempt: pty + routed env + clear/send/submit (x-c136).
+
+    ``claude attach`` allocates no pty of its own; invoked non-interactively
+    it prints "Attaching..." and exits having done nothing, which reads as a
+    no-op rather than a refusal. ``script -q /dev/null`` supplies the pty.
+
+    The attached session runs with bracketed paste on, so a trailing ``\\r``
+    sent in the SAME write as the message inserts a newline into the input
+    instead of submitting it -- three stacked, unsent wake messages were the
+    visible proof of this on a real blocked fleet. The clear (``\\x15``),
+    the message, and the submit (``\\r``) are three separate timed writes.
+
+    A row launched on a secondary route (``route_settings_path``) must be
+    woken with that SAME env: ``claude attach`` takes no options, so only
+    the child process environment can carry ``ANTHROPIC_BASE_URL`` and the
+    auth token. The caller resolves ``route_env`` via
+    :func:`fno.agents.model_routing.read_route_settings` and hands it here
+    already resolved -- this function never reads the settings file itself,
+    so a credential never has to round-trip through a shell echo.
+    """
+    env = dict(os.environ)
+    if route_env:
+        env.update(route_env)
+    env["FNO_WAKE_MSG"] = message
+    script_cmd = (
+        "{ sleep 7; printf '\\x15'; sleep 1; printf '%s' \"$FNO_WAKE_MSG\"; "
+        "sleep 2; printf '\\r'; sleep 9; } | script -q /dev/null claude attach "
+        + shlex.quote(short_id)
+    )
+    subprocess.run(
+        ["bash", "-c", script_cmd],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=timeout,
+    )
+
+
+def _resume_claude_wake(
+    *,
+    name: str,
+    short_id: str,
+    session_id: Optional[str],
+    cwd: str,
+    harness: str,
+    route_settings_path: Optional[str],
+    message: str,
+    emit_event: Any,
+    wake_fn: Any,
+    agents_state_fn: Any,
+) -> ResumeResult:
+    """Wake a blocked/stopped claude session and verify it actually moved.
+
+    ``fno agents attach`` already owns the interactive hand-off (exec into
+    the TUI, hand the terminal to the operator); this is the headless
+    counterpart -- allocate a pty, restore the row's own route, inject the
+    message, and confirm the live state moved to Working. Every step here
+    can exit 0 having done nothing (x-c136); the verification read is what
+    makes that detectable instead of a lie.
+    """
+    route_env: Optional[dict[str, str]] = None
+    if route_settings_path:
+        from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+        try:
+            route_env = read_route_settings(route_settings_path)
+        except RouteRestoreError as exc:
+            return ResumeResult(
+                exit_code=2,
+                stderr=(
+                    f"fno agents resume: agent {name!r} was launched on the "
+                    f"route recorded at {route_settings_path}, and it cannot "
+                    f"be restored ({exc}). Refusing to wake it onto the "
+                    f"default account.\n"
+                ),
+            )
+
+    def _state_of() -> str:
+        row = agents_state_fn().get(short_id) or {}
+        return str(row.get("live_status") or "unknown")
+
+    before = _state_of()
+    after = before
+    last_err = ""
+    for _attempt in range(_WAKE_ATTEMPTS):
+        try:
+            wake_fn(short_id, message=message, route_env=route_env)
+        except subprocess.TimeoutExpired:
+            last_err = "wake attempt timed out"
+            continue
+        except OSError as exc:
+            last_err = f"wake attempt failed: {exc}"
+            continue
+        after = _state_of()
+        if after == _WAKE_TARGET_STATUS:
+            break
+
+    if emit_event is None:
+        from fno.agents import events as events_mod
+        emit_event = events_mod.emit
+    try:
+        emit_event(
+            "agent_resumed",
+            name=name,
+            provider=harness,
+            session_id=session_id,
+            cwd=cwd,
+            before=before,
+            after=after,
+        )
+    except OSError:  # best-effort telemetry; never mask the resume outcome.
+        pass
+
+    if after != _WAKE_TARGET_STATUS:
+        return ResumeResult(
+            exit_code=16,
+            stderr=(
+                f"fno agents resume: {name!r} ({short_id}) did not reach "
+                f"{_WAKE_TARGET_STATUS!r} after {_WAKE_ATTEMPTS} wake "
+                f"attempt(s): before={before!r} after={after!r}"
+                + (f" ({last_err})" if last_err else "")
+                + ".\n"
+            ),
+        )
+
+    return ResumeResult(
+        exit_code=0,
+        output=f"{name} ({short_id}): {before} -> {after}\n",
+        exec_argv=["claude", "attach", short_id],
+        exec_cwd=cwd,
+    )
+
+
 def _shell_quote(s: str) -> str:
     """POSIX shell quoting for --print-command output.
 
@@ -116,17 +289,22 @@ def resume_logic(
     *,
     name: str,
     print_command: bool = False,
+    message: str = _DEFAULT_WAKE_MESSAGE,
     registry_loader: Optional[Any] = None,
     path_checker: Optional[Any] = None,
     emit_event: Optional[Any] = None,
     execvp: Optional[Any] = None,
+    wake_fn: Optional[Any] = None,
+    agents_state_fn: Optional[Any] = None,
 ) -> ResumeResult:
     """Pure-function resume pipeline; Typer command wraps this.
 
     Args:
         name: Registered agent name.
         print_command: When True, return the shell snippet and exit 0
-            instead of os.execvp'ing.
+            instead of resuming.
+        message: Text to inject once the claude session is woken (x-c136).
+            Ignored for every other harness, which resume via exec instead.
         registry_loader: Optional callable returning the registry list
             (defaults to ``fno.agents.registry.load_registry``).
         path_checker: Optional callable ``(bin) -> bool`` for PATH check
@@ -134,12 +312,20 @@ def resume_logic(
         emit_event: Optional ``(kind, **data) -> None`` for the
             ``agent_resumed`` event (defaults to events.emit).
         execvp: Optional ``(file, args) -> None`` for the final exec
-            call (defaults to os.execvp). Tests provide a no-op.
+            call (defaults to os.execvp). Tests provide a no-op. Used
+            only for non-claude harnesses; the claude path never execs.
+        wake_fn: Optional callable performing one claude wake attempt
+            (defaults to :func:`_default_wake_fn`). Test seam.
+        agents_state_fn: Optional callable returning the short_id ->
+            live-status map used to verify a claude wake (defaults to
+            :func:`_default_agents_state_fn`). Test seam.
 
     Returns:
         :class:`ResumeResult` — for --print-command, output carries the
-        shell one-liner; for direct resume, exec_argv/exec_cwd carry
-        what os.execvp was (about to be) called with.
+        shell one-liner; for a claude resume, output carries the
+        before -> after state transition; for direct resume of every
+        other harness, exec_argv/exec_cwd carry what os.execvp was
+        (about to be) called with.
     """
     # Lazy-load registry to avoid import-time cost on cold trace runs.
     if registry_loader is None:
@@ -249,6 +435,26 @@ def resume_logic(
             exec_cwd=cwd,
         )
 
+    if harness == "claude":
+        # x-c136: `fno agents attach` owns the interactive hand-off; a claude
+        # resume wakes the session headlessly and verifies the state moved,
+        # rather than exec'ing into an attach that (run non-interactively)
+        # would print "Attaching..." and exit having done nothing.
+        return _resume_claude_wake(
+            name=name,
+            short_id=session_id or "",
+            session_id=session_id,
+            cwd=cwd,
+            harness=harness,
+            route_settings_path=getattr(entry, "route_settings_path", None),
+            message=message,
+            emit_event=emit_event,
+            wake_fn=wake_fn if wake_fn is not None else _default_wake_fn,
+            agents_state_fn=(
+                agents_state_fn if agents_state_fn is not None else _default_agents_state_fn
+            ),
+        )
+
     # chdir BEFORE emit so a stale cwd surfaces as "agent_resume_failed"
     # rather than a misleading "agent_resumed" followed by a traceback.
     # (Pre-fix shape emitted success then crashed in os.chdir; sigma
@@ -301,9 +507,22 @@ def cmd_resume(
         False, "--print-command",
         help="Emit a shell-pasteable resume command and exit (no exec).",
     ),
+    message: str = typer.Option(
+        _DEFAULT_WAKE_MESSAGE, "--message", "-m",
+        help=(
+            "Text to inject once a claude session is woken. Ignored for "
+            "every other harness, which resume via exec instead."
+        ),
+    ),
 ) -> None:
-    """Resume an agent in its recorded cwd via the provider's resume CLI."""
-    result = resume_logic(name=name, print_command=print_command)
+    """Resume an agent in its recorded cwd via the provider's resume CLI.
+
+    A claude agent is woken headlessly: allocate a pty, restore its route,
+    inject `message`, and verify the live state moved to Working (exit 16
+    if it did not). Every other harness execs into the provider's own
+    resume CLI in the recorded cwd, handing over the terminal.
+    """
+    result = resume_logic(name=name, print_command=print_command, message=message)
     if result.stderr:
         sys.stderr.write(result.stderr)
     if result.output:

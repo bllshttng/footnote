@@ -192,11 +192,12 @@ def test_print_command_emits_one_liner() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2-EDGE — claude path uses claude attach
+# x-c136 — claude path wakes headlessly and verifies the state moved
 # ---------------------------------------------------------------------------
 
 
-def test_claude_path_uses_attach_substrate() -> None:
+def test_claude_resume_wakes_and_verifies_working() -> None:
+    """A claude row with a live short_id is woken, not exec'd into attach."""
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -204,14 +205,130 @@ def test_claude_path_uses_attach_substrate() -> None:
         cwd="/cwd",
         short_id="deadbeef",
     )
+    wake_calls: list[dict] = []
+
+    def _wake(short_id, *, message, route_env):
+        wake_calls.append({"short_id": short_id, "message": message, "route_env": route_env})
+
+    states = iter(["Needs input", "Working"])
+
+    def _state():
+        current = next(states)
+        return {"deadbeef": {"live_status": current}}
+
+    res = resume_logic(
+        name="alpha",
+        message="continue",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=_state,
+    )
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Needs input -> Working\n"
+    assert len(wake_calls) == 1
+    assert wake_calls[0] == {"short_id": "deadbeef", "message": "continue", "route_env": None}
+
+
+def test_claude_resume_retries_once_before_giving_up() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    def _wake(short_id, *, message, route_env):
+        wake_calls.append(1)
+
+    # Stays "Needs input" through the pre-check and both post-attempt reads.
+    def _state():
+        return {"deadbeef": {"live_status": "Needs input"}}
+
     res = resume_logic(
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=_state,
     )
+    assert res.exit_code == 16
+    assert len(wake_calls) == 2, "must retry once before reporting failure"
+    assert "Needs input" in res.stderr
+    assert "deadbeef" in res.stderr
+
+
+def test_claude_resume_restores_routed_env() -> None:
+    """A routed row's env must reach the wake attempt (x-c136 finding 2)."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/route.json"  # type: ignore[attr-defined]
+    seen_env: list[Optional[dict]] = []
+
+    def _wake(short_id, *, message, route_env):
+        seen_env.append(route_env)
+
+    def _read_route_settings(path):
+        assert path == "/tmp/route.json"
+        return {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"}
+
+    import fno.agents.model_routing as model_routing_mod
+
+    orig = model_routing_mod.read_route_settings
+    model_routing_mod.read_route_settings = _read_route_settings
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            execvp=_no_exec,
+            emit_event=lambda *a, **kw: None,
+            wake_fn=_wake,
+            agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+        )
+    finally:
+        model_routing_mod.read_route_settings = orig
+
     assert res.exit_code == 0
-    assert res.exec_argv == ["claude", "attach", "deadbeef"]
+    assert seen_env == [{"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"}]
+
+
+def test_claude_resume_refuses_when_route_cannot_be_restored() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/gone.json"  # type: ignore[attr-defined]
+
+    import fno.agents.model_routing as model_routing_mod
+
+    def _raise(path):
+        raise model_routing_mod.RouteRestoreError(f"{path} is unreadable")
+
+    orig = model_routing_mod.read_route_settings
+    model_routing_mod.read_route_settings = _raise
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            execvp=_no_exec,
+            wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+            agents_state_fn=lambda: {},
+        )
+    finally:
+        model_routing_mod.read_route_settings = orig
+
+    assert res.exit_code == 2
+    assert "gone.json" in res.stderr
 
 
 # ---------------------------------------------------------------------------
