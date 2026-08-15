@@ -262,12 +262,17 @@ pub enum PlanUnavailable {
 /// that root, so a bare `myvault` and an absolute `/Users/x/myvault` produce the
 /// same URI (a test pins this).
 pub fn plan_link(plan_path: Option<&Path>, cfg: &ObsidianCfg) -> PlanLink {
-    let Some(plan) = plan_path else {
-        return PlanLink::Unavailable(PlanUnavailable::NoPlan);
-    };
+    // Obsidian-off is checked FIRST: LD7 says config-off is absent because
+    // nothing in this menu can unlock it, which outranks "no plan" (state
+    // that CAN change) when both are true. Reversing this order would grey
+    // the item with "no plan" on an obsidian-off node, misleading the
+    // operator into thinking a plan alone would enable it.
     if !cfg.enabled {
         return PlanLink::Unavailable(PlanUnavailable::ObsidianOff);
     }
+    let Some(plan) = plan_path else {
+        return PlanLink::Unavailable(PlanUnavailable::NoPlan);
+    };
     let Some(vault_cfg) = cfg.vault.as_deref().filter(|v| !v.is_empty()) else {
         // enabled with no vault: the Python schema refuses this, but the Rust
         // reader is permissive. Unavailable rather than synthesise a name.
@@ -625,6 +630,12 @@ mod tests {
         // enabled but no vault configured -> absent (no name invented).
         assert_eq!(
             plan_link(Some(plan), &cfg(true, None)),
+            PlanLink::Unavailable(PlanUnavailable::ObsidianOff)
+        );
+        // Both true at once: obsidian off outranks no-plan (LD7). Greying
+        // "no plan" here would wrongly imply a plan alone would unlock it.
+        assert_eq!(
+            plan_link(None, &cfg(false, Some("v"))),
             PlanLink::Unavailable(PlanUnavailable::ObsidianOff)
         );
     }

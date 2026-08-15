@@ -9305,11 +9305,11 @@ async fn handle_stdin(
         // so pane right-click behavior is untouched (AC3-EDGE).
         if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) {
             if let Some(i) = view.sideline_row_at(rep.row, rep.col) {
-                // Swallow the press only when a menu actually opened, matching
-                // row_menu_mouse's re-anchor discipline (10311): a header with no
-                // menu leaves the press to fall through instead of eating it
-                // silently, so the right-click never reads as a no-op that a
-                // following Left press then turns into a collapse toggle.
+                // Swallow the press only when a menu actually opened: a header
+                // with no menu leaves the press to fall through instead of
+                // eating it silently, so the right-click never reads as a
+                // no-op that a following Left press then turns into a
+                // collapse toggle.
                 if view.open_row_menu(
                     i,
                     Anchor::At {

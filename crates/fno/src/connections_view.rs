@@ -1632,15 +1632,17 @@ mod tests {
     }
 
     #[test]
-    fn expand_tilde_expands_leading_home_only() {
+    fn expand_tilde_expands_leading_and_bare_home() {
         use std::ffi::OsStr;
         let home = Some(OsStr::new("/Users/x"));
         assert_eq!(expand_tilde("~/.claude-ccm", home), "/Users/x/.claude-ccm");
-        // No `~/` prefix -> verbatim; a bare `~` is not expanded.
+        assert_eq!(expand_tilde("~", home), "/Users/x");
+        // Anything else -> verbatim: no leading `~/` and not a bare `~`.
         assert_eq!(expand_tilde("/abs/dir", home), "/abs/dir");
         assert_eq!(expand_tilde("~notme", home), "~notme");
         // No home -> verbatim (fail-open).
         assert_eq!(expand_tilde("~/.claude", None), "~/.claude");
+        assert_eq!(expand_tilde("~", None), "~");
     }
 
     #[test]
