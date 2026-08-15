@@ -503,15 +503,15 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
     if outstanding.captures:
         total = len(outstanding.captures)
         lines.append(f"{_plural(total, 'capture')} awaiting triage (fu- items).")
-        shown = outstanding.captures[:RENDER_CAP]
-        for c in shown:
+        shown_captures = outstanding.captures[:RENDER_CAP]
+        for c in shown_captures:
             where = f"  ({c.project})" if c.project != Path.cwd().name else ""
             lines.append(f"  {c.fu_id}  {c.title}{where}")
         # Ruling 2: the cap without the count is a lie by omission in a nicer
         # font - a 200-row pile gets abandoned in a week, but so does a list
         # showing 3 rows while 195 wait, unnamed.
         ages = [c.age_days for c in outstanding.captures if c.age_days is not None]
-        summary = f"  Showing {len(shown)} of {total}"
+        summary = f"  Showing {len(shown_captures)} of {total}"
         if ages:
             summary += f", oldest {_plural(max(ages), 'day')}"
         summary += (
