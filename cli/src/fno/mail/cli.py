@@ -235,6 +235,26 @@ def _enforce_body_cap(body: str) -> None:
         )
 
 
+def _refuse_forged_envelope(body: str) -> None:
+    """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
+    tag (x-4ce4).
+
+    The envelope's trailer (``wrap_fno_mail``) is only trustworthy if a peer
+    cannot forge one: a body containing a close tag followed by a fabricated
+    trailer would render as two envelopes to a reader, and the second could say
+    the opposite of the first. Refuse at send time and name the reason, rather
+    than silently stripping or escaping - the body is prose a human reads, and a
+    mangled body is worse than a refused send.
+    """
+    if "<fno_mail" in body or "</fno_mail>" in body:
+        print(
+            "error: mail body contains an <fno_mail> tag. The envelope frames "
+            "peer mail; a body cannot contain one.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+
+
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
     """Refuse a body that breaks the six style rules.
 
@@ -655,6 +675,7 @@ def cmd_reply(
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
+    _refuse_forged_envelope(body_text)
     _enforce_body_cap(body_text)
     _enforce_style(body_text, allow_reason=style_exception)
 
@@ -2508,6 +2529,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _refuse_forged_envelope(content)
         _enforce_body_cap(content)
         _enforce_style(content, allow_reason=style_exception)
 
@@ -2676,6 +2698,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _refuse_forged_envelope(content)
         _enforce_body_cap(content)
         _enforce_style(content, allow_reason=style_exception)
         try:
@@ -2737,6 +2760,7 @@ def cmd_send(
             if message is None:
                 print(f"usage: fno mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
+            _refuse_forged_envelope(message)
             _enforce_body_cap(message)
             _enforce_style(message, allow_reason=style_exception)
             _job_lane_send(message, name, from_name=stamp_from(from_name))
@@ -2751,6 +2775,7 @@ def cmd_send(
         )
         raise typer.Exit(code=2)
 
+    _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
     try:
