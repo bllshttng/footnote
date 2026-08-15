@@ -427,8 +427,10 @@ def resume_logic(
     name: str,
     print_command: bool = False,
     message: str = _DEFAULT_WAKE_MESSAGE,
+    cwd_override: Optional[str] = None,
     registry_loader: Optional[Any] = None,
     path_checker: Optional[Any] = None,
+    cwd_checker: Optional[Any] = None,
     emit_event: Optional[Any] = None,
     execvp: Optional[Any] = None,
     wake_fn: Optional[Any] = None,
@@ -442,10 +444,17 @@ def resume_logic(
             instead of resuming.
         message: Text to inject once the claude session is woken.
             Ignored for every other harness, which resume via exec instead.
+        cwd_override: Use this cwd instead of the registry's recorded one.
+            The Rust binary resolves a claude row's EnterWorktree-moved
+            transcript dir before delegating here (`resolve_resume_cwd`);
+            without this override this fallback would silently re-derive
+            the stale pre-EnterWorktree cwd from the registry instead.
         registry_loader: Optional callable returning the registry list
             (defaults to ``fno.agents.registry.load_registry``).
         path_checker: Optional callable ``(bin) -> bool`` for PATH check
             (defaults to shutil.which).
+        cwd_checker: Optional callable ``(cwd) -> bool`` for the
+            resume-time cwd-reachability check (defaults to os.path.isdir).
         emit_event: Optional ``(kind, **data) -> None`` for the
             ``agent_resumed`` event (defaults to events.emit).
         execvp: Optional ``(file, args) -> None`` for the final exec
@@ -499,7 +508,7 @@ def resume_logic(
     # Identity is one axis (x-8dfc): resume keys on harness (provider fallback
     # for a not-yet-backfilled row); harness == provider on every current row.
     harness = getattr(entry, "harness", None)
-    cwd = getattr(entry, "cwd", None)
+    cwd = cwd_override or getattr(entry, "cwd", None)
     session_id = _session_id_for(entry)
 
     if not cwd:
@@ -570,6 +579,23 @@ def resume_logic(
             output=snippet,
             exec_argv=argv,
             exec_cwd=cwd,
+        )
+
+    # Validate before actually resuming (mirrors Rust's `run_resume`, which
+    # checks this before claiming, delegating, or launching). The claude
+    # branch below never reaches the non-claude os.chdir check further down,
+    # so without this a deleted cwd burned a full wake attempt (~19s) before
+    # surfacing as a confusing "did not reach Working" instead of the
+    # immediate, actionable rm hint every other harness gets.
+    if cwd_checker is None:
+        cwd_checker = os.path.isdir
+    if not cwd_checker(cwd):
+        return ResumeResult(
+            exit_code=13,
+            stderr=(
+                f"fno agents resume: cwd {cwd!r} for agent {name!r} is no "
+                f"longer reachable. Run `fno agents rm {name}` to clean up.\n"
+            ),
         )
 
     if harness == "claude":
@@ -654,6 +680,14 @@ def cmd_resume(
             "every other harness, which resume via exec instead."
         ),
     ),
+    cwd: Optional[str] = typer.Option(
+        None, "--cwd",
+        help=(
+            "Use this cwd instead of the registry's recorded one. Internal: "
+            "the Rust binary passes this when delegating a claude row whose "
+            "transcript moved under EnterWorktree."
+        ),
+    ),
 ) -> None:
     """Resume an agent in its recorded cwd via the provider's resume CLI.
 
@@ -662,7 +696,9 @@ def cmd_resume(
     if it did not). Every other harness execs into the provider's own
     resume CLI in the recorded cwd, handing over the terminal.
     """
-    result = resume_logic(name=name, print_command=print_command, message=message)
+    result = resume_logic(
+        name=name, print_command=print_command, message=message, cwd_override=cwd
+    )
     if result.stderr:
         sys.stderr.write(result.stderr)
     if result.output:

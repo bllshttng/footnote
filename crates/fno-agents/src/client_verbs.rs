@@ -2529,7 +2529,11 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new("fno");
         command
-            .args(["agents", "resume", &name])
+            // --cwd carries the EnterWorktree-resolved cwd computed above
+            // (`resolved_cwd`), not the raw registry value: Python has no
+            // equivalent of `resolve_resume_cwd` and would otherwise re-derive
+            // the stale pre-EnterWorktree cwd from the registry entry itself.
+            .args(["agents", "resume", &name, "--cwd", cwd])
             .env("FNO_AGENTS_RUNTIME", "python");
         if let Some(msg) = &message {
             command.args(["--message", msg]);
