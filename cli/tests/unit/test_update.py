@@ -288,6 +288,140 @@ def test_write_installed_rev_silent_on_oserror(
     update._write_installed_rev("deadbeef")  # must not raise
 
 
+def _fake_uv_script(tools_dir: Path, fail_times: int, fail_sigs: bool) -> str:
+    """A fake `uv`: `tool dir` names tools_dir; `tool install` fails
+    fail_times times (with the ENOTEMPTY signature when fail_sigs, else a
+    plain error) before exiting 0."""
+    err = (
+        "'error: failed to remove directory `/x/fno/lib`: "
+        "Directory not empty (os error 66)'"
+        if fail_sigs
+        else "'error: invalid credential'"
+    )
+    return (
+        "#!/bin/sh\n"
+        "case \"$1 $2\" in\n"
+        f"'tool dir') echo '{tools_dir}'; exit 0;;\n"
+        "esac\n"
+        f"n=$(cat {tools_dir}/n 2>/dev/null || echo 0); n=$((n+1)); echo $n > {tools_dir}/n\n"
+        f"if [ \"$n\" -le {fail_times} ]; then echo {err} >&2; exit 9; fi\n"
+        "exit 0\n"
+    )
+
+
+def test_uv_retry_absorbs_the_enotempty_signature_and_verifies(tmp_path: Path) -> None:
+    """Two signature failures then success, with the marker tree present: the
+    wrapper retries, verifies via the marker, and exits 0."""
+    import os as _os
+    import subprocess as _sp
+
+    tools = tmp_path / "tools"
+    pyc = tools / "fno/lib/python3.13/site-packages/fno/__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "x.pyc").write_text("")
+    (tools / "fno/bin").mkdir(parents=True)
+    (tools / "fno/bin/fno-py").write_text("#!/bin/sh\n")
+    (tools / "fno/bin/fno-py").chmod(0o755)  # the marker checks -x
+    uv = tmp_path / "uv"
+    uv.write_text(_fake_uv_script(tools, fail_times=2, fail_sigs=True))
+    uv.chmod(0o755)
+
+    line = update._uv_retry_sh(["uv", "tool", "install", "--compile-bytecode", "fno"])
+    out = _sp.run(
+        ["/bin/sh", "-c", line], capture_output=True, text=True,
+        env={**_os.environ, "PATH": f"{tmp_path}:{_os.environ['PATH']}"},
+    )
+    assert out.returncode == 0, out
+    assert (tools / "n").read_text().strip() == "3", "two failures, one success"
+    # uv's error was surfaced verbatim on the failing attempts.
+    assert "Directory not empty (os error 66)" in out.stderr, out.stderr
+
+
+def test_uv_retry_fails_fast_on_a_non_signature_error(tmp_path: Path) -> None:
+    """A non-signature failure runs exactly once and propagates uv's code."""
+    import os as _os
+    import subprocess as _sp
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    uv = tmp_path / "uv"
+    uv.write_text(_fake_uv_script(tools, fail_times=5, fail_sigs=False))
+    uv.chmod(0o755)
+
+    line = update._uv_retry_sh(["uv", "tool", "install", "--compile-bytecode", "fno"])
+    out = _sp.run(
+        ["/bin/sh", "-c", line], capture_output=True, text=True,
+        env={**_os.environ, "PATH": f"{tmp_path}:{_os.environ['PATH']}"},
+    )
+    assert out.returncode == 9, "uv's own exit code is preserved"
+    assert (tools / "n").read_text().strip() == "1", "no retry off-signature"
+
+
+def test_uv_retry_bounds_the_signature_and_rejects_unverified_success(tmp_path: Path) -> None:
+    """Three signature failures hit the cap; a 0 exit without the marker tree
+    (no bytecode shipped) is refused, never trusted."""
+    import os as _os
+    import subprocess as _sp
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    uv = tmp_path / "uv"
+    uv.write_text(_fake_uv_script(tools, fail_times=5, fail_sigs=True))
+    uv.chmod(0o755)
+    env = {**_os.environ, "PATH": f"{tmp_path}:{_os.environ['PATH']}"}
+
+    capped = update._uv_retry_sh(["uv", "tool", "install", "--compile-bytecode", "fno"])
+    out = _sp.run(["/bin/sh", "-c", capped], capture_output=True, text=True, env=env)
+    assert out.returncode != 0
+    assert (tools / "n").read_text().strip() == "3", "bounded at three attempts"
+
+    # Success exit but no marker tree: install_dir exists (bin/fno-py) yet no
+    # bytecode shipped -> the exit code alone must not certify it.
+    (tools / "fno/bin").mkdir(parents=True)
+    (tools / "fno/bin/fno-py").write_text("#!/bin/sh\n")
+    uv.write_text(_fake_uv_script(tools, fail_times=0, fail_sigs=True))
+    out = _sp.run(["/bin/sh", "-c", capped], capture_output=True, text=True, env=env)
+    assert out.returncode != 0
+    assert "does not verify" in out.stderr, out.stderr
+
+
+def test_install_then_mark_with_retry_wrapper_still_writes_the_marker(
+    tmp_path: Path,
+) -> None:
+    """The retry snippet composed via install_sh must not exit the shell on
+    success, or the `&&`-gated marker write and agent refresh never run."""
+    import os as _os
+    import subprocess as _sp
+
+    tools = tmp_path / "tools"
+    pyc = tools / "fno/lib/python3.13/site-packages/fno/__pycache__"
+    pyc.mkdir(parents=True)
+    (pyc / "x.pyc").write_text("")
+    (tools / "fno/bin").mkdir(parents=True)
+    (tools / "fno/bin/fno-py").write_text("#!/bin/sh\n")
+    (tools / "fno/bin/fno-py").chmod(0o755)  # the marker checks -x
+    uv = tmp_path / "uv"
+    uv.write_text(_fake_uv_script(tools, fail_times=0, fail_sigs=True))
+    uv.chmod(0o755)
+
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["uv", "tool", "install", "--compile-bytecode", "fno"],
+        "feedface",
+        marker=marker,
+        pid=99,
+        install_sh=update._uv_retry_sh(
+            ["uv", "tool", "install", "--compile-bytecode", "fno"]
+        ),
+    )
+    out = _sp.run(
+        ["/bin/sh", "-c", line], capture_output=True, text=True,
+        env={**_os.environ, "PATH": f"{tmp_path}:{_os.environ['PATH']}"},
+    )
+    assert out.returncode == 0, out.stderr
+    assert marker.read_text(encoding="utf-8").strip() == "feedface"
+
+
 def test_install_then_mark_gates_marker_on_install_success(tmp_path: Path) -> None:
     """The shell line writes the marker ONLY after a zero install exit (&&)."""
     marker = tmp_path / "state" / "installed-rev"

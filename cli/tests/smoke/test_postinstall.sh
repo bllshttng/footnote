@@ -25,7 +25,7 @@ done
 # via a version match, falls back to the bundled source, and reports which path
 # it took so the user knows whether daemon-backed verbs will work.
 for needle in \
-  "uv tool install --force --compile-bytecode fno" \
+  'uv tool install --force --compile-bytecode "$@"' \
   "uv tool uninstall fno" \
   "__version__" \
   "binary-complete" \

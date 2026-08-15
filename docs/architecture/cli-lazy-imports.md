@@ -206,59 +206,20 @@ which cost more than a transient, self-healing failure. Specifically rejected:
 
 ### The bytecode-write race (fixed at install time)
 
-A plain `uv tool install` ships zero `.pyc`, so every process that runs out of
-the tool venv writes `__pycache__` bytecode into `site-packages` as it imports:
-the pr-watch daemon on its timer, every hook, every manual call. When a
-`--force`/`--reinstall` later deletes that tree, new `.pyc` entries appear
-behind uv's walk and the closing `rmdir` returns ENOTEMPTY (`os error 66`),
-leaving no entrypoint behind. The failed install is sticky: the next `fno` call
-re-attempts it and hits the same error, so the CLI stays down until an install
-lands in a quiet window. This is the mechanism behind node x-46b5, measured at
-427 `.pyc` files written into the venv during the failure window.
+A plain `uv tool install` ships zero `.pyc`. Every process that runs out of the tool venv then writes `__pycache__` bytecode into `site-packages` as it imports. The pr-watch daemon on its timer, every hook, every manual call. A later `--force`/`--reinstall` deletes that tree. New `.pyc` entries appear behind uv's walk, the closing `rmdir` returns ENOTEMPTY (`os error 66`), and no entrypoint is left behind. The failed install is sticky. The next `fno` call re-attempts it and hits the same error, so the CLI stays down until an install lands in a quiet window. This is the mechanism behind the 2026-08-14 CLI outage, measured at 427 `.pyc` files written into the venv during the failure window.
 
-Every provisioning site therefore passes `--compile-bytecode`: the venv ships
-its own bytecode up front, a matching `.pyc` gives no process a reason to
-write, and the steady-state writer is gone for every caller at once
-(`PYTHONDONTWRITEBYTECODE` was rejected as the fix because it protects only
-the processes that remember to set it). `scripts/ci/check-uv-install-compiles-bytecode.sh`
-keeps this true: it fails CI on any `uv tool install` run site without the
-flag, and its `--self-test` proves the search matches a real invocation rather
-than certifying an empty result. One residual window remains and is measured,
-not assumed: during the removal phase of a `--force` install, an import that
-lands after uv has deleted a module's `.pyc` but before its `.py` recompiles
-and rewrites that `.pyc` behind the walk, so ENOTEMPTY is still reachable.
-Under five concurrent import loops it fired 3 of 6 installs; under the
-daemon's own shape (one CLI loop) it fired 0 of 10, with the shipped count
-stable across every run. Precompile shrinks the race from continuous writes
-to that sub-second removal window; it does not delete the OS behavior.
+Every provisioning site therefore passes `--compile-bytecode`. The venv ships its own bytecode up front, and a matching `.pyc` gives no process a reason to write. The steady-state writer is gone for every caller at once. `PYTHONDONTWRITEBYTECODE` was rejected as the fix because it protects only the processes that remember to set it. `scripts/ci/check-uv-install-compiles-bytecode.sh` keeps this true: it fails CI on any `uv tool install` run site without the flag. Its `--self-test` proves the search matches a real invocation rather than certifying an empty result. One residual window remains and is measured, not assumed. During the removal phase of a `--force` install, an import can land after uv deleted a module's `.pyc` but before its `.py`. It recompiles and rewrites that `.pyc` behind the walk, so ENOTEMPTY stays reachable: 3 of 6 bare installs under five concurrent import loops. The provisioning paths absorb that with a bounded retry on exactly this signature. The retry accepts success only through a positive marker, the `fno-py` console script plus shipped bytecode, never the exit code alone. Precompile shrinks the race from continuous writes to that sub-second removal window. The retry closes what remains of it for the install paths.
 
 ## Contracts (do not break)
 
 A future refactor must preserve:
 
-1. `fno --help` does not import sub-app bodies. Test:
-   `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
-2. `fno paths state-dir` does not import the heavy sub-apps. Test:
-   `test_fno_paths_does_not_import_heavy_subapps`.
-3. Single-command sub-apps keep their group shape. Test:
-   `test_executor_resolve_group_shape_preserved`.
-4. Parent-side `add_typer` overrides survive lazy loading (see
-   `info_overrides` above). Test:
-   `test_executor_resolve_group_shape_preserved` covers the group shape;
-   the overrides themselves are exercised by the `--help` tests.
-5. Misconfigured lazy entries fail loudly with the bad path in stderr.
-   Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
-6. The error path never first-imports `typer.rich_utils` (see the
-   reinstall-window hazard above). Tests:
-   `test_error_path_never_first_imports_rich_utils`,
-   `test_building_the_command_does_not_import_rich_utils`.
-7. A missing module under the `fno` package explains itself and names both
-   causes; a missing third-party dependency collects no reinstall
-   speculation. Tests:
-   `test_fno_module_import_failure_names_reinstall_window`,
-   `test_third_party_import_failure_has_no_reinstall_hint`.
+1. `fno --help` does not import sub-app bodies. Test: `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
+2. `fno paths state-dir` does not import the heavy sub-apps. Test: `test_fno_paths_does_not_import_heavy_subapps`.
+3. Single-command sub-apps keep their group shape. Test: `test_executor_resolve_group_shape_preserved`.
+4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_executor_resolve_group_shape_preserved` covers the group shape; the overrides themselves are exercised by the `--help` tests.
+5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
+6. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Tests: `test_error_path_never_first_imports_rich_utils`, `test_building_the_command_does_not_import_rich_utils`.
+7. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.
 
-Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py`
-with the import path and a short help string. Run the test suite to
-confirm coverage. No changes to `_lazy_group.py` should be required for
-a normal sub-app addition.
+Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py` with the import path and a short help string. Run the test suite to confirm coverage. No changes to `_lazy_group.py` should be required for a normal sub-app addition.

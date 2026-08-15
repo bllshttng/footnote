@@ -138,6 +138,43 @@ redact_source() {
 	esac
 }
 
+# Positive marker for a provisioned install: the console script exists AND the
+# venv ships compiled bytecode. A zero exit from uv proves nothing about what
+# landed, so every install path verifies before trusting itself.
+uv_install_verifies() {
+	_td=$(NO_COLOR=1 UV_NO_COLOR=1 "$FNO_UV" tool dir 2>/dev/null) || return 1
+	[ -x "$_td/fno/bin/fno-py" ] || return 1
+	[ -n "$(find "$_td/fno/lib" -name '*.pyc' -print -quit 2>/dev/null)" ]
+}
+
+# `uv tool install --force --compile-bytecode` with ONE retried failure: the
+# ENOTEMPTY signature, uv's removal walk racing a concurrent importer's
+# bytecode rewrite (docs/architecture/cli-lazy-imports.md). Any other failure
+# dies immediately, uv's error already printed verbatim above. Bounded at
+# three attempts; success is accepted only via uv_install_verifies.
+uv_tool_install_retry() {
+	_attempts=0
+	_err=$(mktemp) || die "cannot create a temp file to capture uv's error"
+	while :; do
+		_attempts=$((_attempts + 1))
+		if "$FNO_UV" tool install --force --compile-bytecode "$1" 2>"$_err"; then
+			rm -f "$_err"
+			uv_install_verifies || die "uv exited 0 but the install does not verify: no fno-py script or no shipped bytecode under the tool venv. Inspect it with \`$FNO_UV tool dir\`."
+			return 0
+		fi
+		cat "$_err" >&2
+		if ! grep -q "Directory not empty" "$_err" || ! grep -q "os error 66" "$_err"; then
+			rm -f "$_err"
+			die "\`uv tool install $(redact_source "$1")\` failed (uv's own error is above). Retry, or run it manually (re-supplying any credential your FNO_INSTALL_WHEEL carries)."
+		fi
+		rm -f "$_err"
+		if [ "$_attempts" -ge 3 ]; then
+			die "\`uv tool install $(redact_source "$1")\` hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run."
+		fi
+		sleep 1
+	done
+}
+
 # Choose the `uv tool install` source. FNO_INSTALL_WHEEL (a local wheel / any uv
 # spec) wins so the channel is testable before the PyPI publish; otherwise the
 # by-name PyPI package `fno`, optionally pinned by FNO_VERSION. Sets FNO_SOURCE.
@@ -320,11 +357,7 @@ main() {
 	# failing with "already installed" (AC4-FR); we only reach here when no usable
 	# verified install was found, so --force never clobbers a healthy one.
 	say "provisioning the fno CLI via uv (one time, may take a few seconds)..."
-	# --compile-bytecode: ship the venv's own .pyc so no later process writes
-	# into a tree a reinstall may be deleting (docs/architecture/cli-lazy-imports.md).
-	if ! "$FNO_UV" tool install --force --compile-bytecode "$FNO_SOURCE"; then
-		die "\`uv tool install $(redact_source "$FNO_SOURCE")\` failed (network/PyPI unreachable, disk full, or a bad version). Check the error above and retry, or run it manually (re-supplying any credential your FNO_INSTALL_WHEEL carries)."
-	fi
+	uv_tool_install_retry "$FNO_SOURCE"
 
 	# Name the source we installed from, the path we built, and why we rejected
 	# it. The old one-liner named none of the three, which made the failure

@@ -855,6 +855,47 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     return outcome
 
 
+_UV_INSTALL_ATTEMPTS = 3
+
+
+def _uv_retry_sh(cmd: list[str]) -> str:
+    """Shell snippet running the uv install with ONE retried failure.
+
+    Retried: only the ENOTEMPTY signature (uv's removal walk racing a
+    concurrent importer's bytecode rewrite; docs/architecture/cli-lazy-imports.md).
+    Any other failure exits immediately with uv's own code, uv's stderr
+    re-printed verbatim. Bounded at ``_UV_INSTALL_ATTEMPTS``. Success is
+    accepted only via a positive marker - the ``fno-py`` console script plus
+    shipped bytecode under the tool venv - never the exit code alone.
+
+    This lives as a shell string (not a Python loop) because the Unix install
+    path execs it: uv must be free to replace the venv this interpreter may
+    itself be running from, which an in-process ``subprocess.run`` loop would
+    reintroduce as a race.
+    """
+    c = shlex.join(cmd)
+    verify = (
+        '__td=$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null) && '
+        '[ -n "$__td" ] && [ -x "$__td/fno/bin/fno-py" ] && '
+        '[ -n "$(find "$__td/fno/lib" -name "*.pyc" -print -quit 2>/dev/null)" ]'
+    )
+    return (
+        f'__n=0; __e=$(mktemp) || exit 1; '
+        f'while :; do __n=$((__n+1)); '
+        f'if {c} 2>"$__e"; then rm -f "$__e"; '
+        # break, not exit 0: callers chain `&& marker-write && refresh` after
+        # this snippet, and an exit here would skip both on every success.
+        f'if {verify}; then break; '
+        f'else echo "fno: uv exited 0 but the install does not verify '
+        f'(no fno-py script or no shipped bytecode under the tool venv)" >&2; exit 1; fi; '
+        f'else __rc=$?; cat "$__e" >&2; '
+        f'if ! grep -q "Directory not empty" "$__e" '
+        f'|| ! grep -q "os error 66" "$__e" '
+        f'|| [ "$__n" -ge {_UV_INSTALL_ATTEMPTS} ]; then rm -f "$__e"; exit "$__rc"; fi; '
+        f'rm -f "$__e"; sleep 1; fi; done'
+    )
+
+
 def _install_then_mark(
     install_cmd: list[str],
     rev: str,
@@ -863,6 +904,7 @@ def _install_then_mark(
     pid: int,
     post_install: Optional[str] = None,
     await_binary: Optional[str] = None,
+    install_sh: Optional[str] = None,
 ) -> str:
     """Build a shell line that installs, then writes the marker iff install succeeds.
 
@@ -893,7 +935,10 @@ def _install_then_mark(
         f"printf '%s\\n' {q(rev)} > {q(str(tmp))} && "
         f"mv {q(str(tmp))} {q(str(marker))}"
     )
-    line = f"{shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
+    # install_sh overrides the plain join when the caller wrapped the install
+    # in its own shell logic (the uv retry/verify wrapper at the real call
+    # site); the && gating is identical either way.
+    line = f"{install_sh or shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
     if post_install:
         line += f" && {{ {_await_binary(post_install, await_binary)} }}"
     return line
@@ -1119,6 +1164,7 @@ def update_command(
                 _install_then_mark(
                     cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
                     post_install=post_install, await_binary=_await_bin,
+                    install_sh=_uv_retry_sh(cmd),
                 ),
             ],
         )
@@ -1128,7 +1174,7 @@ def update_command(
         os.execvp(
             "/bin/sh",
             ["/bin/sh", "-c",
-             f"{shlex.join(cmd)} && {{ {_await_binary(post_install, _await_bin)} }}"],
+             f"{_uv_retry_sh(cmd)} && {{ {_await_binary(post_install, _await_bin)} }}"],
         )
     else:
-        os.execvp(cmd[0], cmd)
+        os.execvp("/bin/sh", ["/bin/sh", "-c", _uv_retry_sh(cmd)])

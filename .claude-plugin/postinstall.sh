@@ -53,11 +53,48 @@ uv_installed_fno_version() {
   printf '%s' "$v"
 }
 
+# Positive marker for a provisioned install: the console script exists AND the
+# venv ships compiled bytecode. A zero exit from uv proves nothing about what
+# landed, so every install path verifies before trusting itself.
+uv_install_verifies() {
+  local td
+  td="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null)" || return 1
+  [[ -x "$td/fno/bin/fno-py" ]] || return 1
+  [[ -n "$(find "$td/fno/lib" -name '*.pyc' -print -quit 2>/dev/null)" ]]
+}
+
+# `uv tool install --force --compile-bytecode "$@"` with ONE retried failure:
+# the ENOTEMPTY signature, uv's removal walk racing a concurrent importer's
+# bytecode rewrite (docs/architecture/cli-lazy-imports.md). Any other failure
+# returns non-zero immediately, uv's error already printed verbatim above.
+# Bounded at three attempts; success is accepted only via uv_install_verifies.
+uv_tool_install_retry() {
+  local attempts=0 err
+  err="$(mktemp)" || { err "cannot create a temp file to capture uv's error."; return 1; }
+  while :; do
+    attempts=$((attempts + 1))
+    if uv tool install --force --compile-bytecode "$@" 2>"$err"; then
+      rm -f "$err"
+      uv_install_verifies || { err "uv exited 0 but the install does not verify: no fno-py script or no shipped bytecode under the tool venv. Inspect it with 'uv tool dir'."; return 1; }
+      return 0
+    fi
+    cat "$err" >&2
+    if ! grep -q "Directory not empty" "$err" || ! grep -q "os error 66" "$err"; then
+      rm -f "$err"
+      return 1
+    fi
+    rm -f "$err"
+    if [[ "$attempts" -ge 3 ]]; then
+      err "uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run."
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 install_source_via_uv() {
   log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
-  # --compile-bytecode: ship the venv's own .pyc so no later process writes
-  # into a tree a reinstall may be deleting (docs/architecture/cli-lazy-imports.md).
-  if uv tool install --force --compile-bytecode "$CLI_DIR"; then
+  if uv_tool_install_retry "$CLI_DIR"; then
     log "installed Python-only fno from source. The Rust binaries are NOT included -"
     log "run 'fno update --rust' for the daemon-backed verbs (or install a published PyPI wheel)."
     log "restart your shell (or source your env) to pick up PATH."
@@ -83,7 +120,7 @@ if command -v uv >/dev/null 2>&1; then
   fi
 
   log "preferring the published PyPI wheel: uv tool install fno (by name)..."
-  if uv tool install --force --compile-bytecode fno >/dev/null 2>&1; then
+  if uv_tool_install_retry fno >/dev/null 2>&1; then
     INSTALLED="$(uv_installed_fno_version)"
     if [[ -n "$SRC_VERSION" && "$INSTALLED" == "$SRC_VERSION" ]]; then
       log "installed binary-complete fno $INSTALLED from PyPI (CLI + all three Rust binaries on PATH)."

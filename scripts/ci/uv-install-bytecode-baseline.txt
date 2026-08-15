@@ -10,7 +10,6 @@ cli/benchmarks/measure_cli_help.py::print(" install with: uv tool install <fno-r
 cli/src/fno/config/registry.py::"dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
 cli/tests/smoke/cargo_bootstrap_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 cli/tests/smoke/fno_sh_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
-cli/tests/smoke/test_postinstall.sh::"uv tool install --force fno" \
 cli/tests/smoke/test_postinstall.sh::for needle in "uv tool install" "pip install --user" "ERROR:"; do
 cli/tests/unit/test_update.py::(l for l in output.splitlines() if "uv tool install" in l), ""
 cli/tests/unit/test_update.py::assert "uv tool install --reinstall" in line
@@ -18,3 +17,4 @@ cli/tests/unit/test_update.py::assert line.index("uv tool install") < line.index
 crates/fno/src/bootstrap.rs::m.contains("uv tool install --force --from <repo>/cli fno"),
 crates/fno/src/bootstrap.rs::uv tool install --force --from <repo>/cli fno"
 scripts/triage.py::f"error: fno CLI not found. Install with: uv tool install '{_repo_root / 'cli'}'\n"
+.claude-plugin/postinstall.sh::err "uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run."

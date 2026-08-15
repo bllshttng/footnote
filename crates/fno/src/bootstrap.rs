@@ -33,11 +33,14 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 /// A bootstrap failure: a human-facing message plus the exit code to use.
 /// Every failure path produces one of these so the shim never panics on an
@@ -291,20 +294,126 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     // --compile-bytecode so the venv ships its own .pyc and no later process
     // (pr-watch, hooks, any caller) writes into a tree a reinstall may be
     // deleting; see docs/architecture/cli-lazy-imports.md.
-    let status = Command::new(uv)
-        .args(["tool", "install", "--force", "--compile-bytecode", source])
-        .status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(BootErr::new(
-            s.code().unwrap_or(1),
-            install_failure_message(source),
-        )),
-        Err(e) => Err(BootErr::new(
-            1,
-            format!("could not run uv to install the fno wheel: {e}"),
-        )),
+    //
+    // The install is retried on exactly one failure signature: ENOTEMPTY from
+    // uv's removal walk racing a concurrent importer's bytecode rewrite (the
+    // residual window the doc names). Any other non-zero exit - auth, network,
+    // disk - fails immediately, because retrying it would only reprint the same
+    // error. Each attempt's uv output is re-emitted verbatim, and success is
+    // accepted only after a positive marker (entrypoint + shipped bytecode),
+    // never on the exit code alone.
+    let mut last_code = 1;
+    for attempt in 1..=INSTALL_ATTEMPTS {
+        let out = match Command::new(uv)
+            .args(["tool", "install", "--force", "--compile-bytecode", source])
+            .env("NO_COLOR", "1")
+            .env("UV_NO_COLOR", "1")
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(BootErr::new(
+                    1,
+                    format!("could not run uv to install the fno wheel: {e}"),
+                ))
+            }
+        };
+        // Re-emit both streams exactly as an inherited-status run would have,
+        // so the user sees uv's own error (the better pointer) on every attempt.
+        let _ = std::io::stdout().write_all(&out.stdout);
+        let _ = std::io::stderr().write_all(&out.stderr);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        if out.status.success() {
+            return match install_verified(uv) {
+                Ok(()) => Ok(()),
+                Err(m) => Err(BootErr::new(
+                    1,
+                    format!(
+                        "uv reported success but the install does not verify: {m}"
+                    ),
+                )),
+            };
+        }
+        last_code = out.status.code().unwrap_or(1);
+        if !stderr_is_enotempty(&stderr) || attempt == INSTALL_ATTEMPTS {
+            return Err(BootErr::new(
+                last_code,
+                install_failure_message(source),
+            ));
+        }
+        // Give the racing importer a moment to finish its pass before the
+        // next removal walk starts under it.
+        thread::sleep(Duration::from_millis(300));
     }
+    unreachable!("the loop returns on success, non-signature failure, or final attempt")
+}
+
+/// How many times `install_wheel` may run uv before giving up. Three: one
+/// real attempt plus two retries, enough to absorb the measured intermittent
+/// race without turning a genuinely broken environment into a slow one.
+const INSTALL_ATTEMPTS: u32 = 3;
+
+/// The retryable signature: uv's closing `rmdir` hit a directory a concurrent
+/// writer refilled behind its walk. Pure for testing.
+fn stderr_is_enotempty(stderr: &str) -> bool {
+    stderr.contains("Directory not empty") && stderr.contains("os error 66")
+}
+
+/// Confirm the install with markers only a real provisioned venv produces:
+/// the `fno-py` console script AND shipped bytecode under its lib tree. A
+/// zero exit from uv proves nothing about what landed.
+fn install_verified(uv: &Path) -> Result<(), String> {
+    let tool_dir = uv_tool_dir(uv).ok_or("uv tool dir unreadable")?;
+    let venv = tool_dir.join(TOOL_NAME);
+    let entry = venv.join("bin").join("fno-py");
+    if !entry.exists() {
+        return Err(format!("no console script at {}", entry.display()));
+    }
+    let lib = venv.join("lib");
+    if count_pyc(&lib) == 0 {
+        return Err(format!(
+            "no compiled bytecode under {} (--compile-bytecode install ships it)",
+            lib.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Count `*.pyc` files under `dir`, recursively. Pure filesystem, testable.
+fn count_pyc(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut n = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            n += count_pyc(&path);
+        } else if path.extension().is_some_and(|e| e == "pyc") {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// `uv tool dir` as a PathBuf, or None when uv is absent/fails. Shared by the
+/// entrypoint resolution and the post-install marker check.
+fn uv_tool_dir(uv: &Path) -> Option<PathBuf> {
+    let out = Command::new(uv)
+        .args(["tool", "dir"])
+        .env("NO_COLOR", "1")
+        .env("UV_NO_COLOR", "1")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let tool_dir = strip_ansi(raw.trim());
+    if tool_dir.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(tool_dir))
 }
 
 /// Compose the install-failure message. Pure (uv has already printed its own
@@ -429,22 +538,9 @@ fn parse_dev_source(content: &str) -> Option<String> {
 /// or the tool dir cannot be read; the caller then provisions.
 fn resolve_via_uv_tool_dir() -> Option<PathBuf> {
     let uv = find_uv()?;
-    let out = Command::new(&uv)
-        .args(["tool", "dir"])
-        .env("NO_COLOR", "1")
-        .env("UV_NO_COLOR", "1")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&out.stdout);
-    let tool_dir = strip_ansi(raw.trim());
-    if tool_dir.is_empty() {
-        return None;
-    }
+    let tool_dir = uv_tool_dir(&uv)?;
     Some(
-        PathBuf::from(tool_dir)
+        tool_dir
             .join(TOOL_NAME)
             .join("bin")
             // The console script is `fno-py` (see the wheel's [project.scripts]);
@@ -1091,6 +1187,125 @@ mod tests {
         let m = locate_failure_message(Some(&p), false, "fno", None);
         assert!(m.contains("/u/.local/share/uv/tools/fno/bin/fno-py"), "{m}");
         assert!(m.contains("nothing exists at that path"), "{m}");
+    }
+
+    #[test]
+    fn enotempty_signature_matches_the_incident_string_and_only_it() {
+        // The exact line uv printed in the 2026-08-14 incident.
+        let incident = "error: failed to remove directory `/x/uv/tools/fno/lib`: \
+                        Directory not empty (os error 66)";
+        assert!(stderr_is_enotempty(incident));
+        // Near-misses that must NOT retry: wrong errno, no errno, unrelated.
+        assert!(!stderr_is_enotempty("Directory not empty (os error 39)"));
+        assert!(!stderr_is_enotempty("Directory not empty"));
+        assert!(!stderr_is_enotempty("error: failed to remove directory: os error 66"));
+        assert!(!stderr_is_enotempty("No solution found when resolving dependencies"));
+    }
+
+    #[test]
+    fn count_pyc_walks_recursively_and_skips_other_suffixes() {
+        let root = env::temp_dir().join(format!("fno-pyc-{}", std::process::id()));
+        let pkg = root.join("lib/python3.13/site-packages/fno/__pycache__");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("cli.cpython-313.pyc"), "").unwrap();
+        fs::write(pkg.join("stray.py"), "").unwrap();
+        fs::write(root.join("lib/other.txt"), "").unwrap();
+        assert_eq!(count_pyc(&root.join("lib")), 1);
+        // Absent dir is 0, not a panic.
+        assert_eq!(count_pyc(&root.join("nope")), 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn install_wheel_retries_only_the_enotempty_signature_and_verifies_the_marker() {
+        // A fake uv that fails twice with the incident signature, then succeeds
+        // and materializes the marker tree (entrypoint + one .pyc). install_wheel
+        // must absorb both failures, run three attempts total, and accept the
+        // result only because the marker verifies.
+        let root = env::temp_dir().join(format!("fno-uvfake-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
+        fs::create_dir_all(tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__")).unwrap();
+        fs::write(
+            tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__/x.pyc"),
+            "",
+        )
+        .unwrap();
+        fs::write(tool_dir.join("fno/bin/fno-py"), "#!/bin/sh\n").unwrap();
+        let counter = root.join("attempts");
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') echo '{}'; exit 0;;\n\
+             'tool install') n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; \
+             if [ $n -lt 3 ]; then \
+             echo 'error: failed to remove directory `/x/fno/lib`: Directory not empty (os error 66)' >&2; exit 2; \
+             fi; exit 0;;\n\
+             esac; exit 64\n",
+            tool_dir.display(),
+            c = counter.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        install_wheel(&uv, "fno").expect("retry absorbs the signature race");
+        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "3");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn install_wheel_fails_fast_on_a_non_signature_error() {
+        // Same fake, but the failure is NOT the ENOTEMPTY signature: one
+        // attempt, no retry, and the error must carry uv's exit code.
+        let root = env::temp_dir().join(format!("fno-uvfake2-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let counter = root.join("attempts");
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') exit 0;;\n\
+             'tool install') n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; \
+             echo 'error: invalid credential' >&2; exit 7;;\n\
+             esac; exit 64\n",
+            c = counter.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let e = install_wheel(&uv, "fno").unwrap_err();
+        assert_eq!(e.code, 7, "uv's own exit code is preserved");
+        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn install_wheel_rejects_a_success_that_does_not_verify() {
+        // uv exits 0 but the marker tree is absent (no pyc shipped): the exit
+        // code alone must not certify the install.
+        let root = env::temp_dir().join(format!("fno-uvfake3-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
+        fs::write(tool_dir.join("fno/bin/fno-py"), "#!/bin/sh\n").unwrap();
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') echo '{}'; exit 0;;\n\
+             'tool install') exit 0;;\n\
+             esac; exit 64\n",
+            tool_dir.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let e = install_wheel(&uv, "fno").unwrap_err();
+        assert!(e.msg.contains("does not verify"), "{}", e.msg);
+        assert!(e.msg.contains("no compiled bytecode"), "{}", e.msg);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
