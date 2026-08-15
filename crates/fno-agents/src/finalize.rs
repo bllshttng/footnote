@@ -795,7 +795,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // that gets a postmortem, with an operator-directed question in its last
     // message and nothing already filed for this session, gets it filed here.
     let mut outstanding_filed = false;
-    if POSTMORTEM_REASONS.contains(&reason.as_str()) {
+    if STUCK_REASONS.contains(&reason.as_str()) {
         let question = a
             .transcript
             .as_deref()
