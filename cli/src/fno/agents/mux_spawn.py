@@ -2318,7 +2318,8 @@ def dispatch_spawn_pane(
                 harness=provider,
                 harness_session_id=stored_session_uuid,
             ):
-                final_log_path = str(_touch_log_path(name))
+                touched_log_path = _touch_log_path(name)
+                final_log_path = str(touched_log_path) if touched_log_path is not None else ""
             rows.append(
                 AgentEntry(
                     name=name,

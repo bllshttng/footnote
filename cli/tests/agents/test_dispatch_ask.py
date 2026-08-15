@@ -221,6 +221,23 @@ def test_claude_create_path_creates_the_log_file_it_records(tmp_path: Path, monk
     )
 
 
+def test_touch_log_path_returns_none_on_a_failed_create(tmp_path: Path, monkeypatch) -> None:
+    """x-7bcd follow-up (code review on #874): a failed touch must yield
+    ``None``, not a path nothing backs and not an uncaught OSError — the
+    caller then records an empty log_path leg (a claim, not evidence, per
+    AC4) instead of one the write-time guard would wrongly treat as real."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.dispatch import _touch_log_path
+
+    def _raise_touch(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "touch", _raise_touch)
+
+    assert _touch_log_path("some-worker") is None
+
+
 # ---------------------------------------------------------------------------
 # AC1-ERR — input validation
 # ---------------------------------------------------------------------------
