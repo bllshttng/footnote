@@ -26,10 +26,17 @@ match nothing fails loudly instead of certifying an empty sweep.
 """
 
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+_TEST_DIR = Path(__file__).resolve().parent
+if str(_TEST_DIR.parents[2] / "cli" / "src") not in sys.path:
+    sys.path.insert(0, str(_TEST_DIR.parents[2] / "cli" / "src"))
+
+from fno.paths import resolve_repo_root  # noqa: E402
+
+REPO_ROOT = resolve_repo_root()
 PY_DIRS = [REPO_ROOT / "cli/src/fno"]
 RS_DIR = REPO_ROOT / "crates/fno-agents/src"
 
@@ -39,28 +46,28 @@ PY_ASSIGN = re.compile(r"^\s*([\w.]+)\s*=\s*\[(.*)\]")
 PY_CONCAT = re.compile(r"^\s*([\w.]+)\s*=\s*[\w.]+\s*\+\s*\[(.*)\]")
 PY_EXTEND = re.compile(r"^\s*([\w.]+)\.extend\(\[(.*)\]\)\s*$")
 PY_APPEND = re.compile(r"^\s*([\w.]+)\.append\((.*)\)\s*$")
+PY_APPEND_OPEN = re.compile(r"^\s*([\w.]+)\.append\(\s*$")
 RS_PUSH = re.compile(r"^\s*([\w.]+)\.push\((.*)\);?\s*$")
 RS_VEC = re.compile(r"vec!\[(.*)\]\s*;?\s*$")
-RS_ELEMENT = re.compile(
-    r"^\s*(?:(?:ctx\.)?(?:message|full_prompt|prompt|seed|effective|msg)\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\))\s*,\s*$"
-)
+RS_ELEMENT = re.compile(r"^\s*(?:(?:ctx\.)?\w+\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\)\.to_string\(\))\s*,\s*$")
 PY_COMMENT = re.compile(r"^\s*#")
 RS_COMMENT = re.compile(r"^\s*//")
 STRING_IN = re.compile(STR)
-# A pushed seed wears one of these names, bare or inside an identifier
-# (rendered_prompt, seed_text). Literal strings are stripped before the test
-# so a flag literal like "--append-system-prompt" (which contains the word
-# "prompt" behind a hyphen boundary) is never mistaken for a seed push.
-HAS_MESSAGE = re.compile(r"\w*(?:message|prompt|seed|effective|msg)")
+# A pushed seed's identifier ENDS in one of these words (rendered_prompt,
+# full_prompt, effective); msg_id and prompt_label are not seeds. Literal
+# strings are stripped before the test so a flag literal like
+# "--append-system-prompt" is never mistaken for a seed push.
+HAS_MESSAGE = re.compile(r"\w*(?:message|prompt|seed|effective|msg)\b")
 
-# The only flags whose following token is legitimately the seed: flags that
-# take the seed as their VALUE. Any other "-"-prefixed literal (a boolean
-# flag) leaves a following seed as a bare positional, which is the exact
-# unfenced shape this gate exists to catch, so it falls through to VIOLATION.
+# The only flags whose following token is NOT the user seed (a model id, a
+# search string, an id, our own system text). A flag that carries the SEED
+# (-p/-i/--prompt/-q) is NEVER whitelisted: yargs/clap-family parsers reject
+# hyphen-leading option values, so those sites must be fenced, use the
+# equal-form, or carry an exempt marker with a probed reason.
 VALUE_FORM_FLAGS = frozenset(
     {
-        "-p", "-i", "-q", "-m",
-        "--prompt", "--search", "--append-system-prompt",
+        "-m",
+        "--search", "--append-system-prompt",
         "--source-inbox-msg",
     }
 )
@@ -74,6 +81,18 @@ ARGV_VAR = re.compile(r"^[A-Za-z_]*(?:argv|cmd|args|command)[A-Za-z_]*$")
 
 def _literals(line: str) -> list:
     return STRING_IN.findall(line)
+
+
+FSTR = re.compile(r'f"([^"]*)"')
+
+
+def _seed_text(text: str) -> str:
+    """Strip string literals but keep f-string INTERPOLATIONS: the seed of an
+    equal-form token (``f"--prompt={message}"``) lives inside the braces."""
+    def keep_braces(m):
+        return " ".join(re.findall(r"\{([^}]*)\}", m.group(1)))
+
+    return re.sub(STR, "", FSTR.sub(keep_braces, text))
 
 
 def _prev_code_line(lines: list, idx: int, is_rust: bool) -> str:
@@ -106,7 +125,11 @@ def _list_opener_line(lines: list, idx: int) -> str:
                 depth += 1
             elif ch in "([{":
                 if depth == 0:
-                    return lines[j] if ch == "[" else ""
+                    if ch == "[":
+                        return lines[j]
+                    # A multi-line .append( call is a seed site too; any
+                    # other "(" is an ordinary call argument, not scanned.
+                    return lines[j] if PY_APPEND_OPEN.match(lines[j]) else ""
                 depth -= 1
         # A def/return line with no open bracket context ends the search: the
         # bare name is a statement, not an element.
@@ -138,11 +161,16 @@ def _classify_inline(text: str) -> str:
     """Classify a seed token inside a bracketed argv expression.
 
     The token before the seed decides: ``"--"`` fences it, a VALUE_FORM_FLAGS
-    literal takes it as the flag's value, anything else is a VIOLATION.
+    literal takes it as the flag's value, anything else is a VIOLATION. An
+    equal-form token (``f"--prompt={message}"``) binds its own value and is a
+    value-form on its own.
     """
     tokens = [t.strip() for t in text.split(",")]
     for t_i, tok in enumerate(tokens):
-        if HAS_MESSAGE.search(re.sub(STR, "", tok)):
+        if HAS_MESSAGE.search(_seed_text(tok)):
+            own_lits = _literals(tok)
+            if own_lits and own_lits[-1].startswith("-") and "=" in own_lits[-1]:
+                return "value-form"
             prev_tok = tokens[t_i - 1] if t_i else ""
             lits = _literals(prev_tok)
             if lits == ["--"]:
@@ -200,7 +228,7 @@ def scan_file(path: Path, is_rust: bool) -> list:
                 or PY_CONCAT.match(line)
                 or PY_EXTEND.match(line)
             )
-            if m and HAS_MESSAGE.search(re.sub(STR, "", m.group(2))):
+            if m and HAS_MESSAGE.search(_seed_text(m.group(2))):
                 if _argv_named(m.group(1)):
                     kind = _classify_inline(m.group(2))
                     pushed = line.strip()
@@ -209,24 +237,27 @@ def scan_file(path: Path, is_rust: bool) -> list:
                 if (
                     m
                     and _argv_named(m.group(1))
-                    and HAS_MESSAGE.search(re.sub(STR, "", m.group(2)))
+                    and HAS_MESSAGE.search(_seed_text(m.group(2)))
                 ):
                     pushed = line.strip()
                     kind = _classify_prev(_prev_code_line(lines, idx - 1, is_rust))
-            if kind is None:
-                # Element of a multi-line argv LIST literal, bare or mixed with
-                # literals on one line (not a call argument: the innermost
-                # unclosed opener must be "[" and its assignment argv-named).
-                # A bare leading element takes its classification from the line
-                # above; a mid-line seed classifies against the in-line token
-                # before it.
+            if kind is None and HAS_MESSAGE.search(_seed_text(line)):
+                # Element of a multi-line argv LIST literal or append call,
+                # bare or mixed with literals on one line. A bare leading
+                # element takes its classification from the line above; a
+                # mid-line seed classifies against the in-line token before
+                # it. The cheap seed-word test runs FIRST: the bracket walk
+                # is O(n^2) and most lines carry no seed at all.
                 opener = _list_opener_line(lines, idx - 1)
-                if opener and HAS_MESSAGE.search(re.sub(STR, "", line)):
+                if opener:
                     om = re.match(r"^\s*([\w.]+)\s*(?:\+=|=[^=]|\+)\s*\[", opener)
-                    if om and _argv_named(om.group(1)):
+                    am = PY_APPEND_OPEN.match(opener)
+                    if (om and _argv_named(om.group(1))) or (
+                        am and _argv_named(am.group(1))
+                    ):
                         seed_index = None
                         for t_i, tok in enumerate(t.strip() for t in line.split(",")):
-                            if HAS_MESSAGE.search(re.sub(STR, "", tok)):
+                            if HAS_MESSAGE.search(_seed_text(tok)):
                                 seed_index = t_i
                                 break
                         if seed_index == 0:
@@ -243,7 +274,7 @@ def scan_file(path: Path, is_rust: bool) -> list:
             if (
                 is_push
                 and _argv_named(is_push.group(1))
-                and HAS_MESSAGE.search(re.sub(STR, "", arg))
+                and HAS_MESSAGE.search(_seed_text(arg))
             ) or (
                 arg == "" and RS_ELEMENT.match(line) and HAS_MESSAGE.search(line)
             ):
@@ -253,7 +284,7 @@ def scan_file(path: Path, is_rust: bool) -> list:
                 # Single-line vec! literal: classify the seed token in place,
                 # mirroring the Python inline-list arm.
                 m = RS_VEC.search(line)
-                if m and HAS_MESSAGE.search(re.sub(STR, "", m.group(1))):
+                if m and HAS_MESSAGE.search(_seed_text(m.group(1))):
                     kind = _classify_inline(m.group(1))
                     pushed = line.strip()
         if kind == "VIOLATION" and _exempt(lines, idx - 1, is_rust):
@@ -297,11 +328,12 @@ def test_scanner_still_sees_the_known_seams() -> None:
     counts = {}
     for _, _, _, kind in results:
         counts[kind] = counts.get(kind, 0) + 1
-    assert counts.get("fenced", 0) >= 16, counts
-    assert counts.get("value-form", 0) >= 10, counts
+    assert counts.get("fenced", 0) >= 20, counts
+    assert counts.get("value-form", 0) >= 4, counts
     # A floor AND a ceiling on exemptions: each new exempt marker must be a
-    # visible test edit, never a silent gate bypass. The one standing
-    # exemption is the agy pane arm (no clean end-of-options in agy).
-    assert counts.get("exempt", 0) == 1, counts
+    # visible test edit, never a silent gate bypass. Ten standing exemptions:
+    # the agy arms (no clean end-of-options, probed), the deprecated-gemini
+    # arms, and the hermes -q value form.
+    assert counts.get("exempt", 0) == 10, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts

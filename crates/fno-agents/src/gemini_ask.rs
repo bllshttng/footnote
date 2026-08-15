@@ -156,6 +156,8 @@ pub fn build_argv_create(
         "gemini".to_string(),
         "--skip-trust".to_string(),
         "-p".to_string(),
+        // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p value
+        // form is pinned by tests and left as-is).
         full_prompt.to_string(),
         "--output-format".to_string(),
         "json".to_string(),
@@ -185,6 +187,8 @@ pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec
         "gemini".to_string(),
         "--skip-trust".to_string(),
         "-p".to_string(),
+        // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p value
+        // form is pinned by tests and left as-is).
         full_prompt.to_string(),
         "--output-format".to_string(),
         "json".to_string(),

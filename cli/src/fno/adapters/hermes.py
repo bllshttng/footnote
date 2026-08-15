@@ -152,6 +152,8 @@ class HermesCliAdapter:
 
         worker_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
+        # argv-fence: exempt (hermes `-q` takes the prompt as its value; no
+        # verified end-of-options in hermes, value form pinned and left).
         cmd = ["hermes", "chat", "-q", prompt]
 
         try:

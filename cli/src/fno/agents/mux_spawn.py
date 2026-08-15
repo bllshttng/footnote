@@ -896,6 +896,8 @@ def build_pane_argv(
         if model:
             argv += ["--model", model]
         if message:
+            # argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -i
+            # value form is pinned by tests and left as-is).
             argv += ["-i", message]
         if permission_mode:
             argv += permission_pane_tokens("gemini", permission_mode)
@@ -941,7 +943,10 @@ def build_pane_argv(
         # opencode's default permission prompting for the answer queue.
         argv = ["opencode"]
         if message:
-            argv += ["--prompt", message]
+            # Equal-form binds the value even when it is flag-shaped; yargs
+            # misparses the split form there (probed: usage error on a
+            # leading-flag value), so never spell this "--prompt", message.
+            argv += [f"--prompt={message}"]
         # opencode expects the provider/model form. An explicit --model wins,
         # else the per-harness default table (opencode is the only entry);
         # inject nothing if the table has no entry for this provider.

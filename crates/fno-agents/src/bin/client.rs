@@ -1814,6 +1814,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 }
                 argv = Some(rest);
             }
+            "--" => {
+                // End-of-options: everything after is positional (the seed
+                // fence, same contract as the Python CLI's click parser).
+                for a in it.by_ref() {
+                    positional.push(a);
+                }
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {other}"));
             }

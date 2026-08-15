@@ -817,12 +817,13 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
         "--dangerously-skip-permissions",
     ]
 
-    # x-51f6 US2: bare `opencode` is the TUI; the message rides --prompt (the
-    # positional is a PROJECT PATH, not a prompt), --auto only under yolo,
-    # and never the headless `run` subcommand.
+    # x-51f6 US2: bare `opencode` is the TUI; the message rides --prompt in
+    # the EQUAL form (yargs misparses the split form on a flag-shaped value;
+    # the positional is a PROJECT PATH, not a prompt), --auto only under
+    # yolo, and never the headless `run` subcommand.
     # x-c772: opencode is always launched with a model (the z-ai/glm-5.2 default).
     opencode = build_pane_argv("opencode", "task", tmp_path, False, "ignored")
-    assert opencode == ["opencode", "--prompt", "task", "--model", "z-ai/glm-5.2"]
+    assert opencode == ["opencode", "--prompt=task", "--model", "z-ai/glm-5.2"]
     assert build_pane_argv("opencode", "", tmp_path, False, None) == [
         "opencode",
         "--model",
@@ -831,8 +832,7 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     opencode_yolo = build_pane_argv("opencode", "task", tmp_path, True, None)
     assert opencode_yolo == [
         "opencode",
-        "--prompt",
-        "task",
+        "--prompt=task",
         "--model",
         "z-ai/glm-5.2",
         "--auto",
@@ -853,7 +853,7 @@ def test_build_pane_argv_normalizes_direct_slash_commands(tmp_path: Path) -> Non
     )[-1] == "$fno:target x-81ad"
     assert build_pane_argv(
         "opencode", "/fno:target x-81ad", tmp_path, False, None
-    )[2] == "/fno:target x-81ad"
+    )[1] == "--prompt=/fno:target x-81ad"
     assert build_pane_argv(
         "claude", "/fno:target x-81ad", tmp_path, False, "uuid"
     )[-1] == "/fno:target x-81ad"

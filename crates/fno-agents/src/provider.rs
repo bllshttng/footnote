@@ -722,6 +722,9 @@ impl Provider for GeminiProvider {
             "gemini".into(),
             "--skip-trust".into(),
             "-p".into(),
+            // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p
+            // value form is pinned by tests and left as-is, successor agy
+            // has its own probed exemption).
             ctx.message.clone(),
             "--output-format".into(),
             "json".into(),
@@ -740,6 +743,8 @@ impl Provider for GeminiProvider {
             "gemini".into(),
             "--skip-trust".into(),
             "-p".into(),
+            // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p
+            // value form is pinned by tests and left as-is).
             ctx.message.clone(),
             "--output-format".into(),
             "json".into(),
@@ -895,6 +900,9 @@ impl Provider for AgyProvider {
         // unattended agy cannot wedge on its first approval prompt.
         let mut argv = vec!["agy".into(), "--dangerously-skip-permissions".into()];
         argv.push("-p".into());
+        // argv-fence: exempt (probed 2026-08-15: agy's parser folds flag-shaped
+        // text into the prompt instead of dying; it has no clean end-of-options,
+        // so neither a fence nor the equal-form applies).
         argv.push(ctx.message.clone());
         argv
     }
@@ -909,6 +917,8 @@ impl Provider for AgyProvider {
             ctx.session_id.clone(),
         ];
         argv.push("-p".into());
+        // argv-fence: exempt (probed 2026-08-15: agy folds flag-shaped text
+        // into the prompt; no clean end-of-options to fence with).
         argv.push(ctx.message.clone());
         argv
     }
