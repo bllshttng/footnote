@@ -2124,7 +2124,7 @@ fn read_pr_info(
         let checks_out = Command::new(gh_bin)
             .args(["pr", "checks"])
             .args(&sel)
-            .args(["--json", "name,state,bucket"])
+            .args(["--json", "name,state,bucket,startedAt"])
             .current_dir(cwd)
             .output()
             .map_err(|e| ("pr_checks".to_string(), e.to_string()))?;
@@ -2135,6 +2135,11 @@ fn read_pr_info(
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
             .map_err(|_| ("pr_checks_parse".to_string(), String::new()))?;
+        // One dedup feeds every reader of this payload, so the conclusion, the
+        // failing-name set, and the pending flag can never answer off different
+        // rollups (a superseded run read as the current one is the exact lie
+        // this dedup exists to remove).
+        let checks = latest_per_name(&checks);
 
         let failing = failing_check_names(&checks);
         let has_pending = ci_has_pending_checks(&checks);
@@ -2445,6 +2450,52 @@ fn read_pr_info(
     })
 }
 
+/// Latest run per check name, keyed on when the run was TRIGGERED. A
+/// superseding run always starts later but need not finish later, so
+/// `startedAt` is the only honest recency key; list order is not one. A
+/// missing timestamp sorts oldest and loses to any timestamped sibling. On a
+/// timestamp tie the kept entry is fail-closed: a fail|cancel entry is never
+/// dropped by a same-time non-fail (parity with `_latest_per_name` in
+/// cli/src/fno/pr/_status.py). Entries without a name cannot group and pass
+/// through verbatim.
+fn latest_per_name(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    fn ts_of(v: &Value) -> &str {
+        v.get("startedAt").and_then(|t| t.as_str()).unwrap_or("")
+    }
+    fn is_fail(v: &Value) -> bool {
+        matches!(
+            v.get("bucket")
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_lowercase()
+                .as_str(),
+            "fail" | "cancel"
+        )
+    }
+    let mut kept: Vec<Value> = Vec::new();
+    for c in arr {
+        let name = c.get("name").and_then(|n| n.as_str()).map(str::to_string);
+        let slot = name.as_deref().and_then(|nm| {
+            kept.iter()
+                .position(|k| k.get("name").and_then(|n| n.as_str()) == Some(nm))
+        });
+        match slot {
+            None => kept.push(c.clone()),
+            Some(i) => {
+                let (tn, te) = (ts_of(c), ts_of(&kept[i]));
+                // Strictly-newer replaces; a tie replaces only fail-closed.
+                if tn > te || (tn == te && !is_fail(&kept[i]) && is_fail(c)) {
+                    kept[i] = c.clone();
+                }
+            }
+        }
+    }
+    Value::Array(kept)
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -2544,12 +2595,16 @@ fn failing_check_names(checks: &Value) -> Vec<String> {
         .collect()
 }
 
-/// True iff any check is still in a non-terminal bucket (`pending`, or an
-/// unrecognized bucket that is not one of pass|fail|cancel|skipping). The
+/// True iff any check is still in a non-terminal bucket (`pending`, `cancel`,
+/// or an unrecognized bucket that is not one of pass|fail|skipping). The
 /// DoneAwaitingMerge terminal must not fire while any check is unresolved: a
 /// still-running check (e.g. the session's own new job) could turn red, so a
 /// partial `Failure` is not yet proof that the ONLY problem is pre-existing
-/// main-red.
+/// main-red. `cancel` is deliberately non-terminal here even though it stays
+/// red in `failing_check_names` and `compute_ci_conclusion`: a cancelled run
+/// produced NO result, so declaring the session done off it would assert a
+/// verdict that never ran. The held terminal waits for a newer run (or the
+/// iteration/budget kill criteria), which is the correct trade.
 fn ci_has_pending_checks(checks: &Value) -> bool {
     let Some(arr) = checks.as_array() else {
         return false;
@@ -2560,7 +2615,7 @@ fn ci_has_pending_checks(checks: &Value) -> bool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_lowercase();
-        !matches!(bucket.as_str(), "pass" | "fail" | "cancel" | "skipping")
+        !matches!(bucket.as_str(), "pass" | "fail" | "skipping")
     })
 }
 
@@ -5755,13 +5810,16 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
             // Get CI
             let ci = match Command::new(gh_bin)
-                .args(["pr", "checks", "--json", "name,state,bucket"])
+                .args(["pr", "checks", "--json", "name,state,bucket,startedAt"])
                 .current_dir(&cwd)
                 .output()
             {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    compute_ci_conclusion(&cv).unwrap_or(CiConclusion::None)
+                    // Same dedup as the main CI read: the fingerprint's CI arm
+                    // must describe the latest run per name, not a superseded
+                    // one a newer push already replaced.
+                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
                 }
                 _ => CiConclusion::None,
             };
@@ -11208,6 +11266,59 @@ mod tests {
         assert!(ci_has_pending_checks(&unknown));
         // Malformed input never panics.
         assert!(!ci_has_pending_checks(&serde_json::json!({})));
+    }
+
+    // ── cancel is an absent result, not a terminal one ─────────────────────
+
+    #[test]
+    fn ci_has_pending_counts_latest_cancel_as_unresolved() {
+        // A cancelled latest run produced no result: the DoneAwaitingMerge
+        // terminal must not fire off it, exactly as it must not off a pending
+        // one. Composition mirrors the real path (dedup, then the reader).
+        let cancelled = serde_json::json!([
+            {"name": "ci", "bucket": "cancel", "startedAt": "2026-08-15T00:00:00Z"}
+        ]);
+        assert!(ci_has_pending_checks(&latest_per_name(&cancelled)));
+    }
+
+    #[test]
+    fn latest_per_name_drops_superseded_cancel_for_newer_pass() {
+        // The dedup is what makes the non-terminal cancel safe: a superseded
+        // cancel from an earlier push loses to the newer same-name pass, so
+        // the terminal is held only by a cancel that IS the latest run.
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "cancel", "startedAt": "2026-08-15T00:00:00Z"},
+            {"name": "ci", "bucket": "pass",  "startedAt": "2026-08-15T01:00:00Z"},
+            {"name": "doc", "bucket": "skipping", "startedAt": "2026-08-15T01:00:00Z"},
+        ]);
+        let deduped = latest_per_name(&checks);
+        assert!(!ci_has_pending_checks(&deduped));
+        assert!(failing_check_names(&deduped).is_empty());
+        // Recency keys on TRIGGER time: a slow superseded pass completing
+        // later must not displace a newer fast fail.
+        let swapped = serde_json::json!([
+            {"name": "ci", "bucket": "pass", "startedAt": "2026-08-15T01:00:00Z"},
+            {"name": "ci", "bucket": "cancel", "startedAt": "2026-08-15T00:00:00Z"},
+        ]);
+        let deduped = latest_per_name(&swapped);
+        assert!(!ci_has_pending_checks(&deduped));
+        assert!(failing_check_names(&deduped).is_empty());
+    }
+
+    #[test]
+    fn latest_per_name_tie_keeps_fail_over_same_time_pass() {
+        // Parity with the Python rule: on a missing/equal timestamp a fail is
+        // never dropped by a same-time non-fail, so a superseded pass can
+        // never hide a real fail when the payload carries no ordering.
+        let tie = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "ci", "bucket": "fail"},
+        ]);
+        let deduped = latest_per_name(&tie);
+        assert_eq!(
+            failing_check_names(&deduped),
+            vec!["ci".to_string()]
+        );
     }
 
     #[test]
