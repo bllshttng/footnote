@@ -8585,9 +8585,7 @@ impl Core {
                 // (AC4-FR: nothing outlives the session), then shut down -
                 // the SocketGuard unlinks on the way out.
                 self.bye_all("killed");
-                for entry in self.panes.values() {
-                    entry.pty.kill();
-                }
+                self.kill_all_panes();
                 Flow::Shutdown
             }
             CoreMsg::Gone(id) => {
@@ -9004,6 +9002,17 @@ impl Core {
             let _ = c.reliable_tx.try_send(ServerMsg::Bye {
                 reason: reason.to_string(),
             });
+        }
+    }
+
+    /// Kill every pane child: the teardown half of every sanctioned exit path
+    /// (`CoreMsg::Kill`, the idle reaper, SIGTERM/SIGINT - x-48a5). PtyShell
+    /// has no Drop that kills its child, so an exit path that skips this
+    /// leaves pane children to whatever SIGHUP the closing pty master happens
+    /// to deliver; a worker that ignores SIGHUP keeps running.
+    fn kill_all_panes(&self) {
+        for entry in self.panes.values() {
+            entry.pty.kill();
         }
     }
 }
@@ -9766,15 +9775,25 @@ async fn serve(
             _ = tokio::time::sleep_until(idle_deadline), if idle_exit_e2e => {
                 if *idle_count_rx.borrow() == 0 {
                     eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
-                    for entry in core.panes.values() {
-                        entry.pty.kill();
-                    }
+                    core.kill_all_panes();
                     break Flow::Shutdown;
                 }
                 idle_deadline = tokio::time::Instant::now() + idle_grace;
             }
-            _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => break Flow::Shutdown,
-            _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => break Flow::Shutdown,
+            // SIGTERM/SIGINT tear panes down the way CoreMsg::Kill does
+            // (x-48a5): the arms used to break straight to Shutdown, so a
+            // signal exit left pane children to SIGHUP luck. This only helps
+            // a LIVE loop; a wedged one never reaches the arm, and
+            // kill-server's SIGKILL rung reports the unreaped children
+            // honestly instead.
+            _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => {
+                core.kill_all_panes();
+                break Flow::Shutdown;
+            }
+            _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => {
+                core.kill_all_panes();
+                break Flow::Shutdown;
+            }
         }
         // Loop-tail choke point (x-4e30): the out_rx/exit_rx arms mutate
         // `clients` via the dead-client sweeps (broadcast_pane /

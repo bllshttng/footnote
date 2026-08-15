@@ -595,3 +595,58 @@ fn server_publishes_and_removes_its_pid_sidecar() {
     }
     drop(server);
 }
+
+#[test]
+fn sigterm_shutdown_kills_pane_children() {
+    // x-48a5: the SIGTERM arm must tear panes down the way CoreMsg::Kill
+    // does. The pane holds a child that ignores SIGHUP, so the closing pty
+    // master cannot be what kills it - only the server's explicit teardown
+    // can. Pre-fix, the child outlives the server.
+    let scratch = Scratch::new("sigterm_panes");
+    let dir = scratch.0.to_str().unwrap();
+    let run = pane(
+        &scratch,
+        &[
+            "run",
+            "--cwd",
+            dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap '' HUP; exec sleep 300",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    // The pane's child pid, straight from the listing.
+    let ls = stdout(&pane(&scratch, &["ls", "--json"]));
+    let panes: Vec<serde_json::Value> = serde_json::from_str(&ls).unwrap();
+    let child_pid = panes[0]["child_pid"]
+        .as_u64()
+        .expect("pane reports child_pid") as i32;
+    assert!(
+        unsafe { libc::kill(child_pid, 0) } == 0,
+        "pane child {child_pid} live before SIGTERM"
+    );
+
+    let server_pid: i32 = std::fs::read_to_string(scratch.0.join("main.pid"))
+        .expect("server pid sidecar")
+        .trim()
+        .parse()
+        .unwrap();
+    unsafe { libc::kill(server_pid, libc::SIGTERM) };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while unsafe { libc::kill(child_pid, 0) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        unsafe { libc::kill(child_pid, 0) } != 0,
+        "pane child {child_pid} outlived the server's SIGTERM"
+    );
+    drop(scratch);
+}
