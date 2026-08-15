@@ -217,23 +217,36 @@ def tick() -> None:
     settings = load_settings()
     cfg = settings.pr_watch
 
-    result = _tick(
-        claim=ClaimAdapter(),
-        emit=_emit_event,
-        reviewers_for=_reviewers_for,
-        notify=lambda message, **_kw: _notify_parked(message),
-        post_merge_readiness_fn=post_merge_readiness,
-        now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        max_age_days=cfg.max_age_days,
-        max_retries=cfg.retries,
-    )
-
-    if result.lock_held:
-        typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
-    else:
-        typer.echo(
-            f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+    # A dead tick must not kill the legs below. The receipt contract makes
+    # _tick raise on a failed emission even though state is already persisted,
+    # so a broken events path would otherwise crash-loop recovery and sync
+    # catch-up, which ride this same launchd cadence. Fail the exit code at
+    # the end instead, mirroring how those legs wrap their own failures.
+    tick_failed = None
+    try:
+        result = _tick(
+            claim=ClaimAdapter(),
+            emit=_emit_event,
+            reviewers_for=_reviewers_for,
+            notify=lambda message, **_kw: _notify_parked(message),
+            post_merge_readiness_fn=post_merge_readiness,
+            now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            max_age_days=cfg.max_age_days,
+            max_retries=cfg.retries,
         )
+    except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
+        tick_failed = str(exc)
+        log.warning("pr-watch: tick failed: %s", exc)
+        typer.echo(f"pr-watch tick: failed: {exc}", err=True)
+        result = None
+
+    if result is not None:
+        if result.lock_held:
+            typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
+        else:
+            typer.echo(
+                f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+            )
 
     # Session recovery rides this same launchd cadence: a sweep over
     # footnote-launched bg /target sessions that rotates providers on swap-class
@@ -291,6 +304,9 @@ def tick() -> None:
                 _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
     except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
         log.warning("pr-watch: sync catch-up failed: %s", exc)
+
+    if tick_failed is not None:
+        raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

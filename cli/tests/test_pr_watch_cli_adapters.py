@@ -315,3 +315,32 @@ def test_AC6_subsystem_failure_is_not_reported_as_a_held_lock(monkeypatch) -> No
     assert "unavailable" in res.output
     assert "No space left on device" in res.output
     assert "open_prs=" not in res.output
+
+
+def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) -> None:
+    """A raised tick fails the command but never the recovery and sync legs."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+
+    def _boom(**_kw):
+        raise RuntimeError("pr-watch tick receipt emission failed")
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.tick", _boom, raising=True)
+
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+
+    assert "pr-watch tick: failed:" in res.output
+    assert res.exit_code == 1
+    # A controlled failure exit, not the RuntimeError escaping the command:
+    # reaching SystemExit proves the composed legs ran to the end.
+    assert isinstance(res.exception, SystemExit), repr(res.exception)
