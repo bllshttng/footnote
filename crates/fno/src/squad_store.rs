@@ -114,6 +114,13 @@ pub struct StoredMember {
     /// STORE_VERSION at 1 (an additive field never quarantines existing squads).
     #[serde(default)]
     pub tab_name: Option<String>,
+    /// (x-caef) The pane's spawn cwd at store time, re-derived fresh on every
+    /// persist like `tab_name`. Restore spawns `claude attach` here instead of
+    /// the squad's `origins[0]` when the directory still exists (a worktree
+    /// worker's true home), falling back to `origins[0]` with a notice when it
+    /// does not. `#[serde(default)]`, same no-quarantine rule as `tab_name`.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// A durable per-squad identity for an UNNAMED squad, minted the first time it
@@ -1324,6 +1331,7 @@ mod tests {
             attach_id: id.into(),
             tombstone: false,
             tab_name: None,
+            cwd: None,
         }
     }
 
@@ -1486,6 +1494,19 @@ mod tests {
         assert!(loaded.squads[0].tab_trees.is_empty());
         assert_eq!(loaded.squads[0].active_tab, None);
         assert!(loaded.notice.is_none());
+    }
+
+    #[test]
+    fn pre_xcaef_member_loads_without_cwd_field() {
+        // Wire tolerance for StoredMember.cwd, same rule as tab_trees above: a
+        // member row written before x-caef has no "cwd" key and must load
+        // unquarantined with cwd defaulting to None.
+        let s = Scratch::new("no-member-cwd");
+        let raw = r#"{"version":1,"squads":[{"name":"w","origins":[],"members":[{"attach_id":"c19cd2c3","tombstone":false}],"created_at":"2026-08-11T00:00:00Z","tab_specs":[]}]}"#;
+        std::fs::write(s.file(), raw).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1, "not quarantined");
+        assert_eq!(loaded.squads[0].members[0].cwd, None);
     }
 
     #[test]
@@ -2295,6 +2316,7 @@ mod tests {
                 attach_id: "deadbeef".into(),
                 tombstone: true,
                 tab_name: None,
+                cwd: None,
             }];
             assert_eq!(
                 prune_decision(&s, false, live_some, &no_cwds, &gone),
@@ -2487,6 +2509,7 @@ mod tests {
             attach_id: "deadbeef".into(),
             tombstone: true,
             tab_name: None,
+            cwd: None,
         }];
         assert_eq!(
             prune_decision_at(

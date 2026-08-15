@@ -1500,6 +1500,25 @@ fn spec_to_node(tree: &LayoutTreeSpec, resolve: &dyn Fn(&str) -> Option<u64>) ->
     }
 }
 
+/// The cwd to spawn a restored member's pane at (x-caef case 2/3), and the
+/// stored path to name in a fallback notice when it no longer resolves. Pure
+/// over an injected `is_dir` so the policy is unit-testable without touching
+/// the filesystem, like `live_ids_from`. `stored.is_none()` (a pre-x-caef
+/// member) and a stored path that fails `is_dir` both fall back to `cwd0` -
+/// the two-path notice (member wants -> where it actually landed) is the
+/// caller's job, since only the caller knows the member's identity to name.
+fn restore_member_cwd(
+    stored: Option<&str>,
+    cwd0: &str,
+    is_dir: impl Fn(&str) -> bool,
+) -> (String, Option<String>) {
+    match stored {
+        Some(path) if is_dir(path) => (path.to_string(), None),
+        Some(path) => (cwd0.to_string(), Some(path.to_string())),
+        None => (cwd0.to_string(), None),
+    }
+}
+
 /// The set of attach-ids live NOW, from the raw registry + roster contents
 /// (x-8f11). Pure so restore's liveness read is unit-testable without files or
 /// env, like `agents_view::derive_rows`: a non-exited registry row's
@@ -4125,6 +4144,22 @@ impl Core {
                     m.tab_name = tab_name;
                 }
             }
+            // (x-caef) Re-derive each live member's pane cwd the same way: only
+            // a resolvable live pane overwrites, so a tombstone or a transient
+            // miss keeps the last-known cwd rather than erasing it. This is what
+            // lets restore spawn a worktree worker back into its own worktree
+            // instead of the squad's `origins[0]` (server.rs restore_squads).
+            for m in list.iter_mut() {
+                if let Some(cwd) = self
+                    .attached
+                    .get(&m.attach_id)
+                    .and_then(|pid| self.panes.get(pid))
+                    .map(|p| p.cwd.clone())
+                    .filter(|c| !c.is_empty())
+                {
+                    m.cwd = Some(cwd);
+                }
+            }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
@@ -4187,7 +4222,21 @@ impl Core {
     /// funnel every layout mutation crosses) and flush immediately when the
     /// debounce window is already past, so an isolated mutation does not wait
     /// for the next tick.
+    ///
+    /// A no-op before `self.restored` flips true: `attach()`'s FIRST
+    /// `push_layout(true)` (server.rs, the freshly-minted home squad's own
+    /// initial layout push) fires before `restore_squads` runs a few lines
+    /// later in the same call. Capturing there would persist the brand-new
+    /// squad, and `restore_squads` would then read its own just-written row
+    /// back as a "restored" lane matching this squad's origin and home-merge
+    /// a second pane into it - the session observing its own bootstrap as a
+    /// restart. Once `self.restored` is true this can never happen again (the
+    /// gate is one-shot for the server's lifetime), so every later mutation
+    /// captures exactly as before.
     fn mark_topology_dirty(&mut self) {
+        if !self.restored {
+            return;
+        }
         self.topology_dirty = true;
         let due = self
             .last_topology_flush
@@ -4231,6 +4280,7 @@ impl Core {
                 attach_id: id.to_string(),
                 tombstone: false,
                 tab_name: None,
+                cwd: None,
             }),
         }
         self.persist_squad(sid);
@@ -4498,6 +4548,7 @@ impl Core {
                         attach_id: m.attach_id.clone(),
                         tombstone: true,
                         tab_name: m.tab_name.clone(),
+                        cwd: m.cwd.clone(),
                     });
                     continue;
                 }
@@ -4506,8 +4557,24 @@ impl Core {
                     Some((a, d)) => (Some(a.as_str()), Some(d.as_path())),
                     None => (None, None),
                 };
+                // (x-caef case 2/3) Spawn at the member's OWN stored cwd when it
+                // still exists - a worktree worker restores into its worktree,
+                // not the squad's `origins[0]`. A gone cwd (an archived worktree)
+                // falls back to `origins[0]` with a two-path notice so the
+                // operator learns where it landed rather than discovering it
+                // silently mid-edit.
+                let (spawn_cwd, fallback_notice) =
+                    restore_member_cwd(m.cwd.as_deref(), &cwd0, |p| {
+                        std::path::Path::new(p).is_dir()
+                    });
+                if let Some(gone) = fallback_notice {
+                    self.notice_all(format!(
+                        "restore: {}'s directory {gone} is gone; restored at {cwd0} instead",
+                        m.attach_id
+                    ));
+                }
                 let argv = attach_argv(&m.attach_id, acct, cd);
-                match self.spawn_pane_cmd(&argv, rows, cols, &cwd0) {
+                match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(pid) => {
                         // (x-ed59) Title the restored pane from its registered name
                         // (the roster, the sidepane's source) so it matches the
@@ -4519,6 +4586,7 @@ impl Core {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
                             tab_name: m.tab_name.clone(),
+                            cwd: m.cwd.clone(),
                         });
                     }
                     Err(e) => {
@@ -4529,6 +4597,7 @@ impl Core {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
                             tab_name: m.tab_name.clone(),
+                            cwd: m.cwd.clone(),
                         });
                     }
                 }
@@ -7913,8 +7982,10 @@ impl Core {
                         crate::squad_store::StoredMember {
                             attach_id: id.clone(),
                             tombstone: false,
-                            // persist_squad below re-derives the hosting tab name.
+                            // persist_squad below re-derives the hosting tab name
+                            // and the pane cwd.
                             tab_name: None,
+                            cwd: None,
                         },
                     );
                     recruited += 1;
@@ -15614,6 +15685,7 @@ mod tests {
                 attach_id: attach.into(),
                 tombstone: false,
                 tab_name: None,
+                cwd: None,
             }],
         );
         core.attached.insert(attach.into(), pid);
@@ -15624,7 +15696,38 @@ mod tests {
             attach_id: id.into(),
             tombstone,
             tab_name: None,
+            cwd: None,
         }
+    }
+
+    #[test]
+    fn restore_member_cwd_prefers_the_stored_cwd_when_it_still_exists() {
+        // x-caef case 2: a worktree worker restores into its own worktree, not
+        // the squad's origins[0].
+        let (cwd, notice) = restore_member_cwd(Some("/worktrees/x-caef"), "/repo", |p| {
+            p == "/worktrees/x-caef"
+        });
+        assert_eq!(cwd, "/worktrees/x-caef");
+        assert!(notice.is_none(), "no fallback happened, no notice");
+    }
+
+    #[test]
+    fn restore_member_cwd_falls_back_and_names_the_gone_path_on_a_vanished_worktree() {
+        // x-caef case 3: an archived worktree is not silently swallowed - the
+        // pane still lands (at origins[0]) and the caller gets both paths to
+        // notice, not just a bare fallback.
+        let (cwd, notice) = restore_member_cwd(Some("/worktrees/archived"), "/repo", |_| false);
+        assert_eq!(cwd, "/repo", "falls back to cwd0");
+        assert_eq!(notice.as_deref(), Some("/worktrees/archived"));
+    }
+
+    #[test]
+    fn restore_member_cwd_falls_back_silently_for_a_pre_xcaef_member() {
+        // A member persisted before this field existed has no stored cwd at
+        // all - that is not a vanished path, so no notice.
+        let (cwd, notice) = restore_member_cwd(None, "/repo", |_| true);
+        assert_eq!(cwd, "/repo");
+        assert!(notice.is_none());
     }
 
     #[test]
@@ -16507,6 +16610,7 @@ mod tests {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
                 tab_name: Some("old".into()),
+                cwd: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -16630,6 +16734,7 @@ mod tests {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
                 tab_name: Some("home".into()),
+                cwd: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);
@@ -16687,6 +16792,7 @@ mod tests {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
                 tab_name: Some("src".into()),
+                cwd: None,
             }],
         );
         core.attached.insert("c19cd2c3".into(), 100);

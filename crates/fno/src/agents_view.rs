@@ -1107,7 +1107,7 @@ fn registry_start_time(pid: u32) -> Option<u64> {
     if written != size {
         return None;
     }
-    Some((info.pbi_start_tvsec as u64) * 1_000_000 + info.pbi_start_tvusec as u64)
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
 #[cfg(target_os = "linux")]
