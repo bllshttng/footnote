@@ -85,7 +85,7 @@ claude accepts `max`, and codex does not. codex accepts `minimal`, and claude do
 
 ## Provider translation, and why an unset effort costs money
 
-A harness's own effort parameter is not the final word. The provider on the other end of the wire applies its own translation, recorded verbatim from z.ai's model docs (`~/c3po/internal/zai/docs/latest-model.md`).
+A harness's own effort parameter is not the final word. The provider on the other end of the wire applies its own translation, recorded verbatim from z.ai's own model documentation.
 
 | Input | Resolves to |
 |---|---|
