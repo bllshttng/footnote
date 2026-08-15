@@ -265,11 +265,12 @@ def test_update_without_source_rev_skips_marker_chain(
     assert "pr-watch refresh" in joined
 
 
-def test_update_without_source_rev_execs_plain_install_when_no_refresh(
+def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no rev AND no refresh resolvable, exec the plain installer directly
-    (no /bin/sh wrapper) - the original no-rev fast path."""
+    """With no rev AND no refresh resolvable, still exec the install through
+    the /bin/sh retry wrapper: the ENOTEMPTY race retry and the marker verify
+    live in the exec'd shell line, so no path may bypass them."""
     import fno.update as update_mod
 
     monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
@@ -290,7 +291,10 @@ def test_update_without_source_rev_execs_plain_install_when_no_refresh(
 
     result = runner.invoke(app, ["update"])
     assert result.exit_code == 0
-    assert captured["file"] != "/bin/sh"  # plain installer, no shell wrapper
+    assert captured["file"] == "/bin/sh"  # the retry wrapper needs the shell
+    line = captured["args"][2]
+    assert "Directory not empty" in line, "retry signature match must be present"
+    assert "fno-py" in line, "marker verify must be present"
 
 
 # ---------------------------------------------------------------------------
