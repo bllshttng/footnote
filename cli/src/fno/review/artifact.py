@@ -204,13 +204,16 @@ def read_sigma_last_head(
     head, while this answers "what head is stored?". Any non-found status is
     a normal input meaning "review everything", never an exception.
     """
-    path = (
-        Path(reviews_root)
-        / _component(project, "project")
-        / "reviews"
-        / _component(node, "node")
-        / "sigma.md"
-    )
+    try:
+        path = (
+            Path(reviews_root)
+            / _component(project, "project")
+            / "reviews"
+            / _component(node, "node")
+            / "sigma.md"
+        )
+    except ValueError as exc:
+        return LastHeadResult("rejected", None, str(exc))
     if not path.exists():
         return LastHeadResult("missing", None, "artifact does not exist")
     try:

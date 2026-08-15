@@ -888,6 +888,13 @@ def review(
             typer.echo(f"error: sigma artifact metadata missing: {', '.join(missing)}", err=True)
             raise typer.Exit(code=2)
 
+        if sigma_last_head and (publish_sigma is not None or inspect_sigma):
+            typer.echo(
+                "error: --sigma-last-head cannot combine with --publish-sigma/--inspect-sigma",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
         if sigma_last_head:
             assert root is not None and project is not None
             assert sigma_node is not None and sigma_pr is not None
