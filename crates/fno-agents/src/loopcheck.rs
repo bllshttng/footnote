@@ -6847,7 +6847,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // never gh pr view and might succeed on the very next fire.
                 let is_graphql_read = matches!(
                     failed_read.as_str(),
-                    "pr_view" | "pr_checks" | "pr_checks_parse" | "pr_reviews" | "pr_commits"
+                    "pr_view"
+                        | "pr_checks"
+                        | "pr_checks_parse"
+                        | "pr_reviews"
+                        | "pr_reviews_parse"
+                        | "pr_commits"
+                        | "pr_commits_parse"
                 );
                 // Checked BEFORE the primary-quota branch and independent of
                 // it: a secondary (burst/concurrency) refusal has its OWN
