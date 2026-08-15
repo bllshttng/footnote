@@ -1158,7 +1158,7 @@ def cmd_spawn(
     )
 
     message = normalize_legacy_no_merge(message)
-    if message_carries_no_merge(message):
+    if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
     node_reservation: tuple[str, str] | None = None
     if node is not None:
@@ -1225,7 +1225,7 @@ def cmd_spawn(
     # here too, not only on the bg/headless export path (review round 7). The
     # message is authoritative in both directions.
     prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
-    if prov_env.get("TARGET_NO_MERGE") == "1":
+    if (prov_env or {}).get("TARGET_NO_MERGE") == "1":
         os.environ["TARGET_NO_MERGE"] = "1"
     else:
         os.environ.pop("TARGET_NO_MERGE", None)
