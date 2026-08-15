@@ -6076,6 +6076,12 @@ def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
     """
     from fno.agents import discover as discover_mod
 
+    # A bus-only recipient declines the wake from every caller (the send-time
+    # heads-up and the inbox drain daemon rung alike): waking revives a second
+    # writer on a session that declared the durable bus its one lane.
+    if _delivery_policy_refusal(token) == BUS_ONLY_POLICY:
+        return False, None
+
     try:
         reachable, _ambiguous = discover_mod.resolve_reachable(token)
     except Exception:  # noqa: BLE001 - a resolver failure is not a delivery failure
@@ -6218,6 +6224,13 @@ def _deliver_live(
     def _record(reason: str) -> None:
         if reason_out is not None:
             reason_out.append(reason)
+
+    # The bus-only policy bounds EVERY live transport below, not only the three
+    # shared injectors: the switchboard and daemon-RPC lanes drive a recipient
+    # turn without routing through any of them.
+    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
+        _record(BUS_ONLY_POLICY)
+        return False
 
     if entry.mux:
         mux_delivered = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)

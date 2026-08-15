@@ -1792,7 +1792,10 @@ def _job_lane_send(
     # One stdout line (the receipt contract) + an advisory on stderr naming the
     # recovery: the message waits for the holder's next drain, not a reply window.
     # A bus-only holder skipped the inject by policy (x-e21e), so the receipt
-    # says the policy, not a miss.
+    # says the policy, not a miss. A node:<id> thread is NOT surfaced by the
+    # holder's turn-boundary notify-self (that scan reads only the session's
+    # own handle): it drains at a holder's SessionStart scan, so the receipt
+    # must not promise turn-boundary visibility.
     if bus_only:
         print(
             f"mail: holder is bus-only by delivery policy; queued durable "
@@ -1801,7 +1804,7 @@ def _job_lane_send(
         )
         print(
             f"{th.thread_id} queued (durable) for {recipient} "
-            f"[bus-only: holder polls the bus at each turn boundary]{holder_tag}"
+            f"[bus-only: a holder drains it by policy]{holder_tag}"
         )
         return
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
@@ -2642,18 +2645,13 @@ def cmd_send(
         # A bus-only recipient (x-e21e) declines the wake too: waking revives a
         # second writer on a session that declared the durable bus its one lane.
         elif kind == Kind.HEADS_UP.value:
-            from fno.agents.dispatch import (
-                BUS_ONLY_POLICY,
-                _delivery_policy_refusal,
-                wake_if_asleep_claude,
-            )
+            from fno.agents.dispatch import wake_if_asleep_claude
 
-            if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
-                pass  # bus-only: the note surfaces at their turn boundary
-            else:
-                woke, short = wake_if_asleep_claude(recipient)
-                if woke:
-                    print(f"woke {recipient} to drain (bg thread {short})", file=sys.stderr)
+            # A bus-only recipient declines the wake inside
+            # wake_if_asleep_claude: the note surfaces at its turn boundary.
+            woke, short = wake_if_asleep_claude(recipient)
+            if woke:
+                print(f"woke {recipient} to drain (bg thread {short})", file=sys.stderr)
 
         if json_out:
             import json as _json
@@ -2703,11 +2701,22 @@ def cmd_send(
             # envelope is addressed to that peer (its at-least-once copy), NOT
             # the project. Report it as such so the line is not a peer/project
             # mismatch (codex P2) - the resolved peer's own drain picks it up.
-            _warn_deferred(result.recipient)
-            print(
-                f"{result.msg_id} queued (durable) for {result.recipient} "
-                f"[project {to_project}] [live-miss]"
-            )
+            # A bus-only peer demoted by policy gets the designed-queue
+            # receipt, not a recovery warning.
+            from fno.agents.dispatch import BUS_ONLY_POLICY
+
+            if result.reason == BUS_ONLY_POLICY:
+                print(
+                    f"{result.msg_id} queued (durable) for {result.recipient} "
+                    f"[project {to_project}] "
+                    f"[bus-only: recipient polls the bus at each turn boundary]"
+                )
+            else:
+                _warn_deferred(result.recipient)
+                print(
+                    f"{result.msg_id} queued (durable) for {result.recipient} "
+                    f"[project {to_project}] [live-miss]"
+                )
         else:
             _warn_deferred(to_project, project=True)
             print(
