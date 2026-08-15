@@ -15,7 +15,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Serializes every PTY fork in this process.
@@ -58,6 +58,28 @@ fn wedge_cooldown(timeout: std::time::Duration) -> Option<std::time::Duration> {
     let elapsed = (*guard)?.elapsed();
     (elapsed < timeout).then_some(elapsed)
 }
+
+/// Count of probe threads currently between spawn and return. The cooldown
+/// above only throttles retry *rate*; a host that stays wedged past the
+/// cooldown window would otherwise leak one more thread every window,
+/// forever, which is the failure mode this module exists to prevent.
+///
+/// This is a bounded counter, not a single-flight lock: `open_pty` has
+/// legitimate concurrent callers (every test in this crate that spawns a
+/// pane, and potentially more than one caller outside the mux server's
+/// single-threaded core loop), so refusing on ANY overlap - not just a
+/// genuine wedge - would misfire constantly. `MAX_INFLIGHT_PROBES` is
+/// generous headroom over ordinary concurrency (a healthy `openpty()`
+/// returns and decrements within microseconds) while still bounding a
+/// sustained real wedge to a finite number of leaked threads instead of an
+/// unbounded one, since a permanently-stuck probe never decrements.
+static OPENPTY_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// See `OPENPTY_INFLIGHT`. 64 leaked threads (2MB stack default = 128MB) is
+/// cheap insurance, not a real resource cost, while comfortably clearing
+/// this crate's test-suite-level concurrency (bounded by `cargo test`'s
+/// thread pool, typically the CPU count).
+const MAX_INFLIGHT_PROBES: usize = 64;
 
 #[cfg(test)]
 struct TestHome(PathBuf);
@@ -374,12 +396,26 @@ fn clear_wedge_cooldown() {
 /// The real `openpty(3)` call runs on a throwaway thread with a bounded
 /// wait, because it is a blocking syscall against a kernel resource
 /// (`/dev/tty*`) that can wedge, and this runs on the server's single
-/// core-loop thread: one wedged call must refuse one pane, not the whole
-/// server (see the module-level incident writeup this fixes).
+/// core-loop thread: without the offload, a wedge stalls that thread, and
+/// so the server, forever (see the module-level incident writeup this
+/// fixes). This bounds the stall to `timeout` instead of removing it - the
+/// core loop is synchronous, so every other client is still frozen for that
+/// window - but the server recovers and refuses that one pane afterward,
+/// rather than staying wedged indefinitely.
 fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
     let timeout = openpty_timeout();
     if let Some(ago) = wedge_cooldown(timeout) {
         return Err(PtyError::OpenPtyWedged(ago));
+    }
+    if OPENPTY_INFLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_INFLIGHT_PROBES {
+        // Already at the cap: every slot is either genuine concurrency (rare
+        // to stay this high) or an accumulation of past probes still stuck
+        // in the kernel. Give back the slot we just claimed and refuse
+        // without spawning, so a sustained wedge cannot grow this without
+        // bound.
+        OPENPTY_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+        note_wedge();
+        return Err(PtyError::OpenPtyWedged(std::time::Duration::ZERO));
     }
     let size = PtySize {
         rows: rows.max(1),
@@ -392,32 +428,47 @@ fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
     // be able to hand off and exit even after the receiver gave up, so the
     // dropped PtyPair closes its fds instead of the sender parking forever.
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("fno-mux-openpty".into())
         .spawn(move || {
             if !hang.is_zero() {
                 std::thread::sleep(hang);
             }
+            let result = native_pty_system().openpty(size).map_err(|e| e.to_string());
+            // Release the slot before send: the moment the kernel call
+            // returns, this thread is no longer stuck, whether or not
+            // anyone is still listening.
+            OPENPTY_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
             // Send may fail when we already timed out; the pair drops here
             // and its fds close, so a late success leaks nothing.
-            let _ = tx.send(native_pty_system().openpty(size).map_err(|e| e.to_string()));
-        })
-        .map_err(|e| PtyError::OpenPty(format!("could not start the openpty thread: {e}")))?;
+            let _ = tx.send(result);
+        });
+    if let Err(e) = spawned {
+        // No thread was ever stuck, so nothing to track.
+        OPENPTY_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+        return Err(PtyError::OpenPty(format!(
+            "could not start the openpty thread: {e}"
+        )));
+    }
     match rx.recv_timeout(timeout) {
         Ok(Ok(pair)) => Ok(pair),
         Ok(Err(e)) => Err(PtyError::OpenPty(e)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            // A wedged call leaks this one thread forever (an
-            // uninterruptible kernel sleep no timeout can cancel); the
-            // cooldown above bounds how often that happens. Upgrade path if
-            // a leak count ever matters: a single shared opener thread with
-            // a request queue instead of one thread per attempt.
+            // The slot stays claimed (the thread is presumably still stuck
+            // in the kernel), bounding leaked threads to the cap for the
+            // life of the wedge instead of growing without limit.
             note_wedge();
             Err(PtyError::OpenPtyTimeout(timeout))
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(PtyError::OpenPty(
-            "the openpty thread ended without answering".into(),
-        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The thread ended (panicked) before sending, so it is no
+            // longer stuck; a phantom claimed slot would eventually wedge
+            // every call for no reason.
+            OPENPTY_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
+            Err(PtyError::OpenPty(
+                "the openpty thread ended without answering".into(),
+            ))
+        }
     }
 }
 
@@ -718,27 +769,56 @@ mod tests {
     // it panics only inside an async context, and these tests have none.
     static PTY_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// Reset the two globals a wedge test can leave dirty: the cooldown
-    /// Instant, and the hang-injection thread-local a worker thread may have
-    /// carried over from an earlier test.
+    /// Reset the globals a wedge test can leave dirty: the cooldown Instant,
+    /// the hang-injection thread-local a worker thread may have carried over
+    /// from an earlier test, and the inflight count leaked probe threads
+    /// left claimed (those threads are stuck forever in the real kernel
+    /// call, so nothing else will ever release their slots). Zeroing here
+    /// can under-count a genuinely concurrent probe from another test
+    /// running at this exact instant, which only weakens the cap
+    /// momentarily - never a spurious refusal - so that's an acceptable
+    /// trade for keeping this crate's wedge tests from permanently eating
+    /// into the cap themselves.
     fn reset_pty_test_globals() {
         clear_wedge_cooldown();
         set_hang_injection(std::time::Duration::ZERO);
+        OPENPTY_INFLIGHT.store(0, Ordering::Release);
+    }
+
+    /// A held `PTY_GATE` guard that also resets the wedge globals on drop,
+    /// not just on acquire. Without this, a wedge test leaves the cooldown
+    /// fresh (up to `timeout`) or the inflight flag stuck (until its probe
+    /// thread's injected hang elapses, seconds later) for as long as no
+    /// *other* wedge test happens to run next and reset it - and any
+    /// `server::tests` case that reaches `open_pty` via `Core::spawn_pane`
+    /// in that window (this crate's tests run in parallel by default) sees a
+    /// spuriously wedged host and fails for a reason unrelated to itself.
+    /// Resetting on drop closes that window the instant the wedge test ends,
+    /// leaving only true same-instant concurrent overlap with a wedge test
+    /// still in flight - accepted here rather than gating all 35+ existing
+    /// `spawn_pane` call sites in `server.rs` for a PTY fix this narrow in
+    /// scope.
+    struct PtyTestGuard(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+
+    impl Drop for PtyTestGuard {
+        fn drop(&mut self) {
+            reset_pty_test_globals();
+        }
     }
 
     /// Gate for the plain `#[test]` fns in this module.
-    fn pty_gate() -> tokio::sync::MutexGuard<'static, ()> {
+    fn pty_gate() -> PtyTestGuard {
         let guard = PTY_GATE.blocking_lock();
         reset_pty_test_globals();
-        guard
+        PtyTestGuard(guard)
     }
 
     /// Gate for the `#[tokio::test]` fns, which need to hold it across an
     /// `.await`.
-    async fn pty_gate_async() -> tokio::sync::MutexGuard<'static, ()> {
+    async fn pty_gate_async() -> PtyTestGuard {
         let guard = PTY_GATE.lock().await;
         reset_pty_test_globals();
-        guard
+        PtyTestGuard(guard)
     }
 
     #[test]
@@ -1157,6 +1237,67 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("skipped"), "{msg}");
         assert!(msg.contains("ls /dev"), "{msg}");
+        std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
+    }
+
+    #[test]
+    fn open_pty_bounds_leaked_threads_during_a_sustained_wedge() {
+        // Falsifier for the leak the cooldown alone does not close: a host
+        // that stays wedged past every cooldown window must still leak only
+        // a bounded number of threads, not one per retry forever. Clearing
+        // the cooldown between attempts simulates window expiry (instead of
+        // sleeping past it each time) while the 60s injected hang guarantees
+        // every earlier probe is still genuinely stuck when the next one
+        // starts.
+        let _gate = pty_gate();
+        std::env::set_var("FNO_MUX_OPENPTY_TIMEOUT_MS", "50");
+        set_hang_injection(std::time::Duration::from_secs(60));
+
+        for pane_id in 0..MAX_INFLIGHT_PROBES as u64 {
+            clear_wedge_cooldown();
+            let (tx, _rx) = tokio::sync::mpsc::channel(64);
+            let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+            let err = PtyShell::spawn(
+                &shell_candidates(Some(OsStr::new("/bin/sh"))),
+                24,
+                80,
+                None,
+                "main",
+                pane_id,
+                tx,
+                exit_tx,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("attempt {pane_id} must still time out under the cap"));
+            assert!(
+                matches!(err, PtyError::OpenPtyTimeout(_)),
+                "attempt {pane_id} must pay the deadline and leak, not refuse early: {err}"
+            );
+        }
+
+        // The cap is now fully claimed by MAX_INFLIGHT_PROBES threads still
+        // stuck in the 60s hang. One more attempt must refuse without
+        // spawning a 65th leaked thread - OpenPtyTimeout here would mean the
+        // cap did not hold.
+        clear_wedge_cooldown();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+        let err = PtyShell::spawn(
+            &shell_candidates(Some(OsStr::new("/bin/sh"))),
+            24,
+            80,
+            None,
+            "main",
+            MAX_INFLIGHT_PROBES as u64,
+            tx,
+            exit_tx,
+        )
+        .err()
+        .expect("the capped attempt must refuse, not spawn past the bound");
+        assert!(
+            matches!(err, PtyError::OpenPtyWedged(_)),
+            "must refuse once the cap is claimed, got: {err}"
+        );
         std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
     }
 

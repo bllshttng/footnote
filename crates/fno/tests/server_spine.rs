@@ -362,8 +362,9 @@ fn server_spine_bad_client_dropped_peers_keep_streaming() {
 
 #[test]
 fn server_answers_queries_while_a_pane_spawn_is_wedged() {
-    // The x-3347 falsifier. A pty slave on the real host can wedge openpty
-    // forever (2026-08-14 incident: two stack samples, minutes apart, both
+    // The falsifier for the open_pty-off-the-core-loop fix. A pty slave on
+    // the real host can wedge openpty forever (2026-08-14 incident: two
+    // stack samples, minutes apart, both
     // 100% in ttyname_r/lstat). `FNO_MUX_OPENPTY_HANG_MS` simulates that
     // deterministically; a fresh squad's first pane spawn happens INSIDE
     // `CoreMsg::Attach` (Locked 7: PTY spawn before the model), so client A's
