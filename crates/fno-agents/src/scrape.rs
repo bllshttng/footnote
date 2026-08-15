@@ -783,6 +783,7 @@ mod tests {
         std::env::set_var("FNO_AGENTS_HOME", &dir);
         let home = AgentsHome::from_env();
         let mut scraped = entry("scrapee", "codex");
+        scraped.log_path = Some("/tmp/scrapee.log".into()); // x-7bcd: resolvable handle
         scraped.screen_state = Some(rep("idle", "2026-07-02T00:00:00Z", 1));
         state::update_registry(&home.registry_json(), |r| r.entries.push(scraped)).unwrap();
 
@@ -814,6 +815,7 @@ mod tests {
 
         // One hook-less codex pane in session "main".
         let mut row = entry("scrapee", "codex");
+        row.log_path = Some("/tmp/scrapee.log".into()); // x-7bcd: resolvable handle
         row.mux = Some(state::MuxRef {
             session: "main".into(),
             pane_id: 7,

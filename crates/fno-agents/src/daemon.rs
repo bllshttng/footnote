@@ -5448,7 +5448,9 @@ mod tests {
             short_id: String::new(),
             legacy_provider: "claude".into(),
             harness: None,
-            harness_session_id: None,
+            // x-7bcd: needs a resolvable handle (leg 3); deterministic per
+            // name so two rows never collide.
+            harness_session_id: Some(format!("{name}-sess")),
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
@@ -6097,7 +6099,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 created_at: "2026-05-24T00:00:00Z".into(),
                 pid: Some(std::process::id()), // alive -> not reaped
                 pid_start_time: None,
-                log_path: None,
+                log_path: Some("/tmp/worker-A.log".into()), // x-7bcd: resolvable handle
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
@@ -6169,7 +6171,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 created_at: "2026-05-24T00:00:00Z".into(),
                 pid: None,
                 pid_start_time: None,
-                log_path: None,
+                log_path: Some("/tmp/ghost.log".into()), // x-7bcd: resolvable handle
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
@@ -6310,7 +6312,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 // PID 2^31-ish: almost certainly not a live process.
                 pid: Some(0x7fff_fff0),
                 pid_start_time: None,
-                log_path: None,
+                log_path: Some("/tmp/dead.log".into()), // x-7bcd: resolvable handle
                 last_reconciled_at: None,
                 inside_leg: None,
                 exited_at: None,
@@ -6348,6 +6350,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             let mut e = rentry("hosted", AgentStatus::Live, None);
             e.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
             e.pid = Some(0x7fff_fff0); // not a live process
+            e.log_path = Some("/tmp/hosted.log".into()); // x-7bcd: resolvable handle
             r.entries.push(e);
         })
         .unwrap();
@@ -6805,6 +6808,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         e.legacy_provider = "claude".into();
         e.short_id = short_id.into();
         e.claude_session_uuid = None;
+        // x-7bcd: needs a resolvable handle; short_id is the transport key
+        // this row is actually tested against, not one of the three legs.
+        e.log_path = Some(format!("/tmp/{name}.log"));
         e
     }
 
@@ -6886,14 +6892,13 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             })
             .unwrap()
         };
-        assert!(
-            reserve(rentry("dup", AgentStatus::Live, None)),
-            "first wins"
-        );
-        assert!(
-            !reserve(rentry("dup", AgentStatus::Live, None)),
-            "second loses the race -> no insert"
-        );
+        let dup_row = || -> RegistryEntry {
+            let mut e = rentry("dup", AgentStatus::Live, None);
+            e.log_path = Some("/tmp/dup.log".into()); // x-7bcd: resolvable handle
+            e
+        };
+        assert!(reserve(dup_row()), "first wins");
+        assert!(!reserve(dup_row()), "second loses the race -> no insert");
         let reg = state::load_registry(&path).unwrap();
         assert_eq!(
             reg.entries.iter().filter(|e| e.name == "dup").count(),
@@ -7443,6 +7448,11 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn codex_pane_row(name: &str) -> RegistryEntry {
         let mut e = ask_row(name, None);
         e.harness = Some("codex".into());
+        // x-7bcd: a real codex pane starts id-less (late-bind is what sets
+        // harness_session_id), so undo ask_row's default and use a log_path
+        // for the resolvable handle instead.
+        e.harness_session_id = None;
+        e.log_path = Some(format!("/tmp/{name}.log"));
         e.status = AgentStatus::Live;
         e.mux = Some(state::MuxRef {
             session: "main".into(),
@@ -7952,7 +7962,10 @@ done
             created_at: "2026-06-09T00:00:00Z".into(),
             pid: None,
             pid_start_time: None,
-            log_path: None,
+            // x-7bcd: no short_id/harness_session_id (leg 3) and no pid (leg
+            // 1) is the whole point of this fixture -- give it leg 2 instead
+            // so the write-time guard passes without disturbing that intent.
+            log_path: Some(format!("/tmp/{name}.log")),
             last_reconciled_at: None,
             inside_leg: None,
             exited_at: None,

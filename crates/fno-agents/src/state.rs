@@ -580,10 +580,7 @@ pub fn validate_single_live_ref(entry: &RegistryEntry) -> Result<(), String> {
 /// makes no new-vs-existing distinction.
 pub fn validate_resolvable_handle(entry: &RegistryEntry) -> Result<(), String> {
     let leg1 = entry.pid.is_some() && entry.pid_start_time.is_some();
-    let leg2 = entry
-        .log_path
-        .as_deref()
-        .is_some_and(|p| !p.is_empty());
+    let leg2 = entry.log_path.as_deref().is_some_and(|p| !p.is_empty());
     let leg3 = entry.harness.as_deref().is_some_and(|h| !h.is_empty())
         && entry
             .harness_session_id
