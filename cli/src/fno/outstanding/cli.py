@@ -130,7 +130,7 @@ def clear(
     ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
-    from fno.events import append_event, operator_decision, operator_question_closed
+    from fno.events import append_event, operator_question_closed
     from fno.outstanding.core import events_path, read_open_questions
 
     root = _storage_root()
@@ -157,25 +157,25 @@ def clear(
             # An answered question IS a decision, so the close path records it
             # as one (AC3). A close with no answer is a withdrawal and decides
             # nothing. Emitted alongside the closed event, never instead of it.
+            # Routed through record_decision so the decision gets both halves
+            # a `fno decide` record has: the event AND the graph projection
+            # onto the subject node, which is what `fno decide list` reads.
+            # The decider is the operator by definition on this path
+            # (closed_by records the typing session on the close event);
+            # decided_by must not depend on whether the closing session could
+            # be resolved.
             if answer is not None:
+                from fno.decide import record_decision
+
                 record = open_by_id[qid]
-                append_event(
-                    operator_decision(
-                        decision_id=f"d-{secrets.token_hex(4)}",
-                        decision=answer,
-                        subject=record.node,
-                        question_id=qid,
-                        question=record.question,
-                        asked_by=record.session_id,
-                        asked_at=record.ts or None,
-                        # The decider is the operator by definition on this
-                        # path (closed_by records the typing session on the
-                        # close event); decided_by must not depend on whether
-                        # the closing session could be resolved.
-                        decided_by="operator",
-                        authority_source="operator",
-                    ),
-                    events_path=events_path(root),
+                record_decision(
+                    decision=answer,
+                    subject=record.node,
+                    question_id=qid,
+                    question=record.question,
+                    asked_by=record.session_id,
+                    asked_at=record.ts or None,
+                    events_root=root,
                 )
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)

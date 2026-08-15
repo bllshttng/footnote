@@ -5325,7 +5325,9 @@ pub fn decide(args: &[String]) -> (i32, String) {
             .join(", ");
         let reason = format!(
             "a decided question has no decision record ({names}); record it with \
-             `fno decide --subject <node> --decision \"...\"` (or re-run the clear) \
+             `fno decide --subject <node> --question-id <id> --decision \"...\"` \
+             (the gate matches on the question id; a re-run of the clear is a \
+             no-op once the question is closed) \
              so the decision survives this session"
         );
         emit(

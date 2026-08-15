@@ -31,7 +31,7 @@ def mint_decision_id() -> str:
 def record_decision(
     *,
     decision: str,
-    subject: str,
+    subject: str | None = None,
     decided_by: str = "operator",
     authority_source: str = "operator",
     rationale: str | None = None,

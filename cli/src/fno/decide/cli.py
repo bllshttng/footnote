@@ -34,6 +34,13 @@ def record(
     decision: Optional[str] = typer.Option(
         None, "--decision", help="What was chosen."
     ),
+    question_id: Optional[str] = typer.Option(
+        None,
+        "--question-id",
+        help="The operator_question this decision answers, when one is on file. "
+        "Without it a decision recorded to settle an already-closed question "
+        "cannot match the stop gate, which keys on this id.",
+    ),
     rationale: Optional[str] = typer.Option(
         None, "--rationale", help="One line: the reason, not a restatement."
     ),
@@ -64,6 +71,7 @@ def record(
         result = record_decision(
             decision=decision,
             subject=subject,
+            question_id=question_id,
             decided_by=decided_by or "operator",
             authority_source="operator" if not decided_by else "beastmode",
             rationale=rationale,

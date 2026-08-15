@@ -67,6 +67,15 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import fno.paths as paths_mod
 
     paths_mod.resolve_repo_root.cache_clear()
+    # The clear path projects decisions onto the subject node's graph entry,
+    # resolving GRAPH_JSON through the module attribute. Pin it to a
+    # nonexistent path so these tests never read or write the real machine
+    # graph when a --node happens to resolve there.
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", tmp_path / "graph.json")
+    monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -232,6 +241,32 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
     ]
     assert len([e for e in lines if e["type"] == "operator_decision"]) == 1
     assert len([e for e in lines if e["type"] == "operator_question_closed"]) == 2
+
+
+def test_clear_with_answer_projects_the_decision_onto_the_node(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The clear-path decision has both halves a `fno decide` record has:
+    findable by subject through the graph projection, not merely greppable
+    in the journal."""
+    graph = root / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"id": "x-7d94", "title": "t", "status": "ready"}]}) + "\n"
+    )
+
+    qid = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    ).stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+    assert cleared.exit_code == 0, cleared.output
+
+    from fno.decide.cli import decide_app as decide_cli_app
+
+    listed = runner.invoke(decide_cli_app, ["list", "--subject", "x-7d94", "--json"])
+    assert listed.exit_code == 0, listed.output
+    decisions = json.loads(listed.stdout)["decisions"]
+    assert [d["question_id"] for d in decisions] == [qid]
+    assert decisions[0]["decision"] == "fold"
 
 
 def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
