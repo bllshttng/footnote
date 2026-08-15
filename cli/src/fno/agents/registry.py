@@ -802,7 +802,23 @@ def _validate_single_live_ref(entry: AgentEntry) -> None:
         )
 
 
-def _refuse_write_over_newer_schema(target: Path) -> None:
+def _read_raw_registry(target: Path) -> Optional[dict]:
+    """Best-effort parse of the on-disk registry, or ``None`` when it is
+    missing, unreadable, or not a JSON object.
+
+    Shared by ``_refuse_write_over_newer_schema`` and ``_existing_row_names``
+    so a write pays for this read once, not twice.
+    """
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
+def _refuse_write_over_newer_schema(raw: Optional[dict], target: Path) -> None:
     """Refuse to overwrite a registry written by a newer fno.
 
     This is the half of read-forward that protects the file. ``load_registry``
@@ -814,11 +830,7 @@ def _refuse_write_over_newer_schema(target: Path) -> None:
     file is not a newer writer, and refusing there would leave a torn registry
     unrepairable by the very command meant to rewrite it.
     """
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return
-    if not isinstance(raw, dict):
+    if raw is None:
         return
     on_disk = raw.get("schema_version")
     if isinstance(on_disk, int) and on_disk > SCHEMA_VERSION:
@@ -828,6 +840,41 @@ def _refuse_write_over_newer_schema(target: Path) -> None:
             "fno understands, and writing would drop the fields it cannot see. "
             "Upgrade fno to match."
         )
+
+
+def _existing_row_names(raw: Optional[dict]) -> set[str]:
+    """Names already on disk, from the same read ``_refuse_write_over_newer_schema``
+    uses -- so the new-vs-existing split for the resolvable-handle invariant
+    (x-7bcd) costs no extra I/O."""
+    if raw is None:
+        return set()
+    agents = raw.get("agents")
+    if not isinstance(agents, list):
+        return set()
+    return {a["name"] for a in agents if isinstance(a, dict) and isinstance(a.get("name"), str)}
+
+
+def _validate_resolvable_handle(entry: AgentEntry) -> None:
+    """The resolvable-handle invariant (x-7bcd, mirrors Rust
+    ``validate_resolvable_handle``): at creation, every registry row carries
+    at least one handle an outside observer can resolve without asking the
+    worker anything. Any one of three legs satisfies it: (1) ``pid`` +
+    ``pid_start_time``, when the writer owns the process; (2) a non-empty
+    ``log_path``, when the writer has created the file it records (file
+    existence is enforced at the mint site, not here); (3) ``harness`` +
+    ``harness_session_id``, when the writer owns neither a pid nor a log
+    file. Scoped to NEW rows only by the caller (AC3-FR); this function does
+    no I/O and makes no new-vs-existing distinction itself.
+    """
+    leg1 = entry.pid is not None and entry.pid_start_time is not None
+    leg2 = bool(entry.log_path)
+    leg3 = bool(entry.harness) and bool(entry.harness_session_id)
+    if leg1 or leg2 or leg3:
+        return
+    raise ValueError(
+        f"registry row {entry.name!r} carries no resolvable handle: needs one of "
+        "(pid + pid_start_time), log_path, or (harness + harness_session_id)"
+    )
 
 
 def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> None:
@@ -840,9 +887,13 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     the orphan ``.tmp`` is unlinked so it doesn't accumulate on retry.
     """
     target = _registry_path(path)
-    _refuse_write_over_newer_schema(target)
+    raw = _read_raw_registry(target)
+    _refuse_write_over_newer_schema(raw, target)
+    existing = _existing_row_names(raw)
     for e in entries:
         _validate_single_live_ref(e)
+        if e.name not in existing:
+            _validate_resolvable_handle(e)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "agents": [asdict(e) for e in entries],

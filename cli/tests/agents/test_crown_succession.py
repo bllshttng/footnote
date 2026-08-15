@@ -150,7 +150,10 @@ def test_succession_matches_cc_session_id_for_a_partially_backfilled_row(court) 
             AgentEntry(
                 name="sitting-king",
                 cwd="/tmp",
-                log_path="",
+                # x-7bcd: needs a resolvable handle; harness_session_id is
+                # deliberately None here (that's what this test is about), so
+                # this stands in for the fallback log a real mint would touch.
+                log_path="/tmp/sitting-king.log",
                 harness="claude",
                 harness_session_id=None,
                 cc_session_id=CALLER_SESSION,

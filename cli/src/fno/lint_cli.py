@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -35,6 +36,7 @@ CHECKS: dict[str, str] = {
     "verb-ratchet": "verb_ratchet",
     "style": "style",
     "stale-skill-refs": "stale_skill_refs",
+    "registry": "registry",
 }
 
 
@@ -841,6 +843,94 @@ def stale_skill_refs() -> None:
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
+def registry(as_json: bool = False) -> None:
+    """Check every registry row against the resolvable-handle invariant (x-7bcd).
+
+    Read-only: never mutates the registry and never reaps a row (eviction is
+    x-e520's job). For each row, resolves each of the three legs FOR REAL, not
+    just "is the field set": leg 1 (``pid`` + ``pid_start_time``) via a
+    liveness probe with the pid-reuse check; leg 2 (``log_path``) via a stat;
+    leg 3 (``harness`` + ``harness_session_id``) via a direct stat of the
+    resolved transcript path (upgrades to x-e520's ``harness_session_probe``
+    once that lands). A row lands in exactly one of three buckets, because
+    they have different fixes:
+
+    - "no handle recorded": no leg field is even set. Fails the write-time
+      invariant outright.
+    - "recorded but unresolvable": at least one leg field is set, but none of
+      them resolves to a real artifact (a log_path to a deleted file, a
+      harness_session_id whose transcript is gone, a pid reused or reaped).
+    - "ok": at least one leg resolves.
+
+    Exits nonzero when bucket 1 or bucket 2 is non-empty.
+    """
+    from fno.agents.registry import load_registry
+    from fno.agents.spawn_gate import _pid_alive
+    from fno.provenance.resolver import resolve_transcript
+
+    entries = load_registry()
+    no_handle: list[dict] = []
+    unresolvable: list[dict] = []
+    ok_count = 0
+
+    for e in entries:
+        legs_recorded: list[str] = []
+        legs_resolved: list[str] = []
+
+        if e.pid is not None and e.pid_start_time is not None:
+            legs_recorded.append("pid")
+            if _pid_alive(e.pid, e.pid_start_time) is True:
+                legs_resolved.append("pid")
+
+        if e.log_path:
+            legs_recorded.append("log_path")
+            if Path(e.log_path).exists():
+                legs_resolved.append("log_path")
+
+        if e.harness and e.harness_session_id:
+            legs_recorded.append("harness")
+            if resolve_transcript(e.harness, e.harness_session_id, e.cwd).resolved:
+                legs_resolved.append("harness")
+
+        if not legs_recorded:
+            no_handle.append({"name": e.name})
+        elif not legs_resolved:
+            unresolvable.append({"name": e.name, "legs_recorded": legs_recorded})
+        else:
+            ok_count += 1
+
+    total = len(entries)
+
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "total": total,
+                    "no_handle_recorded": no_handle,
+                    "recorded_but_unresolvable": unresolvable,
+                    "ok": ok_count,
+                },
+                indent=2,
+            )
+        )
+    else:
+        for row in no_handle:
+            typer.echo(f"no handle recorded: {row['name']}")
+        for row in unresolvable:
+            typer.echo(
+                f"recorded but unresolvable: {row['name']} "
+                f"(recorded: {', '.join(row['legs_recorded'])})"
+            )
+        typer.echo(
+            f"fno lint registry: {len(no_handle)} no handle recorded, "
+            f"{len(unresolvable)} recorded but unresolvable, {ok_count} ok, "
+            f"{total} total"
+        )
+
+    if no_handle or unresolvable:
+        raise typer.Exit(code=1)
+
+
 def lint(
     check: str = typer.Argument(
         ...,
@@ -872,6 +962,9 @@ def lint(
         None, "--diff-base",
         help="style: check ADDED lines only since this ref (e.g. origin/main).",
     ),
+    as_json: bool = typer.Option(
+        False, "--json", "-J", help="registry: machine-readable output."
+    ),
 ) -> None:
     """Run a repository lint check by name.
 
@@ -897,6 +990,7 @@ def lint(
         "stdin": stdin,
         "files": files,
         "diff_base": diff_base,
+        "as_json": as_json,
     }
     accepted = set(inspect.signature(fn).parameters)
     fn(**{k: v for k, v in supplied.items() if k in accepted})

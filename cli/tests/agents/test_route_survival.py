@@ -142,6 +142,7 @@ def test_route_path_round_trips_through_the_registry(tmp_path, monkeypatch) -> N
                 cwd="/w",
                 log_path="",
                 harness="claude",
+                harness_session_id="sess-router",  # x-7bcd: needs a resolvable handle
                 short_id="deadbeef",
                 route_settings_path="/tmp/route-settings/abc.json",
             )

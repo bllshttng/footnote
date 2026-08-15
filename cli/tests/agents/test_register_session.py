@@ -673,7 +673,10 @@ def test_restamp_promotes_a_spawning_row_once_the_worker_names_itself(
             harness="claude",
             harness_session_id=None,
             cwd="/proj",
-            log_path="",
+            # x-7bcd: needs a resolvable handle; harness_session_id is
+            # deliberately None (that's what this test is about), so this
+            # stands in for the fallback log a real mint would touch.
+            log_path="/proj/worker-happy-pane.log",
             status="spawning",
             mux={"session": "main", "pane_id": 11},
         )

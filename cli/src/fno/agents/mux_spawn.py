@@ -41,6 +41,7 @@ from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
     _capture_spawn_trigger,
+    _derive_log_path,
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
@@ -2297,6 +2298,27 @@ def dispatch_spawn_pane(
                     else "live"
                 )
             )
+            # Resolvable-handle fallback (x-7bcd): the pane itself is a live
+            # ref (the `mux` field below), but that is not one of the three
+            # legs the write-choke-point guard checks. Evaluated HERE, with
+            # the FINAL stored_session_uuid (post claim-dedup above) rather
+            # than the outer session_uuid, because a claim race can null it
+            # out after this row already looked resolvable. The pid leg
+            # needs BOTH child_pid AND a readable pid_start_time (a fake,
+            # exited, or unreadable pid still leaves pid_start_time None) -
+            # when none of the three will resolve, touch a stable per-name
+            # log file so the row always has a resolvable handle and the
+            # guard never refuses a live pane's registry write.
+            final_log_path = death_log_path
+            if (
+                not final_log_path
+                and stored_session_uuid is None
+                and not (child_pid is not None and pid_start_time is not None)
+            ):
+                fallback_path = _derive_log_path(name)
+                fallback_path.parent.mkdir(parents=True, exist_ok=True)
+                fallback_path.touch(exist_ok=True)
+                final_log_path = str(fallback_path)
             rows.append(
                 AgentEntry(
                     name=name,
@@ -2305,7 +2327,7 @@ def dispatch_spawn_pane(
                     # Written in the SAME registry transaction as the status, so
                     # a concurrent reconcile cannot land one without the other
                     # and lose the only evidence the death left.
-                    log_path=death_log_path,
+                    log_path=final_log_path,
                     harness_session_id=stored_session_uuid,
                     status=row_status,
                     pid=child_pid,

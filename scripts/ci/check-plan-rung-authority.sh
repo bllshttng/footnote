@@ -172,7 +172,7 @@ crates/fno-agents/src/readiness.rs:13
 crates/fno-agents/src/roster_progress.rs:7
 crates/fno-agents/src/scrape.rs:10
 crates/fno-agents/src/spawn_gate.rs:12
-crates/fno-agents/src/state.rs:43
+crates/fno-agents/src/state.rs:44
 crates/fno-agents/src/stream_worker.rs:19
 crates/fno-agents/src/subprocess_ask.rs:6
 crates/fno-agents/src/verify_evidence.rs:9

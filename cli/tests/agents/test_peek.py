@@ -194,7 +194,10 @@ def test_lookup_mux_pane_finds_registry_row(tmp_path):
         name="worker-x-5f43",
         harness="claude",
         cwd=str(tmp_path),
-        log_path="",
+        # x-7bcd: needs a resolvable handle to pass write_registry's guard;
+        # log_path stands in for the fallback file mux_spawn.py now touches
+        # for an id-less mux row.
+        log_path=str(tmp_path / "worker-x-5f43.log"),
         mux={"session": "mux-sess", "pane_id": 33},
     )
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
@@ -208,7 +211,14 @@ def test_lookup_mux_pane_finds_registry_row(tmp_path):
     # An unknown handle and a non-mux row both resolve to None.
     assert _lookup_mux_pane("nope", registry_path=registry_path) is None
 
-    plain = AgentEntry(name="daemon-worker", harness="claude", cwd=str(tmp_path), log_path="", short_id="cafe1234")
+    plain = AgentEntry(
+        name="daemon-worker",
+        harness="claude",
+        harness_session_id="sess-cafe1234",  # x-7bcd: needs a resolvable handle
+        cwd=str(tmp_path),
+        log_path="",
+        short_id="cafe1234",
+    )
     write_registry([plain], path=registry_path)
     assert _lookup_mux_pane("daemon-worker", registry_path=registry_path) is None
 
