@@ -112,6 +112,32 @@ def _cargo_stub(
     path.chmod(0o755)
 
 
+def _uv_stub(path: Path, log: Path, tmp_path: Path) -> None:
+    """Stub ``uv`` that logs its args, exits 0, and answers ``tool dir`` with a
+    dir carrying the post-install marker (executable ``fno-py`` plus one
+    ``.pyc``). The installer's retry wrapper verifies that marker after every
+    success, so a stub that only logs would make a "successful" install be
+    correctly refused."""
+    tools = tmp_path / "uvtools"
+    entry = tools / "fno/bin/fno-py"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o755)
+    pyc = tools / "fno/lib/python3.13/site-packages/fno/__pycache__/x.pyc"
+    pyc.parent.mkdir(parents=True, exist_ok=True)
+    pyc.write_text("", encoding="utf-8")
+    path.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{log}"\n'
+        'if [ "$1 $2" = "tool dir" ]; then\n'
+        f'  echo "{tools}"\n'
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _run_update(cli_src: Path, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -141,7 +167,7 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
     cargo_log = tmp_path / "cargo.log"
     uv_log = tmp_path / "uv.log"
     _cargo_stub(fakebin / "cargo", cargo_log, cargo_home, crates_rev, head_rev)
-    _stub(fakebin / "uv", uv_log)
+    _uv_stub(fakebin / "uv", uv_log, tmp_path)
 
     rust_marker = home / ".fno" / "installed-rust-rev"
     rust_marker.write_text("0" * 40 + "\n", encoding="utf-8")  # stale
