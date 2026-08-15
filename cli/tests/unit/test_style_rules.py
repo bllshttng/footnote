@@ -415,6 +415,18 @@ def test_link_text_kept_target_dropped():
     assert not rule_set(body)
 
 
+def test_multiple_modals_in_one_sentence_each_report():
+    text = "you should run it and you would try it."
+    violations = style.check(text)
+    assert sum(1 for v in violations if v.rule == 3) == 2
+
+
+def test_multiple_contractions_in_one_sentence_each_report():
+    text = "don't stop and don't wait."
+    violations = style.check(text)
+    assert sum(1 for v in violations if v.rule == 4) == 2
+
+
 # --- format_violations --------------------------------------------------------
 
 def test_format_returns_empty_when_clean():
@@ -426,6 +438,63 @@ def test_format_names_each_rule():
     msg = style.format_violations(style.check(text))
     assert "rule 3" in msg
     assert "modal" in msg
+
+
+def test_format_reports_every_violation_class_in_one_pass():
+    # The measured failure: four distinct rule classes across a body, all
+    # named in one refusal instead of costing four round trips.
+    body = (
+        " ".join("w" for _ in range(26)) + ".\n\n"
+        "do one thing; do another.\n\n"
+        "you should run it.\n\n"
+        "stop when the queue is empty.\n"
+    )
+    msg = style.format_violations(style.check(body))
+    for rule in (1, 2, 3, 5):
+        assert f"rule {rule}" in msg
+
+
+def test_format_groups_by_rule_number():
+    text = "you should try it and you would run it."
+    msg = style.format_violations(style.check(text))
+    first = msg.index("rule 3")
+    second = msg.index("rule 3", first + 1)
+    assert first < second
+
+
+def test_format_quotes_an_excerpt_of_the_offending_text():
+    text = "you should run it."
+    msg = style.format_violations(style.check(text))
+    assert '"you should run it."' in msg
+
+
+def test_format_caps_the_excerpt_at_twelve_words():
+    words = " ".join("w" for _ in range(26))
+    msg = style.format_violations(style.check(words + "."))
+    assert "..." in msg
+    assert " ".join(["w"] * 13) not in msg
+
+
+def test_format_names_the_local_dry_run():
+    msg = style.format_violations(style.check("you should run it."))
+    assert "fno lint style --stdin" in msg
+
+
+def test_format_excerpt_survives_an_inner_double_quote():
+    # A sentence carrying a literal double quote must not close the wrapping
+    # quote early and expose the rest of the excerpt to the word count.
+    text = 'you should run "the check" now.'
+    msg = style.format_violations(style.check(text))
+    assert style.check(msg) == [], msg
+
+
+def test_format_detail_survives_an_unmatched_quote_on_a_later_hit():
+    # A second violation in the same sentence can carry a word with an
+    # unmatched quote, which used to shift every later quote pairing and
+    # leave a real word unmasked, failing the refusal's own self-check.
+    text = 'you should run and would" stop.'
+    msg = style.format_violations(style.check(text))
+    assert style.check(msg) == [], msg
 
 
 def test_the_refusal_message_passes_its_own_rules():
