@@ -81,8 +81,14 @@ def test_idea_status_overridden_by_in_progress(tmp_graph):
     )
 
 
-def test_idea_status_overridden_by_blocked(tmp_graph):
-    """A plan-less node with an unresolved blocker derives to blocked, not idea."""
+def test_idea_status_not_overridden_by_blocked_at_write_time(tmp_graph):
+    """A plan-less node with an unresolved blocker persists as idea.
+
+    recompute_statuses no longer derives `blocked` from `blocked_by` at write
+    time (fno.graph.statuses.compute_readiness answers it fresh on every read
+    instead, wired into fno.graph.store._apply_graph_defaults). This helper
+    reads the raw on-disk entries, so it sees the write-time value.
+    """
     a = _invoke("--json", "backlog", "add", "Blocker A")
     blocker_id = json.loads(a.stdout)["id"]
     b = _invoke("--json", "backlog", "add", "Idea blocked by A", "--blocked-by", blocker_id)
@@ -91,8 +97,29 @@ def test_idea_status_overridden_by_blocked(tmp_graph):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("plan_path") is None
+    assert node.get("status") == "idea", (
+        f"blocked_by is not derived at write time; got {node.get('status')!r}"
+    )
+
+
+def test_idea_status_overridden_by_blocked_at_read_time(tmp_graph):
+    """The same plan-less blocked node reads as blocked through read_graph.
+
+    Read-time is where blocked_by is answered now - every reader routing
+    through _apply_graph_defaults sees this, the raw on-disk write above does
+    not.
+    """
+    from fno.graph.store import read_graph
+
+    a = _invoke("--json", "backlog", "add", "Blocker A")
+    blocker_id = json.loads(a.stdout)["id"]
+    b = _invoke("--json", "backlog", "add", "Idea blocked by A", "--blocked-by", blocker_id)
+    node_id = json.loads(b.stdout)["id"]
+
+    entries = read_graph(tmp_graph)
+    node = next(e for e in entries if e["id"] == node_id)
     assert node.get("status") == "blocked", (
-        f"blocked beats idea; got {node.get('status')!r}"
+        f"blocked beats idea at read time; got {node.get('status')!r}"
     )
 
 
