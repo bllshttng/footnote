@@ -30,7 +30,7 @@ The implementation is a Python package (`cli/src/fno/pr_watch/`) split along a p
    - closed-without-merge, or open past the max-age window -> park (poll it no further).
    - a configured reviewer posted activity newer than the watermark -> fire `/fno:pr check`.
    - otherwise no-op.
-5. **Advance the watermark only after a clean dispatch.** A headless `claude --print` that exits 0 but reports `is_error: true` is a failure. The watermark is left unadvanced and retried next tick. Retries are bounded to three before the PR is parked with a notification.
+5. Advance the watermark **only after a clean dispatch**. A headless `claude --print` that exits 0 but reports `is_error: true` is a failure. The watermark is left unadvanced and retried next tick. Retries are bounded to three before the PR is parked with a notification.
 
 The daemon never merges, closes, comments on, or mutates a PR or a graph node - it only reads state and fires skills. Decisions emit canonical events (`pr_watch_dispatched`, `pr_watch_skipped`, `pr_watch_dispatch_failed`, `pr_watch_parked`) plus a per-tick heartbeat (`pr_watch_tick`) to the global event log under `~/.fno/`, so a quiet-but-alive watcher is distinguishable from a dead one.
 
