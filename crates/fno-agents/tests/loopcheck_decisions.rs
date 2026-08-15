@@ -1,10 +1,9 @@
-//! Stop-gate refusal when a decided question left no decision record (x-7d94,
-//! task 2.3 / AC7-EDGE).
+//! Stop-gate refusal when a decided question left no decision record.
 //!
 //! The recording obligation is enforced at the stop gate, never self-reported:
 //! a session that closed an operator question WITH an answer but emitted no
 //! `operator_decision` event is held, and the hold names the question. This is
-//! what stops "explicit" from meaning "never" (ruling 3 in the x-7d94 plan).
+//! what stops "explicit" from meaning "never".
 use std::fs;
 use std::path::Path;
 
@@ -131,8 +130,8 @@ fn base_args(cwd: &Path, transcript: &Path) -> Vec<String> {
     ]
 }
 
-/// AC7-EDGE: an answered close with no decision record refuses the stop and
-/// names the question.
+/// An answered close with no decision record refuses the stop and names the
+/// question.
 #[test]
 fn answered_close_without_record_blocks() {
     let (_tmp, cwd, transcript) = setup();

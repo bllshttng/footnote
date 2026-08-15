@@ -1531,8 +1531,8 @@ struct UnattestedReviewer {
 }
 
 /// A question THIS session asked, that was closed WITH an answer, and for
-/// which no `operator_decision` event exists on any reachable journal
-/// (x-7d94, AC7-EDGE). The stop gate holds the session until the decision is
+/// which no `operator_decision` event exists on any reachable journal. The
+/// stop gate holds the session until the decision is
 /// recorded, because a ruling that dies with the transcript is the failure
 /// the decision record exists to prevent.
 pub(crate) struct UnrecordedDecision {
@@ -5299,7 +5299,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
         manifest.plan_path.as_deref(),
         &project_events,
     );
-    // ── Step 3b: decided question left no decision record (x-7d94, AC7) ──────
+    // ── Step 3b: decided question left no decision record ────────────────────
     // The recording obligation is enforced here, never self-reported: a
     // session that closed one of ITS OWN operator questions WITH an answer but
     // emitted no matching operator_decision event is held, and the hold names

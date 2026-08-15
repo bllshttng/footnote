@@ -1,4 +1,4 @@
-"""The durable decision record (x-7d94): what a human decided, kept findable.
+"""The durable decision record: what a human decided, kept findable.
 
 Two halves that must both exist. The ``operator_decision`` event is append-only
 and machine-wide, so it survives the compaction that eats the transcript the

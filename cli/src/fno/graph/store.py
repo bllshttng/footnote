@@ -591,7 +591,7 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
         e.setdefault("spawned_by_cwd", None)
         # Append-only lifecycle provenance (x-b6e4): empty on legacy nodes.
         e.setdefault("sessions", [])
-        # Decision records projected from operator_decision events (x-7d94).
+        # Decision records projected from operator_decision events.
         # Append-only; supersession is a marked field on the older row, never
         # a removal, so a reader of an overturned decision can tell.
         e.setdefault("decisions", [])

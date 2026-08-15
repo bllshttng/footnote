@@ -1,4 +1,4 @@
-"""Schema registration for the ``operator_decision`` event (x-7d94, task 2.1).
+"""Schema registration for the ``operator_decision`` event.
 
 The event log is schema-validated: an unregistered type is refused at emit,
 so the schema row is the prerequisite every producer depends on.

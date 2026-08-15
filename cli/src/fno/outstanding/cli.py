@@ -149,7 +149,7 @@ def clear(
     for qid in targets:
         try:
             # An answered question IS a decision, so the close path records it
-            # as one (AC3). A close with no answer is a withdrawal and decides
+            # as one. A close with no answer is a withdrawal and decides
             # nothing. Record it before closing so a projection failure leaves
             # the question open and therefore retryable.
             # Routed through record_decision so the decision gets both halves

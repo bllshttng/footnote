@@ -68,7 +68,7 @@ def _events(root: Path) -> list[dict]:
 
 
 def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path):
-    """AC4-HP: fno decide writes the event AND the graph projection."""
+    """fno decide writes the event AND the graph projection."""
     res = runner.invoke(
         decide_app,
         [
@@ -109,7 +109,7 @@ def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path):
 
 
 def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path):
-    """AC6-EDGE: two decisions on one subject order themselves; the older one
+    """Two decisions on one subject order themselves; the older one
     is marked, not hidden."""
     first = runner.invoke(
         decide_app, ["--subject", "x-7d94", "--decision", "migrate now"]
@@ -131,7 +131,7 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path):
 
 
 def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path):
-    """AC5-EDGE: a decision recorded pre-archive is still listable post-archive
+    """A decision recorded pre-archive is still listable post-archive
     through entries_with_archive."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     entries = json.loads(tmp_graph.read_text())["entries"]

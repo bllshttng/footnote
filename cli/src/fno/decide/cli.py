@@ -2,8 +2,8 @@
 
 That is the case that loses today: the operator states a ruling in chat, it
 touches no file, emits no event, and dies with the context. This verb is the
-explicit write path (ruling 3: automatic recording needs a classifier deciding
-what counts as a ruling, which is judgment on a truncated view).
+explicit write path because automatic recording would require classifying a
+ruling from a truncated view.
 
 Machine-first, mirroring `fno outstanding`: stdout carries the value (the new
 decision id, or the decision history as JSON), guidance goes to stderr.

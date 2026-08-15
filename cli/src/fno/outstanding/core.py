@@ -292,8 +292,8 @@ def read_open_captures(root: Path) -> "list[Capture]":
     inbox file, so counting per root multiplied this repo's 293 open items
     into 18,459 on the first live run. First by RESOLVED inbox path (one
     file is read once, and a canonical checkout - a real ``.git`` dir -
-    supplies the label, since a worktree dir name like ``x-7d7c`` names a
-    branch, not a project), then by ``fu_id`` across the distinct files that
+    supplies the label, since a worktree directory names a branch rather than
+    a project), then by ``fu_id`` across the distinct files that
     remain.
     """
     from fno.backlog.capture import parse_items
@@ -338,8 +338,7 @@ def read_open_captures(root: Path) -> "list[Capture]":
         project = _store_label(path, roots)
         # Canonical checkouts (a real .git dir) front the events lookup: a
         # worktree-local events journal is not the one the capture verbs
-        # wrote to, and a worktree dir name like ``x-7d7c`` names a branch,
-        # not a project.
+        # wrote to, and a worktree directory names a branch, not a project.
         roots = sorted(roots, key=lambda r: not (r / ".git").is_dir())
         added: "dict[str, str]" = {}
         for r in roots:

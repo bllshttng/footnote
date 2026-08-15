@@ -200,7 +200,7 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
 
 
 def test_clear_with_answer_emits_operator_decision(root: Path):
-    """AC3-HP: an answered close records the decision, not just the closure.
+    """An answered close records the decision, not just the closure.
 
     The closed event stays; the decision event lands beside it carrying the
     recovery fields. A close with NO answer is a withdrawal and must not
@@ -327,7 +327,7 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     assert [q["id"] for q in json.loads(result.stdout)["questions"]] == [qid]
 
 
-# --- 3rd leg: the capture fold (x-7d94 task 1.1) -----------------------------
+# --- 3rd leg: the capture fold -----------------------------------------------
 
 def _write_inbox(root: Path, lines: list[str]) -> Path:
     inbox = root / "internal" / "fno" / "backlog" / "inbox.md"
@@ -383,7 +383,7 @@ def capture_roots(
 
 
 def test_capture_leg_folds_every_project_and_renders_true_count(capture_roots):
-    """AC1-HP: three legs; the capture leg renders Showing N of M, oldest D
+    """Three legs; the capture leg renders Showing N of M, oldest D
     days, with M folded across projects."""
     this, other = capture_roots
     _write_inbox(this, ["- [ ] fu-aaaaaa - alpha (p1)", "- [ ] fu-bbbbbb - beta"])
@@ -422,7 +422,7 @@ def test_capture_leg_reports_oldest_age_from_capture_add_events(capture_roots):
 
 
 def test_unreadable_inbox_contributes_zero_and_never_raises(capture_roots):
-    """AC2-EDGE: a missing/unreadable sibling inbox contributes zero captures
+    """A missing or unreadable sibling inbox contributes zero captures
     and the other projects still report."""
     this, other = capture_roots
     _write_inbox(this, ["- [ ] fu-aaaaaa - alpha"])
