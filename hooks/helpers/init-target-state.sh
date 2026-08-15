@@ -354,7 +354,7 @@ fi
 # get_auto_merge_enabled cannot distinguish unset from false (both read
 # "false"), so the raw key is read with an empty default here.
 if [[ "$AUTO_MERGE_SOURCE" == "default-off" ]] && declare -F get_config >/dev/null 2>&1; then
-  _am_set="$(get_config "auto_merge.enabled" "" 2>/dev/null)"
+  _am_set="$(get_config "auto_merge.enabled" "" 2>/dev/null)"  # presence-probe: empty default distinguishes set from unset
   [[ -n "$_am_set" ]] && AUTO_MERGE_SOURCE="config"
 fi
 

@@ -149,6 +149,20 @@ def test_bash_get_config_defaults_match_model() -> None:
                 leaf = key[len("config.") :] if key.startswith("config.") else key
                 if leaf not in defaults:
                     continue  # not a modeled leaf; out of scope for this guard
+                # A key-PRESENCE probe deliberately passes an empty default so
+                # unset reads as "" (the caller distinguishes set from unset).
+                # It is exempt by its trailing marker, never by evasion: the
+                # marker is the reviewable claim that this is a probe.
+                probe_line = next(
+                    (
+                        ln
+                        for ln in text.splitlines()
+                        if f'get_config "{key}"' in ln and "presence-probe" in ln
+                    ),
+                    None,
+                )
+                if probe_line:
+                    continue
                 checked += 1
                 if _normalize(defaults[leaf]) != bash_default:
                     mismatches.append(
