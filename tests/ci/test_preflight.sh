@@ -165,10 +165,10 @@ run_pf() { ( cd "$FIX" && bash scripts/ci/preflight.sh "$@" ); }
 echo "== AC2-HP-green: clean HEAD, smoke green, rust stubs green -> exit 0 =="
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "exit 0 on green" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "GREEN - safe to push" && ok "reports GREEN" || fail "no GREEN line"
-echo "$out" | grep -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
-echo "$out" | grep -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
-echo "$out" | grep -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
+grep <<<"$out" -q "GREEN - safe to push" && ok "reports GREEN" || fail "no GREEN line"
+grep <<<"$out" -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
+grep <<<"$out" -q "cargo test --all-targets (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
+grep <<<"$out" -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
 jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed" and .data.generation >= 1' \
     "$EVENTS" >/dev/null \
@@ -197,7 +197,7 @@ mv "$EVENTS" "$EVENTS.saved"
 mkdir "$EVENTS"
 out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "global commit remains authoritative" || fail "mirror failure changed verdict rc=$rc: $out"
-echo "$out" | grep -q "delivery-root mirror unavailable" \
+grep <<<"$out" -q "delivery-root mirror unavailable" \
     && ok "mirror failure is observable" || fail "mirror failure was silent"
 ( cd "$FIX" && fno pr evidence-check >/dev/null 2>&1 ) \
     && ok "canonical global receipt satisfies the producing checkout" \
@@ -209,30 +209,30 @@ echo "== AC1-HP: a second call on the attested SHA reuses (exit 0, no lock) =="
 rm -rf "$LOCKDIR"   # a cache hit must create no lock
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "reuse exits 0" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "reused attestation" && ok "prints reuse receipt" || fail "no reuse receipt: $out"
-echo "$out" | grep -q "candidate=$GREEN_SHA" && ok "receipt names the matched SHA" || fail "receipt omits candidate"
-echo "$out" | grep -qE "earned=.*ago" && ok "receipt reports the attestation age" || fail "receipt omits age: $out"
-echo "$out" | grep -q "host=$HOST" && ok "receipt reports the earning host" || fail "receipt omits host"
+grep <<<"$out" -q "reused attestation" && ok "prints reuse receipt" || fail "no reuse receipt: $out"
+grep <<<"$out" -q "candidate=$GREEN_SHA" && ok "receipt names the matched SHA" || fail "receipt omits candidate"
+grep <<<"$out" -qE "earned=.*ago" && ok "receipt reports the attestation age" || fail "receipt omits age: $out"
+grep <<<"$out" -q "host=$HOST" && ok "receipt reports the earning host" || fail "receipt omits host"
 [[ ! -d "$LOCKDIR" ]] && ok "a cache hit created no lock directory" || fail "reuse took the lock"
 
 echo "== AC1-FR: a cache hit does not contend for a held lock =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"  # live pid
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "reuse exit 0 despite a live lock holder" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "reused attestation" && ok "satisfied by the cache, not the lock" || fail "did not reuse under a held lock"
+grep <<<"$out" -q "reused attestation" && ok "satisfied by the cache, not the lock" || fail "did not reuse under a held lock"
 grep -q "pid=$$" "$LOCKDIR/holder" && ok "the held lock was left untouched" || fail "reuse clobbered the live lock"
 rm -rf "$LOCKDIR"
 
 echo "== AC2-FR: --force always discards the attestation and re-runs =="
 out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "--force re-runs to GREEN" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "reused attestation" && fail "--force printed a reuse receipt" || ok "--force did not reuse"
+grep <<<"$out" -q "reused attestation" && fail "--force printed a reuse receipt" || ok "--force did not reuse"
 
 echo "== AC1-EDGE: a dirty tree still refuses, attestation or not =="
 ( cd "$FIX" && echo dirt > dirty.txt )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 4 ]] && ok "exit 4 on dirty even with a valid attestation" || fail "expected 4 got $rc"
-echo "$out" | grep -q "reused attestation" && fail "dirty tree printed a reuse GREEN" || ok "dirty tree never reuses"
+grep <<<"$out" -q "reused attestation" && fail "dirty tree printed a reuse GREEN" || ok "dirty tree never reuses"
 ( cd "$FIX" && rm -f dirty.txt )
 
 echo "== advisory evidence: both audit scopes execute even when the first fails =="
@@ -251,24 +251,24 @@ echo "== AC3-EDGE: an attestation from another host is rejected =="
 write_attest "$GREEN_FULL" foreign-box
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "still GREEN after rejecting the foreign attestation" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "foreign host" && ok "receipt states the attestation was rejected as foreign" || fail "no foreign-host line: $out"
-echo "$out" | grep -q "reused attestation" && fail "reused a foreign attestation" || ok "did not reuse the foreign attestation"
+grep <<<"$out" -q "foreign host" && ok "receipt states the attestation was rejected as foreign" || fail "no foreign-host line: $out"
+grep <<<"$out" -q "reused attestation" && fail "reused a foreign attestation" || ok "did not reuse the foreign attestation"
 
 echo "== AC2-EDGE: a corrupt / empty attestation degrades to a full run =="
 printf 'sha=not-even-a-sha garbage\n' > "$ATT"
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "unparseable attestation -> full run -> GREEN" || fail "expected 0 got $rc"
-echo "$out" | grep -q "reused attestation" && fail "trusted an unparseable attestation" || ok "unparseable attestation not trusted"
+grep <<<"$out" -q "reused attestation" && fail "trusted an unparseable attestation" || ok "unparseable attestation not trusted"
 : > "$ATT"   # empty file
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "empty attestation -> full run -> GREEN" || fail "expected 0 got $rc"
-echo "$out" | grep -q "reused attestation" && fail "trusted an empty attestation" || ok "empty attestation not trusted"
+grep <<<"$out" -q "reused attestation" && fail "trusted an empty attestation" || ok "empty attestation not trusted"
 
 echo "== AC2-EDGEb: a non-FULL / non-green attestation degrades to a full run =="
 printf 'sha=%s mode=FULL verdict=red at=%s iso=now host=%s pid=4242\n' "$GREEN_FULL" "$(date +%s)" "$HOST" > "$ATT"
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "non-green attestation -> full run -> GREEN" || fail "expected 0 got $rc"
-echo "$out" | grep -q "reused attestation" && fail "trusted a non-green attestation" || ok "non-green attestation not trusted"
+grep <<<"$out" -q "reused attestation" && fail "trusted a non-green attestation" || ok "non-green attestation not trusted"
 
 echo "== AC1-ERR: a --retry-failed (subset) pass mints no FULL attestation; reuse then full-runs =="
 rm -f "$ATT"
@@ -287,7 +287,7 @@ jq -se --arg sha "$GREEN_FULL" \
 # satisfy the gate).
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "subsequent full run passes" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "reused attestation" && fail "reused a subset-only green" || ok "no FULL attestation to reuse -> full run"
+grep <<<"$out" -q "reused attestation" && fail "reused a subset-only green" || ok "no FULL attestation to reuse -> full run"
 
 echo "== leg record: a cargo-only RED records its leg scope alone =="
 rm -f "$ATT"
@@ -301,11 +301,11 @@ echo "== --retry-failed honors the leg record: smoke skipped, only the red leg r
 rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "leg-scoped retry passes" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "smoke suite (skipped - not in the retry leg record)" \
+grep <<<"$out" -q "smoke suite (skipped - not in the retry leg record)" \
     && ok "smoke leg skipped" || fail "smoke leg ran: $out"
-echo "$out" | grep -q "cargo test --all-targets (fno-agents) (skipped - not in the retry leg record)" \
+grep <<<"$out" -q "cargo test --all-targets (fno-agents) (skipped - not in the retry leg record)" \
     && ok "untouched cargo leg skipped" || fail "fno-agents leg ran: $out"
-echo "$out" | grep -q "=== cargo test --all-targets (fno) ===" \
+grep <<<"$out" -q "=== cargo test --all-targets (fno) ===" \
     && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
 [[ ! -f "$ATT" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
 jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
@@ -331,7 +331,7 @@ printf 'not-a-leg\n' > "$LEGREC"
 rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "corrupt record falls back to every leg" || fail "expected 0 got $rc: $out"
-echo "$out" | grep -q "=== smoke suite" && ok "smoke ran under a corrupt record" || fail "smoke skipped on a corrupt record"
+grep <<<"$out" -q "=== smoke suite" && ok "smoke ran under a corrupt record" || fail "smoke skipped on a corrupt record"
 rm -f "$LEGREC"
 
 echo "== AC3-ERR: a RED run deletes a matching attestation =="
@@ -339,7 +339,7 @@ echo "== AC3-ERR: a RED run deletes a matching attestation =="
 write_attest "$(git -C "$FIX" rev-parse HEAD)"   # plant a stale green for the RED sha
 out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "RED run exits non-zero" || fail "expected red got $rc"
-echo "$out" | grep -q "RED - fix" && ok "reports RED" || fail "no RED line: $out"
+grep <<<"$out" -q "RED - fix" && ok "reports RED" || fail "no RED line: $out"
 [[ ! -f "$ATT" ]] && ok "RED deleted the matching attestation" || fail "RED left a stale green attestation"
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison AC3-ERR" )
 rm -f "$ATT"
@@ -348,8 +348,8 @@ echo "== AC2-HP-red: a POISON commit is caught locally, exit non-zero, no push =
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "poisoned" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "exit non-zero on red" || fail "expected non-zero got $rc"
-echo "$out" | grep -q "RED - fix" && ok "reports RED" || fail "no RED line"
-echo "$out" | grep -q "fail.*smoke suite" && ok "smoke suite marked fail" || fail "smoke not failed in summary"
+grep <<<"$out" -q "RED - fix" && ok "reports RED" || fail "no RED line"
+grep <<<"$out" -q "fail.*smoke suite" && ok "smoke suite marked fail" || fail "smoke not failed in summary"
 # back to green for remaining tests
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison" )
 
@@ -358,9 +358,9 @@ rm -f "$ATT"
 ( cd "$FIX" && touch CHANGED_POISON && git add -A && git commit -qm "changed-packet red" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "exit 1 on a red changed packet" || fail "expected 1 got $rc: $out"
-echo "$out" | grep -q "RED (changed packet)" && ok "names the changed packet as the cause" || fail "no changed-packet RED line: $out"
-echo "$out" | grep -q "all green (stub)" && fail "full smoke ran after a red changed packet" || ok "full gate not started (earliest signal)"
-echo "$out" | grep -q "the full gate has NOT run" && ok "says the full gate did not run" || fail "no full-gate caveat"
+grep <<<"$out" -q "RED (changed packet)" && ok "names the changed packet as the cause" || fail "no changed-packet RED line: $out"
+grep <<<"$out" -q "all green (stub)" && fail "full smoke ran after a red changed packet" || ok "full gate not started (earliest signal)"
+grep <<<"$out" -q "the full gate has NOT run" && ok "says the full gate did not run" || fail "no full-gate caveat"
 [[ ! -f "$ATT" ]] && ok "a red changed packet mints no attestation" || fail "changed packet wrote an attestation"
 ( cd "$FIX" && git rm -q CHANGED_POISON && git commit -qm "unpoison changed" )
 
@@ -369,8 +369,8 @@ rm -f "$ATT"
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "full red, changed green" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "exit non-zero when an unselected full step fails" || fail "expected non-zero got $rc"
-echo "$out" | grep -q "pass.*changed packet (CHANGED SUBSET)" && ok "changed packet passed" || fail "changed leg not green: $out"
-echo "$out" | grep -q "fail.*smoke suite" && ok "full smoke marked fail" || fail "full smoke not failed"
+grep <<<"$out" -q "pass.*changed packet (CHANGED SUBSET)" && ok "changed packet passed" || fail "changed leg not green: $out"
+grep <<<"$out" -q "fail.*smoke suite" && ok "full smoke marked fail" || fail "full smoke not failed"
 [[ ! -f "$ATT" ]] && ok "no FULL attestation minted (AC7)" || fail "minted a full attestation on a red run"
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison full" )
 
@@ -380,18 +380,18 @@ for sentinel in CHANGED_NONE CHANGED_UNEVAL; do
     ( cd "$FIX" && touch "$sentinel" && git add -A && git commit -qm "$sentinel" )
     out="$(run_pf 2>&1)"; rc=$?
     [[ $rc -eq 0 ]] && ok "$sentinel: full gate ran and passed" || fail "$sentinel: expected 0 got $rc: $out"
-    echo "$out" | grep -q "all green (stub)" && ok "$sentinel: full smoke still ran" || fail "$sentinel: full smoke skipped"
-    echo "$out" | grep -q "GREEN - safe to push" && ok "$sentinel: verdict came from the full gate" || fail "$sentinel: no GREEN"
+    grep <<<"$out" -q "all green (stub)" && ok "$sentinel: full smoke still ran" || fail "$sentinel: full smoke skipped"
+    grep <<<"$out" -q "GREEN - safe to push" && ok "$sentinel: verdict came from the full gate" || fail "$sentinel: no GREEN"
     ( cd "$FIX" && git rm -q "$sentinel" && git commit -qm "drop $sentinel" )
 done
-echo "$out" | grep -q "UNEVALUATED" && ok "unevaluated state is stated, not swallowed" || fail "no UNEVALUATED note"
+grep <<<"$out" -q "UNEVALUATED" && ok "unevaluated state is stated, not swallowed" || fail "no UNEVALUATED note"
 
 echo "== a missing prerequisite keeps preflight's documented exit 2 =="
 rm -f "$ATT"
 ( cd "$FIX" && touch CHANGED_PREREQ && git add -A && git commit -qm "changed prereq missing" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 2 ]] && ok "exit 2 (not 1) when the packet cannot run" || fail "expected 2 got $rc: $out"
-echo "$out" | grep -q "RED (changed packet)" && fail "reported a test failure for a prerequisite gap" \
+grep <<<"$out" -q "RED (changed packet)" && fail "reported a test failure for a prerequisite gap" \
     || ok "not reported as a suite failure"
 ( cd "$FIX" && git rm -q CHANGED_PREREQ && git commit -qm "drop prereq sentinel" )
 
@@ -399,14 +399,14 @@ echo "== --retry-failed skips the changed packet (a different subset mode) =="
 rm -f "$ATT"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed still passes" || fail "expected 0 got $rc"
-echo "$out" | grep -q "changed packet" && fail "retry-failed ran the changed packet" || ok "changed packet skipped"
+grep <<<"$out" -q "changed packet" && fail "retry-failed ran the changed packet" || ok "changed packet skipped"
 rm -f "$ATT"
 
 echo "== AC2-ERR: dirty invoking tree refused (exit 4), nothing touched =="
 ( cd "$FIX" && echo dirt > dirty.txt )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 4 ]] && ok "exit 4 on dirty" || fail "expected 4 got $rc"
-echo "$out" | grep -q "dirty.txt" && ok "lists the dirty file" || fail "did not list dirty file"
+grep <<<"$out" -q "dirty.txt" && ok "lists the dirty file" || fail "did not list dirty file"
 [[ ! -d "$WT_BASE/repo/preflight" ]] || { [[ -z "$(ls -A "$WT_BASE/repo/preflight" 2>/dev/null)" ]] && ok "no worktree materialized on refusal" || ok "worktree pre-existed (from green run) - refusal touched nothing"; }
 ( cd "$FIX" && rm -f dirty.txt )
 
@@ -414,8 +414,8 @@ echo "== AC2-EDGE: concurrent invocation (--wait-timeout 0) -> exit 3 with holde
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"  # $$ is alive
 out="$(run_pf --wait-timeout 0 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "exit 3 when lock held by a live pid" || fail "expected 3 got $rc"
-echo "$out" | grep -q "lock held" && ok "prints holder info" || fail "no holder info"
-echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hint" || fail "no skip hint"
+grep <<<"$out" -q "lock held" && ok "prints holder info" || fail "no holder info"
+grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hint" || fail "no skip hint"
 rm -rf "$LOCKDIR"
 
 echo "== FIFO queue: waiters are served in arrival order, not by chance =="
@@ -463,8 +463,8 @@ echo "== FIFO queue: --wait-timeout expiry exits 3 and cleans up its ticket =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
 out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "expired wait exits 3" || fail "expected 3 got $rc: $out"
-echo "$out" | grep -q "gave up waiting after 4s" && ok "names the give-up" || fail "no give-up line: $out"
-echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the skip hint" || fail "no skip hint: $out"
+grep <<<"$out" -q "gave up waiting after 4s" && ok "names the give-up" || fail "no give-up line: $out"
+grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the skip hint" || fail "no skip hint: $out"
 [[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "ticket removed on give-up" || fail "ticket left behind: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
@@ -495,7 +495,7 @@ sleep 600 & stall_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$stall_holder" "$recent" > "$LOCKDIR/holder"
 out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 run_pf --wait-timeout 30 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole from a stalled holder and ran to GREEN" || fail "stall steal failed rc=$rc: $out"
-echo "$out" | grep -q "stalled holder" && ok "the steal is reported as a recorded exception" || fail "no exception line: $out"
+grep <<<"$out" -q "stalled holder" && ok "the steal is reported as a recorded exception" || fail "no exception line: $out"
 if ! kill -0 "$stall_holder" 2>/dev/null; then
     ok "the stalled holder's tree was TERMed on the steal"
 else
@@ -520,7 +520,7 @@ printf 'pid=%s started=%s host=x sha=deadbee\n' "$$" "$guard_recent" > "$LOCKDIR
 holder_stamp="$(cat "$LOCKDIR/holder")"
 out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 PREFLIGHT_STALL_CPU_FLOOR=0 run_pf --wait-timeout 6 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "a healthy holder is waited on, not stolen" || fail "expected 3 got $rc: $out"
-echo "$out" | grep -q "stalled holder" && fail "stole from a healthy holder" || ok "no false stall verdict"
+grep <<<"$out" -q "stalled holder" && fail "stole from a healthy holder" || ok "no false stall verdict"
 [[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the healthy holder kept its lock" || fail "holder stamp changed"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
@@ -534,7 +534,7 @@ out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole the recycled holder's lock and ran to GREEN" || fail "recycled steal failed rc=$rc: $out"
 # The steal fires at first acquire (before queueing), which prints nothing;
 # what matters is the path taken: dead-style, never the stall/TERM verdict.
-echo "$out" | grep -q "stalled holder" && fail "recycled pid took the stall path" || ok "recycled pid took the dead path, not the stall path"
+grep <<<"$out" -q "stalled holder" && fail "recycled pid took the stall path" || ok "recycled pid took the dead path, not the stall path"
 kill -0 "$recycled_holder" 2>/dev/null && ok "the innocent recycled process was NOT signaled" || fail "an innocent process was TERMed"
 kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
@@ -679,8 +679,8 @@ git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEA
 ( cd "$FIX" && git reset -q --hard HEAD~3 )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 6 ]] && ok "exit 6 on a stale base" || fail "expected 6 got $rc: $out"
-echo "$out" | grep -q "3 commit(s) behind origin/main" && ok "names the behind count" || fail "no behind count: $out"
-echo "$out" | grep -q "rebase" && ok "tells the caller to rebase" || fail "no rebase guidance: $out"
+grep <<<"$out" -q "3 commit(s) behind origin/main" && ok "names the behind count" || fail "no behind count: $out"
+grep <<<"$out" -q "rebase" && ok "tells the caller to rebase" || fail "no rebase guidance: $out"
 [[ ! -d "$LOCKDIR" && ! -d "$LOCKDIR.queue.d" ]] && ok "refused before creating any lock or queue artifact" || fail "lock artifacts left behind"
 git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
 
@@ -760,7 +760,7 @@ write_attest "$(git -C "$FIX" rev-parse HEAD)"   # AC2-ERR: a prior attestation 
 # run must actually execute to reach the VOID tripwire.
 out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 5 ]] && ok "exit 5 (VOID) when the lock changed hands" || fail "expected 5 got $rc: $out"
-echo "$out" | grep -q "VOID - another preflight took our lock" && ok "names the lock, not the worktree" || fail "wrong VOID cause: $out"
+grep <<<"$out" -q "VOID - another preflight took our lock" && ok "names the lock, not the worktree" || fail "wrong VOID cause: $out"
 grep -q "pid=424242" "$LOCKDIR/holder" 2>/dev/null && ok "the stealer's lock survived our exit" \
     || fail "cleanup deleted a lock owned by the stealer"
 [[ -f "$ATT" ]] && ok "VOID left the prior attestation untouched (AC2-ERR)" || fail "VOID wrote or deleted the attestation"
@@ -782,9 +782,9 @@ chmod +x "$BIN/uv"
 ( cd "$FIX" && git commit -q --allow-empty -m "hijacking smoke stub" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 5 ]] && ok "exit 5 (VOID), distinct from RED's 1" || fail "expected 5 got $rc: $out"
-echo "$out" | grep -q "VOID - worktree moved off our candidate" && ok "names the cause" || fail "no VOID line: $out"
-echo "$out" | grep -q "not a code failure" && ok "tells the caller it is not RED" || fail "no re-run hint: $out"
-echo "$out" | grep -qE "GREEN - safe to push|RED - fix" && fail "printed a verdict for a hijacked tree" || ok "printed neither GREEN nor RED"
+grep <<<"$out" -q "VOID - worktree moved off our candidate" && ok "names the cause" || fail "no VOID line: $out"
+grep <<<"$out" -q "not a code failure" && ok "tells the caller it is not RED" || fail "no re-run hint: $out"
+grep <<<"$out" -qE "GREEN - safe to push|RED - fix" && fail "printed a verdict for a hijacked tree" || ok "printed neither GREEN nor RED"
 
 echo ""
 if [[ $FAILS -eq 0 ]]; then echo "test_preflight: ALL PASS"; exit 0
