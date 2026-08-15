@@ -203,20 +203,23 @@ impl Provider for ClaudeProvider {
     }
 
     fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
-        // Mirrors claude.py `_build_argv`: `claude --bg --name <name> <message>`.
+        // Mirrors claude.py `_build_argv`: `claude --bg --name <name> -- <message>`.
         // LD38: `--bg` is the subscription-billed mode; `claude -p` is
         // Agent-SDK-credit-billed and MUST NOT be used.
+        // The seed rides behind `--` so a leading-flag seed is the prompt
+        // positional, not a claude flag (verified against the real CLI).
         vec![
             "claude".into(),
             "--bg".into(),
             "--name".into(),
             ctx.name.clone(),
+            "--".into(),
             ctx.message.clone(),
         ]
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
-        // Subprocess fallback form (`claude --resume <id> --print <msg>`). The
+        // Subprocess fallback form (`claude --resume <id> --print -- <msg>`). The
         // production daemon prefers the Phase 5 messaging-socket poke when a
         // `messaging_socket_path` is registered; this argv exists so the trait
         // is satisfiable without the socket (e.g. tests, socket-unavailable
@@ -226,6 +229,7 @@ impl Provider for ClaudeProvider {
             "--resume".into(),
             ctx.session_id.clone(),
             "--print".into(),
+            "--".into(),
             ctx.message.clone(),
         ]
     }
@@ -323,6 +327,9 @@ impl ClaudeInteractiveProvider {
             argv.push(prompt.to_string());
         }
         if !ctx.message.is_empty() {
+            // Behind `--`: a leading-flag seed must be the prompt positional,
+            // not a claude flag (same fence as ClaudeProvider::create_argv).
+            argv.push("--".into());
             argv.push(ctx.message.clone());
         }
         argv
@@ -346,6 +353,8 @@ impl Provider for ClaudeInteractiveProvider {
         // TUI. The resume id IS the session, so no separate `--session-id` pin.
         let mut argv = vec!["claude".into(), "--resume".into(), ctx.session_id.clone()];
         if !ctx.message.is_empty() {
+            // Behind `--`, same fence as interactive_argv.
+            argv.push("--".into());
             argv.push(ctx.message.clone());
         }
         argv
@@ -517,6 +526,9 @@ impl Provider for CodexProvider {
             argv.push("-c".into());
             argv.push(format!("model_reasoning_effort={effort}"));
         }
+        // Behind `--`: clap's own prescription ("to pass ... as a value, use
+        // '-- ...'"), so a leading-flag seed is the PROMPT, not a flag.
+        argv.push("--".into());
         argv.push(normalize_codex_command(&ctx.message));
         argv
     }
@@ -534,6 +546,9 @@ impl Provider for CodexProvider {
         if !ctx.yolo {
             argv.extend(codex_sandbox_config_args_resume(&ctx.cwd));
         }
+        // Behind `--`: clap's own prescription ("to pass ... as a value, use
+        // '-- ...'"), so a leading-flag seed is the PROMPT, not a flag.
+        argv.push("--".into());
         argv.push(normalize_codex_command(&ctx.message));
         argv
     }
@@ -1320,7 +1335,7 @@ mod tests {
         let argv = ClaudeProvider.create_argv(&create_ctx());
         assert_eq!(
             argv,
-            vec!["claude", "--bg", "--name", "worker-A", "build feature X"]
+            vec!["claude", "--bg", "--name", "worker-A", "--", "build feature X"]
         );
         assert!(!argv.iter().any(|a| a == "-p"), "LD38: never claude -p");
     }
@@ -1336,7 +1351,7 @@ mod tests {
         };
         assert_eq!(
             ClaudeProvider.resume_argv(&ctx),
-            vec!["claude", "--resume", "7c5dcf5d", "--print", "follow up"]
+            vec!["claude", "--resume", "7c5dcf5d", "--print", "--", "follow up"]
         );
     }
 
@@ -1378,6 +1393,7 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
+                "--",
                 "build feature X"
             ]
         );
@@ -1544,6 +1560,7 @@ mod tests {
                 "uuid-1",
                 "--json",
                 "--skip-git-repo-check",
+                "--",
                 "m"
             ]
         );
