@@ -89,7 +89,8 @@ def _serve(row: dict, *, stale: bool) -> int:
         )
     out["cached"] = True
     sys.stdout.write(json.dumps(out) + "\n")
-    return int(row.get("exit") if row.get("exit") is not None else 4)
+    exit_raw = row.get("exit")
+    return 4 if exit_raw is None else int(exit_raw)
 
 
 def cached_status(pr: str, cwd: Optional[str] = None) -> int:
