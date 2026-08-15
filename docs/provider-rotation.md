@@ -436,40 +436,11 @@ is load-bearing:
 | `fno agents resume`, live arm (`claude attach`), Python fallback | no | restore + wake + verify, or refuse (exit 2) |
 | `fno agents attach` | no | nothing to do |
 
-`fno agents resume` is two arms, and only one of them relaunches - in theory.
-The theory was that a reachable supervisor gets `claude attach <short_id>`,
-which opens a session that is still running ("The session keeps running either
-way", `claude attach --help`), so the route lives in that process and no attach
-can lose it.
+`fno agents resume` is two arms, and only one of them relaunches - in theory. The theory holds that a reachable supervisor gets `claude attach <short_id>`, which opens a session that is still running (`claude attach --help` says the session keeps running either way), so the route already lives in that process and no attach can lose it.
 
-A 2026-08-15 incident found the theory does not hold for a *blocked* row: a
-supervisor that is registered as reachable can still be sitting at a
-populated prompt with no live model turn in flight, and `claude attach` run
-non-interactively (no pty) prints "Attaching..." and exits having done
-nothing - which reads as "the route was fine" when nothing happened at all.
-The Python fallback (`resume_cli.py`, live under `FNO_AGENTS_RUNTIME=python`
-or when no Rust binary is installed) now treats the live arm the same as a
-relaunch for routing purposes: it restores `route_settings_path` into the
-attaching subprocess's env unconditionally, allocates its own pty
-(`script -q /dev/null`), injects an optional message as three
-bracketed-paste-safe writes, and verifies the row's live status actually
-reached `Working` before reporting success (exit 16 otherwise). This is
-strictly more defensive than "nothing to do": restoring the route is a no-op
-when the target process really is alive with its own correct env, and is
-the fix when it was not.
+A 2026-08-15 incident found the theory does not hold for a *blocked* row. A supervisor registered as reachable can still sit at a populated prompt with no live model turn in flight, and `claude attach` run non-interactively has no pty, so it prints "Attaching..." and exits having done nothing. When nothing happened at all, that silence reads as "the route was fine." The Python fallback (`resume_cli.py`, live under `FNO_AGENTS_RUNTIME=python` or when no Rust binary is installed) now treats the live arm the same as a relaunch for routing purposes: it restores `route_settings_path` into the attaching subprocess's env unconditionally, allocates its own pty (`script -q /dev/null`), injects an optional message as three bracketed-paste-safe writes, and verifies the row's live status actually reached `Working` before reporting success, or exits 16 otherwise. This is strictly more defensive than "nothing to do." When the target process really is alive with its own correct env, restoring the route is a no-op. When it was not, restoring the route is the fix.
 
-**The Rust arm has not been ported.** An exited row gets `claude --resume
-<uuid>`, which starts a new process and is therefore a genuine relaunch that
-must carry the route.
-That arm lives in Rust (`client_verbs.rs`), not in `resume_cli.py`, because
-`resume` is in `RUST_CLIENT_VERBS` and auto-routes to the daemon binary
-whenever an installed `fno-agents` binary is present (`FNO_AGENTS_RUNTIME`
-unset, the default) - reading only the Python path is how you conclude,
-wrongly, that resume can never lose a route, and it is also why the
-verified-wake fix above does not fire by default on a machine with an
-installed binary. `client_verbs.rs`'s live arm still has "nothing to do":
-the same finding applies there too and is unfixed; see the backlog's
-Rust-side route-restore investigation for the related open question.
+**The Rust arm has not been ported.** An exited row gets `claude --resume <uuid>`, which starts a new process and is therefore a genuine relaunch that must carry the route. That arm lives in Rust (`client_verbs.rs`), not in `resume_cli.py`, because `resume` is in `RUST_CLIENT_VERBS` and auto-routes to the daemon binary whenever an installed `fno-agents` binary is present (`FNO_AGENTS_RUNTIME` unset, the default). Reading only the Python path is how you conclude, wrongly, that resume can never lose a route, and it is also why the verified-wake fix above does not fire by default on a machine with an installed binary. `client_verbs.rs`'s live arm still has "nothing to do." The same finding applies there too and is unfixed. See the backlog's Rust-side route-restore investigation for the related open question.
 
 Both doors apply the same usability rule, not just an existence check: a recorded
 file that is missing, unparseable, or carries only the auth-scrub floor all
