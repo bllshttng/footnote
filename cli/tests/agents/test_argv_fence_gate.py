@@ -299,7 +299,8 @@ def test_scanner_still_sees_the_known_seams() -> None:
     assert counts.get("fenced", 0) >= 16, counts
     assert counts.get("value-form", 0) >= 10, counts
     # A floor AND a ceiling on exemptions: each new exempt marker must be a
-    # visible test edit, never a silent gate bypass.
-    assert counts.get("exempt", 0) == 4, counts
+    # visible test edit, never a silent gate bypass. The one standing
+    # exemption is the agy pane arm (no clean end-of-options in agy).
+    assert counts.get("exempt", 0) == 1, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts

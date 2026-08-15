@@ -805,9 +805,9 @@ def _spawn_think_worker(
             mode = ""
     if mode and (resolved_harness == "claude" or substrate == "pane"):
         cmd += ["--permission-mode", mode]
-    # argv-fence: exempt (fno's own Typer namespace, the x-04ce seam: a
-    # leading-flag seed needs fno's own -- separator, not tracked here).
-    cmd += ["--name", agent_name, rendered_prompt]
+    # Behind `--` (fno's own click parser honors it, verified both
+    # directions): a leading-flag seed must be the prompt positional.
+    cmd += ["--name", agent_name, "--", rendered_prompt]
 
     # x-42c5: tag the CAUSE of this spawn (never reached for an unforced birth -
     # maybe_spawn_think resolves that to "offered" before this function is ever

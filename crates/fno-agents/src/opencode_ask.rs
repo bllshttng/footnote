@@ -438,6 +438,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--command",
                 "fno:target",
+                "--",
                 "no-merge x-abcd"
             ]
         );

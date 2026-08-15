@@ -990,11 +990,14 @@ pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
         let mut parts = rest.splitn(2, ' ');
         // `/fno:target no-merge x` -> --command fno:target, args "no-merge x".
         if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
-            let mut tail = vec!["--command".to_string(), cmd.to_string()];
-            if let Some(args) = parts.next().filter(|a| !a.is_empty()) {
-                tail.push(args.to_string());
+            let mut argv_tail = vec!["--command".to_string(), cmd.to_string()];
+            if let Some(msg_args) = parts.next().filter(|a| !a.is_empty()) {
+                // Behind `--` (probed: yargs accepts it after --command's
+                // value): flag-shaped verb args ride as the message.
+                argv_tail.push("--".to_string());
+                argv_tail.push(msg_args.to_string());
             }
-            return tail;
+            return argv_tail;
         }
     }
     // Behind `--` (verified against opencode's yargs parser 2026-08-15:
@@ -1682,6 +1685,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--command",
                 "fno:target",
+                "--",
                 "no-merge x-abcd"
             ]
         );
