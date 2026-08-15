@@ -14,7 +14,7 @@ import pytest
 from fno.config import AutoMergeBlock
 from fno.pr import _verify
 from fno.pr import _merge
-from fno.pr._proc import Result
+from fno.pr._proc import Result, ToolMissing
 
 
 def _state_file(tmp_path) -> str:
@@ -222,6 +222,31 @@ def test_bounded_remediation_stays_single_poll(tmp_path, gh_on, monkeypatch):
     assert slept == [30]  # exactly one 30s poll, never a retry loop
     merge_calls = [c for c in fake.calls if c[:3] == ["gh", "pr", "merge"]]
     assert len(merge_calls) == 1
+
+
+def test_a_missing_gh_during_the_already_armed_probe_keeps_exit_127(
+    tmp_path, gh_on, monkeypatch, capsys
+):
+    """_already_armed's own gh call owes the same 127 contract its sibling
+    _checks_verdict call has (review round 12): it must not propagate a raw
+    ToolMissing past _bounded_remediation."""
+    sf = _state_file(tmp_path)
+
+    class _GhVanishes(FakeGH):
+        def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+            cmd = list(cmd)
+            if cmd[:3] == ["gh", "pr", "view"] and "autoMergeRequest" in cmd:
+                raise ToolMissing("gh")
+            return super().__call__(
+                cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
+            )
+
+    fake = _GhVanishes(toplevel=str(tmp_path), pr_states=[{"state": "OPEN"}])
+    monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
+    rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None)
+    assert rc == 127
+    assert "gh CLI not installed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("delete_branch", [True, False])

@@ -443,7 +443,15 @@ def _bounded_remediation(
     # already armed GitHub's queue, stand down instead of racing it.
     from fno.pr import _merge as _merge_mod
 
-    if _merge_mod._already_armed(int(pr_number), cwd):
+    try:
+        armed = _merge_mod._already_armed(int(pr_number), cwd)
+    except ToolMissing:
+        # _already_armed calls _gh, which can raise ToolMissing same as the
+        # sibling _checks_verdict call below - it owes the same handler its
+        # sibling call sites have (review round 12).
+        sys.stderr.write("verify-pr-merged: gh CLI not installed\n")
+        return 127
+    if armed:
         _emit_audit(
             repo_root, state_file, pr_number, "merge_attempt_did_not_complete",
             {"reason": "already armed in GitHub auto-merge queue"},

@@ -161,12 +161,13 @@ resolve_node_posture() {
 # free text stopped being a control input) and the legacy bare `no-merge` token
 # an old config template can still carry. Space-delimited replacement
 # (AC1-EDGE: never a substring - a pathological id like `no-merger-x` is
-# untouched); guarded to /target|$fno:target so a non-/target command or a
+# untouched); guarded to /target|/fno:target|$fno:target (all three renderings,
+# matching the family case below - round 12) so a non-/target command or a
 # prose brief's text is never mangled.
 strip_no_merge() {
   local cmd="$1"
   case "$cmd" in
-    "/target "*|'$fno:target '*) : ;;
+    "/target "*|"/fno:target "*|'$fno:target '*) : ;;
     *) printf '%s' "$cmd"; return ;;
   esac
   local padded=" $cmd "
