@@ -361,6 +361,78 @@ fn server_spine_bad_client_dropped_peers_keep_streaming() {
 }
 
 #[test]
+fn server_answers_queries_while_a_pane_spawn_is_wedged() {
+    // The falsifier for the open_pty-off-the-core-loop fix. A pty slave on
+    // the real host can wedge openpty forever (2026-08-14 incident: two
+    // stack samples, minutes apart, both
+    // 100% in ttyname_r/lstat). `FNO_MUX_OPENPTY_HANG_MS` simulates that
+    // deterministically; a fresh squad's first pane spawn happens INSIDE
+    // `CoreMsg::Attach` (Locked 7: PTY spawn before the model), so client A's
+    // own Attach is the call that wedges.
+    //
+    // Before the fix, `open_pty` has no timeout knob at all - the env vars
+    // below are inert, the real (unwedged, on a test host) openpty returns
+    // immediately, A attaches cleanly, and the Bye-naming-openpty assertion
+    // below fails. That is "fails today": pre-fix there is no refusal path
+    // to assert on, because there is nothing to time out.
+    let scratch = Scratch::new("wedged-openpty");
+    let _server = spawn_server_with_env(
+        &scratch.sock(),
+        "/bin/sh",
+        &[
+            ("FNO_MUX_OPENPTY_HANG_MS", "60000"),
+            ("FNO_MUX_OPENPTY_TIMEOUT_MS", "1500"),
+        ],
+    );
+
+    // Client A: Attach only writes the message and returns - it does not
+    // wait for a reply - so this does not block while the core loop is
+    // stuck inside A's own wedged spawn.
+    let mut a = attach(&scratch.sock(), 24, 80);
+
+    // Give the core loop time to have actually dequeued and started A's
+    // Attach (and be parked inside open_pty's bounded wait) before B
+    // connects, so B's Query is genuinely sent while A is in flight rather
+    // than racing ahead of it.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Client B: a pre-Attach Query. The core loop is single-threaded
+    // (`Builder::new_current_thread`, server.rs) and drains `core_rx`
+    // strictly in order via a synchronous `core.handle(msg)` call per
+    // message, so B's reply cannot be produced before A's own `handle_msg`
+    // invocation returns - B jumping the queue is not what this proves.
+    // What it proves is that the outage is BOUNDED to the deadline instead
+    // of open-ended: before the fix this call blocks for the full injected
+    // 60s (this test's 5s read timeout would fire first and panic); after
+    // the fix it returns shortly after A's ~1500ms deadline elapses.
+    let query_start = Instant::now();
+    let mut b = connect_with_retry(&scratch.sock());
+    write_msg_sync(&mut b, &ClientMsg::Query).unwrap();
+    b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    match read_msg_sync::<_, ServerMsg>(&mut b) {
+        Ok(ServerMsg::Info { .. }) => {}
+        other => panic!("expected Info, got {other:?}"),
+    }
+    let query_elapsed = query_start.elapsed();
+    assert!(
+        query_elapsed < Duration::from_secs(4),
+        "a wedged pane spawn must bound the outage to the deadline, not the injected 60s hang: query took {query_elapsed:?}"
+    );
+
+    // A's own attach refuses (AC1-ERR: nothing spawnable, refuse THIS
+    // attach, the server keeps serving), and the refusal names the syscall
+    // and the host check (change 2).
+    a.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    match read_msg_sync::<_, ServerMsg>(&mut a) {
+        Ok(ServerMsg::Bye { reason }) => {
+            assert!(reason.contains("openpty"), "{reason}");
+            assert!(reason.contains("ls /dev"), "{reason}");
+        }
+        other => panic!("expected a Bye naming openpty, got {other:?}"),
+    }
+}
+
+#[test]
 fn server_spine_version_skew_is_refused_with_both_versions() {
     // The version handshake at the wire level: a mismatched Attach gets a
     // loud Bye naming both sides, and the connection closes.

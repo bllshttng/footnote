@@ -19827,9 +19827,9 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(headers.iter().any(|h| *h == "aaa1111 -> bbb2222"));
-        assert!(headers.iter().any(|h| *h == "fix(x): thing"));
-        assert!(headers.iter().any(|h| *h == "feat(y): other thing"));
+        assert!(headers.contains(&"aaa1111 -> bbb2222"));
+        assert!(headers.contains(&"fix(x): thing"));
+        assert!(headers.contains(&"feat(y): other thing"));
         assert!(headers.iter().any(|h| h.contains("14 shells survive")));
     }
 
