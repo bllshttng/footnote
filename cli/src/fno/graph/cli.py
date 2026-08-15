@@ -8495,6 +8495,28 @@ def cmd_reconcile(
             if not json_out:
                 typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
 
+    # Claim GC (x-aeeb). This call site reaches every path that fires
+    # reconcile - the SessionStart hook, the megawalk stop hook, and a
+    # manual invocation, all through scripts/lib/reconcile-throttle.sh - so
+    # a reaper hook on any one caller instead would be a guard on one of N
+    # reachable paths. --dry-run propagates to the reaper (one mode
+    # contract); best-effort, same posture as sync_catchup above: a reap
+    # error is reported and never fails the sweep.
+    claim_reap: dict = {"outcome": "not-run"}
+    try:
+        from fno.claims.core import reap_dead_claims
+
+        _reap = reap_dead_claims(apply=not dry_run)
+        claim_reap = {"outcome": "ok", **_reap}
+        _count = _reap["would_reap"] if dry_run else _reap["reaped"]
+        if _count and not json_out:
+            _verb = "would archive" if dry_run else "archived"
+            typer.echo(f"claim reap: {_verb} {_count} dead claim(s)", err=True)
+    except Exception as _reap_exc:  # noqa: BLE001 - never abort the sweep
+        claim_reap = {"outcome": "error", "detail": str(_reap_exc)[:200]}
+        if not json_out:
+            typer.echo(f"warning: claim reap skipped: {_reap_exc}", err=True)
+
     if json_out:
         payload = {
             "dry_run": dry_run,
@@ -8526,6 +8548,7 @@ def cmd_reconcile(
             # --json and discards stderr - a leg whose result is unobservable is
             # the exact failure mode this feature exists to end.
             "sync_catchup": sync_catchup,
+            "claim_reap": claim_reap,
             "failures": [
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures

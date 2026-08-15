@@ -102,6 +102,34 @@ def _hermetic_promise_carveout_gate(monkeypatch):
     monkeypatch.setattr(rec, "_unharvested_deferred_carveouts", lambda cwd: [])
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_claim_reap(monkeypatch):
+    """Neutralise cmd_reconcile's claim-GC leg during tests (x-aeeb).
+
+    ``reap_dead_claims()``'s default roots resolve through
+    ``resolve_canonical_repo_root()`` (cwd-based ``git worktree list``
+    discovery - the SAME channel hermetic.py documents as unclosable by any
+    env var, see its ``FNO_REPO_ROOT`` comment) and ``global_claims_root()``
+    (HOME, which IS sandboxed). A reconcile test run from inside a real
+    checkout would otherwise archive real dead claims on the host machine.
+    Closed at the reader, same pattern as ``_hermetic_promise_carveout_gate``
+    above. ``cmd_reconcile`` imports ``reap_dead_claims`` fresh inside the
+    function body, so patching the defining module's attribute reaches it;
+    a test module that imports the name directly (``test_claim_reap.py``)
+    binds its own reference at collection time and is unaffected.
+    """
+    import fno.claims.core as claims_core
+
+    def _noop_reap(*, roots=None, apply=False):
+        return {
+            "scanned": 0, "reaped": 0, "would_reap": 0, "kept_live": 0,
+            "kept_suspect": 0, "kept_offhost": 0, "corrupted": 0, "vanished": 0,
+            "reap_failed": [], "apply": apply, "roots": [],
+        }
+
+    monkeypatch.setattr(claims_core, "reap_dead_claims", _noop_reap)
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation
 # ---------------------------------------------------------------------------

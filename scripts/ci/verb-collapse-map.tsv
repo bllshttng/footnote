@@ -131,6 +131,7 @@ carveout resolve	T1	carveout resolve	3
 carveout update	T1	carveout update	2
 claim acquire	T1	claim acquire	27
 claim list	T1	claim list	9
+claim reap	T1	claim reap	1
 claim refresh	T1	claim refresh	5
 claim release	KEEP	claim release	38	deliberate readability slack for a high-traffic distinct operation
 claim session-pid	T1	claim session-pid	2

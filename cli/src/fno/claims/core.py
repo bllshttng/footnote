@@ -28,6 +28,8 @@ from .events import (
     emit_claim_acquired,
     emit_claim_force_overridden,
     emit_claim_idempotent_reacquired,
+    emit_claim_reap_swept,
+    emit_claim_reaped,
     emit_claim_refreshed,
     emit_claim_rebound,
     emit_claim_released,
@@ -43,10 +45,11 @@ from .io import (
     claim_path,
     claims_dir,
     decode_key,
+    global_claims_root,
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, now_ms
+from .staleness import classify, is_provably_dead, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import _stamp_owner, release_dir_mutex, steal_if_stale
 from .types import (
@@ -122,6 +125,8 @@ __all__ = [
     "compare_and_rebind",
     "force_release_claim",
     "list_claims",
+    "list_claims_with_counts",
+    "reap_dead_claims",
     "refresh_claim",
     "release_claim",
 ]
@@ -772,24 +777,23 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     return out
 
 
-def list_claims(
+def _list_claims_impl(
     *,
     prefix: Optional[str] = None,
     include_stale: bool = False,
     root: Optional[Path] = None,
-) -> list[dict[str, Any]]:
-    """Enumerate claims under the claims directory.
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Shared directory walk for ``list_claims`` and ``list_claims_with_counts``.
 
-    Filters:
-        prefix:        only return claims whose key starts with this string.
-        include_stale: include stale + corrupted entries (default: live only).
-
-    Corrupted entries are returned with state="corrupted" and an "error"
-    key when ``include_stale=True``; they are skipped silently otherwise.
+    Returns ``(rows, counts)``: ``rows`` is filtered per ``include_stale``
+    exactly as before; ``counts`` is every state seen while walking,
+    regardless of what ``include_stale`` kept, so a caller can report what
+    it withheld (x-aeeb AC7).
     """
     cdir = claims_dir(root)
+    counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0}
     if not cdir.is_dir():
-        return []
+        return [], {**counts, "total": 0}
 
     out: list[dict[str, Any]] = []
     for entry in sorted(cdir.iterdir()):
@@ -805,6 +809,8 @@ def list_claims(
 
         status = claim_status(key, root=root)
         state = status.get("state")
+        if state in counts:
+            counts[state] += 1
         # SUSPECT (x-ba4b) is an active, TTL-protected claim - it must count
         # alongside LIVE so lane accounting (advance._live_lane_domains) does not
         # under-count a slot held by a respawned worker and over-dispatch.
@@ -816,7 +822,43 @@ def list_claims(
         }:
             out.append(status)
 
-    return out
+    return out, {**counts, "total": sum(counts.values())}
+
+
+def list_claims(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    """Enumerate claims under the claims directory.
+
+    Filters:
+        prefix:        only return claims whose key starts with this string.
+        include_stale: include stale + corrupted entries (default: live only).
+
+    Corrupted entries are returned with state="corrupted" and an "error"
+    key when ``include_stale=True``; they are skipped silently otherwise.
+    """
+    rows, _counts = _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
+    return rows
+
+
+def list_claims_with_counts(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Like :func:`list_claims`, but also returns the filtered-state counts.
+
+    x-aeeb AC7: a store that is 99 percent stale must not render as an
+    empty store. ``counts`` carries ``live``/``suspect``/``stale``/
+    ``corrupted``/``total`` for every lockfile the walk saw, independent of
+    what ``include_stale`` kept in ``rows`` - this is what lets a caller
+    print what it filtered instead of the bare string ``no claims``.
+    """
+    return _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
 
 
 def force_release_claim(
@@ -857,3 +899,172 @@ def force_release_claim(
         previous_holder=previous.holder if previous is not None else None,
         previous_pid=previous.pid if previous is not None else None,
     )
+
+
+def _default_reap_roots() -> list[Path]:
+    """Both claims roots swept by a bare ``fno claim reap`` (AC2).
+
+    Global node claims live at ``claims_dir(global_claims_root())``
+    (``~/.fno/claims`` by default); a repo's own root is
+    ``claims_dir(None)`` (canonical repo root). A cwd whose canonical repo
+    root IS the global root sweeps once, not twice - dedup is by
+    ``Path.resolve()`` on the resolved claims dir, not on the raw root arg.
+    """
+    candidates = [claims_dir(global_claims_root()), claims_dir(None)]
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for cdir in candidates:
+        resolved = cdir.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(cdir)
+    return out
+
+
+def reap_dead_claims(
+    *,
+    roots: Optional[list[Optional[Path]]] = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Archive every provably-dead claim across one or more claims roots.
+
+    x-aeeb: the only mutation missing from the claim lifecycle. Acquire,
+    release, refresh, and force-release all exist; nothing prunes a claim
+    whose holder died without releasing, so a dead session leaks its
+    lockfile forever. This walks every ``.lock`` file in the swept roots,
+    classifies it with :func:`fno.claims.staleness.is_provably_dead` (the
+    single liveness authority - see that function for the three-part
+    proof), and archives the provably-dead ones to ``.expired/``.
+
+    ``roots``, when given, is a list of repo-root arguments passed through
+    to :func:`fno.claims.io.claims_dir` exactly as ``--root`` does for
+    every other claim verb (``None`` means the canonical repo root). When
+    omitted, both default roots are swept in one run (AC2) - sweeping only
+    one is the guard-on-one-of-N-paths trap: 574 of the claims measured on
+    2026-08-14 lived in the root a single-root sweep would have missed.
+
+    With ``apply=False`` (the default), nothing is written; reapable files
+    are counted under ``would_reap`` so a dry run reports exactly what an
+    apply run would do.
+
+    With ``apply=True``, each reapable file is archived and then the store
+    is RE-READ to confirm the move: the source path must be gone and the
+    ``.expired/`` destination must exist. Only that re-read increments
+    ``reaped`` - never the absence of an exception, because ``fno agents
+    rm`` was observed tonight to exit 0 having moved nothing. A file whose
+    source path is still present after the archive call is counted under
+    ``reap_failed`` with its path, and the caller (the ``reap`` CLI verb)
+    exits non-zero when that list is non-empty.
+
+    Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
+    ``kept_live``, ``kept_suspect``, ``kept_offhost``, ``corrupted``,
+    ``vanished``, ``reap_failed`` (list of ``(path, reason)``), ``apply``,
+    ``roots``. A ``claim_reap_swept`` event fires on every call, apply or
+    dry-run, including a zero-reap run - a leg that never ran must not
+    look the same as one that ran and found nothing.
+    """
+    use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
+
+    ts = now_ms()
+    scanned = 0
+    reaped = 0
+    would_reap = 0
+    kept_live = 0
+    kept_suspect = 0
+    kept_offhost = 0
+    corrupted = 0
+    vanished = 0
+    reap_failed: list[tuple[str, str]] = []
+
+    for cdir in use_dirs:
+        if not cdir.is_dir():
+            continue
+        root_label = str(cdir)
+        for entry in sorted(cdir.iterdir()):
+            if entry.is_dir():
+                # Skip .expired/ and any future subdir.
+                continue
+            if not entry.name.endswith(".lock"):
+                continue
+
+            scanned += 1
+            try:
+                claim = read_claim_file(entry)
+            except ClaimCorrupted:
+                # Cannot classify what cannot be parsed; a claim that
+                # cannot be read cannot be proven dead (AC6).
+                corrupted += 1
+                continue
+            except ClaimGoneAway:
+                # A concurrent release between listdir and read is a
+                # normal outcome, not a failure of this run.
+                vanished += 1
+                continue
+
+            if is_provably_dead(claim, now=ts):
+                if not apply:
+                    would_reap += 1
+                    continue
+
+                archive_path = archive_claim(entry, ts_ms=ts)
+                if not entry.exists() and archive_path.exists():
+                    reaped += 1
+                    emit_claim_reaped(
+                        claim,
+                        root=root_label,
+                        age_ms=max(0, ts - claim.acquired_at),
+                    )
+                elif not entry.exists() and not archive_path.exists():
+                    # Some other actor (a concurrent reap, or the holder's
+                    # own delayed release) fully cleared this file between
+                    # our classification and our archive call. The store
+                    # no longer holds it, which is the outcome we wanted;
+                    # we just cannot claim credit for the move.
+                    vanished += 1
+                else:
+                    # The positive-marker rule: an exit without exception
+                    # is not evidence. The source is still there, so the
+                    # move did not happen (AC5).
+                    reap_failed.append(
+                        (str(entry), "archive_claim did not move the file")
+                    )
+                continue
+
+            # Not provably dead. Bucket the reason for the report.
+            if not is_same_machine(claim.host, claim.machine_id):
+                kept_offhost += 1
+            elif classify(claim, now=ts) is ClaimState.SUSPECT:
+                kept_suspect += 1
+            else:
+                kept_live += 1
+
+    summary: dict[str, Any] = {
+        "scanned": scanned,
+        "reaped": reaped,
+        "would_reap": would_reap,
+        "kept_live": kept_live,
+        "kept_suspect": kept_suspect,
+        "kept_offhost": kept_offhost,
+        "corrupted": corrupted,
+        "vanished": vanished,
+        "reap_failed": reap_failed,
+        "apply": apply,
+        "roots": [str(d) for d in use_dirs],
+    }
+    emit_claim_reap_swept(summary)
+    return summary
+
+
+def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
+    """Resolve + dedup an explicit ``--root`` list the same way the default is."""
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for r in roots:
+        cdir = claims_dir(r)
+        resolved = cdir.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(cdir)
+    return out

@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -65,9 +65,12 @@ from .core import (
     claim_status,
     force_release_claim,
     list_claims,
+    list_claims_with_counts,
+    reap_dead_claims,
     refresh_claim,
     release_claim,
 )
+from .io import claims_dir, global_claims_root
 from fno.tombstones import tombstone_group_cls
 
 
@@ -658,47 +661,115 @@ def list_cmd(
     prefix: str = typer.Option("", "--prefix", help="Filter keys starting with this prefix"),
     include_stale: bool = typer.Option(False, "--include-stale"),
     json_output: bool = typer.Option(False, "--json", "-J"),
+    root: Optional[Path] = typer.Option(
+        None, "--root", help="Explicit claims root (repo root); overrides the both-roots default"
+    ),
 ) -> None:
     """Enumerate claims under the claims directory.
 
-    Merges the global root (node:/dispatch:/session:/groom: claims live at
-    ~/.fno/claims by default) with the resolved local root. A caller with no
-    --prefix (the common case) has no way to name which root to search, and
-    most claims in practice are global, so scanning only the local root - a
-    near-always-empty directory - silently hid every global claim: 573 files
-    on disk read as "no claims" (measured 2026-08-14). An explicit global
-    --prefix (e.g. node:) already resolved correctly and would resolve to the
-    same root as the global scan here; the root dedup below scans it once.
-    Stale-only piles still need --include-stale: list_claims defaults to
-    live/suspect claims only.
+    With no --prefix and no --root, both claims roots (global
+    ~/.fno/claims and the cwd-local root) are read and merged in one run -
+    a bare `fno claim list` used to resolve only whichever single root an
+    empty prefix happened to fall to, silently missing the other store
+    (x-aeeb specimen 1: 574 lockfiles in a root a bare `list` could never
+    reach). A --prefix narrows to the root that key kind actually lives
+    in, as before; an explicit --root always wins.
     """
-    from .io import global_claims_root
-
-    roots: list[Path] = []
-    for r in (global_claims_root(), _node_aware_root(prefix)):
-        if r not in roots:
-            roots.append(r)
-
-    seen: "set[str]" = set()
-    results = []
-    for root in roots:
-        for r in list_claims(prefix=prefix or None, include_stale=include_stale, root=root):
-            if r["key"] in seen:
-                continue
-            seen.add(r["key"])
-            results.append(r)
-    results.sort(key=lambda r: r["key"])
-    if json_output:
-        typer.echo(json.dumps(results))
+    if root is not None:
+        roots: list[Optional[Path]] = [root]
+    elif prefix:
+        roots = [_node_aware_root(prefix)]
     else:
-        if not results:
-            typer.echo("no claims")
-            return
-        for r in results:
+        roots = [global_claims_root(), None]
+
+    all_rows: list[dict] = []
+    totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "total": 0}
+    seen_dirs: set[Path] = set()
+    for candidate_root in roots:
+        cdir = claims_dir(candidate_root)
+        resolved = cdir.resolve()
+        if resolved in seen_dirs:
+            continue
+        seen_dirs.add(resolved)
+        rows, counts = list_claims_with_counts(
+            prefix=prefix or None, include_stale=include_stale, root=candidate_root,
+        )
+        for r in rows:
+            r["root"] = str(cdir)
+        all_rows.extend(rows)
+        for k in totals:
+            totals[k] += counts[k]
+
+    n_roots = len(seen_dirs)
+
+    if json_output:
+        # Bare list, matching the pre-x-aeeb shape: a scripted caller already
+        # does `for r in json.loads(...)`. The filtered-count fix below is a
+        # human-output problem only - JSON already answers unambiguously
+        # (an empty list here really does mean zero rows in this mode).
+        typer.echo(json.dumps(all_rows))
+        return
+
+    if not all_rows:
+        # AC7: a store that is mostly stale must never print the bare
+        # string "no claims" - that reads identically to an empty store.
+        typer.echo(
+            f"no live claims ({totals['stale']} stale, {totals['corrupted']} corrupted "
+            f"across {n_roots} root{'s' if n_roots != 1 else ''}); "
+            f"--include-stale to list them"
+        )
+        return
+    for r in all_rows:
+        typer.echo(
+            f"{r['state']:9} {r['key']:32} holder={r.get('holder', '-')} "
+            f"pid={r.get('pid', '-')} host={r.get('host', '-')} root={r['root']}"
+        )
+
+
+@cli.command(name="reap")
+def reap_cmd(
+    apply: bool = typer.Option(
+        False, "--apply", help="Archive dead claims. Default is dry-run: report what would be reaped."
+    ),
+    root: Optional[List[Path]] = typer.Option(
+        None,
+        "--root",
+        help="Repeatable. Overrides the default both-roots sweep "
+        "(global ~/.fno/claims + the cwd-local root).",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Archive every provably-dead claim: same-machine, dead/reused pid, no live TTL.
+
+    Not an age cutoff - a claim's holder pid is proven dead
+    (:func:`fno.claims.staleness.is_provably_dead`), never guessed from how
+    old the file is. Dry-run by default; `--apply` archives to `.expired/`
+    and re-reads the store to confirm each move before counting it
+    `reaped` - an exit code alone is not evidence (x-aeeb). Exits 1 when
+    any reapable file's move could not be confirmed on that re-read.
+    """
+    summary = reap_dead_claims(roots=list(root) if root else None, apply=apply)
+
+    if json_output:
+        typer.echo(json.dumps(summary))
+    else:
+        for path, reason in summary["reap_failed"]:
+            typer.echo(f"FAILED  {path}  ({reason})", err=True)
+        if apply:
+            typer.echo(f"reaped {summary['reaped']} of {summary['scanned']} scanned")
+        else:
             typer.echo(
-                f"{r['state']:9} {r['key']:32} holder={r.get('holder', '-')} "
-                f"pid={r.get('pid', '-')} host={r.get('host', '-')}"
+                f"would reap {summary['would_reap']} of {summary['scanned']} scanned "
+                "(dry-run; pass --apply)"
             )
+        typer.echo(
+            f"kept: {summary['kept_live']} live, {summary['kept_suspect']} suspect, "
+            f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
+            f"{summary['vanished']} vanished  |  roots: {', '.join(summary['roots'])}"
+        )
+
+    if summary["reap_failed"]:
+        raise typer.Exit(code=1)
 
 
 @cli.command(name="session-pid")

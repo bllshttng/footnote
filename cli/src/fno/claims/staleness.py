@@ -121,3 +121,23 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
     # (TTL-protected, not stealable).
     return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT
+
+
+def is_provably_dead(claim: Claim, now: Optional[int] = None) -> bool:
+    """Return True iff a claim's holder can be PROVEN dead from this host.
+
+    Three conditions, all required, x-aeeb:
+
+      1. Same machine, by machine_id (never by hostname - see module header).
+         An off-machine or unverifiable claim cannot be proven dead here.
+      2. Pid absent, or pid reused (create_time > acquired_at). This is
+         exactly what makes ``is_live`` return False for a reason other than
+         being off-machine.
+      3. No live TTL. A dead-pid-but-unexpired claim is SUSPECT, not STALE:
+         the TTL still protects the slot for a respawned worker.
+
+    Composed, this is ``is_same_machine(...) and classify(...) is STALE``.
+    No age threshold: age is a guess, pid liveness is a measurement, and a
+    measurement beats an inference. GC must never reap on age alone.
+    """
+    return is_same_machine(claim.host, claim.machine_id) and classify(claim, now=now) is ClaimState.STALE

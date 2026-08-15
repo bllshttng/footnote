@@ -150,11 +150,42 @@ def emit_claim_force_overridden(
 # so adding a helper now would be dead code.
 
 
+def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
+    """GC archived one provably-dead claim (x-aeeb). Per-file record."""
+    data = _common(claim)
+    data["root"] = root
+    data["age_ms"] = int(age_ms)
+    _emit(_build("claim_reaped", data))
+
+
+def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
+    """One `fno claim reap` run completed (x-aeeb). Fires on every run,
+    apply or dry-run, including a run that reaped nothing - a silent sweep
+    and a dead sweep must not look the same.
+    """
+    data = {
+        "scanned": int(summary["scanned"]),
+        "reaped": int(summary["reaped"]),
+        "would_reap": int(summary["would_reap"]),
+        "kept_live": int(summary["kept_live"]),
+        "kept_suspect": int(summary["kept_suspect"]),
+        "kept_offhost": int(summary["kept_offhost"]),
+        "corrupted": int(summary["corrupted"]),
+        "vanished": int(summary["vanished"]),
+        "reap_failed": len(summary["reap_failed"]),
+        "apply": bool(summary["apply"]),
+        "roots": [str(r) for r in summary["roots"]],
+    }
+    _emit(_build("claim_reap_swept", data))
+
+
 __all__ = [
     "CLAIM_SOURCE",
     "emit_claim_acquired",
     "emit_claim_force_overridden",
     "emit_claim_idempotent_reacquired",
+    "emit_claim_reap_swept",
+    "emit_claim_reaped",
     "emit_claim_refreshed",
     "emit_claim_rebound",
     "emit_claim_released",
