@@ -35,27 +35,36 @@ use std::sync::{Arc, Mutex};
 /// every later spawn into a second failure.
 static FORK_LOCK: Mutex<()> = Mutex::new(());
 
-/// Instant of the last openpty timeout. While it is fresher than one
-/// timeout window, further opens refuse immediately instead of paying the
-/// deadline again: a wedged host wedges every pty, not just the first.
-/// Self-clearing, so a host that recovers needs no reset.
-static LAST_OPENPTY_TIMEOUT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+thread_local! {
+    // Instant of the last openpty timeout, scoped per thread rather than a
+    // process-wide static. In production this is a no-op difference: the
+    // mux server's single-threaded core loop is the only caller, so a
+    // thread-local and a process-wide value hold identical state. In this
+    // crate's test binary it matters a great deal - `cargo test` runs many
+    // threads concurrently, and a process-wide cooldown let one test's
+    // deliberately-injected wedge get read as a real wedge by an unrelated,
+    // healthy `server::tests` spawn racing it on another thread (observed:
+    // CI failures like "openpty skipped: it timed out 2ms ago" in tests that
+    // never touch the wedge machinery). Thread-local closes that class of
+    // failure by construction, not by narrowing a window.
+    //
+    // While fresher than one timeout window, further opens on the same
+    // thread refuse immediately instead of paying the deadline again: a
+    // wedged host wedges every pty, not just the first. Self-clearing, so a
+    // host that recovers needs no reset.
+    static LAST_OPENPTY_TIMEOUT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
 
 /// Record that an openpty call just timed out, starting the cooldown window.
 fn note_wedge() {
-    let mut guard = LAST_OPENPTY_TIMEOUT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *guard = Some(std::time::Instant::now());
+    LAST_OPENPTY_TIMEOUT.with(|c| c.set(Some(std::time::Instant::now())));
 }
 
 /// `Some(elapsed)` when the last timeout is still fresher than `timeout`,
 /// `None` when there was no recent timeout or the cooldown has expired.
 fn wedge_cooldown(timeout: std::time::Duration) -> Option<std::time::Duration> {
-    let guard = LAST_OPENPTY_TIMEOUT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let elapsed = (*guard)?.elapsed();
+    let elapsed = LAST_OPENPTY_TIMEOUT.with(|c| c.get())?.elapsed();
     (elapsed < timeout).then_some(elapsed)
 }
 
@@ -385,10 +394,7 @@ fn set_hang_injection(d: std::time::Duration) {
 
 #[cfg(test)]
 fn clear_wedge_cooldown() {
-    let mut guard = LAST_OPENPTY_TIMEOUT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *guard = None;
+    LAST_OPENPTY_TIMEOUT.with(|c| c.set(None));
 }
 
 /// Open a fresh PTY pair at `rows`x`cols` (clamped to >=1).
@@ -783,6 +789,11 @@ mod tests {
         clear_wedge_cooldown();
         set_hang_injection(std::time::Duration::ZERO);
         OPENPTY_INFLIGHT.store(0, Ordering::Release);
+        // Also covers FNO_MUX_OPENPTY_TIMEOUT_MS: a test that sets it and
+        // then panics before its own remove_var would otherwise leave every
+        // later open_pty call in the process reading a 50-200ms deadline
+        // instead of the 5s default, failing unrelated tests under load.
+        // The Drop side of this (see PtyTestGuard) makes that panic-safe.
     }
 
     /// A held `PTY_GATE` guard that also resets the wedge globals on drop,
@@ -1160,7 +1171,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("openpty"), "{msg}");
         assert!(msg.contains("ls /dev"), "{msg}");
-        std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
     }
 
     #[test]
@@ -1191,7 +1201,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("openpty"), "{msg}");
         assert!(msg.contains("ls /dev"), "{msg}");
-        std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
     }
 
     #[test]
@@ -1237,7 +1246,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("skipped"), "{msg}");
         assert!(msg.contains("ls /dev"), "{msg}");
-        std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
     }
 
     #[test]
