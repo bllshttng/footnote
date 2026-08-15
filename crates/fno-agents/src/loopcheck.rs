@@ -1561,19 +1561,20 @@ fn is_secondary_limit_stderr(stderr: &str) -> bool {
     stderr.to_lowercase().contains("secondary rate limit")
 }
 
-/// Whether a recent gh read on this session hit the secondary limit. The
-/// primary-quota floor (`GRAPHQL_FLOOR`) is blind to this failure mode by
+/// Whether ANY session on this machine hit the secondary limit recently.
+/// The secondary limit is per-USER, not per-session: a fleet of concurrent
+/// sessions shares one burst budget, so a refusal scoped to the reading
+/// session alone means every other session keeps sending against a budget
+/// one of them just proved is refusing - each of those sends is itself a
+/// call against the shared limiter. Scans the MACHINE-WIDE `global_events`
+/// log (every session's `loop_check_gh_error` rows already land there via
+/// `emit_to_both`, so this reuses an existing write path rather than adding
+/// one) with no session filter, by design.
+/// The primary-quota floor (`GRAPHQL_FLOOR`) is blind to this failure mode by
 /// construction - advertised remaining looks healthy while calls are being
 /// refused - so a fire must ALSO stand down on observed refusals, not only
 /// on advertised headroom, or the floor never fires when it is most needed.
-/// Scans `loop_check_gh_error` rows (the forensic trail every failed read
-/// already writes) rather than adding a second write path.
-fn recent_secondary_refusal(
-    events_path: &Path,
-    session_id: &str,
-    now: DateTime<Utc>,
-    window_secs: i64,
-) -> bool {
+fn recent_secondary_refusal(events_path: &Path, now: DateTime<Utc>, window_secs: i64) -> bool {
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return false;
     };
@@ -1582,9 +1583,6 @@ fn recent_secondary_refusal(
             continue;
         };
         if val.get("type").and_then(|v| v.as_str()) != Some("loop_check_gh_error") {
-            continue;
-        }
-        if val.pointer("/data/session_id").and_then(|v| v.as_str()) != Some(session_id) {
             continue;
         }
         let Some(ts) = val
@@ -5583,8 +5581,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // never fires when THAT is the limiter, so a fire also stands down on an
     // observed secondary refusal in the last 5 minutes, independent of what
     // the probe reports (and independent of whether the probe itself
-    // succeeded).
-    let secondary_refusal = recent_secondary_refusal(&project_events, &session_id, now, 300);
+    // succeeded). Reads `global_events`, not `project_events`: the limit is
+    // per-USER, shared by every session on the machine, so a refusal any one
+    // of them observed must stand every fleet member down, not just the one
+    // that hit it.
+    let secondary_refusal = recent_secondary_refusal(&global_events, now, 300);
     let below_primary_floor = quota_probe
         .as_ref()
         .map(|q| q.remaining < GRAPHQL_FLOOR)
@@ -10921,12 +10922,37 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(recent_secondary_refusal(&events, "sess-sec", now, 300));
+        assert!(recent_secondary_refusal(&events, now, 300));
         // Outside the window (5 minutes = 300s; this row is 130s old, so still
         // in-window - shrink the window to prove the cutoff actually applies).
-        assert!(!recent_secondary_refusal(&events, "sess-sec", now, 60));
-        // Wrong session must not match another session's refusal.
-        assert!(!recent_secondary_refusal(&events, "sess-other", now, 300));
+        assert!(!recent_secondary_refusal(&events, now, 60));
+    }
+
+    #[test]
+    fn recent_secondary_refusal_is_fleet_wide_not_scoped_to_the_reading_session() {
+        // The secondary limit is per-USER: a refusal observed by session A
+        // must stand session B down too, or a 29-session fleet only quiets
+        // one member at a time while the other 28 keep tripping the guard.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let now: DateTime<Utc> = "2026-06-05T00:30:00Z".parse().unwrap();
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "loop_check_gh_error",
+                    "ts": "2026-06-05T00:28:00Z",
+                    "data": {
+                        "session_id": "sess-a",
+                        "read": "pulls_comments",
+                        "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        assert!(recent_secondary_refusal(&events, now, 300));
     }
 
     #[test]
@@ -10950,7 +10976,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(!recent_secondary_refusal(&events, "sess-prim", now, 300));
+        assert!(!recent_secondary_refusal(&events, now, 300));
     }
 
     #[test]

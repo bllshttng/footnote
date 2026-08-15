@@ -370,6 +370,17 @@ fn fire(args: &[&str]) -> (i32, Decision) {
     // by the bash e2e harness, which controls HOME per case).
     args_owned.push("--global-settings".to_string());
     args_owned.push("/nonexistent/global-settings.yaml".to_string());
+    // Hermeticity, third door: recent_secondary_refusal reads global_events,
+    // which defaults to the developer's real ~/.fno/events.jsonl. This very
+    // suite runs under a live footnote session whose own stop-hook fires
+    // write secondary-refusal rows to that real file all session long, so an
+    // unisolated test silently inherits an unrelated stand-down. A case that
+    // wants to test the secondary-refusal path passes its own
+    // `--global-events`, and this skips.
+    if !args.iter().any(|a| a.starts_with("--global-events")) {
+        args_owned.push("--global-events".to_string());
+        args_owned.push("/nonexistent/global-events.jsonl".to_string());
+    }
     // Hermeticity, second door: the author harness came from ambient env
     // markers, so these cases passed in CI (no marker) and failed under
     // `cargo test` run from inside Claude Code, where the marker floors a
@@ -5960,11 +5971,14 @@ fn floor_stand_down_spends_no_graphql() {
 fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
+    let global_dir = tmp.path().join("global_fno");
     fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::create_dir_all(&global_dir).unwrap();
     isolate_settings(cwd);
     let manifest_path = cwd.join("target-state.md");
     let transcript_path = cwd.join("transcript.jsonl");
     let events_path = cwd.join(".fno/events.jsonl");
+    let global_events_path = global_dir.join("events.jsonl");
     fs::write(
         &manifest_path,
         new_manifest("sess-2ndary", "2026-06-05T00:00:00Z", true),
@@ -5972,9 +5986,10 @@ fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
     .unwrap();
     fs::write(&transcript_path, transcript_empty()).unwrap();
     // A prior fire's forensic trail: a secondary-limit refusal 90s ago, well
-    // inside the 5-minute window, for THIS session.
+    // inside the 5-minute window, on the MACHINE-WIDE log (`emit_to_both`'s
+    // destination for every session's rows, this session's included).
     fs::write(
-        &events_path,
+        &global_events_path,
         format!(
             "{}\n",
             serde_json::json!({
@@ -6008,6 +6023,8 @@ fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
         &format!("--git-bin={}", git.display()),
         "--events",
         events_path.to_str().unwrap(),
+        "--global-events",
+        global_events_path.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
     assert_eq!(d.decision, "block");
@@ -6021,6 +6038,77 @@ fn floor_stands_down_on_a_recent_secondary_refusal_even_with_healthy_quota() {
     assert!(
         !calls.contains("pr view"),
         "no GraphQL spend on a secondary-refusal stand-down: {calls}"
+    );
+}
+
+/// The fleet-wide half of the same guard: the secondary limit is per-USER,
+/// so a refusal recorded by ANOTHER session on this machine must stand THIS
+/// session down too, not just one that refused itself. 29 live workers were
+/// on this machine the night the guard was designed; a per-session refusal
+/// record would have let 28 of them keep sending against a budget the 29th
+/// had already proven refused.
+#[test]
+fn floor_stands_down_on_another_sessions_secondary_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let global_dir = tmp.path().join("global_fno");
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::create_dir_all(&global_dir).unwrap();
+    isolate_settings(cwd);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    let global_events_path = global_dir.join("events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-quiet", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+    // A DIFFERENT session's refusal, in the shared machine-wide log. This
+    // session's own project-local log has no such row.
+    fs::write(
+        &global_events_path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "loop_check_gh_error",
+                "ts": "2026-06-05T00:28:30Z",
+                "data": {
+                    "session_id": "sess-loud",
+                    "read": "pulls_comments",
+                    "stderr_tail": "HTTP 403: You have exceeded a secondary rate limit"
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let gh = quota_gh(cwd, 4922, false);
+    let git = MockBins::green().git;
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+        "--global-events",
+        global_events_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message.contains("secondary"),
+        "another session's refusal must stand this one down too: {}",
+        d.message
     );
 }
 
