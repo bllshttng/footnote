@@ -1052,8 +1052,9 @@ enum ConfirmKind {
     /// Close one tab (the tab menu's destructive item). The captured stable
     /// [`TabId`], not a view index, commits: `CloseTab` closes the SENDER'S
     /// VIEWED tab server-side, so Enter first selects the captured tab then
-    /// closes it, and a tab that raced out between arm and Enter resolves to
-    /// the server's stale-id refusal instead of closing a neighbour.
+    /// closes it. The id is re-resolved at Enter (the ClearDead re-fold
+    /// precedent): a tab that raced out between arm and Enter is a notice,
+    /// never a bare CloseTab closing whatever is viewed now.
     CloseTab { tab: TabId },
 }
 
@@ -1410,6 +1411,18 @@ enum MoveSrc {
     Pane(u64),
 }
 
+/// (x-92d3 6.2) An entry whose action has a prefix binding: the hint is the
+/// LIVE glyph from `key_for`, never a literal chord. An unbound or unknown
+/// id resolves to nothing, which is the honest hint (LD9 / AC8).
+fn entry_kb(glyph: &str, label: &str, id: &str) -> PopupRow {
+    PopupRow::Entry {
+        glyph: glyph.into(),
+        label: label.into(),
+        hint: crate::keys::key_for(id).unwrap_or_default(),
+        enabled: true,
+    }
+}
+
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
 /// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
 /// Entry sets mirror the row's state so no dead item ever renders: a paneless
@@ -1427,15 +1440,6 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         glyph: glyph.into(),
         label: label.into(),
         hint: String::new(),
-        enabled: true,
-    };
-    // (x-92d3 6.2) An entry whose action has a prefix binding: the hint is the
-    // LIVE glyph from `key_for`, never a literal chord. An unbound or unknown
-    // id resolves to nothing, which is the honest hint (LD9 / AC8).
-    let entry_kb = |glyph: &str, label: &str, id: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: crate::keys::key_for(id).unwrap_or_default(),
         enabled: true,
     };
     let cell = |glyph: &str, label: &str| GridCell {
@@ -1701,11 +1705,11 @@ fn build_section_menu(
 /// them would bind to a verb this socket can never carry. That needs a
 /// `Command` surface and is filed rather than faked.
 fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
-    let entry = |glyph: &str, label: &str, id: &str| PopupRow::Entry {
-        glyph: glyph.into(),
-        label: label.into(),
-        hint: crate::keys::key_for(id).unwrap_or_default(),
-        enabled: true,
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<MenuAction> = Vec::new();
+    let mut add = |row: PopupRow, acts: &[MenuAction]| {
+        rows.push(row);
+        actions.extend_from_slice(acts);
     };
     let cell = |glyph: &str, label: &str| GridCell {
         glyph: glyph.into(),
@@ -1715,29 +1719,40 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
     // the focused pane the joined tab lands on. No hint: no prefix binding
     // names a join (the gesture path is the tab drag), and LD9 forbids a
     // literal chord standing in for one.
-    let rows = vec![
+    add(
         PopupRow::Header(tab_label_text(&tab.name, idx, tab.named)),
-        PopupRow::Rule,
-        entry("▭", "New tab", "new-tab"),
-        entry("✎", "Rename", "rename-tab"),
-        entry("◧", "Move left", "move-tab-left"),
-        entry("◨", "Move right", "move-tab-right"),
+        &[],
+    );
+    add(PopupRow::Rule, &[]);
+    add(entry_kb("▭", "New tab", "new-tab"), &[MenuAction::TabNew]);
+    add(
+        entry_kb("✎", "Rename", "rename-tab"),
+        &[MenuAction::TabRename],
+    );
+    add(
+        entry_kb("◧", "Move left", "move-tab-left"),
+        &[MenuAction::TabReorder(-1)],
+    );
+    add(
+        entry_kb("◨", "Move right", "move-tab-right"),
+        &[MenuAction::TabReorder(1)],
+    );
+    add(
         PopupRow::Grid(vec![cell("◧", "Join Left"), cell("◨", "Join Right")]),
+        &[
+            MenuAction::TabJoin(Dir::Left),
+            MenuAction::TabJoin(Dir::Right),
+        ],
+    );
+    add(
         PopupRow::Grid(vec![cell("⬒", "Join Up"), cell("⬓", "Join Down")]),
-        PopupRow::Rule,
-        entry("✕", "Close tab", "close-tab"),
-    ];
-    let actions = vec![
-        MenuAction::TabNew,
-        MenuAction::TabRename,
-        MenuAction::TabReorder(-1),
-        MenuAction::TabReorder(1),
-        MenuAction::TabJoin(Dir::Left),
-        MenuAction::TabJoin(Dir::Right),
-        MenuAction::TabJoin(Dir::Up),
-        MenuAction::TabJoin(Dir::Down),
-        MenuAction::TabClose,
-    ];
+        &[MenuAction::TabJoin(Dir::Up), MenuAction::TabJoin(Dir::Down)],
+    );
+    add(PopupRow::Rule, &[]);
+    add(
+        entry_kb("✕", "Close tab", "close-tab"),
+        &[MenuAction::TabClose],
+    );
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Tab(tab.id),
@@ -2697,9 +2712,11 @@ impl View {
             return false;
         };
         // Clone the tab out of the layout borrow before mutating `self`
-        // (menu open is cold; the clone is one small Vec).
-        let Some((_, idx, tab)) = self.find_tab(tid).map(|(s, i, t)| (s, i, t.clone())) else {
-            return false; // the tab vanished mid-press; nothing to anchor a menu to
+        // (menu open is cold; the clone is one small Vec). Unreachable today -
+        // `tab_cell_at` walks spans minted from this same layout with no await
+        // between - kept as the fail-closed shape if spans are ever cached.
+        let Some((idx, tab)) = self.find_tab(tid).map(|(_, i, t)| (i, t.clone())) else {
+            return false;
         };
         self.clear_peek();
         self.row_menu = Some(build_tab_menu(idx, &tab, anchor));
@@ -10687,13 +10704,21 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("diff send failed: {e}"))?;
         }
-        MenuAction::Peek => {
+        MenuAction::Peek | MenuAction::Mail => {
             let idx = view
                 .display_rows()
                 .iter()
                 .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
             match idx {
-                Some(idx) => fetch_peek(view, idx, a.name.clone(), sock_w).await?,
+                Some(idx) => {
+                    fetch_peek(view, idx, a.name.clone(), sock_w).await?;
+                    // (x-92d3 6.2) Mail arms the SAME free-text composer peek
+                    // `m` opens - one input surface, two doors.
+                    if matches!(action, MenuAction::Mail) {
+                        view.peek_input = Some((a.name.clone(), String::new()));
+                        view.peek_input_esc.clear();
+                    }
+                }
                 None => view.set_notice("agent is no longer here".into()),
             }
         }
@@ -10712,22 +10737,6 @@ async fn execute_row_menu_action(
                 .map_err(|e| format!("respawn send failed: {e}"))?;
             } else {
                 view.set_notice("only an exited row can resume".into());
-            }
-        }
-        // (x-92d3 6.2) Mail: peek the row, then arm the SAME free-text
-        // composer peek `m` opens - one input surface, two doors.
-        MenuAction::Mail => {
-            let idx = view
-                .display_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::Agent(x) if target.matches(x)));
-            match idx {
-                Some(idx) => {
-                    fetch_peek(view, idx, a.name.clone(), sock_w).await?;
-                    view.peek_input = Some((a.name.clone(), String::new()));
-                    view.peek_input_esc.clear();
-                }
-                None => view.set_notice("agent is no longer here".into()),
             }
         }
         // Unreachable: the crossed-pair guard above returns before an agent
@@ -10948,12 +10957,14 @@ async fn row_menu_mouse(
                 }
             }
         }
-        MouseKind::Press(MouseButton::Right) => match view.sideline_row_at(rep.row, rep.col) {
-            // Re-anchor on the row under the second right-press (never stack two
-            // menus); a non-agent row leaves nothing open.
-            Some(i) => {
-                if !view.open_row_menu(
-                    i,
+        MouseKind::Press(MouseButton::Right) => {
+            // (x-92d3 5.1) A tab cell re-anchors the tab menu, the same
+            // one-press contract a sideline row gets below; the strip and the
+            // sideline own disjoint columns, so the two cannot contend.
+            if view.tab_cell_at(rep.row, rep.col).is_some() {
+                if !view.open_tab_menu(
+                    rep.row,
+                    rep.col,
                     Anchor::At {
                         row: rep.row,
                         col: rep.col,
@@ -10961,14 +10972,30 @@ async fn row_menu_mouse(
                 ) {
                     view.row_menu = None;
                 }
+                return Ok(());
             }
-            // On the menu itself (not a sideline row): swallow, do not dismiss.
-            None => {
-                if !view.row_menu_block_contains(rep.row, rep.col) {
-                    view.row_menu = None;
+            match view.sideline_row_at(rep.row, rep.col) {
+                // Re-anchor on the row under the second right-press (never stack two
+                // menus); a non-agent row leaves nothing open.
+                Some(i) => {
+                    if !view.open_row_menu(
+                        i,
+                        Anchor::At {
+                            row: rep.row,
+                            col: rep.col,
+                        },
+                    ) {
+                        view.row_menu = None;
+                    }
+                }
+                // On the menu itself (not a sideline row): swallow, do not dismiss.
+                None => {
+                    if !view.row_menu_block_contains(rep.row, rep.col) {
+                        view.row_menu = None;
+                    }
                 }
             }
-        },
+        }
         _ => {}
     }
     Ok(())
@@ -18584,6 +18611,36 @@ mod tests {
         assert_eq!(v.tab_cell_at(pr, pc), None);
         assert!(!v.open_tab_menu(pr, pc, Anchor::Center));
         assert!(v.row_menu.is_none(), "no menu, no swallow");
+    }
+
+    #[tokio::test]
+    async fn a_right_press_on_a_tab_cell_re_anchors_an_open_menu() {
+        // (x-92d3 5.1) One press, same as a sideline row: with a menu open, a
+        // right-press on a tab cell swaps in that tab's menu instead of
+        // dismissing and making the user press again.
+        let mut v = view_with_agents(vec![]);
+        let tabs = squad_tabs(&v, 1);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        // Start from a menu pinned to the OTHER tab (index 1).
+        v.row_menu = Some(super::build_tab_menu(1, &tabs[1], Anchor::Center));
+        let mut buf: Vec<u8> = Vec::new();
+        super::row_menu_mouse(
+            &mut v,
+            crate::mouse::MouseReport {
+                row: tr,
+                col: tc,
+                kind: MouseKind::Press(MouseButton::Right),
+                shift: false,
+            },
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v.row_menu.as_ref().map(|m| m.target.clone()),
+            Some(super::MenuTarget::Tab(tabs[0].id)),
+            "the open menu re-anchored onto the pressed tab in one press"
+        );
     }
 
     #[tokio::test]
