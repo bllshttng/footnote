@@ -181,7 +181,7 @@ crates/fno/build.rs:2
 crates/fno/src/agents_view.rs:94
 crates/fno/src/backlog_view.rs:91
 crates/fno/src/bootstrap.rs:11
-crates/fno/src/client.rs:56
+crates/fno/src/client.rs:58
 crates/fno/src/clipboard.rs:2
 crates/fno/src/connections_view.rs:3
 crates/fno/src/digest_overlay.rs:1

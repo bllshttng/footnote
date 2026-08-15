@@ -19621,9 +19621,7 @@ mod tests {
         assert!(headers.iter().any(|h| *h == "aaa1111 -> bbb2222"));
         assert!(headers.iter().any(|h| *h == "fix(x): thing"));
         assert!(headers.iter().any(|h| *h == "feat(y): other thing"));
-        assert!(headers
-            .iter()
-            .any(|h| h.contains("14 shells survive")));
+        assert!(headers.iter().any(|h| h.contains("14 shells survive")));
     }
 
     /// AC6-EDGE: a degraded probe renders the reason, never an empty body.
