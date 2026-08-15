@@ -40,6 +40,12 @@ With enough live panes, restored squads, and subprocess churn, a GUI mux can exh
 State that accumulates across restarts lowers the headroom that makes the default livable; a squad store that grew one row per restart was one such accumulator (closed by deriving a squad's durable key from its origin, so one repo holds one row across unbounded restarts).
 Raising the ceiling is an operator decision (`launchctl limit maxfiles <soft> <hard>`, or a `SoftResourceLimits` key on a LaunchDaemon), not a code change.
 
+## Badge lattice: the three state producers
+
+The mux pane badge (and every other reader of `inside_leg`) is driven by exactly three Claude Code hook events, each wired in `hooks/hooks.json` to `hooks/inside-leg-report.sh`: `Notification` reports `blocked` (a permission prompt or an idle wait for input — both read as one state, Waiting, with the payload's `message` carried through as the reason), `PreToolUse` and `UserPromptSubmit` report `working` (a tool call or a new turn are each proof the worker is unblocked and running — `PreToolUse` is `blocked`'s natural inverse, since an approved permission prompt fires no `UserPromptSubmit` of its own), and `Stop` reports `done`. A report is a positive marker on a named field (`inside_leg.state`), never an absence, so a reader never has to infer Waiting from silence. The daemon's capability flip clears any stored `screen_state` on a row's first `inside_leg` report, so a hook-reported state can never be shadowed by a stale scrape verdict — this holds for `blocked` exactly as it does for `working`/`done`, by construction rather than a special case.
+
+This lattice is Claude-only. No other harness (codex, agy, opencode) emits a permission-prompt hook event, so a row hosted by one of those keeps the screen-manifest scrape as its sole authority, unchanged by this section.
+
 ## Reconcile at startup
 
 Because the migration removes PTY workers, a registry row that still carries a pre-migration worker ref would otherwise look live forever. The daemon settles these at startup: recovery scans for a live worker socket and, finding none, falls back to a PID-liveness probe (`kill(0)` plus a start-time match to defeat PID reuse) and marks the row exited. No stranded agents, no phantoms — the first `list` after a restart reads truthful liveness.
