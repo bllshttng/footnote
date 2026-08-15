@@ -283,7 +283,14 @@ fn family1_truth_probe_with_command(
             return None;
         }
     };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    let state = parsed
+        .as_ref()
+        .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
     if !output.status.success() {
+        // The warn-on-malfunction decision stays exactly as before, keyed off
+        // `reason` regardless of what follows: a resolver crash still needs
+        // its WARN even though its body is about to be salvaged below.
         let detail =
             family1_truth_failure_detail(&output.stdout, &String::from_utf8_lossy(&output.stderr));
         if !truth_failure_is_routine(&detail) {
@@ -292,41 +299,55 @@ fn family1_truth_probe_with_command(
                 output.status, detail
             );
         }
-        return None;
+        // truth writes its full, already-computed verdict to stdout BEFORE
+        // deciding the exit code (`cmd_truth` in cli.py), so exit 13
+        // (unresolvable handle) still carries a real `{state, reachability,
+        // basis, ...}` body - typically `state: "unknown"` with a genuine
+        // `reachability`/`basis` pair, not a bare refusal. Discarding it here
+        // used to turn a correct "unmeasured" answer into `None`, which the
+        // next reader is free to interpret as death (x-9de7). Salvage it, but
+        // only when it is NOT a live-seeming state: a failed probe run has no
+        // standing to assert liveness, so this is monotone-lowering only,
+        // exactly like `lower_state_with_verdict` above - it can report
+        // done/stalled/unknown, never invent "still working".
+        return match state.as_deref() {
+            Some(s @ ("done" | "stalled" | "unknown")) => {
+                Some(build_truth_probe(parsed.as_ref(), s))
+            }
+            _ => None,
+        };
     }
-    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
-    let state = parsed
-        .as_ref()
-        .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
     match state.as_deref() {
-        Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => {
-            Some(TruthProbe {
-                state: state.unwrap_or_default(),
-                // The shared reachability verdict, derived Python-side with the
-                // falsifiers applied. Absent on a truth build that predates the
-                // field, and callers then fall back to mapping `state` — which
-                // is transcript activity only, so it cannot see a dead process.
-                reachability: parsed
-                    .as_ref()
-                    .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
-                basis: parsed
-                    .as_ref()
-                    .and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
-                last_activity_age_s: parsed
-                    .as_ref()
-                    .and_then(|value| value.get("last_activity_age_s")?.as_f64()),
-                // Absent on a truth build that predates the field: null rather
-                // than a fabricated variant, so a stale `fno` reads as "this
-                // probe did not answer" instead of asserting no transcript.
-                observed_model: parsed
-                    .and_then(|value| value.get("observed_model").cloned())
-                    .unwrap_or(serde_json::Value::Null),
-            })
+        Some(s @ ("done" | "watching" | "your-move" | "working" | "stalled" | "unknown")) => {
+            Some(build_truth_probe(parsed.as_ref(), s))
         }
         _ => {
             eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
             None
         }
+    }
+}
+
+/// Build a [`TruthProbe`] from a parsed truth JSON body and its already-read
+/// `state`. Shared by the success path and the x-9de7 non-zero-exit salvage
+/// path so the field extraction has exactly one implementation.
+fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthProbe {
+    TruthProbe {
+        state: state.to_owned(),
+        // The shared reachability verdict, derived Python-side with the
+        // falsifiers applied. Absent on a truth build that predates the
+        // field, and callers then fall back to mapping `state` — which
+        // is transcript activity only, so it cannot see a dead process.
+        reachability: parsed
+            .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
+        basis: parsed.and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
+        last_activity_age_s: parsed.and_then(|value| value.get("last_activity_age_s")?.as_f64()),
+        // Absent on a truth build that predates the field: null rather
+        // than a fabricated variant, so a stale `fno` reads as "this
+        // probe did not answer" instead of asserting no transcript.
+        observed_model: parsed
+            .and_then(|value| value.get("observed_model").cloned())
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -4157,11 +4178,15 @@ mod tests {
     }
 
     #[test]
-    fn family1_truth_nonzero_exit_is_unresolved_either_way() {
-        // Both a routine not-found and a genuine refusal fail to resolve, so
-        // silencing one never changes the verdict. This pins only that; the
-        // quiet/loud split itself is pinned by the predicate test above, which
-        // is the seam that actually fails when the behavior is reverted.
+    fn family1_truth_nonzero_exit_still_salvages_the_unknown_verdict() {
+        // x-9de7: truth writes its full computed verdict to stdout BEFORE
+        // deciding the exit code, so exit 13 with `state: "unknown"` is a
+        // correct "unmeasured" answer, not a bare refusal - discarding it
+        // used to become `reachability: null, basis: null`, an absence the
+        // next reader was free to read as death. Both a routine not-found and
+        // a genuine resolver-error now resolve identically to "unknown": the
+        // warn-vs-quiet split (pinned by the predicate test above) governs
+        // stderr noise only, never whether the verdict itself is kept.
         let mut not_found = std::process::Command::new("sh");
         not_found.args([
             "-c",
@@ -4169,18 +4194,51 @@ mod tests {
         ]);
         assert_eq!(
             probe_state(not_found, Duration::from_secs(1), "ses_1d9e"),
-            None
+            Some("unknown".to_string())
         );
 
-        // A genuine refusal on the same exit code still surfaces.
         let mut broken = std::process::Command::new("sh");
         broken.args([
             "-c",
-            "printf '{\"state\":\"unknown\",\"reason\":\"transcript-unreadable\"}'; exit 13",
+            "printf '{\"state\":\"unknown\",\"reason\":\"resolver-error\"}'; exit 13",
         ]);
         assert_eq!(
             probe_state(broken, Duration::from_secs(1), "abcd1234"),
-            None
+            Some("unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn family1_truth_nonzero_exit_carries_the_real_reachability_and_basis() {
+        // The realistic shape from the plan's own repro (cx-x-e14b): a row
+        // with no corroborating identity surface resolves `state: "unknown"`
+        // with a genuinely computed `reachability`/`basis` pair, still on
+        // exit 13. The salvage must carry those through, not just the state.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf '{\"state\":\"unknown\",\"reason\":\"not-found\",\
+             \"reachability\":\"unreachable\",\"basis\":\"process-gone\"}'; exit 13",
+        ]);
+        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "cx-x-e14b")
+            .expect("a real computed verdict on exit 13 must not be discarded");
+        assert_eq!(probe.state, "unknown");
+        assert_eq!(probe.reachability.as_deref(), Some("unreachable"));
+        assert_eq!(probe.basis.as_deref(), Some("process-gone"));
+    }
+
+    #[test]
+    fn family1_truth_nonzero_exit_never_salvages_a_live_looking_state() {
+        // Monotone-lowering safety net: today's real `cmd_truth` never pairs a
+        // non-zero exit with a live state, but a failed probe run has no
+        // standing to assert liveness either way, so a live-looking state
+        // must still fall through to None rather than being trusted.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "printf '{\"state\":\"working\"}'; exit 13"]);
+        assert_eq!(
+            family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1").map(|p| p.state),
+            None,
+            "a non-zero exit must never assert a live state"
         );
     }
 

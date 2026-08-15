@@ -651,6 +651,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_create_no_session",
     "agent_orphan_reaped",
     "agent_orphan_state_archived",
+    // Late bind (daemon-emitted, x-9de7 task 2): a pane-hosted codex row whose
+    // spawn-time bind window expired got its `harness_session_id` resolved on
+    // a later reconcile tick, from the pane-tree rollout probe. Makes "the row
+    // bound 40 seconds after spawn" visible instead of inferred.
+    "agent_late_bind",
     // Dead-row GC (daemon/reap-verb-emitted, x-b1aa): a terminal, past-grace,
     // clean agent-view row was removed from the registry by the GC sweep or
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a

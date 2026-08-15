@@ -246,6 +246,12 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # hook calls it synchronously. Routing it to the daemon would make a sweep
     # for stray processes lazy-start a process. No Rust client port.
     "orphans",
+    # x-9de7: the codex late-bind helper `late_bind_codex_sessions` (Rust,
+    # fno-agents daemon) shells out to for one pane's rollout session id.
+    # Pure Python (fno.agents.mux_spawn._codex_session_id_for_pid, reads the
+    # pane's open rollout fd); no Rust port, so it must never auto-route to
+    # the daemon.
+    "codex-session-for-pid",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
@@ -281,7 +287,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     # enforces the invariant).
     "status": "Report daemon liveness and per-agent state.",
     "restart": "Restart a stale daemon (pick up a new build; PTY workers survive).",
-    "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output.",
+    "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, mutates nothing).",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",

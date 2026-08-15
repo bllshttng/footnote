@@ -215,19 +215,36 @@ pub fn effective_yolo(yolo: bool, headless_default: bool) -> bool {
 /// GC first observes its process gone, before it is reaped (x-b1aa).
 pub const DEFAULT_DEAD_ROW_GRACE_SECS: u64 = 3600;
 
-/// Resolve `agents.dead_row_grace` (seconds) for the daemon GC sweep and
-/// `fno agents reap`. `$FNO_AGENTS_DEAD_ROW_GRACE_SECS` is a test/tuning
-/// override; otherwise the config.toml chain, degrading to the default.
-pub fn dead_row_grace_secs(cwd: &Path) -> u64 {
+/// Resolve `agents.dead_row_grace` (seconds) for `harness`, for the daemon GC
+/// sweep and `fno agents reap`. `$FNO_AGENTS_DEAD_ROW_GRACE_SECS` is a global
+/// test/tuning override (unchanged by harness); otherwise the config.toml
+/// chain, degrading to the default.
+///
+/// This is also the transcript-freshness window (`transcript_fresh_probe`
+/// reuses whatever grace the caller resolves here), so a per-harness table is
+/// the fix for a codex worker's normal multi-hour silence being misread as
+/// staleness (x-9de7 task 6) -- not a second knob, the SAME one, keyed wider.
+///
+/// Two shapes are accepted at `agents.dead_row_grace`, mutually exclusive in
+/// TOML by construction:
+/// - a bare integer (today's shape): applies to every harness, unchanged.
+/// - a table, `agents.dead_row_grace.<harness> = <seconds>`: looked up by
+///   `harness` first; a harness with no key present falls through (to the
+///   next config candidate, then the default) rather than inheriting a
+///   sibling harness's number.
+pub fn dead_row_grace_secs(cwd: &Path, harness: &str) -> u64 {
     if let Some(v) = non_empty_env("FNO_AGENTS_DEAD_ROW_GRACE_SECS")
         .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
     {
         return v;
     }
-    resolve(cwd, |t| {
-        table_agents_scalar(t, "dead_row_grace")?
+    resolve(cwd, |t| match table_agents_scalar(t, "dead_row_grace")? {
+        Value::Integer(i) => u64::try_from(i).ok(),
+        Value::Table(per_harness) => per_harness
+            .get(harness)?
             .as_integer()
-            .and_then(|i| u64::try_from(i).ok())
+            .and_then(|i| u64::try_from(i).ok()),
+        _ => None,
     })
     .unwrap_or(DEFAULT_DEAD_ROW_GRACE_SECS)
 }
@@ -382,6 +399,23 @@ pub(crate) fn read_dead_row_grace(content: &str) -> Option<u64> {
         .and_then(|i| u64::try_from(i).ok())
 }
 
+/// `agents.dead_row_grace`, resolved for `harness` -- either a bare scalar
+/// (applies to every harness) or `agents.dead_row_grace.<harness>` (x-9de7
+/// task 6). Same extraction `dead_row_grace_secs` runs against a config.toml
+/// body, exposed directly so the resolution logic is tested without the
+/// candidate-file walk.
+#[cfg(test)]
+pub(crate) fn read_dead_row_grace_for_harness(content: &str, harness: &str) -> Option<u64> {
+    match table_agents_scalar(&parse_config(content)?, "dead_row_grace")? {
+        Value::Integer(i) => u64::try_from(i).ok(),
+        Value::Table(per_harness) => per_harness
+            .get(harness)?
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok()),
+        _ => None,
+    }
+}
+
 /// A normalized `agents.<key>` scalar (direct child) from a config.toml body.
 #[cfg(test)]
 pub(crate) fn read_agents_value(content: &str, key: &str) -> Option<String> {
@@ -433,6 +467,52 @@ mod tests {
         // Non-integer value -> None (falls through to default).
         let bad = "[agents]\ndead_row_grace = \"banana\"\n";
         assert_eq!(read_dead_row_grace(bad), None);
+    }
+
+    #[test]
+    fn dead_row_grace_bare_integer_applies_to_every_harness() {
+        // x-9de7 task 6 AC1: today's shape, unchanged behavior for any harness.
+        let cfg = "[agents]\ndead_row_grace = 3600\n";
+        assert_eq!(read_dead_row_grace_for_harness(cfg, "codex"), Some(3600));
+        assert_eq!(read_dead_row_grace_for_harness(cfg, "claude"), Some(3600));
+    }
+
+    #[test]
+    fn dead_row_grace_per_harness_table_does_not_leak_across_harnesses() {
+        // x-9de7 task 6 AC2: agents.dead_row_grace.codex set, no claude key ->
+        // codex gets its own value, claude falls through (to the default,
+        // resolved one level up in dead_row_grace_secs -- this pure reader
+        // just proves the table lookup itself does not leak).
+        let cfg = "[agents.dead_row_grace]\ncodex = 28800\n";
+        assert_eq!(read_dead_row_grace_for_harness(cfg, "codex"), Some(28800));
+        assert_eq!(read_dead_row_grace_for_harness(cfg, "claude"), None);
+    }
+
+    #[test]
+    fn dead_row_grace_secs_resolves_per_harness_table() {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-agents-config-test-grace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            "[agents.dead_row_grace]\ncodex = 28800\n",
+        )
+        .unwrap();
+        // Isolate from any real env override so this reads the file alone.
+        std::env::remove_var("FNO_AGENTS_DEAD_ROW_GRACE_SECS");
+        assert_eq!(dead_row_grace_secs(&dir, "codex"), 28800);
+        assert_eq!(
+            dead_row_grace_secs(&dir, "claude"),
+            DEFAULT_DEAD_ROW_GRACE_SECS,
+            "a harness absent from the table falls back to the default, not the codex value"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

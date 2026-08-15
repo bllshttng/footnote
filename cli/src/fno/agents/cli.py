@@ -1980,6 +1980,26 @@ def cmd_heal_token(
     sys.stdout.write("\n")
 
 
+@agents_app.command("codex-session-for-pid", hidden=True)
+def cmd_codex_session_for_pid(pid: int = typer.Argument(..., help="Pane pid to probe.")) -> None:
+    """Internal: resolve a codex pane's session id from its open rollout.
+
+    Wraps ``mux_spawn._codex_session_id_for_pid`` (the pane-tree rollout walk
+    already used at spawn time) so the Rust reconcile tick can late-bind a row
+    whose spawn-time bind window expired, without a second implementation of
+    the walk. Prints ``session_id=<id>`` and exits 0 on an unambiguous match;
+    exits 13 with no stdout when the pid is gone, no rollout is open yet, or
+    the tree holds more than one distinct session.
+    """
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    sid = _codex_session_id_for_pid(pid)
+    if not sid:
+        raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+    sys.stdout.write(f"session_id={sid}\n")
+    sys.stdout.flush()
+
+
 @agents_app.command("nudge-peek", hidden=True)
 def cmd_nudge_peek(
     session: str = typer.Option(..., "--session-id", help="Loop session id."),

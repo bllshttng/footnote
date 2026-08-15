@@ -5434,6 +5434,14 @@ impl Core {
                             consumed[i] = true;
                             let a = &self.agents[i];
                             let exited = a.exited || pane_dead;
+                            // A confirmed-gone pane is its own corroboration
+                            // (fact beats badge) even when the registry row's
+                            // own liveness read is Unmeasured -- only render
+                            // the softer glyph when nothing here corroborates
+                            // the exit at all.
+                            let unmeasured = exited
+                                && !pane_dead
+                                && a.liveness == agents_view::Liveness::Unmeasured;
                             AgentRow {
                                 squad: Some(squad.id),
                                 name: a.name.clone(),
@@ -5441,6 +5449,7 @@ impl Core {
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
+                                unmeasured,
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
                                 // target never rides it (wire contract).
@@ -5483,6 +5492,7 @@ impl Core {
                                 badge: None,
                                 reason: None,
                                 exited: pane_dead,
+                                unmeasured: false,
                                 answerable: None,
                                 attach_id: None,
                                 external: false,
@@ -5530,6 +5540,7 @@ impl Core {
                         badge: None,
                         reason: None,
                         exited: true,
+                        unmeasured: false,
                         answerable: None,
                         attach_id: None,
                         external: a.external,
@@ -5569,6 +5580,7 @@ impl Core {
                         badge: if a.exited { None } else { a.badge },
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
+                        unmeasured: a.exited && a.liveness == agents_view::Liveness::Unmeasured,
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
                         external: a.external,
@@ -5611,6 +5623,7 @@ impl Core {
                     badge: None,
                     reason: None,
                     exited: true,
+                    unmeasured: false,
                     answerable: None,
                     // Carried so the client can DismissMember; exited: true keeps
                     // it out of the attach catalog gate (attach_id + !exited).
@@ -5679,6 +5692,7 @@ impl Core {
                 badge: None,
                 reason,
                 exited,
+                unmeasured: false,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;
                 // on a live-ish row it is the StopExternal target. Either way the
@@ -10466,6 +10480,11 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
+            liveness: if exited {
+                agents_view::Liveness::Dead
+            } else {
+                agents_view::Liveness::Alive
+            },
         }
     }
 
@@ -10503,6 +10522,7 @@ mod tests {
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
@@ -10523,6 +10543,7 @@ mod tests {
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
             },
         ];
         let rows = core.agent_rows();
@@ -10600,6 +10621,7 @@ mod tests {
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
             },
         ];
         let rows = core.agent_rows();
@@ -10614,6 +10636,85 @@ mod tests {
             watcher.squad,
             Some(2),
             "a watch-only row matches a squad via a child of origins[1]"
+        );
+    }
+
+    #[test]
+    fn agent_rows_pane_dead_corroborates_over_an_unmeasured_registry_liveness() {
+        // x-9de7: pane-exit fact beats any badge. `empty_core()` has no live
+        // pane, so the matched row's pane is always confirmed gone
+        // (`pane_dead`) here - itself positive corroboration of death, even
+        // when the registry row's own liveness read is Unmeasured. `unmeasured`
+        // must stay false: the join layer has independent proof, so it must
+        // never downgrade a corroborated dead row to the softer glyph.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(42),
+                focus: 42,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            liveness: agents_view::Liveness::Unmeasured,
+            ..agent_in("main", 42, None, false)
+        }];
+        let rows = core.agent_rows();
+        let hosted = rows.iter().find(|r| r.pane_id == Some(42)).unwrap();
+        assert!(hosted.exited, "a gone pane still forces exited");
+        assert!(
+            !hosted.unmeasured,
+            "a confirmed-gone pane corroborates death outright, regardless of \
+             the registry row's own Unmeasured liveness read"
+        );
+    }
+
+    #[test]
+    fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
+        // x-9de7: the paneless (watch-only) join site has no pane fact to
+        // consult at all, so `unmeasured` passes the registry's own
+        // corroboration read straight through.
+        let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
+            session_id: None,
+            harness_session_id: None,
+            name: name.into(),
+            cwd: "/w".into(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness,
+        };
+        let mut core = empty_core();
+        core.agents = vec![
+            paneless("uncorroborated", agents_view::Liveness::Unmeasured),
+            paneless("confirmed-dead", agents_view::Liveness::Dead),
+        ];
+        let rows = core.agent_rows();
+        let unmeasured = rows.iter().find(|r| r.name == "uncorroborated").unwrap();
+        assert!(unmeasured.exited);
+        assert!(
+            unmeasured.unmeasured,
+            "an uncorroborated terminal row renders the softer, dim glyph"
+        );
+        let dead = rows.iter().find(|r| r.name == "confirmed-dead").unwrap();
+        assert!(dead.exited);
+        assert!(
+            !dead.unmeasured,
+            "a corroborated-dead row keeps the confirmed exit glyph"
         );
     }
 
@@ -10642,6 +10743,7 @@ mod tests {
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
@@ -10661,6 +10763,7 @@ mod tests {
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
+                liveness: agents_view::Liveness::Dead,
             },
         ];
         assert!(
@@ -10703,6 +10806,7 @@ mod tests {
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
+            liveness: agents_view::Liveness::Alive,
             badge: None,
             reason: None,
             mux: Some(("main".into(), 77)),
@@ -12957,6 +13061,7 @@ mod tests {
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
+            liveness: agents_view::Liveness::Dead,
             badge: None,
             reason: None,
             mux: None,
@@ -14599,6 +14704,7 @@ mod tests {
             name: name.into(),
             cwd: cwd.into(),
             exited: false,
+            liveness: agents_view::Liveness::Alive,
             badge: None,
             reason: None,
             mux: None,

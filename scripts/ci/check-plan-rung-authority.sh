@@ -151,11 +151,11 @@ crates/fno-agents/src/client.rs:25
 crates/fno-agents/src/client_verbs.rs:72
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:136
+crates/fno-agents/src/daemon.rs:145
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:35
-crates/fno-agents/src/gc.rs:21
+crates/fno-agents/src/gc.rs:22
 crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
 crates/fno-agents/src/lib.rs:12
@@ -177,7 +177,7 @@ crates/fno-agents/src/subprocess_ask.rs:6
 crates/fno-agents/src/verify_evidence.rs:9
 crates/fno-agents/src/wait.rs:4
 crates/fno/build.rs:2
-crates/fno/src/agents_view.rs:56
+crates/fno/src/agents_view.rs:73
 crates/fno/src/backlog_view.rs:79
 crates/fno/src/bootstrap.rs:11
 crates/fno/src/client.rs:56
@@ -187,7 +187,7 @@ crates/fno/src/digest_overlay.rs:1
 crates/fno/src/keys.rs:9
 crates/fno/src/link.rs:9
 crates/fno/src/needs_overlay.rs:1
-crates/fno/src/proto.rs:3
+crates/fno/src/proto.rs:4
 crates/fno/src/pty.rs:1
 crates/fno/src/server.rs:20
 crates/fno/src/squad.rs:6

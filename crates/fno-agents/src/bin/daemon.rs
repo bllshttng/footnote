@@ -46,17 +46,21 @@ fn main() {
             opts.idle_exit = Duration::from_secs(secs);
         }
     }
-    // Dead-row GC grace window (x-b1aa): resolve config.agents.dead_row_grace
-    // (env FNO_AGENTS_DEAD_ROW_GRACE_SECS > FNO_CONFIG > project > global >
-    // default 1h). The daemon's cwd is where it was lazy-started; a global
-    // ~/.fno knob is read via the global fallback regardless.
-    let grace_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    opts.dead_row_grace =
-        Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(&grace_cwd));
+    // Dead-row GC grace window (x-b1aa, per-harness since x-9de7 task 6):
+    // resolve config.agents.dead_row_grace.<harness> (env
+    // FNO_AGENTS_DEAD_ROW_GRACE_SECS > FNO_CONFIG > project > global >
+    // default 1h) once per row, at sweep time -- the idle tick reads this cwd,
+    // not a pre-resolved Duration. The daemon's cwd is where it was
+    // lazy-started; a global ~/.fno knob is read via the global fallback
+    // regardless.
+    opts.dead_row_grace_cwd =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // Badge -> OS notification knobs (x-dd84): config.mux.notify_on_blocked
     // (default ON) / notify_on_done (default OFF), read from the same cwd.
-    opts.notify_on_blocked = fno_agents::agents_config::notify_on_blocked_enabled(&grace_cwd);
-    opts.notify_on_done = fno_agents::agents_config::notify_on_done_enabled(&grace_cwd);
+    opts.notify_on_blocked =
+        fno_agents::agents_config::notify_on_blocked_enabled(&opts.dead_row_grace_cwd);
+    opts.notify_on_done =
+        fno_agents::agents_config::notify_on_done_enabled(&opts.dead_row_grace_cwd);
     // Opt out of the startup reconcile sweep for the fastest cold start
     // (Architecture B, plan ab-70faa65b). Any non-empty value disables it.
     if std::env::var("FNO_AGENTS_NO_STARTUP_RECONCILE")

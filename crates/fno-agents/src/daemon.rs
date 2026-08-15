@@ -64,10 +64,11 @@ pub struct DaemonOptions {
     /// (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's discretion #5) trades a
     /// truthful first `list` for the fastest possible cold start.
     pub reconcile_on_start: bool,
-    /// Grace window before the dead-row GC reaps a finished agent-view row
-    /// (x-b1aa). Default 1h; the daemon entrypoint overrides it from
-    /// `config.agents.dead_row_grace` (via `agents_config::dead_row_grace_secs`).
-    pub dead_row_grace: Duration,
+    /// cwd the idle tick resolves `agents.dead_row_grace.<harness>` against
+    /// (x-9de7 task 6). A `Duration` cannot be pre-resolved here the way
+    /// `idle_exit` is: the grace is per-HARNESS, so the lookup happens once
+    /// per row, at sweep time, not once at startup.
+    pub dead_row_grace_cwd: PathBuf,
     /// Fire an OS notification when a badge ENTERS `blocked` (x-dd84). Default
     /// ON; overridden from `config.mux.notify_on_blocked` at startup.
     pub notify_on_blocked: bool,
@@ -82,7 +83,7 @@ impl Default for DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin: resolve_worker_bin(),
             reconcile_on_start: true,
-            dead_row_grace: Duration::from_secs(crate::agents_config::DEFAULT_DEAD_ROW_GRACE_SECS),
+            dead_row_grace_cwd: PathBuf::from("."),
             notify_on_blocked: true,
             notify_on_done: false,
         }
@@ -286,12 +287,22 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
         }
     }
     if !to_reap.is_empty() {
-        let reaped: std::collections::BTreeSet<String> =
-            to_reap.iter().map(|(s, _)| s.clone()).collect();
+        // Keyed on (short_id, pid), not short_id alone (x-9de7 task 1). Every
+        // codex/gemini shellout row shares the same empty short_id, so a
+        // short_id-only set condemns every row wearing that empty id the
+        // moment ONE of them fails pid_is_ours -- including live pane-hosted
+        // siblings that were never checked. pid is what pid_is_ours actually
+        // verified, so it is what must gate the write.
+        let reaped: std::collections::BTreeSet<(String, u32)> = to_reap.iter().cloned().collect();
+        let is_reaped = |e: &RegistryEntry| {
+            e.pid
+                .map(|p| reaped.contains(&(e.short_id.clone(), p)))
+                .unwrap_or(false)
+        };
         // Ordered exit teardown (E3.3, AC-X2-4): publish any inside-leg
         // completion before the reap write clears the report below.
         for e in &registry.entries {
-            if reaped.contains(&e.short_id) {
+            if is_reaped(e) {
                 emit_inside_leg_completion(emitter, e);
             }
         }
@@ -299,7 +310,7 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
         // event log (which says reaped) from the on-disk registry (Gemini high).
         if let Err(e) = state::update_registry(&home.registry_json(), |r| {
             for e in r.entries.iter_mut() {
-                if reaped.contains(&e.short_id) {
+                if is_reaped(e) {
                     e.status = AgentStatus::Exited;
                     // Clear the inside-leg authority on exit (E3.3 / AC-X2-4):
                     // a dead pane's last badge must not linger. Same for a
@@ -391,6 +402,12 @@ pub struct GcSummary {
     /// becomes the main path silently, and the corroboration gate it bypasses
     /// turns into decoration. Reported at every pass, including zero.
     pub reaped_backstop: Vec<String>,
+    /// Past-grace rows kept by the corroboration gate alone: no confirmed-dead
+    /// pid, no positively-stale transcript, and a liveness surface still on
+    /// record - short of the backstop horizon too (x-9de7 task 5). This is
+    /// the "stuck and invisible" case `gc.rs`'s own comments warn about;
+    /// before this field it had no report at all.
+    pub kept_uncorroborated: Vec<String>,
 }
 
 /// Distinct canonical repo roots the registry knows about, deduplicated.
@@ -744,7 +761,43 @@ fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(
 /// cleared. A registry-write failure is surfaced as `daemon_recovery_error` and
 /// reported as zero reaps, so the event log never claims a removal the disk did
 /// not get (AC1-ERR).
-pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> GcSummary {
+/// `grace_for_harness` resolves `agents.dead_row_grace` PER ROW, keyed on
+/// `e.harness_name()` (x-9de7 task 6) -- defence in depth, not the fix: it
+/// only sets the blast radius of a false `exited` write, since a live row is
+/// re-checked and never touched regardless of grace. Injected so this stays
+/// testable without shelling config reads; production passes
+/// `agents_config::dead_row_grace_secs`.
+pub fn gc_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+) -> GcSummary {
+    gc_sweep_impl(home, emitter, grace_for_harness, false)
+}
+
+/// `fno agents reap --dry-run` (x-9de7 task 5): classify the registry exactly
+/// as [`gc_sweep`] does, including every `kept_dirty` / `kept_uncorroborated`
+/// diagnostic, but never write the registry, never emit a `daemon_recovery_error`
+/// or `agent_row_reaped` event, and never touch dispatch termination. "Would
+/// reap" and "would keep, and why" are read straight off the same
+/// classification the real sweep uses - a reaper an operator cannot rehearse
+/// is one they will not run.
+pub fn gc_sweep_dry_run(
+    home: &AgentsHome,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+) -> GcSummary {
+    // Never emitted to in dry-run mode (the whole write+emit tail is skipped
+    // below), so an unused placeholder path satisfies the shared signature.
+    let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
+    gc_sweep_impl(home, &emitter, grace_for_harness, true)
+}
+
+fn gc_sweep_impl(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+    dry_run: bool,
+) -> GcSummary {
     let mut summary = GcSummary::default();
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
     if registry.entries.is_empty() {
@@ -752,7 +805,6 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
     }
     let live_workers = home.scan_worker_sockets();
     let now = now_epoch_secs();
-    let grace_secs = grace.as_secs() as i64;
 
     // Keyed by row name -> the `created_at` we evaluated. Applied under the lock
     // ONLY when the row's current `created_at` still matches, so a same-name
@@ -771,6 +823,7 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         std::collections::BTreeMap::new();
 
     for e in &registry.entries {
+        let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         let is_live = live_workers.contains(&e.short_id)
             || e.pid
                 .map(|p| pid_is_ours(p, e.pid_start_time))
@@ -834,7 +887,6 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
         if needs_probe {
             row.worktree_clean = worktree_clean_probe(&e.cwd);
         }
-        let worktree_clean = row.worktree_clean;
         let id = if e.short_id.is_empty() {
             e.name.clone()
         } else {
@@ -856,15 +908,55 @@ pub fn gc_sweep(home: &AgentsHome, emitter: &EventEmitter, grace: Duration) -> G
                     // Resurrected: drop the stale exit stamp so a later death
                     // starts a fresh grace clock.
                     to_clear.insert(e.name.clone(), e.created_at.clone());
-                } else if needs_probe && matches!(worktree_clean, Some(false) | None) {
-                    // Past grace but held back by a dirty/undeterminable worktree.
-                    summary.kept_dirty.push((id, e.cwd.clone()));
+                } else {
+                    // The SAME decision `gc_action` above just made, read a
+                    // second time for its reason (x-9de7 task 5): a row that
+                    // is stuck and invisible is the failure mode `gc.rs`'s own
+                    // comments warn about, so a past-grace Keep always gets a
+                    // named gate instead of a silent, unexplained keep.
+                    match crate::gc::keep_reason(&row, now, grace_secs) {
+                        Some(
+                            crate::gc::KeepReason::WorktreeDirty
+                            | crate::gc::KeepReason::WorktreeUnprobed,
+                        ) => {
+                            summary.kept_dirty.push((id, e.cwd.clone()));
+                        }
+                        Some(crate::gc::KeepReason::Uncorroborated) => {
+                            summary.kept_uncorroborated.push(id);
+                        }
+                        // Live / NotTerminal / WithinGrace: the ordinary,
+                        // expected keep - not what task 5 exists to surface.
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
     if to_reap.is_empty() && to_stamp.is_empty() && to_clear.is_empty() {
+        return summary;
+    }
+    if dry_run {
+        // "Would reap": same `to_reap`/`backstop_ids` membership the real
+        // write below applies, read straight off the classification pass
+        // with no lock taken and no disk touched - `--dry-run`'s whole
+        // contract. Stamp/clear candidates need no report: they never remove
+        // a row, so a rehearsal has nothing to say about them.
+        for e in &registry.entries {
+            if to_reap.get(&e.name) != Some(&e.created_at) {
+                continue;
+            }
+            let id = if e.short_id.is_empty() {
+                e.name.clone()
+            } else {
+                e.short_id.clone()
+            };
+            if backstop_ids.contains_key(&e.name) {
+                summary.reaped_backstop.push(id);
+            } else {
+                summary.reaped.push(id);
+            }
+        }
         return summary;
     }
 
@@ -1398,7 +1490,13 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // ritual. Cheap in steady state (no candidates -> no git, no
                 // registry write); the grace window makes exact cadence
                 // non-critical, so running it on the idle tick is fine.
-                let _ = gc_sweep(&ctx.home, &ctx.emitter, ctx.opts.dead_row_grace);
+                let grace_cwd = &ctx.opts.dead_row_grace_cwd;
+                let grace_for_harness = |harness: &str| {
+                    Duration::from_secs(crate::agents_config::dead_row_grace_secs(
+                        grace_cwd, harness,
+                    ))
+                };
+                let _ = gc_sweep(&ctx.home, &ctx.emitter, &grace_for_harness);
                 // Worktree report sweep: the backstop for what the merge ritual
                 // missed. Its own 24h stamp makes it a near-no-op on this tick,
                 // but the verb shells git across every worktree when it does
@@ -3092,16 +3190,35 @@ fn reap_zombies() {
 /// because silence is absence of evidence and this registry lists REACHABLE
 /// agents rather than live processes -- a row is never condemned for being
 /// quiet, only for an affirmative falsification.
-fn rendered_status_from_truth(probe: Option<&crate::claude_ask::TruthProbe>) -> &'static str {
+/// `pid_confirmed_live` is a positive measurement in its OWN right (x-9de7
+/// task 3): a row whose `short_id` and `harness_session_id` are both empty
+/// resolves to its bare `name` in `registry_truth_handle`, which the truth
+/// probe can never find, so it answers `unknown` -- unrelated to whether the
+/// worker is actually running. Only the two shapes that mean "the probe could
+/// not measure" (`Some("unknown")`, and the state fallthrough) accept the
+/// override; `reachable`/`unreachable` and `working`/`done`/`stalled` stay
+/// probe-authoritative and unchanged, matching the monotone-lowering rule
+/// (never let a weaker signal raise a row the probe positively lowered).
+fn rendered_status_from_truth(
+    probe: Option<&crate::claude_ask::TruthProbe>,
+    pid_confirmed_live: bool,
+) -> &'static str {
     match probe.and_then(|p| p.reachability.as_deref()) {
         Some("reachable") => return "live",
         Some("unreachable") => return "orphaned",
-        Some("unknown") => return "unknown",
+        Some("unknown") => {
+            return if pid_confirmed_live {
+                "live"
+            } else {
+                "unknown"
+            }
+        }
         _ => {}
     }
     match probe.map(|p| p.state.as_str()) {
         Some("working" | "watching" | "your-move") => "live",
         Some("done" | "stalled") => "orphaned",
+        _ if pid_confirmed_live => "live",
         _ => "unknown",
     }
 }
@@ -3207,7 +3324,11 @@ where
         .map(|e| {
             let truth_handle = registry_truth_handle(e);
             let truth = truth_fn(&truth_handle);
-            let rendered_status = rendered_status_from_truth(truth.as_ref());
+            let pid_confirmed_live = e
+                .pid
+                .map(|p| pid_is_ours(p, e.pid_start_time))
+                .unwrap_or(false);
+            let rendered_status = rendered_status_from_truth(truth.as_ref(), pid_confirmed_live);
             // The whole reachability triple, not just the verdict that
             // `rendered_status` above was picked from. That rendered word says
             // WHAT the row is; the triple says which question was answered and
@@ -4278,11 +4399,102 @@ struct ReconcileSweepResult {
 /// the registry write fails (the registry is then unchanged, so callers degrade
 /// to serving last-recorded status rather than reporting a sweep that did not
 /// apply -- Codex P1). Shared by the `reconcile` RPC and the startup sweep.
+/// Late bind (x-9de7 task 2): resolve a pane-hosted codex row's session id on
+/// the reconcile tick, keyed on the PANE, not on cwd. `(harness, cwd)` is not
+/// a join key -- 43 of 49 registry rows share a `(harness, cwd)` bucket with
+/// a sibling on this machine, so joining on it would light every sibling
+/// alive off one live transcript. The pane-tree rollout probe already used at
+/// spawn time (`_codex_session_id_for_pid`) identifies a session down to the
+/// exact pane, because each pane's process tree holds a distinct rollout.
+///
+/// A codex spawn's 8-second bind window (`_BINDING_WINDOW_S`) is real and is
+/// NOT widened here: widening blocks the spawn caller longer, still loses the
+/// race whenever codex is slower than whatever number is picked, and does
+/// nothing for rows already on disk. This runs the same probe later instead,
+/// bounded to rows that still need it (a live pid, a mux ref, no session id
+/// yet -- a handful of rows, never the full registry), and NEVER from a
+/// render path: `fno agents list --json` already shells one Python
+/// subprocess per row and is not getting a second.
+///
+/// `probe` is injected so this is testable without shelling out.
+fn late_bind_codex_sessions(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    probe: &dyn Fn(u32) -> Option<String>,
+) {
+    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let candidates: Vec<(String, u32)> = registry
+        .entries
+        .iter()
+        .filter(|e| {
+            e.harness_name() == "codex"
+                && e.mux.is_some()
+                && e.harness_session_id.is_none()
+                && e.pid.is_some_and(|p| pid_is_ours(p, e.pid_start_time))
+        })
+        .filter_map(|e| e.pid.map(|p| (e.name.clone(), p)))
+        .collect();
+    for (name, pid) in candidates {
+        let Some(sid) = probe(pid) else { continue };
+        let bound = state::update_registry(&home.registry_json(), |r| {
+            let Some(e) = r.find_mut(&name) else {
+                return false;
+            };
+            // A concurrent writer may have bound this row (or reaped it) since
+            // the candidate scan above; never clobber a session id that
+            // arrived in between.
+            if e.harness_session_id.is_some() {
+                return false;
+            }
+            e.harness_session_id = Some(sid.clone());
+            true
+        })
+        .unwrap_or(false);
+        if bound {
+            let _ = emitter.emit_fields(
+                "agent_late_bind",
+                json_obj(&[
+                    ("name", Value::String(name)),
+                    ("pid", Value::Number(pid.into())),
+                    ("harness_session_id", Value::String(sid)),
+                ]),
+            );
+        }
+    }
+}
+
+/// Shell `fno agents codex-session-for-pid <pid>` -- the pane-tree rollout
+/// walk (`_codex_session_id_for_pid`), reused rather than reimplemented in
+/// Rust (Codex's rollout discovery needs a process-tree + open-fd walk this
+/// crate has no dependency for; see `worktree_clean_probe` for the same
+/// shell-and-parse-a-marker pattern). Fails closed to `None` on anything but
+/// a clean exit with a non-empty `session_id=` line.
+fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("fno")
+        .args(["agents", "codex-session-for-pid", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("session_id="))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn run_reconcile_sweep(
     home: &AgentsHome,
     emitter: &EventEmitter,
 ) -> Result<ReconcileSweepResult, String> {
     use crate::provider::ReachabilityProbeError;
+
+    // Late bind (x-9de7 task 2), before the registry snapshot below is taken,
+    // so a row bound this tick is already visible to the probe/reconcile pass
+    // that follows.
+    late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout);
+
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
 
     // Fairness: probe least-recently-reconciled first (None < Some), so a
@@ -5259,7 +5471,7 @@ mod tests {
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
 
         assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
 
@@ -5441,7 +5653,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
 
-        gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let stamps: std::collections::BTreeSet<String> = reg
@@ -5495,9 +5707,160 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn gc_sweep_empty_registry_is_noop() {
         let home = tmp_home("gc-empty");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(3600));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
         assert!(summary.reaped.is_empty());
         assert!(summary.kept_dirty.is_empty());
+        assert!(summary.kept_uncorroborated.is_empty());
+    }
+
+    /// x-9de7 task 5: the "stuck and invisible" case named in the plan -
+    /// past grace, a liveness surface on record, but no positive corroboration
+    /// (no confirmed-dead pid, no resolvable transcript) and short of the
+    /// backstop horizon. Before `kept_uncorroborated` this row was neither
+    /// reaped nor reported: an operator staring at `fno agents reap` saw
+    /// nothing at all.
+    #[test]
+    fn gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row() {
+        let home = tmp_home("gc-uncorroborated");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        // Past a 1h grace, nowhere near the 7-day backstop horizon: the case
+        // the corroboration gate exists to hold, not the escape hatch.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("stuck", Some(exited_at.as_str()));
+            e.short_id = "stuck".into(); // liveness_surface, no live socket
+            e.log_path = None; // transcript unresolvable -> transcript_fresh: None
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
+
+        assert!(
+            summary.reaped.is_empty(),
+            "no corroboration -> never reaped"
+        );
+        assert!(summary.kept_dirty.is_empty(), "not a worktree case");
+        assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
+
+        // The row itself is untouched (still on disk, unstamped-differently).
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().any(|e| e.name == "stuck"));
+    }
+
+    /// `--dry-run` (x-9de7 task 5): the same classification as a real sweep,
+    /// including the kept-reason diagnostics, but the registry is provably
+    /// untouched and no `agent_row_reaped` event lands.
+    #[test]
+    fn gc_sweep_dry_run_reports_without_mutating() {
+        let home = tmp_home("gc-dry-run");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let recent_exit = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            // Would reap (no liveness surface -> auto-corroborated regardless
+            // of age, so an old stamp is fine here).
+            r.entries
+                .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
+            // Would keep uncorroborated: past grace, short of the 7-day
+            // backstop horizon.
+            let mut stuck = ask_row("stuck", Some(recent_exit.as_str()));
+            stuck.short_id = "stuck".into();
+            stuck.log_path = None;
+            r.entries.push(stuck);
+        })
+        .unwrap();
+        let before = state::load_registry(&home.registry_json()).unwrap();
+
+        let summary = gc_sweep_dry_run(&home, &|_| Duration::from_secs(3600));
+
+        assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
+        assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
+
+        let after = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            before.entries.len(),
+            after.entries.len(),
+            "dry-run must not remove a row"
+        );
+        assert!(
+            after.entries.iter().any(|e| e.name == "ask-old"),
+            "dry-run must not remove ask-old from disk"
+        );
+        assert!(
+            !std::path::Path::new(&home.events_jsonl()).exists(),
+            "dry-run must never emit agent_row_reaped"
+        );
+    }
+
+    /// The long-silence repro (x-9de7 verification #7, the one task 6 exists
+    /// for). A codex row whose transcript went untouched for 90 minutes while
+    /// the pane was alive: under the OLD one-hour-for-every-harness window
+    /// that silence corroborates a reap; under an 8h codex grace it does not.
+    /// Both sweeps run against the SAME fixture (same exited_at, same
+    /// transcript mtime) so the only variable is the grace the resolver hands
+    /// back for "codex".
+    #[test]
+    fn gc_sweep_a_90_minute_codex_silence_reaps_under_1h_grace_not_under_8h() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exited_at_secs = now - 9 * 3600; // well past either grace
+        let (y, mo, d, h, mi, s) = civil(exited_at_secs);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+
+        let seed = |tag: &str| -> (AgentsHome, std::path::PathBuf) {
+            let home = tmp_home(tag);
+            let log_path = home.root().join("transcript.jsonl");
+            std::fs::write(&log_path, "{}\n").unwrap();
+            let mtime =
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now - 90 * 60);
+            std::fs::File::options()
+                .write(true)
+                .open(&log_path)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+            state::update_registry(&home.registry_json(), |r| {
+                let mut e = ask_row("codex-silent", Some(exited_at.as_str()));
+                e.short_id = "codex-silent".into(); // liveness_surface, no live socket
+                e.harness = Some("codex".into());
+                e.log_path = Some(log_path.to_string_lossy().into_owned());
+                r.entries.push(e);
+            })
+            .unwrap();
+            (home, log_path)
+        };
+
+        // OLD behaviour: one number for every harness.
+        let (home_old, _) = seed("gc-silence-old");
+        let emitter_old = EventEmitter::new(home_old.events_jsonl(), "daemon");
+        let summary_old = gc_sweep(&home_old, &emitter_old, &|_| Duration::from_secs(3600));
+        assert_eq!(
+            summary_old.reaped,
+            vec!["codex-silent".to_string()],
+            "control: a 1h window reads 90 minutes of silence as corroborated staleness"
+        );
+
+        // FIXED behaviour: codex gets its own 8h grace/freshness window.
+        let (home_new, _) = seed("gc-silence-new");
+        let emitter_new = EventEmitter::new(home_new.events_jsonl(), "daemon");
+        let summary_new = gc_sweep(&home_new, &emitter_new, &|harness| {
+            Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 })
+        });
+        assert!(
+            summary_new.reaped.is_empty(),
+            "an 8h codex grace must not corroborate a worker that was silent for only 90 minutes"
+        );
     }
 
     #[test]
@@ -5558,7 +5921,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         )
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
         assert_eq!(summary.reaped.len(), 2);
 
         let reaps = read_events(&home);
@@ -5619,7 +5982,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
 
         assert!(summary.reaped.is_empty());
         let registry = state::load_registry(&home.registry_json()).unwrap();
@@ -5659,7 +6022,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         .unwrap();
         std::fs::create_dir_all(global_events_path(&home)).unwrap();
 
-        let summary = gc_sweep(&home, &emitter, Duration::from_secs(0));
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
 
         assert!(summary.reaped.is_empty());
         let registry = state::load_registry(&home.registry_json()).unwrap();
@@ -5973,6 +6336,58 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             row.host_mode_or_default(),
             crate::state::HOST_MODE_INTERACTIVE,
             "host_mode must survive recovery"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_orphan_pid_sweep_does_not_condemn_every_row_sharing_an_empty_short_id() {
+        // x-9de7 task 1: the orphan-PID sweep (Step 6 of recover(), ~line 270)
+        // collects reaped short_ids into a `BTreeSet<String>`, then marks EVERY
+        // entry whose short_id is a MEMBER of that set as Exited -- not just the
+        // specific entry that failed pid_is_ours. Every codex/gemini shellout
+        // row shares the same empty short_id (see the comment at the top of
+        // recover()), so one genuinely dead pane-hosted row poisons every live
+        // one that happens to sit beside it in the registry. This is the writer
+        // behind the false `exited` write on a live mux pane row.
+        let home = tmp_home("recover-empty-short-id-collision");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return; // platform without start-time support; nothing to assert
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            // Genuinely dead: pid_is_ours must return false for this one.
+            let mut dead = ask_row("dead-pane", None);
+            dead.status = AgentStatus::Live;
+            dead.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(dead);
+
+            // Live: real pid, matching start time, hosted in a mux pane -- same
+            // empty short_id as the dead row above.
+            let mut live = ask_row("live-pane", None);
+            live.status = AgentStatus::Live;
+            live.pid = Some(me);
+            live.pid_start_time = Some(my_start);
+            live.mux = Some(state::MuxRef {
+                session: "main".into(),
+                pane_id: 1,
+            });
+            r.entries.push(live);
+        })
+        .unwrap();
+
+        let _ = recover(&home, &emitter);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let live = reg.find("live-pane").unwrap();
+        assert_eq!(
+            live.status,
+            AgentStatus::Live,
+            "a live pane-hosted row must not be condemned by a sibling's empty short_id"
+        );
+        assert!(
+            live.pid.is_some(),
+            "the writer clears no pid; a fix must not start clearing it here either"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }
@@ -6992,6 +7407,155 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         assert_eq!(changes.len(), 1, "only one entry probed before budget");
     }
 
+    /// A pane-hosted codex row: empty short_id (matches the real spawn shape),
+    /// a mux ref, and whatever pid/session id the caller sets afterward.
+    fn codex_pane_row(name: &str) -> RegistryEntry {
+        let mut e = ask_row(name, None);
+        e.harness = Some("codex".into());
+        e.status = AgentStatus::Live;
+        e.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 1,
+        });
+        e
+    }
+
+    #[test]
+    fn late_bind_writes_harness_session_id_for_an_unbound_live_codex_pane() {
+        // AC1 (x-9de7 task 2): a codex pane whose spawn-time bind window
+        // expired carries no harness_session_id. One late-bind pass, given a
+        // live pid, resolves and writes it.
+        let home = tmp_home("late-bind-basic");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = codex_pane_row("pane-a");
+            e.pid = Some(me);
+            e.pid_start_time = Some(my_start);
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions(&home, &emitter, &|pid| {
+            (pid == me).then(|| "sess-a".to_string())
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            reg.find("pane-a").unwrap().harness_session_id.as_deref(),
+            Some("sess-a")
+        );
+        let events = read_events(&home);
+        assert!(events
+            .iter()
+            .any(|e| e.get("type").and_then(Value::as_str) == Some("agent_late_bind")));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_gives_each_same_cwd_pane_its_own_session_id() {
+        // The same-cwd repro (x-9de7 verification #5): two codex panes in one
+        // cwd, both bound late, each keyed on its own pid -- this is the test
+        // that would have caught a `(harness, cwd)` join.
+        let home = tmp_home("late-bind-same-cwd");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut a = codex_pane_row("pane-a");
+            a.cwd = "/repo".into();
+            a.pid = Some(me);
+            a.pid_start_time = Some(my_start);
+            r.entries.push(a);
+
+            let mut b = codex_pane_row("pane-b");
+            b.cwd = "/repo".into();
+            b.pid = Some(me);
+            b.pid_start_time = Some(my_start);
+            r.entries.push(b);
+        })
+        .unwrap();
+
+        // A real probe is keyed on pid, so two DISTINCT pids would resolve to
+        // two distinct sessions; here both rows share this test's own pid (no
+        // second live process to fork), so the fake keys on name via a
+        // once-per-call counter to prove per-row binding still lands
+        // per-row rather than being skipped as "already bound" after the
+        // first write.
+        let calls = std::cell::RefCell::new(0);
+        late_bind_codex_sessions(&home, &emitter, &|_pid| {
+            let mut n = calls.borrow_mut();
+            *n += 1;
+            Some(format!("sess-{n}"))
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let sid_a = reg.find("pane-a").unwrap().harness_session_id.clone();
+        let sid_b = reg.find("pane-b").unwrap().harness_session_id.clone();
+        assert!(sid_a.is_some() && sid_b.is_some());
+        assert_ne!(sid_a, sid_b, "each pane must receive its own session id");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_leaves_a_gone_pane_for_the_reaper() {
+        // A pane-hosted row whose pane is gone: no session id is written and
+        // the row is left for the reaper (x-9de7 task 2 AC3).
+        let home = tmp_home("late-bind-gone-pane");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = codex_pane_row("pane-gone");
+            e.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions(&home, &emitter, &|_| {
+            panic!("the probe must not run against a pid that already fails pid_is_ours")
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.find("pane-gone").unwrap().harness_session_id.is_none());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_never_clobbers_an_already_bound_row() {
+        let home = tmp_home("late-bind-already-bound");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = codex_pane_row("pane-bound");
+            e.pid = Some(me);
+            e.pid_start_time = Some(my_start);
+            e.harness_session_id = Some("already-there".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions(&home, &emitter, &|_| {
+            panic!("an already-bound row must not be re-probed")
+        });
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            reg.find("pane-bound")
+                .unwrap()
+                .harness_session_id
+                .as_deref(),
+            Some("already-there")
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     #[test]
     fn run_reconcile_sweep_empty_registry_is_noop() {
         // Boundaries (Architecture B): an empty registry sweeps cleanly -- no
@@ -7169,20 +7733,51 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     #[test]
     fn the_reachability_verdict_outranks_the_transcript_state() {
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
+            rendered_status_from_truth(
+                probe_with_verdict("working", "unreachable").as_ref(),
+                false
+            ),
             "orphaned",
             "a falsified row must not render live merely because its transcript is recent"
         );
         // And silence is not death: the verdict says unknown where the legacy
         // state mapping said orphaned.
         assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
+            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref(), false),
             "unknown"
         );
         assert_eq!(
-            rendered_status_from_truth(probe("stalled").as_ref()),
+            rendered_status_from_truth(probe("stalled").as_ref(), false),
             "orphaned",
             "the fallback keeps its old meaning for a fno too old to send a verdict"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_live_pid_overrides_an_unresolvable_truth_probe_but_never_a_falsifier() {
+        // x-9de7 task 3 (the second render path the king's live measurement
+        // found): a row with no short_id/harness_session_id resolves through
+        // its bare name, which the truth probe can never find -- "unknown" is
+        // then a statement about missing session identity, not about whether
+        // the worker is alive. A confirmed-live pid is its own measurement.
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("working", "unknown").as_ref(), true),
+            "live",
+            "an unresolvable probe + a confirmed-live pid must render live, not unknown"
+        );
+        assert_eq!(
+            rendered_status_from_truth(None, true),
+            "live",
+            "no probe at all (too-old fno / shellout failure) + a live pid still renders live"
+        );
+        // The override is scoped to the two unmeasured shapes ONLY. A probe
+        // that positively falsified the row (unreachable) is never raised by
+        // a live pid -- that would contradict the monotone-lowering rule
+        // task 4 exists to enforce.
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref(), true),
+            "orphaned",
+            "a positive falsifier must never be overridden by pid liveness"
         );
     }
 
@@ -7194,7 +7789,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace: Duration::from_secs(3600),
+                dead_row_grace_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
@@ -7217,7 +7812,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 idle_exit: Duration::from_secs(1800),
                 worker_bin,
                 reconcile_on_start: true,
-                dead_row_grace: Duration::from_secs(3600),
+                dead_row_grace_cwd: PathBuf::from("/dev/null"),
                 // Off in tests: a unit test must never spawn a real `fno notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
@@ -7298,6 +7893,49 @@ done
             });
         })
         .unwrap();
+    }
+
+    /// A row with no `short_id` and no `harness_session_id` -- the shape
+    /// `registry_truth_handle` cannot resolve to anything a truth probe can
+    /// find, matching a pane-hosted codex row that never bound a session id.
+    fn seed_bare_row(name: &str) -> RegistryEntry {
+        RegistryEntry {
+            name: name.into(),
+            short_id: String::new(),
+            legacy_provider: String::new(),
+            harness: Some("codex".into()),
+            harness_session_id: None,
+            cwd: "/tmp".into(),
+            project_root: "/tmp".into(),
+            session_id: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: None,
+            status: AgentStatus::Live,
+            last_message_at: None,
+            created_at: "2026-06-09T00:00:00Z".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: Some(state::MuxRef {
+                session: "main".into(),
+                pane_id: 1,
+            }),
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+        }
     }
 
     /// The shared key-set contract. `handle_list` -- NOT Python's
@@ -7484,6 +8122,54 @@ done
         let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"], json!({"kind": "no-transcript"}));
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The end-to-end shape of the king's live measurement (x-9de7 task 3): a
+    /// codex pane row with no short_id and no harness_session_id -- the exact
+    /// specimen -- resolves through `registry_truth_handle` to its bare name,
+    /// which no truth probe can ever find. `status` must still read `live`
+    /// when the pid demonstrably is, not `unknown`.
+    #[test]
+    fn list_status_is_live_for_an_unresolvable_row_with_a_confirmed_live_pid() {
+        let home = short_home("listlivepid");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = seed_bare_row("cx-x-e14b");
+            e.pid = Some(std::process::id());
+            e.pid_start_time = process_start_time(std::process::id());
+            r.entries.push(e);
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["status"], "live");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The pid-liveness override never fires FOR a row the probe positively
+    /// falsified, and never fires when the pid is confirmed dead -- only
+    /// "the probe could not measure" plus "the pid is confirmed live" together
+    /// produce the override.
+    #[test]
+    fn list_status_stays_unknown_for_an_unresolvable_row_with_no_confirmed_live_pid() {
+        let home = short_home("listnolivepid");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = seed_bare_row("cx-dead");
+            e.pid = Some(0x7fff_fff0); // not a live process
+            r.entries.push(e);
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["status"], "unknown");
 
         std::fs::remove_dir_all(home.root()).ok();
     }

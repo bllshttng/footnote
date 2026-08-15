@@ -1315,33 +1315,46 @@ async fn run_status() -> i32 {
 /// `fno agents reap`: manual dead-row garbage collection (x-b1aa). Runs the same
 /// `gc_sweep` the daemon runs on its idle tick, operating on the registry
 /// directly under the shared flock (no daemon required), and reports what it did:
-/// the count removed and, for each row KEPT because its worktree is dirty, the
-/// worktree path so the operator can commit/clean it (AC1-UI). The grace window
-/// is resolved from `config.agents.dead_row_grace` exactly as the daemon does.
+/// the count removed and, for each row KEPT, the specific gate that kept it
+/// (dirty/unprobed worktree, or no positive corroboration yet - x-9de7 task 5)
+/// so a stuck row is never silent and invisible. The grace window is resolved
+/// from `config.agents.dead_row_grace` exactly as the daemon does.
+///
+/// `--dry-run` runs the identical classification with no registry write and no
+/// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they
+/// will not run.
 fn run_reap(rest: &[String]) -> i32 {
     let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
+    let dry_run = rest.iter().any(|a| a == "--dry-run");
     let extras: Vec<&str> = rest
         .iter()
         .map(String::as_str)
-        .filter(|a| *a != "--json" && *a != "-J")
+        .filter(|a| *a != "--json" && *a != "-J" && *a != "--dry-run")
         .collect();
     if !extras.is_empty() {
         eprintln!(
-            "fno-agents: reap takes no arguments (got: {})",
+            "fno-agents: reap takes no arguments other than --json/--dry-run (got: {})",
             extras.join(" ")
         );
         return 2;
     }
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let grace =
-        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(&cwd));
-    // Source "daemon" matches the event schema's declared source for
-    // agent_row_reaped; the manual verb is the same operation as the tick.
-    let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
-    let summary = fno_agents::daemon::gc_sweep(&home, &emitter, grace);
+    let grace_for_harness = |harness: &str| {
+        std::time::Duration::from_secs(fno_agents::agents_config::dead_row_grace_secs(
+            &cwd, harness,
+        ))
+    };
+    let summary = if dry_run {
+        fno_agents::daemon::gc_sweep_dry_run(&home, &grace_for_harness)
+    } else {
+        // Source "daemon" matches the event schema's declared source for
+        // agent_row_reaped; the manual verb is the same operation as the tick.
+        let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
+        fno_agents::daemon::gc_sweep(&home, &emitter, &grace_for_harness)
+    };
 
-    print!("{}", render_reap(&summary, json_out));
+    print!("{}", render_reap(&summary, json_out, dry_run));
     0
 }
 
@@ -1353,7 +1366,13 @@ fn run_reap(rest: &[String]) -> i32 {
 /// the entire reason it is a separate verdict, so an operator can see the bypass
 /// happening and compare the two totals. A field nothing prints is not a count -
 /// it reported zero reaps while rows were being deleted.
-fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool) -> String {
+///
+/// `kept_uncorroborated` (x-9de7 task 5) names the row that is stuck and
+/// invisible without it: past grace, nothing positively confirms it dead yet,
+/// short of the 7-day backstop. Reported at every pass so "the count of rows
+/// kept with no named gate is zero" is a claim the output itself can be
+/// checked against, not one that has to be taken on faith.
+fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run: bool) -> String {
     if json_out {
         let kept: Vec<Value> = summary
             .kept_dirty
@@ -1366,24 +1385,35 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool) -> Strin
                 "reaped": summary.reaped,
                 "reaped_backstop": summary.reaped_backstop,
                 "kept_dirty": kept,
+                "kept_uncorroborated": summary.kept_uncorroborated,
+                "dry_run": dry_run,
             })
         );
     }
+    let verb = if dry_run { "would reap" } else { "reaped" };
     let mut out = format!(
-        "reaped {} row(s) ({} by the age backstop)\n",
+        "{verb} {} row(s) ({} by the age backstop)\n",
         summary.reaped.len(),
         summary.reaped_backstop.len()
     );
     for id in &summary.reaped {
-        out.push_str(&format!("  reaped {id}\n"));
+        out.push_str(&format!("  {verb} {id}\n"));
     }
     for id in &summary.reaped_backstop {
         out.push_str(&format!(
-            "  reaped {id} (age backstop: nothing corroborated it)\n"
+            "  {verb} {id} (age backstop: nothing corroborated it)\n"
         ));
     }
     for (id, path) in &summary.kept_dirty {
         out.push_str(&format!("  kept {id} (dirty worktree: {path})\n"));
+    }
+    for id in &summary.kept_uncorroborated {
+        out.push_str(&format!(
+            "  kept {id} (uncorroborated: no confirmed-dead pid, no positively-stale transcript yet)\n"
+        ));
+    }
+    if dry_run {
+        out.push_str("(dry-run: no changes made)\n");
     }
     out
 }
@@ -2502,7 +2532,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "list [--all]",
     "status",
     "restart",
-    "reap [--json]",
+    "reap [--json] [--dry-run]",
     "stop <name> [--force]",
     "rm <name> [--force]",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
@@ -2962,7 +2992,7 @@ mod tests {
         // The always-on half of the criterion. An operator reading a quiet pass
         // must still see that the second count exists and is zero, or a later
         // nonzero one has nothing to be read against.
-        let out = render_reap(&summary(&["a1"], &[]), false);
+        let out = render_reap(&summary(&["a1"], &[]), false, false);
         assert!(
             out.starts_with("reaped 1 row(s) (0 by the age backstop)"),
             "missing the zero backstop count: {out}"
@@ -2973,7 +3003,7 @@ mod tests {
     fn reap_names_every_backstop_row_it_removed() {
         // The regression: the field existed and nothing printed it, so the verb
         // said "reaped 0 row(s)" while the backstop deleted two rows.
-        let out = render_reap(&summary(&[], &["b1", "b2"]), false);
+        let out = render_reap(&summary(&[], &["b1", "b2"]), false, false);
         assert!(
             out.starts_with("reaped 0 row(s) (2 by the age backstop)"),
             "backstop removals missing from the totals: {out}"
@@ -2984,7 +3014,7 @@ mod tests {
 
     #[test]
     fn reap_json_carries_both_lists() {
-        let out = render_reap(&summary(&["a1"], &["b1"]), true);
+        let out = render_reap(&summary(&["a1"], &["b1"]), true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["reaped"], json!(["a1"]));
         assert_eq!(v["reaped_backstop"], json!(["b1"]));
@@ -2994,9 +3024,56 @@ mod tests {
     fn reap_json_keeps_the_backstop_key_when_empty() {
         // A key that vanishes at zero makes every consumer write a default, and
         // one of them will default to "no backstop removals ever happened".
-        let out = render_reap(&summary(&[], &[]), true);
+        let out = render_reap(&summary(&[], &[]), true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["reaped_backstop"], json!([]));
+    }
+
+    // -- x-9de7 task 5: kept_uncorroborated + --dry-run ----------------------
+
+    #[test]
+    fn reap_names_the_uncorroborated_gate_in_text_and_json() {
+        let s = fno_agents::daemon::GcSummary {
+            kept_uncorroborated: vec!["stuck1".to_string()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept stuck1 (uncorroborated"),
+            "no named gate for the stuck row: {text}"
+        );
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["kept_uncorroborated"], json!(["stuck1"]));
+    }
+
+    #[test]
+    fn reap_dry_run_says_would_reap_not_reaped() {
+        // `--dry-run` must never claim past tense on a row nothing removed.
+        let out = render_reap(&summary(&["a1"], &["b1"]), false, true);
+        assert!(out.starts_with("would reap 1 row(s) (1 by the age backstop)"));
+        assert!(out.contains("  would reap a1"));
+        assert!(out.contains("  would reap b1 (age backstop"));
+        assert!(
+            !out.contains("reaped a1"),
+            "must not also say reaped: {out}"
+        );
+        assert!(out.contains("(dry-run: no changes made)"));
+    }
+
+    #[test]
+    fn reap_dry_run_json_names_the_mode() {
+        let out = render_reap(&summary(&["a1"], &[]), true, true);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["dry_run"], json!(true));
+        assert_eq!(v["reaped"], json!(["a1"]));
+    }
+
+    #[test]
+    fn reap_live_run_json_names_the_mode_false() {
+        let out = render_reap(&summary(&["a1"], &[]), true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["dry_run"], json!(false));
     }
 
     // ab-1891cdff: `restart` outcome rendering (AC2-HP / AC2-EDGE / AC2-FR)
