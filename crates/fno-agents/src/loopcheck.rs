@@ -5560,7 +5560,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         // `blocker` is only as trustworthy as the agent's tag:
                         // pass the declared reason through when it is one of
                         // the two real classes, else the honest "unknown"
-                        // (schema-valid, x-9715) rather than guessing.
+                        // (schema-valid) rather than guessing.
                         let blocker = match reason.as_str() {
                             "ci" => "ci",
                             "review" => "review",
@@ -6755,8 +6755,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     }),
                 );
                 // pulls_comments(_parse) and pr_commits share this error arm but
-                // are not all GraphQL: pulls_comments is a REST endpoint (x-9715
-                // read 4, `gh api .../pulls/N/comments`). A zero-remaining probe
+                // are not all GraphQL: pulls_comments is a REST endpoint
+                // (`gh api .../pulls/N/comments`). A zero-remaining probe
                 // must not blame GraphQL for a REST read's own failure - that
                 // reads as "stop retrying gh pr view" advice for a call that was
                 // never gh pr view and might succeed on the very next fire.

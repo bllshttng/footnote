@@ -90,7 +90,7 @@ def test_rest_in_progress_is_pending_not_red():
 
 
 def test_rest_superseded_run_dedup_survives_the_port():
-    """REST returns superseded runs in the same list (x-0bfa / x-4825 warning):
+    """REST returns superseded runs in the same list (a known dedup hazard):
     the port must classify only the latest attempt per name."""
     r = _runner(
         check_runs=[
