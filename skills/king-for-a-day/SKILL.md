@@ -183,7 +183,7 @@ This is the difference between a track that walks and one that silently wedges, 
 
 **Take over.**
 
-`fno agents attach <name>` joins a running session interactively, claude only. `resume` restarts a codex, gemini, or opencode row through the provider's own resume CLI. For a claude row it wakes a blocked or stopped session headlessly in place, with no attach and no exec, then verifies the state moved. `stop` ends it.
+`fno agents attach <name>` joins a running session interactively, claude only. `resume` restarts a codex, gemini, or opencode row through the provider's own resume CLI. For a claude row that is still supervised (blocked at a prompt or idle), resume wakes it headlessly in place with no attach or exec. It then checks the state moved. A claude row whose process has exited relaunches instead via `claude --resume`, which execs. `stop` ends it.
 `stop` and `peek` work everywhere, so on a non-claude provider observe with `peek` and end with `stop`.
 Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 

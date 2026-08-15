@@ -12,12 +12,12 @@ instead of exec):
 
 - ``codex`` → ``codex resume <codex_session_id>`` (bypasses the
   exec-source picker filter via direct UUID argument), via
-  ``os.execvp`` — hands the terminal to the provider CLI.
+  ``os.execvp``: hands the terminal to the provider CLI.
 - ``claude`` → woken headlessly: a pty (``script -q /dev/null``), the
   row's own routed env restored from ``route_settings_path``, the
   message injected as three separate bracketed-paste-safe writes
   (clear / text / submit), and the live state verified to have moved to
-  Working. Never execs — ``fno agents attach`` is the interactive
+  Working. Never execs: ``fno agents attach`` is the interactive
   hand-off; this is the unattended counterpart, and every step in the
   recipe can exit 0 having done nothing, so verification is what makes
   a no-op detectable instead of a lie. Up to two wake attempts, each
@@ -32,15 +32,15 @@ instead of exec):
   same as codex.
 
 Exit codes:
-- 0   — success (``--print-command``; a non-claude direct resume, where
+- 0   - success (``--print-command``; a non-claude direct resume, where
   ``os.execvp`` replaces the process and the Python interpreter is
   gone; or a claude resume that verified Working).
-- 2   — a claude row's recorded route could not be restored; refused
+- 2   - a claude row's recorded route could not be restored; refused
   rather than waking it onto the default account.
-- 13  — name not in registry / missing cwd / missing session_id /
+- 13  - name not in registry / missing cwd / missing session_id /
   unsupported provider.
-- 14  — provider CLI not on ``$PATH``.
-- 16  — claude wake attempts ran but the live state never reached
+- 14  - provider CLI not on ``$PATH``.
+- 16  - claude wake attempts ran but the live state never reached
   Working.
 """
 from __future__ import annotations
@@ -128,8 +128,8 @@ _WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
 _WAKE_TARGET_STATUS = "Working"
 # A row already in one of these needs no wake: Working is the target itself,
 # Idle is a live, reachable session that may hold unsubmitted composer
-# text — injecting keystrokes into it risks destroying that text for no
-# benefit, since the row isn't blocked or stopped in the first place — and
+# text - injecting keystrokes into it risks destroying that text for no
+# benefit, since the row isn't blocked or stopped in the first place - and
 # Done is a terminal row that was never going to reach Working no matter how
 # many attempts run (visible here for the first time now that
 # `claude_agents_json` passes `--all`). Defined lower-case directly (not
@@ -137,7 +137,7 @@ _WAKE_TARGET_STATUS = "Working"
 # case-insensitively: a live_map producer that skips claude.py's own
 # Title-Case normalization has slipped an un-normalized status through
 # before (see the matching check in read.py's live_status fill-in, ~line
-# 168 — both independently enumerate a subset of claude.py's
+# 168 - both independently enumerate a subset of claude.py's
 # `KNOWN_LIVE_STATUSES` and must be kept in sync by hand).
 _WAKE_SKIP_STATUSES_LOWER = frozenset({"working", "idle", "done"})
 
@@ -341,7 +341,14 @@ def _resume_claude_wake(
     # needs the wake subprocess itself to poll and abort mid-sleep, which
     # would change the verified wake.sh recipe's timing; accepted as a
     # residual few-second race rather than risk that.
-    if before.lower() not in _WAKE_SKIP_STATUSES_LOWER:
+    #
+    # Computed once here rather than re-derived at each of its three uses
+    # below (loop guard, exit-16 condition, emit guard): a future edit to
+    # the skip condition that touches only one of three call sites would
+    # silently reintroduce the exact misreport bug the surrounding comments
+    # already describe as fixed once.
+    skipped = before.lower() in _WAKE_SKIP_STATUSES_LOWER
+    if not skipped:
         for _attempt in range(_WAKE_ATTEMPTS):
             try:
                 wake_fn(short_id, message=message, route_env=route_env, cwd=cwd)
@@ -367,10 +374,7 @@ def _resume_claude_wake(
     # so emitting it unconditionally would misreport a wake that never
     # reached Working as a success, the same pre-fix shape a sigma review
     # already caught below for the exec-based harnesses' chdir failure.
-    if (
-        before.lower() not in _WAKE_SKIP_STATUSES_LOWER
-        and after.lower() != _WAKE_TARGET_STATUS.lower()
-    ):
+    if not skipped and after.lower() != _WAKE_TARGET_STATUS.lower():
         return ResumeResult(
             exit_code=16,
             stderr=(
@@ -387,7 +391,7 @@ def _resume_claude_wake(
     # same misreport the exit-16 check above already refuses for a failed
     # wake. The failure branch already returned above, so the only path left
     # here besides a skip is a genuine wake that reached Working.
-    if before.lower() not in _WAKE_SKIP_STATUSES_LOWER:
+    if not skipped:
         try:
             emit_event(
                 "agent_resumed",
@@ -467,7 +471,7 @@ def resume_logic(
             :func:`_default_agents_state_fn`). Test seam.
 
     Returns:
-        :class:`ResumeResult` — for --print-command, output carries the
+        :class:`ResumeResult`: for --print-command, output carries the
         shell one-liner; for a claude resume, output carries the
         before -> after state transition; for direct resume of every
         other harness, exec_argv/exec_cwd carry what os.execvp was

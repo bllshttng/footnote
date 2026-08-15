@@ -2020,6 +2020,22 @@ fn acquire_resume_session_claim(
     root: Option<&Path>,
     ttl_ms: Option<u64>,
 ) -> Result<(), (i32, String)> {
+    acquire_named_session_claim(&format!("session:{uuid}"), uuid, root, ttl_ms)
+}
+
+/// Shared by the dead-row `claude --resume` relaunch (keyed `session:{uuid}`)
+/// and the live-row headless wake delegation (keyed `resume-attach:{short_id}`,
+/// no uuid available on that arm today -- x-8dfc). Two different keys by
+/// design: a live wake and a dead relaunch are mutually exclusive outcomes of
+/// one truth-state read, never racing each other for the same row, but two
+/// concurrent resumes both landing on the SAME arm for the same row do race
+/// -- each key only needs to guard against its own arm's double-writer.
+fn acquire_named_session_claim(
+    key: &str,
+    label: &str,
+    root: Option<&Path>,
+    ttl_ms: Option<u64>,
+) -> Result<(), (i32, String)> {
     use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
     let holder = format!("resume:{}", std::process::id());
     let opts = AcquireOpts {
@@ -2028,18 +2044,18 @@ fn acquire_resume_session_claim(
         ttl_ms: ttl_ms.map(|t| t as i64),
         ..Default::default()
     };
-    match acquire(&format!("session:{uuid}"), &holder, opts) {
+    match acquire(key, &holder, opts) {
         AcquireOutcome::Acquired(_) => Ok(()),
         AcquireOutcome::HeldByOther { holder, pid, host } => Err((
             11,
             format!(
-                "fno agents resume: session {uuid} is held live by another writer \
+                "fno agents resume: session {label} is held live by another writer \
                  ({holder}, pid={pid}, host={host}); not opening a second writer on one transcript."
             ),
         )),
         AcquireOutcome::Error(e) => Err((
             12,
-            format!("fno agents resume: could not claim session {uuid}: {e}"),
+            format!("fno agents resume: could not claim session {label}: {e}"),
         )),
     }
 }
@@ -2509,6 +2525,30 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // and `fno-agents resume` still printing "Attaching..." and exiting,
     // which is the guard-on-one-of-N-paths trap this repo already tracks.
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
+        // Guard the delegated wake with the session single-writer claim,
+        // same as the dead-relaunch arm below: the old bare `claude attach`
+        // exec this replaced was a no-op (no pty, nothing written), so two
+        // concurrent resumes racing it were harmless. The wake actually
+        // injects keystrokes into a real pty, so two concurrent resumes of
+        // the same live row now race real writes without this. Keyed on
+        // short_id, not the session uuid the dead arm uses: this arm has no
+        // uuid available (claim_uuid is None here by construction) and the
+        // two arms are mutually exclusive outcomes of one truth-state read,
+        // so they never need to contend for the same key. ttl=None: the
+        // exec() below keeps this pid, so a PID-only claim lives exactly as
+        // long as the delegated wake does.
+        let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
+        if !short_id.is_empty() {
+            if let Err((code, msg)) = acquire_named_session_claim(
+                &format!("resume-attach:{short_id}"),
+                short_id,
+                None,
+                None,
+            ) {
+                eprintln!("{msg}");
+                return code;
+            }
+        }
         // Route through `fno` (the wrapper every install puts on PATH, which
         // resolves the `fno-py` console script by absolute path -- see
         // crates/fno/src/bootstrap.rs), not a bare `fno-py`: this binary has
@@ -4626,6 +4666,51 @@ mod tests {
             rec.expires_at.is_some(),
             "a TTL claim records an expiry; a PID-only claim would not"
         );
+    }
+
+    #[test]
+    fn acquire_named_session_claim_guards_the_live_attach_delegation() {
+        // The live-attach delegation has no session uuid (claim_uuid is None
+        // by construction on that arm), so it claims on short_id under a
+        // distinct "resume-attach:" prefix rather than the dead-relaunch
+        // arm's "session:{uuid}" -- verify that key independently refuses a
+        // second concurrent writer, the same contract acquire_resume_session_
+        // claim already has for its own key.
+        use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+        let short_id = "deadbeef";
+        let root = cv_tmpdir();
+
+        // A different live writer already holds the claim (matching this
+        // process's own holder string would just re-acquire, not conflict).
+        let pre = acquire(
+            &format!("resume-attach:{short_id}"),
+            "other-writer",
+            AcquireOpts {
+                root: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pre, AcquireOutcome::Acquired(_)));
+
+        let err = acquire_named_session_claim(
+            &format!("resume-attach:{short_id}"),
+            short_id,
+            Some(root.path()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, 11);
+        assert!(err.1.contains("held live by another writer"));
+
+        // A different short_id: an unrelated row's wake is never blocked by
+        // this one's claim.
+        let other = acquire_named_session_claim(
+            "resume-attach:other-id",
+            "other-id",
+            Some(root.path()),
+            None,
+        );
+        assert!(other.is_ok());
     }
 
     #[test]
