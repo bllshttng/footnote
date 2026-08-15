@@ -528,7 +528,7 @@ def cmd_spawn(
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
             "pane substrate every provider honors it (claude/codex/gemini/agy/"
             "opencode); on --substrate bg/headless it reaches claude and agy. "
-            "Unset = provider default; opencode defaults to z-ai/glm-5.2."
+            "Unset = provider default; opencode defaults to z-ai/glm-5.3."
         ),
     ),
     permission_mode: str | None = typer.Option(
