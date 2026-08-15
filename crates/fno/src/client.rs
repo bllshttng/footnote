@@ -838,6 +838,10 @@ struct View {
     /// (x-a496) `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
+    /// `config.obsidian.*`, latched once at startup like the toggles above.
+    /// Feeds the backlog card menu's open-plan item (`link::plan_link`); never
+    /// re-read mid-session, matching every other startup-latched config value.
+    obsidian: crate::digest_overlay::ObsidianCfg,
     /// `config.mux.show_missions` / `config.mux.show_backlog` (default on): drop
     /// the `~ missions` progress band or the `~ backlog` lane entirely. Latched
     /// once at startup; an operator who runs no epics hides the empty band rather
@@ -1350,6 +1354,10 @@ enum MenuAction {
     Remove,
     /// (x-1d91) Run a reorder verb on a Backlog card.
     Backlog(BacklogVerb),
+    /// Open a Backlog card's plan: through Obsidian, or as a plain file when
+    /// the plan resolves outside the configured vault. Card-menu only (LD5);
+    /// the resolution and the opener live in `link::plan_link`.
+    OpenPlan,
     /// Remove EVERY exited row in the target section (x-f300). The section comes
     /// from [`MenuTarget::Section`], so this stays payload-free and `Copy`.
     ClearDead,
@@ -1490,7 +1498,11 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
 /// project scoping), so a floated card is not certain to be taken. Warning about
 /// a possibility is the useful half; promising a certainty would be a claim this
 /// code cannot keep.
-fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
+fn build_card_menu(
+    card: &BacklogCard,
+    obsidian: &crate::digest_overlay::ObsidianCfg,
+    anchor: Anchor,
+) -> RowMenu {
     let label = if card.slug.is_empty() {
         &card.id
     } else {
@@ -1500,7 +1512,7 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
         CardState::Ready => "may dispatch",
         _ => "",
     };
-    let rows = vec![
+    let mut rows = vec![
         PopupRow::Header(label.clone()),
         PopupRow::Rule,
         PopupRow::Entry {
@@ -1516,13 +1528,49 @@ fn build_card_menu(card: &BacklogCard, anchor: Anchor) -> RowMenu {
             enabled: true,
         },
     ];
+    let mut actions = vec![
+        MenuAction::Backlog(BacklogVerb::RankTop),
+        MenuAction::Backlog(BacklogVerb::Defer),
+    ];
+    // LD7: a node with no plan is greyed (state can change; the item will
+    // apply later). Obsidian off is absent instead - no state change in this
+    // menu can unlock it, so a permanently-greyed item would advertise a
+    // capability nothing here can turn on.
+    match crate::link::plan_link(card.plan_path.as_deref().map(Path::new), obsidian) {
+        crate::link::PlanLink::Unavailable(crate::link::PlanUnavailable::NoPlan) => {
+            rows.push(PopupRow::Entry {
+                glyph: "📄".into(),
+                label: "Open plan".into(),
+                hint: "no plan".into(),
+                enabled: false,
+            });
+            // Disabled: 0 cells, so no action slot - actions stays index-aligned
+            // with Popup::targets(), never with rows.
+        }
+        crate::link::PlanLink::Unavailable(crate::link::PlanUnavailable::ObsidianOff) => {}
+        crate::link::PlanLink::Obsidian { .. } => {
+            rows.push(PopupRow::Entry {
+                glyph: "📄".into(),
+                label: "Open plan".into(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(MenuAction::OpenPlan);
+        }
+        crate::link::PlanLink::PlainFile(_) => {
+            rows.push(PopupRow::Entry {
+                glyph: "📄".into(),
+                label: "Open plan (file)".into(),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(MenuAction::OpenPlan);
+        }
+    }
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Card(card.id.clone()),
-        actions: vec![
-            MenuAction::Backlog(BacklogVerb::RankTop),
-            MenuAction::Backlog(BacklogVerb::Defer),
-        ],
+        actions,
     }
 }
 /// The command that clears ONE dead row, by what kind of row it is. Three
@@ -1795,6 +1843,7 @@ impl View {
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
+            obsidian: crate::digest_overlay::ObsidianCfg::default(),
             show_missions: true,
             show_backlog: true,
             theme: Theme::default_theme(),
@@ -2480,7 +2529,11 @@ impl View {
                 Some(Pick::Menu(Box::new(menu)))
             }
             // (x-1d91) A Backlog card gets the reorder menu.
-            Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(c, anchor)))),
+            Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(
+                c,
+                &self.obsidian,
+                anchor,
+            )))),
             Some(DisplayRow::Sel(row)) if row.tab.is_none() => squad_key(&self.layout, row.squad)
                 .map(|key| {
                     let label = self
@@ -5557,11 +5610,11 @@ impl View {
             };
             lines.push(pad_to(&format!(" {marker} {ord} {name}"), W));
         }
-        // Two lines, not three (x-3a91): enter/t and space/. are each one
-        // action under two keys, so they collapse to one entry apiece. The
-        // split row spells `shift+HJKL` rather than a bare `HJKL`, naming the
-        // modifier in words so it reads as "hjkl, held with shift" rather than
-        // an unrelated set of four capital-letter bindings.
+        // Two lines, not three: enter/t and space/. are each one action under
+        // two keys, so they collapse to one entry apiece. The split row spells
+        // `shift+HJKL` rather than a bare `HJKL`, naming the modifier in words
+        // so it reads as "hjkl, held with shift" rather than an unrelated set
+        // of four capital-letter bindings.
         lines.push(pad_to(" hjkl/arrows move · 1-9 jump · shift+HJKL split", W));
         lines.push(pad_to(
             " enter/t new tab in › · space/. here · esc/q cancel",
@@ -8149,6 +8202,7 @@ async fn attach_and_run(
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    view.obsidian = crate::digest_overlay::ObsidianCfg::read(Path::new(&cwd));
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
     view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
@@ -8955,7 +9009,10 @@ async fn handle_stdin(
         // DIAGNOSTIC (header right-click toggle): log every mouse event one stdin
         // chunk produces, so a single operator right-click can be COUNTED. Inert
         // unless FNO_MUX_MOUSE_TRACE is set; drop once the event pair is read.
-        if std::env::var_os("FNO_MUX_MOUSE_TRACE").is_some() {
+        // Cached in a OnceLock: a drag or scroll emits dozens of reports a
+        // second, and the flag never changes mid-process.
+        static MOUSE_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *MOUSE_TRACE.get_or_init(|| std::env::var_os("FNO_MUX_MOUSE_TRACE").is_some()) {
             eprintln!(
                 "mux-mouse kind={:?} row={} col={} shift={}",
                 rep.kind, rep.row, rep.col, rep.shift
@@ -10159,6 +10216,29 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("backlog verb send failed: {e}"))?;
             return Ok(());
         }
+        // Open a Backlog card's plan. Re-resolved at execute (not carried from
+        // the menu build), so a plan_path or obsidian config change between
+        // open and pick is honored rather than acting on a stale target.
+        (MenuTarget::Card(node), MenuAction::OpenPlan) => {
+            let Some(card) = view.layout.backlog.iter().find(|c| c.id == node) else {
+                view.set_notice(format!("{node} is no longer in the backlog"));
+                return Ok(());
+            };
+            let link =
+                crate::link::plan_link(card.plan_path.as_deref().map(Path::new), &view.obsidian);
+            let result = match &link {
+                crate::link::PlanLink::Obsidian { uri } => crate::link::open_fno_uri(uri),
+                crate::link::PlanLink::PlainFile(path) => crate::link::open_fno_path(path),
+                crate::link::PlanLink::Unavailable(_) => {
+                    view.set_notice("plan is no longer available".into());
+                    return Ok(());
+                }
+            };
+            if let Err(e) = result {
+                view.set_notice(e);
+            }
+            return Ok(());
+        }
         // (x-f300) The section menu's clear-dead action, resolved against the
         // section rather than a single row.
         (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
@@ -10368,6 +10448,9 @@ async fn execute_row_menu_action(
         // Unreachable: Rename is built only for a workspace section, which
         // returns above. Visible refusal over a silent no-op.
         MenuAction::Rename => view.set_notice("action does not apply to an agent".into()),
+        // Unreachable: OpenPlan is built only for a Backlog card, which
+        // returns above. Visible refusal over a silent no-op.
+        MenuAction::OpenPlan => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
             // A confirm owns the bottom row; a too-short terminal refuses rather
             // than arm an invisible prompt (matching the selector's stop/reap).
@@ -11908,10 +11991,10 @@ async fn attach_place_keys(
         // never do. No key's meaning depends on whether the cursor has moved.
         //
         // Enter opens a new tab in the cursor-marked workspace; `t` is a named
-        // alias for the same commit (operator ruling, x-3a91: a mouse-only door
-        // onto workspace actions is unreachable for a Ghostty operator whose
-        // right-click never reaches the mux, so every commit here keeps a
-        // keyboard-only alias). Space attaches HERE instead: repoint the
+        // alias for the same commit (operator ruling: a mouse-only door onto
+        // workspace actions is unreachable for an operator whose right-click
+        // never reaches the mux, so every commit here keeps a keyboard-only
+        // alias). Space attaches HERE instead: repoint the
         // focused pane, ignoring the cursor by design, and let the server pick
         // swap-viewer vs take-over-idle-shell. `.` is kept as Space's alias
         // rather than freed, so the muscle memory from when `.` was the only
@@ -20093,7 +20176,11 @@ mod tests {
         // dispatcher's next pick, so that entry says so; a blocked card carries
         // no such consequence and no such hint.
         let hint_of = |state| {
-            let m = build_card_menu(&bcard("x-a", state), Anchor::Center);
+            let m = build_card_menu(
+                &bcard("x-a", state),
+                &crate::digest_overlay::ObsidianCfg::default(),
+                Anchor::Center,
+            );
             match &m.popup.rows[2] {
                 PopupRow::Entry { hint, .. } => hint.clone(),
                 other => panic!("expected the float entry, got {other:?}"),
@@ -20101,6 +20188,69 @@ mod tests {
         };
         assert_eq!(hint_of(CardState::Ready), "may dispatch");
         assert_eq!(hint_of(CardState::Blocked), "");
+    }
+
+    #[test]
+    fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
+        let mut card = bcard("x-a", CardState::Ready);
+        let off = crate::digest_overlay::ObsidianCfg::default();
+        let on = crate::digest_overlay::ObsidianCfg {
+            enabled: true,
+            // Absolute, so resolution never depends on the test host's HOME.
+            vault: Some("/tmp/vault".into()),
+        };
+
+        // Obsidian disabled: the item cannot apply no matter what the operator
+        // does in this menu, so LD7 says absent, never greyed.
+        card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
+        let m = build_card_menu(&card, &off, Anchor::Center);
+        assert_eq!(
+            m.popup.rows.len(),
+            4,
+            "no open-plan row when obsidian is off"
+        );
+        assert_eq!(
+            m.actions.len(),
+            2,
+            "no OpenPlan action when obsidian is off"
+        );
+
+        // No plan_path: state can change (a plan can be added later), so LD7
+        // says greyed with the reason, not absent.
+        card.plan_path = None;
+        let m = build_card_menu(&card, &on, Anchor::Center);
+        match &m.popup.rows[4] {
+            PopupRow::Entry {
+                label,
+                hint,
+                enabled,
+                ..
+            } => {
+                assert_eq!(label, "Open plan");
+                assert_eq!(hint, "no plan");
+                assert!(!enabled);
+            }
+            other => panic!("expected the open-plan entry, got {other:?}"),
+        }
+        assert_eq!(
+            m.actions.len(),
+            2,
+            "a disabled entry contributes no action slot"
+        );
+
+        // Plan present and obsidian on: enabled, and the third action lines up
+        // with the third selectable target.
+        card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
+        let m = build_card_menu(&card, &on, Anchor::Center);
+        match &m.popup.rows[4] {
+            PopupRow::Entry { label, enabled, .. } => {
+                assert_eq!(label, "Open plan");
+                assert!(enabled);
+            }
+            other => panic!("expected the open-plan entry, got {other:?}"),
+        }
+        assert_eq!(m.actions.len(), 3);
+        assert_eq!(m.actions[2], MenuAction::OpenPlan);
     }
 
     #[test]
@@ -21271,9 +21421,9 @@ mod tests {
         assert_eq!(picker.squads, vec![1, 2]);
         // The footer must let each axis name its OWN keys, and must say which
         // key acts on the `›` marker. The old footer listed the split
-        // directions as if they were list navigation, which is the mislabel
-        // half of the reported defect. x-3a91 collapsed it to two lines and
-        // spelled the split row `shift+HJKL` so the shift relationship to
+        // directions as if they were list navigation, which was the mislabel
+        // half of the reported defect. This footer collapses it to two lines
+        // and spells the split row `shift+HJKL` so the shift relationship to
         // lowercase hjkl reads in words, not just in case.
         let overlay = v.attach_place_lines(picker).join("\n");
         for label in [
@@ -21667,7 +21817,7 @@ mod tests {
         v.selector = Some(8); // bg-claude
         let mut buf = Vec::new();
         selector_keys(&mut v, b"p", &mut buf).await.unwrap();
-        // `t` is Enter's named alias (x-3a91): both open a new tab in the
+        // `t` is Enter's named alias: both open a new tab in the
         // cursor-marked workspace. Space and `.` are the separate "here" pair.
         attach_place_keys(&mut v, b"t", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -21704,7 +21854,7 @@ mod tests {
         // premise: the overlay drew a marker on one workspace and Enter
         // attached to another, which is this node's own defect one layer up.
         //
-        // x-3a91 re-split Enter and Space, which had been merged into one
+        // This re-splits Enter and Space, which had been merged into one
         // "new tab in ›" commit: Enter (and its alias `t`) always commits the
         // cursor; Space (and its alias `.`) always attaches HERE. No key's
         // meaning depends on cursor history either way.

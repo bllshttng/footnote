@@ -292,15 +292,14 @@ pub fn plan_link(plan_path: Option<&Path>, cfg: &ObsidianCfg) -> PlanLink {
 /// `paths.py :: vault_root`. Takes `home` so a test can fix HOME without touching
 /// the process environment.
 fn resolve_vault_root_with(vault: &str, home: Option<&Path>) -> PathBuf {
-    if let Some(rest) = vault.strip_prefix("~/") {
-        return home
-            .map(|h| h.join(rest.trim_end_matches('/')))
-            .unwrap_or_else(|| PathBuf::from(vault));
-    }
-    if vault == "~" {
-        return home
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(vault));
+    // `~/rest` and bare `~` share the crate's one tilde-expansion helper
+    // rather than a third re-implementation (bootstrap.rs's is deliberately
+    // isolated - a recovery path with no other-module dependencies).
+    if vault == "~" || vault.starts_with("~/") {
+        return PathBuf::from(crate::connections_view::expand_tilde(
+            vault,
+            home.map(Path::as_os_str),
+        ));
     }
     let p = Path::new(vault);
     if p.is_absolute() {

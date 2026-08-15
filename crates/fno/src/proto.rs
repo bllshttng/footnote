@@ -1543,6 +1543,25 @@ mod verb_baseline_tests {
             .collect()
     }
 
+    /// The checked-in collapse map, embedded at compile time. Its `current-leaf`
+    /// column is the true registry of tracked CLI verbs - a T1 verb collapses to
+    /// its group's bare command in `verb-baseline.txt` (a `backlog defer` row
+    /// never appears there on its own), so `baseline_leaves()` cannot tell a
+    /// genuinely tracked T1 leaf from a made-up one that merely shares the
+    /// group word. This is the source of truth `every_backlog_verb_leaf_is_in_
+    /// the_baseline` checks against instead.
+    const COLLAPSE_MAP: &str = include_str!("../../../scripts/ci/verb-collapse-map.tsv");
+
+    fn collapse_map_leaves() -> std::collections::HashSet<String> {
+        COLLAPSE_MAP
+            .lines()
+            .skip(1) // header row
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| l.split('\t').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[test]
     fn every_backlog_verb_leaf_is_in_the_baseline() {
         let leaves = baseline_leaves();
@@ -1552,19 +1571,25 @@ mod verb_baseline_tests {
             leaves.contains("backlog advance"),
             "baseline parsed; leaves: {leaves:?}"
         );
+        let tracked = collapse_map_leaves();
+        assert!(
+            tracked.contains("backlog advance"),
+            "collapse map parsed; tracked: {tracked:?}"
+        );
         for v in ALL_BACKLOG_VERBS {
             let leaf = v.leaf();
-            // verb-collapse-map.tsv's `test_live_baseline_matches_the_projected_
-            // allocation` collapses a T1-tier leaf to its bare GROUP word in the
-            // baseline (e.g. "backlog rank" -> the standalone "backlog" line);
-            // only a KEEP-tier row (like "backlog advance", EndMission's own
-            // leaf) keeps its full string. So a leaf is baseline-covered either
-            // way: verbatim, or by its group word appearing as its own line.
-            let group = leaf.split_whitespace().next().unwrap_or(leaf);
+            // A T1-tier leaf (e.g. "backlog rank") collapses to its group's
+            // bare command in verb-baseline.txt, so its full string never
+            // appears there as its own line - only `verb-collapse-map.tsv`'s
+            // `current-leaf` column names every tracked leaf individually,
+            // T1 and KEEP alike. Checking the baseline directly would pass
+            // for any made-up "backlog whatever" leaf too, since the group's
+            // bare "backlog" line is permanently present; the collapse map is
+            // the only source that can tell a tracked leaf from an invented one.
             assert!(
-                leaves.contains(leaf) || leaves.contains(group),
-                "BacklogVerb leaf {leaf:?} is covered by neither the full string \
-                 nor its group {group:?} in scripts/ci/verb-baseline.txt; \
+                tracked.contains(leaf),
+                "BacklogVerb leaf {leaf:?} has no row in \
+                 scripts/ci/verb-collapse-map.tsv; \
                  a menu item binds it, so the ratchet must list it"
             );
         }

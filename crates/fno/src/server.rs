@@ -12582,9 +12582,9 @@ mod tests {
 
     #[test]
     fn rename_squad_onto_a_taken_name_is_refused_with_a_notice() {
-        // Operator report (x-3a91): renaming a workspace to a name another
-        // workspace already carries "fails silently". named_squad_taken already
-        // guards this - the invariant this test pins is that the rename never
+        // Reported as "renaming a workspace to a name another workspace
+        // already carries fails silently". named_squad_taken already guards
+        // this - the invariant this test pins is that the rename never
         // applies, so the operator's row keeps its old name rather than reading
         // as a no-op when it is actually a name collision with nothing renamed.
         let mut core = empty_core();

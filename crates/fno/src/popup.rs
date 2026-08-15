@@ -112,6 +112,11 @@ pub struct Popup {
 pub struct RenderedLine {
     pub text: String,
     pub header: bool,
+    /// Whether this line is a greyed, inert `Entry`. Computed once here (the
+    /// only place that reads `enabled`) and carried through rather than
+    /// re-derived by re-indexing `self.rows` later - two derivations of the
+    /// same fact can only agree by coincidence once either side changes.
+    pub disabled: bool,
     /// `(col_offset, len)` within the block that renders normal-video (the
     /// selection cut-out), if the selected target is on this line.
     pub sel_span: Option<(usize, usize)>,
@@ -328,6 +333,7 @@ impl Popup {
                 PopupRow::Header(s) => RenderedLine {
                     text: pad(&format!(" {s}"), width),
                     header: true,
+                    disabled: false,
                     sel_span: None,
                     hits: vec![],
                     roles: vec![],
@@ -335,6 +341,7 @@ impl Popup {
                 PopupRow::Rule => RenderedLine {
                     text: "─".repeat(width),
                     header: false,
+                    disabled: false,
                     sel_span: None,
                     hits: vec![],
                     roles: vec![],
@@ -345,6 +352,7 @@ impl Popup {
                     RenderedLine {
                         text: pad(&format!(" {s}"), width),
                         header: false,
+                        disabled: false,
                         sel_span: (sel == Some((ri, 0))).then_some((0, width)),
                         hits: vec![(ti, 0, width)],
                         roles: vec![],
@@ -386,6 +394,7 @@ impl Popup {
                     RenderedLine {
                         text,
                         header: false,
+                        disabled,
                         sel_span: (!disabled && sel == Some((ri, 0))).then_some((0, width)),
                         hits,
                         roles: vec![],
@@ -408,6 +417,7 @@ impl Popup {
                     RenderedLine {
                         text: pad(&text, width),
                         header: false,
+                        disabled: false,
                         sel_span,
                         hits,
                         roles: vec![],
@@ -435,23 +445,12 @@ impl Popup {
         // the left border and adds the chrome rows + scrollbar column.
         let body: Vec<BodyLine> = windowed
             .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                // A disabled Entry greys its whole row. Re-derive from the source
-                // row so the chrome styles it without RenderedLine carrying a flag:
-                // `lines` is 1:1 with `self.rows`, so windowed[i] is
-                // self.rows[scroll + i].
-                let disabled = matches!(
-                    self.rows.get(scroll + i),
-                    Some(PopupRow::Entry { enabled: false, .. })
-                );
-                BodyLine {
-                    text: l.text.clone(),
-                    header: l.header,
-                    disabled,
-                    sel_span: l.sel_span,
-                    hits: l.hits.clone(),
-                }
+            .map(|l| BodyLine {
+                text: l.text.clone(),
+                header: l.header,
+                disabled: l.disabled,
+                sel_span: l.sel_span,
+                hits: l.hits.clone(),
             })
             .collect();
         let framed = chrome::frame(&body, &self.chrome, width, scroll_state);
@@ -465,6 +464,7 @@ impl Popup {
             .map(|fl: FramedLine| RenderedLine {
                 text: fl.text,
                 header: false,
+                disabled: false,
                 sel_span: None,
                 hits: fl.hits,
                 roles: fl.roles,

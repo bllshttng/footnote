@@ -241,6 +241,11 @@ pub fn expand_tilde(path: &str, home: Option<&std::ffi::OsStr>) -> String {
             return p.to_string_lossy().into_owned();
         }
     }
+    if path == "~" {
+        if let Some(h) = home {
+            return std::path::PathBuf::from(h).to_string_lossy().into_owned();
+        }
+    }
     path.to_string()
 }
 

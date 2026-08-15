@@ -933,10 +933,10 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             "row menu · on a header: clear dead".into(),
             KeySection::SidelineRows,
         ),
-        // (x-3a91) Workspace-row rename/reorder, only reachable inside the
-        // prefix+w selector today (selector_keys) - listed here so the
-        // reference names them instead of leaving an operator to discover
-        // them by accident, or not at all.
+        // Workspace-row rename/reorder, only reachable inside the prefix+w
+        // selector today (selector_keys) - listed here so the reference names
+        // them instead of leaving an operator to discover them by accident,
+        // or not at all.
         (
             format!("{p} w then r"),
             "rename the focused workspace row".into(),
