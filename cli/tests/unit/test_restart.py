@@ -332,3 +332,15 @@ def test_restart_wedged_row_not_killed_and_json_ok_false(monkeypatch) -> None:
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["mux_wedged"] == ["stuck"]
     assert payload["ok"] is False
+
+
+def test_is_revivable_predicate() -> None:
+    """AC7-HP (x-b1cc): the extracted predicate matches `_revive_orphans`'s
+    inline decision exactly - a claude provider with a recorded session_id, and
+    nothing else. `fno.update.update_readiness` imports this same function to
+    count what `--revive` would attempt, so the two callers cannot drift."""
+    assert restart.is_revivable({"provider": "claude", "session_id": "uuid-1"}) is True
+    assert restart.is_revivable({"provider": "codex", "session_id": "uuid-1"}) is False
+    assert restart.is_revivable({"provider": "claude", "session_id": None}) is False
+    assert restart.is_revivable({"provider": "claude"}) is False
+    assert restart.is_revivable({}) is False

@@ -87,6 +87,15 @@ def _agents_rows() -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def is_revivable(row: dict[str, Any]) -> bool:
+    """True when `row` (an `fno agents list --json` row) is a claude worker with
+    a recorded resumable session - the exact predicate `_revive_orphans` applies
+    per orphan. The update-readiness resolver (`fno.update`) calls this same
+    function to count what `--revive` would bring back (AC7-HP, x-b1cc): one
+    predicate, two callers, so they cannot drift apart."""
+    return row.get("provider") == "claude" and bool(row.get("session_id"))
+
+
 def _revive_orphans(
     pre_live: dict[str, dict[str, Any]],
     say: Callable[..., None],
@@ -109,7 +118,7 @@ def _revive_orphans(
         if name in now_live:
             continue
         session = row.get("session_id")
-        if row.get("provider") != "claude" or not session:
+        if not is_revivable(row):
             result["agents_revive_skipped"].append(name)
             say(
                 f"fno restart: worker '{name}' died with its mux server and has no "
