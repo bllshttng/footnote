@@ -283,6 +283,9 @@ def test_claude_resume_restores_routed_env() -> None:
 
     orig = model_routing_mod.read_route_settings
     model_routing_mod.read_route_settings = _read_route_settings
+    # Starts "Needs input" so the wake loop actually runs (an already-Working
+    # row is skipped by design and _wake would never be called).
+    states = iter(["Needs input", "Working"])
     try:
         res = resume_logic(
             name="alpha",
@@ -291,7 +294,7 @@ def test_claude_resume_restores_routed_env() -> None:
             execvp=_no_exec,
             emit_event=lambda *a, **kw: None,
             wake_fn=_wake,
-            agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+            agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
         )
     finally:
         model_routing_mod.read_route_settings = orig
@@ -578,3 +581,110 @@ def test_stale_cwd_exits_13_with_rm_hint() -> None:
     assert "fno agents rm alpha" in res.stderr
     # Critically: no agent_resumed event was emitted on the failure path.
     assert events_seen == []
+
+
+# ---------------------------------------------------------------------------
+# code-review high --comment --fix findings on the x-c136 wake path
+# ---------------------------------------------------------------------------
+
+
+def test_claude_resume_skips_waking_an_already_working_row() -> None:
+    """An already-Working row must never have keystrokes injected into it."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+    assert res.output == "alpha (deadbeef): Working -> Working\n"
+
+
+def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
+    """A wake that lands but whose subprocess outlives the timeout must not
+    be scored a failure: the post-attempt state read must run even when
+    wake_fn raised TimeoutExpired."""
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    states = iter(["Needs input", "Working"])
+
+    def _wake(short_id, *, message, route_env):
+        raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+    )
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Needs input -> Working\n"
+
+
+def test_default_wake_fn_scrubs_ambient_auth_before_overlaying_the_route(
+    monkeypatch,
+) -> None:
+    """The operator's own ANTHROPIC_API_KEY must not survive alongside a
+    routed row's credential in the attaching subprocess's env."""
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _default_wake_fn
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-operators-own-key")
+    seen: dict = {}
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _fake_popen(argv, *, env, **kwargs):
+        seen["env"] = env
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _fake_popen)
+
+    _default_wake_fn(
+        "deadbeef",
+        message="continue",
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"},
+    )
+
+    assert seen["env"].get("ANTHROPIC_API_KEY") is None
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/paas/v4"
+
+
+def test_script_wrapped_attach_uses_bsd_form_on_darwin(monkeypatch) -> None:
+    from fno.agents.resume_cli import _script_wrapped_attach
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    cmd = _script_wrapped_attach("deadbeef")
+    assert cmd == "script -q /dev/null claude attach deadbeef"
+
+
+def test_script_wrapped_attach_uses_gnu_form_on_linux(monkeypatch) -> None:
+    from fno.agents.resume_cli import _script_wrapped_attach
+
+    monkeypatch.setattr("sys.platform", "linux")
+    cmd = _script_wrapped_attach("deadbeef")
+    assert cmd == "script -qc 'claude attach deadbeef' /dev/null"

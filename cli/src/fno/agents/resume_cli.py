@@ -20,7 +20,14 @@ x-c136):
   Working. Never execs — ``fno agents attach`` is the interactive
   hand-off; this is the unattended counterpart, and every step in the
   recipe can exit 0 having done nothing, so verification is what makes
-  a no-op detectable instead of a lie.
+  a no-op detectable instead of a lie. Up to two wake attempts, each
+  bounded by a fixed ~19s send sequence plus a 60s subprocess timeout, so
+  a full failure takes up to roughly two minutes wall-clock, not instant.
+  ``--print-command`` still prints the OLD interactive form
+  (``claude attach <short_id>``) for a claude row: that is the manual
+  escape hatch for a human who wants to type into the session directly,
+  distinct from (and no longer equivalent to) what a direct
+  ``fno agents resume <name>`` now does.
 - ``gemini`` / ``opencode`` → exec into the provider's own resume CLI,
   same as codex.
 
@@ -41,6 +48,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -134,6 +142,24 @@ def _default_agents_state_fn() -> dict[str, dict]:
     return live_map
 
 
+def _script_wrapped_attach(short_id: str) -> str:
+    """The pty-allocating shell fragment that runs ``claude attach <id>``.
+
+    BSD ``script`` (macOS, the verified environment) takes the command as
+    trailing argv: ``script -q /dev/null claude attach <id>``. GNU/util-linux
+    ``script`` (Linux) has no such form -- the command rides ``-c`` instead:
+    ``script -qc "claude attach <id>" /dev/null``. Branching here mirrors the
+    existing ``sys.platform`` split in ``harnesses/codex.py`` /
+    ``spawn_gate.py`` rather than guessing one syntax and failing silently
+    on the other (the wake would report exit 16 with no clue the real cause
+    was a platform mismatch).
+    """
+    attach_cmd = f"claude attach {shlex.quote(short_id)}"
+    if sys.platform == "darwin" or sys.platform.endswith("bsd"):
+        return f"script -q /dev/null {attach_cmd}"
+    return f"script -qc {shlex.quote(attach_cmd)} /dev/null"
+
+
 def _default_wake_fn(
     short_id: str,
     *,
@@ -145,7 +171,7 @@ def _default_wake_fn(
 
     ``claude attach`` allocates no pty of its own; invoked non-interactively
     it prints "Attaching..." and exits having done nothing, which reads as a
-    no-op rather than a refusal. ``script -q /dev/null`` supplies the pty.
+    no-op rather than a refusal. ``script`` supplies the pty.
 
     The attached session runs with bracketed paste on, so a trailing ``\\r``
     sent in the SAME write as the message inserts a newline into the input
@@ -159,24 +185,55 @@ def _default_wake_fn(
     auth token. The caller resolves ``route_env`` via
     :func:`fno.agents.model_routing.read_route_settings` and hands it here
     already resolved -- this function never reads the settings file itself,
-    so a credential never has to round-trip through a shell echo.
+    so a credential never has to round-trip through a shell echo. The
+    scrub-then-overlay order matches ``bg_create``/``headless_create``: an
+    operator's own ambient ``ANTHROPIC_API_KEY`` is cleared first, so it can
+    never sit alongside the routed row's credential in the attaching
+    subprocess.
+
+    Runs in its own process group (``start_new_session=True``) so a timeout
+    kills the whole ``script``/``claude attach`` tree, not just the
+    top-level ``bash``: an orphaned grandchild left holding the pty is
+    exactly what would make a retry's second ``claude attach`` race the
+    first for the same session.
+
+    Does not reuse ``dispatch.py``'s ``_mux_pane_send``/``_paste_then_submit``
+    (a guarded send plus content-based transcript confirmation): that
+    primitive addresses a mux-hosted PANE, a different substrate from the
+    ``claude --bg`` supervisor a blocked/stopped row actually is here, and
+    has no ``claude attach`` arm. The fixed sleep sequence below is the
+    exact recipe verified against a real blocked fleet; the caller's
+    post-attempt state read (``_resume_claude_wake``) is the readiness
+    signal this function itself does not have.
     """
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
     env = dict(os.environ)
+    for key in SCRUB_AUTH_VARS:
+        env.pop(key, None)
     if route_env:
         env.update(route_env)
     env["FNO_WAKE_MSG"] = message
     script_cmd = (
         "{ sleep 7; printf '\\x15'; sleep 1; printf '%s' \"$FNO_WAKE_MSG\"; "
-        "sleep 2; printf '\\r'; sleep 9; } | script -q /dev/null claude attach "
-        + shlex.quote(short_id)
-    )
-    subprocess.run(
+        "sleep 2; printf '\\r'; sleep 9; } | "
+    ) + _script_wrapped_attach(short_id)
+    proc = subprocess.Popen(
         ["bash", "-c", script_cmd],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=timeout,
+        start_new_session=True,
     )
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+        raise
 
 
 def _resume_claude_wake(
@@ -225,18 +282,26 @@ def _resume_claude_wake(
     before = _state_of()
     after = before
     last_err = ""
-    for _attempt in range(_WAKE_ATTEMPTS):
-        try:
-            wake_fn(short_id, message=message, route_env=route_env)
-        except subprocess.TimeoutExpired:
-            last_err = "wake attempt timed out"
-            continue
-        except OSError as exc:
-            last_err = f"wake attempt failed: {exc}"
-            continue
-        after = _state_of()
-        if after == _WAKE_TARGET_STATUS:
-            break
+    # Already Working (a stale-registry race, or the operator resuming the
+    # wrong name): don't inject anything into a session mid-turn. Skip
+    # straight to reporting; the loop below never runs.
+    if before != _WAKE_TARGET_STATUS:
+        for _attempt in range(_WAKE_ATTEMPTS):
+            try:
+                wake_fn(short_id, message=message, route_env=route_env)
+            except subprocess.TimeoutExpired:
+                last_err = "wake attempt timed out"
+            except OSError as exc:
+                last_err = f"wake attempt failed: {exc}"
+            # Read state even after a caught exception: `script`/`claude
+            # attach` only returns when the attach TUI exits, which need not
+            # happen the instant the piped stdin hits EOF, so a message that
+            # actually landed can still be mid-flight when the subprocess
+            # timeout fires. Skipping this read on the exception path would
+            # score a successful wake as failed.
+            after = _state_of()
+            if after == _WAKE_TARGET_STATUS:
+                break
 
     if emit_event is None:
         from fno.agents import events as events_mod
@@ -266,11 +331,13 @@ def _resume_claude_wake(
             ),
         )
 
+    # No exec_argv/exec_cwd: this path never execs (unlike every other
+    # harness's resume arm), so leaving those fields set to a
+    # ["claude", "attach", short_id] this call never runs would misdescribe
+    # what just happened to a future reader of the result.
     return ResumeResult(
         exit_code=0,
         output=f"{name} ({short_id}): {before} -> {after}\n",
-        exec_argv=["claude", "attach", short_id],
-        exec_cwd=cwd,
     )
 
 

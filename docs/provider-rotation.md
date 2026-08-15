@@ -442,7 +442,7 @@ which opens a session that is still running ("The session keeps running either
 way", `claude attach --help`), so the route lives in that process and no attach
 can lose it.
 
-x-c136 (2026-08-15) found the theory does not hold for a *blocked* row: a
+A 2026-08-15 incident found the theory does not hold for a *blocked* row: a
 supervisor that is registered as reachable can still be sitting at a
 populated prompt with no live model turn in flight, and `claude attach` run
 non-interactively (no pty) prints "Attaching..." and exits having done
@@ -468,8 +468,8 @@ unset, the default) - reading only the Python path is how you conclude,
 wrongly, that resume can never lose a route, and it is also why the
 verified-wake fix above does not fire by default on a machine with an
 installed binary. `client_verbs.rs`'s live arm still has "nothing to do":
-x-c136's finding applies there too and is unfixed; see x-9e9a for the related
-Rust-side route-restore investigation.
+the same finding applies there too and is unfixed; see the backlog's
+Rust-side route-restore investigation for the related open question.
 
 Both doors apply the same usability rule, not just an existence check: a recorded
 file that is missing, unparseable, or carries only the auth-scrub floor all
