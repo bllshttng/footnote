@@ -8,7 +8,7 @@ code with the others, so the file is what keeps the three honest.
 import json
 import pathlib
 
-from fno.agents.format import attention_sort_key
+from fno.agents.format import attention_sort_key, render_json, render_table
 from fno.agents.session_truth import _humanize_age
 
 FIXTURE = (
@@ -38,3 +38,18 @@ def test_humanize_age_is_fixed_width_and_covers_days():
 
 def test_humanize_age_renders_absent_as_question_mark_not_zero():
     assert _humanize_age(None) == "   ?"
+
+
+def test_render_json_emits_rows_in_the_shared_attention_order():
+    rows, expected = _fixture()
+    payload = json.loads(render_json(rows, filters_applied={}))
+    assert [r["name"] for r in payload["agents"]] == expected
+
+
+def test_render_table_emits_rows_in_the_shared_attention_order():
+    # render_table sorts internally too (not just render_json) - a plain TTY
+    # `fno agents list` must not fall back to registry order.
+    rows, expected = _fixture()
+    output = render_table(rows, terminal_width=200)
+    positions = [output.index(name) for name in expected]
+    assert positions == sorted(positions)

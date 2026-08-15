@@ -7579,7 +7579,17 @@ fn evidence_rank(a: &AgentRow) -> u8 {
     // A fired falsifier, or an exit with positive corroboration (a confirmed
     // dead pid / gone pane): the sunk tier. Archived, snoozed and pane-dead
     // all collapse here - none of them needs the operator's attention now.
-    if matches!(basis, Some("process-gone") | Some("pane-gone")) || (a.exited && !a.unmeasured) {
+    // `exit-recorded` fires when reconcile already nulled the pid, which can
+    // leave the mux's OWN `exited`/`unmeasured` pair reading dormant (x-9239
+    // review: the probe saw the tombstone the mux's liveness derivation
+    // cannot see); the basis string is the more complete reading here and
+    // must win. Mirrors the falsifier set `fno agents list` and the daemon
+    // projection both sink to their tier 5.
+    if matches!(
+        basis,
+        Some("process-gone") | Some("pane-gone") | Some("exit-recorded")
+    ) || (a.exited && !a.unmeasured)
+    {
         return 5;
     }
     // Claiming to work, silent past the attention window: the row that most

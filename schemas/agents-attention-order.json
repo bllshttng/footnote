@@ -82,6 +82,14 @@
       "reachability": "unreachable",
       "exited": true,
       "unmeasured": false
+    },
+    {
+      "name": "tombstone",
+      "basis": "exit-recorded",
+      "last_activity_age_s": 100,
+      "reachability": "unreachable",
+      "exited": true,
+      "unmeasured": true
     }
   ],
   "expected_order": [
@@ -94,6 +102,7 @@
     "sleeper",
     "worker",
     "ghost",
-    "reaper"
+    "reaper",
+    "tombstone"
   ]
 }

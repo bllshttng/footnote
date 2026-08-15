@@ -325,8 +325,13 @@ def render_table(
     When ``discovered`` is non-empty, a visually distinct "DISCOVERED LIVE
     SESSIONS" section is appended below the registered-agents table (AC1-UI),
     so live un-adopted sessions never blend into the registry rows.
+
+    Rows render in attention order, same as ``render_json`` - an operator
+    reading the plain TTY table top-down meets the row that needs them first,
+    not whatever order the registry happened to return.
     """
     width = terminal_width or _terminal_width()
+    rows = sorted(rows, key=attention_sort_key)
 
     # Compute display fields once, then size columns from the actual data.
     display_rows = []
