@@ -2846,6 +2846,14 @@ def cmd_send(
     # problem.
     if result.delivery == "hosted":
         print(f"{result.msg_id} delivered (hosted)")
+    elif result.reason == "bus-only":
+        # x-e21e: the registered-agent lane's gate refused by policy; the
+        # durable write already happened inside dispatch_send. Designed, not
+        # stranded -- no recovery ladder.
+        print(
+            f"{result.msg_id} queued (durable) "
+            f"[bus-only: recipient polls the bus at each turn boundary]"
+        )
     else:
         reason_tok = result.reason or "live-miss"
         _warn_deferred(name, reason=result.reason)

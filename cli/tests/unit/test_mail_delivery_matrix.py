@@ -636,7 +636,7 @@ def test_cell1_codex_is_probed_too_when_nothing_resolved(
     )
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_codex",
-        lambda *_a: (tried.append("codex"), True)[1],
+        lambda *_a, **_k: (tried.append("codex"), True)[1],
     )
 
     res = runner.invoke(app, ["mail", "send", LIVE_HANDLE, "hi", "--from-name", "web"])
@@ -670,7 +670,7 @@ def test_a_resolved_codex_session_is_probed_on_its_own_harness(
     )
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_codex",
-        lambda *_a: (tried.append("codex"), True)[1],
+        lambda *_a, **_k: (tried.append("codex"), True)[1],
     )
 
     res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
@@ -812,7 +812,7 @@ def test_unreadable_store_full_id_live_miss_queues_to_drainable_full_id(
     )
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_codex",
-        lambda target, _message: (attempted.append(("codex", target)), False)[1],
+        lambda target, _message, **_k: (attempted.append(("codex", target)), False)[1],
     )
 
     res = runner.invoke(

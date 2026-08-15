@@ -158,7 +158,7 @@ def test_send_live_holder_delivers_no_durable(runner, isolated, monkeypatch):
 
     inject_calls: list[str] = []
 
-    def _fake_inject(session_id, wrapped):
+    def _fake_inject(session_id, wrapped, **_k):
         inject_calls.append(session_id)
         return True  # confirmed delivery
 
@@ -187,7 +187,7 @@ def test_send_live_miss_durables_to_job_address(runner, isolated, monkeypatch):
 
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_claude",
-        lambda sid, wrapped: False,  # live miss
+        lambda sid, wrapped, **_k: False,  # live miss
     )
 
     res = runner.invoke(
@@ -223,7 +223,7 @@ def test_pr_resolves_to_node_and_delivers(runner, isolated, monkeypatch):
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
 
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped: True
+        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped, **_k: True
     )
 
     res = runner.invoke(
@@ -278,7 +278,7 @@ def test_pr_resolves_via_additional_prs(runner, isolated, monkeypatch):
     _acquire_node("x-multi", "88888888-8888-8888-8888-888888888888")
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped: True
+        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped, **_k: True
     )
     res = runner.invoke(
         app, ["mail", "send", "pr:101", "secondary pr", "--from-name", "king"]

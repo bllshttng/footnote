@@ -6723,6 +6723,12 @@ def dispatch_send(
 
                 _live_delivered = False
                 _live_reason: list = []
+                # x-e21e: the row's own policy names the durable queue's cause
+                # even when no live rung was attemptable (an idle registered
+                # leader), so the receipt never reads as a live-miss.
+                _bus_only = (
+                    _delivery_policy_refusal(existing) == BUS_ONLY_POLICY
+                )
                 if family1_attemptable:
                     _live_delivered = _deliver_live(
                         existing,
@@ -6737,6 +6743,8 @@ def dispatch_send(
                         delivery = "hosted"
                     else:
                         live_miss_reason = _live_reason[0] if _live_reason else None
+                if _bus_only:
+                    live_miss_reason = BUS_ONLY_POLICY
                 if not _live_delivered and (durable_recipient is None or family1_attemptable):
                     # Live-first fallback: an attemptable recipient whose live
                     # attempt missed, or a recipient with no durable address
