@@ -493,11 +493,7 @@ model as one unit through the settings file, while the account's
 Nothing refuses the pair - `fno agents spawn` does not either, so a refusal here
 would have been this path inventing a rule the rest of the system does not have.
 
-The restored route goes THROUGH `resolve_spawn_route` rather than past it.
-That call is the single composition decision, and it is where managed OAuth
-refuses a foreign endpoint layered over the default Claude credential slot.
-A restored route assigned past it would be the one route in the system exempt
-from a guard every other route pays.
+The restored route goes THROUGH `resolve_spawn_route` rather than past it. That call is the single composition decision, and it is where an incomplete route (an endpoint without its own credential) is refused. A restored route assigned past it becomes the one route in the system exempt from a check every other route pays.
 
 The `pick_on_launch` headroom picker skips a `--resume` spawn on both seams
 (`_pick_account_at_seam` and `dispatch_spawn`), so any `--account` reaching the

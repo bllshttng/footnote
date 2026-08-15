@@ -114,7 +114,7 @@ def test_unknown_id_refused_lists_claude_accounts(tmp_path: Path, providers_root
         tmp_path,
         [{"id": "makers", "name": "Makers", "harness": "claude", "auth": "managed"}],
     )
-    with pytest.raises(AccountResolutionError, match="not a registered provider.*makers"):
+    with pytest.raises(AccountResolutionError, match="is not registered.*makers"):
         resolve_account_overlay("nope", repo_root=repo, providers_root=providers_root)
 
 

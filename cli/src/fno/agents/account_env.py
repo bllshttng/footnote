@@ -39,7 +39,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from fno.adapters.providers.dispatch import _env_for_api_key, _env_for_oauth
 from fno.adapters.providers.loader import load_providers
@@ -100,6 +100,125 @@ class AccountOverlay:
     lane: str  # own-dir | config-dir | managed-active | api-key
 
 
+@dataclass(frozen=True)
+class CredentialDecision:
+    """What fno made live for one worker, read off the composed env.
+
+    Facts fno owns, never claims about what claude honored: composition is
+    decided before the process starts, so the composed environment is a fact,
+    but only claude knows which credential it sent (the x-74ea boundary).
+    """
+
+    profile: Optional[str]  # account id whose CLAUDE_CONFIG_DIR is set
+    config_dir: Optional[str]
+    auth: str  # "route:<vendor>" | "account:<id>" | "ambient"
+    endpoint: str  # the base url, or "anthropic-default"
+    model: Optional[str]
+    bills: str  # vendor | account id | "unknown"
+
+
+def _vendor_for_endpoint(endpoint: str) -> Optional[str]:
+    """The provider name that owns ``endpoint``, or its URL host.
+
+    Derived from the composed env, never from a flag: the receipt's honesty
+    depends on the vendor label traveling with the endpoint value actually
+    applied, not with the spelling the caller typed.
+    """
+    from urllib.parse import urlparse
+
+    from fno.agents.model_routing import effective_providers, _routing_block
+
+    for name, prov in effective_providers(_routing_block(None)).items():
+        if prov.get("base_url") == endpoint:
+            return name
+    host = urlparse(endpoint).hostname if "://" in endpoint else None
+    return host
+
+
+def _credential_decision(
+    composed: Mapping[str, str],
+    *,
+    account_id: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> CredentialDecision:
+    """Derive the receipt facts from one composed environment."""
+    endpoint = composed.get("ANTHROPIC_BASE_URL") or "anthropic-default"
+    vendor = _vendor_for_endpoint(endpoint) if endpoint != "anthropic-default" else None
+    model = composed.get("ANTHROPIC_MODEL")
+    if model is None:
+        model = next(
+            (composed[k] for k in MODEL_ENV_KEYS if composed.get(k)), None
+        )
+    route_self_authed = bool(
+        route_env
+        and (route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY"))
+    )
+    if route_self_authed:
+        named = vendor or "unknown"
+        return CredentialDecision(
+            profile=account_id,
+            config_dir=composed.get("CLAUDE_CONFIG_DIR"),
+            auth=f"route:{named}",
+            endpoint=endpoint,
+            model=model,
+            bills=named,
+        )
+    if account_id is not None:
+        # No route credential: the account's own login (Keychain OAuth for the
+        # config-dir/managed lanes, the record's key for api_key) is what
+        # authenticates, and an api_key record's endpoint names its vendor.
+        payer = vendor or account_id
+        return CredentialDecision(
+            profile=account_id,
+            config_dir=composed.get("CLAUDE_CONFIG_DIR"),
+            auth=f"account:{account_id}",
+            endpoint=endpoint,
+            model=model,
+            bills=payer,
+        )
+    return CredentialDecision(
+        profile=None,
+        config_dir=composed.get("CLAUDE_CONFIG_DIR"),
+        auth="ambient",
+        endpoint=endpoint,
+        model=model,
+        bills="unknown",
+    )
+
+
+def compose_worker_credentials(
+    account_env: Optional[Mapping[str, str]],
+    route_env: Optional[Mapping[str, str]],
+    base: Mapping[str, str],
+    *,
+    account_id: Optional[str] = None,
+) -> "tuple[dict[str, str], CredentialDecision]":
+    """Apply the scrub/account/route precedence once and report the outcome.
+
+    THE composition rule, stated here and nowhere else (x-8552): scrub every
+    ``SCRUB_AUTH_VARS`` entry from the inherited environment, layer the account
+    overlay (profile + its own login), layer the route overlay last so it wins
+    ``ANTHROPIC_BASE_URL``/``ANTHROPIC_AUTH_TOKEN`` and every model tier as one
+    unit. The account's login is dormant for model traffic under a route and
+    still supplies the profile (measured 2026-08-15: claude prefers an env
+    credential over a Keychain login).
+
+    Every spawn seam (bg, headless, pane) consumes this one function, so a
+    fourth seam cannot hand-roll a disagreeing order - the drift that let the
+    settings branch drop the account's env while the env paths kept it.
+    """
+    composed = dict(base)
+    for _var in SCRUB_AUTH_VARS:
+        composed.pop(_var, None)
+    if account_env:
+        composed.update(account_env)
+    if route_env:
+        composed.update(route_env)
+    return composed, _credential_decision(
+        composed, account_id=account_id, route_env=route_env
+    )
+
+
 def _login_present(config_dir: Path) -> bool:
     """True when ``config_dir`` holds a login CREDENTIAL specific to THIS dir.
 
@@ -156,7 +275,7 @@ def resolve_account_overlay(
         claude_ids = sorted(r.id for r in config.records if r.harness == "claude")
         listing = ", ".join(claude_ids) or "(none registered)"
         raise AccountResolutionError(
-            f"account {account_id!r} is not a registered provider. "
+            f"account {account_id!r} is not registered. "
             f"claude accounts: {listing}"
         )
 

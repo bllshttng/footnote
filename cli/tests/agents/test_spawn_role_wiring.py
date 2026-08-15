@@ -86,66 +86,85 @@ def test_dispatch_spawn_defaults_role_to_none(
     assert captured["role"] is None
 
 
-def test_direct_dispatch_spawn_refuses_managed_role_route(
+def test_direct_dispatch_spawn_composes_managed_role_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The in-process spawn API cannot bypass atomic route composition."""
+    """A complete route composes even under an inherited managed marker.
+
+    The managed-OAuth ambient guard is gone (measured 2026-08-15: claude
+    prefers an env credential over a Keychain login, so a self-authed route
+    leaves the managed login dormant). FNO_PROVIDER_AUTH describes the CALLING
+    process's slot, not this spawn, so it must not refuse anything.
+    """
     _setup_tmp_home(tmp_path, monkeypatch)
 
-    from fno.agents import model_routing
-    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents import dispatch as dispatch_mod, model_routing
+    from fno.agents.dispatch import DispatchAskResult, dispatch_spawn
+
+    route = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "secret",
+        "ANTHROPIC_MODEL": "glm-5.2",
+    }
+    captured: Dict[str, Any] = {}
+
+    def fake_create(**kw: Any) -> DispatchAskResult:
+        captured.update(kw)
+        return DispatchAskResult(kind="create", short_id="abc12345")
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
-    monkeypatch.setattr(
-        model_routing,
-        "resolve_route",
-        lambda *_a, **_k: {
-            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-            "ANTHROPIC_AUTH_TOKEN": "secret",
-            "ANTHROPIC_MODEL": "glm-5.2",
-        },
+    monkeypatch.setattr(model_routing, "resolve_route", lambda *_a, **_k: route)
+    monkeypatch.setattr(dispatch_mod, "_claude_create_path", fake_create)
+
+    result = dispatch_spawn(
+        name="direct-route",
+        message="work",
+        provider="claude",
+        cwd=tmp_path,
+        role="tidy",
     )
-
-    with pytest.raises(DispatchAskError, match="managed OAuth provider 'makers'"):
-        dispatch_spawn(
-            name="direct-route",
-            message="work",
-            provider="claude",
-            cwd=tmp_path,
-            role="tidy",
-        )
+    assert result.kind == "created"
+    assert captured["route_env"] == route
 
 
-def test_direct_pane_spawn_refuses_managed_route_before_mux(
+def test_direct_pane_spawn_composes_managed_route_before_mux(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The direct pane API crosses the same composition refusal."""
+    """The direct pane API composes the same route the bg lane does."""
     _setup_tmp_home(tmp_path, monkeypatch)
 
-    from fno.agents.dispatch import DispatchAskError
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
 
-    def unexpected_runner(*_a: Any, **_k: Any) -> Any:
-        pytest.fail("managed route must refuse before mux spawn")
+    launched: list[list[str]] = []
 
-    with pytest.raises(DispatchAskError, match="managed OAuth provider 'makers'"):
-        dispatch_spawn_pane(
-            name="direct-pane-route",
-            message="work",
-            provider="claude",
-            cwd=tmp_path,
-            role="tidy",
-            route_env={
-                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-                "ANTHROPIC_AUTH_TOKEN": "secret",
-                "ANTHROPIC_MODEL": "glm-5.2",
-            },
-            runner=unexpected_runner,
-        )
+    def runner(argv: list[str], **_k: Any) -> Any:
+        launched.append(list(argv))
+        if argv[1:4] == ["mux", "pane", "run"]:
+            return SimpleNamespace(returncode=0, stdout="7\n", stderr="")
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    dispatch_spawn_pane(
+        name="direct-pane-route",
+        message="work",
+        provider="claude",
+        cwd=tmp_path,
+        role="tidy",
+        route_env={
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "secret",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+        runner=runner,
+    )
+    run_argv = next(a for a in launched if a[1:4] == ["mux", "pane", "run"])
+    assert "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" in run_argv
+    assert "ANTHROPIC_AUTH_TOKEN=secret" in run_argv
 
 
 @pytest.mark.parametrize("substrate", ["worker", "pane"])
@@ -303,22 +322,30 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
 
 
 @pytest.mark.parametrize("adapter", ["bg_create", "headless_create"])
-def test_direct_claude_adapter_refuses_managed_route_before_subprocess(
+def test_direct_claude_adapter_composes_managed_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str
 ) -> None:
-    """Even a direct provider-adapter call crosses the composition refusal."""
+    """Even a direct provider-adapter call composes a complete route: the
+    managed ambient marker neither refuses nor strips the route's env."""
     _setup_tmp_home(tmp_path, monkeypatch)
 
-    from fno.agents.model_routing import RouteCompositionError
     from fno.agents.harnesses import claude
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
-    monkeypatch.setattr(
-        claude,
-        "_subprocess_run",
-        lambda *_a, **_k: pytest.fail("refusal must precede the claude subprocess"),
-    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-stale")
+    captured: dict[str, Any] = {}
+
+    class _Result:
+        returncode = 0
+        stdout = "backgrounded · 1234abcd · started\n"
+        stderr = ""
+
+    def fake_run(_argv: list[str], **kw: Any) -> _Result:
+        captured.update(kw)
+        return _Result()
+
+    monkeypatch.setattr(claude, "_subprocess_run", fake_run)
     route = {
         "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "secret",
@@ -332,8 +359,12 @@ def test_direct_claude_adapter_refuses_managed_route_before_subprocess(
     if adapter == "bg_create":
         kwargs["name"] = "direct-bg"
 
-    with pytest.raises(RouteCompositionError, match="managed OAuth provider 'makers'"):
-        getattr(claude, adapter)(**kwargs)
+    getattr(claude, adapter)(**kwargs)
+    child_env = captured["env"]
+    assert child_env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert child_env["ANTHROPIC_AUTH_TOKEN"] == "secret"
+    # The scrub floor: the ambient stale credential must not survive.
+    assert "ANTHROPIC_API_KEY" not in child_env
 
 
 class _Gate:
@@ -422,27 +453,25 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
 
 
 @pytest.mark.parametrize(
-    ("routing", "extra", "intent"),
+    ("routing", "extra"),
     [
-        (["--role", "tidy"], [], "routed role 'tidy'"),
-        (["--role", "tidy"], ["--substrate", "bg"], "routed role 'tidy'"),
-        (["--role", "tidy"], ["--substrate", "headless"], "routed role 'tidy'"),
-        (["--route", "zai,glm-5.2"], ["--substrate", "bg"], "route 'zai,glm-5.2'"),
-        (
-            ["--route", "zai,glm-5.2"],
-            ["--substrate", "headless"],
-            "route 'zai,glm-5.2'",
-        ),
+        (["--role", "tidy"], []),
+        (["--role", "tidy"], ["--substrate", "bg"]),
+        (["--role", "tidy"], ["--substrate", "headless"]),
+        (["--route", "zai,glm-5.2"], ["--substrate", "bg"]),
+        (["--route", "zai,glm-5.2"], ["--substrate", "headless"]),
     ],
     ids=["role-pane", "role-bg", "role-headless", "route-bg", "route-headless"],
 )
-def test_cmd_spawn_refuses_role_route_over_managed_oauth_overlay_before_gate(
+def test_cmd_spawn_composes_role_route_over_managed_oauth_overlay(
     monkeypatch: pytest.MonkeyPatch,
     routing: list[str],
     extra: list[str],
-    intent: str,
 ) -> None:
-    """The provider snapshot cannot half-compose with a routed role."""
+    """A routed spawn under an inherited managed marker composes on every
+    substrate: the marker describes the CALLING process's credential slot, not
+    this spawn, and a self-authed route beats a Keychain login (measured
+    2026-08-15), so the old refusal is gone."""
     from fno.agents import dispatch, model_routing, mux_spawn, spawn_gate
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
@@ -455,15 +484,34 @@ def test_cmd_spawn_refuses_role_route_over_managed_oauth_overlay_before_gate(
     monkeypatch.setattr(model_routing, "resolve_route", lambda *_a, **_k: route)
     monkeypatch.setattr(model_routing, "resolve_explicit_route", lambda *_a, **_k: route)
     gate_calls: list[object] = []
-    spawn_calls: list[object] = []
+    spawn_calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         spawn_gate, "run_gate", lambda *a, **k: gate_calls.append(object()) or _Gate()
     )
     monkeypatch.setattr(
-        mux_spawn, "dispatch_spawn_pane", lambda **kwargs: spawn_calls.append(kwargs)
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: spawn_calls.append(kwargs)
+        or mux_spawn.MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="s",
+            pane_id=1,
+            child_pid=None,
+            session_uuid=None,
+        ),
     )
     monkeypatch.setattr(
-        dispatch, "dispatch_spawn", lambda **kwargs: spawn_calls.append(kwargs)
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: spawn_calls.append(kwargs)
+        or dispatch.SpawnResult(
+            kind="once" if "headless" in extra else "created",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="abcd1234",
+            reply="ok" if "headless" in extra else None,
+        ),
     )
 
     from fno.agents.cli import agents_app
@@ -473,7 +521,7 @@ def test_cmd_spawn_refuses_role_route_over_managed_oauth_overlay_before_gate(
         [
             "spawn",
             "--name",
-            "unsafe-route",
+            "composed-route",
             "--harness",
             "claude",
             *routing,
@@ -483,8 +531,7 @@ def test_cmd_spawn_refuses_role_route_over_managed_oauth_overlay_before_gate(
         ],
     )
 
-    assert result.exit_code == 2, result.output
-    assert "managed OAuth provider 'makers'" in result.output
-    assert f"refusing {intent}" in result.output
-    assert gate_calls == []
-    assert spawn_calls == []
+    assert result.exit_code == 0, result.output
+    assert len(gate_calls) == 1
+    assert len(spawn_calls) == 1
+    assert spawn_calls[0]["route_env"] == route

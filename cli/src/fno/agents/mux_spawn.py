@@ -1024,19 +1024,32 @@ def _mesh_env_wrapper(
         from fno.agents.harnesses.claude import claude_stop_hook_block_cap
 
         pairs.append(f"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP={claude_stop_hook_block_cap()}")
-    # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
-    # account's own login. SCRUB inherited auth vars (env -u) so an ambient
-    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't override the account's
-    # login and bill the wrong account. Applied BEFORE the route so a route (when
-    # both are present, x-5ed4) wins endpoint+auth+model atomically (x-2af5):
-    # env(1) assignments are left-to-right last-wins, so the route pairs below
-    # override the account's, while CLAUDE_CONFIG_DIR survives.
-    if account_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
+    # Per-spawn account overlay (x-d012) and any route compose through ONE
+    # function (x-8552), same as bg/headless: scrub inherited auth vars
+    # (env -u), layer the account (profile + its own login), layer the route
+    # last so it wins endpoint+auth+model as one unit (x-2af5). env(1)
+    # assignments are left-to-right last-wins, so rendering the composed
+    # overlay as pairs below expresses that order without re-deriving it.
+    resolved_route = route_env
+    if resolved_route is None and role:
+        from fno.agents.model_routing import resolve_route
 
-        for _k in SCRUB_AUTH_VARS:
-            unset += ["-u", _k]
-        pairs += [f"{k}={v}" for k, v in account_env.items()]
+        resolved_route = resolve_route(role)
+    if account_env or resolved_route:
+        from fno.agents.account_env import SCRUB_AUTH_VARS, compose_worker_credentials
+
+        composed, _decision = compose_worker_credentials(
+            account_env, resolved_route, {}
+        )
+        # The scrub floor is claude-shaped (SCRUB_AUTH_VARS are all
+        # ANTHROPIC_*/CLAUDE_* vars): an OpenAI-protocol route on another
+        # harness must not strip unrelated inherited Claude auth. `env -u` on
+        # an unset var is a harmless no-op; `unset +=` (not `=`) so the
+        # identity/provenance unsets above are preserved.
+        if provider == "claude":
+            for _k in SCRUB_AUTH_VARS:
+                unset += ["-u", _k]
+        pairs += [f"{k}={v}" for k, v in composed.items()]
     # Set-or-clear the whole triple, never merge. A pane spawned from a
     # node-bound worker inherits that worker's env, so adding only what this
     # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE
@@ -1048,26 +1061,6 @@ def _mesh_env_wrapper(
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
-    if role or route_env:
-        route = route_env
-        if route is None:
-            from fno.agents.model_routing import resolve_route
-
-            route = resolve_route(role)
-        if route:
-            # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
-            # a lingering API key or subscription OAuth token would otherwise
-            # override it and send the routed pane back to Anthropic. `env -u`
-            # on an unset var is a harmless no-op. `unset +=` (not `=`) so the
-            # account/provenance unsets above are preserved.
-            if provider == "claude":
-                unset += [
-                    "-u",
-                    "ANTHROPIC_API_KEY",
-                    "-u",
-                    "CLAUDE_CODE_OAUTH_TOKEN",
-                ]
-            pairs += [f"{k}={v}" for k, v in route.items()]
     return ["env", *unset, *pairs, *argv]
 
 
@@ -1760,7 +1753,7 @@ def dispatch_spawn_pane(
         )
 
         try:
-            route_env = resolve_spawn_route(role, route_env, account_overlay=bool(account_env))
+            route_env = resolve_spawn_route(role, route_env)
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         launch_role = None

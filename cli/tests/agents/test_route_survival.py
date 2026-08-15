@@ -442,22 +442,28 @@ def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
     assert path in capsys.readouterr().err
 
 
-def test_a_restored_route_pays_the_managed_oauth_composition_guard(
+def test_a_restored_route_composes_under_managed_marker(
     tmp_path, monkeypatch
 ) -> None:
     """The restore goes THROUGH resolve_spawn_route, not past it.
 
-    Managed OAuth owns the default Claude credential slot, so resolve_spawn_route
-    refuses a foreign endpoint layered over it unless an account overlay is
-    present and the route is self-authed. A restored route assigned past that
-    call would be the one route in the system exempt from the check.
+    The managed-OAuth ambient guard is gone (measured 2026-08-15), so a
+    restored self-authed route under an inherited FNO_PROVIDER_AUTH=managed
+    composes like every other route - but an INCOMPLETE restored route (an
+    endpoint without its own credential) still refuses there, which is what
+    keeps the restore from being the one route exempt from the check.
     """
-    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.dispatch import dispatch_spawn
 
     _routed_claude_row(tmp_path, monkeypatch)
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "claude-managed")
-    with pytest.raises(DispatchAskError) as exc:
+
+    def _stop(**kw):
+        raise RuntimeError(f"stop before launch; route={sorted(kw['route_env'] or {})}")
+
+    monkeypatch.setattr("fno.agents.dispatch._claude_create_path", _stop)
+    with pytest.raises(RuntimeError) as exc:
         dispatch_spawn(
             name="router",
             message="go",
@@ -465,6 +471,4 @@ def test_a_restored_route_pays_the_managed_oauth_composition_guard(
             cwd=tmp_path,
             resume_session_id="sess-1",
         )
-    assert exc.value.exit_code == 2
-    assert "managed OAuth" in str(exc.value)
-    assert "no worker launched" in str(exc.value)
+    assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"

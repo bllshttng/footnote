@@ -159,49 +159,48 @@ def resolve_spawn_route(
     *,
     intent: Optional[str] = None,
     notice: Optional[Callable[[str], None]] = None,
-    account_overlay: bool = False,
     business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[dict[str, str]]:
-    """Resolve one spawn route and reject managed-OAuth half-composition.
+    """Resolve one spawn route; a pre-resolved route must be a complete unit.
 
     This is the single composition decision consumed by CLI and in-process
     pane/bg/headless births. A pre-resolved explicit route wins over ``role``;
     otherwise the normal fail-safe role resolver decides whether routing is
-    active. Managed OAuth owns the default Claude credential slot, so applying
-    a secondary endpoint/model over that snapshot is refused as one unit -
-    unless an account overlay is present AND the route carries its own auth
-    (``account_overlay``). The overlay pins CLAUDE_CONFIG_DIR (Keychain OAuth),
-    so a route without its own credential would send that OAuth token to the
-    route's foreign endpoint; a resolved route is fail-closed and always
-    carries ANTHROPIC_AUTH_TOKEN, but a hand-built partial route_env (e.g.
-    base-URL-only from a direct dispatch_spawn caller) does not, so the guard
-    stays armed for it. With a self-authed route the composition is atomic
-    (route wins endpoint+auth+model), and claude prefers an env credential
-    over Keychain OAuth, so the split-brain the guard exists to prevent cannot
-    recur.
+    active.
+
+    A pre-resolved ``route_env`` that sets an endpoint without carrying its own
+    credential is refused: it would pair that foreign endpoint with whatever
+    OAuth login the account or the ambient slot holds, the one split-brain the
+    composition cannot express (endpoint, auth, and model move as one unit).
+    Resolved routes - the role lane, the explicit CLI lane, restored routes -
+    are fail-closed and always carry ``ANTHROPIC_AUTH_TOKEN``, so this fires
+    only on hand-built partial env from a direct in-process caller.
+
+    The managed-OAuth ambient guard that used to live here is gone (measured
+    2026-08-15): claude prefers an env credential over a Keychain login, so a
+    self-authed route composed over a managed account leaves the Keychain
+    login dormant and bills the vendor - there is nothing left to refuse, and
+    the old trigger read the CALLING process's credential slot, naming an
+    account the spawn never used.
     """
     route = (
         dict(route_env)
         if route_env
         else resolve_route(role, notice=notice, business_lookup=business_lookup)
     )
-    if route and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
-        # An account overlay relaxes the refusal only when the route is
-        # self-sufficient (see docstring): without its own auth the route's
-        # foreign endpoint would be paired with the account's Keychain OAuth.
-        route_self_authed = bool(
-            route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
+    if route and route.get("ANTHROPIC_BASE_URL") and not (
+        route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
+    ):
+        route_intent = intent or (
+            f"routed role {role!r}" if role is not None else "pre-resolved route"
         )
-        if not (account_overlay and route_self_authed):
-            overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
-            route_intent = intent or (
-                f"routed role {role!r}" if role is not None else "pre-resolved route"
-            )
-            raise RouteCompositionError(
-                f"refusing {route_intent} over managed OAuth provider {overlay_id!r}: "
-                "endpoint, auth, and model must be selected as one provider route; "
-                "no worker launched."
-            )
+        raise RouteCompositionError(
+            f"refusing {route_intent}: it sets endpoint "
+            f"{route['ANTHROPIC_BASE_URL']!r} without its own credential, which "
+            "would pair that endpoint with the account's OAuth login; endpoint, "
+            "auth, and model must be selected as one provider route; "
+            "no worker launched."
+        )
     return route
 
 
@@ -724,25 +723,12 @@ def materialize_account_scrub_settings(account_env: Mapping[str, str]) -> str:
     """Write an ``--account`` spawn's auth/model scrub as a claude ``--settings``
     JSON and return its path.
 
-    The env scrub layered in ``bg_create``/``headless_create`` is dropped at the
-    ``claude --bg`` daemon fork: the daemon forks the session with its OWN env,
-    not the invoker's per-spawn overlay, so an account worker born under another
-    vendor's exported ``ANTHROPIC_*`` inherits those vars and resolves the vendor
-    model. A settings file is read by the forked session itself, so expressing
-    the scrub here survives that fork where an env overlay cannot.
-
-    Every ``SCRUB_AUTH_VARS`` entry is written as an empty string: claude reads
-    an empty settings env value as UNSET (measured 2026-07-27), which is what
-    drops the inherited vendor endpoint and model tiers. The account's FULL
-    resolved overlay is then re-applied (not just the scrub vars), so an api_key
-    account survives the fork with every env its record pins, including extra
-    entries a scrub-var allowlist would drop (custom headers, proxy vars, ...).
-    CLAUDE_CONFIG_DIR is the one exclusion: it selects which config the worker
-    reads, so it cannot live in a file read FROM that config, and it rides the
-    spawn env (which selects the per-account daemon).
-
-    Content-addressed and 0600 via the shared writer, so identical account
-    overlays reuse one file rather than accumulating per spawn.
+    Retained as the account-only spelling of :func:`route_settings_path_for`;
+    the composed case lives there. Every ``SCRUB_AUTH_VARS`` entry is written as
+    an empty string (claude reads an empty settings env value as UNSET,
+    measured 2026-07-27), the account's overlay minus ``CLAUDE_CONFIG_DIR`` is
+    re-applied on top, and the shared content-addressed writer dedupes
+    identical overlays to one file.
     """
     from fno.agents.account_env import SCRUB_AUTH_VARS
 
@@ -759,20 +745,33 @@ def route_settings_path_for(
     route_env: Optional[Mapping[str, str]],
     account_env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
-    """The ``--settings`` path a spawn carrying this overlay launches with.
+    """The ``--settings`` path a spawn carrying these overlays launches with.
 
-    ONE place expressing the route-wins-the-settings-file precedence (x-5ed4),
-    so the spawn seam and the registry row it stamps can never disagree about
-    which file a worker was launched with. Both writers are content-addressed,
-    so re-asking for an already-materialized overlay returns the same path
-    rather than writing a second file - which is what lets a caller that only
-    holds the resolved env recover the path without threading it through.
+    ONE place expressing the composed settings payload (x-5ed4, x-8552): the
+    auth/model scrub floor, the account overlay minus ``CLAUDE_CONFIG_DIR``,
+    and the route written last so it wins every credential variable as one
+    unit. An account composed with a route keeps the non-credential env its
+    record pins (custom headers, proxy vars) across the ``claude --bg`` daemon
+    fork - the old if/elif kept only the route's keys and dropped them.
+
+    ``CLAUDE_CONFIG_DIR`` never lives in the file: it selects which config the
+    worker reads, so it cannot ride a file read FROM that config; it travels on
+    the spawn env, which selects the per-account daemon. An account-only spawn
+    still writes the scrub floor even when its overlay reduces to the config
+    dir - the env scrub is dropped at the daemon fork, so the floor is the one
+    channel that survives it.
+
+    Content-addressed via the shared writer, so re-asking for an
+    already-materialized overlay returns the same path rather than writing a
+    second file - which is what lets a caller that only holds the resolved env
+    recover the path without threading it through.
     """
-    if route_env:
-        return materialize_route_settings(route_env)
-    if account_env:
-        return materialize_account_scrub_settings(account_env)
-    return None
+    if not (route_env or account_env):
+        return None
+    overlay = {
+        k: v for k, v in (account_env or {}).items() if k != "CLAUDE_CONFIG_DIR"
+    }
+    return materialize_route_settings({**overlay, **(route_env or {})})
 
 
 def read_route_settings(path: str) -> dict[str, str]:
