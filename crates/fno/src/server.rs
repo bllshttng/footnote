@@ -1065,7 +1065,27 @@ struct SocketGuard(PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        crate::proto::remove_session_files(&self.0);
+        let _ = crate::proto::remove_session_files(&self.0);
+    }
+}
+
+/// RAII count of in-flight connections, read by the FNO_E2E idle reaper. A
+/// control one-shot (`pane run`, kill-server, a probe) is NOT an attached
+/// client, so without this the reaper can fire mid-verb on a young server
+/// whose test grace is shorter than a loaded machine's verb latency, killing
+/// the server out from under a live peer.
+struct ConnAlive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ConnAlive {
+    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::Release);
+        ConnAlive(count.clone())
+    }
+}
+
+impl Drop for ConnAlive {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -9548,6 +9568,8 @@ async fn serve(
 
     // Accept loop: handshake each connection off the core loop's back.
     let accept_core_tx = core_tx.clone();
+    let conns_alive = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accept_conns = conns_alive.clone();
     tokio::spawn(async move {
         let mut next_id: u64 = 1;
         loop {
@@ -9561,12 +9583,13 @@ async fn serve(
                         "conn {id} accepted (peer pid {:?})",
                         stream.peer_cred().ok().and_then(|c| c.pid())
                     ));
-                    tokio::spawn(handle_client(
-                        stream,
-                        accept_core_tx.clone(),
-                        resolver.clone(),
-                        id,
-                    ));
+                    let alive = accept_conns.clone();
+                    let conn_core_tx = accept_core_tx.clone();
+                    let conn_resolver = resolver.clone();
+                    tokio::spawn(async move {
+                        let _alive = ConnAlive::new(&alive);
+                        handle_client(stream, conn_core_tx, conn_resolver, id).await;
+                    });
                 }
                 Err(e) => {
                     eprintln!("fno mux: accept failed: {e}");
@@ -9773,7 +9796,9 @@ async fn serve(
             // SocketGuard unlinks); NEVER std::process::exit, which would
             // orphan the pane shells and leak the socket file.
             _ = tokio::time::sleep_until(idle_deadline), if idle_exit_e2e => {
-                if *idle_count_rx.borrow() == 0 {
+                if *idle_count_rx.borrow() == 0
+                    && conns_alive.load(std::sync::atomic::Ordering::Acquire) == 0
+                {
                     eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
                     core.kill_all_panes();
                     break Flow::Shutdown;
