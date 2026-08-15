@@ -171,22 +171,7 @@ Behavior:
   holder). A dead holder's lock is stolen so a crashed run never wedges you.
   The steal is a single atomic rename, so when several runs find the same dead
   holder exactly one wins and the rest exit 3.
-- Reuses a prior verdict: a FULL, non-VOID, all-legs-green run records a
-  one-line attestation beside the lock, bound to `(full SHA, host)`. The next
-  caller on the same SHA + host reads it before taking the lock and exits 0 in
-  well under a second without re-running anything - so a second caller is never
-  blocked behind a run still holding the lock. The receipt prints its own
-  evidence (the matched SHA, the attestation's age, the earning pid, the host),
-  because a GREEN printed by a process that ran no tests is exactly the receipt
-  a reader should be able to audit; `--force` discards it and re-runs every
-  suite. A RED run deletes a matching attestation, so a stale green cannot
-  outlive a real failure; a subset pass (fewer legs executed than the required
-  scope) or a VOID mints nothing. The mode is derived from coverage, not from
-  the flag: a `--retry-failed` run with no usable failure record executes every
-  leg and earns FULL. The SHA is a complete cache key because the runner
-  hard-resets a
-  dedicated worktree to that SHA and scrubs the environment; `host=` closes the
-  one cross-environment hole a SHA key alone leaves.
+- Reuses a prior verdict: a FULL, non-VOID, all-legs-green run records a one-line attestation beside the lock, bound to `(full SHA, host)`. The next caller on the same SHA + host reads it before taking the lock. It exits 0 in well under a second, so a second caller is never blocked behind a run still holding the lock. The receipt prints its own evidence (the matched SHA, the attestation's age, the earning pid, the host). A GREEN printed by a process that ran no tests must be auditable, and `--force` discards the attestation and re-runs every suite. A RED run deletes a matching attestation, so a stale green cannot outlive a real failure. A subset pass (fewer legs executed than the required scope) or a VOID mints nothing. The mode comes from coverage, not from the flag: a `--retry-failed` run with no usable failure record executes every leg and earns FULL. The SHA is a complete cache key because the runner hard-resets a dedicated worktree to it and scrubs the environment. The `host=` field closes the one cross-environment hole a SHA key alone leaves.
 - Exits 5 (VOID) if the shared preflight worktree or the lock changed hands
   mid-run, printing which of the two it lost. The run earned no verdict, so it
   prints neither GREEN nor RED. Treat 5 as re-run, never as a code failure:
@@ -194,46 +179,21 @@ Behavior:
   which is the misattribution this tripwire exists to catch.
 - Exit 0 iff every non-advisory suite passed; `cargo audit` findings are shown
   in an advisory row and never flip the exit code.
-- `--retry-failed` re-runs only the legs named in
-  `.fno/preflight-last-failed-legs.txt` (a fast SUBSET; the record is
-  preflight's, never hand-edited, and a missing or corrupt record means every
-  leg runs). run a full preflight before the push you expect to settle green.
+- `--retry-failed` re-runs only the legs named in `.fno/preflight-last-failed-legs.txt`, a fast SUBSET. The record is preflight's, never hand-edited, and a missing or corrupt record means every leg runs. Run a full preflight before the push you expect to settle green.
 
 ## Ship-phase wiring
 
-`fno target`'s ship phase and fix loop run preflight before pushing when the
-script exists in the repo (see `skills/target/references/ship-phase.md`):
+When the script exists in the repo, `fno target`'s ship phase and fix loop run preflight before pushing (see `skills/target/references/ship-phase.md`):
 
 - Full run before the first PR push and before the settle-green push.
 - `--retry-failed` between fix-loop commits, then one full run before the push
   you expect to go green.
 
-The receipt this mints is **review-entry evidence, not merge eligibility**.
-`fno pr evidence-check` (and the ship/batch lanes behind it) requires a
-full/passed receipt bound to the exact HEAD before a PR is opened; from there,
-hosted CI re-runs everything on the PR head and the configured reviewers
-decide. Nothing local gates the merge: `fno pr merge` reads hosted CI and
-review attestations, never a preflight receipt. A receipt also survives a
-rebase: `fno pr evidence-check --allow-rebase-equivalent` accepts a full/passed
-receipt for an earlier commit whose patch ids equal HEAD's, so `fno pr rebase`
-does not destroy evidence about code that did not change. Any code edit or
-conflict resolution changes the patch ids, so the equivalence path refuses
-exactly there. The flag is review-entry only; the attestation reuse check
-inside `preflight.sh` stays strict, so a cached carrier from a different
-commit is never blessed.
+The receipt this mints is **review-entry evidence, not merge eligibility**. `fno pr evidence-check` (and the ship/batch lanes behind it) requires a full/passed receipt bound to the exact HEAD before a PR is opened. From there, hosted CI re-runs everything on the PR head and the configured reviewers decide. Nothing local gates the merge: `fno pr merge` reads hosted CI and review attestations, never a preflight receipt. A receipt also survives a rebase: `fno pr evidence-check --allow-rebase-equivalent` accepts a full/passed receipt for an earlier commit whose patch ids equal HEAD's, so `fno pr rebase` does not destroy evidence about code that did not change. Any code edit or conflict resolution changes the patch ids, so the equivalence path refuses exactly there. The flag is review-entry only. The attestation reuse check inside `preflight.sh` stays strict, so a cached carrier from a different commit is never blessed.
 
-Verdict reuse needs no caller change: it is checked inside `preflight.sh`
-itself, before the lock, so the ship phase and fix loop inherit it from the one
-invocation they already make. (A second push of an unchanged SHA therefore
-returns instantly; `--force` is there for the rare case a caller wants to
-re-prove it. The reuse check is deliberately not duplicated in `ship-phase.md`
-or the fix loop - one implementation, every reachable caller.)
+Verdict reuse needs no caller change: it is checked inside `preflight.sh` itself, before the lock, so the ship phase and fix loop inherit it from the one invocation they already make. A second push of an unchanged SHA therefore returns instantly. `--force` is there for the rare case a caller wants to re-prove it. The reuse check is deliberately not duplicated in `ship-phase.md` or the fix loop - one implementation, every reachable caller.
 
-The trigger is an existence guard (`[[ -x scripts/ci/preflight.sh ]]`), so it
-no-ops in any repo that does not ship the script - a repo-neutral convention,
-not a footnote hardcode. Skips are explicit and auditable:
-`FNO_SKIP_PREFLIGHT=1`, or a docs-only diff (only documentation, the vault dir, and `*.md` files).
-The scripts never self-skip; the skip decision lives in the caller.
+The trigger is an existence guard (`[[ -x scripts/ci/preflight.sh ]]`), so it no-ops in any repo that does not ship the script - a repo-neutral convention, not a footnote hardcode. Skips are explicit and auditable: `FNO_SKIP_PREFLIGHT=1`, or a docs-only diff (only documentation, the vault dir, and `*.md` files). The scripts never self-skip. The skip decision lives in the caller.
 
 ## Running it yourself
 
@@ -247,7 +207,4 @@ fno test smoke --changed --list         # what it would run, and what it could n
 fno test smoke --list                   # what CI actually runs
 ```
 
-`fno test smoke --keep-going` run directly in your working tree is the fast,
-non-hermetic option for checking before you commit, the same registry minus
-the worktree isolation. Preflight refuses a dirty tree on purpose; that direct
-smoke run is how you check uncommitted work.
+`fno test smoke --keep-going` in your working tree is the fast, non-hermetic option for checking before you commit, the same registry minus the worktree isolation. Preflight refuses a dirty tree on purpose. That direct smoke run is how you check uncommitted work.
