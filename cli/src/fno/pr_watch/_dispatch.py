@@ -546,15 +546,9 @@ def _run_tick(
             # A delivery record is the only persistence of a terminal PR's
             # retry/parked facts; its removal needs the same receipt every
             # other removal gets, or retries-exhausted merges vanish silently.
-            dropped.append(
-                {
-                    "key": stale_key,
-                    "reason": "delivery-pruned",
-                    "state": str(pruned.get("last_seen_state") or "UNKNOWN")
-                    if isinstance(pruned, dict)
-                    else "UNKNOWN",
-                }
-            )
+            # Delivery records carry retries/parked only, never an observed
+            # state, so no "state" field here; the reason names the removal.
+            dropped.append({"key": stale_key, "reason": "delivery-pruned"})
     swept: set[str] = set()
     failed: set[str] = set()
 
