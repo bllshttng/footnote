@@ -2457,10 +2457,11 @@ pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
 
 /// Remove every file a session leaves beside its name: the socket, the
 /// wire-version sidecar, and the pid sidecar. Shared by the server's
-/// SocketGuard and kill-server's recovery ladder so the two cannot drift
-/// apart about what a dead session leaves behind. A file that is already
-/// gone is fine (the guard may have run first); the first other failure is
-/// returned so a caller mid-recovery can report it.
+/// SocketGuard, kill-server's recovery ladder, and bind_or_probe's stale
+/// takeover so the three cannot drift apart about what a dead session
+/// leaves behind. A file that is already gone is fine (the guard may have
+/// run first); the first other failure is returned so a caller mid-recovery
+/// can report it.
 pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
     for path in [
         socket.to_path_buf(),
@@ -2507,12 +2508,10 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
             if probe_alive(path) {
                 return Ok(BindOutcome::AlreadyRunning);
             }
-            // Stale socket from a dead server: take the name over.
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            // Stale socket from a dead server: take the name over. Session
+            // files, not just the socket, so a dead holder's .pid cannot
+            // outlive the rebind and name an unrelated pid.
+            remove_session_files(path)?;
             match UnixListener::bind(path) {
                 Ok(l) => Ok(BindOutcome::Bound(l)),
                 Err(e) if socket_in_use(&e) => {

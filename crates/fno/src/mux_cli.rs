@@ -376,7 +376,8 @@ pub fn ls(json: bool) -> i32 {
             Probe::Unqueryable => println!("{name}: alive (unqueryable - older server?)"),
             Probe::Wedged => {
                 println!(
-                    "{name}: wedged (holds the socket but not accepting - kill the server process)"
+                    "{name}: wedged (holds the socket but not accepting - \
+                     `fno mux kill-server {name}` recovers it)"
                 )
             }
             Probe::Stale => println!("{name}: stale"),
@@ -875,7 +876,7 @@ fn kill_server_inner(session: &str, sock: &Path) -> KillOutcome {
         }
     }
     let deadline = Instant::now() + PROBE_TIMEOUT;
-    while !sock.exists() && Instant::now() < deadline {
+    while sock.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(30));
     }
     if !sock.exists() {
@@ -924,7 +925,7 @@ fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
 /// the server wrote at bind, SIGTERM it, SIGKILL it, and clean up what it
 /// leaves.
 ///
-/// ponytail: pid reuse. A SIGKILLed server leaves its `.pid` sidecar behind
+/// Pid reuse ceiling: a SIGKILLed server leaves its `.pid` sidecar behind
 /// (no guard runs), so a recycled pid plus a socket rebound by something
 /// else is the one shape that could aim a signal at the wrong process. The
 /// entry-state proof plus the sanity checks on the pid close it in practice;
@@ -955,7 +956,12 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
         return if e.raw_os_error() == Some(libc::ESRCH) {
             // The holder is already gone: its files are stale, and nothing
             // needs signalling. The SocketGuard never ran, so clean up here.
-            let _ = proto::remove_session_files(sock);
+            if let Err(e) = proto::remove_session_files(sock) {
+                return plain_unrecoverable(format!(
+                    "the holder is dead but its session files remain at {}: {e}",
+                    sock.display()
+                ));
+            }
             KillOutcome {
                 path: KillPath::StaleSocket,
                 note: format!("removed stale socket for session {session:?} (server was dead)"),
@@ -970,7 +976,12 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     }
     unsafe { libc::kill(pid, libc::SIGTERM) };
     if holder_gone(pid, sock, SIGTERM_GRACE) {
-        let _ = proto::remove_session_files(sock);
+        if let Err(e) = proto::remove_session_files(sock) {
+            return plain_unrecoverable(format!(
+                "the holder died but its session files remain at {}: {e}",
+                sock.display()
+            ));
+        }
         return KillOutcome {
             path: KillPath::Sigterm,
             note: format!(
@@ -980,7 +991,12 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     }
     unsafe { libc::kill(pid, libc::SIGKILL) };
     if holder_gone(pid, sock, SIGKILL_GRACE) {
-        let _ = proto::remove_session_files(sock);
+        if let Err(e) = proto::remove_session_files(sock) {
+            return plain_unrecoverable(format!(
+                "the holder died but its session files remain at {}: {e}",
+                sock.display()
+            ));
+        }
         return KillOutcome {
             path: KillPath::Sigkill,
             // Honest report, not a silent success: a SIGKILLed server never
@@ -1007,7 +1023,15 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
 fn holder_gone(pid: i32, sock: &Path, grace: Duration) -> bool {
     let deadline = Instant::now() + grace;
     loop {
-        if unsafe { libc::kill(pid, 0) } != 0 || !sock.exists() {
+        // ESRCH is the only kill(pid, 0) error that proves death: EPERM (pid
+        // recycled to a privileged process) must read as not-gone, the same
+        // read escalate()'s pre-check and server::pid_alive use.
+        if unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return true;
+        }
+        if !sock.exists() {
             return true;
         }
         if Instant::now() >= deadline {

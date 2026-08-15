@@ -300,8 +300,8 @@ def restart_command(
             log = w.get("log") or "(server log path unknown)"
             say(
                 f"fno restart: mux session '{name}' is WEDGED (holds its socket but is not "
-                f"accepting connections); the server is stuck. Kill the server process directly "
-                f"(its log: {log}).",
+                f"accepting connections). `fno mux kill-server {name}` recovers it "
+                f"(escalates to SIGTERM/SIGKILL; its log: {log}).",
                 err=True,
             )
             failures.append(f"mux: {name} wedged")

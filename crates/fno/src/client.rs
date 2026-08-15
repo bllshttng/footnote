@@ -288,8 +288,9 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             return Err(format!(
                 "server at {} is not accepting connections (connect timed out); it is \
-                 wedged. kill-server needs an accepted connection and cannot recover it - \
-                 kill the server process directly (its log is at {}), then retry.",
+                 wedged. Run `fno mux kill-server` for this session: it escalates to \
+                 SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
+                 then retry.",
                 path.display(),
                 log_path(path).display()
             ));
