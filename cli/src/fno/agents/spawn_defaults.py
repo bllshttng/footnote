@@ -615,7 +615,10 @@ def inject_spawn_defaults(
     has_provider, explicit_provider, has_model, has_effort = _scan(out[1:])
 
     inject: List[str] = []
-    from_config: List[Tuple[str, str]] = []
+    # (axis, value, source) - source is f"{rung}.{field}"; axis is the
+    # coordinate the field actually feeds (provider feeds "harness", not
+    # "provider" - see docs/architecture/axis-vocabulary.md).
+    from_config: List[Tuple[str, str, str]] = []
 
     # Lazy resolved-target provider for the substrate/permission compatibility
     # checks: explicit -p > merged config provider > harness inference.
@@ -636,6 +639,30 @@ def inject_spawn_defaults(
                     _resolved["v"] = None
         return _resolved["v"]
 
+    # Explicit-flag reads needed before the harness injection below: the
+    # route-collision refusal (AC2-HP) must see whether the caller's argv is
+    # already route-shaped (-P vendor --model m, or --route v) BEFORE a
+    # config-sourced harness gets injected, so a refusal leaves the argv
+    # untouched and nothing spawns. A bare explicit -m/--model with no -P
+    # already names the model half of a route, so injecting a config route on
+    # top would carry a DIFFERENT vendor's model behind the explicit one
+    # (cmd_spawn does not reject that combination the way it rejects -P+-m
+    # against --route, so a bare -m slipped through here and reached the
+    # routed vendor's endpoint asking for a model it likely doesn't have -
+    # the exact invisible-billing shape this field exists to kill). Also
+    # covers -P/--provider + -m/--model, which carries the same two pieces of
+    # information as --route and cmd_spawn rejects two route spellings
+    # together. A bare explicit -P/--provider (vendor) with no -m is NOT yet
+    # route-shaped (AC4-EDGE): cmd_spawn rejects vendor + --route together
+    # ("two spellings of one route") BEFORE it ever reaches the "add --model"
+    # check, so a config route or a route-collision refusal here would turn a
+    # helpful "add --model" error into a confusing one on an argv the
+    # operator never paired with a route at all.
+    explicit_model_present = has_model
+    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
+    explicit_vendor_present = explicit_vendor is not None
+    explicit_route = _flag_present(out[1:], "--route")
+
     if cfg_provider and not has_provider:
         from fno.agents.harnesses import READABLE_PROVIDERS
 
@@ -647,39 +674,50 @@ def inject_spawn_defaults(
                 file=err,
             )
             raise SystemExit(2)
+
+        # AC2-HP: the profile is about to fill the HARNESS axis (nothing on
+        # the caller's argv set it - has_provider is False, or we would not
+        # be here). If the caller's argv is already route-shaped, that route
+        # only the claude harness can carry, and a non-claude profile harness
+        # makes it unusable. This is not a precedence bug (no explicit flag is
+        # overwritten); it is a cross-axis collision, so say everything: the
+        # config path, the value, the axis it set, and the caller's own flags
+        # in the caller's own spelling.
+        route_shaped = explicit_route or (explicit_vendor_present and explicit_model_present)
+        if route_shaped and cfg_provider != "claude":
+            if explicit_route:
+                caller_spelling = f"--route {_flag_value(out[1:], '--route')}"
+            else:
+                model_val = _flag_value(out[1:], "--model", "-m")
+                caller_spelling = f"-P {explicit_vendor} --model {model_val}"
+            print(
+                f"fno agents spawn: config.{provider_rung}.provider = {cfg_provider!r} "
+                "sets the HARNESS axis,\n"
+                "and a route only the claude harness can carry is already on your "
+                "command line\n"
+                f"({caller_spelling}).\n"
+                "Nothing you passed set the harness: -P names the model vendor, a "
+                "different axis,\n"
+                "so the profile filled it.\n"
+                f"Pass -H claude to keep your route, or clear {provider_rung}.provider.",
+                file=err,
+            )
+            raise SystemExit(2)
+
         inject += ["--harness", cfg_provider]
-        from_config.append(("provider", provider_rung))  # type: ignore[arg-type]
+        from_config.append(("harness", cfg_provider, f"{provider_rung}.provider"))  # type: ignore[arg-type]
 
     # route / account (ruling 4): two new fields beside the legacy provider.
     # route carries vendor/model as vendor/model and is forwarded as --route, so
     # it inherits the flag's fail-closed resolution - an unknown vendor or a
     # missing key refuses the spawn rather than silently billing the primary,
     # which is the invisible-billing shape this node exists to kill. account
-    # forwards --account. An explicit flag always wins - including a BARE
-    # explicit -m/--model with no -P: it already names the model half of a
-    # route, so injecting a config route on top would carry a DIFFERENT
-    # vendor's model behind the explicit one (cmd_spawn does not reject that
-    # combination the way it rejects -P+-m against --route, so a bare -m
-    # slipped through here and reached the routed vendor's endpoint asking
-    # for a model it likely doesn't have - the exact invisible-billing shape
-    # this field exists to kill). Also covers -P/--provider + -m/--model,
-    # which carries the same two pieces of information as --route and
-    # cmd_spawn rejects two route spellings together.
-    explicit_model_present = has_model
-    # A bare explicit -P/--provider (vendor) with no -m already names the vendor
-    # half of a route; cmd_spawn rejects vendor + --route together ("two
-    # spellings of one route") BEFORE it ever reaches the "add --model" check,
-    # so injecting a config route here would turn a helpful "add --model" error
-    # into a confusing route-collision one on an argv the operator never paired
-    # with a route at all.
-    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
-    explicit_vendor_present = explicit_vendor is not None
-    explicit_route = _flag_present(out[1:], "--route")
+    # forwards --account.
     route_injected = False
     if cfg_route and not explicit_route and not explicit_model_present and not explicit_vendor_present:
         inject += ["--route", cfg_route]
         route_injected = True
-        from_config.append(("route", route_rung))  # type: ignore[arg-type]
+        from_config.append(("route", cfg_route, f"{route_rung}.route"))  # type: ignore[arg-type]
     # route_present covers BOTH ways --route ends up in the final argv: injected
     # from config just above, or already explicit on the caller's argv. Gating
     # the model-suppression below on route_injected alone missed the explicit
@@ -697,7 +735,7 @@ def inject_spawn_defaults(
         prov = resolved_provider()
         if prov == "claude":
             inject += ["--account", cfg_account]
-            from_config.append(("account", account_rung))  # type: ignore[arg-type]
+            from_config.append(("account", cfg_account, f"{account_rung}.account"))  # type: ignore[arg-type]
         else:
             # AC9-UI: config-sourced routing is never invisible - a substrate/
             # permission skip already warns here, so account must too rather than
@@ -779,7 +817,7 @@ def inject_spawn_defaults(
                 target = None
             if target and target == home:
                 inject += ["--model", cfg_model]
-                from_config.append(("model", model_rung))  # type: ignore[arg-type]
+                from_config.append(("model", cfg_model, f"{model_rung}.model"))  # type: ignore[arg-type]
             elif target:
                 print(
                     f"fno agents spawn: config model {cfg_model!r} is scoped to "
@@ -805,7 +843,7 @@ def inject_spawn_defaults(
         allowed = _EFFORT_ALLOWED.get(eff_provider)
         if allowed and cfg_effort in allowed:
             inject += ["--effort", cfg_effort]
-            from_config.append(("effort", effort_rung))  # type: ignore[arg-type]
+            from_config.append(("effort", cfg_effort, f"{effort_rung}.effort"))  # type: ignore[arg-type]
         else:
             # Config-sourced effort degrades open on BOTH a no-surface provider
             # AND a value the resolved provider can't map (e.g. codex + "max"):
@@ -834,7 +872,7 @@ def inject_spawn_defaults(
         if prov and _substrate_compatible(cfg_substrate, prov):
             inject += ["--substrate", cfg_substrate]
             injected_substrate = cfg_substrate
-            from_config.append(("substrate", substrate_rung))  # type: ignore[arg-type]
+            from_config.append(("substrate", cfg_substrate, f"{substrate_rung}.substrate"))  # type: ignore[arg-type]
         else:
             if not prov:
                 reason = "provider resolution failed"
@@ -862,7 +900,7 @@ def inject_spawn_defaults(
         eff_substrate = explicit_substrate or injected_substrate or "pane"
         if prov and _permission_mappable(prov, cfg_permission, eff_substrate):
             inject += ["--permission-mode", cfg_permission]
-            from_config.append(("permission_mode", permission_rung))  # type: ignore[arg-type]
+            from_config.append(("permission_mode", cfg_permission, f"{permission_rung}.permission_mode"))  # type: ignore[arg-type]
         else:
             reason = (
                 f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
@@ -876,10 +914,13 @@ def inject_spawn_defaults(
             )
 
     if from_config:
-        # AC9-UI: config-sourced routing is never invisible; name field + rung.
+        # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the
+        # AXIS a field feeds (not the field name), its value, and the config
+        # path - "provider=agents.profiles.target" reads as though a provider
+        # was set to a profile, when what actually happened is harness=codex.
         print(
             "fno agents spawn: applied "
-            + ", ".join(f"{f}={r}" for f, r in from_config),
+            + ", ".join(f"{a}={v} ({s})" for a, v, s in from_config),
             file=err,
         )
     if inject:
