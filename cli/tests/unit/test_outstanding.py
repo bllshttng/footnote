@@ -267,6 +267,8 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     decisions = json.loads(listed.stdout)["decisions"]
     assert [d["question_id"] for d in decisions] == [qid]
     assert decisions[0]["decision"] == "fold"
+    assert decisions[0]["question"] == "fold or migrate?"
+    assert decisions[0]["asked_at"]
 
 
 def test_failed_decision_record_does_not_consume_the_question(

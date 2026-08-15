@@ -75,6 +75,8 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
             "--subject", "x-7d94",
             "--decision", "fold every project's inbox",
             "--rationale", "a fold is a read; you do not migrate before you can see",
+            "--option", "fold first",
+            "--option", "migrate first",
         ],
     )
     assert res.exit_code == 0, res.output
@@ -92,7 +94,12 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     entry = json.loads(tmp_graph.read_text())["entries"][0]
     assert [d["decision_id"] for d in entry["decisions"]] == [did]
     assert entry["decisions"][0]["rationale"].startswith("a fold is a read")
+    assert entry["decisions"][0]["options"] == ["fold first", "migrate first"]
     assert entry["decisions"][0]["superseded_by"] is None
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
+    assert listed.exit_code == 0, listed.output
+    assert "options: fold first, migrate first" in listed.output
 
 
 def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path):

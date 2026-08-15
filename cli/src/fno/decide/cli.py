@@ -138,5 +138,9 @@ def list_cmd(
         )
         if d.get("rationale"):
             typer.echo(f"    rationale: {d['rationale']}")
+        if d.get("question"):
+            typer.echo(f"    question: {d['question']}")
+        if d.get("options"):
+            typer.echo(f"    options: {', '.join(str(o) for o in d['options'])}")
         if d.get("supersedes"):
             typer.echo(f"    supersedes: {d['supersedes']}")

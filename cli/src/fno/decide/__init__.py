@@ -15,6 +15,11 @@ from typing import Any
 PROJECTION_FIELDS = (
     "decision_id",
     "decision",
+    "subject",
+    "question",
+    "asked_by",
+    "asked_at",
+    "options",
     "decided_by",
     "authority_source",
     "rationale",
