@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Enforce the four-axis vocabulary in two independent scans:
+# Enforce the axis vocabulary in three independent scans:
 #   contents - no identifier, dict/JSON key, or env var named for one axis
 #              (provider / harness / model) may hold a literal from another;
+#   effort   - no line may attribute an effort spelling (thinking.type,
+#              reasoning.effort, ...) to the wrong harness;
 #   names    - no DIRECTORY named for one axis may hold another axis's
 #              implementation, judged against the DECLARED_PATH_AXIS map below.
-# Only the contents scan is baselined. See docs/architecture/four-axis-vocabulary.md
-# for the axis definitions this guards.
+# Only the contents and effort scans are baselined. See
+# docs/architecture/axis-vocabulary.md for the axis definitions this guards.
 set -euo pipefail
 
 MODE="baseline"
@@ -197,7 +199,7 @@ root_arg = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 baseline_path = Path(sys.argv[3])
 
-# --- Axis definitions (mirror docs/architecture/four-axis-vocabulary.md) -------
+# --- Axis definitions (mirror docs/architecture/axis-vocabulary.md) -------
 # Harness values unambiguous enough to auto-flag under a provider name. gemini is
 # deliberately excluded: it names a harness, a provider, and a model family, so
 # auto-flagging fires on correct code. gemini sites are reviewed via the allowlist.
@@ -1209,7 +1211,7 @@ if name_violations:
         print(f"  {v}", file=sys.stderr)
     print(
         "A directory named for one axis may not hold another axis's "
-        "implementation; see docs/architecture/four-axis-vocabulary.md",
+        "implementation; see docs/architecture/axis-vocabulary.md",
         file=sys.stderr,
     )
     # Not in write-baseline mode. The header promises the two scans are
@@ -1394,14 +1396,14 @@ if mode == "write-baseline":
         )
         sys.exit(2)
     header = [
-        "# Known four-axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).",
+        "# Known axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).",
         "# Each entry is exact: file, line, the binding, the literal, and the axis collision.",
         "# A binding named for one axis (provider/harness/model) may not hold a literal from another.",
         "# Remove an entry only in the same PR that removes the violation. Convert a genuinely",
         "# correct ambiguous site (opencode/gemini) by copying its row below, appending",
         "# `| <one-line justification>`, and prefixing it with `allowlist: `. The entry",
         "# suppresses that one finding and nothing else, and the gate fails once it matches",
-        "# nothing. See docs/architecture/four-axis-vocabulary.md.",
+        "# nothing. See docs/architecture/axis-vocabulary.md.",
         "# Regenerate: bash scripts/ci/check-axis-vocabulary.sh --write-baseline",
         "",
     ]
@@ -1425,7 +1427,7 @@ if mode == "strict":
             print(f"  {f}", file=sys.stderr)
         print(
             "No identifier/key/env named for one axis may hold a literal from "
-            "another; see docs/architecture/four-axis-vocabulary.md",
+            "another; see docs/architecture/axis-vocabulary.md",
             file=sys.stderr,
         )
         sys.exit(1)

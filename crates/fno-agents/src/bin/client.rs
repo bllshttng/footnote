@@ -2165,7 +2165,7 @@ fn format_success(
             // Emit the SAME compact single-line JSON receipt that lane produces
             // ({"name","short_id","harness","status"}). The harness axis is
             // reported under `harness`, never under a `provider` key (a provider
-            // key holding a harness literal is the four-axis defect). The in-repo
+            // key holding a harness literal is the axis defect). The in-repo
             // receipt parsers (skills/target/scripts/dispatch-node.sh and
             // backlog/advance.py) read only `short_id`, so the rename is safe.
             // serde_json::to_string (NOT _pretty) keeps it one line for the

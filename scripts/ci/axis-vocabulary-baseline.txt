@@ -1,11 +1,11 @@
-# Known four-axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).
+# Known axis vocabulary findings held by the CI ratchet (check-axis-vocabulary.sh).
 # Each entry is exact: file, line, the binding, the literal, and the axis collision.
 # A binding named for one axis (provider/harness/model) may not hold a literal from another.
 # Remove an entry only in the same PR that removes the violation. Convert a genuinely
 # correct ambiguous site (opencode/gemini) by copying its row below, appending
 # `| <one-line justification>`, and prefixing it with `allowlist: `. The entry
 # suppresses that one finding and nothing else, and the gate fails once it matches
-# nothing. See docs/architecture/four-axis-vocabulary.md.
+# nothing. See docs/architecture/axis-vocabulary.md.
 # Regenerate: bash scripts/ci/check-axis-vocabulary.sh --write-baseline
 
 cli/src/fno/agents/dispatch.py:1032: provider="codex" (provider-named binding holds a harness literal)
@@ -802,7 +802,7 @@ docs/architecture/fno-agents-registry-and-dispatch.md:215: provider="claude" (pr
 docs/architecture/fno-agents-registry-and-dispatch.md:216: provider="claude" (provider-named binding holds a harness literal)
 docs/architecture/fno-agents-registry-and-dispatch.md:217: provider="claude" (provider-named binding holds a harness literal)
 docs/architecture/fno-agents-registry-and-dispatch.md:42: provider="claude" (provider-named binding holds a harness literal)
-docs/architecture/four-axis-vocabulary.md:36: provider="claude" (provider-named binding holds a harness literal)
+docs/architecture/axis-vocabulary.md:36: provider="claude" (provider-named binding holds a harness literal)
 docs/guides/agents-quickstart.md:19: provider="codex" (provider-named binding holds a harness literal)
 docs/guides/fno-agents-list-logs.md:177: provider="claude" (provider-named binding holds a harness literal)
 docs/guides/fno-agents-send.md:109: provider="codex" (provider-named binding holds a harness literal)

@@ -8,9 +8,9 @@ See [What this substrate does NOT do](#what-this-substrate-does-not-do).
 
 ---
 
-## The four axes
+## The axes
 
-Four different things used to share the word `provider`.
+Several different things used to share the word `provider`. This document covers harness, provider, model, and account: see [docs/architecture/axis-vocabulary.md](architecture/axis-vocabulary.md) for the full set, including effort.
 They are orthogonal, and no code path may infer which one is meant from a value: `opencode` is a legal member of both the harness set and the provider set, so only position disambiguates.
 
 | Axis | Values | Where it lives |

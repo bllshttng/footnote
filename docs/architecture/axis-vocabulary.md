@@ -1,4 +1,4 @@
-# Four-axis vocabulary: harness, provider, model, effort, account
+# Axis vocabulary: harness, provider, model, effort, account
 
 This document is the single source for footnote's axis definitions.
 The code, the spawn/register receipts, the process environment, the config, and the skills all conform to the table below.
@@ -62,6 +62,47 @@ So `cli/src/fno/agents/providers/` held harness adapters for a long time while `
 Nothing failed.
 Two directories, one name, two axes: a reader who learns one cannot predict the other.
 The harness package is now `cli/src/fno/agents/harnesses/`, and the harness docs are now `docs/harnesses/`.
+
+## Effort: one axis, three harness spellings
+
+The caller sets one value on the effort axis. Each harness spells the reasoning-effort parameter differently, and `thinking.type` and `reasoning.effort` are both effort, just spelled differently.
+
+| Harness | Parameter the harness names | How fno emits it |
+|---|---|---|
+| claude | `thinking.type`, `output_config.effort` | `--effort <value>` |
+| codex | `reasoning.effort` | `-c model_reasoning_effort=<value>` |
+| opencode | (accepts the full value set) | no token emitted |
+
+The code that holds this is `_EFFORT_ALLOWED` and `effort_tokens` in `cli/src/fno/agents/mux_spawn.py`. The per-harness value sets, verbatim from `_EFFORT_ALLOWED`, appear below.
+
+| Harness | Allowed effort values |
+|---|---|
+| claude | `low`, `medium`, `high`, `xhigh`, `max` |
+| codex | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| opencode | the full superset |
+
+claude accepts `max`, and codex does not. codex accepts `minimal`, and claude does not. An `--effort` value valid for one harness can be invalid for another, so `effort_tokens` validates against the resolved harness's own set, not the union.
+
+## Provider translation, and why an unset effort costs money
+
+A harness's own effort parameter is not the final word. The provider on the other end of the wire applies its own translation, recorded verbatim from z.ai's model docs (`~/c3po/internal/zai/docs/latest-model.md`).
+
+| Input | Resolves to |
+|---|---|
+| `thinking.type` unset / `true` / `enabled` / `adaptive` | `max` (the default) |
+| `thinking.type` `false` / `disabled` / `none` / `off` | `low` (not off) |
+| `reasoning_effort` `minimal` / `light` / `low` | `low` |
+| `reasoning_effort` `medium` / `high` | `high` |
+| `reasoning_effort` `xhigh` / `max` / `ultra` | `max` |
+| `reasoning_effort` anything unrecognised | `max`, with a logged hint |
+
+Priority, verbatim: "Explicit Effort > thinking toggle > default `max`".
+
+An unset effort resolves to `max`. fno spawns most workers without one, so a mechanical task pays maximum reasoning tokens by default.
+
+## Resolver authority
+
+`inject_spawn_defaults` (`cli/src/fno/agents/spawn_defaults.py`) decides which config value fills which axis on a spawn. It holds one rule: an explicit command-line axis is never overwritten by a profile default. A profile can fill an axis the command line left unset. A profile-filled harness that cannot carry an already-typed route is the case this plan handles. When that fill makes an explicitly-set axis unusable, the refusal names the config path, the value, the axis it set, and the caller's own flags. This is a cross-axis collision, not a precedence bug. No field-wise rule was ever violated, so the report says what happened instead of what looks like an override.
 
 ## Declared directory axes
 
@@ -147,6 +188,8 @@ The guard's harness-literal set is the union the operator declared, broader than
 | `config.model_routing.providers` | provider | the genuine provider axis |
 | `config.accounts.records` | account | |
 | `config.agent_harnesses` | harness | |
+| `config.agents.defaults.effort`, `config.agents.profiles.<verb>.effort` | effort | |
+| `config.agents.defaults.provider`, `config.agents.profiles.<verb>.provider` | harness | the field name is parked by the value rule; the resolver receipt names the axis it feeds, not the field |
 | `FNO_AGENT_HARNESS` | harness | injected at spawn, read for identity |
 | spawn/register receipt `harness` | harness | |
 | spawn/register receipt `provider` | provider | present only when a route was applied |
