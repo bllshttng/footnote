@@ -67,6 +67,17 @@ wait_for_file() {
     return 1
 }
 
+# Poll for the last command in a detached reconcile chain. The result file is
+# published before retro/tidy run, so its presence cannot prove the job finished.
+wait_for_log_line() {
+    local pattern="$1" tries=40
+    while (( tries-- > 0 )); do
+        grep -q "$pattern" "$FNO_CALL_LOG" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 # ============================================================================
 # AC: fire when no stamp exists; MUTATE mode (no --dry-run); stamp written.
 # ============================================================================
@@ -78,6 +89,8 @@ STAMP1="$REPO1/.fno/.reconcile-stamp"
 RECONCILE_THROTTLE_SECONDS=900 reconcile_maybe_fire "$REPO1"
 [[ -f "$STAMP1" ]] || fail "fire: throttle stamp was not written"
 wait_for_file "$RESULT1" || fail "fire: result json never published by bg reconcile"
+wait_for_log_line "^retro drain-postmortems$" \
+    || fail "fire: detached reconcile chain never completed"
 grep -q "backlog reconcile --json" "$FNO_CALL_LOG" \
     || fail "fire: fno not invoked with 'backlog reconcile --json' (got: $(cat "$FNO_CALL_LOG"))"
 grep -q -- "--dry-run" "$FNO_CALL_LOG" \
@@ -304,6 +317,8 @@ RESULT_RF="$REPO_RF/.fno/.reconcile-result.json"
 : > "$FNO_CALL_LOG"
 FNO_RETRO_FAIL=1 RECONCILE_THROTTLE_SECONDS=0 reconcile_maybe_fire "$REPO_RF"
 wait_for_file "$RESULT_RF" || fail "chain-fail: result json not published despite retro failing"
+wait_for_log_line "^retro drain-postmortems$" \
+    || fail "chain-fail: detached chain never completed after retro failure"
 grep -q "^retro run$" "$FNO_CALL_LOG" || fail "chain-fail: retro run not attempted"
 grep -q "backlog capture tidy" "$FNO_CALL_LOG" \
     || fail "chain-fail: tidy skipped after retro failure (job aborted early)"
