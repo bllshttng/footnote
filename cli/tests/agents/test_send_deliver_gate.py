@@ -852,6 +852,7 @@ def test_real_relay_descendant_releases_captured_receipt_pipes(
     relay_marker = tmp_path / "relay-started"
     script = """
 import os
+import sys
 import time
 from pathlib import Path
 from fno.agents import dispatch
@@ -861,7 +862,7 @@ dispatch._registered_family1_state = lambda _entry: "working"
 
 def run_relay(*_args, **_kwargs):
     Path(os.environ["FNO_TEST_RELAY_MARKER"]).write_text("started")
-    time.sleep(4)
+    time.sleep(6)
 
 dispatch._run_relay_loop = run_relay
 dispatch._daemon_rpc = lambda *_args, **_kwargs: {
@@ -890,17 +891,18 @@ def deliver(entry, body, from_name, mail=None, sender_entry=None, reason_out=Non
     )
 
 dispatch._deliver_live = deliver
+t0 = time.monotonic()
 result = dispatch.dispatch_send(
     name="red",
     message="hello",
     provider=None,
     cwd=Path.cwd(),
 )
+print(f"send_elapsed={time.monotonic() - t0:.3f}", file=sys.stderr)
 print(f"{result.msg_id} delivered ({result.delivery})")
 """
     env = os.environ.copy()
     env["FNO_TEST_RELAY_MARKER"] = str(relay_marker)
-    started = time.monotonic()
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -910,15 +912,37 @@ print(f"{result.msg_id} delivered ({result.delivery})")
         check=False,
     )
 
-    assert time.monotonic() - started < 2.5
+    # Time the send itself, not the subprocess. Interpreter startup and imports
+    # are unbounded on a loaded machine, and a total-wall-clock bound flakes
+    # there while measuring nothing about pipe release. The bound comes from
+    # the relay descendant's 6s hold rather than a magic number: a send that
+    # waited on the captured pipes cannot return in under 6s, and a healthy
+    # one measures about 3s here (dispatch_send still pays two live-session
+    # discovery sweeps, which is why the margin is wide).
+    send_elapsed = next(
+        float(line.split("=", 1)[1])
+        for line in result.stderr.splitlines()
+        if line.startswith("send_elapsed=")
+    )
+    assert send_elapsed < 5.0, f"send waited on the relay pipes: {send_elapsed}s"
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(result.stdout.splitlines()) == 1
     assert result.stdout.strip().endswith("delivered (hosted)")
     assert not bus_log_path().exists()
+    # Wait for the CONTENT, not the path. `exists()` goes true the instant the
+    # file is created, so polling it can read an empty file the relay has not
+    # finished writing.
     marker_deadline = time.monotonic() + 2.0
-    while not relay_marker.exists() and time.monotonic() < marker_deadline:
+    marker = ""
+    while time.monotonic() < marker_deadline:
+        try:
+            marker = relay_marker.read_text()
+        except OSError:
+            marker = ""
+        if marker:
+            break
         time.sleep(0.01)
-    assert relay_marker.read_text() == "started"
+    assert marker == "started"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
