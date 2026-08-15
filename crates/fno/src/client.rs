@@ -1001,17 +1001,17 @@ struct View {
     /// mutation guarded by `ConnectionsView::acting`.
     #[allow(clippy::type_complexity)]
     conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
-    /// (x-b1cc) The last `fno update --check --json` probe's outcome, or
+    /// The last `fno update --check --json` probe's outcome, or
     /// `None` before the first one lands. `build_sideline_menu` reads this
     /// directly rather than waiting on a fresh probe, so the menu always
     /// opens instantly (Locked Decision 4).
     update_outcome: Option<UpdateOutcome>,
-    /// (x-b1cc) An update-readiness probe is wanted; the run loop spawns it
+    /// An update-readiness probe is wanted; the run loop spawns it
     /// at loop top and clears this. Set once after the first server frame
     /// lands, and again every time the sideline menu opens, so a menu opened
     /// an hour later is not showing an hour-old answer.
     update_probe_want: bool,
-    /// (x-b1cc) An update-readiness probe is in flight; bounds concurrent
+    /// An update-readiness probe is in flight; bounds concurrent
     /// probes to one, mirroring `conn_inflight`.
     update_probe_inflight: bool,
 }
@@ -1790,7 +1790,7 @@ enum AuxAction {
     OpenKeybinds,
     OpenSettings,
     OpenConnections,
-    /// (x-b1cc) Open the update-readiness overlay: version pair, changelog,
+    /// Open the update-readiness overlay: version pair, changelog,
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
@@ -1877,7 +1877,7 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
-/// (x-b1cc) The client's view of `fno update --check --json`'s payload - only
+/// The client's view of `fno update --check --json`'s payload - only
 /// the fields the menu row and overlay render. `#[serde(default)]` on
 /// `changelog` tolerates an absent key rather than failing the whole parse;
 /// every other field is required, so a shape the Python resolver no longer
@@ -1893,7 +1893,7 @@ struct UpdateReadiness {
     degraded: Option<String>,
 }
 
-/// (x-b1cc) The result of one `fno update --check --json` probe: parsed
+/// The result of one `fno update --check --json` probe: parsed
 /// readiness, or a degraded reason (missing binary, non-zero exit, timeout,
 /// unparseable JSON). Mirrors `connections_view::ReadOutcome` (Locked
 /// Decision 4) - the TUI computes nothing beyond folding this into rows.
@@ -1913,7 +1913,7 @@ const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
 
 /// Run `fno update --check --json` off the UI loop and fold it into an
 /// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
-/// Decision 4, x-b1cc): the event loop never blocks on this subprocess: a
+/// Decision 4): the event loop never blocks on this subprocess: a
 /// timeout, non-zero exit, or unparseable JSON all degrade rather than hang
 /// or panic (AC6-EDGE).
 async fn probe_update_readiness() -> UpdateOutcome {
@@ -1955,11 +1955,19 @@ fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPop
     };
     let mut rows = vec![PopupRow::Header("menu".into()), PopupRow::Rule];
     let mut actions = Vec::new();
-    // (x-b1cc) A probe still in flight (or never fired yet) builds the menu
+    // A probe still in flight (or never fired yet) builds the menu
     // WITHOUT an update row rather than waiting - the menu opens instantly.
     match update {
         Some(UpdateOutcome::Ok(r)) if r.update_ready => {
             rows.push(entry("⬆", "update ready"));
+            actions.push(AuxAction::OpenUpdate);
+        }
+        // A successfully-parsed probe (Python always exits 0) can still be
+        // internally degraded (e.g. `fno mux ls` failed inside the check).
+        // Without this arm that state falls to `_ => {}` and the menu shows
+        // nothing, hiding a real check failure from the operator.
+        Some(UpdateOutcome::Ok(r)) if r.degraded.is_some() => {
+            rows.push(entry("⬆", "update check degraded"));
             actions.push(AuxAction::OpenUpdate);
         }
         Some(UpdateOutcome::Degraded(_)) => {
@@ -1982,7 +1990,7 @@ fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPop
     }
 }
 
-/// (x-b1cc) Build the update-readiness overlay from the last probe outcome:
+/// Build the update-readiness overlay from the last probe outcome:
 /// version pair, up to ten changelog subjects, a rule, then the one computed
 /// guidance line - or, for a degraded probe, the degraded reason in the
 /// guidance line's place. Never an empty body (AC5-HP/AC6-EDGE): `outcome`
@@ -2888,7 +2896,7 @@ impl View {
     }
 
     /// Open the sideline MENU popup anchored at `anchor` (x-8ccf US4). Also
-    /// re-arms the update-readiness probe (x-b1cc) so a menu opened long
+    /// re-arms the update-readiness probe so a menu opened long
     /// after the last probe is never showing a stale answer; the menu itself
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
@@ -8716,7 +8724,7 @@ async fn attach_and_run(
         bool, // is_login: keep the pending notice on success, no acting flip
     )>();
 
-    // x-b1cc: the update-readiness probe runs off the UI loop and reports back
+    // The update-readiness probe runs off the UI loop and reports back
     // here. Untagged (unlike conn_rx) - there is no per-open state to
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
@@ -8736,7 +8744,7 @@ async fn attach_and_run(
         .unwrap_or_default();
     view.digest = crate::digest_overlay::on_attach(&view.session, &focused_cwd).await;
 
-    // x-b1cc: arm the ONE post-attach update-readiness probe now that the
+    // Arm the ONE post-attach update-readiness probe now that the
     // first server frame has landed. A flag set, not an await - the actual
     // subprocess spawns off the UI loop at loop top, so this costs the first
     // paint nothing.
@@ -8797,7 +8805,7 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result, is_login));
             });
         }
-        // x-b1cc: kick a wanted update-readiness probe off the UI loop, at
+        // Kick a wanted update-readiness probe off the UI loop, at
         // most one in flight. The select loop never blocks on it - the menu
         // and overlay render whatever is already in `view.update_outcome`.
         if view.update_probe_want && !view.update_probe_inflight {
@@ -9156,7 +9164,7 @@ async fn attach_and_run(
                 }
             }
             Some(outcome) = update_rx.recv() => {
-                // x-b1cc: no gen guard needed - this is a last-outcome-wins
+                // No gen guard needed - this is a last-outcome-wins
                 // cache, not a stateful modal read. Redraw so a menu open at
                 // the moment this lands shows the fresh row immediately.
                 view.update_probe_inflight = false;
@@ -19533,7 +19541,7 @@ mod tests {
         );
     }
 
-    /// AC5-HP (x-b1cc): a ready outcome puts the update row above keybinds.
+    /// AC5-HP: a ready outcome puts the update row above keybinds.
     #[test]
     fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         let outcome = UpdateOutcome::Ok(UpdateReadiness {
@@ -19595,6 +19603,35 @@ mod tests {
             .collect();
         assert_eq!(labels[0], "update check failed");
         assert_eq!(degraded_menu.actions[0], AuxAction::OpenUpdate);
+    }
+
+    /// Regression: a successfully-parsed probe (Python `--check` always exits
+    /// 0) can still be internally degraded - `update_ready: false` with
+    /// `degraded: Some(_)`. That must still surface a menu row rather than
+    /// silently falling to the `_ => {}` arm, which would hide a real check
+    /// failure the operator has no other way to see.
+    #[test]
+    fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
+        let outcome = UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: Some("same".into()),
+            source_rev: Some("same".into()),
+            changelog: vec![],
+            guidance: "update check degraded (fno mux ls --json failed) - ...".into(),
+            degraded: Some("fno mux ls --json failed".into()),
+        });
+        let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+        let labels: Vec<&str> = menu
+            .popup
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                PopupRow::Entry { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels[0], "update check degraded");
+        assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
     }
 
     /// AC5-HP: the overlay carries the version pair, changelog, and guidance.

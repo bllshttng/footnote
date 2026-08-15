@@ -2256,7 +2256,7 @@ def test_update_refreshes_the_groom_agent_too(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# update_readiness (x-b1cc): AC1-HP, AC2-HP, AC3-HP, AC4-EDGE
+# update_readiness: AC1-HP, AC2-HP, AC3-HP, AC4-EDGE
 # ---------------------------------------------------------------------------
 
 
@@ -2335,10 +2335,10 @@ def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_p
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
         agent_rows=[
-            {"name": "w1", "provider": "claude", "session_id": "s1"},
-            {"name": "w2", "provider": "claude", "session_id": "s2"},
-            {"name": "w3", "provider": "codex", "session_id": "s3"},
-            {"name": "w4", "provider": "claude", "session_id": None},
+            {"name": "w1", "harness": "claude", "session_id": "s1"},
+            {"name": "w2", "harness": "claude", "session_id": "s2"},
+            {"name": "w3", "harness": "codex", "session_id": "s3"},
+            {"name": "w4", "harness": "claude", "session_id": None},
         ],
     )
 
@@ -2464,3 +2464,47 @@ def test_update_check_rejects_force_combo() -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["update", "--check", "--force"])
     assert result.exit_code != 0
+
+
+def test_update_check_direct_call_does_not_false_positive_on_optioninfo(monkeypatch, tmp_path) -> None:
+    """Regression: a direct call passing only `check=True` (the same calling
+    convention `doctor.py` already uses for this function) must not raise, even
+    though `dry_run`/`force` are left as their un-normalized Typer `OptionInfo`
+    defaults - those are truthy objects, and the combo guard must not mistake
+    them for an explicit `--dry-run`/`--force`."""
+    monkeypatch.setattr(update, "update_readiness", lambda source=None: {"guidance": "stub"})
+
+    # No exception: dry_run/force must normalize to False like rust/no_rust/check do.
+    update.update_command(check=True)
+
+
+def test_update_readiness_not_ready_ignores_unrelated_degraded_input(monkeypatch, tmp_path) -> None:
+    """Regression: when both revs are confidently known and match (nothing to
+    update), an unrelated degraded input (mux ls failing) must not produce
+    "treated as a wire bump ... at risk" guidance - there is no update for
+    anything to be at risk from."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    runner = _make_runner(mux_rc=1)
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["update_ready"] is False
+    assert "up to date" in result["guidance"]
+    assert "at risk" not in result["guidance"]
+    assert "wire bump" not in result["guidance"].lower()
+
+
+def test_update_readiness_shells_and_revivable_none_when_unknown(monkeypatch, tmp_path) -> None:
+    """Regression (AC4-EDGE): the structured JSON fields must carry the same
+    "unknown, not zero" honesty as the guidance prose - a consumer reading
+    `shells`/`revivable` directly (not parsing `guidance`) must not see a false
+    zero for a count that was never fetched."""
+    _readiness_env(monkeypatch, tmp_path)
+    runner = _make_runner(mux_rc=1, agent_rc=1)
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["shells"] is None
+    assert result["shells_ended"] is None
+    assert result["sessions"] is None
+    assert result["revivable"] is None

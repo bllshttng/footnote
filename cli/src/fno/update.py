@@ -599,6 +599,7 @@ def _wire_label(wires: list[int]) -> str:
 def _build_update_guidance(
     *,
     update_ready: bool,
+    revs_known: bool,
     source_rev: Optional[str],
     wire_bump: bool,
     running_wires: list[int],
@@ -610,7 +611,7 @@ def _build_update_guidance(
     revivable_known: bool,
     degraded_reason: Optional[str],
 ) -> str:
-    """The one guidance line, computed rather than authored (x-b1cc). Three
+    """The one guidance line, computed rather than authored. Three
     branches - no bump, bump, degraded - and no fourth. Every branch names a
     count and a positive outcome; the degraded branch treats an unknown wire as
     a bump and, when the shell/worker count itself could not be read (a failed
@@ -619,6 +620,14 @@ def _build_update_guidance(
     fleet (AC4-EDGE)."""
     rev_label = (source_rev or "unknown")[:8]
     source_label = f"v{source_wire}" if source_wire is not None else "unknown"
+
+    # A degraded input (mux ls, agents list, wire) never overrides a *confidently*
+    # known not-ready state - if both revs were read and match, there is no update
+    # to warn about, regardless of what else failed to fetch. Only take the
+    # degraded branch when readiness itself is uncertain (a rev is unreadable) or
+    # an update actually is pending.
+    if not update_ready and revs_known:
+        return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
 
     if degraded_reason:
         shells_label = f"{shells} live shell(s)" if shells_known else "an unknown number of live shells"
@@ -651,7 +660,7 @@ def update_readiness(
 ) -> dict:
     """Compute update readiness: whether an install is waiting, whether it would
     break the wire, and the one guidance line an operator sees. The single
-    resolver (Locked Decision 1, x-b1cc) - the TUI (``crates/fno/src/client.rs``)
+    resolver (Locked Decision 1) - the TUI (``crates/fno/src/client.rs``)
     renders this payload and computes nothing itself; ``fno update --check
     --json`` exposes it directly. Every input degrades independently rather
     than raising, so a broken environment still gets a non-empty, honest
@@ -716,6 +725,7 @@ def update_readiness(
 
     guidance = _build_update_guidance(
         update_ready=update_ready,
+        revs_known=installed_rev is not None and source_rev is not None,
         source_rev=source_rev,
         wire_bump=wire_bump,
         running_wires=running_wires,
@@ -728,15 +738,19 @@ def update_readiness(
         degraded_reason=degraded_reason,
     )
 
+    # None (not 0) when the underlying fetch never happened - a count fno never
+    # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
+    # says "unknown" in prose; the structured fields need the same honesty for a
+    # consumer reading them directly instead of parsing that prose.
     return {
         "update_ready": update_ready,
         "installed_rev": installed_rev,
         "source_rev": source_rev,
         "wire": {"running": running_wires, "source": source_wire, "bump": wire_bump},
-        "shells": shells,
-        "shells_ended": shells_ended,
-        "sessions": sessions,
-        "revivable": revivable,
+        "shells": shells if shells_known else None,
+        "shells_ended": shells_ended if shells_known else None,
+        "sessions": sessions if shells_known else None,
+        "revivable": revivable if revivable_known else None,
         "changelog": changelog,
         "guidance": guidance,
         "degraded": degraded_reason,
@@ -1296,6 +1310,8 @@ def update_command(
     """
     # Normalize to plain bool: when called directly (not via CLI), Typer Option
     # defaults are OptionInfo objects, not False. Guard against both.
+    dry_run = dry_run is True
+    force = force is True
     rust = rust is True
     no_rust = no_rust is True
     check = check is True
