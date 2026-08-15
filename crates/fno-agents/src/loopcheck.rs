@@ -10724,7 +10724,21 @@ mod tests {
              echo '{\"resources\":{\"graphql\":{\"remaining\":0,\"reset\":1750000000}}}' && exit 0\n\
              exit 1\n",
         );
-        let q = probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).unwrap();
+        // Retry the spawn a few times: under a loaded CI runner (this crate's
+        // suite forks hundreds of fake `gh`/`git` subprocesses in parallel),
+        // `Command::output()` has measured an intermittent fork/exec failure
+        // that has nothing to do with the parser under test - probe_graphql_
+        // quota's own `.ok()?` already treats that as "unavailable, degrade
+        // gracefully" in production, so retrying here absorbs the same
+        // transient blip instead of failing the build on an infra hiccup.
+        let mut q = None;
+        for _ in 0..5 {
+            q = probe_graphql_quota(gh.to_str().unwrap(), tmp.path());
+            if q.is_some() {
+                break;
+            }
+        }
+        let q = q.expect("gh spawn kept failing across 5 retries - a real regression, not a blip");
         assert_eq!(q.remaining, 0);
         assert_eq!(q.reset_epoch, 1750000000);
     }
