@@ -9303,6 +9303,52 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    /// x-7496: the `blocked` producer (Notification hook) stores state and
+    /// reason exactly like `working`/`done` and gets the same capability flip
+    /// -- a `blocked` row is demoted from the scraper by construction, not by
+    /// a special case, so a stale screen-manifest verdict can never shadow a
+    /// hook-reported Waiting row.
+    #[test]
+    fn handle_report_blocked_stores_reason_and_clears_screen_state() {
+        let home = tmp_home("report-blocked");
+        seed_stream_row(&home, "worker-A", "repW");
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].screen_state = Some(state::ScreenStateReport {
+                state: "idle".into(),
+                rule: "idle_prompt".into(),
+                seq: 4,
+                at: "2026-07-02T00:00:00Z".into(),
+                ttl_ms: Some(120_000),
+                answerable: None,
+            });
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+        let resp = handle_report(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.report",
+                json!({"session_id": "uuid-repW", "seq": 1, "state": "blocked", "reason": "permission to run rm"}),
+            ),
+        );
+        assert!(!resp.is_err(), "report must return Ok: {resp:?}");
+        assert_eq!(resp.result().unwrap()["stored"], true);
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let rep = reg.entries[0]
+            .inside_leg
+            .as_ref()
+            .expect("inside_leg stored");
+        assert_eq!(rep.state, state::InsideLegState::Blocked);
+        assert_eq!(rep.reason.as_deref(), Some("permission to run rm"));
+        assert_eq!(
+            reg.entries[0].screen_state, None,
+            "capability flip must clear the scrape verdict on a blocked report too"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     /// AC-X2-1 seq: a `seq <= last_seq` is dropped (the newer report wins) and
     /// emits `inside_leg_report_dropped`.
     #[test]
