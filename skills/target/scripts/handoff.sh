@@ -590,10 +590,20 @@ fi
 _NODE_8HEX="${NODE_ID:3:8}"
 CHILD_NAME="tgt-${_NODE_8HEX}-${_HARNESS}-g${CHILD_GEN}"
 
-# Build command: inject no-merge when auto_merge_approved != true
+# Build command: inject the refusal flag when auto_merge_approved != true.
+# The flag is the attributable carrier in the command; the exported env var is
+# the MECHANICAL carrier (x-9d11): the successor's init folds TARGET_NO_MERGE
+# even if it never passes the flag through, so a post-compaction or thin-skinned
+# child cannot inherit merge authority the parent refused.
 SPAWN_FLAGS=""
 if [ "$AUTO_MERGE_APPROVED" != "true" ]; then
-  SPAWN_FLAGS="no-merge"
+  SPAWN_FLAGS="--no-merge"
+  export TARGET_NO_MERGE=1
+else
+  # Clear-on-absent like every sibling setter (review round 7): a carrier
+  # leaked into this session's env must not outlive a manifest that granted
+  # merge authority.
+  unset TARGET_NO_MERGE
 fi
 if [ -n "$TARGET_SIZE" ]; then
   SPAWN_FLAGS="$SPAWN_FLAGS $TARGET_SIZE"

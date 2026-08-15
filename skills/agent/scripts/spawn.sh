@@ -404,6 +404,34 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
 cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
+# x-9d11 mechanical refusal carrier: when the spawn message itself carries the
+# --no-merge posture flag (normalize.sh or harness_map injected it), export the
+# env var too so the worker's init folds the refusal even if it never passes
+# the flag through to `fno target start/init` (post-compaction, thin skill
+# layer). The flag stays the attributable carrier; the env is the backstop.
+# Scoped to /target-family first tokens (same vocabulary as harness_map's
+# message_carries_no_merge): a /think or /review prompt that MENTIONS the flag
+# arms nothing, and the message is authoritative over any inherited carrier.
+# A non-family message clears NOTHING: an operator's exported TARGET_NO_MERGE is
+# a documented control input, and a leaked carrier surviving a prose worker errs
+# toward refusing merges, the safe side (round 8; mirrors the cli.py edit).
+case "${MESSAGE%% *}" in
+  /target|/fno:target|\$fno:target)
+    case " $MESSAGE " in
+      *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
+      *" no-merge "*)
+        # Bare token outside flag position: ambiguous (legacy FLAGS-then-token
+        # spelling, or a description that mentions the word). Neither arm nor
+        # clear - dropping an operator's exported refusal here would err toward
+        # granting merges. The worker's init prints the loud no-op note.
+        ;;
+      *)
+        [[ -n "${TARGET_NO_MERGE:-}" ]] && echo "spawn: inherited TARGET_NO_MERGE cleared; /target-family message carries no --no-merge flag and the message is authoritative" >&2
+        unset TARGET_NO_MERGE 2>/dev/null || true
+        ;;
+    esac
+    ;;
+esac
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"
 # EXIT trap guarantees cleanup even if interrupted (SIGINT) mid-spawn; the manual

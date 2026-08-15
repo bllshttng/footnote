@@ -398,7 +398,7 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 The walker pre-generates a `session_key` in `gen_session_key()` (shape: `{utc}-mw{pid}-{6hex}`; the `mw` infix distinguishes megawalk-assigned keys from target-assigned keys in logs). `MegawalkDispatcher` injects two env vars before each dispatch:
 
 - `TARGET_SESSION_ID=<session_key>` - consumed by `init-target-state.sh`, which uses the preset value verbatim rather than generating its own.
-- `CONTINUE_PROMPT="/target no-merge <unit.id>"` (or `/target <unit.id>` when `--allow-merge`).
+- `CONTINUE_PROMPT="/target --no-merge <unit.id>"`. When `--allow-merge` is set, `/target <unit.id>` instead.
 
 Three consequences flow from this:
 

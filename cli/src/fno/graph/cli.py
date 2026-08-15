@@ -2808,7 +2808,7 @@ def cmd_update(
     dispatch_verb: Optional[str] = typer.Option(
         None,
         "--dispatch-verb",
-        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs at dispatch, not here. Pass 'null' to clear (revert to /target no-merge).",
+        help="Verb a dispatcher launches this node with (US3), e.g. /think. Validated against config.dispatch.allowed_verbs at dispatch, not here. Pass 'null' to clear (revert to the /target --no-merge default).",
     ),
     dispatch_brief: Optional[str] = typer.Option(
         None,
@@ -4251,7 +4251,7 @@ def cmd_dispatch_lanes(
     Selects distinct-domain ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
     ``.fno/config.local.toml`` (x-cbce: own project.id), and
-    spawns a detached ``/target no-merge`` worker rooted there. Prints one JSON
+    spawns a detached ``/target --no-merge`` worker rooted there. Prints one JSON
     receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
     nothing (sequential: use ``fno backlog advance`` / ``next``).
     """
@@ -7741,7 +7741,7 @@ def cmd_advance(
         help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
     ),
 ) -> None:
-    """Dispatch a fresh /target no-merge worker for the next now-unblocked node.
+    """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
 
     Merge-triggered auto-continue (ab-3cd195b6). Opt-in and non-fatal: when
     auto-continue is disabled it emits advance_skipped{disabled} and dispatches
@@ -8313,7 +8313,7 @@ def cmd_reconcile(
             # Merge-triggered auto-continue (ab-3cd195b6 / task 2.1): now that
             # this node's close has committed (AC1-RACE ordering: advance runs
             # only AFTER the locked_mutate_graph above), dispatch a fresh
-            # /target no-merge worker for the next now-unblocked node IF
+            # /target --no-merge worker for the next now-unblocked node IF
             # auto-continue is armed for the project. advance gates on
             # enablement internally (a no-op advance_skipped{disabled} when
             # off) and is strictly non-fatal: a failed advance never fails the

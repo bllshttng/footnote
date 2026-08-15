@@ -616,7 +616,7 @@ def prepare_batch(
     shared worktree, opening a new batch if needed.
 
     Returns one of:
-      {"mode": "solo", "reason": ...}                          -> dispatch /target no-merge
+      {"mode": "solo", "reason": ...}                          -> dispatch /target --no-merge
       {"mode": "batched", "domain", "worktree", "branch", "batch_id"}
 
     Fail-safe: ANY error (node lookup, worktree ensure, disabled) degrades to

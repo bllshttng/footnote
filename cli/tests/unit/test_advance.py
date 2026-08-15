@@ -488,7 +488,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
     assert cmd[-2] == "target-ab-2222aaaa"
-    assert cmd[-1] == "/target no-merge ab-2222aaaa"  # no-merge rides as a token
+    assert cmd[-1] == "/target --no-merge ab-2222aaaa"  # no-merge rides as a token
     # subscription lane only - never the API-credit/-p lane.
     assert "-p" not in cmd and "--print" not in cmd and "--bare" not in cmd
 
@@ -536,7 +536,7 @@ def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
     assert sid == "abc12345"
     cmd = captured["cmd"]
     assert "--fresh" in cmd and "--cwd" not in cmd
-    assert cmd[-1] == "/target no-merge ab-2222aaaa"
+    assert cmd[-1] == "/target --no-merge ab-2222aaaa"
 
 
 def test_spawn_worker_default_substrate_bg(monkeypatch):
@@ -1537,7 +1537,7 @@ def test_spawn_worker_auto_merge_read_failure_no_merge(monkeypatch):
 
     monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
     adv._spawn_worker("ab-2222aaaa", "/work/dir")
-    assert captured["cmd"][-1] == "/target no-merge ab-2222aaaa"
+    assert captured["cmd"][-1] == "/target --no-merge ab-2222aaaa"
 
 
 # ---------------------------------------------------------------------------
@@ -1759,7 +1759,7 @@ def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
     assert adv_captured["provider"] == disp_captured["provider"] == "codex"
     assert adv_captured["extra_env"] == disp_captured["account_env"] == env
     # Codex takes its own command surface, never a raw claude slash verb.
-    assert disp_captured["message"] == f"$fno:target no-merge {DISPATCH_NODE['id']}"
+    assert disp_captured["message"] == f"$fno:target --no-merge {DISPATCH_NODE['id']}"
     # Both launchers leave one post-spawn cutover receipt naming the same
     # destination, triggering window, and reason.
     for receipt in (
@@ -1847,7 +1847,7 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
         lambda **_kw: {
             "harness": resolved_harness,
             "substrate": substrate,
-            "command": "/target no-merge ab-2222aaaa",
+            "command": "/target --no-merge ab-2222aaaa",
             "env": {},
         },
     )

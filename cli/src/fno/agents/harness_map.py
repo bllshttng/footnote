@@ -51,15 +51,59 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # maps it per-harness for the builtin `dispatch_command`, so the per-harness
 # spelling lives in ONE place (command_surface), not five literal strings.
 #
-# The `no-merge` token is the merge POSTURE, resolved from config.dispatch.auto_merge
-# rather than baked in. It was baked in until x-8e59, which made this the one
-# reader of that key that was deaf to it: the two callers that did honor it
-# (backlog/advance.py, skills/agent/scripts/normalize.sh) worked around the
-# builtin by passing an explicit command instead of fixing it, so an operator
-# who set the key still got `/target no-merge <id>` here, a manifest frozen at
-# auto_merge_approved: false, and a refusal from `fno pr merge`.
-_AUTONOMOUS_COMMAND = "/target no-merge {id}"
+# The `--no-merge` flag is the merge POSTURE, resolved from
+# config.dispatch.auto_merge rather than baked in. It was the free-text
+# `no-merge` token until x-8e59 (config-deaf) and x-9d11 (free text stopped
+# being a control input): the flag is the deterministic carrier that survives
+# `fno target start` resolving its argument to a bare node id, and unlike the
+# token it cannot be manufactured by prose an LLM wrote into a brief.
+_AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
+
+# The /target-family first tokens (the per-harness spellings normalize_command
+# emits). The refusal carrier's vocabulary is scoped to these: rewriting the
+# args of another slash verb would mutate its instruction text, and prose is
+# not a control input (x-9d11).
+_TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
+
+
+def normalize_legacy_no_merge(command: str) -> str:
+    """Rewrite the legacy bare ``no-merge`` token to the flag in a
+    /target-family command. Scoped to the two positions the legacy injectors
+    actually produced (round 12): the token directly after the verb
+    (``/target no-merge <arg>``, the documented spelling) or trailing
+    (``/target <arg> no-merge``, the old normalize.sh append and keep_going
+    build). A MID-STRING token is left alone on purpose: a /target argument is
+    free text (``/target fix the no-merge carrier bug`` is a real feature
+    description), and rewriting the word anywhere would mutate prompt text the
+    operator typed and arm a refusal from prose (round 10)."""
+    parts = command.split()
+    if not parts or parts[0] not in _TARGET_FAMILY:
+        return command
+    if len(parts) >= 2 and parts[1] == "no-merge":
+        parts[1] = "--no-merge"
+    elif len(parts) >= 3 and parts[-1] == "no-merge":
+        parts[-1] = "--no-merge"
+    else:
+        return command
+    return " ".join(parts)
+
+
+def is_target_family(message: str) -> bool:
+    """True when the message's first token is a /target-family command
+    spelling - the one vocabulary that can carry merge-posture flags."""
+    first = message.split(maxsplit=1)[0] if message else ""
+    return first in _TARGET_FAMILY
+
+
+def message_carries_no_merge(message: str) -> bool:
+    """True when a /target-family message carries the ``--no-merge`` flag.
+
+    The family gate is load-bearing: a /think or /review prompt that MENTIONS
+    the flag arms no env carrier, and neither does prose. The word-padded
+    match is too: ``--no-merge-guard`` (a different flag) is not the carrier
+    (round 8, angle A)."""
+    return is_target_family(message) and " --no-merge " in f" {message} "
 
 
 def _refused_reason(harness: str) -> str:
@@ -180,11 +224,11 @@ def normalize_command(command: str, harness: str) -> str:
     """Translate a claude-syntax footnote slash command to ``harness``'s native
     invocation - the single normalizer both dispatch surfaces route through.
 
-    ``/target no-merge {id}`` becomes, per the harness ``command_surface``:
-      - ``slash`` (claude, agy, opencode) -> ``/[slash_prefix]target no-merge {id}``
+    ``/target --no-merge {id}`` becomes, per the harness ``command_surface``:
+      - ``slash`` (claude, agy, opencode) -> ``/[slash_prefix]target --no-merge {id}``
         (prefix ``""`` for claude/agy -> verbatim; ``"fno:"`` for opencode's
         plugin-namespaced palette + ``opencode run --command`` -> ``/fno:target``)
-      - ``codex-skill`` (codex)           -> ``$fno:target no-merge {id}`` (swap the
+      - ``codex-skill`` (codex)           -> ``$fno:target --no-merge {id}`` (swap the
         leading ``/verb`` for ``$fno:verb``; codex exec expands the plugin skill)
       - ``refused`` (gemini)              -> a loud :class:`DispatchResolveError`
         naming agy; the harness is deprecated and has no dispatch lane.
@@ -220,7 +264,7 @@ def normalize_command(command: str, harness: str) -> str:
 
 def dispatch_command(harness: str, allow_merge: bool = False) -> str:
     """Builtin autonomous dispatch command for ``harness``: the per-harness
-    normalization of ``/target no-merge {id}``, or of ``/target {id}`` when
+    normalization of ``/target --no-merge {id}``, or of ``/target {id}`` when
     ``allow_merge``. ``config.dispatch.command`` and a node ``dispatch_verb``
     override this in :func:`resolve_dispatch`, which is also where
     ``config.dispatch.auto_merge`` is read into ``allow_merge``.
@@ -302,7 +346,7 @@ def resolve_dispatch(
       substrate  : explicit > config.dispatch.substrate > per-harness default
       command    : explicit > node ``verb`` > config.dispatch.command > builtin
       merge      : builtin rung only; ``config.dispatch.auto_merge`` picks
-                   ``/target {id}`` over the default ``/target no-merge {id}``
+                   ``/target {id}`` over the default ``/target --no-merge {id}``
 
     ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
     (``config.dispatch.allowed_verbs`` > built-in ``/target``, ``/think``) and
@@ -427,7 +471,7 @@ def resolve_dispatch(
         template = f"{chosen_verb} {{id}}"
         decision.append(f"command=verb({chosen_verb})")
     else:
-        # Per-harness builtin (x-a5e4): the normalize of `/target no-merge {id}` -
+        # Per-harness builtin (x-a5e4): the normalize of `/target --no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
         # refused. config.dispatch.command overrides.
         #
@@ -480,7 +524,22 @@ def resolve_dispatch(
 
     # 4. brief -> TARGET_BRIEF env only (never the command line). Byte-capped at
     # the 8 KB env budget; an oversized brief is an explicit error, not truncation.
+    # x-9d11 refusal carrier, at the ONE choke point every spawn surface resolves
+    # through (skill spawn.sh, dispatch.py pane, advance/recovery/keep_going bg):
+    # when the command carries the refusal, the env carries it too, so a worker
+    # that drops the flag post-compaction still folds the refusal at init.
+    # The /target-family gate and the legacy-token rewrite live in
+    # normalize_legacy_no_merge / message_carries_no_merge so every spawn lane
+    # (including direct `fno agents spawn` messages that never reach this
+    # resolver) judges the SAME vocabulary.
+    normalized = normalize_legacy_no_merge(resolved_command)
+    if normalized != resolved_command:
+        resolved_command = normalized
+        decision.append("command=legacy-no-merge->--no-merge")
     env: dict[str, str] = {}
+    if message_carries_no_merge(resolved_command):
+        env["TARGET_NO_MERGE"] = "1"
+        decision.append("no-merge->TARGET_NO_MERGE")
     if brief:
         n_bytes = len(brief.encode("utf-8"))
         if n_bytes > _BRIEF_MAX_BYTES:

@@ -428,7 +428,7 @@ class TestCutoverMergePosture:
     """Quota exhaustion must not change who may merge."""
 
     def test_cutover_command_keeps_no_merge_under_auto_merge_config(self, monkeypatch) -> None:
-        # `fno dispatch`'s normal path always spawns `/target no-merge`. Routing
+        # `fno dispatch`'s normal path always spawns the no-merge `/target`. Routing
         # the cutover through the full resolver would read
         # config.dispatch.auto_merge and could hand the rerouted worker merge
         # authority the non-cutover launch never gets.
@@ -441,7 +441,7 @@ class TestCutoverMergePosture:
         )
         for harness in ("claude", "codex"):
             cmd = dm._cutover_command(harness, "ab-1111aaaa")
-            assert "no-merge" in cmd, (harness, cmd)
+            assert "--no-merge" in cmd, (harness, cmd)
             assert "ab-1111aaaa" in cmd
 
     def test_unresolvable_harness_renders_nothing(self) -> None:

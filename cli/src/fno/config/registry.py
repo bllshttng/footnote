@@ -245,7 +245,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.dispatch.* (harness-capability map overlay; `fno dispatch resolve`) ---
     "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
     "dispatch.substrate": Meta("advanced", "Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).", default_source="default"),
-    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}; empty = '/target no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve (a leading /verb becomes $fno:verb on codex, /fno:verb on opencode, and is refused on the deprecated gemini); a non-slash template passes through literally.", default_source="default"),
+    "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally.", default_source="default"),
     "dispatch.allowed_verbs": Meta("advanced", "Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).", default_source="default"),
     "dispatch.auto_merge": Meta("advanced", "Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false.", default_source="default"),
     "dispatch.on_exhaustion": Meta("advanced", "On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.", default_source="default"),
@@ -347,7 +347,7 @@ FIELD_META: dict[str, Meta] = {
         question="Auto-merge PRs after external review passes?",
     ),
     "auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
-    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the branch after an auto-merge."),
+    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Executor paths only (`fno pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook."),
     "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),

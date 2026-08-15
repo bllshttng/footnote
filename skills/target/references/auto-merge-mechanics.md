@@ -40,9 +40,11 @@ State update rules per outcome:
 | outcome | State update |
 |---------|-------------|
 | `merged` | Append `$PR_NUMBER` to `merged_prs` |
-| `queued` | Append `$PR_NUMBER` to `merge_auto_queued` |
+| `held` | No state change (checks not green, retry when green) |
 | `failed` | Append `{pr: $PR_NUMBER, reason: ...}` to `merge_failed` (NOT a target failure - PR exists) |
-| `skipped` | No state change (auto-merge disabled: `enabled: false`) |
+| `skipped` | No state change (auto-merge disabled, or finalize already armed GitHub's queue) |
+
+No `queued` outcome exists (x-9d11): the merge verb executes with in-process checks enforcement. GitHub's native auto-merge queue is armed by `fno-agents finalize` alone.
 
 A `failed` outcome does NOT block the promise. The PR was created successfully; merge failure is post-hoc.
 

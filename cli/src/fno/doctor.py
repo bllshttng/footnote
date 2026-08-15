@@ -865,17 +865,21 @@ def _mission_active_count() -> int:
         return 0
 
 
-def _auto_merge_armed_manifests() -> int:
-    """Worktree manifests whose resolved ``auto_merge_approved`` is true.
+def _auto_merge_armed_manifests() -> dict[str, int]:
+    """Worktree manifests whose resolved ``auto_merge_approved`` is true,
+    counted by ``auto_merge_source`` (x-9d11).
 
     Each is one run's standing merge authority; the count is the legibility
-    point (an armed manifest set against an operator who expects to review).
-    Scans BOTH worktree homes: the fno-managed base (``paths.worktrees_base()``)
-    and the harness-native ``<repo>/.claude/worktrees`` (the default policy's
-    location, which the fno base does not cover, so without it the count reads
-    0 on a default-config machine). Uses ``parse_target_state`` so a quoted
-    ``"true"`` coerces instead of string-matching to nothing. Fixed-depth globs
-    avoid descending into each worktree's own tree the way rglob would.
+    point (an armed manifest set against an operator who expects to review),
+    and the per-source breakdown answers the operator's first question - WHICH
+    layer set each posture. A manifest predating the source field counts under
+    ``unknown``, never a guessed origin. Scans BOTH worktree homes: the
+    fno-managed base (``paths.worktrees_base()``) and the harness-native
+    ``<repo>/.claude/worktrees`` (the default policy's location, which the fno
+    base does not cover, so without it the count reads 0 on a default-config
+    machine). Uses ``parse_target_state`` so a quoted ``"true"`` coerces
+    instead of string-matching to nothing. Fixed-depth globs avoid descending
+    into each worktree's own tree the way rglob would.
     """
     bases: list[Path] = []
     try:
@@ -896,9 +900,9 @@ def _auto_merge_armed_manifests() -> int:
     try:
         from fno.cost._register import parse_target_state
     except Exception:
-        return 0
+        return {}
 
-    count = 0
+    counts: dict[str, int] = {}
     seen: set[Path] = set()
     for base in bases:
         if not base.is_dir():
@@ -913,11 +917,13 @@ def _auto_merge_armed_manifests() -> int:
                     continue
                 seen.add(real)
                 try:
-                    if parse_target_state(str(mf)).get("auto_merge_approved") is True:
-                        count += 1
+                    state = parse_target_state(str(mf))
+                    if state.get("auto_merge_approved") is True:
+                        source = state.get("auto_merge_source") or "unknown"
+                        counts[str(source)] = counts.get(str(source), 0) + 1
                 except (OSError, ValueError):
                     continue
-    return count
+    return counts
 
 
 def _read_posture_stamp() -> Optional[dict[str, Any]]:
@@ -1010,12 +1016,19 @@ def _silent_switch_report() -> dict[str, Any]:
     # become a live, silent irreversible action worth a doctor line.
     armed = _auto_merge_armed_manifests()
     if armed and am is True:
+        total = sum(armed.values())
+        # Name WHICH layer set each posture (x-9d11): "24 manifests" hides that
+        # 12 came from config and 12 from an env grant; the breakdown is the
+        # actionable half of the count.
+        breakdown = ", ".join(
+            f"{n} {src}" for src, n in sorted(armed.items(), key=lambda kv: -kv[1])
+        )
         findings.append(
             {
                 "direction": "irreversible",
                 "switch": "auto_merge_approved (worktree manifests)",
-                "count": armed,
-                "count_label": "manifest(s)",
+                "count": total,
+                "count_label": f"manifest(s): {breakdown}",
                 "command": "fno config set auto_merge.enabled false",
             }
         )

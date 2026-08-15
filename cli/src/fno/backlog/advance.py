@@ -11,8 +11,8 @@ group across merges with no manual re-invocation.
 Locked Decisions this module embodies:
   1. Decoupled from the loop driver - driven by the merge event, so megawalk /
      /target / /megatron all inherit auto-continue (no driver-specific code).
-  4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [no-merge] <id>``
-     (the ``no-merge`` token is gated on ``config.dispatch.auto_merge``; x-4391).
+  4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [--no-merge] <id>``
+     (the ``--no-merge`` flag is gated on ``config.dispatch.auto_merge``; x-4391).
   5. Concurrency via ``fno claim``: honor ``walker:<root>`` (no double-dispatch
      during a live walk); reserve ``dispatch:<id>`` (O_EXCL dedup + bridge token
      that outlives this short-lived process until the worker owns ``node:<id>``,
@@ -1031,7 +1031,7 @@ def _spawn_worker(
     Merge posture (x-4391) stays a launcher decision, never baked into a node verb:
     the default builtin bakes ``no-merge``; ``config.dispatch.auto_merge`` routes the
     ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
-    ``/target [no-merge] --reconcile <manifest> {id}`` template. The agent is named
+    ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
     ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
     resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
 
@@ -1090,7 +1090,7 @@ def _spawn_worker(
         "settings": settings_obj,
     }
     if is_reconcile:
-        _nm = "" if allow_merge else "no-merge "
+        _nm = "" if allow_merge else "--no-merge "
         resolve_kwargs["command"] = (
             f"/target {_nm}--reconcile {reconcile_manifest} {{id}}"
         )
@@ -1139,7 +1139,14 @@ def _spawn_worker(
     # here too, so `--provider <harness>` selects the CLI while extra_env selects
     # the account (x-0676; --provider never carries a record id).
     merged_env = {**spawn_env, **(extra_env or {})}
-    run_env = {**os.environ, **merged_env} if merged_env else None
+    # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so the
+    # inherited TARGET_NO_MERGE never survives into a successor the resolver just
+    # granted allow-merge (this verb runs as a subprocess of the prior no-merge
+    # worker, whose exported carrier would otherwise silently kill the config's
+    # auto-merge posture - review round 5). Dropped from the base BEFORE the
+    # merge so the resolver's own value (either way) is the only one that lands.
+    base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
+    run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
     proc = subprocess.run(
         cmd, capture_output=True, text=True, timeout=600, env=run_env
     )
@@ -1401,7 +1408,7 @@ def dispatch_lanes(
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
     per pick, LD#8), then for each pick: isolates a worktree off origin/main,
     seeds its per-lane `.fno/settings.local.yaml` (x-cbce), and spawns a detached
-    `claude --bg` `/target no-merge` worker rooted in that worktree. The worker's
+    `claude --bg` `/target --no-merge` worker rooted in that worktree. The worker's
     `fno target init` reconciles the already-held slot rather than acquiring a
     fresh one.
 
@@ -1961,7 +1968,7 @@ def advance(
 #
 # advance_dependents() closes that gap by following `blocked_by` EDGES instead of
 # a project-scoped selection: for each now-unblocked DIRECT dependent in a
-# DIFFERENT project, it spawns `/target no-merge <dep> --cwd <dep project root>`.
+# DIFFERENT project, it spawns `/target --no-merge <dep> --cwd <dep project root>`.
 # The two paths are intentionally distinct (Domain Pitfall: dispatch-by-edge vs
 # select-next must not be conflated) and share the same dispatch:<id> dedup +
 # node:<id> liveness + spawn machinery, so the same successor observed by both

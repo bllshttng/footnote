@@ -173,6 +173,11 @@ struct ManifestFields {
     /// where every refusal outranks every grant). Gates arming GitHub's native
     /// auto-merge at a green terminal. `None` = the key was absent.
     auto_merge_approved: Option<bool>,
+    /// Which input set the posture (x-9d11): config | flag-no-merge |
+    /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
+    /// surfaced as `unknown`, never guessed. Advisory only: arming still reads
+    /// `auto_merge_approved`.
+    auto_merge_source: Option<String>,
 }
 
 /// Does this line close the double-quoted scalar `init-target-state.sh` opened?
@@ -292,6 +297,10 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             "auto_merge_approved" if !line_untrusted && m.auto_merge_approved.is_none() => {
                 m.auto_merge_approved = Some(v == "true")
             }
+            // Provenance (x-9d11): same untrusted-line rule as the posture
+            // itself - prose inside the `input` scalar must not be able to
+            // claim an origin either. Advisory, so no separate trust gate.
+            "auto_merge_source" if !line_untrusted => set(&mut m.auto_merge_source, v),
             _ => {}
         }
     }
@@ -873,7 +882,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm_auto_merge(&reason, approved)
     {
         match optional_review_block_reason(&cwd) {
-            None => (arm_auto_merge(&cwd), None),
+            None => arm_auto_merge(&cwd),
             Some(blocked) => {
                 eprintln!("finalize: native auto-merge withheld: {blocked}");
                 (false, Some(blocked))
@@ -912,6 +921,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // Re-homed from `fno worker ship`'s return dict (x-1951): the fact now
         // belongs to the terminal that authorized it, not to PR creation.
         "auto_merge_armed": auto_merge_armed,
+        // Provenance (x-9d11): `unknown` when the manifest predates the field,
+        // so an operator reading the event can always tell WHICH layer set the
+        // posture - or that the manifest cannot say.
+        "auto_merge_source": m.auto_merge_source.as_deref().unwrap_or("unknown"),
         // x-cdc7 HALF ONE: the sha of the rescue commit, or null on a clean
         // tree / non-git dir / commit failure.
         "wip_commit_sha": wip_commit_sha,
@@ -2093,10 +2106,10 @@ fn covered_head_from_event(cwd: &Path) -> Option<String> {
     latest.filter(|s| !s.is_empty())
 }
 
-fn arm_auto_merge(cwd: &Path) -> bool {
+fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
     let Some((number, _url)) = gh_pr_ref(cwd) else {
         eprintln!("finalize: no open PR found for branch; auto-merge not armed");
-        return false;
+        return (false, None);
     };
     // Stacked-base guard: a PR merged into a base branch that no longer leads to
     // the default branch reports MERGED and ships nothing. This arm reaches
@@ -2129,7 +2142,7 @@ fn arm_auto_merge(cwd: &Path) -> bool {
                     "finalize: auto-merge NOT armed for PR {number}: {}",
                     String::from_utf8_lossy(&o.stderr).trim()
                 );
-                return false;
+                return (false, Some("stale base".to_string()));
             }
             Some(0) => {}
             // Includes None (killed by a signal): unevaluated, so arm anyway.
@@ -2144,6 +2157,11 @@ fn arm_auto_merge(cwd: &Path) -> bool {
         ),
     }
     let strategy = crate::agents_config::auto_merge_strategy(cwd);
+    // No --delete-branch here (x-9d11): the flag's LOCAL delete attempt is the
+    // x-7267 false-failure shape. KNOWN GAP: nothing deletes the remote ref
+    // when the queue later lands the merge (the executor-side
+    // _post_merge_remote_delete never runs on that path). Repos wanting the
+    // ref gone should enable GitHub's own delete-head-branches setting.
     let mut args = vec![
         "pr".to_string(),
         "merge".to_string(),
@@ -2151,9 +2169,6 @@ fn arm_auto_merge(cwd: &Path) -> bool {
         "--auto".to_string(),
         format!("--{strategy}"),
     ];
-    if crate::agents_config::auto_merge_delete_branch(cwd) {
-        args.push("--delete-branch".to_string());
-    }
     // x-0eaf P1 (codex round 3): pin the arm to the covered head so a racing
     // remote push cannot land an unreviewed head via GitHub's --auto queue.
     if let Some(sha) = covered_head_from_event(cwd) {
@@ -2167,25 +2182,58 @@ fn arm_auto_merge(cwd: &Path) -> bool {
     match Command::new("gh").args(&args).current_dir(cwd).output() {
         Ok(o) if o.status.success() => {
             eprintln!("finalize: auto-merge armed for PR {number} with --{strategy}");
-            true
+            (true, None)
         }
         // Surface gh's own message so an operator can tell a repo with the
         // auto-merge feature disabled from stale auth or an unmergeable state.
         Ok(o) => {
+            // x-7267: gh exits nonzero on an ALREADY-MERGED PR ("was already
+            // merged") - a second path landed it between the terminal and this
+            // arm. That is success-shaped (the merge the arm existed to cause
+            // has happened), so name it as such instead of logging a false
+            // failure an operator would chase.
+            let state = Command::new("gh")
+                .args([
+                    "pr",
+                    "view",
+                    number.to_string().as_str(),
+                    "--json",
+                    "state",
+                    "-q",
+                    ".state",
+                ])
+                .current_dir(cwd)
+                .output();
+            let merged = state
+                .ok()
+                .filter(|s| s.status.success())
+                .map(|s| String::from_utf8_lossy(&s.stdout).trim().to_string())
+                .is_some_and(|s| s == "MERGED");
+            if merged {
+                eprintln!(
+                    "finalize: PR {number} already merged (another path landed it); \
+                     nothing to arm - auto-merge goal already met"
+                );
+                // No queue entry exists, so armed=false; the blocked_reason
+                // names the state so the event can neither claim a phantom arm
+                // (armed=true for an arm that never happened) nor read as an
+                // unexplained decline.
+                return (false, Some("already merged".to_string()));
+            }
             eprintln!(
                 "finalize: auto-merge arm failed for PR {number} with --{strategy} \
                  (from config.auto_merge.merge_strategy; check the repo allows that \
                  merge method) (non-fatal): {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             );
-            false
+            (false, None)
         }
         Err(e) => {
             eprintln!(
                 "finalize: auto-merge arm failed for PR {number} with --{strategy} \
                  (from config.auto_merge.merge_strategy) (non-fatal): {e}"
             );
-            false
+            (false, None)
         }
     }
 }

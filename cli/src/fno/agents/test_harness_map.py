@@ -27,7 +27,7 @@ def test_default_harness_is_claude_bg_with_bypass():
     out = _resolve(node_id="x-4d85")
     assert out["harness"] == "claude"
     assert out["substrate"] == "bg"
-    assert out["command"] == "/target no-merge x-4d85"
+    assert out["command"] == "/target --no-merge x-4d85"
     assert out["permission_bypass"] == ["--dangerously-skip-permissions"]
 
 
@@ -70,13 +70,13 @@ def test_template_without_node_is_literal():
     """No node id -> the template is returned verbatim ({id} unsubstituted).
     codex normalizes to its `$fno:` skill surface (x-a5e4)."""
     out = _resolve(harness="codex")
-    assert out["command"] == "$fno:target no-merge {id}"
+    assert out["command"] == "$fno:target --no-merge {id}"
 
 
 def test_bad_template_rejected_when_substituting():
     """A template lacking exactly one {id} cannot substitute a node id."""
     with pytest.raises(DispatchResolveError, match="{id}"):
-        _resolve(node_id="x-1", command="/target no-merge")
+        _resolve(node_id="x-1", command="/target --no-merge")
 
 
 def test_empty_explicit_harness_fails_loud():
@@ -120,19 +120,19 @@ def test_config_overlay_precedence():
 def test_config_command_normalized_per_harness():
     """x-f0e2: a slash-leading config template is normalized on the chosen
     harness, exactly like the builtin rung - config stops being literal."""
-    cfg = {"command": "/target no-merge {id}"}
+    cfg = {"command": "/target --no-merge {id}"}
     # codex: leading /verb -> $fno:verb
     assert resolve_dispatch(harness="codex", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ] == "$fno:target no-merge x-1234"
+    ] == "$fno:target --no-merge x-1234"
     # claude: byte-identical to today (slash surface normalizes to itself)
     assert resolve_dispatch(harness="claude", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ] == "/target no-merge x-1234"
+    ] == "/target --no-merge x-1234"
     # opencode: plugin-namespaced slash surface -> `/fno:target ...` (x-de43)
     assert resolve_dispatch(harness="opencode", node_id="x-1234", dispatch_cfg=cfg)[
         "command"
-    ] == "/fno:target no-merge x-1234"
+    ] == "/fno:target --no-merge x-1234"
 
 
 def test_explicit_command_normalized_per_harness():
@@ -143,8 +143,8 @@ def test_explicit_command_normalized_per_harness():
     # `[dispatch] substrate = "bg"` it resolved bg on codex and died
     # ("bg is claude-only") instead of testing the normalization it names.
     # Green in CI, red on a configured developer machine.
-    out = _resolve(command="/target no-merge {id}", harness="codex", node_id="x-1")
-    assert out["command"] == "$fno:target no-merge x-1"
+    out = _resolve(command="/target --no-merge {id}", harness="codex", node_id="x-1")
+    assert out["command"] == "$fno:target --no-merge x-1"
 
 
 def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
@@ -163,7 +163,7 @@ def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
     invocation `/fno:target ...` on the headless substrate - no prose brief."""
     out = _resolve(harness="opencode", node_id="x-4d85")
-    assert out["command"] == "/fno:target no-merge x-4d85"
+    assert out["command"] == "/fno:target --no-merge x-4d85"
     assert out["substrate"] == "headless"
     assert out["command_surface"] == "slash"
 
@@ -337,11 +337,12 @@ def test_brief_at_8kb_ok():
     assert out["env"]["TARGET_BRIEF"] == "x" * 8192
 
 
-def test_no_verb_leaves_default_and_empty_env():
-    """Verify 3 (regression): no dispatch fields -> /target no-merge <id>, env empty."""
+def test_no_verb_leaves_default_command_with_env_refusal():
+    """Verify 3 (regression, x-9d11): no dispatch fields -> /target --no-merge
+    <id>, and the env carries the refusal (TARGET_NO_MERGE), not briefs only."""
     out = _resolve(node_id="x-1")
-    assert out["command"] == "/target no-merge x-1"
-    assert out["env"] == {}
+    assert out["command"] == "/target --no-merge x-1"
+    assert out["env"] == {"TARGET_NO_MERGE": "1"}
 
 
 def test_config_extends_allowlist():
@@ -361,7 +362,7 @@ def test_node_verb_wins_over_config_command():
 def test_brief_without_verb_still_rides_env():
     """A brief on a default (/target) dispatch still travels via env."""
     out = _resolve(node_id="x-1", brief="ship carefully")
-    assert out["command"] == "/target no-merge x-1"
+    assert out["command"] == "/target --no-merge x-1"
     assert out["env"]["TARGET_BRIEF"] == "ship carefully"
 
 
@@ -447,7 +448,57 @@ def test_both_merge_posture_readers_default_to_deny():
     # harness_map: absent key, and a truthy non-boolean, both deny.
     assert resolve_dispatch(harness="claude", node_id="x-1", dispatch_cfg={})[
         "command"
-    ] == "/target no-merge x-1"
+    ] == "/target --no-merge x-1"
     assert resolve_dispatch(
         harness="claude", node_id="x-1", dispatch_cfg={"auto_merge": "true"}
-    )["command"] == "/target no-merge x-1"
+    )["command"] == "/target --no-merge x-1"
+
+
+def test_is_target_family_pins_the_carrier_vocabulary():
+    """The refusal carrier judges only /target-family first tokens (x-9d11).
+
+    Direct pins for the predicate trio every spawn lane shares: the family
+    gate, the word-padded flag match, and the legacy token rewrite. A drift
+    here re-opens either the prose-manufactures-a-refusal defect or the
+    family-scoping regression (rounds 6/8)."""
+    from fno.agents.harness_map import is_target_family
+
+    assert is_target_family("/target x-1")
+    assert is_target_family("/fno:target x-1")
+    assert is_target_family("$fno:target x-1")
+    assert not is_target_family("")
+    assert not is_target_family("prose about /target")
+    assert not is_target_family("/think /target-adjacent words")
+
+
+def test_message_carries_no_merge_is_word_padded():
+    from fno.agents.harness_map import message_carries_no_merge
+
+    assert message_carries_no_merge("/target --no-merge x-1")
+    assert message_carries_no_merge("$fno:target x-1 --no-merge")
+    # Round 8, angle A: a different flag is not the carrier.
+    assert not message_carries_no_merge("/target --no-merge-guard x-1")
+    # Non-family messages that mention the flag arm nothing.
+    assert not message_carries_no_merge("/think use --no-merge for x-1")
+    assert not message_carries_no_merge("please do not merge")
+    assert not message_carries_no_merge("")
+
+
+def test_legacy_token_rewrite_is_position_scoped():
+    """Only the two legacy positions (directly after the verb, or trailing -
+    the old normalize.sh append) are migrated. A /target argument is free
+    text: ``/target fix the no-merge carrier bug`` is a real feature
+    description, and rewriting the word mid-string would mutate prompt text
+    and arm a refusal from prose (rounds 10/12)."""
+    from fno.agents.harness_map import (
+        message_carries_no_merge,
+        normalize_legacy_no_merge,
+    )
+
+    assert normalize_legacy_no_merge("/target no-merge x-1") == "/target --no-merge x-1"
+    # The end-position legacy spelling (pre-x-9d11 normalize.sh append).
+    assert normalize_legacy_no_merge("/target x-1 no-merge") == "/target x-1 --no-merge"
+    assert message_carries_no_merge(normalize_legacy_no_merge("/target x-1 no-merge"))
+    untouched = "/target fix the no-merge carrier bug x-1"
+    assert normalize_legacy_no_merge(untouched) == untouched
+    assert not message_carries_no_merge(untouched)

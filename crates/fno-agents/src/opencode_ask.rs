@@ -429,9 +429,13 @@ mod tests {
     #[test]
     fn argv_routes_footnote_slash_command_via_command_flag() {
         // A rendered `/fno:verb` rides `--command` so opencode expands the plugin
-        // command instead of running it as prose (x-de43 / codex P1).
+        // command instead of running it as prose (x-de43 / codex P1). A
+        // LEADING-DASH args tail rides as separate WORDS behind a `--`
+        // separator (a single "--no-merge x" element would read as an unknown
+        // flag to the CLI's argv parser, x-9d11 round 7); any other args keep
+        // the one-positional shape (round 11).
         assert_eq!(
-            build_opencode_argv("/fno:target no-merge x-abcd", None),
+            build_opencode_argv("/fno:target --no-merge x-abcd", None),
             vec![
                 "opencode",
                 "run",
@@ -439,7 +443,21 @@ mod tests {
                 "--command",
                 "fno:target",
                 "--",
-                "no-merge x-abcd"
+                "--no-merge",
+                "x-abcd"
+            ]
+        );
+        // No leading dash: no separator, one positional - multiword free-text
+        // args reach the command exactly as before the separator existed.
+        assert_eq!(
+            build_opencode_argv("/fno:blueprint my multi word idea", None),
+            vec![
+                "opencode",
+                "run",
+                "--dangerously-skip-permissions",
+                "--command",
+                "fno:blueprint",
+                "my multi word idea"
             ]
         );
     }

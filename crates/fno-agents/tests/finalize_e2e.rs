@@ -1221,6 +1221,7 @@ fn set_posture(env: &Env, session_id: &str, approved: bool) {
              plan_path: \"plan.md\"\n\
              provider: claude\n\
              auto_merge_approved: {approved}\n\
+             auto_merge_source: config\n\
              claude_transcript_id: tid-{session_id}\n\
              ---\n\
              # Target Session State\n\
@@ -1288,7 +1289,26 @@ fn finalize_arms_when_configured_optional_app_reviewed() {
     assert!(c.contains("gh pr merge 358 --auto --merge"), "arm: {c}");
     let event = finalized_event(&env, "S-optional-reviewed");
     assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    // x-9d11: the terminal event names which input set the posture.
+    assert_eq!(
+        event.pointer("/data/auto_merge_source"),
+        Some(&"config".into())
+    );
     assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
+}
+
+#[test]
+fn finalize_event_source_reads_unknown_on_pre_provenance_manifest() {
+    // AC4-ERR: a manifest predating auto_merge_source must surface `unknown`,
+    // never a guessed origin. setup()'s stock manifest carries no source line.
+    let env = setup("S-nosource", false);
+    let out = run_finalize_shimmed(&env, "DoneAdvisory", GH_PR_358_LOGGING);
+    assert!(out.status.success());
+    let event = finalized_event(&env, "S-nosource");
+    assert_eq!(
+        event.pointer("/data/auto_merge_source"),
+        Some(&"unknown".into())
+    );
 }
 
 #[test]
@@ -1431,39 +1451,29 @@ fn finalize_arms_with_merge_on_an_invalid_strategy() {
     assert!(!c.contains("--octopus"), "never pass through to gh: {c}");
 }
 
-/// `delete_branch_on_merge` defaults to true and is honored by
-/// `fno pr merge`, so an arm that ignored it left branches behind that the same
-/// PR merged through the CLI would have deleted.
+/// x-9d11: the arm NEVER carries --delete-branch, in either config state.
+/// gh exits right after queueing and GitHub's server-side merge deletes
+/// nothing, so the flag bought nothing at arm time - while its LOCAL delete
+/// attempt was the x-7267 false-failure shape. Remote cleanup after a
+/// `fno pr merge` merge is this verb's post-merge step, not an arm flag.
 #[test]
-fn finalize_arms_with_delete_branch_by_default() {
-    let env = setup("S-delbr", false);
-    set_posture(&env, "S-delbr", true);
-    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
-    assert!(out.status.success());
-    let c = calls(&env);
-    assert!(
-        c.contains("--delete-branch"),
-        "absent config takes AutoMergeBlock's true default: {c}"
-    );
-}
-
-/// An opt-out suppresses it. A present non-affirmative value counts,
-/// which is why the reader mirrors `_coerce_affirmative` instead of `as_bool()`.
-#[test]
-fn finalize_omits_delete_branch_when_configured_off() {
+fn finalize_arm_never_carries_delete_branch() {
     for body in [
+        "", // absent config takes AutoMergeBlock's true default
+        "[auto_merge]\ndelete_branch_on_merge = true\n",
         "[auto_merge]\ndelete_branch_on_merge = false\n",
-        "[auto_merge]\ndelete_branch_on_merge = \"no\"\n",
     ] {
-        let env = setup("S-nodelbr", false);
-        set_posture(&env, "S-nodelbr", true);
-        write_auto_merge_config(&env, body);
+        let env = setup("S-delbr", false);
+        set_posture(&env, "S-delbr", true);
+        if !body.is_empty() {
+            write_auto_merge_config(&env, body);
+        }
         let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
         assert!(out.status.success());
         let c = calls(&env);
         assert!(
             !c.contains("--delete-branch"),
-            "opt-out must suppress the flag ({body}): {c}"
+            "the arm must never carry --delete-branch ({body}): {c}"
         );
     }
 }

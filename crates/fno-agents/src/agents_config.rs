@@ -336,24 +336,6 @@ pub fn auto_merge_strategy(cwd: &Path) -> String {
     .unwrap_or_else(|| "merge".to_string())
 }
 
-/// Resolve `auto_merge.delete_branch_on_merge` (default `true`).
-///
-/// Mirrors `_coerce_affirmative`'s truth table rather than calling `as_bool()`:
-/// a PRESENT non-affirmative value reads as false, so `delete_branch_on_merge =
-/// "no"` (the shape a settings.yaml migration can leave behind) suppresses the
-/// flag. `as_bool()` would return `None` there and fall through to the `true`
-/// default, deleting a branch the config asked to keep.
-pub fn auto_merge_delete_branch(cwd: &Path) -> bool {
-    resolve(cwd, |t| {
-        t.get("auto_merge")?
-            .as_table()?
-            .get("delete_branch_on_merge")
-            .and_then(scalar_to_string)
-    })
-    .map(|raw| matches!(raw.as_str(), "1" | "true" | "yes" | "on"))
-    .unwrap_or(true)
-}
-
 /// The normalized raw scalar for a direct child of `agents:` (the generalized
 /// `dead_row_grace_secs` chain), so each caller applies its own coercion.
 fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
@@ -867,56 +849,6 @@ mod tests {
         assert_eq!(auto_merge_strategy(&cwd), "merge");
     }
 
-    #[test]
-    fn auto_merge_delete_branch_absent_is_true() {
-        // Matches AutoMergeBlock's `True` default, which `fno pr merge` honors.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_config_env();
-        let cwd = write_project_settings("amd-absent", "schema_version = 1\n");
-        assert!(auto_merge_delete_branch(&cwd));
-    }
-
-    #[test]
-    fn auto_merge_delete_branch_present_non_affirmative_is_false() {
-        // The reason this reader is not `as_bool()`: a settings.yaml migration
-        // can leave a STRING behind, and `_coerce_affirmative` reads any present
-        // non-affirmative value as false. `as_bool()` would yield None on "no"
-        // and fall through to the `true` default, deleting a branch the config
-        // asked to keep.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for body in [
-            "[auto_merge]\ndelete_branch_on_merge = false\n",
-            "[auto_merge]\ndelete_branch_on_merge = \"no\"\n",
-            "[auto_merge]\ndelete_branch_on_merge = \"false\"\n",
-            "[auto_merge]\ndelete_branch_on_merge = 0\n",
-        ] {
-            clear_config_env();
-            let cwd = write_project_settings("amd-off", body);
-            assert!(
-                !auto_merge_delete_branch(&cwd),
-                "a present non-affirmative value must suppress --delete-branch: {body}"
-            );
-        }
-    }
-
-    #[test]
-    fn auto_merge_delete_branch_affirmative_forms_are_true() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for body in [
-            "[auto_merge]\ndelete_branch_on_merge = true\n",
-            "[auto_merge]\ndelete_branch_on_merge = \"yes\"\n",
-            "[auto_merge]\ndelete_branch_on_merge = 1\n",
-            // Padded + upper: Python does `v.strip().lower()`, so this is a
-            // supported affirmative there. Untrimmed it read as false here,
-            // appending --delete-branch via `fno pr merge` but not via finalize.
-            "[auto_merge]\ndelete_branch_on_merge = \" YES \"\n",
-        ] {
-            clear_config_env();
-            let cwd = write_project_settings("amd-on", body);
-            assert!(auto_merge_delete_branch(&cwd), "affirmative: {body}");
-        }
-    }
-
     /// Build a main checkout + linked worktree, with `body` as the CANONICAL
     /// config and nothing in the worktree. Returns the linked worktree path, or
     /// None when git is unavailable (mirrors the skip in `paths.rs`).
@@ -965,12 +897,11 @@ mod tests {
         clear_config_env();
         let Some(linked) = linked_worktree_with_canonical_config(
             "read",
-            "[auto_merge]\nmerge_strategy = \"squash\"\ndelete_branch_on_merge = false\n",
+            "[auto_merge]\nmerge_strategy = \"squash\"\n",
         ) else {
             return;
         };
         assert_eq!(auto_merge_strategy(&linked), "squash");
-        assert!(!auto_merge_delete_branch(&linked));
     }
 
     #[test]

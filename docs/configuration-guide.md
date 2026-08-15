@@ -107,7 +107,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.spawn_permission_mode` | str | `bypassPermissions` | advanced | Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit "" (forward nothing) or "default" (prompt positively). Claude-native, fail-closed at the spawn seam. |
 | `dispatch.harness` | str | `` | advanced | Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map. |
 | `dispatch.substrate` | str | `` | advanced | Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless). |
-| `dispatch.command` | str | `` | advanced | Dispatch command template with a single {id}; empty = '/target no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve (a leading /verb becomes $fno:verb on codex, /fno:verb on opencode, and is refused on the deprecated gemini); a non-slash template passes through literally. |
+| `dispatch.command` | str | `` | advanced | Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally. |
 | `dispatch.allowed_verbs` | list[str] | `["/target", "/think"]` | advanced | Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think). |
 | `dispatch.auto_merge` | bool | `false` | advanced | Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false. |
 | `dispatch.on_exhaustion` | str | `defer` | advanced | On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'. |
@@ -131,7 +131,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `parallel.max_lanes` | int | `1` | advanced | Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in). |
 | `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
 | `auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge | squash | rebase. |
-| `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the branch after an auto-merge. |
+| `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the remote branch after a merge. Executor paths only (`fno pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook. |
 | `auto_merge.require_checks_pass` | bool | `true` | advanced | Require CI green before auto-merge. |
 | `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
 | `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |

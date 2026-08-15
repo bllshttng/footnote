@@ -217,7 +217,7 @@ out="$(run_nofno 'ab-12345678' --provider opencode)"
 check_eq           'opencode build status'       "$(field "$out" status)"  'ok'
 check_eq           'opencode build payload_mode' "$(field "$out" payload_mode)" 'build'
 check_contains     'opencode build /fno:target'  "$(field "$out" message)" '/fno:target ab-12345678'
-check_contains     'opencode build no-merge'     "$(field "$out" message)" 'no-merge'
+check_contains     'opencode build --no-merge'   "$(field "$out" message)" '--no-merge'
 check_not_contains 'opencode build no prose'     "$(field "$out" message)" 'Implement'
 
 # AC4-EDGE: passthrough renders ANY verb via the single prefix-swap (no allowlist)
@@ -722,7 +722,7 @@ out="$(run_nofno 'x-2aad bg')"
 check_eq 'configured-prefix node classifies'      "$(field "$out" node)" 'x-2aad'
 check_eq 'configured-prefix build mode'           "$(field "$out" payload_mode)" 'build'
 check_eq 'configured-prefix substrate survives'   "$(field "$out" substrate)" 'bg'
-check_eq 'configured-prefix message'              "$(field "$out" message)" '/target x-2aad no-merge'
+check_eq 'configured-prefix message'              "$(field "$out" message)" '/target x-2aad --no-merge'
 
 out="$(run_nofno 'ab-4040eee8')"
 check_eq 'ab- id still classifies (regression)'   "$(field "$out" node)" 'ab-4040eee8'

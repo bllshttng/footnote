@@ -332,8 +332,9 @@ Output the completion promise when the pipeline is done. Choose the variant that
 # outcome: merged
 <promise>MISSION COMPLETE: all tasks done, tests passing, docs generated, PR #42 merged.</promise>
 
-# outcome: queued
-<promise>MISSION COMPLETE: all tasks done, tests passing, docs generated, PR #42 queued for auto-merge.</promise>
+# outcome: held (checks not green yet; retry when green - there is no queued
+# outcome, x-9d11: only fno-agents finalize arms GitHub's native queue)
+<promise>MISSION COMPLETE: all tasks done, tests passing, docs generated, PR #42 green; merge held for checks.</promise>
 
 # outcome: failed
 <promise>MISSION COMPLETE: all tasks done, tests passing, docs generated, PR #42 created; auto-merge failed: <reason>. Merge manually.</promise>

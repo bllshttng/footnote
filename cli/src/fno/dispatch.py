@@ -95,7 +95,7 @@ def cmd_resolve(
         None, "--node", "--id", help="Node id substituted into the command's {id}. Absent = template returned literally."
     ),
     command: Optional[str] = typer.Option(
-        None, "--command", help="Command template. Default: config.dispatch.command > '/target no-merge {id}'."
+        None, "--command", help="Command template. Default: config.dispatch.command > '/target --no-merge {id}'."
     ),
     verb: Optional[str] = typer.Option(
         None, "--verb", help="Node dispatch verb (validated against config.dispatch.allowed_verbs); assembled as '<verb> {id}'. Wins over --command's config/builtin default."
@@ -356,7 +356,7 @@ def _cutover_command(harness: Optional[str], node_id: str) -> str:
     caller's signal to stage nothing - a half-resolved destination must not
     spawn.
 
-    This verb's normal path always spawns `/target no-merge`, so the cutover
+    This verb's normal path always spawns the no-merge `/target` command, so the cutover
     renders the SAME posture on the destination. Going through the full resolver
     would read `config.dispatch.auto_merge` and could hand a rerouted worker the
     merge authority the non-cutover launch never gets: quota exhaustion must not
@@ -578,12 +578,35 @@ def _dispatch_one(
     # command, credential overlay); passing one without the others is the
     # wrong-billing / wrong-binary launch the selector exists to prevent.
     spawn_harness = "claude"
-    message = f"/target no-merge {node_id}"
+    # Same posture render as the cutover destination: through the resolver, so
+    # the flag form (and any per-harness surface) comes from ONE template
+    # (harness_map._AUTONOMOUS_COMMAND), not a second hardcoded string that
+    # drifts when the token changes shape (x-9d11).
+    message = _cutover_command(spawn_harness, node_id)
     if cutover is not None:
         spawn_harness = cutover.harness or "claude"
         message = cutover_command
         account_env = cutover.account_env
         provenance["FNO_ACCOUNT"] = cutover.record_id or ""
+    # x-9d11 mechanical refusal carrier: the flag in the message is the
+    # attributable carrier; the pane env is the backstop, so a worker that
+    # never passes the flag through still folds the refusal at init.
+    if not message:
+        # _cutover_command's contract: empty = stage nothing. An unresolvable
+        # target command must never spawn a billed pane with an empty prompt
+        # (review round 5) - release both holds so the node stays grabbable.
+        release_lane_slot(node_id)
+        release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
+        return {
+            "outcome": "failed",
+            "node": node_id,
+            "slug": slug or "",
+            "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
+        }
+    from fno.agents.harness_map import message_carries_no_merge
+
+    if message_carries_no_merge(message):
+        provenance["TARGET_NO_MERGE"] = "1"
     try:
         result = dispatch_spawn_pane(
             name=_worker_agent_name(node_id, slug),

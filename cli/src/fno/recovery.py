@@ -58,6 +58,7 @@ in the PR body), not a silent default.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -715,8 +716,12 @@ def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool
         proc = subprocess.run(
             [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", "claude",
              "--substrate", "bg", "--cwd", cwd, "--name", agent,
-             f"/target no-merge {node}"],
+             f"/target --no-merge {node}"],
+            # x-9d11: the env carrier backs the flag - a replacement worker
+            # that drops the flag post-compaction still folds the refusal at
+            # init (this respawn lane does not route through resolve_dispatch).
             cwd=cwd, capture_output=True, timeout=60, check=False,
+            env={**os.environ, "TARGET_NO_MERGE": "1"},
         )
         if proc.returncode != 0:
             # No replacement worker started: the node claim is already freed

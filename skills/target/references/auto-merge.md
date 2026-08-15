@@ -90,14 +90,16 @@ When a rebase conflict is detected during the pre-ship phase:
 
 ## Failure Modes
 
-The merge attempt yields one of four outcomes, written to the skill's state file:
+The merge attempt yields one of these outcomes, written to the skill's state file:
 
 | Outcome | Meaning | State update | Blocks promise? |
 |---------|---------|-------------|----------------|
 | `merged` | PR merged successfully | append PR number to `merged_prs` | No |
-| `queued` | Branch protection requires checks; merge queued | append to `merge_auto_queued` | No |
+| `held` | Checks not green yet. Merge not attempted, retry when green | no state change | No |
 | `failed` | Merge attempt failed (protected branch, permissions, etc.) | append `{pr, reason}` to `merge_failed` | No |
-| `skipped` | Auto-merge disabled (`enabled: false`) | no state change | No |
+| `skipped` | Auto-merge disabled, or finalize already armed GitHub's queue | no state change | No |
+
+There is no `queued` outcome (x-9d11): `fno pr merge` executes and enforces `require_checks_pass` in-process. GitHub's native auto-merge queue is armed by `fno-agents finalize` alone, the one arming path.
 
 A `failed` outcome does NOT block the promise or mark the session as failed. The PR was
 created successfully; the merge failure is post-hoc. The user can merge manually.
@@ -110,7 +112,6 @@ After a session completes, check the skill's state file:
 # .fno/target-state.md (target)
 # .fno/megawalk-state.md (megawalk)
 merged_prs: [42, 43]
-merge_auto_queued: [44]
 merge_failed:
   - pr: 45
     reason: "branch protected: required status checks have not passed"
@@ -125,8 +126,8 @@ The promise line also reflects the outcome:
 # merged
 <promise>MISSION COMPLETE: all tasks done, tests passing, PR #42 merged.</promise>
 
-# queued
-<promise>MISSION COMPLETE: all tasks done, tests passing, PR #42 queued for auto-merge.</promise>
+# held (retry when checks go green)
+<promise>MISSION COMPLETE: all tasks done, tests passing, PR #42 green; merge held for checks.</promise>
 
 # failed
 <promise>MISSION COMPLETE: all tasks done, tests passing, PR #42 created; auto-merge failed: branch protected. Merge manually.</promise>

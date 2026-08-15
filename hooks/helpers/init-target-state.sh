@@ -321,6 +321,11 @@ fi
 # ── Auto-merge inputs (read-only at init; no mutable tracking lists) ──
 AUTO_MERGE_ENABLED="false"
 AUTO_MERGE_APPROVED="false"
+# Which input set the posture (x-9d11): closed enum
+# config|flag-no-merge|env-target-auto-merge|default-off. Absent on
+# pre-provenance manifests; consumers must render that as `unknown`, never a
+# guessed origin.
+AUTO_MERGE_SOURCE="default-off"
 if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
   AUTO_MERGE_ENABLED="$(get_auto_merge_enabled 2>/dev/null)" || {
     echo "[init-target-state] warn: auto-merge config lookup failed; defaulting to disabled" >&2
@@ -329,20 +334,35 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
 fi
 if [[ "${TARGET_NO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="false"
-elif [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
-  # Reads INITIAL_INPUT because TARGET_INPUT is unset by here; keying on that
-  # parses fine and silently never fires. Sits above the TARGET_AUTO_MERGE
-  # grant because nothing sets that var, so it can only arrive inherited, and
-  # an inherited grant must not beat a refusal typed into this run (the trap
-  # `fno target init` scrubs for TARGET_BEASTMODE). Space-padded = whole token.
-  AUTO_MERGE_APPROVED="false"
+  AUTO_MERGE_SOURCE="flag-no-merge"
 elif [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   AUTO_MERGE_APPROVED="true"
+  AUTO_MERGE_SOURCE="env-target-auto-merge"
 elif _is_true "$AUTO_MERGE_ENABLED"; then
   # The who-may-merge gate (allowed_invokers) was removed (x-04ab): auto-merge
   # is approved whenever it is `enabled`, gated further by the merge command's
   # own CI-green / external-review / stub-manifest guards.
   AUTO_MERGE_APPROVED="true"
+  AUTO_MERGE_SOURCE="config"
+fi
+# Posture is flag/env/config only (x-9d11): free text in INITIAL_INPUT is NOT a
+# control input. Grants were hardened against prose by x-51a3; refusals match
+# here. A brief that says no-merge must reach --no-merge on `fno target
+# start/init` to take effect - attributable, not parsed out of prose.
+# An EXPLICIT config refusal is still `config`, not `default-off`: the operator
+# set the key, so "which layer said no" must answer config, not "nothing set".
+# get_auto_merge_enabled cannot distinguish unset from false (both read
+# "false"), so the raw key is read with an empty default here.
+if [[ "$AUTO_MERGE_SOURCE" == "default-off" ]] && declare -F get_config >/dev/null 2>&1; then
+  _am_set="$(get_config "auto_merge.enabled" "" 2>/dev/null)"  # presence-probe: empty default distinguishes set from unset
+  [[ -n "$_am_set" ]] && AUTO_MERGE_SOURCE="config"
+fi
+# The legacy interactive spelling gets a LOUD no-op, never a quiet one: prose
+# still manufactures nothing (that is x-9d11's whole point), but an operator
+# typing the pre-x-9d11 bare token deserves to learn their refusal did not
+# land rather than discover it from a merged PR. Warn-only by design.
+if [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
+  echo "[init-target-state] note: input contains a bare 'no-merge' token, which is no longer a control input - it set nothing. Pass --no-merge to 'fno target start/init' for the refusal posture." >&2
 fi
 
 # Auto-merge implies external review on.
@@ -1065,6 +1085,7 @@ advisory: $_advisory
 ${_authority_line}${_budget_lines}# Auto-merge inputs
 auto_merge_enabled: $AUTO_MERGE_ENABLED
 auto_merge_approved: $AUTO_MERGE_APPROVED
+auto_merge_source: $AUTO_MERGE_SOURCE
 # Mission context
 mission_id: $MISSION_ID_YAML
 mission_wave: $MISSION_WAVE_YAML
