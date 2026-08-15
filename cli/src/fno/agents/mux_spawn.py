@@ -34,7 +34,7 @@ import time
 import uuid as _uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
 from fno.agents.dispatch import (
@@ -788,6 +788,72 @@ def _backfill_codex_session_id(
     return None
 
 
+def pane_passthrough_tokens(
+    passthrough: Optional[Sequence[str]],
+    emitted: Sequence[str],
+) -> list[str]:
+    """Validate `--` passthrough tokens against what fno itself emitted, for
+    splicing into a provider arm (x-1caa).
+
+    A passthrough token naming a flag the arm already carries is a named
+    refusal, never a silent last-wins: two sources for one value make the
+    spawn receipt disagree with the process. ``emitted`` is every option token
+    the arm will carry, INCLUDING the tail spliced after the passthrough
+    position (gemini/opencode permission tokens), minus the message. The
+    ``--`` fence itself and value tokens are not flags; an ``=``-joined flag
+    compares by its name.
+    """
+    if not passthrough:
+        return []
+    emitted_flags = {
+        tok.split("=", 1)[0] for tok in emitted if tok.startswith("-") and tok != "--"
+    }
+    for tok in passthrough:
+        if not tok.startswith("-"):
+            continue
+        flag = tok.split("=", 1)[0]
+        if flag in emitted_flags:
+            raise DispatchAskError(
+                f"refusing {flag} on both sides: fno emitted it from its own "
+                "flag and the passthrough carries it too. Two sources for one "
+                "value is the defect, not the collision. Drop one.",
+                exit_code=2,
+            )
+    return list(passthrough)
+
+
+#: x-1caa: provider tokens that turn a pane into a dead one-shot, promoted from
+#: the comments on the arms below into guards now that passthrough hands the
+#: operator the exact token each comment warned about. Bare tokens match too -
+#: opencode's `run` is a subcommand, not a flag. claude is deliberately absent:
+#: its row stays enforced by :func:`claude_argv_is_interactive` so the D2
+#: billing guard keeps its name and its existing test. A provider with no row
+#: forwards everything on purpose; enumerating each CLI's flag surface is the
+#: maintenance burden passthrough exists to remove.
+PANE_HEADLESS_FORM_TOKENS: Mapping[str, tuple[str, ...]] = {
+    "agy": ("-p", "--print"),  # agy's headless form: prints, exits, kills the pane
+    "opencode": ("run",),  # headless subcommand; the positional is a project path
+}
+
+
+def refuse_pane_headless_form(provider: str, argv: Sequence[str]) -> None:
+    """Refuse a composed pane argv carrying a provider's headless-form token
+    (x-1caa). Checked on the COMPOSED argv next to the claude billing guard, so
+    a token reaches this check whichever side of ``--`` it came from."""
+    refused = PANE_HEADLESS_FORM_TOKENS.get(provider)
+    if not refused:
+        return
+    for tok in argv:
+        if tok in refused:
+            raise DispatchAskError(
+                f"refusing to pane-host {provider} with {tok!r}: that is "
+                f"{provider}'s headless form - it answers once and exits, "
+                "killing the pane at birth. Use --substrate headless for a "
+                "one-shot.",
+                exit_code=2,
+            )
+
+
 def build_pane_argv(
     provider: str,
     message: str,
@@ -802,6 +868,7 @@ def build_pane_argv(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     name: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -824,7 +891,13 @@ def build_pane_argv(
     pane worker on one box shows the SAME string in any session list that reads
     it - N distinct workers collapse onto one row and the list cannot route.
     Only claude is wired: the other pane arms have no verified equivalent flag,
-    and guessing one fails the spawn rather than degrading."""
+    and guessing one fails the spawn rather than degrading.
+
+    ``passthrough`` (x-1caa): tokens after a ``--`` on the spawn command line,
+    spliced INSIDE the arm - upstream of the composed-argv refusals in
+    :func:`dispatch_spawn_pane` - so they inherit the same guards fno's own
+    flags pass through, rather than appending past them. Absent/empty composes
+    a byte-identical argv."""
     if message.strip().startswith(("/", "$fno:")):
         message = normalize_command(message, provider)
 
@@ -853,6 +926,7 @@ def build_pane_argv(
         if effort:
             argv += effort_tokens("claude", effort)
         argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         if message:
             # The seed rides behind `--` so a leading-flag seed ("--model x
             # ...") reaches claude as the prompt positional instead of dying
@@ -883,6 +957,7 @@ def build_pane_argv(
         if effort:
             argv += effort_tokens("codex", effort)
         argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         if message:
             # Same fence as the claude arm: clap itself prescribes `--` ("to
             # pass ... as a value, use '-- ...'"), so a leading-flag seed is
@@ -897,14 +972,20 @@ def build_pane_argv(
         argv = ["gemini", "--skip-trust"]
         if model:
             argv += ["--model", model]
+        # Permission tokens are computed before the passthrough splice so the
+        # duplicate-flag refusal sees them (they append after the -i pair, past
+        # the splice position). Output order is unchanged.
+        perm = (
+            permission_pane_tokens("gemini", permission_mode)
+            if permission_mode
+            else (["--yolo"] if yolo else ["--approval-mode", "default"])
+        )
+        argv += pane_passthrough_tokens(passthrough, [*argv, *perm])
         if message:
             # argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -i
             # value form is pinned by tests and left as-is).
             argv += ["-i", message]
-        if permission_mode:
-            argv += permission_pane_tokens("gemini", permission_mode)
-        else:
-            argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
+        argv += perm
         return argv
     if provider == "agy":
         if effort:
@@ -925,6 +1006,7 @@ def build_pane_argv(
         if model:
             argv += ["--model", model]
         argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         if message:
             # Deliberately unfenced: agy has no clean end-of-options. Probed
             # 2026-08-15, `agy -p -- "<prompt>"` folds the flag text AND the
@@ -956,10 +1038,15 @@ def build_pane_argv(
         if _default_model:
             argv += ["--model", _default_model]
         argv += tier3
-        if permission_mode:
-            argv += permission_pane_tokens("opencode", permission_mode)
-        elif yolo:
-            argv.append("--auto")
+        # Computed before the splice (like gemini) so the duplicate refusal sees
+        # the permission tokens that append after the splice position.
+        perm = (
+            permission_pane_tokens("opencode", permission_mode)
+            if permission_mode
+            else (["--auto"] if yolo else [])
+        )
+        argv += pane_passthrough_tokens(passthrough, [*argv, *perm])
+        argv += perm
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
@@ -1713,6 +1800,7 @@ def dispatch_spawn_pane(
     route_provider: Optional[str] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
 
@@ -1857,6 +1945,7 @@ def dispatch_spawn_pane(
         tools=tools,
         deny_tools=deny_tools,
         name=name,
+        passthrough=passthrough,
     )
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
@@ -1867,6 +1956,10 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
+    # x-1caa: same choke point as the billing guard above, reading the composed
+    # argv so a passthrough token faces the identical check an fno-emitted one
+    # would (a splice inside build_pane_argv, never an append past the guards).
+    refuse_pane_headless_form(provider, argv)
     # The outer env wrapper is not merely a scrub: it SETS the whole route in
     # happy's own environment, and happy merges that into its claude child. So
     # the wrapper is what delivers the credential, and --claude-env carries only
