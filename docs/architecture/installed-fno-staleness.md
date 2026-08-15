@@ -162,13 +162,13 @@ reinstall/recheck loop, so `--fix` is the only path that runs `fno update`,
 and it keeps `update`'s existing refusal to reinstall during an `IN_PROGRESS`
 target session.
 
-## Surfacing staleness inside a running mux (x-b1cc)
+## Surfacing staleness inside a running mux
 
 `fno doctor` answers whether the installed CLI is stale. It never reaches an operator sitting inside a mux session rather than a terminal running `doctor` in another pane. `fno update --check --json` is the **single resolver** for that surface. It answers a related but distinct question: not just whether an update is waiting, but what running it costs right now. The mux TUI (`crates/fno/src/client.rs`) renders that answer. The TUI computes nothing itself: no staleness logic, no wire comparison, no shell counting lives in Rust. It runs the CLI probe off its UI loop, an async subprocess mirroring the existing Connections-modal read. It parses the JSON and folds it into a sideline-menu row and an overlay.
 
 The one input `doctor` lacks is whether an update breaks the live mux **wire protocol**. A server whose wire predates a new client's `PROTO_VERSION` rejects the handshake outright. That server is unreachable and must restart, ending every shell it holds. `update_readiness` (in `cli/src/fno/update.py`) computes this by comparing the source checkout's `crates/fno/src/proto.rs::PROTO_VERSION` against each **live** server's `wire_version`. That field comes from `fno mux ls --json` and matches `SessionRow::wire_stale` in `crates/fno/src/mux_cli.rs`, which already detects a stale-wire server. A wire bump names the shells the restart ends. It also names the workers `--revive` brings back, via the shared `is_revivable` predicate in `cli/src/fno/restart.py`, called from both `update_readiness` and `_revive_orphans`. No bump means the shells survive a plain `fno update` and reattach.
 
-Guidance names `fno restart --mux` for recovery, never `fno mux kill-server`. `kill-server` routes its shutdown request through the same control channel it exists to recover from. So it is guaranteed to fail in precisely the situation an operator reaches for it, a wedged or wire-rejecting server. x-48a5 tracks fixing that routing separately. Guidance that names a verb which cannot work in the case it is offered for is worse than no guidance. So this surface routes recovery only through the verb that already works.
+Guidance names `fno restart --mux` for recovery, never `fno mux kill-server`. `kill-server` routes its shutdown request through the same control channel it exists to recover from. So it is guaranteed to fail in precisely the situation an operator reaches for it, a wedged or wire-rejecting server. A dedicated node tracks fixing that routing separately. Guidance that names a verb which cannot work in the case it is offered for is worse than no guidance. So this surface routes recovery only through the verb that already works.
 
 Every input degrades independently rather than failing the whole probe. A missing `fno mux ls`, an unreadable `proto.rs`, or a failing `fno agents list` each name themselves in a `degraded` field. An unknown wire status is always treated as a bump, so the guidance line never claims shells survive on evidence the resolver lacks. `fno update --check` never installs anything and always exits 0. Readiness is data, not a verdict.
 
@@ -190,6 +190,6 @@ fno update --check --json   # the one resolver, the mux TUI's only consumer
    separately planned for environments where the marker is absent.
 5. The `installed-rev` marker is written only on a successful install; absence
    means "rev unknown", never "fresh".
-6. `fno update --check --json` is the single resolver for mux update readiness. The TUI renders it and computes nothing. Guidance routes restart recovery through `fno restart --mux` only, never `fno mux kill-server` (x-48a5). A verb guaranteed to fail in the case it is offered for is worse than no guidance.
+6. `fno update --check --json` is the single resolver for mux update readiness. The TUI renders it and computes nothing. Guidance routes restart recovery through `fno restart --mux` only, never `fno mux kill-server` (that routing fix is tracked separately). A verb guaranteed to fail in the case it is offered for is worse than no guidance.
 
 Implementation: `cli/src/fno/doctor.py`, `cli/src/fno/update.py`, `cli/src/fno/restart.py`, `crates/fno/src/client.rs`, `crates/fno/src/mux_cli.rs`, `scripts/lib/gates-reality.sh`, `scripts/lib/gate-audit.sh`.
