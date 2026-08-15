@@ -1189,6 +1189,7 @@ def register_existing_session(
     short_id: str = "",
     status: Optional[AgentStatus] = None,
     origin: Optional[str] = None,
+    delivery_policy: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
     """Register an operator-started session so peers can address it by name.
@@ -1286,6 +1287,15 @@ def register_existing_session(
                 # would clobber an operator stamp a re-firing hook must preserve.
                 if origin is not None:
                     entry.origin = origin
+                # Same preserve-when-silent discipline for the delivery policy:
+                # the SessionStart hook re-fires register without this kwarg
+                # after every resume/compaction, and a blind overwrite would
+                # silently revert a bus-only recipient to injectable. "off" is
+                # the explicit clear (None means the caller said nothing).
+                if delivery_policy is not None:
+                    entry.delivery_policy = (
+                        None if delivery_policy == "off" else delivery_policy
+                    )
                 return entries
         generated = canonical_handle(session_id)
         if _address_is_taken(generated):
@@ -1314,6 +1324,9 @@ def register_existing_session(
             log_path=log_path,
             status=_REGISTERED_STATUS,
             origin=origin,
+            delivery_policy=(
+                None if delivery_policy in (None, "off") else delivery_policy
+            ),
         )
         setattr(fresh, session_field, session_id)
         if short_id:
