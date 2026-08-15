@@ -10492,6 +10492,7 @@ async fn execute_row_menu_action(
         // against the live layout first, so a tab that closed or moved between
         // open and pick is a notice, never a redirected action.
         (MenuTarget::Tab(_tid), MenuAction::TabNew) => {
+            view.note_command_sent(&Command::NewTab);
             write_msg(sock_w, &ClientMsg::Command(Command::NewTab))
                 .await
                 .map_err(|e| format!("new-tab send failed: {e}"))?;
