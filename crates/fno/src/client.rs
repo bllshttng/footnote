@@ -1994,6 +1994,7 @@ impl View {
                     "review_wedged" => NeedKind::ReviewWedged,
                     "budget_stop" => NeedKind::BudgetStop,
                     "mail_question" => NeedKind::MailQuestion,
+                    "operator_question" | "carveout_stale" | "stale_claims" => NeedKind::Decision,
                     _ => continue,
                 };
                 match self.join_fold_row(item) {
@@ -7235,15 +7236,17 @@ fn is_idle_row(a: &AgentRow) -> bool {
 /// worst band leads and the longest-waiting fold item tops its band (a live
 /// badge row carries no ts, so it degenerates to name order within its band -
 /// leg-1 and leg-2 never share a band, so the two orderings never mix). Same
-/// declaration-order `Ord` trick as [`PaneState`]. `Decision` is reserved for
-/// the typed help / decision-gate source (x-dbaf) and is unpopulated in v1 -
-/// kept so the ordering contract and the future fold arm have a home.
+/// declaration-order `Ord` trick as [`PaneState`]. `Decision` (x-e3be) is fed
+/// by three `needs.rs` fold arms - `operator_question` (a live open question,
+/// `fno outstanding ask`), `carveout_stale` (an aged unharvested carve-out
+/// pile), `stale_claims` (an aged orphaned `node:` claim pile) - all read from
+/// durable on-disk state rather than a recent event, so none of them are
+/// windowed by the fold's 24h `since` bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum NeedKind {
-    // Reserved (x-dbaf); never constructed in v1. Leads the order so a decision
-    // gate, when it lands, outranks everything downstream of it. Kept so the
-    // severity contract and the future fold arm have a home.
-    #[allow(dead_code)]
+    /// Leads the order: an open operator decision (a question awaiting an
+    /// answer, or a pile of carve-outs/claims gone stale) outranks everything
+    /// downstream of it, including a mail-blocked worker.
     Decision,
     // A human-addressed mail escalation (question, or a live-miss to an
     // operator-attended recipient). Sits above the worker blocked-states: a
@@ -24114,6 +24117,33 @@ mod tests {
         assert_eq!(q[0].name, "alive");
         assert_eq!(q[0].kind, NeedKind::ReviewWedged);
         assert!(q[0].pane_id.is_none(), "squadless row has no pane");
+    }
+
+    // x-e3be: NeedKind::Decision is now genuinely constructed by three
+    // needs.rs fold kinds, and it leads the severity order.
+    #[test]
+    fn operator_question_folds_to_decision_and_sorts_first() {
+        let mut v = view_with_agents(vec![agent_row("bs", 5, Some(AgentBadge::Working), false)]);
+        v.needs_fold = Some(vec![
+            fold_item("budget_stop", "bs", false),
+            fold_item("operator_question", "decision-row", true),
+        ]);
+        let q = v.needs_queue();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].kind, NeedKind::Decision);
+        assert_eq!(q[0].name, "decision-row");
+        assert_eq!(q[1].kind, NeedKind::BudgetStop);
+    }
+
+    #[test]
+    fn carveout_stale_and_stale_claims_also_map_to_decision() {
+        for kind in ["carveout_stale", "stale_claims"] {
+            let mut v = view_with_agents(vec![]);
+            v.needs_fold = Some(vec![fold_item(kind, "pile", true)]);
+            let q = v.needs_queue();
+            assert_eq!(q.len(), 1, "kind={kind}");
+            assert_eq!(q[0].kind, NeedKind::Decision, "kind={kind}");
+        }
     }
 
     // AC5-FR (x-feec): Enter on a joined fold row focuses its pane (goto).

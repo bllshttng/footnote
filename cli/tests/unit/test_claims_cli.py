@@ -220,6 +220,45 @@ def test_list_with_prefix(cwd_tmp):
     assert keys == ["node:ab-1"]
 
 
+def test_list_no_prefix_sees_global_claims_from_different_cwd(tmp_path, monkeypatch):
+    """A no-prefix `list` must find node: claims under the global root even
+    when cwd's local claims dir is a different, empty directory.
+
+    Regression for the bug measured 2026-08-14: 573 claim files on disk under
+    ~/.fno/claims, but `fno claim list` printed "no claims" because it only
+    scanned cwd's local root - global-id claims (node:/dispatch:/session:)
+    never live there, so an unscoped call saw nothing.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.chdir(repo)
+
+    acquired = runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h"])
+    assert acquired.exit_code == 0
+    # Sanity: the claim landed under the global root, not the repo-local one.
+    assert (home / ".fno" / "claims" / "node%3Aab-1.lock").exists()
+    assert not (repo / ".fno" / "claims").exists()
+
+    listed = runner.invoke(cli, ["list", "--json"])
+    assert listed.exit_code == 0
+    keys = [r["key"] for r in json.loads(listed.output)]
+    assert keys == ["node:ab-1"]
+
+
+def test_list_prefix_node_scans_global_root_once(cwd_tmp):
+    """An explicit global --prefix still resolves the global root directly;
+    the merge in list_cmd must not duplicate its rows."""
+    runner.invoke(cli, ["acquire", "node:ab-1", "--holder", "h"])
+    result = runner.invoke(cli, ["list", "--prefix", "node:", "--json"])
+    assert result.exit_code == 0
+    keys = [r["key"] for r in json.loads(result.output)]
+    assert keys == ["node:ab-1"]
+
+
 def test_force_release_succeeds(cwd_tmp):
     runner.invoke(cli, ["acquire", "k", "--holder", "h"])
     result = runner.invoke(cli, ["release", "k", "--force", "--reason", "operator override"])
