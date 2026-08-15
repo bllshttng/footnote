@@ -252,7 +252,10 @@ async fn review_start_round_trip(
         review_start_request_json(thread_id, target, delivery).into(),
     ))
     .await
-    .map_err(|_| "not-confirmed")?;
+    // A failed SEND is a pre-send wedge (nothing delivered), not a lost
+    // response; only the timeout layer's request_in_flight remap and the read
+    // below may claim "not-confirmed".
+    .map_err(|_| "io-error")?;
     let resp = read_until_id(&mut stream, &serde_json::json!(1))
         .await
         .map_err(|_| "not-confirmed")?;

@@ -208,12 +208,15 @@ _BODY_WARN_BYTES = _cap_env_int("FNO_MAIL_BODY_WARN", 3000)
 _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 
 
-def _enforce_body_cap(body: str) -> None:
+def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
     Fail-open: a disabled tier (0) or an unset body never blocks coordination.
     The refusal teaches the rule: put the detail in a node or doc and send a
     short pointer, since the mail is re-read far more often than the node.
+    ``usage=True`` exits 2: under ``--raw --check`` an over-cap payload is a
+    malformed CALL, and exit 1 there would read as a not-injectable verdict
+    about a session the run never measured.
     """
     warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
     if warn <= 0 and refuse <= 0:
@@ -226,7 +229,7 @@ def _enforce_body_cap(body: str) -> None:
             f"Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0.",
             file=sys.stderr,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2 if usage else 1)
     if warn > 0 and n > warn:
         print(
             f"note: mail body is {n} bytes (over the {warn}-byte brevity guide); "
@@ -1977,8 +1980,14 @@ def _codex_review_target(
         return target, False
     remainder = parts[1].strip()
     base = remainder.split()
-    if len(base) == 2 and base[0] == "--base":
-        return f"baseBranch:{base[1]}", False
+    if base[0] == "--base":
+        # A named base is an explicit scope request: a malformed form (dangling
+        # flag, a flag-like value, trailing tokens) must refuse rather than
+        # fall through to uncommittedChanges, which silently reviews a
+        # different diff than the one the operator asked for.
+        if len(base) == 2 and not base[1].startswith("--"):
+            return f"baseBranch:{base[1]}", False
+        return None, False
     if remainder == "--uncommitted":
         return "uncommittedChanges", False
     if _COMMIT_SHA.fullmatch(remainder):
@@ -2066,7 +2075,9 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
 
     # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
     # shared size ceiling here before any of the reachable transports can fire.
-    _enforce_body_cap(stripped)
+    # Under --check the refusal is a usage error (exit 2), never a session
+    # verdict: exit 1 is the not-injectable answer's code.
+    _enforce_body_cap(stripped, usage=check)
 
     # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
     #    resolution (a registry this fno cannot read) is not a miss: it is the
@@ -2145,11 +2156,11 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
         if lane == "codex-daemon":
             # --check answers before the RPC fires: a review verb HAS a path on
             # this lane (the structured RPC), everything else has none. The
-            # probe claims path-existence only, same as the keystroke branches.
-            if check:
-                if verb in _CODEX_REVIEW_VERBS:
-                    print("injectable: codex-daemon review/start RPC")
-                    raise typer.Exit(code=0)
+            # probe claims path-existence only, same as the keystroke branches -
+            # but only for preconditions it cannot cheaply decide; a missing
+            # binary or an unresolvable target WOULD refuse the send, so the
+            # check answers them rather than promising a path the send lacks.
+            if check and verb not in _CODEX_REVIEW_VERBS:
                 print(
                     "not-injectable: codex-daemon has no prompt line; only "
                     "/review and /code-review map to its review/start RPC"
@@ -2169,6 +2180,15 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
                     "the session in a mux pane, where --raw pastes at the real "
                     "prompt line and the TUI parser runs it"
                 )
+            if check:
+                from fno import rust_binary
+
+                if rust_binary.resolve_installed_binary() is None:
+                    print(
+                        "not-injectable: the fno-agents binary is absent or too "
+                        "old (run `fno doctor`), so review/start has no transport"
+                    )
+                    raise typer.Exit(code=1)
             default_base = (
                 _codex_default_review_base(getattr(entry, "cwd", None))
                 if stripped in _CODEX_REVIEW_VERBS
@@ -2177,11 +2197,23 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             target, ignored_remainder = _codex_review_target(
                 stripped, default_base=default_base
             )
+            if check:
+                if target is None:
+                    print(
+                        "not-injectable: no resolvable review target (bare verb "
+                        "with no origin default branch, or unparsable arguments); "
+                        "retry with '/review --base <branch>' or "
+                        "'/review --uncommitted'"
+                    )
+                    raise typer.Exit(code=1)
+                print("injectable: codex-daemon review/start RPC")
+                raise typer.Exit(code=0)
             if target is None:
                 _refused(
-                    f"{name!r} bare {verb} has no resolvable origin default branch; "
-                    "retry with '/review --base <branch>' or explicitly request "
-                    "'/review --uncommitted'"
+                    f"{name!r} {verb} has no resolvable review target - a bare "
+                    "verb with no origin default branch, or arguments after the "
+                    "verb do not parse; retry with '/review --base <branch>' or "
+                    "explicitly request '/review --uncommitted'"
                 )
             assert target is not None
             receipt = _review_start_codex(
@@ -2204,6 +2236,12 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
                 _refused(
                     f"{name!r} codex review/start failed: no-daemon; run "
                     "`codex app-server daemon start` and retry"
+                )
+            if reason in ("stale-binary", "binary-not-found"):
+                _refused(
+                    f"{name!r} codex review/start failed: {reason}; the deployed "
+                    "fno-agents binary is absent or rejected the invocation - "
+                    "run `fno doctor --fix` and retry"
                 )
             if reason == "not-confirmed":
                 print(

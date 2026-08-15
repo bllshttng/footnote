@@ -6218,6 +6218,11 @@ def _review_start_codex(
     try:
         receipt = json.loads(proc.stdout.strip())
     except (ValueError, AttributeError):
+        # Exit 2 with no stdout is the binary's usage arm: a deployed binary
+        # predating this PR's flags rejects the invocation there. Point the
+        # operator at the binary, not the daemon.
+        if proc.returncode == 2 and not proc.stdout.strip():
+            return {"delivered": False, "reason": "stale-binary"}
         return {"delivered": False, "reason": "rpc-error"}
     if not isinstance(receipt, dict):
         return {"delivered": False, "reason": "rpc-error"}

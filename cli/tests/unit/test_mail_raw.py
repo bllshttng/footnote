@@ -414,7 +414,173 @@ def test_raw_codex_review_not_confirmed_warns_against_retry(
     assert "refused:" not in captured.err
 
 
-def test_raw_keeps_mux_hosted_codex_on_the_prompt_line(mailbox, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "/review --base",
+        "/review --base --uncommitted",
+        "/review --base origin/main extra",
+    ],
+)
+def test_raw_malformed_codex_base_refuses_instead_of_rescoping(
+    mailbox, monkeypatch, capsys, payload
+):
+    """A named base is an explicit scope request: a malformed form must refuse,
+    never fall through to uncommittedChanges (which silently reviews a
+    different diff than the one asked for)."""
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    called = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *_a, **_k: called.append(True),
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", payload, self_ok=False)
+    assert exc.value.exit_code == 2
+    err = capsys.readouterr().err
+    assert "--base" in err
+    assert not called
+
+
+def test_raw_check_codex_review_answers_the_send_refusals(
+    mailbox, monkeypatch, capsys
+):
+    """"--check cannot say yes where the send says no: an unresolvable target
+    or a missing binary must answer not-injectable, not injectable."""
+    import fno.mail.cli as mail_cli
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(mail_cli, "_codex_default_review_base", lambda _cwd: None)
+
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review", self_ok=False, check=True)
+    assert exc.value.exit_code == 1
+    out = capsys.readouterr().out
+    assert "not-injectable" in out
+    assert "--base" in out
+
+    monkeypatch.setattr("fno.rust_binary.resolve_installed_binary", lambda: None)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review --uncommitted", self_ok=False, check=True)
+    assert exc.value.exit_code == 1
+    assert "fno doctor" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(
+        mail_cli, "_codex_default_review_base", lambda _cwd: "origin/main"
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review", self_ok=False, check=True)
+    assert exc.value.exit_code == 0
+    assert "injectable" in capsys.readouterr().out
+
+
+def test_raw_check_non_review_verb_on_codex_daemon_still_not_injectable(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/compact", self_ok=False, check=True)
+    assert exc.value.exit_code == 1
+    assert "no prompt line" in capsys.readouterr().out
+
+
+def test_review_start_codex_flags_stale_deployed_binary(monkeypatch):
+    from fno.agents import dispatch
+
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(
+        dispatch.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 2, stdout="", stderr="review-start: unknown flag: --audit-payload"
+        ),
+    )
+    assert dispatch._review_start_codex(SID_CODEX, "uncommittedChanges") == {
+        "delivered": False,
+        "reason": "stale-binary",
+    }
+
+
+def test_raw_codex_review_stale_binary_names_doctor(mailbox, monkeypatch, capsys):
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *_a, **_k: {"delivered": False, "reason": "stale-binary"},
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review", self_ok=False)
+    assert exc.value.exit_code == 2
+    err = capsys.readouterr().err
+    assert "stale-binary" in err
+    assert "fno doctor" in err
+
+
+def test_raw_body_cap_under_check_is_a_usage_exit(mailbox, monkeypatch, capsys):
+    import fno.mail.cli as mail_cli
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    monkeypatch.setattr(mail_cli, "_BODY_WARN_BYTES", 0)
+    monkeypatch.setattr(mail_cli, "_BODY_REFUSE_BYTES", 20)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review custom:" + "x" * 32, self_ok=False, check=True)
+    # Exit 1 is the not-injectable verdict's code; an over-cap payload is a
+    # malformed call, so under --check it must stay a usage error at exit 2.
+    assert exc.value.exit_code == 2
+    assert "mail body is" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_raw_generic_daemon_lane_keeps_its_refusal(mailbox, monkeypatch, capsys, check):
+    """The non-codex daemon lanes (gemini, opencode, unknown) never gained the
+    review/start exception; their generic refusal keeps coverage on both the
+    send and the --check form."""
+    from fno.agents.registry import AgentEntry
+    from fno.mail.cli import _raw_send
+
+    entry = AgentEntry(
+        name="gempeer",
+        harness="gemini",
+        harness_session_id="g-1234",
+        cwd=str(mailbox),
+        log_path="",
+        status="live",
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_agent",
+        lambda _name: type("R", (), {"entry": entry})(),
+    )
+    review_calls = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *_a, **_k: review_calls.append(True),
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("gempeer", "/review", self_ok=False, check=check)
+    assert exc.value.exit_code != 0
+    captured = capsys.readouterr()
+    assert not review_calls
+    if check:
+        assert "not-injectable" in captured.out
+        assert "gemini-daemon" in captured.out
+    else:
+        assert "not a prompt-line keystroke path" in captured.err
+        assert "gemini-daemon" in captured.err
     from fno.agents.registry import AgentEntry
     from fno.mail.cli import _raw_send
 
