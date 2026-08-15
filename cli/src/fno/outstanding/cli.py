@@ -17,9 +17,10 @@ from fno.outstanding.core import OutstandingError, collect, render
 
 outstanding_app = typer.Typer(
     help=(
-        "What is outstanding FOR YOU: unharvested carve-outs and open operator "
-        "questions. Read-only by default; `ask` records a question so it "
-        "survives the next turn, `clear` closes it once answered."
+        "What is outstanding FOR YOU: unharvested carve-outs, open operator "
+        "questions, and undecided fu- captures folded across every project. "
+        "Read-only by default; `ask` records a question so it survives the "
+        "next turn, `clear` closes it once answered."
     ),
 )
 

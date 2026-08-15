@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from fno.outstanding.cli import outstanding_app
+from fno.outstanding.core import RENDER_CAP
 
 runner = CliRunner()
 
@@ -268,6 +270,131 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     result = runner.invoke(outstanding_app, ["--json"])
     assert result.exit_code == 0, result.output
     assert [q["id"] for q in json.loads(result.stdout)["questions"]] == [qid]
+
+
+# --- 3rd leg: the capture fold (x-7d94 task 1.1) -----------------------------
+
+def _write_inbox(root: Path, lines: list[str]) -> Path:
+    inbox = root / "internal" / "fno" / "backlog" / "inbox.md"
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    inbox.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return inbox
+
+
+def _capture_event(fu_id: str, ts: str) -> str:
+    return json.dumps(
+        {
+            "ts": ts,
+            "type": "capture_add",
+            "source": "backlog",
+            "data": {"session_id": "manual", "fu_id": fu_id, "title": "t"},
+        }
+    )
+
+
+@pytest.fixture()
+def capture_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> "tuple[Path, Path]":
+    """A hermetic THIS project plus one sibling project, both known to the
+    machine-wide graph so the fold finds the sibling's inbox."""
+    this = tmp_path / "this"
+    other = tmp_path / "other"
+    for p in (this, other):
+        p.mkdir(parents=True)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(this))
+    import fno.paths as paths_mod
+
+    paths_mod.resolve_repo_root.cache_clear()
+    (this / ".fno").mkdir(exist_ok=True)
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-0001", "title": "a", "cwd": str(this)},
+                    {"id": "x-0002", "title": "b", "cwd": str(other)},
+                ]
+            }
+        )
+        + "\n"
+    )
+    import fno.graph._constants as gc
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph)
+    monkeypatch.setattr(gs, "GRAPH_JSON", graph)
+    return this, other
+
+
+def test_capture_leg_folds_every_project_and_renders_true_count(capture_roots):
+    """AC1-HP: three legs; the capture leg renders Showing N of M, oldest D
+    days, with M folded across projects."""
+    this, other = capture_roots
+    _write_inbox(this, ["- [ ] fu-aaaaaa - alpha (p1)", "- [ ] fu-bbbbbb - beta"])
+    _write_inbox(other, ["- [ ] fu-cccccc - gamma", "- [x] fu-dddddd - done -> ab-1"])
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert "3 captures" in res.output, res.output
+    assert "Showing 3 of 3" in res.output, res.output
+
+    as_json = runner.invoke(outstanding_app, ["--json"])
+    payload = json.loads(as_json.stdout)
+    assert payload["captures"]["total"] == 3
+    assert payload["captures"]["by_project"][this.name] == 2
+    assert payload["captures"]["by_project"][other.name] == 2 - 1
+
+
+def test_capture_leg_reports_oldest_age_from_capture_add_events(capture_roots):
+    """The inbox markdown carries no dates; age comes from capture_add in the
+    events journal."""
+    this, other = capture_roots
+    _write_inbox(this, ["- [ ] fu-aaaaaa - alpha", "- [ ] fu-bbbbbb - beta"])
+    events = this / ".fno" / "events.jsonl"
+    events.parent.mkdir(exist_ok=True)
+    old = (datetime.now(timezone.utc) - timedelta(days=62)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    events.write_text(
+        _capture_event("fu-aaaaaa", old) + "\n" + _capture_event("fu-bbbbbb", "2026-08-14T00:00:00Z") + "\n",
+        encoding="utf-8",
+    )
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert "oldest 62 days" in res.output, res.output
+
+
+def test_unreadable_inbox_contributes_zero_and_never_raises(capture_roots):
+    """AC2-EDGE: a missing/unreadable sibling inbox contributes zero captures
+    and the other projects still report."""
+    this, other = capture_roots
+    _write_inbox(this, ["- [ ] fu-aaaaaa - alpha"])
+    # other/ has no inbox at all; also plant a graph cwd that does not exist.
+    import fno.graph._constants as gc
+    import json as _json
+
+    graph = gc.GRAPH_JSON
+    data = _json.loads(graph.read_text())
+    data["entries"].append({"id": "x-dead", "title": "d", "cwd": "/nonexistent/project"})
+    graph.write_text(_json.dumps(data))
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert "1 capture" in res.output, res.output
+
+
+def test_capture_render_caps_rows_but_keeps_the_true_count(capture_roots):
+    """Ruling 2: never the full list; the count beside the cap is the honesty."""
+    this, _ = capture_roots
+    _write_inbox(
+        this, [f"- [ ] fu-{i:06x} - item {i}" for i in range(10)]
+    )
+
+    res = runner.invoke(outstanding_app, [])
+    assert res.exit_code == 0, res.output
+    assert f"Showing {RENDER_CAP} of 10" in res.output, res.output
 
 
 # --- 2.5 the SessionStart block ---------------------------------------------
