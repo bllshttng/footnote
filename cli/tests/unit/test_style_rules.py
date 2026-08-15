@@ -488,6 +488,15 @@ def test_format_excerpt_survives_an_inner_double_quote():
     assert style.check(msg) == [], msg
 
 
+def test_format_detail_survives_an_unmatched_quote_on_a_later_hit():
+    # A second violation in the same sentence can carry a word with an
+    # unmatched quote, which used to shift every later quote pairing and
+    # leave a real word unmasked, failing the refusal's own self-check.
+    text = 'you should run and would" stop.'
+    msg = style.format_violations(style.check(text))
+    assert style.check(msg) == [], msg
+
+
 def test_the_refusal_message_passes_its_own_rules():
     # The gate must not violate its own rule. The refusal message is itself
     # style-checked; every banned word it names is quoted, so masking exempts it.

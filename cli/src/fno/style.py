@@ -307,13 +307,20 @@ def format_violations(violations: list[Violation]) -> str:
     return "\n\n".join(lines)
 
 
-def _excerpt(sentence: str) -> str:
-    """Cap the offending text at 12 words, quoted-safe.
+def _quote_safe(text: str) -> str:
+    """Replace an embedded double quote so it cannot close a wrapping quote early.
 
-    An inner double quote would close the wrapping quote early and expose the
-    rest of the excerpt to the word count this same message is checked against.
+    Applies to any offending token or excerpt this module embeds inside its own
+    double-quoted spans - an unmatched inner ``"`` shifts every quote pairing
+    after it, which can leave a later word unmasked and fail the refusal's own
+    self-check.
     """
-    words = sentence.replace('"', "'").split()
+    return text.replace('"', "'")
+
+
+def _excerpt(sentence: str) -> str:
+    """Cap the offending text at 12 words, quoted-safe."""
+    words = _quote_safe(sentence).split()
     if len(words) > _EXCERPT_CAP:
         words = words[:_EXCERPT_CAP] + ["..."]
     return " ".join(words)
@@ -355,7 +362,8 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
             out.append(
                 Violation(
                     3, index, sentence,
-                    f'sentence {shown} uses "{word}". Write "can", "will", or "must" instead.',
+                    f'sentence {shown} uses "{_quote_safe(word)}". '
+                    'Write "can", "will", or "must" instead.',
                 )
             )
     for word in words:
@@ -364,7 +372,8 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
             out.append(
                 Violation(
                     4, index, sentence,
-                    f'sentence {shown} has the contraction "{word}". Write the words out.',
+                    f'sentence {shown} has the contraction "{_quote_safe(word)}". '
+                    "Write the words out.",
                 )
             )
     keyword = _condition_keyword(sentence)
