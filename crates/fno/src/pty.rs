@@ -776,12 +776,13 @@ fn spawn_reader(
 mod tests {
     use super::*;
 
-    /// Serializes every test in this module that reaches `open_pty`: the
-    /// wedge cooldown is a process-wide static (by design - the real caller
-    /// is always the server's single core-loop thread), so two spawn tests
-    /// running on parallel test threads could otherwise see each other's
-    /// timeout. Poison recovered rather than propagated, matching
-    /// `fork_guard`.
+    /// Serializes every test in this module that reaches `open_pty`. The
+    /// wedge cooldown itself is thread-local (see `LAST_OPENPTY_TIMEOUT`
+    /// above), so it can't leak between tests on different threads; what
+    /// this gate protects is `FNO_MUX_OPENPTY_TIMEOUT_MS`, a process-wide
+    /// env var with no thread-local equivalent - two wedge tests setting it
+    /// concurrently would race (see `PtyTestGuard` below). Poison recovered
+    /// rather than propagated, matching `fork_guard`.
     // tokio::sync::Mutex, not std::sync::Mutex: the `#[tokio::test]` spawn
     // tests hold this guard across an `.await`, which clippy's
     // `await_holding_lock` correctly refuses for a std lock (it can deadlock
@@ -791,14 +792,12 @@ mod tests {
 
     /// Reset the globals a wedge test can leave dirty: the cooldown Instant,
     /// the hang-injection thread-local a worker thread may have carried over
-    /// from an earlier test, and the inflight count leaked probe threads
-    /// left claimed (those threads are stuck forever in the real kernel
-    /// call, so nothing else will ever release their slots). Zeroing here
-    /// can under-count a genuinely concurrent probe from another test
-    /// running at this exact instant, which only weakens the cap
-    /// momentarily - never a spurious refusal - so that's an acceptable
-    /// trade for keeping this crate's wedge tests from permanently eating
-    /// into the cap themselves.
+    /// from an earlier test, and the monotonic give-up counter
+    /// (`TOTAL_TIMEOUTS`). Zeroing the counter here can under-count a
+    /// genuinely concurrent probe from another test running at this exact
+    /// instant, which only weakens the cap momentarily - never a spurious
+    /// refusal - so that's an acceptable trade for keeping this crate's
+    /// wedge tests from permanently eating into the cap themselves.
     fn reset_pty_test_globals() {
         clear_wedge_cooldown();
         set_hang_injection(std::time::Duration::ZERO);
