@@ -57,7 +57,9 @@ def llm_call(
         if model:
             cmd += ["--model", model]
         if prompt_as_arg:
-            cmd.append(prompt)
+            # Behind `--` like every other claude seed: a leading-flag prompt
+            # must be the positional, not a claude flag.
+            cmd += ["--", prompt]
 
     prompt_is_argv = prompt_as_arg and not stub
     return run(

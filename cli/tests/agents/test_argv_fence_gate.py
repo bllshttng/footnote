@@ -11,7 +11,14 @@ a push of a message expression and fails unless that push is one of:
 - value-form: the element immediately before is a single flag push
   (``-p`` / ``-i`` / ``--prompt``), so the message is that flag's value;
 - exempt: the site carries an ``argv-fence: exempt`` comment, for harnesses
-  whose ``--`` support is unverified (see the agy pane arm).
+  whose ``--`` support is unverified (see the agy pane arm) or internal
+  ``fno`` CLI namespaces (the x-04ce seam).
+
+A seed wears a name (``message`` / ``prompt`` / ``full_prompt`` / ``seed`` /
+``effective``), not a fixed identifier; string literals are stripped before
+the name test so a flag like ``--append-system-prompt`` is never mistaken
+for a seed. Bare-name elements of multi-line list literals are scanned, but
+call arguments are not: the innermost unclosed bracket must be ``[``.
 
 A new unfenced seam fails this test with no edit to this file. The floor
 assertions below are the positive control: a scanner whose patterns rot and
@@ -22,20 +29,25 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PY_DIRS = [REPO_ROOT / "cli/src/fno/agents"]
+PY_DIRS = [REPO_ROOT / "cli/src/fno"]
 RS_DIR = REPO_ROOT / "crates/fno-agents/src"
 
 STR = r'"([^"]*)"'
 PY_LIST = re.compile(r"^\s*[\w.]+\s*\+=\s*\[(.*)\]")
+PY_ASSIGN = re.compile(r"^\s*[\w.]+\s*=\s*\[(.*)\]")
+PY_ELEMENT = re.compile(r"^\s*(?:\*)?(?:message|full_prompt|prompt|seed|effective)\s*,\s*$")
 PY_APPEND = re.compile(r"^\s*[\w.]+\.append\((.*)\)\s*$")
 RS_PUSH = re.compile(r"^\s*[\w.]+\.push\((.*)\);?\s*$")
 RS_ELEMENT = re.compile(
-    r"^\s*(?:(?:ctx\.)?message\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\))\s*,\s*$"
+    r"^\s*(?:(?:ctx\.)?(?:message|effective)\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\))\s*,\s*$"
 )
 PY_COMMENT = re.compile(r"^\s*#")
 RS_COMMENT = re.compile(r"^\s*//")
 STRING_IN = re.compile(STR)
-HAS_MESSAGE = re.compile(r"\bmessage\b")
+# A pushed seed wears one of these names. Literal strings are stripped before
+# the test so a flag literal like "--append-system-prompt" (which contains the
+# word "prompt" behind a hyphen boundary) is never mistaken for a seed push.
+HAS_MESSAGE = re.compile(r"\b(?:message|prompt|seed|effective)\b")
 
 
 def _literals(line: str) -> list:
@@ -51,6 +63,32 @@ def _prev_code_line(lines: list, idx: int, is_rust: bool) -> str:
             j -= 1
             continue
         return lines[j]
+    return ""
+
+
+def _enclosing_opener(lines: list, idx: int) -> str:
+    """The innermost unclosed bracket type at the START of line idx, or "".
+
+    Scans upward from idx-1, chars right-to-left, tracking depth. Returns the
+    opener char when depth goes negative: "[" means line idx is an element of
+    a list literal; "(" means a call argument (not an argv element); "{"
+    a dict/tuple. Heuristic: brackets inside strings/comments can mislead,
+    which the floor assertions below would surface as census drift.
+    """
+    depth = 0
+    for j in range(idx - 1, -1, -1):
+        for ch in reversed(lines[j]):
+            if ch in ")]}":
+                depth += 1
+            elif ch in "([{":
+                if depth == 0:
+                    return ch
+                depth -= 1
+        # A def/return line with no open bracket context ends the search: the
+        # bare name is a statement, not an element.
+        stripped = lines[j].strip()
+        if stripped.startswith(("return ", "def ", "if ", "for ", "while ", "raise ")):
+            return ""
     return ""
 
 
@@ -105,11 +143,11 @@ def scan_file(path: Path, is_rust: bool) -> list:
         kind = None
         pushed = None
         if not is_rust:
-            m = PY_LIST.match(line)
-            if m and HAS_MESSAGE.search(m.group(1)):
+            m = PY_LIST.match(line) or PY_ASSIGN.match(line)
+            if m and HAS_MESSAGE.search(re.sub(STR, "", m.group(1))):
                 tokens = [t.strip() for t in m.group(1).split(",")]
                 for t_i, tok in enumerate(tokens):
-                    if HAS_MESSAGE.search(tok):
+                    if HAS_MESSAGE.search(re.sub(STR, "", tok)):
                         prev_tok = tokens[t_i - 1] if t_i else ""
                         lits = _literals(prev_tok)
                         kind = (
@@ -123,13 +161,19 @@ def scan_file(path: Path, is_rust: bool) -> list:
                         break
             if kind is None:
                 m = PY_APPEND.match(line)
-                if m and HAS_MESSAGE.search(m.group(1)):
+                if m and HAS_MESSAGE.search(re.sub(STR, "", m.group(1))):
+                    pushed = line.strip()
+                    kind = _classify_prev(_prev_code_line(lines, idx - 1, is_rust))
+            if kind is None:
+                # Bare seed element of a multi-line argv LIST literal (not a
+                # call argument: the innermost unclosed opener must be "[").
+                if PY_ELEMENT.match(line) and _enclosing_opener(lines, idx - 1) == "[":
                     pushed = line.strip()
                     kind = _classify_prev(_prev_code_line(lines, idx - 1, is_rust))
         else:
             is_push = RS_PUSH.match(line)
             arg = is_push.group(1) if is_push else ""
-            if (is_push and HAS_MESSAGE.search(arg)) or (
+            if (is_push and HAS_MESSAGE.search(re.sub(STR, "", arg))) or (
                 arg == "" and RS_ELEMENT.match(line) and HAS_MESSAGE.search(line)
             ):
                 pushed = line.strip()
@@ -169,7 +213,7 @@ def test_scanner_still_sees_the_known_seams() -> None:
     counts = {}
     for _, _, _, kind in results:
         counts[kind] = counts.get(kind, 0) + 1
-    assert counts.get("fenced", 0) >= 10, counts
-    assert counts.get("value-form", 0) >= 3, counts
-    assert counts.get("exempt", 0) >= 1, counts
+    assert counts.get("fenced", 0) >= 13, counts
+    assert counts.get("value-form", 0) >= 7, counts
+    assert counts.get("exempt", 0) >= 2, counts
     assert sum(counts.values()) == len(results)

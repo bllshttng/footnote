@@ -753,6 +753,9 @@ def create(
         *add_dir_args,
         *git_args,
         *sandbox_flag(eff_yolo),
+        # Behind `--` (codex's own clap tip): a leading-flag seed must be the
+        # prompt positional, not a codex flag.
+        "--",
         full_prompt,
     ]
     return _run_codex(
@@ -807,6 +810,7 @@ def resume(
         "--skip-git-repo-check",
         *sandbox_flag_resume(eff_yolo),
         *([] if eff_yolo else sandbox_config_args_resume(cwd)),
+        "--",
         full_prompt,
     ]
     return _run_codex(

@@ -646,6 +646,8 @@ class Ritual:
         model = getattr(self.ctx.pm, "model", None)
         if model:
             argv += ["--harness", "claude", "--model", model]
+        # argv-fence: exempt (fno's own Typer namespace, the x-04ce seam: a
+        # leading-flag seed needs fno's own -- separator, not tracked here).
         argv += ["--name", f"judgment-pr-{self.ctx.pr}", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
