@@ -337,6 +337,26 @@ def _resume_claude_wake(
             if after == _WAKE_TARGET_STATUS:
                 break
 
+    # A skipped row (before already Working/Idle) reports success on its
+    # `before` state even when that state isn't the wake target: nothing was
+    # attempted, so "did it reach Working" is the wrong question to ask.
+    #
+    # Check the outcome BEFORE emitting: the event is named "agent_resumed",
+    # so emitting it unconditionally would misreport a wake that never
+    # reached Working as a success, the same pre-fix shape a sigma review
+    # already caught below for the exec-based harnesses' chdir failure.
+    if before not in _WAKE_SKIP_STATUSES and after != _WAKE_TARGET_STATUS:
+        return ResumeResult(
+            exit_code=16,
+            stderr=(
+                f"fno agents resume: {name!r} ({short_id}) did not reach "
+                f"{_WAKE_TARGET_STATUS!r} after {_WAKE_ATTEMPTS} wake "
+                f"attempt(s): before={before!r} after={after!r}"
+                + (f" ({last_err})" if last_err else "")
+                + ".\n"
+            ),
+        )
+
     try:
         emit_event(
             "agent_resumed",
@@ -349,21 +369,6 @@ def _resume_claude_wake(
         )
     except OSError:  # best-effort telemetry; never mask the resume outcome.
         pass
-
-    # A skipped row (before already Working/Idle) reports success on its
-    # `before` state even when that state isn't the wake target: nothing was
-    # attempted, so "did it reach Working" is the wrong question to ask.
-    if before not in _WAKE_SKIP_STATUSES and after != _WAKE_TARGET_STATUS:
-        return ResumeResult(
-            exit_code=16,
-            stderr=(
-                f"fno agents resume: {name!r} ({short_id}) did not reach "
-                f"{_WAKE_TARGET_STATUS!r} after {_WAKE_ATTEMPTS} wake "
-                f"attempt(s): before={before!r} after={after!r}"
-                + (f" ({last_err})" if last_err else "")
-                + ".\n"
-            ),
-        )
 
     # No exec_argv/exec_cwd: this path never execs (unlike every other
     # harness's resume arm), so leaving those fields set to a

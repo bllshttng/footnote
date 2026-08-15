@@ -262,6 +262,30 @@ def test_claude_resume_retries_once_before_giving_up() -> None:
     assert "deadbeef" in res.stderr
 
 
+def test_claude_resume_emits_no_event_on_a_failed_wake() -> None:
+    """Mirrors the codex/exec path's chdir-failure convention: an event named
+    "agent_resumed" must never fire on a wake that did not reach Working, or
+    it misreports the failure as a success to anyone reading the log."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    events_seen: list[dict] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert events_seen == []
+
+
 def test_claude_resume_restores_routed_env() -> None:
     """A routed row's env must reach the wake attempt."""
     from fno.agents.resume_cli import resume_logic
