@@ -207,6 +207,78 @@ def test_existing_pr_still_requires_current_verification(tmp_path, monkeypatch):
     assert not list((tmp_path / ".fno" / "artifacts").glob("ship-*.md"))
 
 
+def test_ship_refusal_names_both_checks_and_requests_preflight(
+    tmp_path, monkeypatch
+):
+    """A real refusal is distinguishable from a missing receipt: the error names
+    the exact-SHA check AND the patch-equivalence check."""
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+    existing_pr = [{"number": 57, "url": "https://github.com/owner/repo/pull/57"}]
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),
+        MagicMock(returncode=0, stdout=json.dumps(existing_pr), stderr=""),
+    ]
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence",
+        lambda **_kwargs: {
+            "satisfied": False,
+            "mode": "full",
+            "result": "stale",
+        },
+    )
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="feat: stale",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "error"
+    assert "no full/passed verification receipt for HEAD" in result["error"]
+    assert "no earlier receipt whose patches match it" in result["error"]
+    assert "scripts/ci/preflight.sh" in result["error"]
+
+
+def test_ship_opts_into_rebase_equivalent_evidence(tmp_path, monkeypatch):
+    """Review entry passes allow_equivalent=True, and an equivalent pass ships."""
+    monkeypatch.chdir(tmp_path)
+    state_path = _make_state(tmp_path)
+    existing_pr = [{"number": 58, "url": "https://github.com/owner/repo/pull/58"}]
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/test\n", stderr=""),
+        MagicMock(returncode=0, stdout=json.dumps(existing_pr), stderr=""),
+    ]
+    seen = {}
+
+    def _fake_evidence(**kwargs):
+        seen.update(kwargs)
+        return {"satisfied": True, "mode": "full", "result": "equivalent"}
+
+    monkeypatch.setattr(
+        "fno.pr._preflight.check_verification_evidence", _fake_evidence
+    )
+
+    with patch("subprocess.run", mock_run):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_path,
+            title="feat: rebased",
+            body="body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert seen.get("allow_equivalent") is True
+    assert result["action"] == "pr_exists"
+
+
 def test_explicit_preflight_exemption_does_not_require_receipt(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     state_path = _make_state(tmp_path)

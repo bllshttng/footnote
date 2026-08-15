@@ -171,13 +171,15 @@ def ship(
         cwd=str(Path.cwd()), base_ref=f"origin/{base_branch}"
     )
     if evidence_required:
-        evidence = check_verification_evidence()
+        evidence = check_verification_evidence(allow_equivalent=True)
         if not evidence["satisfied"]:
             return {
                 "action": "error",
                 "error": (
-                    "verification evidence refused ship: "
-                    f"mode={evidence['mode']} result={evidence['result']}"
+                    "verification evidence refused ship: no full/passed "
+                    "verification receipt for HEAD, and no earlier receipt "
+                    "whose patches match it. Run scripts/ci/preflight.sh. "
+                    f"(mode={evidence['mode']} result={evidence['result']})"
                 ),
                 "branch": branch,
             }
