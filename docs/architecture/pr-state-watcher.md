@@ -15,22 +15,22 @@ The implementation is a Python package (`cli/src/fno/pr_watch/`) split along a p
 | Module | Responsibility |
 |---|---|
 | `__init__.py` | `decide()` - the pure decision core over `(observation, watermark, reviewers, merge_ready)` |
-| `_discover.py` | `discover_open_prs()` (open backlog nodes carrying a PR) + `read_pr_state()` (per-PR `gh` reads) + `read_tracked_pr_states()` (the batched `gh` state read that sweeps every tracked record each tick) |
-| `_state.py` | `WatermarkStore` - the atomic per-PR watermark at `~/.fno/pr-watcher-state.json`; keys normalize to `owner/repo#number` on load |
-| `_dispatch.py` | `fire_skill()` (headless `claude --print` for the **review** poll only) + `tick()` (the impure orchestrator); merge dispatch delegates to `post_merge_route.dispatch_post_merge_ritual`. Terminal-PR delivery retries live in a sidecar store at `~/.fno/pr-watcher-state-delivery.json`, never in the observed-state cache |
+| `_discover.py` | `discover_open_prs()` (open backlog nodes carrying a PR). `read_pr_state()` does per-PR `gh` reads. `read_tracked_pr_states()` is the batched read that sweeps every tracked record each tick. |
+| `_state.py` | `WatermarkStore` - the atomic per-PR watermark at `~/.fno/pr-watcher-state.json`. Keys normalize to `owner/repo#number` on load. |
+| `_dispatch.py` | `fire_skill()` (headless `claude --print` for the **review** poll only) + `tick()` (the impure orchestrator). Merge dispatch delegates to `post_merge_route.dispatch_post_merge_ritual`. Terminal-PR delivery retries live in the sidecar at `~/.fno/pr-watcher-state-delivery.json`. They never enter the observed-state cache. |
 | `_install.py` + `cli.py` | the `fno pr-watch {tick,install,uninstall,status}` verbs + the gated plist installer |
 
 ### One poll cycle (a tick)
 
-1. **Normalize and sweep tracked state.** Watermark keys normalize to `owner/repo#number` (a bare-number key collapses into its unique qualified twin; ambiguous ones are discarded), then every tracked record - parked, merge-dispatched, and graph-orphaned ones included - is re-read from GitHub in one batched query per repository. A record GitHub reports MERGED or CLOSED is evicted from the cache on that tick; a failed read is named in the receipt rather than preserving a remembered OPEN. The heartbeat carries the receipt: swept and dropped records with matching counts.
+1. **Normalize and sweep tracked state.** Watermark keys normalize to `owner/repo#number`. A bare-number key collapses into its unique qualified twin. An ambiguous bare key is discarded. Every tracked record is then re-read from GitHub. Parked, merge-dispatched, and graph-orphaned records are included. The read is one batched query per repository. A record GitHub reports MERGED or CLOSED is evicted on that tick. A failed read is named in the receipt. A remembered OPEN is never preserved as current truth. The heartbeat names swept and dropped records with matching counts.
 2. **Discover open PRs** from the global graph: backlog nodes with no `completed_at` carrying a `pr_number`. Each node's own `cwd` field resolves its local checkout; a PR whose repo is not checked out locally is skipped (a headless skill needs a working tree).
 3. **Read PR state** per PR with `gh` (state + reviews/comments, handling the `[bot]` login suffix).
 4. **Decide** (at most one action per PR per tick), in precedence order:
-   - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno pr ritual <n> --autonomous` (warm-inject into the live origin if reachable, else the cold subprocess). The verb owns its own conditional headless judgment leg, so the watcher adds no model layer of its own and creates no background thread;
-   - closed-without-merge, or open past the max-age window -> park (poll it no further);
-   - a configured reviewer posted activity newer than the watermark -> fire `/fno:pr check`;
+   - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno pr ritual <n> --autonomous` (warm-inject into the live origin if reachable, else the cold subprocess). The verb owns its own conditional headless judgment leg. The watcher adds no model layer of its own and creates no background thread.
+   - closed-without-merge, or open past the max-age window -> park (poll it no further).
+   - a configured reviewer posted activity newer than the watermark -> fire `/fno:pr check`.
    - otherwise no-op.
-5. **Advance the watermark only after a clean dispatch.** A headless `claude --print` that exits 0 but reports `is_error: true` is a failure; the watermark is left unadvanced and the action is retried next tick, bounded to three retries before the PR is parked with a notification.
+5. **Advance the watermark only after a clean dispatch.** A headless `claude --print` that exits 0 but reports `is_error: true` is a failure. The watermark is left unadvanced and retried next tick. Retries are bounded to three before the PR is parked with a notification.
 
 The daemon never merges, closes, comments on, or mutates a PR or a graph node - it only reads state and fires skills. Decisions emit canonical events (`pr_watch_dispatched`, `pr_watch_skipped`, `pr_watch_dispatch_failed`, `pr_watch_parked`) plus a per-tick heartbeat (`pr_watch_tick`) to the global event log under `~/.fno/`, so a quiet-but-alive watcher is distinguishable from a dead one.
 
