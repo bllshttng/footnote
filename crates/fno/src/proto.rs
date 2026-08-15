@@ -2458,11 +2458,22 @@ pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
 /// Remove every file a session leaves beside its name: the socket, the
 /// wire-version sidecar, and the pid sidecar. Shared by the server's
 /// SocketGuard and kill-server's recovery ladder so the two cannot drift
-/// apart about what a dead session leaves behind. Tolerates missing files.
-pub fn remove_session_files(socket: &Path) {
-    let _ = std::fs::remove_file(socket);
-    let _ = std::fs::remove_file(version_sidecar_path(socket));
-    let _ = std::fs::remove_file(pid_sidecar_path(socket));
+/// apart about what a dead session leaves behind. A file that is already
+/// gone is fine (the guard may have run first); the first other failure is
+/// returned so a caller mid-recovery can report it.
+pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
+    for path in [
+        socket.to_path_buf(),
+        version_sidecar_path(socket),
+        pid_sidecar_path(socket),
+    ] {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub const DEFAULT_SESSION: &str = "main";

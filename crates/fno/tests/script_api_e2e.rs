@@ -584,6 +584,13 @@ fn server_publishes_and_removes_its_pid_sidecar() {
     );
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(v["killed"], true, "healthy server dies gracefully");
+    // Under load the graceful window can expire and the SIGTERM rung finishes
+    // the same clean shutdown; both are clean deaths of a healthy server.
+    assert!(
+        v["path"] == "graceful" || v["path"] == "sigterm",
+        "path names a clean-death rung: {}",
+        v["path"]
+    );
 
     for name in ["main.sock", "main.ver", "main.pid"] {
         let p = scratch.0.join(name);

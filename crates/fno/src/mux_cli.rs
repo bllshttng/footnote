@@ -21,7 +21,8 @@
 //!   carries `stale` (x-1a85: on a wire version this binary can't handshake -
 //!   `fno restart` auto-restarts these) and `wire_version` (the server's
 //!   `.ver` sidecar value, `null` for a pre-sidecar server).
-//! - `kill-server`: `{session, killed: true, note}` on success.
+//! - `kill-server`: `{session, killed: true, note, path}` on success, `path`
+//!   one of `graceful|stale-socket|sigterm|sigkill`.
 //! - `shell-init`: `{shell, snippet}` (the raw snippet without `--json`).
 //! - `doctor`: `{ok: bool, checks: [{check, verdict: ok|warn|fail|n/a, detail,
 //!   remedy}]}`.
@@ -701,24 +702,73 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
     result
 }
 
+/// Which rung ended a `kill-server` run (x-48a5): printed on both surfaces,
+/// because a silent recovery cannot be told apart from one that did nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum KillPath {
+    /// The server answered `KillServer` and exited on its own.
+    Graceful,
+    /// Nothing live held the socket (dead server, or a holder already gone):
+    /// leftover files removed, nothing signalled.
+    StaleSocket,
+    /// The holder died to SIGTERM after the control channel timed out.
+    Sigterm,
+    /// The holder ignored SIGTERM and died to SIGKILL.
+    Sigkill,
+    /// No rung could end it; the refusal names the next action.
+    Unrecoverable,
+}
+
+impl KillPath {
+    /// The `--json` `path` tag (module contract above).
+    fn json_tag(&self) -> &'static str {
+        match self {
+            KillPath::Graceful => "graceful",
+            KillPath::StaleSocket => "stale-socket",
+            KillPath::Sigterm => "sigterm",
+            KillPath::Sigkill => "sigkill",
+            KillPath::Unrecoverable => "unrecoverable",
+        }
+    }
+}
+
+/// One `kill-server` outcome: the rung that ended it, plus the note to print
+/// (a one-liner on success; on `Unrecoverable` the refusal, verbatim, on
+/// stderr). Split out so the ladder is unit-testable.
+struct KillOutcome {
+    path: KillPath,
+    note: String,
+}
+
+impl KillOutcome {
+    fn exit_code(&self) -> i32 {
+        match self.path {
+            KillPath::Unrecoverable => EXIT_ERROR,
+            _ => EXIT_OK,
+        }
+    }
+}
+
+/// How long a SIGTERM'd holder gets to exit before the ladder escalates to
+/// SIGKILL. The server registers SIGTERM through tokio and only acts on it
+/// inside its core loop, so a healthy server exits well inside this and a
+/// wedged one never will: under a wedge SIGKILL is the EXPECTED rung, not a
+/// last resort.
+const SIGTERM_GRACE: Duration = Duration::from_secs(3);
+/// How long a SIGKILL'd holder gets to disappear before the verb reports
+/// Unrecoverable. SIGKILL is immediate; this only bounds a slow reap.
+const SIGKILL_GRACE: Duration = Duration::from_secs(1);
+
 /// `fno mux kill-server [<name>]`: shut one session down. A live server Byes
 /// its clients, kills every pane child, and exits (its SocketGuard unlinks
 /// the socket); a stale socket is unlinked here with a message (exit 0); no
-/// socket at all is "no server" (exit 1).
+/// socket at all is "no server" (exit 1). A wedged holder - one that never
+/// accepted, or accepted and never answered - is escalated through SIGTERM
+/// and SIGKILL to unlink (x-48a5): a recovery verb must not depend on the
+/// subsystem it recovers. Every run prints which rung ended it, and an
+/// unrecoverable state names the next action instead of leaving a dead `&&`
+/// chain with no hint.
 pub fn kill_server(session: &str, json: bool) -> i32 {
-    // On success `--json` prints `{"session":..,"killed":true,"note":..}`; errors
-    // stay one-line on stderr (mirrors the pane verbs' json/error split).
-    let killed_ok = |note: &str| -> i32 {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({ "session": session, "killed": true, "note": note })
-            );
-        } else {
-            println!("{note}");
-        }
-        EXIT_OK
-    };
     let sock = match proto::socket_path(session) {
         Ok(p) => p,
         Err(e) => {
@@ -730,7 +780,37 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
         eprintln!("fno: no server for session {session:?}");
         return EXIT_ERROR;
     }
-    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
+    let outcome = kill_server_inner(session, &sock);
+    match outcome.path {
+        KillPath::Unrecoverable => eprintln!("{}", outcome.note),
+        _ => {
+            // On success `--json` prints `{session, killed, note, path}`;
+            // errors stay on stderr (mirrors the pane verbs' json/error split).
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "session": session,
+                        "killed": true,
+                        "note": outcome.note,
+                        "path": outcome.path.json_tag(),
+                    })
+                );
+            } else {
+                println!("{}", outcome.note);
+            }
+        }
+    }
+    outcome.exit_code()
+}
+
+/// The work of `kill-server`, returning the rung taken instead of printing.
+/// Both dead ends of the old verb - a connect that timed out, and a graceful
+/// request the connected server never answered - enter the same escalation
+/// ladder instead of refusing, because that is exactly the state the verb
+/// exists for.
+fn kill_server_inner(session: &str, sock: &Path) -> KillOutcome {
+    let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
         // Only a REFUSED connection (or a socket that vanished mid-race)
         // proves the server is dead. Any other connect error - including a
@@ -744,49 +824,46 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
             ) =>
         {
             // AC4-EDGE: dead server left its socket behind - take it out.
-            return match std::fs::remove_file(&sock) {
-                Ok(()) => killed_ok(&format!(
-                    "removed stale socket for session {session:?} (server was dead)"
+            return match proto::remove_session_files(sock) {
+                Ok(()) => KillOutcome {
+                    path: KillPath::StaleSocket,
+                    note: format!("removed stale socket for session {session:?} (server was dead)"),
+                },
+                Err(e) => plain_unrecoverable(format!(
+                    "cannot remove stale socket {}: {e}",
+                    sock.display()
                 )),
-                Err(e) => {
-                    eprintln!("fno: cannot remove stale socket {}: {e}", sock.display());
-                    EXIT_ERROR
-                }
             };
         }
         // A bounded-connect timeout means the server holds the socket but
-        // never accepts: it is wedged. kill-server needs an ACCEPTED
-        // connection to send KillServer, so it cannot recover this - and it
-        // must NOT unlink (the socket may front a live-but-stuck server).
-        // Name the real remedy instead of a bare io::Error, since every other
-        // call site's advice points the operator here.
+        // never accepts: it is wedged. KillServer needs an ACCEPTED
+        // connection, so the graceful rung is unreachable - escalate on the
+        // signal ladder instead of refusing.
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            eprintln!(
-                "fno: session {session:?} is wedged (connect timed out); the server holds \
-                 {} but is not accepting. kill-server cannot recover it - kill the server \
-                 process directly (its log is at {}).",
-                sock.display(),
-                sock.with_extension("log").display()
+            return escalate(
+                session,
+                sock,
+                &format!(
+                    "session {session:?} is wedged (connect timed out); the server holds {} \
+                     but is not accepting",
+                    sock.display()
+                ),
             );
-            return EXIT_ERROR;
         }
         Err(e) => {
-            eprintln!("fno: cannot connect to {}: {e}", sock.display());
-            return EXIT_ERROR;
+            return plain_unrecoverable(format!("cannot connect to {}: {e}", sock.display()));
         }
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
     let mut w = match stream.try_clone() {
         Ok(w) => w,
-        Err(e) => {
-            eprintln!("fno: socket setup failed: {e}");
-            return EXIT_ERROR;
-        }
+        Err(e) => return plain_unrecoverable(format!("socket setup failed: {e}")),
     };
     if write_msg_sync(&mut w, &ClientMsg::KillServer).is_err() {
-        eprintln!("fno: could not reach the server for session {session:?}");
-        return EXIT_ERROR;
+        return plain_unrecoverable(format!(
+            "could not reach the server for session {session:?}"
+        ));
     }
     // Drain until the server closes the connection (bounded), then wait for
     // its SocketGuard unlink - the observable proof the process exited.
@@ -798,14 +875,146 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
         }
     }
     let deadline = Instant::now() + PROBE_TIMEOUT;
-    while sock.exists() && Instant::now() < deadline {
+    while !sock.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(30));
     }
-    if sock.exists() {
-        eprintln!("fno: session {session:?} did not shut down in time");
-        return EXIT_ERROR;
+    if !sock.exists() {
+        return KillOutcome {
+            path: KillPath::Graceful,
+            note: format!("killed session {session:?} (graceful)"),
+        };
     }
-    killed_ok(&format!("killed session {session:?}"))
+    escalate(
+        session,
+        sock,
+        &format!("session {session:?} did not shut down in time"),
+    )
+}
+
+/// A one-line stderr failure: io-level trouble that is not "the holder could
+/// not be killed", so it gets no recovery-chain refusal.
+fn plain_unrecoverable(msg: String) -> KillOutcome {
+    KillOutcome {
+        path: KillPath::Unrecoverable,
+        note: format!("fno: {msg}"),
+    }
+}
+
+/// The refusal: what failed, why, and the exact commands to run next. A
+/// failure here leaves no working mux, so it must carry the chain the
+/// operator was trying to run - the recorded incident is a dead `&&` chain
+/// that stranded a restart.
+fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
+    KillOutcome {
+        path: KillPath::Unrecoverable,
+        note: format!(
+            "fno: {context}\nfno: {reason}\n     next: kill -9 $(lsof -t -U {}) && rm -f {} {} \
+             {}\n     then: fno update && fno restart && fno",
+            sock.display(),
+            sock.display(),
+            proto::version_sidecar_path(sock).display(),
+            proto::pid_sidecar_path(sock).display(),
+        ),
+    }
+}
+
+/// The escalation ladder, entered only from states that prove a live process
+/// still holds the socket (a connect that timed out, or a graceful request a
+/// connected server never answered): resolve the holder pid from the sidecar
+/// the server wrote at bind, SIGTERM it, SIGKILL it, and clean up what it
+/// leaves.
+///
+/// ponytail: pid reuse. A SIGKILLed server leaves its `.pid` sidecar behind
+/// (no guard runs), so a recycled pid plus a socket rebound by something
+/// else is the one shape that could aim a signal at the wrong process. The
+/// entry-state proof plus the sanity checks on the pid close it in practice;
+/// the upgrade if it ever bites is a start-time stamp in the sidecar.
+fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
+    let pid_sidecar = proto::pid_sidecar_path(sock);
+    let pid = std::fs::read_to_string(&pid_sidecar)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    let pid = match pid {
+        // Refuse init and ourselves outright: a signal to either is never
+        // the recovery this verb owes.
+        Some(p) if p > 1 && p as u32 != std::process::id() => p,
+        _ => {
+            return refusal(
+                context,
+                &format!(
+                    "no usable pid sidecar at {} (missing, unparseable, init, or this \
+                     process), so the holder cannot be signalled by name.",
+                    pid_sidecar.display()
+                ),
+                sock,
+            );
+        }
+    };
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        let e = std::io::Error::last_os_error();
+        return if e.raw_os_error() == Some(libc::ESRCH) {
+            // The holder is already gone: its files are stale, and nothing
+            // needs signalling. The SocketGuard never ran, so clean up here.
+            let _ = proto::remove_session_files(sock);
+            KillOutcome {
+                path: KillPath::StaleSocket,
+                note: format!("removed stale socket for session {session:?} (server was dead)"),
+            }
+        } else {
+            refusal(
+                context,
+                &format!("process {pid} holds the socket but cannot be signalled: {e}"),
+                sock,
+            )
+        };
+    }
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    if holder_gone(pid, sock, SIGTERM_GRACE) {
+        let _ = proto::remove_session_files(sock);
+        return KillOutcome {
+            path: KillPath::Sigterm,
+            note: format!(
+                "killed session {session:?} (SIGTERM after the control channel timed out)"
+            ),
+        };
+    }
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    if holder_gone(pid, sock, SIGKILL_GRACE) {
+        let _ = proto::remove_session_files(sock);
+        return KillOutcome {
+            path: KillPath::Sigkill,
+            // Honest report, not a silent success: a SIGKILLed server never
+            // runs teardown, so its pane children were not reaped.
+            note: format!(
+                "killed session {session:?} (SIGKILL after SIGTERM was ignored); pane \
+                 children were not reaped and may still be running"
+            ),
+        };
+    }
+    refusal(
+        context,
+        &format!("process {pid} is still alive after SIGKILL"),
+        sock,
+    )
+}
+
+/// Poll every 50ms for the holder's death until `grace` runs out. Death is
+/// evidenced by EITHER the pid answering ESRCH OR the session socket
+/// vanishing (a clean exit's SocketGuard unlinks it): a child of the calling
+/// process - the e2e harness's server - zombies after death and keeps
+/// answering `kill(pid, 0)` until its parent reaps it, while the real mux
+/// server is never a child of kill-server.
+fn holder_gone(pid: i32, sock: &Path, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        if unsafe { libc::kill(pid, 0) } != 0 || !sock.exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3860,6 +4069,118 @@ mod tests {
             kill_server("../evil", false),
             EXIT_USAGE,
             "validation precedes any I/O"
+        );
+    }
+
+    // -- kill-server escalation ladder (x-48a5) ------------------------------
+    //
+    // A kill-server against a healthy server proves nothing: every test
+    // starts from a broken state. The wedge is built in-process - a real
+    // listener on the session socket that accepts connections but never
+    // answers, which is the observed failure exactly (connect succeeds, the
+    // KillServer write succeeds, no answer ever comes).
+
+    /// Bind the wedged holder on `session`'s socket: a real `UnixListener`,
+    /// accepted on a thread that never reads or replies. The thread-local
+    /// test mux dir exists only as a path until something creates it (the
+    /// real server's bind does this via `ensure_private_dir`).
+    fn wedged_listener(session: &str) -> std::path::PathBuf {
+        let sock = proto::socket_path(session).unwrap();
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    // Accepted and held open, never answered: the client's
+                    // bytes sit in the kernel buffer, unread.
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+        sock
+    }
+
+    /// Spawn a holder pid that ignores SIGTERM (or not, per `ignore_term`)
+    /// and outlives its spawning shell, so it is reparented to init: a child
+    /// of THIS test process would zombie after SIGKILL and keep answering
+    /// `kill(pid, 0)` until reaped, and the real mux server is never a child
+    /// of kill-server. An ignored disposition set before the `&` survives
+    /// into the backgrounded sleep.
+    fn orphan_holder(ignore_term: bool) -> u32 {
+        let trap = if ignore_term { "trap '' TERM; " } else { "" };
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{trap}sleep 300 >/dev/null 2>&1 & echo $!"))
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("holder pid")
+    }
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[test]
+    fn kill_server_escalates_to_sigkill_when_sigterm_is_ignored() {
+        let session = "w9";
+        let sock = wedged_listener(session);
+        let pid = orphan_holder(true);
+        std::fs::write(proto::pid_sidecar_path(&sock), pid.to_string()).unwrap();
+        assert!(alive(pid), "holder live before the kill");
+
+        let out = kill_server_inner(session, &sock);
+
+        assert_eq!(out.path, KillPath::Sigkill, "note: {}", out.note);
+        assert_eq!(out.exit_code(), EXIT_OK);
+        assert!(!alive(pid), "holder dead after SIGKILL");
+        assert!(!sock.exists(), "socket unlinked");
+        assert!(
+            !proto::pid_sidecar_path(&sock).exists(),
+            "pid sidecar removed"
+        );
+    }
+
+    #[test]
+    fn kill_server_stops_at_sigterm_when_the_holder_answers_it() {
+        let session = "w3";
+        let sock = wedged_listener(session);
+        let pid = orphan_holder(false);
+        std::fs::write(proto::pid_sidecar_path(&sock), pid.to_string()).unwrap();
+
+        let out = kill_server_inner(session, &sock);
+
+        assert_eq!(out.path, KillPath::Sigterm, "note: {}", out.note);
+        assert_eq!(out.exit_code(), EXIT_OK);
+        assert!(!alive(pid), "holder died to SIGTERM");
+        assert!(!sock.exists(), "socket unlinked");
+    }
+
+    #[test]
+    fn kill_server_refuses_without_a_pid_sidecar() {
+        let session = "w1";
+        let sock = wedged_listener(session);
+
+        let out = kill_server_inner(session, &sock);
+
+        assert_eq!(out.path, KillPath::Unrecoverable);
+        assert_eq!(out.exit_code(), EXIT_ERROR);
+        // Nothing was signalled, nothing unlinked: the socket survives.
+        assert!(sock.exists(), "refusal must not unlink");
+        assert!(
+            out.note.contains("kill -9"),
+            "refusal names the manual kill: {}",
+            out.note
+        );
+        assert!(
+            out.note.contains("fno restart"),
+            "refusal names the recovery chain: {}",
+            out.note
         );
     }
 
