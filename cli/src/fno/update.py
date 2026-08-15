@@ -18,6 +18,7 @@ import logging
 import filecmp
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -495,6 +496,280 @@ def stale_mux_servers(
         and r.get("stale")
         and r.get("session")
     ]
+
+
+def _read_source_wire_version(source: Path) -> Optional[int]:
+    """Parse ``PROTO_VERSION`` out of the source checkout's
+    ``crates/fno/src/proto.rs``. ``source`` is the ``cli/`` dir (this module's
+    discovery convention, ``_discover_source``); its parent is the repo root in
+    both dev-clone and plugin layouts. None on any read/parse failure - the
+    readiness resolver treats that as a degraded input, never a bogus wire."""
+    proto_path = source.parent / "crates" / "fno" / "src" / "proto.rs"
+    try:
+        text = proto_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def _live_mux_rows(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> Optional[list[dict]]:
+    """Live (``state == "live"``) rows from ``fno mux ls --json``, or None on any
+    failure (missing binary, non-zero exit, timeout, unparseable JSON) so the
+    caller can tell "no live servers" from "could not ask" (AC4-EDGE)."""
+    fno = _cargo_installed_mux() or shutil.which("fno")
+    if not fno:
+        return None
+    try:
+        proc = runner(
+            [str(fno), "mux", "ls", "--json"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    return [r for r in rows if isinstance(r, dict) and r.get("state") == "live"]
+
+
+def _live_agent_rows(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> Optional[list[dict]]:
+    """Rows from ``fno agents list --json``, or None on any failure - same
+    "unavailable vs empty" distinction as :func:`_live_mux_rows`, so a revivable
+    count of 0 always means "asked and got zero", never "could not ask"."""
+    fno = _cargo_installed_mux() or shutil.which("fno")
+    if not fno:
+        return None
+    try:
+        proc = runner(
+            [str(fno), "agents", "list", "--json"],
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("agents", [])
+    else:
+        return None
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _changelog_subjects(
+    installed_rev: str,
+    source: Path,
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+) -> list[str]:
+    """Up to ten commit subjects between ``installed_rev`` and the source
+    checkout's HEAD. [] on any git failure (detached source, unknown rev,
+    missing git) - the readiness payload never blocks on this."""
+    try:
+        proc = runner(
+            ["git", "-C", str(source), "log", "--no-merges", "--format=%s",
+             f"{installed_rev}..HEAD"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line.strip()][:10]
+
+
+def _wire_label(wires: list[int]) -> str:
+    return "/".join(f"v{w}" for w in wires) if wires else "unknown"
+
+
+def _build_update_guidance(
+    *,
+    update_ready: bool,
+    revs_known: bool,
+    source_rev: Optional[str],
+    wire_known: bool,
+    wire_bump: bool,
+    running_wires: list[int],
+    source_wire: Optional[int],
+    shells: int,
+    shells_ended: int,
+    shells_known: bool,
+    revivable: int,
+    revivable_known: bool,
+    degraded_reason: Optional[str],
+) -> str:
+    """The one guidance line, computed rather than authored. Three
+    branches - no bump, bump, degraded - and no fourth. Every branch names a
+    count and a positive outcome; the degraded branch treats an unknown wire as
+    a bump and, when the shell/worker count itself could not be read (a failed
+    `mux ls`/`agents list`, not just an unreadable wire), says "unknown" rather
+    than a false zero - a count fno never fetched is not evidence of an empty
+    fleet (AC4-EDGE). A degraded input unrelated to the wire (e.g. `agents
+    list` failing) must not override an actually-known wire status with
+    "unknown, treated as a bump" - that both contradicts the JSON payload's own
+    `wire.bump` field and, when the wire is known safe, wrongly tells the
+    operator a restart is destructive (P2, codex on PR #881)."""
+    rev_label = (source_rev or "unknown")[:8]
+    source_label = f"v{source_wire}" if source_wire is not None else "unknown"
+
+    # A degraded input (mux ls, agents list, wire) never overrides a *confidently*
+    # known not-ready state - if both revs were read and match, there is no update
+    # to warn about, regardless of what else failed to fetch. Only take the
+    # degraded branch when readiness itself is uncertain (a rev is unreadable) or
+    # an update actually is pending.
+    if not update_ready and revs_known:
+        return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
+
+    if degraded_reason:
+        shells_label = f"{shells} live shell(s)" if shells_known else "an unknown number of live shells"
+        revivable_label = f"{revivable} worker(s)" if revivable_known else "an unknown number of workers"
+        wire_label = (
+            (f"WIRE BUMP {_wire_label(running_wires)} -> {source_label}" if wire_bump else "wire unchanged")
+            if wire_known
+            else "wire status unknown, treated as a wire bump"
+        )
+        return (
+            f"update check degraded ({degraded_reason}) - {wire_label}; "
+            f"{shells_label} at risk, --revive respawns {revivable_label}"
+        )
+
+    if not update_ready:
+        return f"up to date at {rev_label} - no update pending, {shells} shell(s) unaffected"
+
+    if wire_bump:
+        return (
+            f"update ready {rev_label} - WIRE BUMP {_wire_label(running_wires)} -> "
+            f"{source_label} - `fno update && fno restart --mux` ends {shells_ended} "
+            f"shell(s); --revive respawns {revivable} worker(s)"
+        )
+
+    return (
+        f"update ready {rev_label} - wire unchanged ({source_label}) - "
+        f"detach, `fno update`, reattach; {shells} shell(s) survive"
+    )
+
+
+def update_readiness(
+    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
+    source: Optional[Path] = None,
+) -> dict:
+    """Compute update readiness: whether an install is waiting, whether it would
+    break the wire, and the one guidance line an operator sees. The single
+    resolver (Locked Decision 1) - the TUI (``crates/fno/src/client.rs``)
+    renders this payload and computes nothing itself; ``fno update --check
+    --json`` exposes it directly. Every input degrades independently rather
+    than raising, so a broken environment still gets a non-empty, honest
+    guidance line (AC4-EDGE)."""
+    from fno import doctor
+    from fno.restart import is_revivable
+
+    degraded: list[str] = []
+
+    installed_rev = doctor._read_marker()
+    if installed_rev is None:
+        degraded.append("installed rev marker missing")
+
+    resolved_source = doctor._resolve_source(source)
+    if resolved_source is None:
+        degraded.append("source checkout not resolvable")
+
+    source_rev: Optional[str] = None
+    if resolved_source is not None:
+        source_rev = doctor._source_rev(resolved_source)
+        if source_rev is None:
+            degraded.append("source rev unreadable")
+
+    update_ready = bool(installed_rev and source_rev and installed_rev != source_rev)
+
+    source_wire = _read_source_wire_version(resolved_source) if resolved_source else None
+    if resolved_source is not None and source_wire is None:
+        degraded.append("source PROTO_VERSION unreadable")
+
+    live_rows = _live_mux_rows(runner)
+    shells_known = live_rows is not None
+    if live_rows is None:
+        degraded.append("fno mux ls --json failed")
+        live_rows = []
+        wire_bump = True  # unknown live state: never assert shells survive.
+    else:
+        wire_bump = (
+            True
+            if source_wire is None
+            else any(r.get("wire_version") != source_wire for r in live_rows)
+        )
+
+    shells = sum(int(r.get("panes") or 0) for r in live_rows)
+    sessions = len(live_rows)
+    running_wires = sorted(
+        {r["wire_version"] for r in live_rows if isinstance(r.get("wire_version"), int)}
+    )
+    shells_ended = shells if wire_bump else 0
+
+    agent_rows = _live_agent_rows(runner)
+    revivable_known = agent_rows is not None
+    if agent_rows is None:
+        degraded.append("fno agents list --json failed")
+        agent_rows = []
+    # Same candidate scope as `_revive_orphans`' `pre_live` snapshot
+    # (restart.py): only a worker that is actually live now can be orphaned by
+    # a restart, so an exited or already-dead row never counts toward
+    # `--revive` even when `is_revivable` alone would accept it (P2, codex on
+    # PR #881).
+    revivable = sum(1 for r in agent_rows if r.get("status") == "live" and is_revivable(r))
+
+    changelog: list[str] = []
+    if resolved_source is not None and installed_rev and source_rev:
+        changelog = _changelog_subjects(installed_rev, resolved_source, runner)
+
+    degraded_reason = "; ".join(degraded) if degraded else None
+
+    guidance = _build_update_guidance(
+        update_ready=update_ready,
+        revs_known=installed_rev is not None and source_rev is not None,
+        source_rev=source_rev,
+        wire_known=shells_known and source_wire is not None,
+        wire_bump=wire_bump,
+        running_wires=running_wires,
+        source_wire=source_wire,
+        shells=shells,
+        shells_ended=shells_ended,
+        shells_known=shells_known,
+        revivable=revivable,
+        revivable_known=revivable_known,
+        degraded_reason=degraded_reason,
+    )
+
+    # None (not 0) when the underlying fetch never happened - a count fno never
+    # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
+    # says "unknown" in prose; the structured fields need the same honesty for a
+    # consumer reading them directly instead of parsing that prose.
+    return {
+        "update_ready": update_ready,
+        "installed_rev": installed_rev,
+        "source_rev": source_rev,
+        "wire": {"running": running_wires, "source": source_wire, "bump": wire_bump},
+        "shells": shells if shells_known else None,
+        "shells_ended": shells_ended if shells_known else None,
+        "sessions": sessions if shells_known else None,
+        "revivable": revivable if revivable_known else None,
+        "changelog": changelog,
+        "guidance": guidance,
+        "degraded": degraded_reason,
+    }
 
 
 def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) -> None:
@@ -1037,6 +1312,11 @@ def update_command(
         "--no-rust",
         help="Skip the cargo rust-bins refresh leg.",
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Print update readiness as JSON and exit without installing.",
+    ),
 ) -> None:
     """Reinstall fno from its source directory.
 
@@ -1045,8 +1325,19 @@ def update_command(
     """
     # Normalize to plain bool: when called directly (not via CLI), Typer Option
     # defaults are OptionInfo objects, not False. Guard against both.
+    dry_run = dry_run is True
+    force = force is True
     rust = rust is True
     no_rust = no_rust is True
+    check = check is True
+
+    if check:
+        if dry_run or rust or force:
+            raise typer.BadParameter(
+                "--check cannot be combined with --dry-run, --rust, or --force"
+            )
+        typer.echo(json.dumps(update_readiness(source=source)))
+        return
 
     if rust and no_rust:
         typer.echo("fno update: --rust and --no-rust are mutually exclusive", err=True)
