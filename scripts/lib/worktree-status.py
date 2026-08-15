@@ -6,9 +6,10 @@ Cross-references each worktree path against ~/.fno/agents/registry.json's
 than reading `.fno/target-state.md`'s `owner_pid`, which names the short-lived
 `fno target init` CLI invocation and reads as dead within seconds of session
 start (verified live 2026-08-15: a worktree with an active session showed
-owner_pid already exited). The registry's `status` field ("live"/"exited")
-is itself computed by measurement (the Rust daemon's reconciliation sweep),
-so this is a read, not a second liveness probe.
+owner_pid already exited). The registry's `status` field (spawning/ready/
+idle/busy/live/restarting/orphaned/failed/exited/permanent_dead) is itself
+computed by measurement (the Rust daemon's reconciliation sweep), so this is
+a read, not a second liveness probe.
 
 Usage: worktree-status.py [--json] [--repo <path>]
 """
@@ -19,6 +20,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+# Non-terminal AgentStatus vocabulary (crates/fno-agents/src/lib.rs
+# `AgentStatus`), mirrored from `_OWNERSHIP_LIVE_STATUSES` in
+# cli/src/fno/agents/registry.py: a row in any of these is still an active
+# session, not just the literal "live" wire value - most rows sit in "idle"
+# or "busy", not "live", so matching on "live" alone reads a working session
+# as dead.
+_ALIVE_STATUSES = frozenset({"spawning", "ready", "idle", "busy", "live", "restarting"})
 
 
 def _load_registry() -> dict[str, tuple[str, str]]:
@@ -36,7 +45,7 @@ def _load_registry() -> dict[str, tuple[str, str]]:
             continue
         cwd = str(Path(cwd))
         status = a.get("status") or "unknown"
-        rank = 2 if status == "live" else (1 if status == "suspect" else 0)
+        rank = 1 if status in _ALIVE_STATUSES else 0
         ts = a.get("last_reconciled_at") or a.get("exited_at") or a.get("created_at") or ""
         name = a.get("name") or "?"
         cur = best.get(cwd)
@@ -85,7 +94,7 @@ def main(argv: list[str]) -> int:
         if not name:
             target = "none"
             none_n += 1
-        elif status == "live":
+        elif status in _ALIVE_STATUSES:
             target = f"live:{name}"
             live_n += 1
         else:
