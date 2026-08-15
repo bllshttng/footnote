@@ -81,9 +81,11 @@ def message_carries_no_merge(message: str) -> bool:
     """True when a /target-family message carries the ``--no-merge`` flag.
 
     The family gate is load-bearing: a /think or /review prompt that MENTIONS
-    the flag arms no env carrier, and neither does prose."""
+    the flag arms no env carrier, and neither does prose. The word-padded
+    match is too: ``--no-merge-guard`` (a different flag) is not the carrier
+    (round 8, angle A)."""
     first = message.split(maxsplit=1)[0] if message else ""
-    return first in _TARGET_FAMILY and "--no-merge" in f" {message} "
+    return first in _TARGET_FAMILY and " --no-merge " in f" {message} "
 
 
 def _refused_reason(harness: str) -> str:
