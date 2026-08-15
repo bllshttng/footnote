@@ -432,6 +432,39 @@ def _shell_quote(s: str) -> str:
     return shlex.quote(s)
 
 
+def _default_acquire_resume_attach_claim(
+    short_id: str, *, root: Optional[Any] = None
+) -> Optional[str]:
+    """Real claim acquisition guarding the standalone claude wake path.
+
+    Keyed identically to the Rust delegation's own claim
+    (``resume-attach:{short_id}`` in ``client_verbs.rs``'s
+    ``acquire_named_session_claim``), so a directly-invoked
+    ``FNO_AGENTS_RUNTIME=python fno agents resume`` and a Rust-delegated one
+    contend for the same lock on the same row instead of two independent,
+    non-cooperating guards. Returns ``None`` on success, an error message
+    (not yet printed) when another writer already holds it. ``root`` is a
+    test seam for the claims-file root; ``None`` in prod.
+    """
+    from fno.claims.core import ClaimHeldByOther, acquire_claim
+
+    holder = f"resume:{os.getpid()}"
+    try:
+        acquire_claim(
+            f"resume-attach:{short_id}",
+            holder,
+            reason="interactive resume single-writer",
+            root=root,
+        )
+        return None
+    except ClaimHeldByOther as exc:
+        return (
+            f"fno agents resume: session {short_id} is held live by another "
+            f"writer ({exc.holder}, pid={exc.pid}, host={exc.host}); not "
+            f"opening a second writer on one transcript."
+        )
+
+
 def resume_logic(
     *,
     name: str,
@@ -441,6 +474,7 @@ def resume_logic(
     registry_loader: Optional[Any] = None,
     path_checker: Optional[Any] = None,
     cwd_checker: Optional[Any] = None,
+    claim_fn: Optional[Any] = None,
     emit_event: Optional[Any] = None,
     execvp: Optional[Any] = None,
     wake_fn: Optional[Any] = None,
@@ -465,6 +499,10 @@ def resume_logic(
             (defaults to shutil.which).
         cwd_checker: Optional callable ``(cwd) -> bool`` for the
             resume-time cwd-reachability check (defaults to os.path.isdir).
+        claim_fn: Optional callable ``(short_id) -> Optional[str]`` for the
+            claude wake single-writer claim (defaults to
+            :func:`_default_acquire_resume_attach_claim`). Returns ``None``
+            on success, an error message on a held-by-other conflict.
         emit_event: Optional ``(kind, **data) -> None`` for the
             ``agent_resumed`` event (defaults to events.emit).
         execvp: Optional ``(file, args) -> None`` for the final exec
@@ -613,6 +651,21 @@ def resume_logic(
         # resume wakes the session headlessly and verifies the state moved,
         # rather than exec'ing into an attach that (run non-interactively)
         # would print "Attaching..." and exit having done nothing.
+        #
+        # Claim before waking: this function is also a standalone entrypoint
+        # (FNO_AGENTS_RUNTIME=python, or no Rust binary installed at all),
+        # reachable without ever going through Rust's own delegation claim.
+        # Guarding only the Rust side would leave this direct path racing
+        # real pty writes with no lock -- the guard-on-one-of-N-paths trap
+        # applied to this PR's own new claim rather than to the wake
+        # implementation it originally caught. Keyed identically to Rust's
+        # delegation claim so the two entrypoints contend for the same lock
+        # on the same row.
+        if claim_fn is None:
+            claim_fn = _default_acquire_resume_attach_claim
+        claim_err = claim_fn(session_id or "")
+        if claim_err:
+            return ResumeResult(exit_code=11, stderr=claim_err + "\n")
         if emit_event is None:
             from fno.agents import events as events_mod
             emit_event = events_mod.emit

@@ -2025,7 +2025,7 @@ fn acquire_resume_session_claim(
 
 /// Shared by the dead-row `claude --resume` relaunch (keyed `session:{uuid}`)
 /// and the live-row headless wake delegation (keyed `resume-attach:{short_id}`,
-/// no uuid available on that arm today -- x-8dfc). Two different keys by
+/// no uuid available on that arm today). Two different keys by
 /// design: a live wake and a dead relaunch are mutually exclusive outcomes of
 /// one truth-state read, never racing each other for the same row, but two
 /// concurrent resumes both landing on the SAME arm for the same row do race

@@ -60,6 +60,7 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
         execvp=_no_exec,
     )
@@ -131,6 +132,7 @@ def test_agent_resumed_event_emitted_before_execvp() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         emit_event=lambda kind, **_kw: order.append(f"emit:{kind}"),
         execvp=lambda file, args: order.append(f"exec:{file}"),
     )
@@ -155,6 +157,7 @@ def test_missing_cwd_exits_13_with_rm_hint() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -211,11 +214,58 @@ def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda c: True,
+        claim_fn=lambda _s: None,
         wake_fn=_wake,
         agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
     )
     assert res.exit_code == 0
     assert seen_cwd == ["/resolved/worktree/cwd"]
+
+
+def test_default_acquire_resume_attach_claim_refuses_a_second_writer(tmp_path) -> None:
+    """code-review finding: the claim guard on the Rust delegation had no
+    counterpart on this module's own standalone entrypoint
+    (FNO_AGENTS_RUNTIME=python, or no Rust binary installed at all) -- a
+    guard on only one of two reachable paths into the same wake. Exercises
+    the real (non-injected) claim function end to end, keyed identically to
+    Rust's own resume-attach:{short_id} claim."""
+    from fno.claims.core import acquire_claim
+    from fno.agents.resume_cli import _default_acquire_resume_attach_claim
+
+    short_id = "deadbeef"
+    acquire_claim(
+        f"resume-attach:{short_id}", "other-writer", root=tmp_path
+    )
+
+    err = _default_acquire_resume_attach_claim(short_id, root=tmp_path)
+    assert err is not None
+    assert "held live by another writer" in err
+    assert "other-writer" in err
+
+    # A different short_id: an unrelated row's wake is never blocked.
+    assert _default_acquire_resume_attach_claim("other-id", root=tmp_path) is None
+
+
+def test_claude_resume_refuses_when_claim_held_by_another_writer() -> None:
+    """Full resume_logic path: a claim_fn conflict must surface as the
+    resume's own exit code/stderr rather than proceeding to wake."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: "fno agents resume: session deadbeef is held live by another writer",
+        wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+        agents_state_fn=lambda: (_ for _ in ()).throw(AssertionError("must not verify")),
+    )
+    assert res.exit_code == 11
+    assert "held live by another writer" in res.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +287,7 @@ def test_print_command_emits_one_liner() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 0
@@ -282,6 +333,7 @@ def test_claude_resume_wakes_and_verifies_working() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=_wake,
@@ -313,6 +365,7 @@ def test_claude_resume_retries_once_before_giving_up() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=_wake,
@@ -340,6 +393,7 @@ def test_claude_resume_emits_no_event_on_a_failed_wake() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
         wake_fn=lambda *a, **kw: None,
@@ -366,6 +420,7 @@ def test_claude_resume_emits_no_event_on_a_skipped_already_working_row() -> None
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
         wake_fn=lambda *a, **kw: None,
@@ -397,6 +452,7 @@ def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=_wake,
@@ -436,6 +492,7 @@ def test_claude_resume_restores_routed_env() -> None:
             registry_loader=lambda: [entry],
             path_checker=_allow_all_path,
             cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
             execvp=_no_exec,
             emit_event=lambda *a, **kw: None,
             wake_fn=_wake,
@@ -469,6 +526,7 @@ def test_claude_resume_refuses_when_route_cannot_be_restored() -> None:
             registry_loader=lambda: [entry],
             path_checker=_allow_all_path,
             cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
             execvp=_no_exec,
             wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
             agents_state_fn=lambda: {},
@@ -505,6 +563,7 @@ def test_claude_resume_skips_a_broken_route_on_an_already_skip_eligible_row() ->
             registry_loader=lambda: [entry],
             path_checker=_allow_all_path,
             cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
             execvp=_no_exec,
             wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
             agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
@@ -553,6 +612,7 @@ def test_claude_pane_row_refuses_pointing_at_the_smart_runtime() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -577,6 +637,7 @@ def test_missing_session_id_exits_13() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -620,6 +681,7 @@ def test_unknown_agent_exits_13() -> None:
         registry_loader=lambda: [],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -646,6 +708,7 @@ def test_unsupported_provider_exits_13_not_14() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -672,6 +735,7 @@ def test_opencode_argv_attaches_the_tui_by_session() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 0
@@ -697,6 +761,7 @@ def test_opencode_without_captured_session_id_errors_clearly() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -730,6 +795,7 @@ def test_print_command_uses_shlex_quote_for_special_chars() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     # shlex.quote will single-quote any string containing shell-special
@@ -794,6 +860,7 @@ def test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
         execvp=None,
     )
@@ -821,6 +888,7 @@ def test_claude_resume_skips_waking_an_already_working_row() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=lambda *a, **kw: wake_calls.append(1),
@@ -847,6 +915,7 @@ def test_claude_resume_skips_waking_an_already_idle_row() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=lambda *a, **kw: wake_calls.append(1),
@@ -878,6 +947,7 @@ def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=_wake,
@@ -970,6 +1040,7 @@ def test_claude_resume_skips_waking_an_already_done_row() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=lambda *a, **kw: wake_calls.append(1),
@@ -997,6 +1068,7 @@ def test_claude_resume_skip_check_is_case_insensitive() -> None:
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
         emit_event=lambda *a, **kw: None,
         wake_fn=lambda *a, **kw: wake_calls.append(1),
