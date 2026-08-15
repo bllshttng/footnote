@@ -87,7 +87,7 @@ fi
 
 ## Base Agents (Always Run)
 
-`${changedFiles}` below is the review scope from sigma.md Step 1b. On an incremental round it is the increment since the last reviewed head. Otherwise it is the full diff. `${fullDiffFiles}` is always the whole PR, passed as context. Narrowing the analyzed set is not a blindfold. Agents keep `Read`/`Grep`. When an invariant spans the increment, they must open the prior-reviewed file.
+`${changedFiles}` below is the review scope from sigma.md Step 1b. On an incremental round it is the increment since the last reviewed head. Otherwise it is the full diff. `${fullDiffFiles}` is always the whole PR, passed as context. Narrowing the analyzed set is not a blindfold. Agents keep the `Read` and `Grep` tools. When an invariant spans the increment, they must open the prior-reviewed file.
 
 ```typescript
 // ALWAYS run these two agents

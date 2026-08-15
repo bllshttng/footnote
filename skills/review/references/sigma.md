@@ -211,7 +211,7 @@ For CLAUDE.md-related issues: validator must verify the CLAUDE.md actually calls
 
 On every `incremental` round, run this step between the panel results and the verdict. Today the full re-review is the resolution mechanism: the fresh full-diff findings re-derive every prior blocker. An unfixed one resurfaces on its own. Narrowing the scope removes that mechanism. Without a replacement, an incremental round over a one-file increment reports zero findings while round 1's blocker is still live. The gate then clears over an unfixed defect. This step is the replacement. Scope narrowing is unsafe to ship without it.
 
-**Unaddressed now has a checkable definition.** When its cited quote still validates at the current head, a prior blocking finding is unaddressed.
+When its cited quote still validates at the current head, a prior blocking finding is unaddressed. That is the checkable definition of unaddressed.
 
 1. Read the prior round's report. `PRIOR_HEAD` satisfies the inspect validator's expected head by construction, so the existing read surface returns the body:
 
@@ -267,6 +267,7 @@ After the report is durable, deduplicate only on the explicit marker for this re
 
 Load [report-template.md](report-template.md) for the structured output format.
 Render the complete report once to a temporary file as well as to the user-facing response; this exact file is the input to the shared artifact writer in Step 6d.
+
 The report header carries the **Review Scope** line from Step 1b: `$SCOPE_REASON`, plus `$SCOPE_BASE` and the changed-file count on an incremental round. A narrowed round that reads as full coverage is a silent coverage lie.
 
 #### Goal Relevance (if config.toml has goals)
@@ -293,16 +294,16 @@ Exclude common non-plan files: lock files, `.fno/*`, test fixtures, `node_module
 
 ### Step 6c: Emit the reviewers-gate attestation (only on a clean PASS)
 
-If — and only if — the verdict is `ready-to-merge` (no unaddressed blocking finding after Steps 3b/3c/4), emit the head-pinned `review_attestation` so a `config.review.reviewers: [sigma]` gate can clear:
+Emit the head-pinned `review_attestation` only on a clean PASS: the verdict is `ready-to-merge` with no unaddressed blocking finding after Steps 3b/3c/4. A `config.review.reviewers: [sigma]` gate then clears:
 
 ```bash
 bash "${SKILL_DIR}/scripts/emit-attestation.sh" sigma
 ```
 
 This is what lets a solo / claude-only harness (no GitHub App bot) express a real, auditable review gate. Rules:
-- **Never emit on a blocking finding.** A failing or blocked panel emits nothing; absence holds the gate (fail closed). A carried-forward finding that still validates at the current head (Step 3c) is a blocking finding of this round.
-- **Head-pinned, and cumulative in meaning.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma — the old attestation no longer counts (loop-check discards a `head_sha` that is not the current HEAD). What an attestation asserts is coverage **cumulative across rounds up to this head**: every file in the diff was reviewed in some round at or before this head, and every prior blocking finding was re-validated at this head by Step 3c. It does NOT assert that the full diff was re-reviewed in one pass.
-- **Advisory when not gating.** If no `reviewers` entry names `sigma`, the event is harmless telemetry; loop-check only reads it when the gate is configured.
+- **Never emit on a blocking finding:** a failing or blocked panel emits nothing. Absence holds the gate. That is fail closed. A carried-forward finding that still validates at the current head (Step 3c) is a blocking finding of this round.
+- **Head-pinned, and cumulative in meaning.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma. The old attestation no longer counts. Loop-check discards a `head_sha` that is not the current HEAD. An attestation asserts coverage **cumulative across rounds up to this head**. Every file in the diff was reviewed in some round at or before this head. Every prior blocking finding was re-validated at this head by Step 3c. It does NOT assert that the full diff was re-reviewed in one pass.
+- **Advisory when not gating:** if no `reviewers` entry names `sigma`, the event is harmless telemetry. Loop-check only reads it when the gate is configured.
 
 ### Step 6d: Persist the report before deciding whether to comment
 
