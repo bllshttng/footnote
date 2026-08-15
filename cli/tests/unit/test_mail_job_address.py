@@ -391,6 +391,12 @@ def test_drain_self_surfaces_job_mail_for_holder(runner, isolated, monkeypatch):
         "claims_root": __import__("os").environ.get("FNO_CLAIMS_ROOT"),
         "cwd": str(_P.cwd()),
     }
+    _root = _P(__import__("os").environ["FNO_CLAIMS_ROOT"])
+    if _root.exists():
+        _diag["root_ls"] = sorted(p.name for p in _root.rglob("*"))[:12]
+    from fno.claims.core import claim_status as _cs
+
+    _diag["direct_status"] = _cs("node:drain-abcd", root=_root)
     assert "reached the successor" in res.stdout, f"diag={_diag}"
 
 

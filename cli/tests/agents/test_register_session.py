@@ -343,7 +343,14 @@ def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(agents_app, ["register"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload == {"registered": True, "name": "deadbeef", "harness": "claude"}
+    # delivery_policy rides the payload since the bus-only flag (x-e21e); a
+    # plain register carries no policy, so it reads back None.
+    assert payload == {
+        "registered": True,
+        "name": "deadbeef",
+        "harness": "claude",
+        "delivery_policy": None,
+    }
     rows = load_registry()
     assert len(rows) == 1 and rows[0].name == "deadbeef" and rows[0].status == "idle"
 
