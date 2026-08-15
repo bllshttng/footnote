@@ -997,10 +997,10 @@ pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
             return tail;
         }
     }
-    // argv-fence: exempt (opencode `--` support unverified; a leading-flag
-    // seed here rides a bare positional after a boolean flag, the known shape,
-    // and fails at opencode's own parser).
-    vec![message.to_string()]
+    // Behind `--` (verified against opencode's yargs parser 2026-08-15:
+    // unfenced, a leading-flag seed dies with a usage error; fenced, it rides
+    // as the message). The slash-command branch above keeps its flags live.
+    vec!["--".to_string(), message.to_string()]
 }
 
 pub struct OpencodeProvider;
@@ -1661,6 +1661,7 @@ mod tests {
                 "opencode",
                 "run",
                 "--dangerously-skip-permissions",
+                "--",
                 "build feature X"
             ]
         );
@@ -1688,10 +1689,10 @@ mod tests {
 
     #[test]
     fn opencode_run_tail_prose_through_and_bare_verb() {
-        // Prose passes through unchanged; a bare verb has no args tail.
+        // Prose rides behind the `--` fence; a bare verb has no args tail.
         assert_eq!(
             opencode_run_tail("build feature X"),
-            vec!["build feature X"]
+            vec!["--", "build feature X"]
         );
         assert_eq!(opencode_run_tail("/fno:pr"), vec!["--command", "fno:pr"]);
     }
@@ -1713,6 +1714,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--session",
                 "ses_abc",
+                "--",
                 "m"
             ]
         );

@@ -296,10 +296,10 @@ def test_scanner_still_sees_the_known_seams() -> None:
     counts = {}
     for _, _, _, kind in results:
         counts[kind] = counts.get(kind, 0) + 1
-    assert counts.get("fenced", 0) >= 15, counts
-    assert counts.get("value-form", 0) >= 8, counts
+    assert counts.get("fenced", 0) >= 16, counts
+    assert counts.get("value-form", 0) >= 10, counts
     # A floor AND a ceiling on exemptions: each new exempt marker must be a
     # visible test edit, never a silent gate bypass.
-    assert counts.get("exempt", 0) == 5, counts
+    assert counts.get("exempt", 0) == 4, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts

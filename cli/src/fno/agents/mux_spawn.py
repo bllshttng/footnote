@@ -922,10 +922,11 @@ def build_pane_argv(
             argv += ["--model", model]
         argv += tier3
         if message:
-            # Deliberately unfenced: agy is closed-source and its `--` support
-            # is unverified, so fencing blind could break every agy pane. A
-            # leading-flag seed fails loudly at agy's own parser either way.
-            # argv-fence: exempt (test_argv_fence_gate honors this marker)
+            # Deliberately unfenced: agy has no clean end-of-options. Probed
+            # 2026-08-15, `agy -p -- "<prompt>"` folds the flag text AND the
+            # fence itself into the prompt, so fencing corrupts the seed; an
+            # unfenced leading-flag seed rides into the prompt mangled, not
+            # dead. argv-fence: exempt (test_argv_fence_gate honors this marker)
             argv.append(message)
         return argv
     if provider == "opencode":
