@@ -21,7 +21,7 @@ def test_all_pass_is_green():
     verdict, code, counts = _status.verdict_for(rollup)
     assert verdict == "green"
     assert code == 0
-    assert counts == {"total": 2, "pass": 2, "fail": 0, "pending": 0}
+    assert counts == {"total": 2, "pass": 2, "fail": 0, "pending": 0, "unsettled": 0}
 
 
 def test_any_failure_is_red():
@@ -140,6 +140,114 @@ def test_genuine_latest_cancel_stays_red():
     verdict, code, _ = _status.verdict_for(rollup)
     assert verdict == "red"
     assert code == 1
+
+
+# ── x-1d38: settled requires a positive marker, never absent pending ─────────
+# `settled` answers "is there anything left to wait for", which is a DIFFERENT
+# question than the verdict. It must be derived from a positive settled marker
+# per latest run, so an empty rollup (no runs yet) and a cancelled latest run
+# (a result that was taken away) can never read as decided.
+
+
+def _run_status_on(monkeypatch, capsys, rollup):
+    """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
+
+    def _patch(name, value):
+        monkeypatch.setattr(_status, name, value)
+
+    _patch("_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": rollup}, ""))
+    _patch(
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    _patch(
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
+    )
+    code = _status.run_status("42")
+    cap = capsys.readouterr()
+    return code, _json.loads(cap.out), cap.err
+
+
+def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
+    """AC1-HP: a genuinely-cancelled latest run keeps verdict red (a cancelled
+    run is not a pass) but settled FALSE (it is not a conclusion either - the
+    run was taken away, nothing was decided). Exit code stays 1."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED"}],
+    )
+    assert code == 1
+    assert out["verdict"] == "red"
+    assert out["settled"] is False
+    assert out["checks"]["unsettled"] == 1
+    # The instruction travels with the number: which check, and what to do.
+    assert "ci" in err
+    assert "do not read this PR as decided" in err
+
+
+def test_ac2_all_concluded_passes_stay_settled(monkeypatch, capsys):
+    """AC2-HP: every latest run carrying a real pass conclusion (SUCCESS,
+    NEUTRAL, SKIPPED) stays settled - unchanged from before the change."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"name": "lint", "status": "COMPLETED", "conclusion": "SKIPPED"},
+            {"context": "legacy", "state": "NEUTRAL"},
+        ],
+    )
+    assert code == 0
+    assert out["settled"] is True
+    assert out["checks"]["unsettled"] == 0
+    assert err == ""
+
+
+def test_ac3_empty_rollup_is_never_settled(monkeypatch, capsys):
+    """AC3-EDGE: no runs at all -> unknown verdict AND settled false. Zero
+    pending entries must not read as all-green: an absence has two
+    explanations and only one of them is decided."""
+    code, out, err = _run_status_on(monkeypatch, capsys, [])
+    assert code == 3
+    assert out["verdict"] == "unknown"
+    assert out["settled"] is False
+    assert err == ""
+
+
+def test_ac4_superseded_cancelled_settles_green(monkeypatch, capsys):
+    """AC4-EDGE: a superseded CANCELLED run loses to the newer same-name
+    SUCCESS (existing dedup) and the result is fully settled green."""
+    code, out, _ = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
+             "startedAt": "2026-08-15T00:00:00Z"},
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+             "startedAt": "2026-08-15T01:00:00Z"},
+        ],
+    )
+    assert code == 0
+    assert out["verdict"] == "green"
+    assert out["settled"] is True
+    assert out["checks"]["unsettled"] == 0
+
+
+def test_ac5_failure_is_a_real_result_and_settles(monkeypatch, capsys):
+    """AC5-ERR: a FAILURE conclusion settles. This is the boundary that proves
+    the change is about absence, not redness: red AND settled when the red
+    comes from a run that actually produced a result."""
+    code, out, _ = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}],
+    )
+    assert code == 1
+    assert out["verdict"] == "red"
+    assert out["settled"] is True
+    assert out["checks"]["unsettled"] == 0
 
 
 def test_latest_in_progress_over_earlier_success_is_pending():
@@ -318,7 +426,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "settled": True,
         "green": True,
         "pr_state": "OPEN",
-        "checks": {"total": 1, "pass": 1, "fail": 0, "pending": 0},
+        "checks": {"total": 1, "pass": 1, "fail": 0, "pending": 0, "unsettled": 0},
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
         "review_coverage": {"coverage": "covered", "reviewed_count": 2},
