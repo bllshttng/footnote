@@ -9984,6 +9984,24 @@ async fn confirm_keys(
         return Ok(StdinFlow::Continue);
     };
     if matches!(bytes.first(), Some(b'\r') | Some(b'\n')) {
+        // (x-92d3 5.1) Close tab is the one confirm whose commit is TWO
+        // commands (select the captured tab, then close it, because CloseTab
+        // closes the sender's VIEWED tab) and the one that must re-resolve its
+        // target at Enter: a tab that vanished while the prompt sat open must
+        // not fall through to a bare CloseTab, which would close whatever is
+        // viewed now instead. Handled before the one-command table below.
+        if let ConfirmKind::CloseTab { tab } = action.action {
+            if view.find_tab(tab).is_none() {
+                view.set_notice("tab is no longer here".into());
+                return Ok(StdinFlow::Continue);
+            }
+            for cmd in [Command::SelectTab(tab), Command::CloseTab] {
+                write_msg(sock_w, &ClientMsg::Command(cmd))
+                    .await
+                    .map_err(|e| format!("confirm-action send failed: {e}"))?;
+            }
+            return Ok(StdinFlow::Continue);
+        }
         // Most confirms are one command; clear-dead (x-f300) fans out to one
         // Remove per exited row, so the commit path speaks in a list.
         let cmds = match action.action {
@@ -10004,12 +10022,8 @@ async fn confirm_keys(
             ConfirmKind::DismissMember { squad, attach_id } => {
                 vec![Command::DismissMember { squad, attach_id }]
             }
-            // CloseTab closes the sender's VIEWED tab, so select the captured
-            // tab first: one gesture, two commands, and the captured id - not
-            // whatever is viewed when Enter lands - is what closes.
-            ConfirmKind::CloseTab { tab } => {
-                vec![Command::SelectTab(tab), Command::CloseTab]
-            }
+            // Handled (and returned) before this one-command table is reached.
+            ConfirmKind::CloseTab { .. } => unreachable!("CloseTab commits above"),
             // Re-fold on Enter, not at open: the prompt may have sat for a while
             // and the honest set is whatever is dead NOW.
             ConfirmKind::ClearDead { key, squad, .. } => {
@@ -18609,6 +18623,22 @@ mod tests {
             .iter()
             .position(|a| *a == action)
             .unwrap_or_else(|| panic!("menu should offer {action:?}"));
+    }
+
+    #[tokio::test]
+    async fn tab_menu_stale_close_confirm_sends_nothing_on_enter() {
+        // The CloseTab commit is SelectTab-then-CloseTab; a tab that vanished
+        // while the prompt sat open must not fall through to a bare CloseTab,
+        // which would close whatever is viewed NOW. Re-resolved at Enter.
+        let mut v = view_with_agents(vec![]);
+        v.confirm = Some(super::ConfirmAction {
+            action: super::ConfirmKind::CloseTab { tab: 42 },
+            label: "gone".into(),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a stale close sends nothing at all");
+        assert!(v.notice.is_some(), "and says why");
     }
 
     #[tokio::test]
