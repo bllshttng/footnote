@@ -232,7 +232,11 @@ def _build_argv(
     if resume_session_id:
         argv += ["--resume", resume_session_id]
     if not use_stdin:
-        argv.append(message)
+        # The seed rides behind `--` so a leading-flag seed ("--model x ...")
+        # is the prompt positional, not a claude flag; same commander parse as
+        # the verified `-p --` form. The use_stdin branch above already keeps
+        # the seed out of argv entirely.
+        argv += ["--", message]
     return argv
 
 

@@ -350,7 +350,7 @@ def test_build_argv_model_pin_parity() -> None:
     from fno.agents.harnesses.claude import _build_argv
 
     assert _build_argv("a", "hi", False, "fable") == [
-        "claude", "--bg", "--name", "a", "--model", "fable", "hi",
+        "claude", "--bg", "--name", "a", "--model", "fable", "--", "hi",
     ]
     assert _build_argv("a", "hi", True, "fable") == [
         "claude", "--bg", "--name", "a", "--model", "fable",
@@ -358,7 +358,7 @@ def test_build_argv_model_pin_parity() -> None:
     # Empty/None pin == unset: byte-identical, no flag (AC1-EDGE).
     assert _build_argv("a", "hi", False, "") == _build_argv("a", "hi", False, None)
     assert _build_argv("a", "hi", False, None) == [
-        "claude", "--bg", "--name", "a", "hi",
+        "claude", "--bg", "--name", "a", "--", "hi",
     ]
 
 
@@ -371,7 +371,7 @@ def test_build_argv_resume_session() -> None:
     from fno.agents.harnesses.claude import _build_argv
 
     assert _build_argv("a", "hi", False, resume_session_id="U-123") == [
-        "claude", "--bg", "--name", "a", "--resume", "U-123", "hi",
+        "claude", "--bg", "--name", "a", "--resume", "U-123", "--", "hi",
     ]
     # stdin path (large message): message omitted, resume still present.
     assert _build_argv("a", "hi", True, resume_session_id="U-123") == [
@@ -379,14 +379,14 @@ def test_build_argv_resume_session() -> None:
     ]
     # Unset/empty == today (byte-identical, no flag).
     assert _build_argv("a", "hi", False, resume_session_id=None) == [
-        "claude", "--bg", "--name", "a", "hi",
+        "claude", "--bg", "--name", "a", "--", "hi",
     ]
     assert _build_argv("a", "hi", False, resume_session_id="") == _build_argv(
         "a", "hi", False, resume_session_id=None
     )
     # Composes with a model pin (resume after model, before message).
     assert _build_argv("a", "hi", False, "fable", resume_session_id="U-9") == [
-        "claude", "--bg", "--name", "a", "--model", "fable", "--resume", "U-9", "hi",
+        "claude", "--bg", "--name", "a", "--model", "fable", "--resume", "U-9", "--", "hi",
     ]
 
 
@@ -406,11 +406,12 @@ def test_build_argv_tier3_parity() -> None:
         "--agent", "reviewer",
         "--allowedTools", "Read,Edit",
         "--disallowedTools", "Bash",
+        "--",
         "hi",
     ]
     # Empty fields are unset: byte-identical to the bare argv.
     assert _build_argv("a", "hi", False, add_dir="", agent=None) == [
-        "claude", "--bg", "--name", "a", "hi",
+        "claude", "--bg", "--name", "a", "--", "hi",
     ]
 
 
