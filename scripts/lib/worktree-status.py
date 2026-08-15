@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""List a repo's git worktrees annotated with their real session, if any.
+
+Cross-references each worktree path against ~/.fno/agents/registry.json's
+`cwd` field - the live agents registry the daemon already reconciles - rather
+than reading `.fno/target-state.md`'s `owner_pid`, which names the short-lived
+`fno target init` CLI invocation and reads as dead within seconds of session
+start (verified live 2026-08-15: a worktree with an active session showed
+owner_pid already exited). The registry's `status` field ("live"/"exited")
+is itself computed by measurement (the Rust daemon's reconciliation sweep),
+so this is a read, not a second liveness probe.
+
+Usage: worktree-status.py [--json] [--repo <path>]
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _load_registry() -> dict[str, tuple[str, str]]:
+    """cwd -> (name, status), preferring a live row, else the most recent."""
+    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
+    path = Path(override) if override else Path(os.path.expanduser("~/.fno/agents/registry.json"))
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    best: dict[str, tuple[int, str, str, str]] = {}
+    for a in data.get("agents", []):
+        cwd = a.get("cwd") or ""
+        if not cwd:
+            continue
+        cwd = str(Path(cwd))
+        status = a.get("status") or "unknown"
+        rank = 2 if status == "live" else (1 if status == "suspect" else 0)
+        ts = a.get("last_reconciled_at") or a.get("exited_at") or a.get("created_at") or ""
+        name = a.get("name") or "?"
+        cur = best.get(cwd)
+        if cur is None or (rank, ts) > (cur[0], cur[2]):
+            best[cwd] = (rank, name, ts, status)
+    return {cwd: (name, status) for cwd, (_rank, name, _ts, status) in best.items()}
+
+
+def _worktrees(repo: Path) -> list[tuple[str, str]]:
+    """[(branch, path), ...] for every worktree registered to `repo`."""
+    out = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    rows: list[tuple[str, str]] = []
+    wt_path = ""
+    for line in out.stdout.splitlines():
+        if line.startswith("worktree "):
+            wt_path = line[len("worktree ") :]
+        elif line.startswith("branch refs/heads/"):
+            rows.append((line[len("branch refs/heads/") :], wt_path))
+    return rows
+
+
+def _last_commit_age(path: str) -> str:
+    out = subprocess.run(
+        ["git", "-C", path, "log", "-1", "--format=%cr"],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() or "unknown"
+
+
+def main(argv: list[str]) -> int:
+    as_json = "--json" in argv
+    repo = Path.cwd()
+    if "--repo" in argv:
+        repo = Path(argv[argv.index("--repo") + 1])
+
+    registry = _load_registry()
+    rows = []
+    total = live_n = dead_n = none_n = 0
+    for branch, wt_path in _worktrees(repo):
+        name, status = registry.get(str(Path(wt_path)), ("", ""))
+        if not name:
+            target = "none"
+            none_n += 1
+        elif status == "live":
+            target = f"live:{name}"
+            live_n += 1
+        else:
+            target = f"{status or 'exited'}:{name}"
+            dead_n += 1
+        total += 1
+        rows.append(
+            {
+                "branch": branch,
+                "path": wt_path,
+                "last_commit": _last_commit_age(wt_path),
+                "target": target,
+                "session_name": name,
+            }
+        )
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "worktrees": rows,
+                    "summary": {
+                        "total": total,
+                        "live": live_n,
+                        "dead": dead_n,
+                        "no_session": none_n,
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 0
+
+    print("Worktrees:")
+    for r in rows:
+        print(
+            f"  {r['branch']:<30} | {r['last_commit']:<15} | "
+            f"target: {r['target']:<20} | {r['path']}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

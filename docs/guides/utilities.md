@@ -75,7 +75,8 @@ Reports cache hit/miss patterns, idle gaps, resume-bug indicators, and cost attr
 ## Worktree lifecycle (CLI verb)
 
 ```
-fno worktree status                  # list active worktrees with target status
+fno worktree status                  # list worktrees; target: live:<name> / exited:<name> / none, from the agents registry
+fno worktree status --json           # same, as {"worktrees":[...],"summary":{"total","live","dead","no_session"}}
 fno worktree cleanup --older-than 7d  # remove stale worktrees
 fno worktree archive <name>           # remove directory, keep branch
 ```
