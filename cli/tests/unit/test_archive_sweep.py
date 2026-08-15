@@ -292,6 +292,131 @@ def test_apply_with_nothing_to_move_still_emits_zero_moved_event(tmp_path, monke
     evs = _events_of_type(events_path, "graph_archive_swept")
     assert len(evs) == 1
     assert evs[0]["data"]["moved"] == 0
+    assert evs[0]["data"]["mode"] == "apply"
+
+
+def test_dry_run_also_emits_the_swept_event(tmp_path, monkeypatch):
+    # AC8: EVERY run emits, dry-run included - the daily groom rehearsal is
+    # the leg most likely to break quietly, and a silent dry-run is
+    # indistinguishable from one that never ran.
+    g, _archive = _route(tmp_path, monkeypatch)
+    events_path = _with_events(tmp_path, monkeypatch)
+    _seed(g, [{"id": "ab-done0001", "completed_at": _old(40)}])
+    r = runner.invoke(app, ["backlog", "archive"])
+    assert r.exit_code == 0, r.output
+    evs = _events_of_type(events_path, "graph_archive_swept")
+    assert len(evs) == 1
+    assert evs[0]["data"]["moved"] == 1
+    assert evs[0]["data"]["mode"] == "dry-run"
+
+
+# -- soft-edge release (x-e520: the archive drains soft-held terminal nodes) --
+
+
+def test_soft_edges_no_longer_hold_a_terminal_node():
+    # THE MEASURED CASE: 203 terminal nodes pinned ONLY by an open node's
+    # related peer or source_node_id. Hard edges still guard (next test); soft
+    # ones release instead.
+    soft_related = {"id": "x-softrel", "completed_at": _old(40)}
+    soft_origin = {"id": "x-softorg", "completed_at": _old(40)}
+    open_peer = {"id": "x-open", "plan_path": "p.md", "related": ["x-softrel"],
+                 "source_node_id": "x-softorg"}
+    to_a, rem, skip = partition_for_archive([soft_related, soft_origin, open_peer], 30, NOW)
+    assert {e["id"] for e in to_a} == {"x-softrel", "x-softorg"}
+    assert [e["id"] for e in rem] == ["x-open"]
+    assert skip == []
+
+
+def test_hard_edges_still_hold_their_targets():
+    # No superseded_by case: a node carrying it is TERMINAL by module
+    # definition, so an "open node's superseded_by reference" cannot exist.
+    for edge in ("blocked_by", "parent", "supersedes"):
+        held = {"id": "x-hard", "completed_at": _old(40)}
+        if edge == "parent":
+            open_node = {"id": "x-open", "plan_path": "p.md", "parent": "x-hard"}
+        elif edge == "supersedes":
+            open_node = {"id": "x-open", "plan_path": "p.md", "supersedes": ["x-hard"]}
+        else:
+            open_node = {"id": "x-open", "plan_path": "p.md", "blocked_by": ["x-hard"]}
+        to_a, rem, skip = partition_for_archive([held, open_node], 30, NOW)
+        assert to_a == [], f"{edge} must still guard its target"
+        assert [s["_skip"] for s in skip] == ["referenced-by-open-node"]
+
+
+def test_terminal_related_pair_still_moves_together():
+    # The pair rule survives, scoped to terminal pairs: two terminal peers of
+    # different ages must not split (the younger staying behind would name an
+    # id the working graph no longer has). An OPEN peer no longer holds the
+    # pair (its edge is soft and gets stripped).
+    older = {"id": "x-pair-old", "completed_at": _old(60), "related": ["x-pair-new"]}
+    newer = {"id": "x-pair-new", "completed_at": _old(5), "related": ["x-pair-old"]}
+    to_a, rem, skip = partition_for_archive([older, newer], 30, NOW)
+    assert to_a == []
+    assert {e["id"] for e in rem} == {"x-pair-old", "x-pair-new"}
+    assert {s["_skip"] for s in skip} == {"too-recent", "related-peer-not-archived"}
+
+
+def test_release_soft_edges_strips_only_the_archived_refs():
+    from fno.graph.archive import release_soft_edges
+
+    remaining = [
+        {"id": "x-open", "plan_path": "p.md", "related": ["x-gone", "x-stays"],
+         "source_node_id": "x-gone"},
+        {"id": "x-other", "plan_path": "q.md", "related": ["x-stays"],
+         "source_node_id": "x-keeps"},
+        # A hard edge survives untouched even if it somehow names an archived
+        # id (it cannot arise from the partition, but the strip must never
+        # touch hard semantics regardless).
+        {"id": "x-blocked", "plan_path": "r.md", "blocked_by": ["x-gone"]},
+    ]
+    patched, stripped = release_soft_edges(remaining, {"x-gone"})
+    assert stripped == 2  # one related entry + one source_node_id
+    by_id = {e["id"]: e for e in patched}
+    assert by_id["x-open"]["related"] == ["x-stays"]
+    assert by_id["x-open"]["source_node_id"] is None
+    assert by_id["x-other"]["related"] == ["x-stays"]
+    assert by_id["x-other"]["source_node_id"] == "x-keeps"
+    assert by_id["x-blocked"]["blocked_by"] == ["x-gone"]
+    # Pure: the input dicts are not mutated.
+    assert remaining[0]["related"] == ["x-gone", "x-stays"]
+    assert release_soft_edges(remaining, set())[0] is remaining
+
+
+def test_apply_leaves_no_open_reference_to_an_archived_id(tmp_path, monkeypatch):
+    # AC2 end-to-end: the soft-held node moves, the open side is stripped, the
+    # working graph holds no reference to the archived id through any edge
+    # type, and `backlog get` still resolves the archived node read-through.
+    real_now = datetime.now(timezone.utc)
+
+    def _real_old(days: int) -> str:
+        return (real_now - timedelta(days=days)).isoformat()
+
+    g, archive = _route(tmp_path, monkeypatch)
+    events_path = _with_events(tmp_path, monkeypatch)
+    _seed(g, [
+        {"id": "x-softrel", "title": "soft held", "completed_at": _real_old(40),
+         "related": ["x-open"]},
+        {"id": "x-open", "title": "open peer", "plan_path": "p.md",
+         "related": ["x-softrel"], "source_node_id": "x-softrel"},
+    ])
+    r = runner.invoke(app, ["backlog", "archive", "--apply", "--older-than-days", "30"])
+    assert r.exit_code == 0, r.output
+    assert "soft edges stripped from open nodes: 2" in r.output
+    working = json.loads(g.read_text())["entries"]
+    assert [e["id"] for e in working] == ["x-open"]
+    assert working[0]["related"] == []
+    assert working[0]["source_node_id"] is None
+    # The archived side kept its own related entry (its copy leaves with it).
+    archived = json.loads(archive.read_text())["entries"]
+    assert [e["id"] for e in archived] == ["x-softrel"]
+    assert archived[0].get("related") == ["x-open"]
+    # The event carries the strip count.
+    evs = _events_of_type(events_path, "graph_archive_swept")
+    assert evs[0]["data"]["moved"] == 1
+    assert evs[0]["data"]["soft_edges_stripped"] == 2
+    # Read-through still resolves the archived node by id.
+    r_get = runner.invoke(app, ["backlog", "get", "x-softrel"])
+    assert r_get.exit_code == 0, r_get.output
 
 
 # -- remint_archive_collisions (x-f69b) --------------------------------------
