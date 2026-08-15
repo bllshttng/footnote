@@ -431,7 +431,7 @@ mod tests {
         // A rendered `/fno:verb` rides `--command` so opencode expands the plugin
         // command instead of running it as prose (x-de43 / codex P1).
         assert_eq!(
-            build_opencode_argv("/fno:target no-merge x-abcd", None),
+            build_opencode_argv("/fno:target --no-merge x-abcd", None),
             vec![
                 "opencode",
                 "run",

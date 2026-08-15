@@ -4,13 +4,13 @@ Skill-agnostic PR merge wrapper. Shells to ``gh``/``git`` and preserves the
 caller-facing contract verbatim:
 
 - Stdout: one JSON line ``{pr, outcome, reason, strategy[, cleanup]}`` on
-  merged/queued/skipped; failures print the same JSON shape to STDERR.
+  merged/skipped; failures print the same JSON shape to STDERR.
   ``outcome`` is merge truth only: whether the PR landed on main. A post-merge
   cleanup failure (local branch delete, worktree prune, sync) can never retract
   a landed merge, so it is reported as ``outcome=merged, cleanup=failed`` - the
   cleanup result in its own field, never fused into ``outcome``. A merge that
   lands never reports ``failed``.
-- Exit codes: 0 merged|queued, 1 failed (incl. bad args), 2 skipped
+- Exit codes: 0 merged, 1 failed (incl. bad args), 2 skipped
   (auto_merge disabled) or held, 127 gh not installed.
   ``held`` is the retry-later outcome and is never a failure claim: the merge was
   not attempted (lock contention, stale base, unreconciled stub-manifest) or its
@@ -25,7 +25,7 @@ caller-facing contract verbatim:
   redundant ceremony. A legacy ``--invoker=...`` arg is silently accepted and
   ignored so old callers never break.
 - Post-merge followups (memory-pass + triage sentinels, the session_satisfied
-  event, the per-PR artifact consolidation) fire for merged AND queued,
+  event, the per-PR artifact consolidation) fire for every merged outcome,
   best-effort: a followup failure never changes the already-emitted outcome.
 """
 from __future__ import annotations
@@ -50,12 +50,10 @@ _PR_RE = re.compile(r"^[1-9][0-9]*$")
 # is short and bounded - a peer still holding it past the window is reported
 # as "held" (exit 2) for the caller to retry, never an indefinite block.
 #
-# Scope: the lock + freshness hold cover the IMMEDIATE merge path. A queued
-# `--auto` merge (require_checks_pass) only ENQUEUES under the lock - GitHub
-# performs the actual merge asynchronously once checks pass, outside any lock,
-# so serialization there is delegated to GitHub. Operators running parallel
-# lanes with --auto should pair it with branch protection requiring branches
-# to be up to date before merging.
+# Scope: the lock + freshness hold cover the IMMEDIATE merge path. There is no
+# queued lane anymore (x-9d11 dropped --auto): require_checks_pass is enforced
+# by reading the checks under the lock and merging only on green, so every
+# merge this verb performs is serialized here.
 _MERGE_LOCK_WAIT_S = 120
 _MERGE_LOCK_POLL_S = 5
 
@@ -671,6 +669,39 @@ def _on_confirmed_merge(pr_number: int, cwd: str = "") -> None:
     _reconcile_merged_pr_node(pr_number, cwd)
 
 
+def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
+    """Delete the REMOTE branch after a confirmed merge; warn-only (x-9d11).
+
+    Branch cleanup is a separate operation from the merge and must never be
+    able to fail it. `gh pr merge --delete-branch` also deletes the LOCAL
+    branch, which errors with "is already used by worktree" whenever the
+    session stands in that worktree - worktree-first is the standing principle,
+    so the best-disciplined merge was the one most reliably reported failed.
+    Splitting cleanup out: the merge command carries no delete flag at all, the
+    remote ref goes through `git push origin --delete`, and the local
+    branch/worktree lifecycle stays with `scripts/setup/archive-worktree.sh`.
+
+    Returns the receipt's ``cleanup`` value: "" when nothing ran or the delete
+    succeeded, "failed: <first line>" when it did not. Failure changes nothing
+    about the merge outcome.
+    """
+    if not getattr(auto_merge, "delete_branch_on_merge", False):
+        return ""
+    ref = _gh(
+        ["pr", "view", str(pr_number), "--json", "headRefName", "-q", ".headRefName"],
+        repo,
+    )
+    branch = ref.stdout.strip() if ref.ok else ""
+    if not branch:
+        return f"failed: remote branch name unreadable: {(ref.stderr or '').splitlines()[0][:120] if ref.stderr.strip() else 'no error output'}"
+    res = _git(["push", "origin", "--delete", branch], repo)
+    if res.ok:
+        return ""
+    return "failed: remote branch delete: {}".format(
+        (res.stderr or res.stdout or "").splitlines()[0][:160] if (res.stderr or res.stdout or "").strip() else "no error output"
+    )
+
+
 def _emit_session_satisfied(pr_url: str, state_dir: str) -> None:
     """Emit a session_satisfied{source:pr_merge} event (best-effort)."""
     state_file = os.path.join(state_dir, "target-state.md")
@@ -1075,10 +1106,18 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         "auto_merge_approved",
     )
     if approved and approved.strip().lower() not in ("true", "yes", "1"):
+        # Name WHICH input set the posture (x-9d11): the operator's first
+        # question on this refusal is "what layer said no". A pre-provenance
+        # manifest carries no source; that reads as unknown, never a guess.
+        source = (_read_state_field(
+            os.path.join(_repo_state_dir(repo), "target-state.md"),
+            "auto_merge_source",
+        ) or "").strip() or "unknown (pre-provenance manifest)"
         _emit(
             pr_number,
             "skipped",
-            "per-run no-merge (manifest auto_merge_approved is not true)",
+            f"per-run no-merge (manifest auto_merge_approved is not true; "
+            f"auto_merge_source: {source})",
             "none",
             err=False,
         )
@@ -1254,14 +1293,6 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return _do_merge(pr_number, auto_merge, repo, covered_head)
 
 
-#: gh's refusal when a repo has not enabled the auto-merge feature. `--auto` is
-#: a request to QUEUE until checks pass, so this is a repo-capability answer,
-#: not a verdict on the PR.
-_AUTO_MERGE_UNSUPPORTED = re.compile(
-    r"auto[- ]merge is not allowed|enablePullRequestAutoMerge", re.IGNORECASE
-)
-
-
 def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     """CI verdict for the PR plus the head it describes.
 
@@ -1304,53 +1335,44 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
 
 def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
+    # AC5-CON (x-9d11): exactly one arming path. finalize.rs owns GitHub's
+    # auto-merge queue; if the PR is already armed there, merging here would
+    # race the queue. Say so and stand down - the queue merges it when checks
+    # pass, so the merge is not being lost, just not duplicated.
+    armed = _gh(
+        ["pr", "view", str(pr_number), "--json", "autoMergeRequest", "-q", ".autoMergeRequest"],
+        repo,
+    )
+    if armed.ok and armed.stdout.strip() not in ("", "null"):
+        _emit(
+            pr_number,
+            "skipped",
+            "PR already armed in GitHub's auto-merge queue (armed by fno-agents "
+            "finalize at the terminal); the queue merges it when checks pass",
+            auto_merge.merge_strategy,
+            err=False,
+        )
+        return 2
+
     # (3) Build command.
     strategy = auto_merge.merge_strategy
     cmd: List[str] = ["pr", "merge", str(pr_number), f"--{strategy}"]
-    if auto_merge.delete_branch_on_merge:
-        cmd.append("--delete-branch")
-    if auto_merge.require_checks_pass:
-        cmd.append("--auto")
-    # x-0eaf: pin the merge to the covered head so a racing push cannot land an
-    # unreviewed commit - including via `--auto`'s queue, which otherwise merges
-    # whatever head is latest when checks pass. gh refuses if the head moved.
-    if covered_head:
-        cmd += ["--match-head-commit", covered_head]
-    # Set only on the no-auto fallback below, where THIS process is the one
-    # vouching for the checks. The worktree recovery path reads it so its
-    # server-side merge is pinned to the same SHA the verdict came from.
+    # Deliberately NO --delete-branch (x-9d11): it makes gh delete the LOCAL
+    # branch too, which fails "is already used by worktree" from inside the
+    # worktree and can make a landed merge report failed. Remote cleanup runs
+    # post-merge via _post_merge_remote_delete; the local branch/worktree is
+    # archive-worktree.sh's lifecycle.
+    # Deliberately NO --auto either (x-9d11): `--auto` was the second arming
+    # path (finalize.rs arms GitHub's queue at the terminal; this verb queued
+    # its own), and a repo without the auto-merge feature rejected the flag
+    # outright. One arming path: this verb EXECUTES. require_checks_pass is
+    # enforced here, before the merge call, instead of delegated to the queue
+    # (x-8543: an already-green PR merges without the repo having the feature).
+    # Set when THIS process is the one vouching for the checks; the worktree
+    # recovery path reads it so its server-side merge is pinned to the same
+    # SHA the verdict came from.
     verified_head = ""
-
-    # (4) Run + classify.
-    try:
-        res = _gh(cmd, repo)
-    except ToolMissing:
-        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
-        return 127
-
-    output = (res.stdout or "") + (res.stderr or "")
-    if res.ok:
-        if re.search(r"will be automatically merged", output, re.IGNORECASE):
-            _emit(pr_number, "queued", "awaiting required checks", strategy, err=False)
-            _sync_graph_merge_status("queued", pr_number)
-        else:
-            _emit(pr_number, "merged", "merged immediately", strategy, err=False)
-            _on_confirmed_merge(pr_number, repo)
-        _run_post_merge_followups(pr_number, strategy, repo)
-        return 0
-
-    # Failure path. A worktree-local post-merge step can fail even though the
-    # SERVER-SIDE merge already landed (recurring PR #393/#395 bite).
-    first_line = output.splitlines()[0][:200] if output.strip() else ""
-    if _AUTO_MERGE_UNSUPPORTED.search(output) and "--auto" in cmd:
-        # `--auto` asks GitHub to QUEUE the merge until checks go green, and a
-        # repo without the auto-merge feature rejects the request outright.
-        # That is a repo-capability answer, not a verdict on the PR - but it
-        # cannot simply be retried without the flag, because `--auto` IS how
-        # require_checks_pass is enforced: no other guard in this file reads CI.
-        # Dropping it silently would turn "do not merge red" into "merge
-        # anything". So do here what GitHub would have done: read the checks,
-        # merge only on green, and refuse otherwise.
+    if auto_merge.require_checks_pass:
         try:
             verdict, counts, head_read = _checks_verdict(pr_number, repo)
         except ToolMissing:
@@ -1361,8 +1383,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
             _emit(
                 pr_number,
                 "held" if verdict == "pending" else "failed",
-                f"repo has auto-merge disabled so the merge cannot be queued, "
-                f"and checks are {verdict} ({counts}); "
+                f"checks are {verdict} ({counts}); "
                 f"require_checks_pass forbids merging without green",
                 strategy,
                 err=verdict not in ("pending",),
@@ -1385,33 +1406,42 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
             _sync_graph_merge_status("failed", pr_number)
             return 1
         # A verdict belongs to the SHA it was computed on. Between that read and
-        # this merge, another actor can push - and `--auto` is gone, so GitHub is
-        # no longer re-checking on our behalf. Pin the merge to the verified head
-        # so a racing push makes gh refuse instead of merging an unverified (and
-        # possibly red) commit. Server-side required-check rules would cover this
-        # too, but require_checks_pass exists precisely for repos without them.
-        cmd_now = [arg for arg in cmd if arg != "--auto"]
-        if "--match-head-commit" not in cmd_now:
-            cmd_now += ["--match-head-commit", verified_head]
-        try:
-            res = _gh(cmd_now, repo)
-        except ToolMissing:
-            _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
-            return 127
-        output = (res.stdout or "") + (res.stderr or "")
-        if res.ok:
-            _emit(
-                pr_number,
-                "merged",
-                "merged immediately (repo has auto-merge disabled; checks already green)",
-                strategy,
-                err=False,
-            )
-            _on_confirmed_merge(pr_number, repo)
-            _run_post_merge_followups(pr_number, strategy, repo)
-            return 0
-        first_line = output.splitlines()[0][:200] if output.strip() else ""
+        # this merge, another actor can push, and nothing upstream re-checks on
+        # our behalf. Pin the merge to the verified head so a racing push makes
+        # gh refuse instead of merging an unverified (and possibly red) commit.
+        # Server-side required-check rules would cover this too, but
+        # require_checks_pass exists precisely for repos without them.
+    # x-0eaf: pin the merge to the covered head so a racing push cannot land an
+    # unreviewed commit. gh refuses if the head moved.
+    if covered_head:
+        cmd += ["--match-head-commit", covered_head]
+    elif verified_head:
+        cmd += ["--match-head-commit", verified_head]
 
+    # (4) Run + classify.
+    try:
+        res = _gh(cmd, repo)
+    except ToolMissing:
+        _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
+        return 127
+
+    output = (res.stdout or "") + (res.stderr or "")
+    if res.ok:
+        _emit(
+            pr_number,
+            "merged",
+            "merged immediately",
+            strategy,
+            err=False,
+            cleanup=_post_merge_remote_delete(pr_number, repo, auto_merge),
+        )
+        _on_confirmed_merge(pr_number, repo)
+        _run_post_merge_followups(pr_number, strategy, repo)
+        return 0
+
+    # Failure path. A worktree-local post-merge step can fail even though the
+    # SERVER-SIDE merge already landed (recurring PR #393/#395 bite).
+    first_line = output.splitlines()[0][:200] if output.strip() else ""
     # ALWAYS re-read the merge state before reporting failure. `gh pr merge
     # --delete-branch` exits non-zero whenever a POST-merge step fails after a
     # successful server-side merge - the local branch delete (worktree-held), the
@@ -1426,13 +1456,17 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
         landed = view.stdout.strip()
         if landed and landed != "null":
             _git(["fetch", "origin"], repo)
+            # The gh step already reported a cleanup-shaped failure; run the
+            # remote delete anyway and surface both in the cleanup field.
+            remote = _post_merge_remote_delete(pr_number, repo, auto_merge)
+            cleanup = "failed" if not remote else f"failed; remote delete {remote}"
             _emit(
                 pr_number,
                 "merged",
                 f"merged server-side; post-merge cleanup failed: {first_line}",
                 strategy,
                 err=False,
-                cleanup="failed",
+                cleanup=cleanup,
             )
             # Arm the post-merge sentinels: the merge landed, so retro/triage and
             # the memory-pass fire as on a clean merge. On a rare autonomous retry
@@ -1477,6 +1511,7 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
                 "merged server-side (worktree fallback)",
                 strategy,
                 err=False,
+                cleanup=_post_merge_remote_delete(pr_number, repo, auto_merge),
             )
             _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)

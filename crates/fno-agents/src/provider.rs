@@ -998,7 +998,7 @@ impl ProviderWithPty for AgyProvider {
 pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
     if let Some(rest) = message.strip_prefix('/') {
         let mut parts = rest.splitn(2, ' ');
-        // `/fno:target no-merge x` -> --command fno:target, args "no-merge x".
+        // `/fno:target --no-merge x` -> --command fno:target, args "--no-merge x".
         if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
             let mut argv_tail = vec!["--command".to_string(), cmd.to_string()];
             if let Some(msg_args) = parts.next().filter(|a| !a.is_empty()) {
@@ -1686,7 +1686,7 @@ mod tests {
         // expands the plugin command) with the rest as args - NOT a prose prompt
         // that `run` would run verbatim (x-de43 / codex P1).
         let mut ctx = create_ctx();
-        ctx.message = "/fno:target no-merge x-abcd".into();
+        ctx.message = "/fno:target --no-merge x-abcd".into();
         assert_eq!(
             OpencodeProvider.create_argv(&ctx),
             vec![
