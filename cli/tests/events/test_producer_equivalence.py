@@ -3,7 +3,7 @@
 skills/review/SKILL.md:112 lists sigma, peer, code-review, and declare as
 peer producers of the SAME head-pinned `review_attestation` event. Before
 this PR, that sentence was true in prose and false in code: `code-review`
-was listed but had no producer, so a clean `/code-review medium --fix` pass
+was listed but had no producer, so a clean `/code-review` pass with flags
 still read `uncovered`, and six workers in one night had to go find
 `emit-attestation.sh` by hand.
 
@@ -114,8 +114,8 @@ def _drive_code_review(repo: Path) -> None:
     actually produces for a Skill-tool self-invocation of `/code-review`.
 
     `Skill(skill="code-review", ...)` runs the skill as a FORKED subagent
-    (confirmed live by running this PR's own `/code-review medium --fix`
-    self-review, x-e97b): inside a fork the skill's own instructions forbid
+    (confirmed live by running this PR's own sized `/code-review` self-review,
+    x-e97b): inside a fork the skill's own instructions forbid
     calling ReportFindings ("this review's output contract is the JSON
     block above"), so the PostToolUse(ReportFindings) surface below is
     reachable on some invocation shapes but NOT this one - the one the
@@ -126,7 +126,7 @@ def _drive_code_review(repo: Path) -> None:
     payload = json.dumps(
         {
             "hook_event_name": "SubagentStop",
-            "description": "/code-review medium --fix",
+            "description": "/code-review <level> --comment --fix",
             "last_assistant_message": "## Review findings\n\n```json\n[]\n```\n",
             "cwd": str(repo),
         }
@@ -218,7 +218,7 @@ def test_subagent_stop_with_findings_emits_nothing(tmp_path: Path) -> None:
     payload = json.dumps(
         {
             "hook_event_name": "SubagentStop",
-            "description": "/code-review medium --fix",
+            "description": "/code-review <level> --comment --fix",
             "last_assistant_message": (
                 '## Review findings\n\n```json\n[{"file": "a.py", "summary": "x", '
                 '"failure_scenario": "y"}]\n```\n'

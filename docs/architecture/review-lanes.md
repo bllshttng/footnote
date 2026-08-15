@@ -23,7 +23,7 @@ An in-session agent can launch the native review verb through the Skill
 tool with **bare args**, not by typing the slash command:
 
 ```
-Skill(skill="code-review", args="medium --fix")
+Skill(skill="code-review", args="<level> --comment --fix")
 -> Skill "code-review" launched (forked execution, running in the background).
 ```
 
@@ -53,10 +53,12 @@ Use it to fire a verb in a live worker (a king firing `/code-review` into a mini
 
 ```bash
 # Into a peer:
-fno mail send <peer> '/code-review medium --fix' --raw
+fno mail send <peer> '/code-review <level> --comment --fix' --raw
 # At your own prompt line (recipient derived from ambient identity):
-fno mail send '/code-review medium --fix' --to-self --raw
+fno mail send '/code-review <level> --comment --fix' --to-self --raw
 ```
+
+`<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it).
 
 ## A reply does not resolve a thread
 
@@ -89,7 +91,7 @@ The agent path is `fno mail send --raw` above.
 The `mail-inject` binary is reachable directly only for scripting against a daemon session outside the Python CLI, where its STDIN form suits a pipe:
 
 ```bash
-printf '/code-review medium --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
+printf '/code-review <level> --comment --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
 ```
 
 It reads the turn text from STDIN and enforces the brevity cap for the raw/direct lane: `fno mail send --raw` does not cap in Python, so this binary is where that lane, and a direct binary call, get capped.
@@ -121,7 +123,7 @@ verb by hand.
 
 A wrapped `fno mail send` cannot carry a verb.
 It writes an `<fno_mail ...>` envelope at character 0 of the recipient's input, so the slash command is never at the start of the input and never parses.
-Mail therefore carries **instructions** ("review my diff"), not invocations ("/code-review medium --fix").
+Mail therefore carries **instructions** ("review my diff"), not invocations (a sized `/code-review` order).
 `--raw` (Lane 2) is the deliberate exception: it strips the envelope so the slash parses, which is exactly the cost the wrapper exists to impose.
 
 ## Do not assert a cause for a refusal
