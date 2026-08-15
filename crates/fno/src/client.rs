@@ -2196,6 +2196,18 @@ impl View {
     /// fold item joined to a roster row when one exists. Owned rows so a per-key
     /// mutation of `answers` never aliases the borrow (the reason the old
     /// blocked_queue cloned too). Sorted `(kind, ts, name)`.
+    /// Name -> worst open need, for the attention sort's first term. Reuses
+    /// `needs_queue()` (already worst-first sorted) rather than re-folding the
+    /// event log, so the table and the needs-me overlay can never disagree
+    /// about who needs the operator.
+    fn attention_needs(&self) -> HashMap<String, NeedKind> {
+        let mut worst: HashMap<String, NeedKind> = HashMap::new();
+        for r in &self.needs_queue() {
+            worst.entry(r.name.clone()).or_insert(r.kind);
+        }
+        worst
+    }
+
     fn needs_queue(&self) -> Vec<NeedRow> {
         let mut rows: Vec<NeedRow> = Vec::new();
 
@@ -4428,7 +4440,7 @@ impl View {
         // only the numeric index would silently move the cursor onto a different
         // agent and point the next Enter / lifecycle key at the wrong worker.
         let agent_prev = (self.density == Density::Extended
-            && self.agent_sort == AgentSort::Status)
+            && self.agent_sort == AgentSort::Attention)
             .then(|| self.selected_agent_name())
             .flatten();
         // (x-4374) Capture the focused pane before the swap so a focus CHANGE can
@@ -6296,13 +6308,18 @@ impl View {
                 .iter()
                 .filter(|a| a.squad.is_none_or(|id| !known.contains(&id))),
         );
-        if self.agent_sort == AgentSort::Status {
-            // ONE ordering authority (Locked 3): the severity contract lives on
-            // `PaneState`'s declaration-order `Ord`, the same one the needs-me
-            // queue bands on. Exited sorts last - it is not a severity, it is
-            // the absence of one. `sort_by_key` is stable, so rows inside a band
-            // keep their tree order instead of shuffling on every tick.
-            agents.sort_by_key(|a| (a.exited, pane_state(a.badge, a.seen)));
+        if self.agent_sort == AgentSort::Attention {
+            // ONE ordering authority: the attention key (needs fold rank, then
+            // evidence of neglect, then oldest-silent, then name). The previous
+            // key banded on the in-TTL badge - a scraped report that reads
+            // healthy for a worker dead under two hours, which is how a
+            // stale-live row could sit below every row that mattered. The
+            // status word and the reachability verdict are barred from this
+            // key for the same reason: both answer a different question than
+            // "who needs the operator". `sort_by_key` is stable, so rows
+            // inside a band keep their tree order.
+            let needs = self.attention_needs();
+            agents.sort_by_key(|a| attention_key(a, needs.get(a.name.as_str()).copied()));
         }
         let mut out = Vec::with_capacity(agents.len() + 1);
         out.push(DisplayRow::TableHead);
@@ -7542,6 +7559,71 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
     }
 }
 
+/// Attention display window: a transcript-backed row silent longer than this
+/// reads as neglected and floats to the top of the agents table. Deliberately
+/// much tighter than session-truth's two-hour stall window - that one is the
+/// reap-safety window and 7200s is correct for it, but its verdict reads
+/// `reachable` for anything dead inside it, and that gap is exactly where a
+/// stale-live worker hides. Ten minutes catches a twenty-minute floor with
+/// headroom. Display and ordering only: no verdict, falsifier, or reap
+/// decision keys off this constant.
+const STALE_ATTENTION_S: u64 = 600;
+
+/// Where a row sits on the evidence-of-neglect scale. Built ONLY from fields
+/// that carry their evidence with them (`basis`, `last_activity_age_s`,
+/// `exited`, `unmeasured`) - never from `status` or the reachability verdict,
+/// both of which read healthy for a worker dead under two hours, and never
+/// from the in-TTL badge, which is a scraped report rather than a fact.
+fn evidence_rank(a: &AgentRow) -> u8 {
+    let basis = a.basis.as_deref();
+    // A fired falsifier, or an exit with positive corroboration (a confirmed
+    // dead pid / gone pane): the sunk tier. Archived, snoozed and pane-dead
+    // all collapse here - none of them needs the operator's attention now.
+    if matches!(basis, Some("process-gone") | Some("pane-gone")) || (a.exited && !a.unmeasured) {
+        return 5;
+    }
+    // Claiming to work, silent past the attention window: the row that most
+    // needs a human is the row that says it is fine and is not.
+    if basis == Some("transcript")
+        && a.last_activity_age_s
+            .is_some_and(|s| s >= STALE_ATTENTION_S)
+    {
+        return 0;
+    }
+    if basis == Some("silent") {
+        return 1;
+    }
+    if basis == Some("no-evidence") {
+        return 2;
+    }
+    // Dormant but resumable, with no corroboration either way: the operator
+    // has to look before acting, which outranks a healthy worker.
+    if a.exited && a.unmeasured {
+        return 3;
+    }
+    // Genuinely working, no probe answer yet, or fresh transcript: needs
+    // nothing. `basis: None` (an old server that never sends the field)
+    // deliberately lands here too - absence of a reading is not urgency.
+    4
+}
+
+/// The attention key: needs-me fold rank, then evidence of neglect, then
+/// longest-silent first, then name so the table never shuffles on a scrape
+/// tick. Term 3 treats an absent age as 0 (youngest): an absent reading has
+/// two explanations and a sort cannot tell them apart, so it must never float
+/// a row to the top.
+fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Reverse<u64>, &str) {
+    // `NeedKind`'s declaration order IS the severity contract (pinned by
+    // test); `as u8` reads it without re-declaring a second authority.
+    let need_rank = need.map_or(7, |k| k as u8);
+    (
+        need_rank,
+        evidence_rank(a),
+        std::cmp::Reverse(a.last_activity_age_s.unwrap_or(0)),
+        a.name.as_str(),
+    )
+}
+
 /// (x-c5ee) A LIVE idle row - the top-K cap's fold target. Exited is checked
 /// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
@@ -8235,6 +8317,23 @@ fn humanize_ago(secs: u64) -> String {
     }
 }
 
+/// The table's last-activity cell: the same buckets as [`humanize_ago`],
+/// right-justified to a fixed width of 4 so the column never reflows when a
+/// value rolls from `59m` to `1h`. An absent reading renders EMPTY, like the
+/// tail cell - the table never fabricates a placeholder value, and `0s` would
+/// be a fabricated one. (`fno agents list` prints `?` for the same absence;
+/// that lane's rows are one line each, where a blank reads as a bug.)
+fn humanize_age(secs: Option<u64>) -> String {
+    let body = match secs {
+        None => String::new(),
+        Some(s) if s < 60 => format!("{s}s"),
+        Some(s) if s < 3600 => format!("{}m", s / 60),
+        Some(s) if s < 86_400 => format!("{}h", s / 3600),
+        Some(s) => format!("{}d", s / 86_400),
+    };
+    format!("{body:>4}")
+}
+
 /// (x-b186) One extended-table row: status glyph, name, message tail, PR, and a
 /// relative last-update, each padded to its column so the table aligns.
 ///
@@ -8260,11 +8359,15 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
     out.push_str(&pad_cols(&pr, COL_PR as usize - 1));
     out.push(' ');
     if cols.time {
-        // A future stamp (clock skew) clamps to 0 rather than underflowing.
-        let age = a
-            .updated_at
-            .map(|u| humanize_ago(now_secs.saturating_sub(u)))
-            .unwrap_or_default();
+        // The probe's transcript age is the honest reading; `updated_at` is a
+        // registry stamp that reconciliation can refresh with no worker
+        // activity behind it, so it is only the fallback for a server too old
+        // to send the triple. Fixed-width so the column never reflows.
+        let age = match (a.last_activity_age_s, a.updated_at) {
+            (Some(s), _) => humanize_age(Some(s)),
+            (None, Some(u)) => humanize_age(Some(now_secs.saturating_sub(u))),
+            (None, None) => humanize_age(None),
+        };
         out.push_str(&pad_cols(&age, COL_TIME as usize - 1));
     }
     out
@@ -8278,7 +8381,7 @@ fn table_row_text(a: &AgentRow, cols: TableCols, now_secs: u64) -> String {
 fn table_head_text(cols: TableCols, sort: AgentSort) -> String {
     let (long, short) = match sort {
         AgentSort::Squad => ("sort: squad", "·squad"),
-        AgentSort::Status => ("sort: status", "·status"),
+        AgentSort::Attention => ("sort: attention", "·attn"),
     };
     // With the tail column dropped the label has no column of its own, so it
     // rides the NAME header instead of being appended past the end of the row.
@@ -13637,6 +13740,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -13701,6 +13806,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         match agent_hit(&row, 1) {
             ChromeHit::OpenAttachPlace { id, squad } => {
@@ -13956,6 +14063,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }
     }
 
@@ -14388,6 +14497,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }
     }
 
@@ -14584,7 +14695,7 @@ mod tests {
                 // this test needs a long, fully-rendered scrollable list.
                 badge: Some(AgentBadge::Working),
                 ..focus_agent(p)
-            });
+            })
         }
         assert!(
             view.display_rows().len() > view.sideline_visible_rows(),
@@ -16141,6 +16252,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }
     }
 
@@ -16805,6 +16918,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         view_with_agents(vec![
             row("live-a", false),
@@ -16988,6 +17103,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }]);
         let hdr = view
             .display_rows()
@@ -17297,6 +17414,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let mut view = view_with_agents(vec![
             orphan("stray-live", false),
@@ -17347,6 +17466,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
         view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -17455,6 +17576,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
@@ -17480,6 +17603,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -17504,6 +17629,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -17559,6 +17686,8 @@ mod tests {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                basis: None,
+                last_activity_age_s: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -17958,6 +18087,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -18721,6 +18852,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -19190,6 +19323,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }
     }
 
@@ -19908,6 +20043,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
                 AgentRow {
                     squad: Some(1),
@@ -19931,6 +20068,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
                 AgentRow {
                     squad: None,
@@ -19954,6 +20093,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
             ],
             focus_node: None,
@@ -20033,6 +20174,8 @@ mod tests {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                basis: None,
+                last_activity_age_s: None,
             }
         }
         let mut view = two_pane_view();
@@ -20439,6 +20582,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
                 AgentRow {
                     squad: None,
@@ -20462,6 +20607,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
                 AgentRow {
                     squad: None,
@@ -20485,6 +20632,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
                 // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
                 // load-bearing "attention is never dimmed" branch. The accent
@@ -20511,6 +20660,8 @@ mod tests {
                     tail: None,
                     crown_level: None,
                     crown_scope: None,
+                    basis: None,
+                    last_activity_age_s: None,
                 },
             ],
             focus_node: None,
@@ -21000,6 +21151,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -21723,6 +21876,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -22155,6 +22310,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.set_squad_view(1, SectionView::Expanded);
@@ -22199,6 +22356,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }
     }
 
@@ -23218,6 +23377,8 @@ mod tests {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                basis: None,
+                last_activity_age_s: None,
             },
             AgentRow {
                 squad: Some(1),
@@ -23241,6 +23402,8 @@ mod tests {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                basis: None,
+                last_activity_age_s: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -23300,6 +23463,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         };
         let bare = row("zsh", 10, None);
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
@@ -23363,6 +23528,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -23415,6 +23582,8 @@ mod tests {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                basis: None,
+                last_activity_age_s: None,
             },
             AgentRow {
                 squad: Some(2),
@@ -23438,6 +23607,8 @@ mod tests {
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
+                basis: None,
+                last_activity_age_s: None,
             },
         ];
         let rows = v.nav_rows();
@@ -23525,6 +23696,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }];
         let idx = v
             .nav_rows()
@@ -23939,6 +24112,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -24100,6 +24275,8 @@ mod tests {
             tail: None,
             crown_level: None,
             crown_scope: None,
+            basis: None,
+            last_activity_age_s: None,
         }
     }
 
@@ -24251,16 +24428,30 @@ mod tests {
         assert!(names.contains(&"dead".to_string()), "{names:?}");
     }
 
-    // AC3-UI: the sort toggle re-bands rows worst-first AND relabels the header,
-    // so the press is visible even when the two orders coincide.
+    // AC3-UI: the sort toggle re-orders rows AND relabels the header, so the
+    // press is visible even when the two orders coincide. The attention side
+    // of the toggle is keyed on evidence (basis + age), not badges - badges
+    // are a scraped report that reads healthy for a worker dead under two
+    // hours, which is exactly the row this sort exists to surface.
     #[test]
-    fn sort_toggle_rebands_by_severity_and_relabels() {
-        let mut v = wide_view(vec![
-            agent_row("idle", 4, None, false),
-            agent_row("done", 5, Some(AgentBadge::Done), false),
-            agent_row("blocked", 6, Some(AgentBadge::Blocked), false),
-            agent_row("working", 7, Some(AgentBadge::Working), false),
-        ]);
+    fn sort_toggle_reorders_by_attention_and_relabels() {
+        let stale = AgentRow {
+            basis: Some("transcript".into()),
+            last_activity_age_s: Some(1800),
+            ..agent_row("stale-live", 4, Some(AgentBadge::Working), false)
+        };
+        let fresh = AgentRow {
+            basis: Some("transcript".into()),
+            last_activity_age_s: Some(30),
+            ..agent_row("fresh-live", 5, Some(AgentBadge::Working), false)
+        };
+        let sunk = AgentRow {
+            basis: Some("process-gone".into()),
+            last_activity_age_s: Some(40000),
+            ..agent_row("gone", 6, None, true)
+        };
+        let mut v = wide_view(vec![fresh, sunk, stale]);
+        v.agent_sort = AgentSort::Squad;
         set_density(&mut v, Density::Extended);
 
         let names = |v: &View| -> Vec<String> {
@@ -24274,7 +24465,7 @@ mod tests {
         };
         assert_eq!(
             names(&v),
-            ["idle", "done", "blocked", "working"],
+            ["fresh-live", "gone", "stale-live"],
             "by-squad keeps the tree's own order"
         );
         assert!(frame_text(&v.compose()).contains("sort: squad"));
@@ -24282,10 +24473,119 @@ mod tests {
         v.toggle_agent_sort();
         assert_eq!(
             names(&v),
-            ["blocked", "working", "done", "idle"],
-            "by-status bands worst-first, the x-feec severity order"
+            ["stale-live", "fresh-live", "gone"],
+            "by-attention floats the stale-live worker above the fresh one \
+             and sinks the confirmed-gone row last, regardless of badges"
         );
-        assert!(frame_text(&v.compose()).contains("sort: status"));
+        assert!(frame_text(&v.compose()).contains("sort: attention"));
+    }
+
+    // The mux ranker's attention order, pinned to the shared fixture: the
+    // same file the daemon projection and the Python serializer assert
+    // against, keeping three independently-implemented sorts identical. The
+    // `need-decision` row is the seam test - the Decision kind has no
+    // producer yet, and this fixture row is the only proof its seat is
+    // reserved and ranked first. Deleting it because "no real row has this"
+    // removes that proof.
+    // The attention key reads `NeedKind`'s declaration order as a rank
+    // (`k as u8`), so the full order is load-bearing twice over: the
+    // needs-me queue bands on it AND the table's first term reads it. Pin
+    // every adjacent pair so a reorder fails here instead of silently
+    // re-tiering the fleet.
+    #[test]
+    fn need_kind_declaration_order_is_the_severity_contract() {
+        assert!(NeedKind::Decision < NeedKind::MailQuestion);
+        assert!(NeedKind::MailQuestion < NeedKind::BlockedAnswerable);
+        assert!(NeedKind::BlockedAnswerable < NeedKind::BlockedFocusOnly);
+        assert!(NeedKind::BlockedFocusOnly < NeedKind::ReviewWedged);
+        assert!(NeedKind::ReviewWedged < NeedKind::BudgetStop);
+        assert!(NeedKind::BudgetStop < NeedKind::DoneUnseen);
+    }
+
+    #[test]
+    fn attention_key_orders_the_shared_fixture() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/agents-attention-order.json"
+        ));
+        let fixture: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+        let need_of = |kind: Option<&str>| -> Option<NeedKind> {
+            match kind? {
+                "decision" => Some(NeedKind::Decision),
+                "mail_question" => Some(NeedKind::MailQuestion),
+                "review_wedged" => Some(NeedKind::ReviewWedged),
+                "budget_stop" => Some(NeedKind::BudgetStop),
+                _ => None,
+            }
+        };
+        let mut rows: Vec<(AgentRow, Option<NeedKind>)> = fixture["rows"]
+            .as_array()
+            .expect("rows is an array")
+            .iter()
+            .map(|r| {
+                let row = AgentRow {
+                    basis: r["basis"].as_str().map(str::to_string),
+                    last_activity_age_s: r["last_activity_age_s"].as_u64(),
+                    exited: r["exited"].as_bool().unwrap_or(false),
+                    unmeasured: r["unmeasured"].as_bool().unwrap_or(false),
+                    ..blocked_row(r["name"].as_str().expect("row has a name"), 0, None)
+                };
+                (row, need_of(r["need"].as_str()))
+            })
+            .collect();
+        rows.sort_by(|(a, n), (b, m)| attention_key(a, *n).cmp(&attention_key(b, *m)));
+        let got: Vec<&str> = rows.iter().map(|(a, _)| a.name.as_str()).collect();
+        let expected: Vec<&str> = fixture["expected_order"]
+            .as_array()
+            .expect("expected_order is an array")
+            .iter()
+            .map(|v| v.as_str().expect("order entry is a string"))
+            .collect();
+        assert_eq!(got, expected);
+
+        // The seam, asserted on its own so a fixture edit cannot silently
+        // drop it: the Decision kind outranks MailQuestion even though
+        // nothing constructs it today.
+        let (decision_row, decision_need) = rows
+            .iter()
+            .find(|(a, _)| a.name == "need-decision")
+            .expect("fixture carries the decision row");
+        let decision_key = attention_key(decision_row, *decision_need);
+        let (mail_row, mail_need) = rows
+            .iter()
+            .find(|(a, _)| a.name == "need-mail")
+            .expect("fixture carries the mail row");
+        assert!(
+            decision_key < attention_key(mail_row, *mail_need),
+            "the reserved decision seat leads the severity order"
+        );
+
+        // An absent age never floats a row above a real age in the same
+        // tier: the ghost row (age null) sits below the worker row (age 30)
+        // in the fixture order above, pinned here by direct comparison.
+        let (ghost, _) = rows
+            .iter()
+            .find(|(a, _)| a.name == "ghost")
+            .expect("fixture carries the ghost row");
+        let (worker, _) = rows
+            .iter()
+            .find(|(a, _)| a.name == "worker")
+            .expect("fixture carries the worker row");
+        assert!(attention_key(worker, None) < attention_key(ghost, None));
+    }
+
+    #[test]
+    fn humanize_age_is_fixed_width_and_renders_absent_as_a_question_mark() {
+        for s in [12u64, 2700, 10800, 345600] {
+            assert_eq!(humanize_age(Some(s)).chars().count(), 4, "{s}");
+        }
+        assert_eq!(humanize_age(Some(12)), " 12s");
+        assert_eq!(humanize_age(Some(2700)), " 45m");
+        assert_eq!(humanize_age(Some(10800)), "  3h");
+        assert_eq!(humanize_age(Some(345600)), "  4d");
+        // Absent renders EMPTY (a 4-space blank), never a fabricated age.
+        assert_eq!(humanize_age(None), "    ");
     }
 
     // The severity bands must come from the ONE existing authority. LatticeState
@@ -24304,7 +24604,7 @@ mod tests {
             agent_row("live", 9, Some(AgentBadge::Working), false),
         ]);
         set_density(&mut v, Density::Extended);
-        v.agent_sort = AgentSort::Status;
+        v.agent_sort = AgentSort::Attention;
         let names: Vec<String> = v
             .display_rows()
             .iter()
@@ -24445,9 +24745,9 @@ mod tests {
             },
         ] {
             let by_squad = table_head_text(cols, AgentSort::Squad);
-            let by_status = table_head_text(cols, AgentSort::Status);
+            let by_attention = table_head_text(cols, AgentSort::Attention);
             assert_ne!(
-                by_squad, by_status,
+                by_squad, by_attention,
                 "{cols:?}: the header must change when the sort does"
             );
             // The header must FIT: anything past the panel width is painted away,
@@ -24457,7 +24757,7 @@ mod tests {
                 TableCols { time: true, .. } => COL_STATUS + COL_NAME + COL_PR + COL_TIME - 1,
                 _ => MIN_EXTENDED_PANEL_W - 1,
             };
-            for (label, head) in [("squad", &by_squad), ("status", &by_status)] {
+            for (label, head) in [("squad", &by_squad), ("att", &by_attention)] {
                 assert!(
                     head.chars().count() <= panel_text_w as usize,
                     "{cols:?}: header overflows {panel_text_w} cols: {head:?}"
@@ -24546,7 +24846,7 @@ mod tests {
             agent_row("busy", 5, Some(AgentBadge::Working), false),
         ]);
         set_density(&mut v, Density::Extended);
-        v.agent_sort = AgentSort::Status;
+        v.agent_sort = AgentSort::Attention;
         let at = |v: &View, name: &str| {
             v.display_rows()
                 .iter()
