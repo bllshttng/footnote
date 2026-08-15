@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from fno.graph.statuses import compute_readiness, recompute_statuses
-from fno.graph.store import read_graph
+from fno.graph.store import locked_mutate_graph, read_graph
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -193,3 +193,27 @@ def test_recompute_statuses_never_round_trips_a_stale_blocked_reason():
     )
     result = recompute_statuses([entry])
     assert result[0]["blocked_reason"] is None
+
+
+def test_locked_mutate_graph_overlays_blocked_on_the_entries_it_hands_to_render(
+    tmp_path: Path,
+):
+    """recompute_statuses no longer derives `blocked`, so the entries passed
+    to render_graph_md/render_graph_html right after a mutation would show a
+    dependency-blocked sibling as `ready`/`idea` (its persisted status)
+    unless the overlay is re-applied before rendering. Exercise the real
+    write path end to end: a no-op mutation on a graph containing an
+    already-blocked sibling must return (and therefore render) `blocked`,
+    not the persisted `ready`.
+    """
+    p = _write(
+        tmp_path,
+        [
+            _entry("ab-qqqqqqqq"),  # open blocker
+            _entry("ab-rrrrrrrr", blocked_by=["ab-qqqqqqqq"]),  # sibling being touched
+        ],
+    )
+    result = locked_mutate_graph(p, lambda entries: entries)
+    rows = {e["id"]: e for e in result}
+    assert rows["ab-rrrrrrrr"]["status"] == "blocked"
+    assert rows["ab-rrrrrrrr"]["blocked_reason"] == "blocked-by:ab-qqqqqqqq"

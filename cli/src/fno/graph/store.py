@@ -448,6 +448,36 @@ def _create_backup(path: Path) -> Path | None:
     return backup
 
 
+def _apply_readiness_overlay(entries: list[dict]) -> None:
+    """Overlay read-time dependency readiness onto `status`/`blocked_reason`.
+
+    Mutates `entries` in place. Shared by `_apply_graph_defaults` (every
+    reader) and `locked_mutate_graph`'s auto-render step: `recompute_statuses`
+    no longer derives `blocked` at write time, so the entries handed to
+    `render_graph_md`/`render_graph_html` right after a mutation need this
+    same overlay re-applied, or the freshly written graph.md/graph.html would
+    show a mutated node's dependency-blocked status as ready/idea/etc until
+    the next explicit read.
+    """
+    from fno.graph.statuses import compute_readiness
+
+    id_to_entry = {
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if e.get("status") in ("done", "superseded", "deferred", "in_review"):
+            e["blocked_reason"] = None
+            continue
+        kind, blocker_id = compute_readiness(e, id_to_entry)
+        if kind == "ready":
+            e["blocked_reason"] = None
+        else:
+            e["status"] = "blocked"
+            e["blocked_reason"] = f"{kind}:{blocker_id}"
+
+
 def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) -> list[dict]:
     """Apply lazy migration defaults to graph entries (ab- IDs).
 
@@ -580,23 +610,7 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     # deferred/in_review are direct facts about THIS node and already outrank
     # blocked, so they are left alone; everything else (in_progress/idea/
     # design/ready) is a candidate for the blocked overlay.
-    from fno.graph.statuses import compute_readiness
-
-    id_to_entry = {
-        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if e.get("status") in ("done", "superseded", "deferred", "in_review"):
-            e.setdefault("blocked_reason", None)
-            continue
-        kind, blocker_id = compute_readiness(e, id_to_entry)
-        if kind == "ready":
-            e["blocked_reason"] = None
-        else:
-            e["status"] = "blocked"
-            e["blocked_reason"] = f"{kind}:{blocker_id}"
+    _apply_readiness_overlay(entries)
 
     if not keep_malformed:
         entries = [e for e in entries if isinstance(e, dict)]
@@ -876,6 +890,11 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             _obsidian = vault_root() is not None
         except Exception:
             _obsidian = False
+        # recompute_statuses (above) does not derive `blocked` - it is a
+        # read-time overlay - so re-apply it here before rendering, or a
+        # mutation that newly blocks/unblocks a sibling renders stale in
+        # graph.md/graph.html until the next explicit read.
+        _apply_readiness_overlay(entries)
         try:
             render_graph_md(entries, md_target, obsidian=_obsidian)
         except OSError as e:
