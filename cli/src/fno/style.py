@@ -272,6 +272,9 @@ def _run(text: str, only: set[int] | None) -> list[Violation]:
     return violations
 
 
+_EXCERPT_CAP = 12
+
+
 def format_violations(violations: list[Violation]) -> str:
     """Render violations as a self-teaching, rule-compliant refusal message.
 
@@ -281,15 +284,39 @@ def format_violations(violations: list[Violation]) -> str:
     Rule 6 is why the lines are joined by a BLANK line rather than a newline.
     Each line here is its own paragraph, so single newlines would make the
     refusal an example of the break it refuses.
+
+    Violations are grouped by rule number so a sender fixing one rule reads its
+    every occurrence together. Every violation carries a quoted, capped excerpt
+    of the offending text (rule 6's ``sentence`` field already holds its line,
+    so no special case is needed there) - a sender no longer counts sentences
+    by hand to find the one named in the detail.
     """
     if not violations:
         return ""
     lines = ["message blocked by the style rules."]
+    by_rule: dict[int, list[Violation]] = {}
     for violation in violations:
-        name = RULE_NAMES.get(violation.rule, "?")
-        lines.append(f"rule {violation.rule} ({name}): {violation.detail}")
+        by_rule.setdefault(violation.rule, []).append(violation)
+    for rule in sorted(by_rule):
+        name = RULE_NAMES.get(rule, "?")
+        for violation in by_rule[rule]:
+            excerpt = _excerpt(violation.sentence)
+            lines.append(f'rule {rule} ({name}): {violation.detail} "{excerpt}"')
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
+    lines.append('run "fno lint style --stdin" to check a rewrite before you send it.')
     return "\n\n".join(lines)
+
+
+def _excerpt(sentence: str) -> str:
+    """Cap the offending text at 12 words, quoted-safe.
+
+    An inner double quote would close the wrapping quote early and expose the
+    rest of the excerpt to the word count this same message is checked against.
+    """
+    words = sentence.replace('"', "'").split()
+    if len(words) > _EXCERPT_CAP:
+        words = words[:_EXCERPT_CAP] + ["..."]
+    return " ".join(words)
 
 
 def _split_sentences(line: str) -> list[str]:
@@ -331,7 +358,6 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
                     f'sentence {shown} uses "{word}". Write "can", "will", or "must" instead.',
                 )
             )
-            break
     for word in words:
         token = word.replace("’", "'").lower().strip(".,;:!?\"()")
         if token in CONTRACTIONS:
@@ -341,7 +367,6 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
                     f'sentence {shown} has the contraction "{word}". Write the words out.',
                 )
             )
-            break
     keyword = _condition_keyword(sentence)
     if keyword is not None:
         out.append(
