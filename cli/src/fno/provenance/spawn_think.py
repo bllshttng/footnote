@@ -805,6 +805,8 @@ def _spawn_think_worker(
             mode = ""
     if mode and (resolved_harness == "claude" or substrate == "pane"):
         cmd += ["--permission-mode", mode]
+    # argv-fence: exempt (fno's own Typer namespace, the x-04ce seam: a
+    # leading-flag seed needs fno's own -- separator, not tracked here).
     cmd += ["--name", agent_name, rendered_prompt]
 
     # x-42c5: tag the CAUSE of this spawn (never reached for an unforced birth -

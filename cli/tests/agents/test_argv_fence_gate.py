@@ -47,17 +47,22 @@ RS_ELEMENT = re.compile(
 PY_COMMENT = re.compile(r"^\s*#")
 RS_COMMENT = re.compile(r"^\s*//")
 STRING_IN = re.compile(STR)
-# A pushed seed wears one of these names. Literal strings are stripped before
-# the test so a flag literal like "--append-system-prompt" (which contains the
-# word "prompt" behind a hyphen boundary) is never mistaken for a seed push.
-HAS_MESSAGE = re.compile(r"\b(?:message|full_prompt|prompt|seed|effective|msg)\b")
+# A pushed seed wears one of these names, bare or inside an identifier
+# (rendered_prompt, seed_text). Literal strings are stripped before the test
+# so a flag literal like "--append-system-prompt" (which contains the word
+# "prompt" behind a hyphen boundary) is never mistaken for a seed push.
+HAS_MESSAGE = re.compile(r"\w*(?:message|prompt|seed|effective|msg)")
 
 # The only flags whose following token is legitimately the seed: flags that
 # take the seed as their VALUE. Any other "-"-prefixed literal (a boolean
 # flag) leaves a following seed as a bare positional, which is the exact
 # unfenced shape this gate exists to catch, so it falls through to VIOLATION.
 VALUE_FORM_FLAGS = frozenset(
-    {"-p", "-i", "-q", "-m", "--prompt", "--search", "--append-system-prompt"}
+    {
+        "-p", "-i", "-q", "-m",
+        "--prompt", "--search", "--append-system-prompt",
+        "--source-inbox-msg",
+    }
 )
 
 # The container must be argv-shaped by name. Without this, any list named
@@ -293,6 +298,8 @@ def test_scanner_still_sees_the_known_seams() -> None:
         counts[kind] = counts.get(kind, 0) + 1
     assert counts.get("fenced", 0) >= 15, counts
     assert counts.get("value-form", 0) >= 8, counts
-    assert counts.get("exempt", 0) >= 3, counts
+    # A floor AND a ceiling on exemptions: each new exempt marker must be a
+    # visible test edit, never a silent gate bypass.
+    assert counts.get("exempt", 0) == 5, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts
