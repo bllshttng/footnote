@@ -1583,6 +1583,14 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             normalized.extend(rest_iter.cloned());
             break;
         }
+        // The bare `--` seed fence gets the same verbatim treatment: a
+        // fenced `--timeout=5 do X` seed must reach the positional drain
+        // as-is, not be split by the equals-form rewrite below.
+        if tok == "--" {
+            normalized.push(tok.clone());
+            normalized.extend(rest_iter.cloned());
+            break;
+        }
         // ab-3ff64151: the equals-form split is for LONG flags only. The short
         // value flags (-p/-c/-t) take a space-separated value (`-p claude`),
         // matching Click/Typer's short-option convention; the `-p=value` form is
@@ -1813,6 +1821,13 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                     rest.remove(0);
                 }
                 argv = Some(rest);
+            }
+            "--" => {
+                // End-of-options: everything after is positional (the seed
+                // fence, same contract as the Python CLI's click parser).
+                for a in it.by_ref() {
+                    positional.push(a);
+                }
             }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {other}"));

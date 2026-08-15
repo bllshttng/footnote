@@ -62,7 +62,7 @@ def test_effort_mapping_fails_closed(provider, value):
 def test_pane_argv_threads_effort_and_unset_is_noop():
     claude = build_pane_argv("claude", "hi", CWD, False, "uuid", effort="high")
     codex = build_pane_argv("codex", "hi", CWD, False, None, effort="medium")
-    assert claude[-3:] == ["--effort", "high", "hi"]
+    assert claude[-4:] == ["--effort", "high", "--", "hi"]
     assert ["-c", "model_reasoning_effort=medium"] == codex[5:7]
     assert build_pane_argv("claude", "hi", CWD, False, "uuid", effort=None) == build_pane_argv(
         "claude", "hi", CWD, False, "uuid"
@@ -173,6 +173,7 @@ def test_claude_python_build_argv_threads_effort():
         "w",
         "--effort",
         "high",
+        "--",
         "hi",
     ]
 
@@ -217,6 +218,7 @@ def test_claude_python_headless_threads_effort(monkeypatch, tmp_path):
         "--dangerously-skip-permissions",
         "--effort",
         "high",
+        "--",
         "hi",
     ]
     assert result.stdout == "reply"

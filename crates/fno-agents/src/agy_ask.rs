@@ -103,6 +103,8 @@ pub fn build_argv_once(
     }
     // -p LAST, prompt as its value.
     argv.push("-p".to_string());
+    // argv-fence: exempt (probed 2026-08-15: agy folds flag-shaped text into
+    // the prompt; no clean end-of-options to fence with).
     argv.push(full_prompt.to_string());
     argv
 }

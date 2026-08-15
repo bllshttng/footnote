@@ -203,20 +203,23 @@ impl Provider for ClaudeProvider {
     }
 
     fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
-        // Mirrors claude.py `_build_argv`: `claude --bg --name <name> <message>`.
+        // Mirrors claude.py `_build_argv`: `claude --bg --name <name> -- <message>`.
         // LD38: `--bg` is the subscription-billed mode; `claude -p` is
         // Agent-SDK-credit-billed and MUST NOT be used.
+        // The seed rides behind `--` so a leading-flag seed is the prompt
+        // positional, not a claude flag (verified against the real CLI).
         vec![
             "claude".into(),
             "--bg".into(),
             "--name".into(),
             ctx.name.clone(),
+            "--".into(),
             ctx.message.clone(),
         ]
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
-        // Subprocess fallback form (`claude --resume <id> --print <msg>`). The
+        // Subprocess fallback form (`claude --resume <id> --print -- <msg>`). The
         // production daemon prefers the Phase 5 messaging-socket poke when a
         // `messaging_socket_path` is registered; this argv exists so the trait
         // is satisfiable without the socket (e.g. tests, socket-unavailable
@@ -226,6 +229,7 @@ impl Provider for ClaudeProvider {
             "--resume".into(),
             ctx.session_id.clone(),
             "--print".into(),
+            "--".into(),
             ctx.message.clone(),
         ]
     }
@@ -323,6 +327,9 @@ impl ClaudeInteractiveProvider {
             argv.push(prompt.to_string());
         }
         if !ctx.message.is_empty() {
+            // Behind `--`: a leading-flag seed must be the prompt positional,
+            // not a claude flag (same fence as ClaudeProvider::create_argv).
+            argv.push("--".into());
             argv.push(ctx.message.clone());
         }
         argv
@@ -346,6 +353,8 @@ impl Provider for ClaudeInteractiveProvider {
         // TUI. The resume id IS the session, so no separate `--session-id` pin.
         let mut argv = vec!["claude".into(), "--resume".into(), ctx.session_id.clone()];
         if !ctx.message.is_empty() {
+            // Behind `--`, same fence as interactive_argv.
+            argv.push("--".into());
             argv.push(ctx.message.clone());
         }
         argv
@@ -517,6 +526,9 @@ impl Provider for CodexProvider {
             argv.push("-c".into());
             argv.push(format!("model_reasoning_effort={effort}"));
         }
+        // Behind `--`: clap's own prescription ("to pass ... as a value, use
+        // '-- ...'"), so a leading-flag seed is the PROMPT, not a flag.
+        argv.push("--".into());
         argv.push(normalize_codex_command(&ctx.message));
         argv
     }
@@ -534,6 +546,9 @@ impl Provider for CodexProvider {
         if !ctx.yolo {
             argv.extend(codex_sandbox_config_args_resume(&ctx.cwd));
         }
+        // Behind `--`: clap's own prescription ("to pass ... as a value, use
+        // '-- ...'"), so a leading-flag seed is the PROMPT, not a flag.
+        argv.push("--".into());
         argv.push(normalize_codex_command(&ctx.message));
         argv
     }
@@ -707,6 +722,9 @@ impl Provider for GeminiProvider {
             "gemini".into(),
             "--skip-trust".into(),
             "-p".into(),
+            // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p
+            // value form is pinned by tests and left as-is, successor agy
+            // has its own probed exemption).
             ctx.message.clone(),
             "--output-format".into(),
             "json".into(),
@@ -725,6 +743,8 @@ impl Provider for GeminiProvider {
             "gemini".into(),
             "--skip-trust".into(),
             "-p".into(),
+            // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p
+            // value form is pinned by tests and left as-is).
             ctx.message.clone(),
             "--output-format".into(),
             "json".into(),
@@ -880,6 +900,9 @@ impl Provider for AgyProvider {
         // unattended agy cannot wedge on its first approval prompt.
         let mut argv = vec!["agy".into(), "--dangerously-skip-permissions".into()];
         argv.push("-p".into());
+        // argv-fence: exempt (probed 2026-08-15: agy's parser folds flag-shaped
+        // text into the prompt instead of dying; it has no clean end-of-options,
+        // so neither a fence nor the equal-form applies).
         argv.push(ctx.message.clone());
         argv
     }
@@ -894,6 +917,8 @@ impl Provider for AgyProvider {
             ctx.session_id.clone(),
         ];
         argv.push("-p".into());
+        // argv-fence: exempt (probed 2026-08-15: agy folds flag-shaped text
+        // into the prompt; no clean end-of-options to fence with).
         argv.push(ctx.message.clone());
         argv
     }
@@ -975,14 +1000,20 @@ pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
         let mut parts = rest.splitn(2, ' ');
         // `/fno:target no-merge x` -> --command fno:target, args "no-merge x".
         if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
-            let mut tail = vec!["--command".to_string(), cmd.to_string()];
-            if let Some(args) = parts.next().filter(|a| !a.is_empty()) {
-                tail.push(args.to_string());
+            let mut argv_tail = vec!["--command".to_string(), cmd.to_string()];
+            if let Some(msg_args) = parts.next().filter(|a| !a.is_empty()) {
+                // Behind `--` (probed: yargs accepts it after --command's
+                // value): flag-shaped verb args ride as the message.
+                argv_tail.push("--".to_string());
+                argv_tail.push(msg_args.to_string());
             }
-            return tail;
+            return argv_tail;
         }
     }
-    vec![message.to_string()]
+    // Behind `--` (verified against opencode's yargs parser 2026-08-15:
+    // unfenced, a leading-flag seed dies with a usage error; fenced, it rides
+    // as the message). The slash-command branch above keeps its flags live.
+    vec!["--".to_string(), message.to_string()]
 }
 
 pub struct OpencodeProvider;
@@ -1320,7 +1351,14 @@ mod tests {
         let argv = ClaudeProvider.create_argv(&create_ctx());
         assert_eq!(
             argv,
-            vec!["claude", "--bg", "--name", "worker-A", "build feature X"]
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "worker-A",
+                "--",
+                "build feature X"
+            ]
         );
         assert!(!argv.iter().any(|a| a == "-p"), "LD38: never claude -p");
     }
@@ -1336,7 +1374,14 @@ mod tests {
         };
         assert_eq!(
             ClaudeProvider.resume_argv(&ctx),
-            vec!["claude", "--resume", "7c5dcf5d", "--print", "follow up"]
+            vec![
+                "claude",
+                "--resume",
+                "7c5dcf5d",
+                "--print",
+                "--",
+                "follow up"
+            ]
         );
     }
 
@@ -1378,6 +1423,7 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
+                "--",
                 "build feature X"
             ]
         );
@@ -1544,6 +1590,7 @@ mod tests {
                 "uuid-1",
                 "--json",
                 "--skip-git-repo-check",
+                "--",
                 "m"
             ]
         );
@@ -1627,6 +1674,7 @@ mod tests {
                 "opencode",
                 "run",
                 "--dangerously-skip-permissions",
+                "--",
                 "build feature X"
             ]
         );
@@ -1647,6 +1695,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--command",
                 "fno:target",
+                "--",
                 "no-merge x-abcd"
             ]
         );
@@ -1654,10 +1703,10 @@ mod tests {
 
     #[test]
     fn opencode_run_tail_prose_through_and_bare_verb() {
-        // Prose passes through unchanged; a bare verb has no args tail.
+        // Prose rides behind the `--` fence; a bare verb has no args tail.
         assert_eq!(
             opencode_run_tail("build feature X"),
-            vec!["build feature X"]
+            vec!["--", "build feature X"]
         );
         assert_eq!(opencode_run_tail("/fno:pr"), vec!["--command", "fno:pr"]);
     }
@@ -1679,6 +1728,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--session",
                 "ses_abc",
+                "--",
                 "m"
             ]
         );

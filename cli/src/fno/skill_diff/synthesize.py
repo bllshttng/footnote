@@ -180,7 +180,9 @@ def synthesize(prompt: str, *, model: str = SYNTH_MODEL, timeout: int = 900) -> 
     """
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt, "--model", model],
+            # Behind `--` like every other claude seed: a leading-flag prompt
+            # must be the positional, not a claude flag.
+            ["claude", "-p", "--model", model, "--", prompt],
             capture_output=True,
             text=True,
             timeout=timeout,

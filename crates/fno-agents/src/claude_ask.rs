@@ -752,6 +752,9 @@ pub fn build_argv(
         argv.push(m.to_string());
     }
     if !use_stdin {
+        // Behind `--` so a leading-flag seed is the prompt positional, not a
+        // claude flag; same fence as the Python `_build_argv` (parity).
+        argv.push("--".to_string());
         argv.push(message.to_string());
     }
     argv
@@ -2286,6 +2289,9 @@ pub fn dispatch_claude_headless(
     // x-b6e2: Tier-3 passthrough, same token order as the Python headless_create.
     flags.push_onto(&mut argv);
     if !use_stdin {
+        // Behind `--` like every other claude seed: a leading-flag seed must
+        // be the prompt positional, not a claude flag.
+        argv.push("--".to_string());
         argv.push(effective.to_string());
     }
     // QoS (x-c5cc): a headless one-shot is an fno-spawned child — exec-wrap it
@@ -3195,7 +3201,7 @@ mod tests {
     fn build_argv_inline_vs_stdin() {
         assert_eq!(
             build_argv("a", "hi", false, None, None, None, HarnessFlags::default()),
-            vec!["claude", "--bg", "--name", "a", "hi"]
+            vec!["claude", "--bg", "--name", "a", "--", "hi"]
         );
         assert_eq!(
             build_argv("a", "hi", true, None, None, None, HarnessFlags::default()),
@@ -3224,6 +3230,7 @@ mod tests {
                 "a",
                 "--permission-mode",
                 "acceptEdits",
+                "--",
                 "hi"
             ]
         );
@@ -3269,7 +3276,7 @@ mod tests {
                 None,
                 HarnessFlags::default()
             ),
-            vec!["claude", "--bg", "--name", "a", "--model", "fable", "hi"]
+            vec!["claude", "--bg", "--name", "a", "--model", "fable", "--", "hi"]
         );
         assert_eq!(
             build_argv(
@@ -3310,7 +3317,7 @@ mod tests {
                 Some("high"),
                 HarnessFlags::default()
             ),
-            vec!["claude", "--bg", "--name", "a", "--effort", "high", "hi"]
+            vec!["claude", "--bg", "--name", "a", "--effort", "high", "--", "hi"]
         );
     }
 
@@ -3341,6 +3348,7 @@ mod tests {
                 "Read,Edit",
                 "--disallowedTools",
                 "Bash",
+                "--",
                 "hi"
             ]
         );
@@ -3352,7 +3360,16 @@ mod tests {
         };
         assert_eq!(
             build_argv("a", "hi", false, None, None, None, only_dir),
-            vec!["claude", "--bg", "--name", "a", "--add-dir", "/work", "hi"]
+            vec![
+                "claude",
+                "--bg",
+                "--name",
+                "a",
+                "--add-dir",
+                "/work",
+                "--",
+                "hi"
+            ]
         );
     }
 

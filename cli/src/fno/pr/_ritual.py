@@ -646,7 +646,9 @@ class Ritual:
         model = getattr(self.ctx.pm, "model", None)
         if model:
             argv += ["--harness", "claude", "--model", model]
-        argv += ["--name", f"judgment-pr-{self.ctx.pr}", prompt]
+        # Behind `--` (fno's own click parser honors it, verified both
+        # directions): a leading-flag seed must be the prompt positional.
+        argv += ["--name", f"judgment-pr-{self.ctx.pr}", "--", prompt]
         try:
             r = self.runner(argv, timeout=_JUDGMENT_TIMEOUT_S + 60.0)
         except (ToolMissing, subprocess.SubprocessError):

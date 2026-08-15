@@ -131,3 +131,7 @@ cli/.venv/
 # archive-worktree on an otherwise-clean merged tree.
 peer-review.tmp.diff
 peer-review.diff
+
+# Tool-local session state (.omo runner); same accidental-commit shape as
+# the peer-review scratch diffs above.
+.omo/

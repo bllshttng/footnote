@@ -117,6 +117,7 @@ fn build_argv_create_default_sandbox() {
             "--skip-git-repo-check",
             "--sandbox",
             "workspace-write",
+            "--",
             "[from: alice]\n\nhello",
         ]
     );

@@ -387,15 +387,21 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
 
 
 def _args_before_argv(args: Sequence[str]) -> Sequence[str]:
-    """The fno-arg head, stopping at the ``--argv`` provider-payload boundary.
+    """The fno-arg head, stopping at the ``--argv`` provider-payload boundary
+    and at a bare ``--`` seed fence.
 
-    A payload token (e.g. the child command's own ``--resume``/``--role``) must
-    never be read as one of our routing flags, so every spawn-flag scan operates
-    on this slice. Mirrors the ``--argv`` break in :func:`_is_pane_substrate_spawn`.
+    A payload token (e.g. the child command's own ``--resume``/``--role``) and
+    a fenced seed token must never be read as one of our routing flags - both
+    click and the Rust client treat everything past the fence as prompt text -
+    so every spawn-flag scan operates on this slice. Mirrors the ``--argv``
+    break in :func:`_is_pane_substrate_spawn`.
     """
-    if "--argv" in args:
-        return args[: list(args).index("--argv")]
-    return args
+    out: list[str] = []
+    for a in args:
+        if a in ("--argv", "--"):
+            break
+        out.append(a)
+    return out
 
 
 def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -624,7 +630,15 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
         return out
     if not picked:
         return out
-    return [*out, "--account", picked]
+    # Insert BEFORE any --argv payload or bare -- seed fence: appended at the
+    # end, the flag lands in the payload/seed (corrupting a fenced seed and
+    # never pinning the account).
+    boundary = len(out)
+    for i, a in enumerate(out):
+        if a in ("--argv", "--"):
+            boundary = i
+            break
+    return [*out[:boundary], "--account", picked, *out[boundary:]]
 
 
 def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:

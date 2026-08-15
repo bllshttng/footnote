@@ -69,12 +69,15 @@ def _default_spawn(
     """
     name = f"eval-{os.getpid()}-{int(time.time())}"
     cmd = [
-        "fno", "agents", "spawn", "--name", name, prompt,
+        "fno", "agents", "spawn", "--name", name,
         "--substrate", "headless", "--cwd", str(workdir),
         "--timeout", str(timeout_s),
     ]
     if provider:
         cmd += ["--harness", provider]
+    # Behind `--` (fno's own click parser honors it, verified both
+    # directions): a leading-flag seed must be the prompt positional.
+    cmd += ["--", prompt]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
     except FileNotFoundError:

@@ -232,7 +232,11 @@ def _build_argv(
     if resume_session_id:
         argv += ["--resume", resume_session_id]
     if not use_stdin:
-        argv.append(message)
+        # The seed rides behind `--` so a leading-flag seed ("--model x ...")
+        # is the prompt positional, not a claude flag; same commander parse as
+        # the verified `-p --` form. The use_stdin branch above already keeps
+        # the seed out of argv entirely.
+        argv += ["--", message]
     return argv
 
 
@@ -366,7 +370,9 @@ def headless_create(
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     if output_format:
         argv += ["--output-format", output_format]
-    argv.append(message or "hello")
+    # Behind `--` like every other claude seed: a leading-flag seed must be
+    # the prompt positional, not a claude flag.
+    argv += ["--", message or "hello"]
     # A one-shot `claude -p` inherits the parent env, so an ambient
     # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN would override BOTH a per-spawn
     # account overlay (x-d012) AND a routed --settings token (x-6de8, codex P1):
