@@ -91,6 +91,8 @@ class Outstanding:
     carveout_oldest_ts: Optional[str]
     questions: "list[Question]"
     captures: "list[Capture]"
+    capture_file_total: int = 0
+    capture_row_total: int = 0
 
     @property
     def empty(self) -> bool:
@@ -109,6 +111,9 @@ class Outstanding:
             "questions": [q.as_dict() for q in self.questions],
             "captures": {
                 "total": len(self.captures),
+                "resolved_files": self.capture_file_total,
+                "parsed_open_rows": self.capture_row_total,
+                "repeated_ids": self.capture_row_total - len(self.captures),
                 "by_project": by_project,
                 "items": [c.as_dict() for c in self.captures],
             },
@@ -278,7 +283,7 @@ def _capture_added_at(root: Path) -> "dict[str, str]":
     return added
 
 
-def read_open_captures(root: Path) -> "list[Capture]":
+def _read_open_captures_with_counts(root: Path) -> "tuple[list[Capture], int, int]":
     """Fold every project's capture-tier inbox. Never raises.
 
     A missing or unreadable inbox (or a whole missing project root)
@@ -330,11 +335,16 @@ def read_open_captures(root: Path) -> "list[Capture]":
 
     captures: "list[Capture]" = []
     seen_ids: "set[str]" = set()
+    file_total = 0
+    row_total = 0
     for path, roots in sorted(by_path.items()):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        file_total += 1
+        items = parse_items(text)
+        row_total += len(items)
         project = _store_label(path, roots)
         # Canonical checkouts (a real .git dir) lead the events lookup. Fold
         # every distinct journal because projects can share one configured
@@ -354,7 +364,7 @@ def read_open_captures(root: Path) -> "list[Capture]":
                 previous = added.get(fu_id)
                 if previous is None or ts < previous:
                     added[fu_id] = ts
-        for item in parse_items(text):
+        for item in items:
             if item["id"] in seen_ids:
                 continue
             seen_ids.add(item["id"])
@@ -369,7 +379,12 @@ def read_open_captures(root: Path) -> "list[Capture]":
     # Oldest first where the age is known, so the render's cap keeps the
     # items that have waited longest, not an arbitrary three.
     captures.sort(key=lambda c: (c.added_at is None, c.added_at or "", c.fu_id))
-    return captures
+    return captures, file_total, row_total
+
+
+def read_open_captures(root: Path) -> "list[Capture]":
+    """Return the open capture rows from the machine-wide project fold."""
+    return _read_open_captures_with_counts(root)[0]
 
 
 def collect(root: Path) -> Outstanding:
@@ -387,12 +402,15 @@ def collect(root: Path) -> Outstanding:
         by_kind[kind] = by_kind.get(kind, 0) + 1
     stamps = sorted(str(r.get("ts") or "") for r in rows if r.get("ts"))
 
+    captures, capture_file_total, capture_row_total = _read_open_captures_with_counts(root)
     return Outstanding(
         carveout_total=len(rows),
         carveout_by_kind=by_kind,
         carveout_oldest_ts=stamps[0] if stamps else None,
         questions=read_open_questions(root),
-        captures=read_open_captures(root),
+        captures=captures,
+        capture_file_total=capture_file_total,
+        capture_row_total=capture_row_total,
     )
 
 
@@ -497,9 +515,11 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
         if ages:
             summary += f", oldest {_plural(max(ages), 'day')}"
         summary += (
-            ". Count rule: unique open fu-* IDs from each resolved capture file; "
-            "post_merge.parking_lot_path is used when configured, and shared "
-            "files or duplicate IDs count once."
+            f". Count rule: {total} unique open fu-* IDs across "
+            f"{_plural(outstanding.capture_file_total, 'resolved capture file')} "
+            f"({_plural(outstanding.capture_row_total, 'parsed open row')} minus "
+            f"{_plural(outstanding.capture_row_total - total, 'repeated ID')}); "
+            "post_merge.parking_lot_path is used when configured."
         )
         lines.append(summary)
         lines.append("  Triage with: fno backlog triage, or fno backlog capture promote <fu-id>.")

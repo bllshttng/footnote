@@ -399,6 +399,9 @@ def test_capture_leg_folds_every_project_and_renders_true_count(capture_roots):
     as_json = runner.invoke(outstanding_app, ["--json"])
     payload = json.loads(as_json.stdout)
     assert payload["captures"]["total"] == 3
+    assert payload["captures"]["resolved_files"] == 2
+    assert payload["captures"]["parsed_open_rows"] == 3
+    assert payload["captures"]["repeated_ids"] == 0
     assert payload["captures"]["by_project"][this.name] == 2
     assert payload["captures"]["by_project"][other.name] == 2 - 1
 
@@ -509,9 +512,9 @@ def test_capture_leg_prints_its_counting_rule_beside_the_count(capture_roots):
     assert res.exit_code == 0, res.output
     assert "Showing 2 of 2" in res.output, res.output
     assert (
-        "Count rule: unique open fu-* IDs from each resolved capture file; "
-        "post_merge.parking_lot_path is used when configured, and shared "
-        "files or duplicate IDs count once."
+        "Count rule: 2 unique open fu-* IDs across 2 resolved capture files "
+        "(3 parsed open rows minus 1 repeated ID); "
+        "post_merge.parking_lot_path is used when configured."
     ) in res.output, res.output
 
 
