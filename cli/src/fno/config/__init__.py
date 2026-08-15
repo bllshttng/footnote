@@ -624,7 +624,14 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         kind="local-attestation",
         requires="none",
         invocation="/code-review",
-        invocations={"claude": "/code-review", "codex": "/review"},
+        # The claude value carries the full arg grammar with a `<level>`
+        # placeholder; `self_review_invocation` substitutes a validated level
+        # (never `ultra` - it is billed separately and absent from
+        # ALLOWED_REVIEW_LEVELS). Codex stays bare.
+        invocations={
+            "claude": "/code-review <level> --comment --fix",
+            "codex": "/review",
+        },
         asserts="review-evidence",
     ),
     "declare": ReviewerDescriptor(

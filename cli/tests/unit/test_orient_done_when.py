@@ -125,6 +125,36 @@ def test_stock_install_announces_the_self_review_floor(repo, monkeypatch):
     assert "self-review required for code" not in line
 
 
+def test_self_review_floor_sizes_the_level_from_the_diff(repo, monkeypatch):
+    # The floor names the sized invocation, not a hardcoded medium: pre-diff it
+    # keeps the <level> placeholder; a real diff shape picks the tier.
+    import fno.review_capability as rc
+    import fno.target.orient as orient
+
+    monkeypatch.setattr(
+        rc,
+        "detect_session",
+        lambda: rc.SessionCapability(
+            harness="claude", substrate="interactive", attended=True
+        ),
+    )
+    root = repo("")
+    monkeypatch.setattr(orient, "_git_out", lambda cwd, *a: None)
+    line = _done_when_line({}, root)
+    assert "/code-review <level> --comment --fix" in line
+    # 20 files, 2000 added lines: over the medium file cap, inside high's.
+    # Expected is built through the same sizing function, so this asserts the
+    # wiring (diff shape -> sized invocation) without spelling a level here.
+    rows = "".join(f"100\t0\tfile{i:02d}.py\n" for i in range(20))
+    monkeypatch.setattr(
+        orient,
+        "_git_out",
+        lambda cwd, *a: "abc123" if a[0] == "merge-base" else rows,
+    )
+    line = _done_when_line({}, root)
+    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment --fix" in line
+
+
 def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(
     repo, monkeypatch
 ):
