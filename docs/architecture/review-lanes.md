@@ -121,10 +121,7 @@ verb by hand.
 
 ## Why (wrapped) mail cannot carry a verb
 
-A wrapped `fno mail send` cannot carry a verb.
-It writes an `<fno_mail ...>` envelope at character 0 of the recipient's input, so the slash command is never at the start of the input and never parses.
-Mail therefore carries **instructions** ("review my diff"), not invocations (a sized `/code-review` order).
-`--raw` (Lane 2) is the deliberate exception: it strips the envelope so the slash parses, which is exactly the cost the wrapper exists to impose.
+A wrapped `fno mail send` cannot carry a verb. It writes an `<fno_mail ...>` envelope at character 0 of the recipient's input, so the slash command is never at the start of the input and never parses. Mail therefore carries **instructions** ("review my diff"), not invocations (a sized `/code-review` order). `--raw` (Lane 2) is the deliberate exception: it strips the envelope so the slash parses, which is exactly the cost the wrapper exists to impose.
 
 ## Do not assert a cause for a refusal
 

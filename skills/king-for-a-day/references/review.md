@@ -36,7 +36,7 @@ Mail the teammate the verb ITS harness serves. A claude verb mailed to a codex w
 The effort level, the flags, and the target are all optional; bare `/code-review` reviews the current diff and is a complete order.
 `--fix` applies the findings it finds. `--comment` posts them as inline GitHub PR comments.
 
-**`ultra` is not in the grammar you may order.** It is a deep cloud review, billed separately, and reserved for explicit human invocation. This is not a prose ban you can weigh: the builder (`self_review_invocation` in `cli/src/fno/review_capability.py`) rejects it structurally, and a CI check fails any surface that spells a concrete review level outside that builder.
+**`ultra` is not in the orderable grammar.** It is a deep cloud review, billed separately, and reserved for explicit human invocation. This is not a prose ban to weigh. The builder (`self_review_invocation` in `cli/src/fno/review_capability.py`) rejects it structurally. A CI check also fails any surface that spells a concrete review level outside that builder.
 
 Source: the Claude Code command reference (`/code-review` row).
 
@@ -96,7 +96,7 @@ Three details in that template are load-bearing, so do not smooth them out:
 - **"INVOKE IT FOR REAL. Type the verb."** A bare verb as the entire message body has been observed failing where this framing fired. That is one observation each way, so it is a lead rather than a mechanism - but it costs nothing to keep and the shape with it has never failed.
 - **Name the substitutes.** `fno:code-reviewer`, `/fno:review`, a Bash approximation - these exactly, not "do not substitute another reviewer". The refusal text forbids these by name, a worker DID quietly take one of them and report success, and a generic prohibition leaves the worker deciding what counts as a substitute.
 
-Pick `<level>` from the diff (`low|medium|high|xhigh|max`), never `ultra`. The sizing is codified, not judged: `level_for_diff` in `cli/src/fno/review_capability.py` tiers the level from the changed-file count and the added+removed line count against the merge base. Add `--fix` only when the worker can commit to that branch: an auto-applied fix from the wrong worktree writes into the wrong tree.
+Pick `<level>` from the diff (`low|medium|high|xhigh|max`), never `ultra`. The sizing is codified, not judged. `level_for_diff` in `cli/src/fno/review_capability.py` tiers the level from the changed-file and line counts against the merge base. Add `--fix` only on a branch the worker can commit to. An auto-applied fix from the wrong worktree writes into the wrong tree.
 
 ## When the verb refuses
 
