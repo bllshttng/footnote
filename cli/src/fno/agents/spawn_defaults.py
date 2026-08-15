@@ -56,13 +56,14 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 
     Returns ``(provider_present, provider_value, model_present, effort_present)``.
     Handles both `--flag value` and `--flag=value`; stops at the `--argv`
-    payload boundary; skips a value flag's value token.
+    payload boundary and at a bare `--` passthrough fence (x-1caa: fenced
+    tokens are the provider's flags, never fno's); skips a value flag's value.
     """
     provider_present = model_present = effort_present = False
     provider_value: Optional[str] = None
     it = iter(args)
     for a in it:
-        if a == "--argv":
+        if a == "--argv" or a == "--":
             break
         key, eq, val = a.partition("=")
         if key in _PROVIDER_FLAGS:
@@ -161,19 +162,17 @@ def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:
 def _positional_indices(toks: Sequence[str]) -> List[int]:
     """Indices of positional tokens (NAME, MESSAGE), skipping flags + their values.
 
-    Past a bare ``--`` seed fence every token is positional prompt text, even
-    when flag-shaped (click and the Rust client both treat it so).
+    Stops at a bare ``--`` fence: the first fenced token still lands in the
+    MESSAGE (click fills positionals in order), and the rest are the x-1caa
+    provider passthrough - provider tokens, never prompt positionals to refuse.
     """
     idxs: List[int] = []
     i = 0
     n = len(toks)
     while i < n:
         t = toks[i]
-        if t == "--argv":
+        if t == "--argv" or t == "--":
             break
-        if t == "--":
-            idxs.extend(range(i + 1, n))
-            return idxs
         if t.startswith("-"):
             if "=" not in t and t in _SPAWN_VALUE_FLAGS:
                 i += 2  # skip the flag and its value
@@ -331,13 +330,38 @@ def normalize_spawn_args(
             toks += ["--substrate", "bg"]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
 
+    # x-1caa: a bare `--` fence with MORE THAN ONE token after it is provider
+    # passthrough (the first fenced token is still the MESSAGE; click fills
+    # positionals in order). The pane substrate splices those tokens into the
+    # provider argv behind the composed-argv refusals; bg/headless build argv in
+    # Rust with none of those guards, so forwarding there would be a second,
+    # unguarded surface. Refuse here - this seam is the one front door both
+    # runtimes share - rather than dropping the tokens or corrupting the seed.
+    # A single fenced token stays the legacy flag-shaped-seed idiom, untouched.
+    fence = next((i for i, t in enumerate(toks) if t == "--"), None)
+    if fence is not None and len(toks) - fence - 1 > 1 and _has_explicit_substrate(toks) in (
+        "bg",
+        "headless",
+    ):
+        print(
+            "fno agents spawn: passthrough after -- is pane-only; the "
+            "bg/headless argv builders carry none of the pane's provider "
+            "refusals, so the tokens cannot be forwarded. Use --substrate pane "
+            "(the default) or drop them.",
+            file=err,
+        )
+        raise SystemExit(2)
+
     # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
     # the agent name is a handle the caller rarely picks, so it is minted unless
     # --name says otherwise. Canonicalize to `--name <n> <message>` so both
     # parsers read the same shape. A second positional is refused rather than
     # guessed at: under the old `<name> <message>` grammar it would silently
-    # register an agent named after the prompt.
-    if not any(t == "--name" or t.startswith("--name=") for t in toks):
+    # register an agent named after the prompt. The mint probe scans only the
+    # pre-fence head: a passthrough `--name` is the PROVIDER's flag (claude's
+    # session display name) and must not suppress fno's own name mint (x-1caa).
+    head = toks if fence is None else toks[:fence]
+    if not any(t == "--name" or t.startswith("--name=") for t in head):
         names = existing_names if existing_names is not None else _read_registry_names()
         slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
         toks = ["--name", slug, *toks]

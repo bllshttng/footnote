@@ -158,6 +158,16 @@ def test_argv_boundary_not_scanned():
     assert out[-3:] == ["tool", "--model", "x"]
 
 
+def test_passthrough_fence_not_scanned():
+    # x-1caa: a provider flag after a bare `--` fence is not fno's flag (same
+    # contract as the --argv payload), so the config default still injects -
+    # and injects BEFORE the fence, never into the passthrough tail.
+    out = _inject(["spawn", "w", "--", "--model", "x"], model="cfg")
+    assert out.index("--model") < out.index("--")
+    assert out[out.index("--model") + 1] == "cfg"
+    assert out[-3:] == ["--", "--model", "x"]
+
+
 def test_value_flag_value_not_misread_as_our_flag():
     # `--cwd --model` -> "--model" is the cwd VALUE, not a model flag; config injects.
     out = _inject(["spawn", "w", "--cwd", "--model"], model="cfg")

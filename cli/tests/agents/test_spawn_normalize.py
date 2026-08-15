@@ -305,3 +305,52 @@ def test_spawn_value_flags_cover_every_cmd_spawn_value_option():
         "cmd_spawn value options absent from _SPAWN_VALUE_FLAGS (their values "
         f"would be read as positionals): {', '.join(missing)}"
     )
+
+
+# --- x-1caa: the `--` passthrough boundary at the seam ------------------------
+
+def test_passthrough_fence_tokens_are_not_prompt_positionals():
+    # `hi -- --name reviewer`: one prompt positional; the fenced tokens are the
+    # provider's passthrough, not a second/third positional to refuse. The mint
+    # still fires (a passthrough --name is the provider's flag, not fno's).
+    out = _norm(["spawn", "hi", "--", "--name", "reviewer"])
+    assert out[1] == "--name" and out[2] != "reviewer"
+    assert out[3] == "hi"
+    assert out[4:] == ["--", "--name", "reviewer"]
+
+
+def test_single_fenced_seed_still_the_message():
+    # The legacy flag-shaped-seed idiom is untouched: ONE fenced token is the
+    # prompt, not passthrough.
+    out = _norm(["spawn", "--name", "w", "--", "--flag-shaped seed"])
+    assert out == ["spawn", "--name", "w", "--", "--flag-shaped seed"]
+
+
+@pytest.mark.parametrize(
+    "substrate_args",
+    [
+        ["--substrate", "bg"],
+        ["--substrate", "headless"],
+        ["--headless"],
+        ["-p"],
+    ],
+)
+def test_off_pane_substrate_refuses_multi_token_passthrough(substrate_args):
+    # AC7: bg/headless argv builders carry none of the pane's guards, so fenced
+    # passthrough is refused at the seam - the one front door both runtimes
+    # share - rather than silently becoming seed text on the Rust lane.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _norm(
+            ["spawn", "--name", "w", *substrate_args, "hi", "--", "--verbose", "x"],
+            stderr=err,
+        )
+    assert exc.value.code == 2
+    assert "pane-only" in err.getvalue()
+
+
+def test_off_pane_single_fenced_seed_untouched():
+    # One fenced token stays the seed even on bg: the refusal is scoped to
+    # multi-token passthrough, never to the flag-shaped-seed idiom.
+    out = _norm(["spawn", "--name", "w", "--substrate", "bg", "--", "--flag seed"])
+    assert out == ["spawn", "--name", "w", "--substrate", "bg", "--", "--flag seed"]
