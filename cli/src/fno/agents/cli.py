@@ -1235,12 +1235,21 @@ def cmd_spawn(
         # the same predicate over the same message, so one check here decides
         # every substrate (round 10 review).
         os.environ["TARGET_NO_MERGE"] = "1"
+    elif is_target_family(message) and " no-merge " in f" {message} ":
+        # A family message with a bare token OUTSIDE flag position (the legacy
+        # token migrated above was position-scoped): ambiguous - it may be the
+        # pre-x-9d11 FLAGS-then-token spelling or a feature description that
+        # mentions the word. Neither arm nor clear: prose manufactures nothing,
+        # and dropping an operator's exported refusal on an ambiguous message
+        # errs toward granting merges (round 11). Init's loud no-op note fires
+        # in the worker either way.
+        pass
     elif is_target_family(message):
-        # A family message WITHOUT the flag clears the carrier: the flag is the
-        # authority. A non-family (prose/other-verb) message clears NOTHING - see
-        # the comment above. Clearing an INHERITED carrier is never silent: an
-        # operator's exported TARGET_NO_MERGE is a documented control input, and
-        # the message overriding it deserves a visible line.
+        # A family message with NO refusal token at all clears the carrier: the
+        # flag is the authority. A non-family (prose/other-verb) message clears
+        # NOTHING - see the comment above. Clearing an INHERITED carrier is
+        # never silent: an operator's exported TARGET_NO_MERGE is a documented
+        # control input, and the message overriding it deserves a visible line.
         if os.environ.get("TARGET_NO_MERGE"):
             print(
                 "fno agents spawn: inherited TARGET_NO_MERGE cleared; the "

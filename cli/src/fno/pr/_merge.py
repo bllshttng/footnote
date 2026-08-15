@@ -678,8 +678,9 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     session stands in that worktree - worktree-first is the standing principle,
     so the best-disciplined merge was the one most reliably reported failed.
     Splitting cleanup out: the merge command carries no delete flag at all, the
-    remote ref goes through `git push origin --delete`, and the local
-    branch/worktree lifecycle stays with `scripts/setup/archive-worktree.sh`.
+    remote ref goes through `gh api -X DELETE` against the PR's verified base
+    repo, and the local branch/worktree lifecycle stays with
+    `scripts/setup/archive-worktree.sh`.
 
     Returns the receipt's ``cleanup`` value: "" when nothing ran or the delete
     succeeded, "failed: <first line>" when it did not. Failure changes nothing
@@ -704,23 +705,31 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     head_repo = fields[1] if len(fields) > 1 else ""
     base_repo = fields[2] if len(fields) > 2 else ""
     # A fork PR's head branch lives on the fork, not on this repo's origin:
-    # `git push origin --delete <branch>` would delete an unrelated SAME-NAMED
-    # branch on the base repo (or error on a nonexistent one). Delete only on a
-    # POSITIVE same-repo confirmation; a fork, an unreadable repo pair, or a
-    # deleted head repo all skip (fail safe).
+    # a same-repo delete would remove an unrelated SAME-NAMED branch on the
+    # base repo (or error on a nonexistent one). Delete only on a POSITIVE
+    # same-repo confirmation; a fork, an unreadable repo pair, or a deleted
+    # head repo all skip (fail safe).
     if not (head_repo and base_repo and head_repo == base_repo):
         sys.stderr.write(
             f"pr-merge: skipping remote branch delete for PR #{pr_number}: "
             f"head repo {head_repo or '<unreadable>'} is not {base_repo or '<the base repo>'} (fork or deleted head repo)\n"
         )
         return ""
-    res = _git(["push", "origin", "--delete", branch], repo)
+    # Delete through gh's API against the VERIFIED base repo, never `git push
+    # origin`: the local clone's origin remote can point anywhere (a fork
+    # clone, a renamed or mirror remote), and a delete that reaches the wrong
+    # remote is the one cleanup mistake this warn-only path must not make
+    # (round 11).
+    res = _gh(
+        ["api", "-X", "DELETE", f"repos/{base_repo}/git/refs/heads/{branch}"],
+        repo,
+    )
     if res.ok:
         return ""
     # An already-gone remote ref is the requested end state (repo-side
     # "delete head branches" beat us to it), not a cleanup failure.
     _out = (res.stderr or res.stdout or "")
-    if "does not exist" in _out or "not found" in _out.lower():
+    if "does not exist" in _out or "not found" in _out.lower() or "Reference does not exist" in _out:
         return ""
     return "failed: remote branch delete: {}".format(
         _out.splitlines()[0][:160] if _out.strip() else "no error output"

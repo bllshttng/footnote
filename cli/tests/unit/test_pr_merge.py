@@ -100,6 +100,10 @@ class FakeRun:
             if cmd[1] == "api":
                 if len(cmd) > 2 and "/compare/" in cmd[2]:
                     return Result(0, f"{self.behind_by}\n", "")
+                if "DELETE" in cmd and "/git/refs/heads/" in cmd[-1]:
+                    # The post-merge branch delete (gh api against the verified
+                    # base repo, never `git push origin`).
+                    return Result(0, "", "")
                 return Result(0, "", "") if self.api_ok else Result(1, "", "api failed")
         if tool == "bash":
             return Result(0, "", "")
@@ -1134,10 +1138,12 @@ def test_merge_never_passes_delete_branch_and_deletes_remote_after(
     assert len(merge_calls) == 1
     assert "--delete-branch" not in merge_calls[0]
     remote_deletes = [
-        c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]
+        c for c in fake.calls
+        if "DELETE" in c and c[-1].endswith("/git/refs/heads/feature/x")
     ]
-    assert len(remote_deletes) == 1
-    assert remote_deletes[0][-1] == "feature/x"
+    assert len(remote_deletes) == 1, fake.calls
+    # The ref path names the PR's verified base repo (owner/repo by default).
+    assert remote_deletes[0][-1] == "repos/owner/repo/git/refs/heads/feature/x"
 
 
 def test_remote_delete_failure_cannot_fail_the_merge(
@@ -1154,7 +1160,7 @@ def test_remote_delete_failure_cannot_fail_the_merge(
 
     class _NoDelete(FakeRun):
         def __call__(self, cmd, **kw):
-            if cmd[:4] == ["git", "push", "origin", "--delete"]:
+            if cmd[:2] == ["gh", "api"] and "DELETE" in cmd:
                 return Result(1, "", "remote ref protected")
             return super().__call__(cmd, **kw)
 
@@ -1189,7 +1195,7 @@ def test_fork_pr_skips_remote_delete(
     obj = _last_json(capsys)
     assert obj["outcome"] == "merged"
     assert obj.get("cleanup", "") == ""
-    assert not [c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]]
+    assert not [c for c in fake.calls if c[:2] == ["gh", "api"] and "DELETE" in c]
 
 
 def test_deleted_fork_head_repo_skips_remote_delete(
@@ -1213,7 +1219,7 @@ def test_deleted_fork_head_repo_skips_remote_delete(
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys).get("cleanup", "") == ""
-    assert not [c for c in fake.calls if c[:4] == ["git", "push", "origin", "--delete"]]
+    assert not [c for c in fake.calls if c[:2] == ["gh", "api"] and "DELETE" in c]
 
 
 def test_an_already_armed_pr_skips_naming_finalize(

@@ -419,6 +419,12 @@ case "${MESSAGE%% *}" in
   /target|/fno:target|\$fno:target)
     case " $MESSAGE " in
       *" --no-merge "*) export TARGET_NO_MERGE=1 ;;
+      *" no-merge "*)
+        # Bare token outside flag position: ambiguous (legacy FLAGS-then-token
+        # spelling, or a description that mentions the word). Neither arm nor
+        # clear - dropping an operator's exported refusal here would err toward
+        # granting merges. The worker's init prints the loud no-op note.
+        ;;
       *)
         [[ -n "${TARGET_NO_MERGE:-}" ]] && echo "spawn: inherited TARGET_NO_MERGE cleared; /target-family message carries no --no-merge flag and the message is authoritative" >&2
         unset TARGET_NO_MERGE 2>/dev/null || true

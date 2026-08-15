@@ -1004,15 +1004,23 @@ pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
         // parser reads a leading-'--' positional as an unknown flag. VERIFIED
         // live against opencode v1.14.50 (`run --command x -- a b` parses; the
         // help names `--command` "use message for args").
+        //
+        // The separator is scoped to a leading-dash tail (round 11): another
+        // verb's multiword free-text args (`/fno:blueprint my multi word idea`)
+        // keep the one-positional shape it always had, so splitting cannot
+        // change what the command receives.
         if let Some(cmd) = parts.next().filter(|c| !c.is_empty()) {
             let mut argv_tail = vec!["--command".to_string(), cmd.to_string()];
-            if let Some(msg_args) = parts.next().filter(|a| !a.is_empty()) {
-                // Behind `--` (probed: yargs accepts it after --command's
-                // value): flag-shaped verb args ride as separate argv words,
-                // not one joined string (a single element would land as one
-                // literal argv token instead of parseable flags).
-                argv_tail.push("--".to_string());
-                argv_tail.extend(msg_args.split_whitespace().map(str::to_string));
+            if let Some(args) = parts.next().filter(|a| !a.is_empty()) {
+                if args.starts_with('-') {
+                    // Behind `--` (probed: yargs accepts it after --command's
+                    // value): flag-shaped verb args ride as separate argv
+                    // words, not one joined string.
+                    argv_tail.push("--".to_string());
+                    argv_tail.extend(args.split_whitespace().map(str::to_string));
+                } else {
+                    argv_tail.push(args.to_string());
+                }
             }
             return argv_tail;
         }
@@ -1717,6 +1725,12 @@ mod tests {
             vec!["--", "build feature X"]
         );
         assert_eq!(opencode_run_tail("/fno:pr"), vec!["--command", "fno:pr"]);
+        // A non-dash args tail keeps the one-positional shape: multiword
+        // free-text args reach the command unsplit (round 11).
+        assert_eq!(
+            opencode_run_tail("/fno:blueprint my multi word idea"),
+            vec!["--command", "fno:blueprint", "my multi word idea"]
+        );
     }
 
     #[test]
