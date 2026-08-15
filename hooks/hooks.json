@@ -54,7 +54,7 @@
     ],
     "Notification": [
       {
-        "matcher": "",
+        "matcher": "permission_prompt|agent_needs_input",
         "hooks": [
           {
             "type": "command",

@@ -176,5 +176,33 @@ else
   fail "T6 expected 2 calls with distinct reasons; got $n: $(tr '\n' '|' <"$CALLS6")"
 fi
 
+# T7: a FAILED report must not be persisted as sent -- two consecutive
+# same-state calls against a stub that always fails/times out must BOTH
+# attempt the RPC, or a transient daemon outage would leave the row stale for
+# up to the refresh ceiling while the worker keeps running.
+FAILSTUB="$TMP/fno-agents-fail"
+cat >"$FAILSTUB" <<'FAILSTUBEOF'
+#!/bin/sh
+out=""
+for a in "$@"; do
+  out="${out}${a}$(printf '\037')"
+done
+printf '%s\n' "$out" >> "$CALLS_FILE"
+exit 1
+FAILSTUBEOF
+chmod +x "$FAILSTUB"
+CALLS7="$TMP/calls7"; : >"$CALLS7"
+RT7="$TMP/rt7"; mkdir -p "$RT7"
+sink7="$TMP/sink7"
+( printf '{"session_id":"sess-7"}' | \
+    CALLS_FILE="$CALLS7" FNO_TURN_MARKER_TTY="$sink7" XDG_RUNTIME_DIR="$RT7" \
+    FNO_AGENTS_BIN="$FAILSTUB" bash "$HOOK" working ) >/dev/null 2>&1
+( printf '{"session_id":"sess-7"}' | \
+    CALLS_FILE="$CALLS7" FNO_TURN_MARKER_TTY="$sink7" XDG_RUNTIME_DIR="$RT7" \
+    FNO_AGENTS_BIN="$FAILSTUB" bash "$HOOK" working ) >/dev/null 2>&1
+n="$(call_count "$CALLS7")"
+[[ "$n" == "2" ]] && pass "T7 a failed report is not persisted, retry is not suppressed" \
+  || fail "T7 expected 2 attempted calls after a failing send, got $n"
+
 printf '[inside-leg-blocked] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

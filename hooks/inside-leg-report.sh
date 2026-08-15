@@ -232,25 +232,35 @@ fi
 # report there is a socket RPC + a flock'd registry write per call -- a write
 # storm at footnote's tool-call rate. Skip the report when the recorded state
 # AND reason for this session already match what is about to be sent AND the
-# record is younger than the refresh ceiling; otherwise send and rewrite the
-# record. The reason is part of the match, not just the state: two `blocked`
-# reports 30s apart with different reasons (a fresh permission prompt after an
-# idle-wait notification) must both land, or the daemon's stored reason goes
-# stale for up to the ceiling while the operator's Waiting notification still
-# names the first prompt. The ceiling is the defence against a sidecar that
-# says `working` while the registry lost the row to a daemon restart: the
-# state re-asserts itself within two minutes rather than latching silent
-# forever (half the reader TTL pattern from scrape.rs's REFRESH_AFTER_SECS).
+# record is younger than the refresh ceiling; otherwise send. The reason is
+# part of the match, not just the state: two `blocked` reports 30s apart with
+# different reasons (a fresh permission prompt after an idle-wait
+# notification) must both land, or the daemon's stored reason goes stale for
+# up to the ceiling while the operator's Waiting notification still names the
+# first prompt. The ceiling is the defence against a sidecar that says
+# `working` while the registry lost the row to a daemon restart: the state
+# re-asserts itself within two minutes rather than latching silent forever
+# (half the reader TTL pattern from scrape.rs's REFRESH_AFTER_SECS).
 # Fail OPEN in both directions -- an unreadable/unwritable record means send;
 # the gate is an optimisation and must never be the reason a state goes
 # unreported. The daemon's seq gate stays the ordering authority: a report
 # that is never sent cannot lose a seq race, so skipping one here cannot
 # regress a row.
+#
+# The record is written by mark_reported(), called ONLY after a successful
+# send (below) -- never here. Persisting "sent" before the RPC is confirmed
+# would suppress every same-state retry for up to the ceiling on a timeout or
+# a temporarily-down daemon socket, leaving the daemon stale for a worker
+# that is still running: the gate must fail open on send failure too, not
+# just on a missing/unwritable record.
 STATE_REFRESH_AFTER_SECS=120
-should_report() {
-  local dir; dir="$(runtime_pin_dir)" || return 0
+state_record_path() {
+  local dir; dir="$(runtime_pin_dir)" || return 1
   local safe_sid="${SESSION_ID//[\/.]/_}"
-  local record="${dir}/state-${safe_sid}"
+  printf '%s\n' "${dir}/state-${safe_sid}"
+}
+should_report() {
+  local record; record="$(state_record_path)" || return 0
   local prev_state="" prev_epoch="" prev_message=""
   if [[ -r "$record" ]]; then
     read -r prev_state prev_epoch prev_message <"$record" 2>/dev/null || true
@@ -260,8 +270,12 @@ should_report() {
     local age=$((now - prev_epoch))
     [[ "$age" -ge 0 && "$age" -lt "$STATE_REFRESH_AFTER_SECS" ]] && return 1
   fi
-  printf '%s %s %s\n' "$STATE" "$now" "$MESSAGE" >"$record" 2>/dev/null || true
   return 0
+}
+mark_reported() {
+  local record; record="$(state_record_path)" || return 0
+  local now; now=$(date +%s 2>/dev/null) || return 0
+  printf '%s %s %s\n' "$STATE" "$now" "$MESSAGE" >"$record" 2>/dev/null || true
 }
 should_report || exit 0
 
@@ -285,6 +299,8 @@ fi
 REPORT_ARGS=(--session-id "$SESSION_ID" --seq "$SEQ" --state "$STATE")
 [[ -n "$MESSAGE" ]] && REPORT_ARGS+=(--reason "$MESSAGE")
 
-with_timeout 2 "$BIN" report "${REPORT_ARGS[@]}" >/dev/null 2>&1 || true
+if with_timeout 2 "$BIN" report "${REPORT_ARGS[@]}" >/dev/null 2>&1; then
+  mark_reported
+fi
 
 exit 0
