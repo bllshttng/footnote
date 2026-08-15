@@ -8339,7 +8339,10 @@ fn humanize_age(secs: Option<u64>) -> String {
         Some(s) if s < 60 => format!("{s}s"),
         Some(s) if s < 3600 => format!("{}m", s / 60),
         Some(s) if s < 86_400 => format!("{}h", s / 3600),
-        Some(s) => format!("{}d", s / 86_400),
+        // Capped at 999d (review finding: an uncapped day count breaks the
+        // fixed-width-4 invariant once a row is silent for 1000+ days). A row
+        // that old is a display curiosity, not a case worth a 5th column.
+        Some(s) => format!("{}d", (s / 86_400).min(999)),
     };
     format!("{body:>4}")
 }
@@ -24596,6 +24599,14 @@ mod tests {
         assert_eq!(humanize_age(Some(345600)), "  4d");
         // Absent renders EMPTY (a 4-space blank), never a fabricated age.
         assert_eq!(humanize_age(None), "    ");
+    }
+
+    #[test]
+    fn humanize_age_caps_the_day_count_at_three_digits() {
+        // 1000+ days would otherwise render "1000d" (5 chars), breaking the
+        // fixed-width-4 invariant the column exists to hold.
+        assert_eq!(humanize_age(Some(1000 * 86_400)), "999d");
+        assert_eq!(humanize_age(Some(1000 * 86_400)).chars().count(), 4);
     }
 
     // The severity bands must come from the ONE existing authority. LatticeState

@@ -310,7 +310,9 @@ def _humanize_age(seconds: Optional[int]) -> str:
     elif seconds < 86400:
         unit, n = "h", seconds // 3600
     else:
-        unit, n = "d", seconds // 86400
+        # Capped at 999d (review finding: an uncapped day count breaks the
+        # fixed-width-4 invariant once a row is silent for 1000+ days).
+        unit, n = "d", min(seconds // 86400, 999)
     return f"{n}{unit}".rjust(4)
 
 

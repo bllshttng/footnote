@@ -550,9 +550,13 @@ enum CoreMsg {
     /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
     /// probe (`fno agents list --json`, one process for the whole fleet).
     /// Replaces the map wholesale; a failed probe sends nothing so the last
-    /// good map stands until the next success.
+    /// good map stands until the next success. `seq` is the probe's launch
+    /// order (review finding: a probe can outlive the next tick's probe under
+    /// load, and without a sequence guard the LATE result would win and
+    /// silently revert the map to a stale reading until the next success).
     AgentTruth {
         map: HashMap<String, TruthReading>,
+        seq: u64,
     },
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
     /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
@@ -1249,6 +1253,11 @@ struct Core {
     /// on one miss. A name absent from the map has no probe answer, which the
     /// client reads as absence, never as urgency.
     truth_by_name: HashMap<String, TruthReading>,
+    /// (v48) The `seq` of the last-applied `CoreMsg::AgentTruth`. Probes run
+    /// concurrently off-loop and can complete out of launch order under load;
+    /// a message whose `seq` is not newer is dropped rather than allowed to
+    /// overwrite a fresher map with a stale one.
+    truth_seq: u64,
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
@@ -8920,7 +8929,14 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
-            CoreMsg::AgentTruth { map } => {
+            CoreMsg::AgentTruth { map, seq } => {
+                // A late-arriving older probe must not clobber a fresher one
+                // (review finding: probes run concurrently off-loop with no
+                // ordering guarantee between completions).
+                if seq <= self.truth_seq {
+                    return Flow::Continue;
+                }
+                self.truth_seq = seq;
                 self.truth_by_name = map;
                 // Only the attention order and the age column moved: re-push
                 // the layout without re-emitting frames.
@@ -9197,6 +9213,7 @@ async fn serve(
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
+        truth_seq: 0,
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
@@ -9243,6 +9260,9 @@ async fn serve(
             let mut last_uuids: Vec<String> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut last_truth = Instant::now();
+            // (v48) Launch order for AgentTruth probes, so an out-of-order
+            // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
+            let mut truth_probe_seq: u64 = 0;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Stat + conditional read of one file behind an mtime+len gate,
@@ -9294,6 +9314,8 @@ async fn serve(
                 // interval - invisible next to the 600s threshold it feeds.
                 if last_truth.elapsed() >= TRUTH_PROBE_EVERY {
                     last_truth = Instant::now();
+                    truth_probe_seq += 1;
+                    let seq = truth_probe_seq;
                     let tx = core_tx.clone();
                     tokio::spawn(async move {
                         if let Some(map) = tokio::task::spawn_blocking(probe_truth_map)
@@ -9301,7 +9323,7 @@ async fn serve(
                             .ok()
                             .flatten()
                         {
-                            let _ = tx.send(CoreMsg::AgentTruth { map }).await;
+                            let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
                         }
                     });
                 }
@@ -17276,6 +17298,7 @@ mod tests {
             branch_by_cwd: HashMap::new(),
             tail_by_session: HashMap::new(),
             truth_by_name: HashMap::new(),
+            truth_seq: 0,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
