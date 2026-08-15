@@ -67,7 +67,11 @@ class TickResult:
     lock_holder: str = ""
 
 
-_INLINE_RECEIPT_MAX_BYTES = 48_000
+# Receipts chunk below the authoritative event ceiling (fno.events reads it
+# from schema.yaml), leaving envelope headroom, so the two budgets move together.
+from fno.events import MAX_DATA_BYTES as _EVENT_MAX_DATA_BYTES
+
+_INLINE_RECEIPT_MAX_BYTES = _EVENT_MAX_DATA_BYTES - _EVENT_MAX_DATA_BYTES // 4
 
 
 def _compact_keys(keys: list[str] | set[str]) -> dict[str, list[Any]]:
@@ -703,11 +707,11 @@ def _run_tick(
             if entry is None:
                 continue
 
-            # Parked suppresses dispatch, not observation or terminal eviction.
+            # Suppression only. A parked entry synthesized from the delivery
+            # sidecar (a retries-exhausted merge) must not dispatch again.
+            # Parked STATE entries never reach here; the batch loop above
+            # owns their observation and terminal eviction.
             if entry.get("parked"):
-                entry["last_seen_state"] = obs.state
-                if obs.state in ("MERGED", "CLOSED"):
-                    _drop_cached_terminal(state, dropped, key, obs.state)
                 continue
 
             # Compute merge-readiness only when needed
