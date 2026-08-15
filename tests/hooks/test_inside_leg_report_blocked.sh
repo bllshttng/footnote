@@ -46,18 +46,17 @@ exit 0
 STUBEOF
 chmod +x "$STUB"
 
-# run_hook <state> <session_id> <calls_file> <runtime_dir> [message]
+# run_hook <state> <session_id> <calls_file> <runtime_dir> [message] [hook_event_name]
 # Pipes a Notification/PreToolUse-shaped payload through the hook and prints
 # whatever landed on the (redirected) marker sink.
 run_hook() {
-  local state="$1" sid="$2" calls="$3" rt="$4" msg="${5:-}"
+  local state="$1" sid="$2" calls="$3" rt="$4" msg="${5:-}" event="${6:-}"
   local sink; sink="$(mktemp "$TMP/sink.XXXXXX")"
   local payload
-  if [[ -n "$msg" ]]; then
-    payload=$(python3 -c 'import json,sys; print(json.dumps({"session_id": sys.argv[1], "message": sys.argv[2]}))' "$sid" "$msg")
-  else
-    payload=$(python3 -c 'import json,sys; print(json.dumps({"session_id": sys.argv[1]}))' "$sid")
-  fi
+  payload=$(python3 -c 'import json,sys; d={"session_id": sys.argv[1]}
+if sys.argv[2]: d["message"] = sys.argv[2]
+if sys.argv[3]: d["hook_event_name"] = sys.argv[3]
+print(json.dumps(d))' "$sid" "$msg" "$event")
   ( printf '%s' "$payload" | \
       CALLS_FILE="$calls" \
       FNO_TURN_MARKER_TTY="$sink" \
@@ -135,6 +134,44 @@ if echo "$out_working" | grep -qa '133;C'; then
   fi
 else
   fail "T4 positive control failed: working did not emit 133;C"
+fi
+
+# T5: a mid-turn `working` (PreToolUse, `blocked`'s inverse) must NOT open a
+# turn-marker block, or a turn with N tool calls fragments into N sub-blocks;
+# a turn-start `working` (UserPromptSubmit) must still open one (positive
+# control). Same session/pane throughout so the first-writer pin cannot
+# explain a silent read.
+CALLS5="$TMP/calls5"; : >"$CALLS5"
+RT5="$TMP/rt5"; mkdir -p "$RT5"
+export FNO_PANE=5 FNO_PANE_EPOCH=5000 FNO_SESSION=main
+out_ups="$(run_hook working host-5 "$CALLS5" "$RT5" "" "UserPromptSubmit")"
+out_ptu="$(run_hook working host-5 "$CALLS5" "$RT5" "" "PreToolUse")"
+unset FNO_PANE FNO_PANE_EPOCH FNO_SESSION
+if echo "$out_ups" | grep -qa '133;C'; then
+  if echo "$out_ptu" | grep -qa '133'; then
+    fail "T5 PreToolUse-sourced working should write no OSC 133 byte, got: $out_ptu"
+  else
+    pass "T5 PreToolUse working silent, UserPromptSubmit working emits 133;C"
+  fi
+else
+  fail "T5 positive control failed: UserPromptSubmit working did not emit 133;C"
+fi
+
+# T6: two `blocked` reports with DIFFERENT reasons, inside the refresh window,
+# both land -- the transition gate must not dedup past a genuine reason
+# change (a stale reason would otherwise sit in the daemon for up to the
+# refresh ceiling).
+CALLS6="$TMP/calls6"; : >"$CALLS6"
+RT6="$TMP/rt6"; mkdir -p "$RT6"
+run_hook blocked sess-6 "$CALLS6" "$RT6" "waiting on permission A" >/dev/null
+run_hook blocked sess-6 "$CALLS6" "$RT6" "waiting on permission B" >/dev/null
+n="$(call_count "$CALLS6")"
+if [[ "$n" == "2" ]] \
+    && call_str "$CALLS6" 1 | grep -qF -- '--reason waiting on permission A' \
+    && call_str "$CALLS6" 2 | grep -qF -- '--reason waiting on permission B'; then
+  pass "T6 blocked reports with different reasons both land"
+else
+  fail "T6 expected 2 calls with distinct reasons; got $n: $(tr '\n' '|' <"$CALLS6")"
 fi
 
 printf '[inside-leg-blocked] %d passed, %d failed\n' "$PASS" "$FAIL"

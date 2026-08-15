@@ -9303,7 +9303,7 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
-    /// x-7496: the `blocked` producer (Notification hook) stores state and
+    /// The `blocked` producer (Notification hook) stores state and
     /// reason exactly like `working`/`done` and gets the same capability flip
     /// -- a `blocked` row is demoted from the scraper by construction, not by
     /// a special case, so a stale screen-manifest verdict can never shadow a
