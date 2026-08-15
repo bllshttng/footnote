@@ -149,13 +149,17 @@ def _script_wrapped_attach(short_id: str) -> str:
     trailing argv: ``script -q /dev/null claude attach <id>``. GNU/util-linux
     ``script`` (Linux) has no such form -- the command rides ``-c`` instead:
     ``script -qc "claude attach <id>" /dev/null``. Branching here mirrors the
-    existing ``sys.platform`` split in ``harnesses/codex.py`` /
-    ``spawn_gate.py`` rather than guessing one syntax and failing silently
-    on the other (the wake would report exit 16 with no clue the real cause
-    was a platform mismatch).
+    existing ``sys.platform`` split in ``spawn_gate.py`` rather than guessing
+    one syntax and failing silently on the other (the wake would report exit
+    16 with no clue the real cause was a platform mismatch).
+
+    A real BSD ``sys.platform`` carries a trailing version number (e.g.
+    ``freebsd13``, ``openbsd7``) -- it never ends in the literal substring
+    ``"bsd"``, so the check matches on the OS name prefix instead.
     """
     attach_cmd = f"claude attach {shlex.quote(short_id)}"
-    if sys.platform == "darwin" or sys.platform.endswith("bsd"):
+    _BSD_PREFIXES = ("freebsd", "openbsd", "netbsd", "dragonfly")
+    if sys.platform == "darwin" or sys.platform.startswith(_BSD_PREFIXES):
         return f"script -q /dev/null {attach_cmd}"
     return f"script -qc {shlex.quote(attach_cmd)} /dev/null"
 

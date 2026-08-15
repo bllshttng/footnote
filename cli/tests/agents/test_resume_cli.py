@@ -688,3 +688,15 @@ def test_script_wrapped_attach_uses_gnu_form_on_linux(monkeypatch) -> None:
     monkeypatch.setattr("sys.platform", "linux")
     cmd = _script_wrapped_attach("deadbeef")
     assert cmd == "script -qc 'claude attach deadbeef' /dev/null"
+
+
+def test_script_wrapped_attach_uses_bsd_form_on_real_bsd_platform_strings(monkeypatch) -> None:
+    """A real sys.platform on BSD carries a version suffix (freebsd13,
+    openbsd7, ...) and never ends in the literal substring "bsd" -- a
+    `.endswith("bsd")` check silently never matches on real hardware."""
+    from fno.agents.resume_cli import _script_wrapped_attach
+
+    for platform in ("freebsd13", "openbsd7", "netbsd10"):
+        monkeypatch.setattr("sys.platform", platform)
+        cmd = _script_wrapped_attach("deadbeef")
+        assert cmd == "script -q /dev/null claude attach deadbeef", platform
