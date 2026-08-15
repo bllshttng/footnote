@@ -49,13 +49,17 @@ def test_intersecting_id_is_counted_and_named(tmp_path, monkeypatch):
     assert result == {"count": 1, "ids": ["x-dup"]}
 
 
-def test_corrupt_archive_degrades_to_zero_not_crash(tmp_path, monkeypatch):
+def test_corrupt_archive_is_an_alarm_not_a_clean_zero(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     from fno.paths import graph_archive_json, graph_json
 
     graph_json().parent.mkdir(parents=True, exist_ok=True)
     graph_json().write_text(json.dumps({"entries": [{"id": "x-1"}]}), encoding="utf-8")
+    graph_archive_json().parent.mkdir(parents=True, exist_ok=True)
     graph_archive_json().write_text("{not json at all", encoding="utf-8")
 
+    # Reading the corrupt archive must not report a measured zero: the ids
+    # cannot be checked, and a green exit here resumes the collision bug with
+    # every check passing.
     result = doctor._archive_id_collisions()
-    assert result == {"count": 0, "ids": []}
+    assert result.get("unreadable") is True

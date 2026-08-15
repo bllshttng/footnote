@@ -73,6 +73,19 @@ def test_an_archived_node_comes_back(graphs):
     assert "ab-22222222" in _ids(working)
 
 
+def test_a_reminted_node_comes_back_by_its_previous_id(graphs):
+    """A dedupe remint keeps the old id as previous_id; `get` resolves it that
+    way, so `unarchive` - the remedy the dedupe verb names - must too."""
+    working, archive = graphs
+    archive.write_text(
+        json.dumps({"entries": [_node("ab-99999999", previous_id="ab-22222222")]})
+    )
+    res = runner.invoke(app, ["backlog", "unarchive", "ab-22222222"])
+    assert res.exit_code == 0, res.output
+    assert "ab-99999999" in _ids(working)
+    assert "ab-99999999" not in _ids(archive)
+
+
 def test_the_archive_copy_is_dropped(graphs):
     """Otherwise read-through would resolve the node twice."""
     working, archive = graphs

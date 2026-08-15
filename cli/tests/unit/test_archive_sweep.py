@@ -190,6 +190,30 @@ def test_roadmap_archive_guards_across_roadmaps(tmp_path, monkeypatch):
     }
 
 
+def test_roadmap_restricted_held_counts_only_that_roadmap(tmp_path, monkeypatch):
+    """A --roadmap-id run's receipt describes what THAT run considered; other
+    roadmaps' too-recent nodes are not this run's holds."""
+    g, _archive = _route(tmp_path, monkeypatch)
+    _seed(g, [
+        {"id": "ab-old0001", "roadmap_id": "rm-A", "completed_at": "2020-01-01T00:00:00Z"},
+        {"id": "ab-new0001", "roadmap_id": "rm-B", "completed_at": "2026-08-01T00:00:00Z"},
+    ])
+    r = runner.invoke(
+        app, ["backlog", "archive", "--apply", "--older-than-days", "30", "--roadmap-id", "rm-A"]
+    )
+    assert r.exit_code == 0, r.output
+    assert "held back (too-recent): 0" in r.output  # rm-B's node is not this run's hold
+
+
+def test_receipt_passes_through_an_unknown_skip_reason():
+    from fno.graph.cli import _archive_bucket_counts, _receipt_reason_order
+
+    held = _archive_bucket_counts([{"_skip": "some-future-reason"}])
+    assert held["some-future-reason"] == 1
+    assert held["too-recent"] == 0  # zero-fill holds for the known four
+    assert "some-future-reason" in _receipt_reason_order(held)
+
+
 # -- receipt: bucket breakdown + archived_at (x-a023) -----------------------
 
 
@@ -348,9 +372,12 @@ def test_dedupe_ids_apply_writes_and_keeps_previous_id(tmp_path, monkeypatch):
     assert len(entries) == 1
     assert entries[0]["previous_id"] == "ab-dup00001"
     assert entries[0]["id"] != "ab-dup00001"
-    evs = _events_of_type(events_path, "graph_archive_swept")
+    evs = _events_of_type(events_path, "graph_archive_ids_reminted")
     assert len(evs) == 1
     assert evs[0]["data"]["remint_count"] == 1
+    assert evs[0]["data"]["remap"]["ab-dup00001"] == entries[0]["id"]
+    # A repair is not a sweep: it must never be recorded as one.
+    assert _events_of_type(events_path, "graph_archive_swept") == []
 
 
 def test_dedupe_ids_apply_with_no_collision_writes_nothing(tmp_path, monkeypatch):

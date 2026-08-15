@@ -219,7 +219,12 @@ def _run_mechanical(age: int) -> dict[str, str]:
 
 
 def _leg_trouble(mechanical: dict[str, str]) -> list[str]:
-    return sorted(name for name, outcome in mechanical.items() if outcome != "ok")
+    # Prefix match, not equality: the archive leg's success outcome carries
+    # counts ("ok (archived N, held back M)"); an equality test would flag
+    # every green pass as degraded and bury the real signal.
+    return sorted(
+        name for name, outcome in mechanical.items() if not outcome.startswith("ok")
+    )
 
 
 def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:

@@ -834,9 +834,20 @@ event_types:
         older_than_days:
           type: integer
           description: "The age gate this sweep used (--older-than-days)."
+    consumers: [operator]
+
+  - name: graph_archive_ids_reminted
+    description: "One archive id-repair ran to completion (fno backlog archive-dedupe-ids --apply). A distinct type from graph_archive_swept: recording a repair as a zeroed sweep corrupts both 'did the daily sweep run' and per-gate hold statistics."
+    sources: [backlog]
+    data:
+      required: [remint_count]
+      properties:
         remint_count:
           type: integer
-          description: "Archive-side ids reminted this run to resolve a collision with a working-graph id (x-f69b); 0 on an ordinary sweep."
+          description: "Archive-side ids reminted to resolve a collision with a working-graph id."
+        remap:
+          type: object
+          description: "Map of old id to new id for every entry reminted this run."
     consumers: [operator]
 
   - name: style_refusal

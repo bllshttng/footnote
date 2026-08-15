@@ -322,6 +322,17 @@ def test_archive_leg_names_moved_and_held_counts(monkeypatch):
     assert REAL_MECHANICAL(14)["archive"] == "ok (archived 4, held back 582)"
 
 
+def test_green_archive_leg_is_not_trouble(monkeypatch):
+    # The counted outcome "ok (archived N, ...)" is a SUCCESS: an equality
+    # test against "ok" here flagged every fully-green pass as a degraded
+    # archive leg, crying wolf nightly and burying real leg failures.
+    monkeypatch.setattr(G.subprocess, "run", lambda cmd, **k: _Proc(returncode=0))
+    assert G._leg_trouble(REAL_MECHANICAL(14)) == []
+    assert G._leg_trouble(
+        {"archive": "ok (archived 4, held back 582)", "reconcile": "ok"}
+    ) == []
+
+
 def test_archive_leg_outcome_parses_zero_moved():
     assert G._archive_leg_outcome("No terminal nodes eligible to archive.\n") == (
         "ok (archived 0, held back 0)"

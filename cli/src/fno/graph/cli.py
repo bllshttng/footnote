@@ -9660,11 +9660,19 @@ def _archive_bucket_counts(skipped: list) -> dict[str, int]:
     Zero-filled so the receipt always names all four buckets (x-a023): a run
     that holds back 0 for a reason reads as "checked, none held", not as an
     absent line a reader has to interpret as either "zero" or "not measured".
+    A reason not in ``_ARCHIVE_SKIP_REASONS`` still lands in the dict and the
+    stdout receipt prints it, so a new ``_skip`` reason reads in the receipt
+    (and in groom's regex sum over these lines) instead of vanishing.
     """
     held = {reason: 0 for reason in _ARCHIVE_SKIP_REASONS}
     for s in skipped:
         held[s["_skip"]] = held.get(s["_skip"], 0) + 1
     return held
+
+
+def _receipt_reason_order(held: dict[str, int]) -> list[str]:
+    extras = set(held) - set(_ARCHIVE_SKIP_REASONS)
+    return list(_ARCHIVE_SKIP_REASONS) + sorted(extras)
 
 
 @cli.command(
@@ -9719,12 +9727,18 @@ def cmd_archive(
         )
         if roadmap_id:
             to_archive = [e for e in to_archive if e.get("roadmap_id") == roadmap_id]
+            # `skipped` is restricted with the same predicate so the receipt's
+            # held counts describe what THIS run considered; the full-graph
+            # guard above already protects to_archive from cross-roadmap
+            # references, and counting other roadmaps' holds here would pin
+            # them on this run's gate in the receipt and the swept event.
+            skipped = [e for e in skipped if e.get("roadmap_id") == roadmap_id]
         arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
         remaining = [e for e in entries if e.get("id") not in arch_ids]
         return to_archive, remaining, skipped
 
     def _echo_receipt(moved: int, held: dict[str, int]) -> None:
-        for reason in _ARCHIVE_SKIP_REASONS:
+        for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
 
     def _emit_swept_event(moved: int, held: dict[str, int]) -> None:
@@ -9742,7 +9756,6 @@ def cmd_archive(
                     "held_too_recent": held["too-recent"],
                     "held_no_timestamp": held["no-parseable-timestamp"],
                     "older_than_days": older_than_days,
-                    "remint_count": 0,
                 },
             )
             append_event(event, state_dir() / "events.jsonl")
@@ -9794,7 +9807,7 @@ def cmd_archive(
 @cli.command(
     "archive-dedupe-ids",
     hidden=True,
-    epilog="x-f69b: the id generator only checked the working graph, so a freed "
+    epilog="The id generator once checked only the working graph, so a freed "
     "id could be reminted while the archive still held a different node under "
     "it. mint_node_id now reads the archive too; this repairs what predates "
     "that fix.",
@@ -9878,18 +9891,14 @@ def cmd_archive_dedupe_ids(
         from fno.events import _build, append_event
         from fno.paths import state_dir
 
+        # Its own event type, not a zeroed graph_archive_swept: a repair run
+        # recorded as a sweep with age gate 0 corrupts both "did the daily
+        # sweep run" and per-gate hold statistics - the structured channel
+        # lying the same way the bare "ok" stdout did.
         event = _build(
-            "graph_archive_swept",
+            "graph_archive_ids_reminted",
             "backlog",
-            {
-                "moved": 0,
-                "held_referenced": 0,
-                "held_related": 0,
-                "held_too_recent": 0,
-                "held_no_timestamp": 0,
-                "older_than_days": 0,
-                "remint_count": len(remap_holder),
-            },
+            {"remint_count": len(remap_holder), "remap": remap_holder},
         )
         append_event(event, state_dir() / "events.jsonl")
     except Exception:  # noqa: BLE001 - the repair itself must not fail on a bad event write
@@ -10036,6 +10045,20 @@ def cmd_unarchive(
         # probe `reopen` uses: an exact compare made the short id form fail, and
         # `reopen`'s refusal prints this verb as the remedy.
         row = _find_node(archived, task_id)
+        if row is None:
+            # Same previous_id fallback cmd_get uses: a reminted archive entry
+            # keeps its old id as previous_id, and the operator holding the
+            # old id must recover the node, not read a plain miss. Without
+            # this, `get` resolved the id one command earlier and `unarchive`
+            # - the remedy the dedupe verb names - refused it.
+            row = next(
+                (
+                    e
+                    for e in archived
+                    if isinstance(e, dict) and e.get("previous_id") == task_id
+                ),
+                None,
+            )
         if row is None:
             typer.echo(
                 f"Error: {task_id} is in neither the working graph nor {archive_path}",

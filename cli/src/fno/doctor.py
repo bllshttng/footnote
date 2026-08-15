@@ -747,9 +747,13 @@ def _archive_id_collisions() -> dict[str, Any]:
     holds a different node under the same id. A repeat sweep frees more ids,
     so this count grows on its own; it changes doctor's exit code rather than
     reporting quietly.
+
+    The archive is read via ``_read_json``, NOT ``read_graph``: the read path
+    swallows corruption to an empty list, which would report 0 collisions and
+    exit green in exactly the state where the ids cannot be checked.
     """
     try:
-        from fno.graph.store import read_graph
+        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json, read_graph
         from fno.paths import graph_archive_json, graph_json
 
         archive_path = graph_archive_json()
@@ -759,8 +763,12 @@ def _archive_id_collisions() -> dict[str, Any]:
             nid for e in read_graph(graph_json())
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
+        try:
+            archive_entries = _apply_graph_defaults(_read_json(archive_path))
+        except GraphCorruptError:
+            return {"count": 0, "ids": [], "unreadable": True}
         archive_ids = {
-            nid for e in read_graph(archive_path)
+            nid for e in archive_entries
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         collisions = sorted(working_ids & archive_ids)
@@ -1495,6 +1503,12 @@ def _emit_human(
         )
 
     ids = result.get("archive_id_collisions") or {}
+    if ids.get("unreadable"):
+        out(
+            "fno doctor: graph-archive.json is corrupt; node id collisions "
+            "could not be checked. Restore it from the .bak read_graph left, "
+            "or rebuild it, then re-run doctor."
+        )
     if ids.get("count"):
         shown = ", ".join(ids["ids"][:10])
         more = f" (+{ids['count'] - 10} more)" if ids["count"] > 10 else ""
@@ -2757,5 +2771,8 @@ def doctor_command(
             typer.echo("fno doctor: nothing to fix.", err=True)
 
     dead_agents = bool((result.get("launch_agents") or {}).get("dead"))
-    id_collisions = bool((result.get("archive_id_collisions") or {}).get("count"))
+    id_collisions = bool(
+        (result.get("archive_id_collisions") or {}).get("count")
+        or (result.get("archive_id_collisions") or {}).get("unreadable")
+    )
     raise typer.Exit(1 if result["status"] == "stale" or dead_agents or id_collisions else 0)

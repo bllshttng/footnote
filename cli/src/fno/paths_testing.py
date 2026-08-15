@@ -46,6 +46,13 @@ def use_tmpdir(monkeypatch: object, tmp_path: Path) -> Path:
 
     # Fresh, empty caches for this test only - the module's real cached
     # functions are restored untouched when monkeypatch reverts at teardown.
+    #
+    # Reach caveat: this patch covers attribute access (``config.load_settings``,
+    # ``paths._settings``) only. A module that bound ``load_settings`` at import
+    # time (``from fno.config import load_settings`` at top level) keeps the
+    # original cached function and does NOT see the tmp settings. No current
+    # test exercises one of those modules through this fixture; if one lands,
+    # combine this swap with a one-shot cache_clear of the originals here.
     import functools
 
     from fno import config as config_mod
