@@ -28,6 +28,7 @@ Sidecar / backup protocol (Layer 2 hygiene):
 """
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import json
@@ -95,6 +96,7 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "completed_at",
     "deferred_at",
     "deferred_reason",
+    "touched_at",
     "has_brief",
     "roadmap_id",
     "vision_path",
@@ -798,6 +800,22 @@ def _graph_lock_path(path: Path) -> Path:
     return Path(str(base) + ".lock")
 
 
+# Fields whose change marks a node as human-curated "just now" (x-7dcb). Kept
+# to exactly the fields groom's own lever allowlist can move, so this is
+# exactly the reversal class an automated sweep must not undo. An include-list
+# fails closed: a future janitorial field cannot accidentally freeze the drain.
+_CURATION_FIELDS = ("status", "priority", "rank", "parent", "blocked_by", "size")
+
+
+def _curation_key(entry: dict) -> tuple:
+    # blocked_by is a list; freeze it so the tuple stays hashable and
+    # order-sensitive (a reordered blocked_by is a real edge change).
+    return tuple(
+        tuple(entry[f]) if isinstance(entry.get(f), list) else entry.get(f)
+        for f in _CURATION_FIELDS
+    )
+
+
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     """Locked read-modify-write for graph entries. Recomputes statuses after mutation."""
     # Import here to avoid circular imports
@@ -815,6 +833,33 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                   f"Restore from backup or delete before proceeding.", file=sys.stderr)
             sys.exit(1)
         entries = _apply_graph_defaults(raw)
+        # Pre-mutator curation snapshot (x-7dcb), keyed by id, for the
+        # touched_at stamp below. Taken after defaults so a legacy row's
+        # first-touch backfill (e.g. rank -> None) does not itself read as a
+        # curation change.
+        #
+        # `status` is re-derived via `recompute_statuses` on a throwaway
+        # COPY rather than read straight off `entries`: `_apply_graph_defaults`
+        # ends by overlaying live blocked_by readiness onto `status` (every
+        # reader gets "blocked" when a dependency is unmet -
+        # `_apply_readiness_overlay`), but `recompute_statuses` below never
+        # derives "blocked" and the write path never persists it. Comparing
+        # the overlay value against the post-recompute value would misread
+        # EVERY mutation on a currently-blocked node as a status change,
+        # regardless of what the mutator actually touched. Re-deriving both
+        # sides through the same function keeps them comparable.
+        _status_normalized = {
+            e["id"]: e.get("status")
+            for e in recompute_statuses(copy.deepcopy(entries))
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+        _pre_curation = {}
+        for e in entries:
+            if not isinstance(e, dict) or not isinstance(e.get("id"), str):
+                continue
+            _snapshot_entry = dict(e)
+            _snapshot_entry["status"] = _status_normalized.get(e["id"], e.get("status"))
+            _pre_curation[e["id"]] = _curation_key(_snapshot_entry)
         # The pass drops rows it cannot migrate, and on THIS path that drop is
         # persisted by the _write_json below. Dropping is still the right call
         # here -- ensure_slugs / recompute_statuses / canonicalize_entries below
@@ -845,6 +890,21 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         from fno.graph.slug import ensure_slugs
         ensure_slugs(entries)
         entries = recompute_statuses(entries)
+        # touched_at stamp (x-7dcb): compare against the post-recompute value,
+        # not the raw mutator output, because status is derived from
+        # completed_at/deferred_at/superseded_by and the pre-mutator value and
+        # the post-recompute value are the only pair that mean the same thing.
+        # A node absent from the pre-image is new; created_at already carries
+        # that date, so it is left untouched rather than double-stamped.
+        _now_iso = datetime.now(timezone.utc).isoformat()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str) or entry_id not in _pre_curation:
+                continue
+            if _curation_key(entry) != _pre_curation[entry_id]:
+                entry["touched_at"] = _now_iso
         # Status-forward key order + fresh children index. Runs after
         # recompute_statuses so status (top-level and inside child summaries)
         # is already current.

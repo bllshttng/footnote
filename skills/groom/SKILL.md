@@ -87,11 +87,12 @@ fno mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-file <repo
 The report carries, in this order:
 
 0. **Mechanical** - one leading line itemizing every leg of the dispatcher's pass by name with its outcome, e.g. `Mechanical: archive ok, reconcile ok, maintain ok, relatedness failed: 1: ...`. Your seed brief carries these verbatim; report them as given. Name all four legs every time; an aggregate count alone hides which one broke. Anything other than `ok` (`failed:` or `partial:`) also belongs under **Anomalies** - this line is the only signal an operator gets that a leg has quietly stopped working, and a nightly job that degrades unnoticed is what this pipeline was built to prevent.
-1. **Mutations** - every lever you pulled, one line each, with its receipt (node id + what changed).
-2. **Pile** - what is in the triage pile now, and what you added to it today.
-3. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.
-4. **Net mint rate** - nodes opened minus nodes closed today, so the trend is visible without asking.
-5. **PR ratio** - PRs opened vs nodes closed over the same window, one line. A ratio well above 1 means work is being split across more PRs than it closes, against the standing preference for batching small work; report the number and leave the judgment to the reader.
+1. **Reversals** - `reversals: <n>` from `fno backlog maintain --suspect-reverts`, printed even when zero. A lever that reverses a recent human decision is a distinct class from an ordinary mutation, not one more line buried in the list below; this count is what makes it visible without the operator diffing the whole mail.
+2. **Mutations** - every lever you pulled, one line each, with its receipt (node id + what changed).
+3. **Pile** - what is in the triage pile now, and what you added to it today.
+4. **Anomalies** - starvation receipts, guard exclusions, anything that looks wrong but was not yours to fix.
+5. **Net mint rate** - nodes opened minus nodes closed today, so the trend is visible without asking.
+6. **PR ratio** - PRs opened vs nodes closed over the same window, one line. A ratio well above 1 means work is being split across more PRs than it closes, against the standing preference for batching small work; report the number and leave the judgment to the reader.
 
 A day with no defensible action is a valid day: report "no action", exit 0, mutate nothing.
 Still send the report, and still lead it with the Mechanical line - a quiet night and a night the pass never ran look identical otherwise.

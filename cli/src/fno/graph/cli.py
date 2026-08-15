@@ -8854,6 +8854,16 @@ def cmd_maintain(
         "--no-validity",
         help="Skip the validity sweep (the leg that calls the analyzer).",
     ),
+    suspect_reverts: bool = typer.Option(
+        False,
+        "--suspect-reverts",
+        help=(
+            "Read-only retro sweep: print drained nodes that carry evidence of "
+            "a human curation decision, then exit. Runs no other leg, mutates "
+            "nothing, and emits no undefer command - the operator rules on the "
+            "list themselves."
+        ),
+    ),
 ) -> None:
     """Keep graph.json + the kanban board clean by composing existing verbs.
 
@@ -8881,6 +8891,18 @@ def cmd_maintain(
     # Read once and derive status so the judgment legs see accurate states
     # (read_graph applies defaults but does not run the cascade).
     entries = recompute_statuses(read_graph(_graph_path()))
+
+    if suspect_reverts:
+        # Short-circuit (x-7dcb): a retro sweep, not another leg. Runs before
+        # the claim check and every other detector below - it reads and
+        # prints only, so it needs none of their machinery.
+        reverts = _maintain.detect_suspect_reverts(entries)
+        typer.echo(f"reversals: {len(reverts)} of the drained pile carry evidence of a human decision")
+        for r in reverts:
+            title = r.title[:60]
+            typer.echo(f"  {r.node_id}  {r.priority}  {r.deferred_at[:10]}  {r.signal}  {title}")
+        typer.echo("(read-only: no node was changed. Rule on these yourself with `fno backlog undefer <id>...`)")
+        return
 
     # Apply legs must never touch a node a live target session is driving.
     claimed = (
