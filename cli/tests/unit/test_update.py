@@ -422,6 +422,38 @@ def test_install_then_mark_with_retry_wrapper_still_writes_the_marker(
     assert marker.read_text(encoding="utf-8").strip() == "feedface"
 
 
+def test_uv_retry_race_message_only_when_the_last_failure_was_the_race(
+    tmp_path: Path,
+) -> None:
+    """Two real races then an auth failure on the capped attempt: the operator
+    must read uv's credential error, not 'stop your fno processes'."""
+    import os as _os
+    import subprocess as _sp
+
+    counter = tmp_path / "n"
+    uv = tmp_path / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        f"n=$(cat {counter} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {counter}\n"
+        'if [ "$n" -lt 3 ]; then\n'
+        "  echo 'error: failed to remove directory `/x`: Directory not empty "
+        "(os error 66)' >&2; exit 2\n"
+        "fi\n"
+        "echo 'error: invalid credential' >&2; exit 7\n"
+    )
+    uv.chmod(0o755)
+
+    line = update._uv_retry_sh(["uv", "tool", "install", "--compile-bytecode", "fno"])
+    out = _sp.run(
+        ["/bin/sh", "-c", line], capture_output=True, text=True,
+        env={**_os.environ, "PATH": f"{tmp_path}:{_os.environ['PATH']}"},
+    )
+    assert out.returncode == 7, "uv's own exit code survives"
+    assert counter.read_text().strip() == "3"
+    assert "directory race" not in out.stderr, out.stderr
+    assert "invalid credential" in out.stderr, out.stderr
+
+
 def test_install_then_mark_gates_marker_on_install_success(tmp_path: Path) -> None:
     """The shell line writes the marker ONLY after a zero install exit (&&)."""
     marker = tmp_path / "state" / "installed-rev"

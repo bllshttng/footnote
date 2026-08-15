@@ -302,7 +302,6 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     // error. Each attempt's uv output is re-emitted verbatim, and success is
     // accepted only after a positive marker (entrypoint + shipped bytecode),
     // never on the exit code alone.
-    let mut last_code = 1;
     for attempt in 1..=INSTALL_ATTEMPTS {
         let out = match Command::new(uv)
             .args(["tool", "install", "--force", "--compile-bytecode", source])
@@ -332,9 +331,18 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
                 )),
             };
         }
-        last_code = out.status.code().unwrap_or(1);
-        if !stderr_is_enotempty(&stderr) || attempt == INSTALL_ATTEMPTS {
-            return Err(BootErr::new(last_code, install_failure_message(source)));
+        let code = out.status.code().unwrap_or(1);
+        let raced = stderr_is_enotempty(&stderr);
+        if !raced || attempt == INSTALL_ATTEMPTS {
+            // A capped race gets the same words the fno.sh / postinstall twins
+            // die with, so every provisioning path explains it identically; any
+            // other failure defers to uv's own error, printed just above.
+            let msg = if raced {
+                format!("{RACE_CAP_MSG}\n{}", install_failure_message(source))
+            } else {
+                install_failure_message(source)
+            };
+            return Err(BootErr::new(code, msg));
         }
         // Give the racing importer a moment to finish its pass before the
         // next removal walk starts under it.
@@ -347,6 +355,14 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
 /// real attempt plus two retries, enough to absorb the measured intermittent
 /// race without turning a genuinely broken environment into a slow one.
 const INSTALL_ATTEMPTS: u32 = 3;
+
+/// What a capped ENOTEMPTY race means and what to do about it. Word-for-word
+/// the message `scripts/install/fno.sh`, the plugin postinstall, and the
+/// `fno update` shell wrapper print, so the remedy does not depend on which
+/// provisioning path the user happened to hit.
+const RACE_CAP_MSG: &str = "uv tool install hit the directory race (os error 66) three times. \
+     A concurrent fno process is rewriting bytecode into the venv mid-removal. \
+     Stop fno processes and re-run.";
 
 /// The retryable signature: uv's closing `rmdir` hit a directory a concurrent
 /// writer refilled behind its walk. Pure for testing.
@@ -1279,6 +1295,32 @@ mod tests {
         let e = install_wheel(&uv, "fno").unwrap_err();
         assert_eq!(e.code, 7, "uv's own exit code is preserved");
         assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
+        // The race remedy belongs to the race only: a credential failure must
+        // not send the operator off to kill fno processes.
+        assert!(!e.msg.contains("Stop fno processes"), "{}", e.msg);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn install_wheel_names_the_race_remedy_when_the_cap_is_hit() {
+        // Every attempt races. The capped error must carry the same remedy the
+        // fno.sh / postinstall twins print, or the Rust leg is the one
+        // provisioning path that leaves the user with no next step.
+        let root = env::temp_dir().join(format!("fno-uvfake4-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let script = "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') exit 0;;\n\
+             'tool install') echo 'error: failed to remove directory `/x/fno/lib`: \
+             Directory not empty (os error 66)' >&2; exit 2;;\n\
+             esac; exit 64\n";
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let e = install_wheel(&uv, "fno").unwrap_err();
+        assert_eq!(e.code, 2, "uv's own exit code is preserved");
+        assert!(e.msg.contains("Stop fno processes and re-run"), "{}", e.msg);
         fs::remove_dir_all(&root).ok();
     }
 

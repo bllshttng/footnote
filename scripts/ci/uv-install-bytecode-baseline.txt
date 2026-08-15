@@ -7,8 +7,9 @@
 .claude-plugin/postinstall.sh::log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
 .claude-plugin/postinstall.sh::log "preferring the published PyPI wheel: uv tool install fno (by name)..."
 .claude-plugin/postinstall.sh::err "uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run."
+crates/fno/src/bootstrap.rs::const RACE_CAP_MSG: &str = "uv tool install hit the directory race (os error 66) three times. \
 cli/src/fno/config/registry.py::"dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
-cli/src/fno/update.py::f'if [ "$__n" -ge {_UV_INSTALL_ATTEMPTS} ]; then echo "fno: uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run." >&2; fi; '
+cli/src/fno/update.py::f'if [ "$__sig" = 1 ]; then echo "fno: uv tool install hit the directory race (os error 66) three times. A concurrent fno process is rewriting bytecode into the venv mid-removal. Stop fno processes and re-run." >&2; fi; '
 cli/tests/smoke/cargo_bootstrap_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 cli/tests/smoke/fno_sh_smoke.sh::else miss "binary:$b" "absent (uv tool install must surface the wheel's shared_scripts)"; fi
 cli/tests/smoke/test_postinstall.sh::for needle in "uv tool install" "pip install --user" "ERROR:"; do

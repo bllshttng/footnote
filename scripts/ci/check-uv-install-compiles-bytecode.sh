@@ -46,9 +46,19 @@ mode = sys.argv[3] if len(sys.argv) > 3 else ""
 RE_SHELL = re.compile(r'(?<!`)(?:\buv\b|["\'][^"\']+["\'])\s+tool\s+install')
 RE_RUST = re.compile(r'["\']tool["\']\s*,\s*["\']install["\']')
 RE_PY = re.compile(r'["\']uv["\']\s*,\s*["\']tool["\']\s*,\s*["\']install["\']')
-# Command position: line start, optionally behind `if !`, or a shell runner
-# token ("$FNO_UV", `uv`) right before the command words.
-RE_CMDPOS = re.compile(r'^\s*(?:if\s+!?\s*)?(?:"[^"]*"|uv)\s+tool\s+install')
+# Command position: the command words sit at line start OR right after a shell
+# separator (`;`, `&&`, `||`, a pipe), optionally behind keyword/wrapper words
+# (`if`, `then`, `exec`, `sudo`, a YAML `run:`), and are spelled either bare
+# (`uv`) or as a quoted runner ("$FNO_UV"). Anchoring at line start ALONE let a
+# real run site behind `exec`, `sudo`, or `&&` read as prose, and prose is
+# baseline-able - so the gate could be silenced over a live unflagged install.
+# `(` is deliberately NOT a separator: prose routinely parenthesizes the
+# command mid-sentence.
+RE_CMDPOS = re.compile(
+    r'(?:^|[;|&]\s*)\s*'
+    r'(?:(?:if|then|else|elif|do|exec|sudo|env|time|run:|!)\s+)*'
+    r'(?:"[^"]*"|uv)\s+tool\s+install'
+)
 SKIP_SUFFIXES = {".md", ".lock", ".json", ".toml"}
 # Self-reference: this checker's own --self-test fixtures quote unflagged
 # invocations on purpose, and the baseline's entries ARE the quoted lines.
@@ -68,7 +78,7 @@ def classify(line):
         return None
     if RE_RUST.search(line) or RE_PY.search(line) or '"tool"' in line or "'tool'" in line:
         return "inv"
-    return "inv" if RE_CMDPOS.match(line) else "prose"
+    return "inv" if RE_CMDPOS.search(line) else "prose"
 
 
 def window_for(path_lines, i):
@@ -116,7 +126,11 @@ def check(pairs):
     for rel, kind, lineno, window, raw in pairs:
         if "--compile-bytecode" in window:
             continue
-        key = f"{rel}::{re.sub(r'\s+', ' ', raw.strip())}"
+        # Hoisted out of the f-string: a backslash inside an f-string
+        # expression is a SyntaxError before Python 3.12, and this repo
+        # supports 3.11.
+        collapsed = re.sub(r"\s+", " ", raw.strip())
+        key = f"{rel}::{collapsed}"
         (violations if kind == "inv" else prose).append((rel, lineno, key))
     return violations, prose
 
@@ -142,12 +156,22 @@ def run_self_test():
             "single.py": "cmd = ['uv', 'tool', 'install', '--reinstall', src]",
             # Commented-out code executes nothing: skipped entirely.
             "commented.rs": '            // .args(["tool", "install", "--force", source])',
+            # A run site is a run site behind a wrapper word or a separator.
+            # Reading these as prose would let a baseline entry bless them.
+            "exec.sh": 'exec uv tool install --force fno',
+            "sudo.sh": 'sudo uv tool install --force fno',
+            "chain.sh": 'command -v uv && uv tool install --force fno',
+            "runner.sh": 'if ! "$FNO_UV" tool install --force "$SRC"; then',
+            "yaml.yml": '      run: uv tool install --force fno',
         }
         for name, body in cases.items():
             (tmp / name).write_text(body + "\n", encoding="utf-8")
         pairs = collect(tmp, list(cases))
         violations, prose = check(pairs)
-        assert sorted(v[0] for v in violations) == ["a.sh", "b.rs", "c.py", "single.py"], violations
+        assert sorted(v[0] for v in violations) == [
+            "a.sh", "b.rs", "c.py", "chain.sh", "exec.sh", "runner.sh",
+            "single.py", "sudo.sh", "yaml.yml",
+        ], violations
         assert sorted(p[0] for p in prose) == ["prose.sh", "prose2.sh"], prose
     print("check-uv-install-compiles-bytecode self-test OK")
     sys.exit(0)

@@ -297,6 +297,38 @@ def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(
     assert "fno-py" in line, "marker verify must be present"
 
 
+def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No uv on PATH -> the pip fallback execs bare. The retry wrapper's
+    success marker reads `uv tool dir`, so wrapping pip would refuse a
+    perfectly good install on exactly the machines that have no uv."""
+    import fno.update as update_mod
+
+    monkeypatch.setattr(update_mod, "_source_rev", lambda src: None)
+    import fno.pr_watch.cli as pw_cli
+    monkeypatch.setattr(
+        pw_cli, "_resolve_fno_binary",
+        lambda: (_ for _ in ()).throw(RuntimeError("no binary")),
+    )
+    monkeypatch.setattr(
+        update_mod.shutil, "which", lambda name: None if name == "uv" else f"/usr/bin/{name}"
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_execvp(file: str, args: list[str]) -> None:
+        captured["file"] = file
+        captured["args"] = args
+
+    monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
+
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert captured["file"] != "/bin/sh", "pip must not go through the uv wrapper"
+    assert "pip" in captured["args"]
+
+
 # ---------------------------------------------------------------------------
 # Fix 7: delegation-path test - real update_command, only leaf I/O stubbed
 # ---------------------------------------------------------------------------

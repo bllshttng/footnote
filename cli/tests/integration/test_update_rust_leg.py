@@ -67,12 +67,6 @@ def _make_repo(root: Path) -> tuple[Path, str, str]:
     return cli_src, head_rev, crates_rev
 
 
-def _stub(path: Path, log: Path) -> None:
-    """Executable that records its args and exits 0."""
-    path.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0\n', encoding="utf-8")
-    path.chmod(0o755)
-
-
 def _cargo_stub(
     path: Path, log: Path, cargo_home: Path, crates_rev: str, head_rev: str
 ) -> None:
