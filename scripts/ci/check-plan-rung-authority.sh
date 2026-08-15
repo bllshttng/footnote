@@ -179,7 +179,7 @@ crates/fno-agents/src/verify_evidence.rs:9
 crates/fno-agents/src/wait.rs:4
 crates/fno/build.rs:2
 crates/fno/src/agents_view.rs:73
-crates/fno/src/backlog_view.rs:79
+crates/fno/src/backlog_view.rs:91
 crates/fno/src/bootstrap.rs:11
 crates/fno/src/client.rs:56
 crates/fno/src/clipboard.rs:2
