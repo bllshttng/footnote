@@ -86,6 +86,23 @@ def test_lowercase_idle_from_current_claude_still_fills(
     assert rows["target-x-4a48-fleet-status"]["live_status"] == "Working (loop 2m ago)"
 
 
+def test_done_from_all_flag_still_fills(tmp_path, monkeypatch, _patch_claude):
+    """``claude_agents_json`` now passes ``--all``, so a stopped/completed row
+    arrives in live_map as "Done" instead of being absent. Without this fill,
+    the raw supervisor status would silently win over the richer PR/CI-aware
+    truth-status fallback for every row a reap or liveness sweep can now see."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry([_claude("target-x-4a48-fleet-status", short_id="s1")])
+    _patch_claude({"s1": {"live_status": "Done"}})
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda nid, **_: {"state": "working", "last_loop_check_age_s": 120},
+    )
+    rows = _rows(monkeypatch, tmp_path)
+    assert rows["target-x-4a48-fleet-status"]["live_status"] == "Working (loop 2m ago)"
+
+
 def test_target_worker_passes_manifest_cwd_to_truth_resolver(
     tmp_path, monkeypatch, _patch_claude
 ):

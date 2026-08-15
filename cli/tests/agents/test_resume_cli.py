@@ -611,6 +611,31 @@ def test_claude_resume_skips_waking_an_already_working_row() -> None:
     assert res.output == "alpha (deadbeef): Working -> Working\n"
 
 
+def test_claude_resume_skips_waking_an_already_idle_row() -> None:
+    """An Idle row is live and reachable, not blocked: injecting keystrokes
+    risks destroying unsubmitted composer text for no benefit, and must not
+    be scored a failure just because Idle isn't the Working wake target."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Idle"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+    assert res.output == "alpha (deadbeef): Idle -> Idle\n"
+
+
 def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
     """A wake that lands but whose subprocess outlives the timeout must not
     be scored a failure: the post-attempt state read must run even when

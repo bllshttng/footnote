@@ -160,12 +160,16 @@ def list_agents(
             live_status = (live_map.get(entry.short_id) or {}).get(
                 "live_status"
             )
-        # The provider normalizes every claude spelling, so "Idle" is what
-        # arrives here. The case-insensitive compare is defensive: a live_map
-        # from any other producer that skipped that normalization would
-        # otherwise silently disable this fill, which is how a lowercase "idle"
-        # slipped past a Title-case-only check once already.
-        if live_status is None or str(live_status).lower() == "idle":
+        # The provider normalizes every claude spelling, so "Idle"/"Done" is
+        # what arrives here. The case-insensitive compare is defensive: a
+        # live_map from any other producer that skipped that normalization
+        # would otherwise silently disable this fill, which is how a
+        # lowercase "idle" slipped past a Title-case-only check once already.
+        # "Done" joined this set once ``claude_agents_json`` started passing
+        # ``--all``: a stopped/completed row now arrives in live_map instead
+        # of being absent, and without this, its raw supervisor status would
+        # silently win over the richer PR/CI-aware truth-status fallback.
+        if live_status is None or str(live_status).lower() in ("idle", "done"):
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(

@@ -182,7 +182,8 @@ Config is the consent: merge only when `auto_merge.enabled` (or the project's eq
 This is the difference between a track that walks and one that silently wedges, so check it before you conclude a wave is stuck.
 
 **Take over.**
-`fno agents attach <name>` joins a running session interactively (claude only); `resume` restarts one in its recorded cwd via the provider's own resume CLI; `stop` ends it.
+
+`fno agents attach <name>` joins a running session interactively, claude only. `resume` restarts a codex, gemini, or opencode row through the provider's own resume CLI. For a claude row it wakes a blocked or stopped session headlessly in place, with no attach and no exec, then verifies the state moved. `stop` ends it.
 `stop` and `peek` work everywhere, so on a non-claude provider observe with `peek` and end with `stop`.
 Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 

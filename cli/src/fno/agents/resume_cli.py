@@ -126,6 +126,11 @@ _DEFAULT_WAKE_MESSAGE = "continue"
 _WAKE_ATTEMPTS = 2
 _WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
 _WAKE_TARGET_STATUS = "Working"
+# A row already in one of these needs no wake: Working is the target itself,
+# and Idle is a live, reachable session that may hold unsubmitted composer
+# text — injecting keystrokes into it risks destroying that text for no
+# benefit, since the row isn't blocked or stopped in the first place.
+_WAKE_SKIP_STATUSES = frozenset({"Working", "Idle"})
 
 
 def _default_agents_state_fn() -> dict[str, dict]:
@@ -148,10 +153,10 @@ def _script_wrapped_attach(short_id: str) -> str:
     BSD ``script`` (macOS, the verified environment) takes the command as
     trailing argv: ``script -q /dev/null claude attach <id>``. GNU/util-linux
     ``script`` (Linux) has no such form -- the command rides ``-c`` instead:
-    ``script -qc "claude attach <id>" /dev/null``. Branching here mirrors the
-    existing ``sys.platform`` split in ``spawn_gate.py`` rather than guessing
-    one syntax and failing silently on the other (the wake would report exit
-    16 with no clue the real cause was a platform mismatch).
+    ``script -qc "claude attach <id>" /dev/null``. Branching here picks the
+    right syntax up front rather than guessing one and failing silently on
+    the other (the wake would report exit 16 with no clue the real cause was
+    a platform mismatch).
 
     A real BSD ``sys.platform`` carries a trailing version number (e.g.
     ``freebsd13``, ``openbsd7``) -- it never ends in the literal substring
@@ -304,16 +309,17 @@ def _resume_claude_wake(
     before = _state_of()
     after = before
     last_err = ""
-    # Already Working (a stale-registry race, or the operator resuming the
-    # wrong name): don't inject anything into a session mid-turn. Skip
-    # straight to reporting; the loop below never runs. This check is only
-    # AT loop entry, not re-read immediately before each wake_fn call: if
-    # the session transitions to Working during _default_wake_fn's ~7s
-    # pre-clear sleep, the keystrokes still land. Narrowing that window
+    # Already Working or Idle (a stale-registry race, the operator resuming
+    # the wrong name, or a live session that isn't actually blocked): don't
+    # inject anything into a session mid-turn. Skip straight to reporting;
+    # the loop below never runs. This check is only AT loop entry, not
+    # re-read immediately before each wake_fn call: if the session
+    # transitions out of a skip-eligible state during _default_wake_fn's
+    # ~7s pre-clear sleep, the keystrokes still land. Narrowing that window
     # needs the wake subprocess itself to poll and abort mid-sleep, which
     # would change the verified wake.sh recipe's timing; accepted as a
     # residual few-second race rather than risk that.
-    if before != _WAKE_TARGET_STATUS:
+    if before not in _WAKE_SKIP_STATUSES:
         for _attempt in range(_WAKE_ATTEMPTS):
             try:
                 wake_fn(short_id, message=message, route_env=route_env)
@@ -344,7 +350,10 @@ def _resume_claude_wake(
     except OSError:  # best-effort telemetry; never mask the resume outcome.
         pass
 
-    if after != _WAKE_TARGET_STATUS:
+    # A skipped row (before already Working/Idle) reports success on its
+    # `before` state even when that state isn't the wake target: nothing was
+    # attempted, so "did it reach Working" is the wrong question to ask.
+    if before not in _WAKE_SKIP_STATUSES and after != _WAKE_TARGET_STATUS:
         return ResumeResult(
             exit_code=16,
             stderr=(
