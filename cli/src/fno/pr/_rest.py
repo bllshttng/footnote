@@ -1,4 +1,4 @@
-"""REST reads behind `fno pr status` (x-9715 item 1).
+"""REST reads behind `fno pr status`.
 
 The GraphQL quota is per-USER and shared by every session on the machine, so
 the documented idle behaviour (watchers, stop-hook reads) exhausted it while

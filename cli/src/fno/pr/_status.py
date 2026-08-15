@@ -5,8 +5,8 @@ Agents kept re-deriving CI-green from `statusCheckRollup` by hand (or trusting
 settled/green/red verdict from the check rollup, handling
 the in-progress case (a CheckRun with `status != COMPLETED` has an empty
 `conclusion` and must read as *pending*, never red) and the no-checks case
-(verdict `unknown`, never red). The rollup arrives over REST (`fno.pr._rest`,
-x-9715) so the read spends the idle core budget, never the shared GraphQL one.
+(verdict `unknown`, never red). The rollup arrives over REST (`fno.pr._rest`)
+so the read spends the idle core budget, never the shared GraphQL one.
 
 Exit codes (so a caller can branch without re-parsing the JSON):
     0  green    - settled, every check passed
@@ -141,7 +141,7 @@ def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
     here, so a caller saw the same four fields for a deleted PR, a network
     failure, and an exhausted API quota.
 
-    The reads are REST (x-9715): `gh pr view` spends the per-USER GraphQL quota
+    The reads are REST: `gh pr view` spends the per-USER GraphQL quota
     that every watcher on the machine shares, and its exhaustion blinded the
     stop hook for whole reset windows while core REST sat untouched. See
     ``fno.pr._rest``; the GraphQL reader this replaced lived inline here.
@@ -301,8 +301,8 @@ def main(argv: Sequence[str]) -> int:
     try:
         from fno.pr._cache import cached_status
 
-        # The CLI chokepoint goes through the coalescing cache (x-9715 item
-        # 5): N sessions polling one PR issue one network read per TTL. The
+        # The CLI chokepoint goes through the coalescing cache: N sessions
+        # polling one PR issue one network read per TTL. The
         # library entry (run_status) stays uncached for programmatic callers
         # and tests.
         return cached_status(str(argv[0]))

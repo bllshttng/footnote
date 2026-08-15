@@ -1527,8 +1527,8 @@ struct GraphqlQuota {
     reset_epoch: i64,
 }
 
-/// Below this GraphQL remaining count, a no-promise fire stands down entirely
-/// (x-9715 item 4): the last of the budget belongs to the operation that
+/// Below this GraphQL remaining count, a no-promise fire stands down entirely:
+/// the last of the budget belongs to the operation that
 /// ships. Code default, named in the PR body - never the operator's config.
 const GRAPHQL_FLOOR: i64 = 200;
 
@@ -5505,7 +5505,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
     let git_bin = &parsed.git_bin;
     let head_sha = git_head_sha(git_bin, &cwd);
 
-    // ── x-9715 item 4: reserve a GraphQL floor for the merge guard ────────────
+    // ── reserve a GraphQL floor for the merge guard ────────────────────────
     // The GraphQL quota is per-USER and shared by every session on the machine;
     // an idle fire's fingerprint reads are the unbounded low-value consumer that
     // starves the bounded high-value one (the promise/merge evaluation). Below
@@ -6695,8 +6695,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // still the binding ceiling, not budget. AC4-EDGE holds only in
                 // the sense that budget is checked before any gh read, so a gh
                 // outage alone never makes a session immortal from fno's side.
-                // Name the real reason when the quota is the reason (x-9715 item
-                // 2). "retrying next fire" is the right advice for a blip and
+                // Name the real reason when the quota is the reason.
+                // "retrying next fire" is the right advice for a blip and
                 // the worst possible advice for an exhausted quota: it burns a
                 // fire every tick for the whole reset window on a call that
                 // cannot succeed. The probe is REST and primary-exempt, so it
@@ -6922,8 +6922,8 @@ fn short_sha(s: &str) -> String {
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker (codex P2): a review wait
     // has CI already green, so a checks watcher returns instantly and the
-    // session just re-blocks. Both recipes poll on REST at a 60s interval
-    // (x-9715 item 3): `gh pr checks --watch` / `gh pr view` are GraphQL, and
+    // session just re-blocks. Both recipes poll on REST at a 60s interval:
+    // `gh pr checks --watch` / `gh pr view` are GraphQL, and
     // a fleet of 60s GraphQL watchers is exactly what exhausts the per-USER
     // quota the merge guard needs. The CI recipe greps for the POSITIVE
     // settled marker, never for an absence: a rate-limited read answers
@@ -9581,7 +9581,7 @@ mod tests {
         let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("<watching"), "got: {reason}");
         assert!(reason.contains("timeout"), "got: {reason}");
-        // x-9715 item 3: the taught watcher is the REST status poll, never the
+        // The taught watcher is the REST status poll, never the
         // GraphQL `gh pr checks --watch` this assertion used to pin.
         assert!(reason.contains("fno pr status"), "got: {reason}");
         assert!(!reason.contains("gh pr checks"), "got: {reason}");
@@ -10741,7 +10741,7 @@ mod tests {
     #[test]
     fn unwatched_async_nudge_review_uses_review_aware_watcher() {
         // codex P2: the review-wait watcher must poll REVIEW state, not
-        // checks. x-9715 item 3: it must also poll on REST - the GraphQL
+        // checks. It must also poll on REST - the GraphQL
         // reviews read is part of what exhausts the shared quota.
         let hint = arm_watch_hint(404, "review");
         assert!(hint.contains("pulls/404/reviews"), "got: {hint}");

@@ -1,4 +1,4 @@
-"""Tests for the REST settledness reader behind `fno pr status` (x-9715 item 1).
+"""Tests for the REST settledness reader behind `fno pr status`.
 
 The load-bearing guard: the settledness reader issues NO GraphQL call, so a
 watching fleet spends the idle core budget instead of the shared per-USER

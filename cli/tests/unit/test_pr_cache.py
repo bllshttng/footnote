@@ -1,4 +1,4 @@
-"""Tests for the `fno pr status` coalescing cache (x-9715 item 5).
+"""Tests for the `fno pr status` coalescing cache.
 
 The load-bearing claim: N sessions polling one PR issue ONE network read per
 TTL (a secondary limit counts request rate, so transport does not save you -
@@ -10,6 +10,7 @@ a fixed-interval retry that sustains the refusal.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -163,3 +164,24 @@ def test_first_read_secondary_failure_stays_loud(cache_env, monkeypatch, capsys)
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "error"
     assert out["settled"] is False
+
+
+def test_corrupt_cached_exit_code_falls_through_to_a_live_read(cache_env, monkeypatch, capsys):
+    """A row written by a different schema (a concurrent fno install) has a
+    non-numeric `exit`. A crash is not an option; neither is silently serving
+    the corrupt row - it must read as a miss and produce exactly one fresh
+    JSON line, not the corrupt line followed by a second live one."""
+    cache_env.mkdir(parents=True, exist_ok=True)
+    (cache_env / "owner--repo-42.json").write_text(json.dumps({
+        "ts": time.time(),
+        "exit": "bad-schema",
+        "output": {"verdict": "green", "settled": True},
+    }))
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    code = _cache.cached_status("42")
+    assert code == 0
+    assert calls["n"] == 1, "a corrupt exit code must fall through to a live read"
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1, f"expected exactly one JSON line, got: {lines}"
+    assert json.loads(lines[0])["verdict"] == "green"

@@ -1,4 +1,4 @@
-"""TTL coalescing cache for `fno pr status` (x-9715 item 5 - load-bearing).
+"""TTL coalescing cache for `fno pr status` (load-bearing).
 
 The GraphQL quota is per-USER, and the REST SECONDARY limit counts request
 rate, so N sessions polling one PR trip it no matter which transport they
@@ -13,8 +13,8 @@ never a fresh-looking row, and never a silent retry that sustains the very
 refusal it is waiting out. Transient (non-secondary) failures are NOT
 cached: a loud error must reach every caller, not be replayed from disk.
 
-Code defaults, deliberately not operator config (x-9715 constraint): TTL
-60s, backoff base 60s, cap 900s. Env overrides exist for tests and one-off
+Code defaults, deliberately not operator config: TTL 60s, backoff base 60s,
+cap 900s. Env overrides exist for tests and one-off
 tuning: FNO_PR_STATUS_TTL, FNO_PR_STATUS_BACKOFF_CAP, FNO_PR_STATUS_CACHE_DIR.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# Defaults named in the x-9715 PR body: change them here, never in the
+# Defaults named in the PR body: change them here, never in the
 # operator's live config file.
 DEFAULT_TTL_SECONDS = 60
 DEFAULT_BACKOFF_CAP_SECONDS = 900
@@ -82,6 +82,16 @@ def _serve(row: dict, *, stale: bool) -> int:
         # Nothing servable ever landed in the row (a first-read secondary
         # failure). Fall through to a live read rather than fabricate one.
         return -1
+    exit_raw = row.get("exit")
+    try:
+        code = 4 if exit_raw is None else int(exit_raw)
+    except (TypeError, ValueError):
+        # A row written by a different schema (a concurrent fno install
+        # polling the same PR) is corrupt, same as an unparseable file:
+        # a miss, never a crash. Checked BEFORE the stdout write below, so
+        # a corrupt exit code falls through to one clean live read rather
+        # than a served line followed by a second, live-read line.
+        return -1
     if stale:
         out["stale_reason"] = (
             "secondary rate limit backoff - serving the last cached verdict, "
@@ -89,8 +99,7 @@ def _serve(row: dict, *, stale: bool) -> int:
         )
     out["cached"] = True
     sys.stdout.write(json.dumps(out) + "\n")
-    exit_raw = row.get("exit")
-    return 4 if exit_raw is None else int(exit_raw)
+    return code
 
 
 def cached_status(pr: str, cwd: Optional[str] = None) -> int:

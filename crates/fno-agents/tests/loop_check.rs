@@ -5854,7 +5854,7 @@ fn line_bucket(line: &str, label: &str) -> usize {
         .unwrap_or_else(|_| panic!("no digits after {label:?} in {line}"))
 }
 
-// ── x-9715: GraphQL quota floor + exhaustion naming ──────────────────────────
+// ── GraphQL quota floor + exhaustion naming ───────────────────────────────
 
 /// A gh mock that answers ONLY `api rate_limit` (GraphQL bucket per `remaining`
 /// in the script body) and `--version`, fails everything else, and logs every
