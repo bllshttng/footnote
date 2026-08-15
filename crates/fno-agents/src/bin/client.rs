@@ -3049,7 +3049,7 @@ mod tests {
         // nonzero one has nothing to be read against.
         let out = render_reap(&summary(&["a1"], &[]), false, false);
         assert!(
-            out.starts_with("reaped 1 row(s) (0 by the age backstop)"),
+            out.starts_with("reaped 1 row(s) (0 by the age backstop, 0 dormant done)"),
             "missing the zero backstop count: {out}"
         );
     }
@@ -3060,7 +3060,7 @@ mod tests {
         // said "reaped 0 row(s)" while the backstop deleted two rows.
         let out = render_reap(&summary(&[], &["b1", "b2"]), false, false);
         assert!(
-            out.starts_with("reaped 0 row(s) (2 by the age backstop)"),
+            out.starts_with("reaped 0 row(s) (2 by the age backstop, 0 dormant done)"),
             "backstop removals missing from the totals: {out}"
         );
         assert!(out.contains("  reaped b1 (age backstop"), "{out}");
@@ -3106,7 +3106,7 @@ mod tests {
     fn reap_dry_run_says_would_reap_not_reaped() {
         // `--dry-run` must never claim past tense on a row nothing removed.
         let out = render_reap(&summary(&["a1"], &["b1"]), false, true);
-        assert!(out.starts_with("would reap 1 row(s) (1 by the age backstop)"));
+        assert!(out.starts_with("would reap 1 row(s) (1 by the age backstop, 0 dormant done)"));
         assert!(out.contains("  would reap a1"));
         assert!(out.contains("  would reap b1 (age backstop"));
         assert!(

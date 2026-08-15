@@ -6350,13 +6350,29 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             "the codex store holds no such session: its own answer, independent of claude's"
         );
 
-        for unknown in ["gemini", "opencode", "agy", ""] {
+        for unknown in ["gemini", "opencode", "agy"] {
             assert!(
                 idx.matches(&row_for(Some(unknown), Some("sid-1234")))
                     .is_none(),
                 "an unknown harness ({unknown}) is unjudgeable, never judged by another store"
             );
         }
+        // A row with no resolvable identity at all -- harness AND the legacy
+        // provider fallback both blank -- is unjudgeable too. Distinct from
+        // `harness: Some("")` alone: harness_name() treats a blank `harness`
+        // the same as `None` and falls back to legacy_provider (tested below,
+        // where the fixture's legacy_provider is "claude"), so this case must
+        // blank the fallback too or it silently resolves to a known store.
+        let blank = RegistryEntry {
+            harness: Some(String::new()),
+            harness_session_id: Some("sid-1234".to_string()),
+            legacy_provider: String::new(),
+            ..ask_row("keying", None)
+        };
+        assert!(
+            idx.matches(&blank).is_none(),
+            "no resolvable harness identity at all is unjudgeable"
+        );
         // No session id on the row: unjudgeable even for a known harness.
         assert!(idx.matches(&row_for(Some("claude"), None)).is_none());
         // A row whose harness falls back to the legacy provider field keys the
