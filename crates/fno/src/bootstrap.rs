@@ -416,18 +416,19 @@ fn uv_tool_dir(uv: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(tool_dir))
 }
 
-/// Compose the install-failure message. Pure (uv has already printed its own
-/// error to the inherited stderr) so the wording is unit-testable, and
-/// `redact_source` is applied HERE so no caller can leak a credential-bearing
-/// source by forgetting to.
+/// Compose the install-failure message. Pure (install_wheel captures uv's
+/// output and re-emits it verbatim before returning) so the wording is
+/// unit-testable, and `redact_source` is applied HERE so no caller can leak a
+/// credential-bearing source by forgetting to.
 ///
 /// This used to say "Check your network / PyPI access". uv exits nonzero for
 /// plenty of reasons that are not the network -- the case that prompted this was
 /// `failed to remove directory .../lib: Directory not empty (os error 66)`,
-/// printed verbatim on the line immediately above. That error now has a cause
-/// and a fix (bytecode writes racing the reinstall; closed by
-/// `--compile-bytecode` in `install_wheel`), so uv's own error above is the
-/// pointer only for the failures we have NOT yet diagnosed.
+/// re-emitted verbatim by install_wheel after every attempt. That signature now
+/// has a cause (bytecode writes racing the removal walk) and a bounded retry in
+/// install_wheel; `--compile-bytecode` shrinks the window but does not close it
+/// (docs/architecture/cli-lazy-imports.md), so uv's own error above is the
+/// pointer for the failures we have NOT yet diagnosed.
 fn install_failure_message(source: &str) -> String {
     format!(
         "`uv tool install {}` failed; uv's own error is printed above. \
