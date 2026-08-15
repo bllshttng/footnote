@@ -47,9 +47,14 @@ def _run_lifecycle(*args: str) -> int:
 
 
 @app.command()
-def status() -> None:
-    """List active worktrees with branch, last-commit age, and target status."""
-    raise typer.Exit(code=_run_lifecycle("status"))
+def status(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit one JSON object per worktree plus a bucket summary."
+    ),
+) -> None:
+    """List active worktrees with branch, last-commit age, and real session status."""
+    args = ["status", "--json"] if json_out else ["status"]
+    raise typer.Exit(code=_run_lifecycle(*args))
 
 
 @app.command()

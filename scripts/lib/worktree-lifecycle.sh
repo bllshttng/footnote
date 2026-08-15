@@ -165,27 +165,18 @@ _wt_all_orphans() {
 
 case "${1:-status}" in
     status)
-        echo "Worktrees:"
-        git worktree list --porcelain 2>/dev/null | while IFS= read -r line; do
-            case "$line" in
-                "worktree "*)
-                    WT_PATH="${line#worktree }"
-                    ;;
-                "branch "*)
-                    BRANCH="${line#branch refs/heads/}"
-                    # Check target status
-                    TARGET=""
-                    if [[ -f "$WT_PATH/.fno/target-state.md" ]]; then
-                        TARGET=$(grep '^status:' "$WT_PATH/.fno/target-state.md" 2>/dev/null | awk '{print $2}')
-                    elif [[ -L "$WT_PATH/.fno" && -f "$WT_PATH/.fno/target-state.md" ]]; then
-                        TARGET=$(grep '^status:' "$WT_PATH/.fno/target-state.md" 2>/dev/null | awk '{print $2}')
-                    fi
-                    # Last commit age
-                    LAST=$(cd "$WT_PATH" 2>/dev/null && git log -1 --format="%cr" 2>/dev/null || echo "unknown")
-                    printf "  %-30s | %-15s | target: %-12s | %s\n" "$BRANCH" "$LAST" "${TARGET:-none}" "$WT_PATH"
-                    ;;
-            esac
-        done
+        shift
+        # Cross-references the agents registry (real session names + measured
+        # live/exited status) instead of `.fno/target-state.md`'s owner_pid,
+        # which names the short-lived `fno target init` CLI invocation and
+        # reads as dead within seconds of session start - see
+        # scripts/lib/worktree-status.py for the verified specimen.
+        if command -v python3 >/dev/null 2>&1; then
+            python3 "${_WT_LIFECYCLE_DIR}/worktree-status.py" --repo "$(pwd)" "$@"
+        else
+            echo "worktree status: python3 not found" >&2
+            exit 1
+        fi
         ;;
 
     cleanup)
