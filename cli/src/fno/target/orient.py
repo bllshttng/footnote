@@ -580,7 +580,11 @@ def _diff_review_level(project_root: Optional[Path]) -> Optional[str]:
     try:
         from fno.review_capability import level_for_diff
 
-        base = _git_out(project_root, "merge-base", "HEAD", "origin/main")
+        base = None
+        for candidate in ("origin/main", "origin/master"):
+            base = _git_out(project_root, "merge-base", "HEAD", candidate)
+            if base:
+                break
         if not base:
             return None
         numstat = _git_out(project_root, "diff", "--numstat", base)

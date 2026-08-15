@@ -81,7 +81,7 @@ Send this shape. It is not a style preference: every observed firing used it, an
 ```
 fno mail send <worker-handle> "REVIEW GRANTED for <branch-or-PR>. Invoke this in your session, as a command, against your diff:
 
-    /code-review <level> --comment --fix
+    /code-review <level> --comment [--fix]
 
 INVOKE IT FOR REAL. Type the verb. Do not substitute fno:code-reviewer, /fno:review, or a Bash approximation.
 
