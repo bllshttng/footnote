@@ -155,7 +155,7 @@ def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
     seen = _capture_audits(monkeypatch)
 
     # Unwrapped -> one audit record; wrapped envelope -> none.
-    _mux_pane_send(_mux_entry(), "/code-review medium --fix")
+    _mux_pane_send(_mux_entry(), "/code-review <level> --comment --fix")
     _mux_pane_send(_mux_entry(), "<fno_mail from=\"a\">hi</fno_mail>")
 
     assert len(seen) == 1, "only the unwrapped payload is audited"
@@ -166,7 +166,7 @@ def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
     assert event["type"] == "agent_raw_inject"
     assert event["source"] == "daemon"
     data = event["data"]
-    assert data["payload"] == "/code-review medium --fix"
+    assert data["payload"] == "/code-review <level> --comment --fix"
     assert data["lane"] == "mux-pane"
     assert data["harness"] == "claude"
     assert data["target_cwd"] == "/w"

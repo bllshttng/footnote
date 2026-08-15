@@ -1099,11 +1099,12 @@ struct PrInfo {
 /// human to remember.
 /// The fourth element encodes per-harness verb overrides as
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
-/// rendering. The self-review verb is the one case: `/code-review` on claude,
-/// `/review` bare on codex. The codex value must stay bare - prose after the
-/// verb flips codex to a no-merge-base review target - so a no-whitespace
-/// check on the codex value is a unit test, not a convention. Kept honest
-/// against the Python descriptor's `invocations` map by
+/// rendering. The self-review verb is the one case: `/code-review <level>
+/// --comment --fix` on claude (the Python builder sizes `<level>` from the
+/// diff; `ultra` is not issuable), `/review` bare on codex. The codex value
+/// must stay bare - prose after the verb flips codex to a no-merge-base review
+/// target - so a no-whitespace check on it is a unit test. Kept honest against
+/// the Python descriptor's `invocations` map by
 /// check-reviewer-descriptor-parity.sh.
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review sigma", false, ""),
@@ -1111,7 +1112,7 @@ const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
         "code-review",
         "/code-review",
         false,
-        "claude=/code-review;codex=/review",
+        "claude=/code-review <level> --comment --fix;codex=/review",
     ),
     ("declare", "/fno:review declare", true, ""),
 ];
@@ -10685,7 +10686,7 @@ mod tests {
         );
         assert_eq!(
             reviewer_invocation_for("code-review", Some("claude")),
-            Some(("/code-review", false))
+            Some(("/code-review <level> --comment --fix", false))
         );
         assert_eq!(
             reviewer_invocation_for("code-review", None),

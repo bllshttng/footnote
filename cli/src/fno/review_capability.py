@@ -324,7 +324,13 @@ def _resolve_one(
         if per_harness:
             verb = per_harness.get(session.harness)
             if verb is not None:
-                return verdict("satisfiable", f"run `{verb}`")
+                reason = f"run `{verb}`"
+                # Capability resolution runs before a diff exists, so a verb
+                # carrying a <level> placeholder teaches the sizing rule
+                # rather than baking one concrete level into the receipt.
+                if "<level>" in verb:
+                    reason += " (size <level> from the diff)"
+                return verdict("satisfiable", reason)
             if session.harness == "unknown":
                 return verdict(
                     "unverifiable",
@@ -427,24 +433,64 @@ def harness_can_self_review(harness: Optional[str]) -> bool:
     return harness in {"claude", "codex"}
 
 
-def self_review_invocation(harness: Optional[str]) -> str:
+# The effort levels an autonomous agent may issue. `ultra` is billed
+# separately, so it is not merely discouraged here - it is absent from the
+# tuple, which makes `self_review_invocation` raise on it and `level_for_diff`
+# unable to produce it. Any surface that names a level goes through one of
+# those two functions (enforced by the single-source CI check in
+# scripts/ci/), so a prose edit cannot reintroduce it either.
+ALLOWED_REVIEW_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# A tier holds only when BOTH dimensions sit inside its caps; either one alone
+# pushes the level up. Lines are additions plus deletions against the merge
+# base - the two dimensions are what a reviewer actually reads (breadth and
+# depth), which is why the node's --size (an intake-time guess) is not an
+# input here.
+_LEVEL_TIERS = (
+    ("low", 3, 150),
+    ("medium", 10, 600),
+    ("high", 25, 2500),
+    ("xhigh", 60, 8000),
+)
+
+
+def level_for_diff(changed_files: int, diff_lines: int) -> str:
+    """The review effort level for a diff of this shape. Pure and total.
+
+    Never returns `ultra`: the string does not exist in `_LEVEL_TIERS`, which
+    is the structural half of the billing guard."""
+    for level, cap_files, cap_lines in _LEVEL_TIERS:
+        if changed_files <= cap_files and diff_lines <= cap_lines:
+            return level
+    return "max"
+
+
+def self_review_invocation(harness: Optional[str], level: Optional[str] = "medium") -> str:
     """The recommended self-review invocation for a harness.
 
     Codex is `/review` bare - prose after the verb flips it to a no-merge-base
-    review target, so nothing is appended. Claude is `/code-review medium
+    review target, so nothing is appended. Claude is `/code-review <level>
     --comment --fix`: it takes its own argument grammar, and that form actually
-    posts comments and applies findings. The base verb is read from the
-    `code-review` descriptor's per-harness map (the parity-checked source of
-    truth), so this is not a third copy of the verbs; only the claude arg
-    grammar is hardcoded here."""
+    posts comments and applies findings. The verb AND the arg grammar are read
+    from the `code-review` descriptor's per-harness map (the parity-checked
+    source of truth), so this is not a second copy of either.
+
+    `level` is validated against `ALLOWED_REVIEW_LEVELS` - anything outside it
+    (`ultra` included) raises. `None` leaves the `<level>` placeholder in
+    place for a pre-diff surface that has no diff to size from yet."""
+    if level is not None and level not in ALLOWED_REVIEW_LEVELS:
+        raise ValueError(
+            f"review level {level!r} is not one of {ALLOWED_REVIEW_LEVELS}; "
+            "ultra is billed separately and no autonomous surface may issue it"
+        )
     from fno.config import _RESOLVABLE_REVIEWERS
 
     desc = _RESOLVABLE_REVIEWERS.get("code-review")
     invocations = desc.invocations if desc and desc.invocations else {}
-    base = invocations.get(harness or "", invocations.get("claude", "/code-review"))
-    if harness == "codex":
-        return base
-    return f"{base} medium --comment --fix"
+    invocation = invocations.get(harness or "", invocations.get("claude", "/code-review"))
+    if level is None or "<level>" not in invocation:
+        return invocation
+    return invocation.replace("<level>", level)
 
 
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:

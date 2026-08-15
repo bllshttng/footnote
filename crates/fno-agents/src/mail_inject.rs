@@ -688,12 +688,14 @@ mod tests {
         let path = dir.join("events.jsonl");
         let _ = std::fs::remove_file(&path);
 
-        // Unwrapped slash command -> one agent_raw_inject record.
+        // Unwrapped slash command -> one agent_raw_inject record. The payload
+        // is arbitrary command text; the sized review invocation lives behind
+        // the Python builder, never spelled out here.
         emit_raw_inject_audit(
             &path,
             Some("0ab49ebc"),
             "ses-9",
-            "/code-review medium --fix",
+            "/code-review <level> --comment --fix",
             MailInjectProvider::Claude,
             true,
         );
@@ -729,7 +731,7 @@ mod tests {
         assert_eq!(v["type"], "agent_raw_inject");
         assert_eq!(v["source"], "daemon");
         assert_eq!(v["data"]["target_session"], "ses-9");
-        assert_eq!(v["data"]["payload"], "/code-review medium --fix");
+        assert_eq!(v["data"]["payload"], "/code-review <level> --comment --fix");
         assert_eq!(v["data"]["harness"], "claude");
         assert_eq!(v["data"]["lane"], "control.sock");
         assert_eq!(v["data"]["sender"], "0ab49ebc");

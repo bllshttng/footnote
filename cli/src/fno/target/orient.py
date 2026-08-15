@@ -569,13 +569,46 @@ def _local_review_gates(review: Any) -> List[str]:
     return gates
 
 
-def _self_review_clause() -> str:
+def _diff_review_level(project_root: Optional[Path]) -> Optional[str]:
+    """The sized review level for this branch's current diff, or None.
+
+    None means no measurable diff yet (init, or no merge base): the caller then
+    leaves the `<level>` placeholder in the invocation rather than guessing a
+    level the diff has not earned. Advisory only; never raises."""
+    if project_root is None:
+        return None
+    try:
+        from fno.review_capability import level_for_diff
+
+        base = _git_out(project_root, "merge-base", "HEAD", "origin/main")
+        if not base:
+            return None
+        numstat = _git_out(project_root, "diff", "--numstat", base)
+        if not numstat:
+            return None
+        files = lines = 0
+        for row in numstat.splitlines():
+            parts = row.split("\t")
+            if len(parts) < 3:
+                continue
+            files += 1
+            for n in parts[:2]:
+                lines += 0 if n.strip() == "-" else int(n or 0)
+        return level_for_diff(files, lines) if files else None
+    except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
+        return None
+
+
+def _self_review_clause(project_root: Optional[Path] = None) -> str:
     """The self-review verb + fallback clause, or "".
 
     Names this harness's self-review verb and the ``--to-self --raw`` fallback so
     a session can satisfy the code-payload review gate itself rather than ask an
-    epic leader. The fallback is a prompt-line injection, so it is omitted on a
-    headless substrate (no prompt line exists there). Never raises."""
+    epic leader. The level is sized from the branch's actual diff when one
+    exists; pre-diff the invocation keeps its `<level>` placeholder instead of
+    baking in one concrete level. The fallback is a prompt-line injection, so it
+    is omitted on a headless substrate (no prompt line exists there). Never
+    raises."""
     try:
         from fno.review_capability import (
             detect_session,
@@ -586,7 +619,7 @@ def _self_review_clause() -> str:
         s = detect_session()
         if not harness_can_self_review(s.harness):
             return ""
-        verb = self_review_invocation(s.harness)
+        verb = self_review_invocation(s.harness, level=_diff_review_level(project_root))
     except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
         return ""
     harness = s.harness or "unknown"
@@ -662,7 +695,7 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
         # session serves itself instead of asking an epic leader. A configured
         # local lane already names the reviewer in the line above.
         if not local and getattr(review, "self_review_required", True):
-            clause = _self_review_clause()
+            clause = _self_review_clause(project_root)
             if clause:
                 line += f"; {clause}"
     if _is("attended", "false"):

@@ -115,10 +115,10 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
         "fno.inbox.store.write_new_thread", lambda *a, **k: durable.append(a) or object()
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "/code-review medium --fix", self_ok=False)
+        _raw_send("claudepeer", "/code-review <level> --comment --fix", self_ok=False)
     assert exc.value.exit_code == 0
     assert capsys.readouterr().out.strip() == "injected"
-    assert injected == [(SID_CLAUDE, "/code-review medium --fix", None)]
+    assert injected == [(SID_CLAUDE, "/code-review <level> --comment --fix", None)]
     assert not durable, "AC18: --raw never writes durable on any transport result"
 
 
@@ -138,7 +138,7 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
         "fno.inbox.store.write_new_thread", lambda *a, **k: durable.append(a) or object()
     )
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "/code-review medium --fix", self_ok=False)
+        _raw_send("claudepeer", "/code-review <level> --comment --fix", self_ok=False)
     assert exc.value.exit_code == 0
     out = capsys.readouterr().out
     assert "unconfirmed" in out
@@ -156,7 +156,7 @@ def test_raw_refuses_self_send_without_self_flag(mailbox, monkeypatch, capsys):
     injected = _seed_claude(mailbox, monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "/code-review medium --fix", self_ok=False)
+        _raw_send("claudepeer", "/code-review <level> --comment --fix", self_ok=False)
     assert exc.value.exit_code != 0
     err = capsys.readouterr().err
     assert "addressed this session" in err
@@ -228,9 +228,9 @@ def test_raw_injects_the_stripped_payload(mailbox, monkeypatch, capsys):
 
     injected = _seed_claude(mailbox, monkeypatch)
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "  /code-review medium --fix  ", self_ok=False)
+        _raw_send("claudepeer", "  /code-review <level> --comment --fix  ", self_ok=False)
     assert exc.value.exit_code == 0
-    assert injected == [(SID_CLAUDE, "/code-review medium --fix", None)]
+    assert injected == [(SID_CLAUDE, "/code-review <level> --comment --fix", None)]
 
 
 # --- --to-self (replaces the deleted --self): recipient derived from ambient

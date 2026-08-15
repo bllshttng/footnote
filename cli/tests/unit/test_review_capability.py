@@ -253,6 +253,66 @@ def test_self_review_invocation_names_the_harness_verb():
     assert " " not in rc.self_review_invocation("codex")
 
 
+def test_level_for_diff_sizes_from_both_dimensions():
+    """Either dimension alone pushes the tier up: a tier holds only when both
+    the file count and the line count sit inside its caps."""
+    import fno.review_capability as rc
+
+    assert rc.level_for_diff(1, 40) == "low"
+    assert rc.level_for_diff(3, 150) == "low"
+    assert rc.level_for_diff(4, 40) == "medium"
+    assert rc.level_for_diff(1, 151) == "medium"
+    assert rc.level_for_diff(10, 600) == "medium"
+    assert rc.level_for_diff(11, 10) == "high"
+    assert rc.level_for_diff(1, 601) == "high"
+    assert rc.level_for_diff(25, 2500) == "high"
+    assert rc.level_for_diff(26, 5) == "xhigh"
+    assert rc.level_for_diff(1, 2501) == "xhigh"
+    assert rc.level_for_diff(60, 8000) == "xhigh"
+    assert rc.level_for_diff(61, 3) == "max"
+    assert rc.level_for_diff(1, 8001) == "max"
+    for files, lines in ((0, 0), (500, 1000000)):
+        assert rc.level_for_diff(files, lines) in rc.ALLOWED_REVIEW_LEVELS
+
+
+def test_ultra_is_structurally_unreachable():
+    import fno.review_capability as rc
+
+    assert "ultra" not in rc.ALLOWED_REVIEW_LEVELS
+    with pytest.raises(ValueError):
+        rc.self_review_invocation("claude", level="ultra")
+    for files, lines in ((0, 0), (1000, 10**9)):
+        assert rc.level_for_diff(files, lines) != "ultra"
+
+
+def test_self_review_invocation_takes_the_level():
+    import fno.review_capability as rc
+
+    assert (
+        rc.self_review_invocation("claude", level="high")
+        == "/code-review high --comment --fix"
+    )
+    # No diff in hand yet: the placeholder survives for a pre-diff surface.
+    assert (
+        rc.self_review_invocation("claude", level=None)
+        == "/code-review <level> --comment --fix"
+    )
+    # Codex never grows args, whatever level is offered.
+    assert rc.self_review_invocation("codex", level="high") == "/review"
+
+
+def test_satisfiable_verdict_carries_the_arg_grammar():
+    s = SessionCapability(harness="claude", substrate="pane", attended=True)
+    v = resolve_reviewers(["code-review"], s)[0]
+    assert v.status == "satisfiable"
+    assert "--comment --fix" in v.reason
+    assert "<level>" in v.reason
+    codex = SessionCapability(harness="codex", substrate="pane", attended=True)
+    cv = resolve_reviewers(["code-review"], codex)[0]
+    assert cv.status == "satisfiable"
+    assert "run `/review`" in cv.reason
+
+
 def test_code_review_is_scoped_to_harnesses_with_a_verb():
     """code-review resolves per its invocations map, mirroring subagent-dispatch:
     satisfiable on claude/codex (the only verbs that exist), unavailable on a

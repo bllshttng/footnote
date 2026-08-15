@@ -13,7 +13,7 @@ from fno.events import agent_raw_inject, validate
 def test_agent_raw_inject_constructor_minimal():
     event = agent_raw_inject(
         target_session="ses-9",
-        payload="/code-review medium --fix",
+        payload="/code-review <level> --comment --fix",
         harness="claude",
         lane="control.sock",
     )
@@ -24,7 +24,7 @@ def test_agent_raw_inject_constructor_minimal():
     # list (validate does not enforce per-type sources, so nothing caught it).
     assert event["source"] == "daemon"
     assert event["data"]["target_session"] == "ses-9"
-    assert event["data"]["payload"] == "/code-review medium --fix"
+    assert event["data"]["payload"] == "/code-review <level> --comment --fix"
     assert event["data"]["harness"] == "claude"
     assert event["data"]["lane"] == "control.sock"
     assert "sender" not in event["data"], "optional fields omitted when absent"
