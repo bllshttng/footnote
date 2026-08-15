@@ -887,7 +887,7 @@ def test_rebase_equivalent_receipt_satisfies_only_with_the_flag(
     assert equivalent["satisfied"] is True
     assert equivalent["result"] == "equivalent"
     assert equivalent["coverage"]["matched_sha"] == sha_a
-    assert equivalent["coverage"]["equivalence"] == "patch-id"
+    assert equivalent["coverage"]["equivalence"] == "patch-id+blob"
 
 
 def test_equivalence_refused_after_a_code_change(tmp_path: Path) -> None:
@@ -900,6 +900,60 @@ def test_equivalence_refused_after_a_code_change(tmp_path: Path) -> None:
 
     assert decision["satisfied"] is False
     assert decision["result"] == "stale"
+
+
+def test_equivalence_refused_after_a_whitespace_only_edit(tmp_path: Path) -> None:
+    """patch-id strips whitespace, so the identity also keys on blob ids: a
+    re-indent that changes Python semantics must not borrow the old receipt."""
+    repo, journal, _sha_a = _rebase_fixture(tmp_path)
+    _commit(repo, "re-indent", "a.txt", "   a\n")
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "stale"
+
+
+def test_equivalence_never_rescues_a_failed_receipt_for_head(
+    tmp_path: Path,
+) -> None:
+    """A fresh red for HEAD outranks an older green for a patch-equal
+    ancestor: the same patches can fail against a newer main."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    head = _git_ok(repo, "rev-parse", "HEAD")
+    write(
+        journal,
+        receipt(candidate_sha=sha_a, ts="2026-07-26T01:02:04Z"),
+        receipt(candidate_sha=head, ts="2026-07-26T02:02:04Z", result="failed"),
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["result"] == "failed"
+
+
+def test_equivalence_blocked_by_incomplete_journal_coverage(
+    tmp_path: Path,
+) -> None:
+    """The strict path refuses on malformed journal lines; the equivalence
+    path must not relax that fail-closed rule."""
+    repo, journal, sha_a = _rebase_fixture(tmp_path)
+    journal.write_text(
+        json.dumps(receipt(candidate_sha=sha_a)) + "\nnot-json\n",
+        encoding="utf-8",
+    )
+
+    decision = check_verification_evidence(
+        cwd=str(repo), event_paths=[journal], allow_equivalent=True
+    )
+
+    assert decision["satisfied"] is False
+    assert decision["coverage"]["complete"] is False
 
 
 def test_equivalence_refused_when_borrowed_sha_does_not_resolve(

@@ -538,6 +538,13 @@ def check_verification_evidence(
                 allow_equivalent
                 and not decision["satisfied"]
                 and not discovery_errors
+                # A failed verdict for HEAD itself is authoritative: the same
+                # patches can fail against a newer main, so an older green for
+                # a patch-equal ancestor must never override a fresh red.
+                and decision.get("result") != "failed"
+                # The strict path refuses on incomplete coverage; equivalence
+                # must not relax that (malformed lines, unreadable journals).
+                and decision["coverage"].get("complete")
             ):
                 equivalent = rebase_equivalent_evidence(
                     cwd=repo,
@@ -561,12 +568,15 @@ def check_verification_evidence(
 def _patch_identity(
     sha: str, *, cwd: str, base_ref: str = BASE_DEFAULT
 ) -> Optional[Tuple[str, ...]]:
-    """Sorted stable patch ids of the commits ``sha`` adds over its merge-base.
+    """Sorted patch identity of the commits ``sha`` adds over its merge-base.
 
     ``None`` on any failure (unresolvable ref, git error, empty id set); None
-    never matches anything, so every failure mode refuses. Patch ids are the
-    right key for rebase equivalence and nothing weaker is: a rebase preserves
-    them, a conflict resolution or any code edit changes them.
+    never matches anything, so every failure mode refuses. Two keys must both
+    match: stable patch ids (a rebase preserves them, a conflict resolution
+    changes them) and the cumulative ``git diff --raw`` blob lines over the
+    same range. The blob lines are load-bearing: patch-id strips whitespace,
+    so without them a re-indent that changes Python semantics would hash
+    identically.
     """
     try:
         mb = _git(["merge-base", base_ref, sha], cwd)
@@ -578,13 +588,19 @@ def _patch_identity(
         ids = run(["git", "patch-id", "--stable"], cwd=cwd, input_text=log.stdout)
         if ids.returncode != 0:
             return None
+        raw = _git(["diff", "--raw", "--no-abbrev", mb.stdout.strip(), sha], cwd)
+        if raw.returncode != 0:
+            return None
     except ToolMissing:
         return None
     found: set[str] = set()
     for line in ids.stdout.splitlines():
         parts = line.split()
         if parts:
-            found.add(parts[0])
+            found.add(f"patch-id:{parts[0]}")
+    for line in raw.stdout.splitlines():
+        if line.startswith(":"):
+            found.add(f"blob:{line}")
     return tuple(sorted(found)) or None
 
 
@@ -598,13 +614,14 @@ def rebase_equivalent_evidence(
 ) -> Optional[dict]:
     """Satisfy a refused strict decision from a receipt whose patches match.
 
-    Runs only when the strict exact-HEAD decision is unsatisfied (typically a
-    rebase rewrote HEAD after a full green run). Walks the already-discovered
-    receipts for a full/passed one that clears the trusted-producer test,
-    whose commit still resolves, and whose patch ids equal HEAD's. On a match
-    returns the strict decision with ``satisfied``, ``result:
-    "equivalent"``, and the borrowed commit named in coverage; no match
-    returns ``None`` and the refusal stands.
+    Runs only when the strict exact-HEAD decision is unsatisfied and the
+    refusal is not itself a failed HEAD verdict (typically a rebase rewrote
+    HEAD after a full green run). Walks the already-discovered receipts for a
+    full/passed one that clears the trusted-producer test, whose commit still
+    resolves, and whose patch identity equals HEAD's. On a match returns the
+    strict decision with ``satisfied``, ``result: "equivalent"``, and the
+    borrowed commit named in coverage; no match returns ``None`` and the
+    refusal stands.
     """
     from fno.events import ValidationError, validate
 
@@ -665,7 +682,7 @@ def rebase_equivalent_evidence(
                     "coverage": {
                         **decision.get("coverage", {}),
                         "matched_sha": sha,
-                        "equivalence": "patch-id",
+                        "equivalence": "patch-id+blob",
                     },
                 }
     return None
