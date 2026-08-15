@@ -103,6 +103,17 @@ def _merge_entries(legacy: dict, canonical: dict) -> dict:
         if isinstance(value, str) and value
     ]
     merged["last_review_ts"] = max(timestamps) if timestamps else None
+    # The blanket update above lets one twin's last_seen_state silently win.
+    # A terminal observation must not read back OPEN from its duplicate, so a
+    # terminal value on either side wins; otherwise the canonical side is kept.
+    if (
+        merged.get("last_seen_state") not in ("MERGED", "CLOSED")
+        and "last_seen_state" in legacy
+    ):
+        for terminal in ("MERGED", "CLOSED"):
+            if legacy.get("last_seen_state") == terminal:
+                merged["last_seen_state"] = terminal
+                break
     merged["merge_dispatched"] = bool(
         legacy.get("merge_dispatched") or canonical.get("merge_dispatched")
     )

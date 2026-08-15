@@ -205,6 +205,35 @@ class TestWatermarkStore:
             {"key": "316", "reason": "unresolvable-key", "state": "OPEN"}
         ]
 
+    def test_duplicate_collapse_keeps_terminal_last_seen_state(self, tmp_path):
+        """A MERGED twin must not read back OPEN from its duplicate."""
+        from fno.pr_watch._state import WatermarkStore
+
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps({
+            "owner/repo#9": {
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "retries": 0,
+                "parked": None,
+                "last_review_ts": None,
+            },
+            "Owner/Repo#9": {
+                "last_seen_state": "MERGED",
+                "merge_dispatched": True,
+                "retries": 0,
+                "parked": None,
+                "last_review_ts": None,
+            },
+        }))
+        store = WatermarkStore(path)
+
+        receipt = store.normalize_keys()
+
+        assert list(store.load()) == ["owner/repo#9"]
+        assert store.load()["owner/repo#9"]["last_seen_state"] == "MERGED"
+        assert receipt.normalized
+
 
 class TestTrackedStateBatch:
     """The production sweep reads each repository once and fails closed."""
