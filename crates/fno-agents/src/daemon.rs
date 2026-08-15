@@ -554,112 +554,153 @@ fn transcript_fresh_probe(log_path: Option<&str>, now: i64, window_secs: i64) ->
     Some(now.saturating_sub(secs) <= window_secs)
 }
 
-/// Every transcript file this row's harness store holds for its session id,
-/// keyed on the row's OWN harness. `None` means "cannot judge": no session id
-/// recorded, an unknown harness, or a store directory that cannot be read
-/// (AC5 fail-closed - an unreadable store has two explanations and only one of
-/// them is a dead session).
+/// One per-sweep index of the harness transcript stores. A registry-wide
+/// question ("which rows' sessions still exist in their own store") is answered
+/// by ONE walk per harness and in-memory lookups, never a walk per row: the
+/// first cut of this walked `~/.claude/projects` twice per past-grace row, and
+/// a live dry-run against a 125-row registry outran any operator's patience.
 ///
-/// claude: `~/.claude/projects/*/<session_id>*.jsonl`, searched across EVERY
-/// project dir because a session's transcript can live in more than one
-/// (EnterWorktree re-keys it; the other dir keeps a stub). codex: the rollout
-/// jsonl under `~/.codex/sessions/` embedding the session id in its filename -
-/// the same shape `fno.agents.discover.codex_rollout_for_session` resolves.
-/// A harness a reaper cannot speak for is NEVER judged by another harness's
-/// store (AC3): a codex row has no claude transcript by construction, so a
-/// claude-keyed probe would reap every codex worker on the machine.
-fn harness_transcript_matches(
-    harness: &str,
-    session_id: Option<&str>,
-) -> Option<Vec<std::path::PathBuf>> {
-    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    harness_transcript_matches_under(
-        &home.join(".claude").join("projects"),
-        &home.join(".codex").join("sessions"),
-        harness,
-        session_id,
-    )
+/// `None` from [`HarnessStoreIndex::matches`] means "cannot judge": no session
+/// id recorded, an unknown harness, or a store directory that could not be
+/// read (AC5 fail-closed - an unreadable store has two explanations and only
+/// one of them is a dead session).
+///
+/// claude: `~/.claude/projects/*/<session_id>*.jsonl`, across EVERY project
+/// dir because a session's transcript can live in more than one (EnterWorktree
+/// re-keys it; the other dir keeps a stub). codex: the rollout jsonl under
+/// `~/.codex/sessions/` embedding the session id in its filename - the same
+/// shape `fno.agents.discover.codex_rollout_for_session` resolves. A harness a
+/// reaper cannot speak for is NEVER judged by another harness's store (AC3): a
+/// codex row has no claude transcript by construction, so a claude-keyed probe
+/// would reap every codex worker on the machine.
+#[derive(Default)]
+struct HarnessStoreIndex {
+    /// Resolved store roots; `None` until the first lookup resolves them from
+    /// `$HOME` (or forever, for an index built `with_roots` in tests).
+    claude_root: Option<std::path::PathBuf>,
+    codex_root: Option<std::path::PathBuf>,
+    /// `(filename, path)` for every candidate file, or `None` until the first
+    /// lookup walks the store. `Some(Err(()))` marks a walk that hit an
+    /// unreadable directory: every later lookup answers None, fail closed.
+    claude: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
+    codex: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
 }
 
-/// The store-roots-injected core of [`harness_transcript_matches`], so the
-/// per-harness keying is unit-testable against temp trees instead of the
-/// developer's real `~/.claude` / `~/.codex`.
-fn harness_transcript_matches_under(
-    claude_root: &std::path::Path,
-    codex_root: &std::path::Path,
-    harness: &str,
-    session_id: Option<&str>,
-) -> Option<Vec<std::path::PathBuf>> {
-    let sid = session_id.filter(|s| !s.is_empty())?;
-    let root = match harness {
-        "claude" => claude_root.to_path_buf(),
-        "codex" => codex_root.to_path_buf(),
-        // Unknown/unsupported harness (gemini, opencode, ...): no store this
-        // reaper can read. Answer None, never another harness's store.
-        _ => return None,
-    };
-    let mut matches = Vec::new();
-    let mut read_ok = true;
-    // Bounded walk: claude is two levels (projects/<slug>/<file>.jsonl), codex
-    // is four (sessions/YYYY/MM/DD/rollout-*.jsonl). Depth 5 covers both.
-    fn walk(
-        dir: &std::path::Path,
-        sid: &str,
-        harness: &str,
-        depth: usize,
-        out: &mut Vec<std::path::PathBuf>,
-        ok: &mut bool,
-    ) {
-        if depth > 5 {
-            return;
+impl HarnessStoreIndex {
+    /// Test seam: fixed roots, so the per-harness keying is unit-testable
+    /// against temp trees instead of the developer's real `~/.claude`/`~/.codex`.
+    fn with_roots(claude_root: std::path::PathBuf, codex_root: std::path::PathBuf) -> Self {
+        HarnessStoreIndex {
+            claude_root: Some(claude_root),
+            codex_root: Some(codex_root),
+            ..Default::default()
         }
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => {
-                *ok = false;
-                return;
-            }
+    }
+
+    fn root(&self, harness: &str) -> Option<std::path::PathBuf> {
+        let slot = match harness {
+            "claude" => &self.claude_root,
+            "codex" => &self.codex_root,
+            _ => return None,
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
+        slot.clone().or_else(|| {
+            let home = std::path::PathBuf::from(std::env::var("HOME").ok()?);
+            match harness {
+                "claude" => Some(home.join(".claude").join("projects")),
+                _ => Some(home.join(".codex").join("sessions")),
+            }
+        })
+    }
+
+    /// Every transcript candidate this row's harness store holds for its
+    /// session id. Empty vector = the session is GONE from its own store.
+    fn matches(&mut self, e: &state::RegistryEntry) -> Option<Vec<std::path::PathBuf>> {
+        let sid = e.harness_session_id.as_deref().filter(|s| !s.is_empty())?;
+        let harness = e.harness_name();
+        let root = match harness {
+            "claude" | "codex" => self.root(harness)?,
+            // Unknown/unsupported harness (gemini, opencode, ...): no store
+            // this reaper can read. Answer None, never another harness's store.
+            _ => return None,
+        };
+        let cached_empty = match harness {
+            "claude" => self.claude.is_none(),
+            _ => self.codex.is_none(),
+        };
+        if cached_empty {
+            // First lookup for this harness: one walk, cached for the sweep
+            // (an unreadable store caches as Err, so it stays fail-closed
+            // for every later row too instead of re-walking per row).
+            let indexed = index_tree(&root, 0);
+            let parked = match harness {
+                "claude" => &mut self.claude,
+                _ => &mut self.codex,
             };
-            if file_type.is_dir() {
-                walk(&path, sid, harness, depth + 1, out, ok);
-            } else {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                let hit = match harness {
+            *parked = Some(indexed);
+        }
+        let files = match harness {
+            "claude" => self.claude.as_ref()?,
+            _ => self.codex.as_ref()?,
+        };
+        let files = files.as_ref().ok()?;
+        Some(
+            files
+                .iter()
+                .filter(|(name, _)| match harness {
                     // `<uuid>.jsonl` and its stub artifacts (`<uuid>.orphaned-...`)
                     // all prove the session still EXISTS in the store; which of
                     // them carries conversation is a content question this
                     // existence probe does not need to answer.
                     "claude" => name.starts_with(sid) && name.ends_with(".jsonl"),
-                    "codex" => name.starts_with("rollout-") && name.contains(sid),
-                    _ => false,
-                };
-                if hit {
-                    out.push(path);
-                }
-            }
-        }
+                    _ => name.starts_with("rollout-") && name.contains(sid),
+                })
+                .map(|(_, p)| p.clone())
+                .collect(),
+        )
     }
-    walk(&root, sid, harness, 0, &mut matches, &mut read_ok);
-    if !read_ok {
-        return None;
-    }
-    Some(matches)
 }
 
-/// Does this row's session still exist in its OWN harness's store?
-/// `Some(true)` the store holds no entry (positive evidence the session ended -
-/// the `claude rm` case, where the harness record is gone while the registry
-/// row survives), `Some(false)` still present, `None` unjudgeable.
-fn harness_session_probe(e: &state::RegistryEntry) -> Option<bool> {
-    harness_transcript_matches(e.harness_name(), e.harness_session_id.as_deref())
-        .map(|m| m.is_empty())
+/// Bounded walk collecting `(filename, path)` for every regular file under
+/// `dir` (claude is two levels, codex four; depth 5 covers both). `Err` on any
+/// unreadable directory: an unreadable store answers nothing, fail closed.
+fn index_tree(
+    dir: &std::path::Path,
+    depth: usize,
+) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
+    let mut out = Vec::new();
+    if depth > 5 {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir).map_err(|_| ())? {
+        let entry = entry.map_err(|_| ())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|_| ())?;
+        if file_type.is_dir() {
+            out.extend(index_tree(&path, depth + 1)?);
+        } else {
+            out.push((entry.file_name().to_string_lossy().into_owned(), path));
+        }
+    }
+    Ok(out)
+}
+
+/// The most recently written of the store's matches, for the freshness probe.
+/// Newest, not first: a session can leave stubs in other project dirs, and a
+/// stub whose creation post-dates the real transcript's last turn must not
+/// read as the fresher one is stale (a misread there only KEEPS a row, the
+/// fail-safe direction).
+fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    paths
+        .iter()
+        .max_by_key(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        })
+        .cloned()
 }
 
 /// Truth probes spent on live-idle rows per sweep. Bounded so a registry full
@@ -680,24 +721,22 @@ const CASCADE_TIMEOUT: Duration = Duration::from_secs(15);
 fn row_idle_secs(
     e: &state::RegistryEntry,
     now: i64,
-    transcript_for: &dyn Fn(&state::RegistryEntry) -> Option<std::path::PathBuf>,
+    transcript: Option<&std::path::Path>,
 ) -> Option<i64> {
     let msg = e
         .last_message_at
         .as_deref()
         .and_then(state::rfc3339_like_to_secs)
         .map(|s| s as i64);
-    let transcript = transcript_for(e)
-        .or_else(|| e.log_path.as_deref().map(std::path::PathBuf::from))
-        .and_then(|p| {
-            std::fs::metadata(p)
-                .ok()?
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs() as i64)
-        });
+    let transcript = transcript.and_then(|p| {
+        std::fs::metadata(p)
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs() as i64)
+    });
     let latest = [msg, transcript].into_iter().flatten().max()?;
     Some(now.saturating_sub(latest))
 }
@@ -710,11 +749,16 @@ fn row_idle_secs(
 /// done and is never rolled back by anything here.
 ///
 /// claude: `claude rm <short_id>` - the same surface `fno agents rm` shells
-/// out to, bounded here by CASCADE_TIMEOUT. codex: drop the session's entry
-/// from `~/.codex/session_index.jsonl` (transcript files stay; this is the
-/// index record, matching the Python rm teardown arm). opencode/gemini:
-/// registry-only by contract - nothing to cascade.
-fn cascade_harness_session(e: &state::RegistryEntry) -> Option<(String, String)> {
+/// out to, bounded here by CASCADE_TIMEOUT, and only fired when the caller's
+/// store index still sees the session (no refusal noise for work already
+/// done). codex: drop the session's entry from `~/.codex/session_index.jsonl`
+/// (transcript files stay; this is the index record, matching the Python rm
+/// teardown arm). opencode/gemini: registry-only by contract - nothing to
+/// cascade.
+fn cascade_harness_session_with(
+    index: &mut HarnessStoreIndex,
+    e: &state::RegistryEntry,
+) -> Option<(String, String)> {
     let row_id = if e.short_id.is_empty() {
         e.name.clone()
     } else {
@@ -725,8 +769,8 @@ fn cascade_harness_session(e: &state::RegistryEntry) -> Option<(String, String)>
             // Only cascade when the store still holds the session: a row whose
             // session is already gone has nothing to remove, and re-running
             // `claude rm` on a missing id would report a refusal for work that
-            // is already done.
-            if harness_session_probe(e) != Some(false) {
+            // is already done. An unjudgeable store (None) also skips.
+            if !matches!(index.matches(e), Some(hits) if !hits.is_empty()) {
                 return None;
             }
             let short_id = if e.short_id.is_empty() {
@@ -822,23 +866,6 @@ fn cascade_codex_index(
             format!("codex index write failed: {err}"),
         )),
     }
-}
-
-/// The transcript file the freshness probe should read for this row: the
-/// newest match in its own harness's store, so the freshness signal stops
-/// dying with fno's own log copies (routinely absent: 83 of 88 rows on the
-/// machine this was measured on had a missing `log_path`). `None` when the
-/// harness store cannot answer; the caller falls back to `log_path`.
-fn harness_transcript_path(e: &state::RegistryEntry) -> Option<std::path::PathBuf> {
-    let matches = harness_transcript_matches(e.harness_name(), e.harness_session_id.as_deref())?;
-    matches.into_iter().max_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    })
 }
 
 /// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
@@ -1069,15 +1096,16 @@ pub fn gc_sweep(
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
 ) -> GcSummary {
+    let store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
     gc_sweep_impl(
         home,
         emitter,
         grace_for_harness,
         false,
         &live_truth_tail_state,
-        &harness_session_probe,
-        &harness_transcript_path,
-        &cascade_harness_session,
+        &|e| store.borrow_mut().matches(e),
+        &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
     )
 }
 
@@ -1095,15 +1123,16 @@ pub fn gc_sweep_dry_run(
     // Never emitted to in dry-run mode (the whole write+emit tail is skipped
     // below), so an unused placeholder path satisfies the shared signature.
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
+    let store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
     gc_sweep_impl(
         home,
         &emitter,
         grace_for_harness,
         true,
         &live_truth_tail_state,
-        &harness_session_probe,
-        &harness_transcript_path,
-        &cascade_harness_session,
+        &|e| store.borrow_mut().matches(e),
+        &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
     )
 }
 
@@ -1121,11 +1150,10 @@ fn gc_sweep_impl(
     grace_for_harness: &dyn Fn(&str) -> Duration,
     dry_run: bool,
     truth_tail_state: &dyn Fn(&str) -> Option<String>,
-    // The two harness-store reads, injected for the same reason as
-    // `truth_tail_state`: a sweep-level test must not pass or fail depending
-    // on what happens to live in the developer's real ~/.claude / ~/.codex.
-    session_gone: &dyn Fn(&state::RegistryEntry) -> Option<bool>,
-    transcript_for: &dyn Fn(&state::RegistryEntry) -> Option<std::path::PathBuf>,
+    // The harness-store lookup (every transcript candidate this row's own
+    // store holds for its session id), injected so a sweep-level test never
+    // depends on what lives in the developer's real ~/.claude / ~/.codex.
+    store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
     // The post-reap harness-store cascade, injected for the same reason: a
     // test must be able to stage a refusal without mutating PATH/HOME.
     cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
@@ -1198,13 +1226,16 @@ fn gc_sweep_impl(
         // `None` (unknown) and fail-closed to Keep for want of a file nobody
         // writes anymore. `log_path` remains the fallback for a row with no
         // session id.
-        let harness_session_gone = if !is_live && terminal_or_dead && past_grace {
-            session_gone(e)
+        // ONE store lookup answers both the existence question (gone?) and
+        // the freshness question (newest match's mtime) for this row.
+        let store_hits = if !is_live && terminal_or_dead && past_grace {
+            store_matches(e)
         } else {
             None
         };
+        let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
         let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
-            let harness_path = transcript_for(e);
+            let harness_path = store_hits.as_deref().and_then(newest_by_mtime);
             match harness_path
                 .as_deref()
                 .and_then(|p| p.to_str())
@@ -1225,7 +1256,12 @@ fn gc_sweep_impl(
         // sweep into a subprocess farm.
         let mut dormant_done = false;
         if is_live && dormant_probes < DORMANT_PROBE_CAP {
-            if let Some(idle) = row_idle_secs(e, now, transcript_for) {
+            // The idle gate's transcript read comes from the same store index
+            // (in memory after the first build), never a fresh walk.
+            let transcript = store_matches(e)
+                .and_then(|m| newest_by_mtime(&m))
+                .or_else(|| e.log_path.as_deref().map(std::path::PathBuf::from));
+            if let Some(idle) = row_idle_secs(e, now, transcript.as_deref()) {
                 if idle > grace_secs {
                     let handle = if e.short_id.is_empty() {
                         e.name.as_str()
@@ -6294,14 +6330,21 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         std::fs::write(project.join("sid-1234.jsonl"), "{}\n").unwrap();
         std::fs::create_dir_all(&codex_root).unwrap();
 
-        let claude =
-            harness_transcript_matches_under(&claude_root, &codex_root, "claude", Some("sid-1234"))
-                .expect("claude store is readable, so it answers");
+        let row_for = |harness: Option<&str>, sid: Option<&str>| RegistryEntry {
+            harness: harness.map(str::to_string),
+            harness_session_id: sid.map(str::to_string),
+            ..ask_row("keying", None)
+        };
+        let mut idx = HarnessStoreIndex::with_roots(claude_root.clone(), codex_root.clone());
+
+        let claude = idx
+            .matches(&row_for(Some("claude"), Some("sid-1234")))
+            .expect("claude store is readable, so it answers");
         assert_eq!(claude.len(), 1, "the session exists in claude's own store");
 
-        let codex =
-            harness_transcript_matches_under(&claude_root, &codex_root, "codex", Some("sid-1234"))
-                .expect("codex store is readable, so it answers");
+        let codex = idx
+            .matches(&row_for(Some("codex"), Some("sid-1234")))
+            .expect("codex store is readable, so it answers");
         assert!(
             codex.is_empty(),
             "the codex store holds no such session: its own answer, independent of claude's"
@@ -6309,20 +6352,20 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
         for unknown in ["gemini", "opencode", "agy", ""] {
             assert!(
-                harness_transcript_matches_under(
-                    &claude_root,
-                    &codex_root,
-                    unknown,
-                    Some("sid-1234")
-                )
-                .is_none(),
+                idx.matches(&row_for(Some(unknown), Some("sid-1234")))
+                    .is_none(),
                 "an unknown harness ({unknown}) is unjudgeable, never judged by another store"
             );
         }
         // No session id on the row: unjudgeable even for a known harness.
-        assert!(
-            harness_transcript_matches_under(&claude_root, &codex_root, "claude", None).is_none()
-        );
+        assert!(idx.matches(&row_for(Some("claude"), None)).is_none());
+        // A row whose harness falls back to the legacy provider field keys the
+        // same way (harness_name resolves the alias).
+        let mut legacy = HarnessStoreIndex::with_roots(claude_root, codex_root);
+        let hits = legacy
+            .matches(&row_for(None, Some("sid-1234")))
+            .expect("claude (via legacy provider) store is readable, so it answers");
+        assert_eq!(hits.len(), 1);
     }
 
     /// AC1 end-to-end: an exited row past grace whose harness session is gone
@@ -6355,8 +6398,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| Duration::from_secs(3600),
             false,
             &|_| None, // truth tail: no live rows to probe
-            &|e| (e.name == "gone-session").then_some(true), // session gone from its store
-            &|_| None, // no harness transcript to read
+            // Session gone from its own store: the empty hit vector.
+            &|e| (e.name == "gone-session").then(Vec::new),
             &|_| None, // cascade: store holds nothing to remove
         );
 
@@ -6407,7 +6450,6 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|_| None,
             &|_| None,
-            &|_| None,
         );
         assert!(first.reaped.is_empty(), "first sight stamps, never reaps");
         let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -6438,8 +6480,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| Duration::from_secs(3600),
             false,
             &|_| None,
-            &|e| (e.name == "orph").then_some(true),
-            &|_| None,
+            &|e| (e.name == "orph").then(Vec::new),
             &|_| None,
         );
         assert_eq!(second.reaped, vec!["orph".to_string()]);
@@ -6487,7 +6528,6 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 "bgdone" => Some("done".to_string()),
                 _ => Some("watching".to_string()), // the credential-dead shape
             },
-            &|_| None,
             &|_| None,
             &|_| None,
         );
@@ -6538,7 +6578,6 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
             &|_| None,
             &|_| None,
             // The cascade refuses for this row: the harness store would not
