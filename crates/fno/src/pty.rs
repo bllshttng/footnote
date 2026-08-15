@@ -96,11 +96,15 @@ fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
 pub enum PtyError {
     #[error("failed to open pty: {0}")]
     OpenPty(String),
-    #[error("openpty did not return within {0:?}; the host pty layer may be wedged (check: ls /dev). \
-             This pane was refused, the mux server is still serving")]
+    #[error(
+        "openpty did not return within {0:?}; the host pty layer may be wedged (check: ls /dev). \
+             This pane was refused, the mux server is still serving"
+    )]
     OpenPtyTimeout(std::time::Duration),
-    #[error("openpty skipped: it timed out {0:?} ago and the host pty layer is still suspect \
-             (check: ls /dev). Retry once ls /dev returns")]
+    #[error(
+        "openpty skipped: it timed out {0:?} ago and the host pty layer is still suspect \
+             (check: ls /dev). Retry once ls /dev returns"
+    )]
     OpenPtyWedged(std::time::Duration),
     #[error("no spawnable shell: {0}")]
     Spawn(String),
@@ -411,9 +415,9 @@ fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
             note_wedge();
             Err(PtyError::OpenPtyTimeout(timeout))
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err(PtyError::OpenPty("the openpty thread ended without answering".into()))
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(PtyError::OpenPty(
+            "the openpty thread ended without answering".into(),
+        )),
     }
 }
 
