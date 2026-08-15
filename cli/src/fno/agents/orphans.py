@@ -37,8 +37,9 @@ from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
 #: Name prefix that makes a process ours by construction. `fno agents orphans
-#: --reap` kills only these, which is why the guard's refusal text hands back
-#: `exec -a fno-load-...` rather than a bare `timeout`.
+#: --reap` kills only these, which is why the guard's refusal text and
+#: scripts/lib/loadgen.sh both hand back an `fno-load-...` name rather than a
+#: bare `timeout`.
 FNO_PREFIX = "fno-"
 
 #: A named orphan younger than this is left alone. A worker that just launched

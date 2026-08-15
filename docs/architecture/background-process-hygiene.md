@@ -4,13 +4,23 @@ The contract for anything that keeps running after the command that started it. 
 
 ## The one line to copy
 
+Need CPU contention (a race repro, a starvation test)? Do not hand-roll a load generator. Call the helper:
+
+```bash
+bash scripts/lib/loadgen.sh start <label> <seconds> [count]
+```
+
+The bound is mandatory and the `fno-load-` name is mandatory; the script refuses anything else. It works from any lane that can run bash, which includes pytest fixtures, cargo test fixtures, and non-Claude workers the guard cannot see. `stop <label>` ends a batch early; an abandoned batch still dies at its bound.
+
+With no checkout at hand, the same guarantee by hand:
+
 ```bash
 timeout 300 bash -c 'exec -a fno-load-<node-or-session> yes > /dev/null'
 ```
 
 `timeout` is the death path. `exec -a fno-...` is the name. Use `bash` explicitly: zsh has no `exec -a`.
 
-Both halves earn their place. Without the bound the process outlives you. `yes` writing to `/dev/null` never even receives SIGPIPE, because no reader goes away and the sink always accepts. Without the name the survivor is anonymous in `top`. The only way to find its owner is `lsof` archaeology against a session task directory.
+Both halves earn their place. Without the bound the process outlives you. `yes` writing to `/dev/null` never even receives SIGPIPE, because no reader goes away and the sink always accepts. Without the name the survivor is anonymous in `top`. The only way to find its owner is `lsof` archaeology against a session task directory. The helper exists because a refusal text that teaches the hand-rolled form is a refusal producing the escape it prevents: every hand-rolled copy is one missing half away from being the orphan again.
 
 ## Two classes, two mechanisms
 
