@@ -925,6 +925,7 @@ def build_pane_argv(
             # Deliberately unfenced: agy is closed-source and its `--` support
             # is unverified, so fencing blind could break every agy pane. A
             # leading-flag seed fails loudly at agy's own parser either way.
+            # argv-fence: exempt (test_argv_fence_gate honors this marker)
             argv.append(message)
         return argv
     if provider == "opencode":
