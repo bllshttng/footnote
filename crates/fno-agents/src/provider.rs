@@ -997,6 +997,9 @@ pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
             return tail;
         }
     }
+    // argv-fence: exempt (opencode `--` support unverified; a leading-flag
+    // seed here rides a bare positional after a boolean flag, the known shape,
+    // and fails at opencode's own parser).
     vec![message.to_string()]
 }
 

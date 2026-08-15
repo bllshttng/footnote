@@ -26,6 +26,7 @@ match nothing fails loudly instead of certifying an empty sweep.
 """
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -39,8 +40,9 @@ PY_CONCAT = re.compile(r"^\s*([\w.]+)\s*=\s*[\w.]+\s*\+\s*\[(.*)\]")
 PY_EXTEND = re.compile(r"^\s*([\w.]+)\.extend\(\[(.*)\]\)\s*$")
 PY_APPEND = re.compile(r"^\s*([\w.]+)\.append\((.*)\)\s*$")
 RS_PUSH = re.compile(r"^\s*([\w.]+)\.push\((.*)\);?\s*$")
+RS_VEC = re.compile(r"vec!\[(.*)\]\s*;?\s*$")
 RS_ELEMENT = re.compile(
-    r"^\s*(?:(?:ctx\.)?(?:message|effective)\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\))\s*,\s*$"
+    r"^\s*(?:(?:ctx\.)?(?:message|full_prompt|prompt|seed|effective|msg)\.(?:clone|to_string)\(\)|normalize_codex_command\([^)]*\))\s*,\s*$"
 )
 PY_COMMENT = re.compile(r"^\s*#")
 RS_COMMENT = re.compile(r"^\s*//")
@@ -55,7 +57,7 @@ HAS_MESSAGE = re.compile(r"\b(?:message|full_prompt|prompt|seed|effective|msg)\b
 # flag) leaves a following seed as a bare positional, which is the exact
 # unfenced shape this gate exists to catch, so it falls through to VIOLATION.
 VALUE_FORM_FLAGS = frozenset(
-    {"-p", "-i", "-q", "--prompt", "--search", "--append-system-prompt"}
+    {"-p", "-i", "-q", "-m", "--prompt", "--search", "--append-system-prompt"}
 )
 
 # The container must be argv-shaped by name. Without this, any list named
@@ -91,7 +93,9 @@ def _list_opener_line(lines: list, idx: int) -> str:
     """
     depth = 0
     for j in range(idx - 1, -1, -1):
-        for ch in reversed(lines[j]):
+        # Brackets inside string literals are not structural: strip them so a
+        # seed containing "(" or "[" cannot hide the real opener.
+        for ch in reversed(re.sub(STR, "", lines[j])):
             if ch in ")]}":
                 depth += 1
             elif ch in "([{":
@@ -239,6 +243,13 @@ def scan_file(path: Path, is_rust: bool) -> list:
             ):
                 pushed = line.strip()
                 kind = _classify_prev(_prev_code_line(lines, idx - 1, is_rust))
+            if kind is None:
+                # Single-line vec! literal: classify the seed token in place,
+                # mirroring the Python inline-list arm.
+                m = RS_VEC.search(line)
+                if m and HAS_MESSAGE.search(re.sub(STR, "", m.group(1))):
+                    kind = _classify_inline(m.group(1))
+                    pushed = line.strip()
         if kind == "VIOLATION" and _exempt(lines, idx - 1, is_rust):
             kind = "exempt"
         if kind is not None:
@@ -246,7 +257,8 @@ def scan_file(path: Path, is_rust: bool) -> list:
     return found
 
 
-def scan_all() -> list:
+@lru_cache(maxsize=1)
+def _scan_all_cached() -> tuple:
     results = []
     py_files = [p for d in PY_DIRS for p in sorted(d.rglob("*.py"))]
     for p in py_files:
@@ -254,7 +266,12 @@ def scan_all() -> list:
     if RS_DIR.is_dir():
         for p in sorted(RS_DIR.rglob("*.rs")):
             results.extend(scan_file(p, is_rust=True))
-    return results
+    return tuple(results)
+
+
+def scan_all() -> list:
+    # The whole-tree scan runs once per pytest session, not once per test.
+    return list(_scan_all_cached())
 
 
 def test_every_positional_seed_push_is_fenced_value_form_or_exempt() -> None:
@@ -277,4 +294,5 @@ def test_scanner_still_sees_the_known_seams() -> None:
     assert counts.get("fenced", 0) >= 15, counts
     assert counts.get("value-form", 0) >= 8, counts
     assert counts.get("exempt", 0) >= 3, counts
-    assert sum(counts.values()) == len(results)
+    # An unexpected classification kind must surface, not silently count.
+    assert set(counts) <= {"fenced", "value-form", "exempt"}, counts
