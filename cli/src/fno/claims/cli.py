@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -666,14 +667,21 @@ def list_cmd(
     most claims in practice are global, so scanning only the local root - a
     near-always-empty directory - silently hid every global claim: 573 files
     on disk read as "no claims" (measured 2026-08-14). An explicit global
-    --prefix (e.g. node:) already resolved correctly and scans the same root
-    twice here; the seen-key dedup below makes that a no-op.
+    --prefix (e.g. node:) already resolved correctly and would resolve to the
+    same root as the global scan here; the root dedup below scans it once.
+    Stale-only piles still need --include-stale: list_claims defaults to
+    live/suspect claims only.
     """
     from .io import global_claims_root
 
+    roots: list[Path] = []
+    for r in (global_claims_root(), _node_aware_root(prefix)):
+        if r not in roots:
+            roots.append(r)
+
     seen: "set[str]" = set()
     results = []
-    for root in (global_claims_root(), _node_aware_root(prefix)):
+    for root in roots:
         for r in list_claims(prefix=prefix or None, include_stale=include_stale, root=root):
             if r["key"] in seen:
                 continue

@@ -599,6 +599,12 @@ pub fn carveout_age_item(carveouts_raw: &str, now: u64) -> Option<NeedItem> {
         let Some(epoch) = to_epoch_lenient(ts) else {
             continue;
         };
+        // `backfill` rows are the /pr-merged slot's, not the retro sweep's
+        // (it skips them entirely), so counting them would mint a Decision
+        // row whose advertised remedy cannot clear it.
+        if v.get("kind").and_then(|k| k.as_str()) == Some("backfill") {
+            continue;
+        }
         count += 1;
         if oldest.as_ref().is_none_or(|(e, _)| epoch < *e) {
             oldest = Some((epoch, ts.to_string()));
@@ -665,7 +671,12 @@ pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
         node: None,
         name: None,
         title: None,
-        ts: String::new(),
+        // The oldest claim's acquire time, so band sorting orders the row by
+        // its true age instead of an empty string floating it above every
+        // fresher operator question.
+        ts: chrono::DateTime::from_timestamp_millis(oldest.acquired_at_ms)
+            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default(),
         evidence: format!(
             "{stale_count} stale claim(s), oldest {}d ({}, holder {})",
             age_secs / 86_400,
@@ -684,13 +695,15 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Scan `dir` for `node:` claim files and their age, for [`stale_claim_item`].
-/// Reuses the same read primitives `client_verbs::claim_sweep_payload`
-/// already scans the claims dir with. Fail-open: a missing/unreadable dir or
-/// an unparseable lockfile yields fewer entries, never an error - same
-/// posture as `claim_sweep_payload`.
+/// Scan `dir` for `node:` / `dispatch:` claim files and their age, for
+/// [`stale_claim_item`]. Same prefix pair `client_verbs::claim_sweep_payload`
+/// scans (an orphaned dispatch lock is as dead as an orphaned node lock), and
+/// the same read primitives. Fail-open: a missing/unreadable dir or an
+/// unparseable lockfile yields fewer entries, never an error - same posture
+/// as `claim_sweep_payload`.
 fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
     let node_pfx = crate::claims::encode_key("node:");
+    let dispatch_pfx = crate::claims::encode_key("dispatch:");
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -698,13 +711,15 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !name.ends_with(".lock") || !name.starts_with(&node_pfx) {
+        if !name.ends_with(".lock")
+            || !(name.starts_with(&node_pfx) || name.starts_with(&dispatch_pfx))
+        {
             continue;
         }
         let Ok(rec) = crate::claims::read_claim_file(&entry.path()) else {
             continue; // gone-away or corrupted: skip, never abort
         };
-        if !rec.key.starts_with("node:") {
+        if !(rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")) {
             continue; // filename lied about its own key: exclude like the sweep does
         }
         let state = crate::claims::classify(&rec, None);
@@ -731,11 +746,29 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     };
 
     let (default_events, default_ledger) = default_sources(home);
-    let event_paths = if args.events_override.is_empty() {
-        default_events
-    } else {
+    let explicit_events = !args.events_override.is_empty();
+    let mut event_paths = if explicit_events {
         args.events_override
+    } else {
+        default_events
     };
+    // `fno outstanding ask` appends to the CANONICAL checkout's
+    // `.fno/events.jsonl` (never a linked worktree's), while the default
+    // project journal above is cwd-relative and this verb inherits the
+    // caller's cwd. Without the canonical journal in the set, a question
+    // asked from a worktree is invisible to the fold.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let canonical = crate::paths::canonical_repo_root(&cwd);
+    if let Some(root) = &canonical {
+        let canonical_events = root.join(".fno").join("events.jsonl");
+        let cwd_events = cwd.join(".fno").join("events.jsonl");
+        if !explicit_events
+            && canonical_events != cwd_events
+            && !event_paths.contains(&canonical_events)
+        {
+            event_paths.push(canonical_events);
+        }
+    }
     let ledger_path = args.ledger_override.unwrap_or(default_ledger);
 
     let mut events_raw = String::new();
@@ -757,9 +790,14 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     // Carve-out-age and stale-claim legs: durable on-disk state, not events,
     // so they are read directly here (IO layer) rather than folded from
     // `events_raw`, and never windowed by `since` (see the doc comments on
-    // `carveout_age_item` / `stale_claim_item`).
-    let carveouts_raw =
-        std::fs::read_to_string(PathBuf::from(".fno").join("carveouts.jsonl")).unwrap_or_default();
+    // `carveout_age_item` / `stale_claim_item`). The ledger lives under the
+    // canonical checkout's `.fno/` (`resolve_carveout_root` on the write
+    // side); a worktree only sees it through a skip-if-missing symlink, so
+    // read the canonical path directly and fall back to cwd outside a repo.
+    let carveouts_path = canonical
+        .map(|r| r.join(".fno").join("carveouts.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".fno").join("carveouts.jsonl"));
+    let carveouts_raw = std::fs::read_to_string(&carveouts_path).unwrap_or_default();
     if let Some(item) = carveout_age_item(&carveouts_raw, now_secs()) {
         items.push(item);
     }
@@ -1334,6 +1372,9 @@ mod tests {
         let raw = [
             carveout("2026-06-01T00:00:00Z", "oos-bug"),
             carveout("2026-06-15T00:00:00Z", "deferred"),
+            // The /pr-merged slot's rows are not sweep-harvestable; counting
+            // one would mint a row the advertised remedy cannot clear.
+            carveout("2026-06-20T00:00:00Z", "backfill"),
         ]
         .join("\n");
         let now = crate::state::rfc3339_like_to_secs("2026-07-15T00:00:00Z").unwrap();
@@ -1387,6 +1428,10 @@ mod tests {
         assert!(item.evidence.contains("node:x-orphan"));
         assert!(item.evidence.contains("dead-holder"));
         assert!(item.evidence.contains("56d"));
+        // ts carries the oldest claim's acquire time (band sort orders by age),
+        // never an empty string that floats the row above fresher questions.
+        // 56 days before the test's now (1.8e12 ms) lands in 2026-11.
+        assert!(item.ts.starts_with("2026-11-20T"), "ts={}", item.ts);
     }
 
     #[test]
