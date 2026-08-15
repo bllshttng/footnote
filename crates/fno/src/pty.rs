@@ -464,7 +464,17 @@ fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
         )));
     }
     match rx.recv_timeout(timeout) {
-        Ok(Ok(pair)) => Ok(pair),
+        Ok(Ok(pair)) => {
+            // A live open proves the host isn't wedged right now, so past
+            // timeouts stop counting toward the give-up threshold. Without
+            // this, MAX_TIMEOUTS_BEFORE_GIVING_UP accumulates across the
+            // thread's entire lifetime rather than one sustained incident -
+            // a server that recovers from several unrelated wedge episodes
+            // over weeks of uptime would otherwise permanently refuse every
+            // later pane, healthy host or not, until restarted.
+            TOTAL_TIMEOUTS.with(|c| c.set(0));
+            Ok(pair)
+        }
         Ok(Err(e)) => Err(PtyError::OpenPty(e)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             // This thread's spawned probe leaks (an uninterruptible kernel
@@ -1320,6 +1330,64 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("openpty"), "{msg}");
         assert!(msg.contains("ls /dev"), "{msg}");
+        std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
+    }
+
+    #[test]
+    fn open_pty_success_resets_the_giveup_counter() {
+        // Falsifier for the reset-on-success fix: without it, TOTAL_TIMEOUTS
+        // accumulates across the thread's whole lifetime instead of one
+        // sustained incident, so a host that recovers between separate
+        // wedge episodes would eventually and permanently refuse every
+        // later pane, healthy host or not, until the process is restarted.
+        let _gate = pty_gate();
+        std::env::set_var("FNO_MUX_OPENPTY_TIMEOUT_MS", "50");
+        set_total_timeouts(MAX_TIMEOUTS_BEFORE_GIVING_UP - 1);
+
+        // A healthy open (no hang injected) must succeed and reset the
+        // near-threshold count to 0, as if this were a fresh thread that
+        // had never seen a timeout.
+        set_hang_injection(std::time::Duration::ZERO);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+        PtyShell::spawn(
+            &shell_candidates(Some(OsStr::new("/bin/sh"))),
+            24,
+            80,
+            None,
+            "main",
+            0,
+            tx,
+            exit_tx,
+        )
+        .expect("a healthy host must still spawn one attempt below the threshold");
+
+        // Two fresh wedge attempts. Without the reset, the pre-success
+        // count (one below the threshold) survives the success, so the
+        // FIRST of these alone would cross the threshold and the SECOND
+        // would refuse immediately instead of paying the deadline again.
+        set_hang_injection(std::time::Duration::from_secs(60));
+        for i in 1..=2u64 {
+            clear_wedge_cooldown();
+            let (tx, _rx) = tokio::sync::mpsc::channel(64);
+            let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+            let err = PtyShell::spawn(
+                &shell_candidates(Some(OsStr::new("/bin/sh"))),
+                24,
+                80,
+                None,
+                "main",
+                i,
+                tx,
+                exit_tx,
+            )
+            .err()
+            .expect("host is wedged again, this attempt must time out");
+            assert!(
+                matches!(err, PtyError::OpenPtyTimeout(_)),
+                "attempt {i} must still pay the deadline, not read a stale near-threshold count: {err}"
+            );
+        }
         std::env::remove_var("FNO_MUX_OPENPTY_TIMEOUT_MS");
     }
 
