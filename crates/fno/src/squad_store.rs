@@ -168,7 +168,8 @@ pub fn origin_key(origins: &[String]) -> String {
 
 /// One persisted squad. Named workspaces key by `name`; an unnamed squad (empty
 /// `name` - a home squad or a project lane) keys by its durable `key`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Deliberately NOT `Eq`: `tab_trees` carries f32 split weights (x-caef).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredSquad {
     pub name: String,
     /// The durable identity of an UNNAMED squad (empty for a named one). Keeps
@@ -190,6 +191,16 @@ pub struct StoredSquad {
     /// loads to `[]`, so no squad is quarantined).
     #[serde(default)]
     pub tab_specs: Vec<StoredTabSpec>,
+    /// (x-caef) Every tab's full topology, in squad tab order. The successor
+    /// lane to `tab_specs` for shape; restore rebuilds from these when present
+    /// and falls back to the template/member lanes when absent (a pre-x-caef
+    /// store loads them as `[]`). `#[serde(default)]`, same no-bump rule.
+    #[serde(default)]
+    pub tab_trees: Vec<StoredTabTree>,
+    /// (x-caef) The squad's active tab INDEX at capture, clamped at restore.
+    /// `#[serde(default)]`, same no-bump rule as `tab_trees`.
+    #[serde(default)]
+    pub active_tab: Option<usize>,
 }
 
 /// One template-managed tab's persisted layout (x-c4d4). Keyed by `tab_name`,
@@ -200,6 +211,27 @@ pub struct StoredSquad {
 pub struct StoredTabSpec {
     pub tab_name: String,
     pub spec: crate::proto::LayoutSpec,
+}
+
+/// One persisted tab's FULL topology (x-caef): an arbitrary weighted tree
+/// (`layout get`'s shape, the struct `LayoutTreeSpec` graft already uses),
+/// not one of `LayoutSpec`'s five named templates. Capture is uniform across
+/// every tab of a persisted squad, so a hand split survives a restart exactly
+/// like a template tab does. Tabs have no id that outlives the server, so
+/// identity is POSITION in the squad's `tab_trees` vec, captured atomically
+/// with the whole squad; `tab_name` is the chosen name when there is one.
+/// Slot names are decided at CAPTURE (an fno pane names its slot its attach
+/// id and binds `Fno`; anything else is `p<ordinal>` binding `Shell`) so two
+/// snapshots of one session agree on which pane is which.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredTabTree {
+    #[serde(default)]
+    pub tab_name: Option<String>,
+    pub tree: crate::proto::LayoutTreeSpec,
+    pub slots: Vec<crate::proto::LayoutSlot>,
+    /// The slot name that held keyboard focus at capture.
+    #[serde(default)]
+    pub focus: Option<String>,
 }
 
 /// The lifecycle state of a tracked EXTERNAL (claude-daemon) row (x-7561). A
@@ -239,7 +271,7 @@ pub struct ExternalLifecycle {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 struct StoreFile {
     version: u32,
     #[serde(default)]
@@ -264,7 +296,7 @@ pub enum LifecycleCas {
 
 /// What [`load`] read: the (member-validated) squads plus an optional one-line
 /// notice for the operator (a quarantine, or dropped hostile ids).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Loaded {
     pub squads: Vec<StoredSquad>,
     /// (x-7561) The tracked external-row lifecycle tombstones, `attach_id`
@@ -425,10 +457,14 @@ pub fn upsert(
             .map(|s| s.created_at.clone())
             .filter(|c| !c.is_empty())
             .unwrap_or_else(now_iso);
-        // Preserve template tab specs (owned by set_tab_specs, not this path)
-        // across a membership upsert - the struct is rebuilt fresh, so an
-        // un-carried field would be silently wiped (x-c4d4).
+        // Preserve template tab specs and tab trees (owned by set_tab_specs /
+        // set_tab_trees, not this path) across a membership upsert - the struct
+        // is rebuilt fresh, so an un-carried field would be silently wiped
+        // (x-c4d4, x-caef).
         let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
+        let (tab_trees, active_tab) = existing
+            .map(|s| (s.tab_trees.clone(), s.active_tab))
+            .unwrap_or_default();
         squads.retain(|s| !same_squad(s, name, key));
         squads.push(StoredSquad {
             name: name.to_string(),
@@ -437,6 +473,8 @@ pub fn upsert(
             members: members.to_vec(),
             created_at,
             tab_specs,
+            tab_trees,
+            active_tab,
         });
     })
 }
@@ -457,6 +495,43 @@ pub fn set_tab_specs(name: &str, tab_specs: &[StoredTabSpec]) -> io::Result<()> 
                 members: Vec::new(),
                 created_at: now_iso(),
                 tab_specs: tab_specs.to_vec(),
+                tab_trees: Vec::new(),
+                active_tab: None,
+            });
+        }
+    })
+}
+
+/// Set the full tab-topology lane for the squad with this identity (`name` if
+/// named, else the durable `key` - an UNNAMED squad can hold a layout, which
+/// is gate 2 of the three the old template lane dropped), preserving every
+/// other field. Refuses to mint a row for an identity-less squad (the same
+/// skip `upsert` applies); an identity not present inserts a minimal entry
+/// only when `origins` are supplied, so the row carries what restore needs.
+pub fn set_tab_trees(
+    name: &str,
+    key: &str,
+    origins: &[String],
+    tab_trees: &[StoredTabTree],
+    active_tab: Option<usize>,
+) -> io::Result<()> {
+    if name.is_empty() && key.is_empty() {
+        return Ok(()); // no identity: the same skip upsert applies
+    }
+    mutate(|squads| {
+        if let Some(s) = squads.iter_mut().find(|s| same_squad(s, name, key)) {
+            s.tab_trees = tab_trees.to_vec();
+            s.active_tab = active_tab;
+        } else {
+            squads.push(StoredSquad {
+                name: name.to_string(),
+                key: key.to_string(),
+                origins: origins.to_vec(),
+                members: Vec::new(),
+                created_at: now_iso(),
+                tab_specs: Vec::new(),
+                tab_trees: tab_trees.to_vec(),
+                active_tab,
             });
         }
     })
@@ -837,8 +912,10 @@ fn collapse_groups(
         for &i in &ranked[1..] {
             let extra_members = std::mem::take(&mut squads[i].members);
             let extra_specs = std::mem::take(&mut squads[i].tab_specs);
+            let extra_trees = std::mem::take(&mut squads[i].tab_trees);
             squads[surv].members.extend(extra_members);
             squads[surv].tab_specs.extend(extra_specs);
+            squads[surv].tab_trees.extend(extra_trees);
             drop_idx.push(i);
         }
         // Dedup merged members by attach_id; a live member (tombstone=false)
@@ -857,6 +934,11 @@ fn collapse_groups(
         squads[surv]
             .tab_specs
             .dedup_by(|a, b| a.tab_name == b.tab_name);
+        // Trees have no durable per-tab key (identity is position, x-caef), so
+        // a merge dedups only exact duplicates - a would-be reshape by the heal
+        // is wrong, and any real divergence survives until the next topology
+        // mutation rewrites the survivor's whole vec.
+        squads[surv].tab_trees.dedup_by(|a, b| a == b);
     }
     drop_idx
 }
@@ -876,6 +958,9 @@ pub fn rename(
             .filter(|c| !c.is_empty())
             .unwrap_or_else(now_iso);
         let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
+        let (tab_trees, active_tab) = existing
+            .map(|s| (s.tab_trees.clone(), s.active_tab))
+            .unwrap_or_default();
         squads.retain(|s| s.name != old && s.name != new);
         squads.push(StoredSquad {
             name: new.to_string(),
@@ -884,6 +969,8 @@ pub fn rename(
             members: members.to_vec(),
             created_at,
             tab_specs,
+            tab_trees,
+            active_tab,
         });
     })
 }
@@ -1304,6 +1391,104 @@ mod tests {
     }
 
     #[test]
+    fn tab_trees_persist_by_key_for_an_unnamed_squad_and_survive_upsert() {
+        // x-caef gate 2: topology keys by squad IDENTITY (name or key), so an
+        // unnamed squad - the operator's `commanders` case, a named tab in an
+        // unnamed squad - holds a layout. A membership upsert must not wipe it.
+        use crate::proto::{LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec};
+        use crate::tree::Axis;
+        let _s = Scratch::new("tab-trees");
+        let tree = StoredTabTree {
+            tab_name: Some("commanders".into()),
+            tree: LayoutTreeSpec::Split {
+                axis: Axis::Horizontal,
+                children: vec![
+                    LayoutTreeChild {
+                        weight: 0.407,
+                        tree: LayoutTreeSpec::Slot("aaaaaaaa".into()),
+                    },
+                    LayoutTreeChild {
+                        weight: 0.593,
+                        tree: LayoutTreeSpec::Split {
+                            axis: Axis::Vertical,
+                            children: vec![
+                                LayoutTreeChild {
+                                    weight: 0.5,
+                                    tree: LayoutTreeSpec::Slot("p1".into()),
+                                },
+                                LayoutTreeChild {
+                                    weight: 0.5,
+                                    tree: LayoutTreeSpec::Slot("p2".into()),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            },
+            slots: vec![
+                LayoutSlot {
+                    name: "aaaaaaaa".into(),
+                    binding: LayoutBinding::Fno("aaaaaaaa".into()),
+                },
+                LayoutSlot {
+                    name: "p1".into(),
+                    binding: LayoutBinding::Shell,
+                },
+                LayoutSlot {
+                    name: "p2".into(),
+                    binding: LayoutBinding::Shell,
+                },
+            ],
+            focus: Some("p1".into()),
+        };
+        // An UNNAMED squad, keyed by its durable key with no name.
+        set_tab_trees(
+            "",
+            "k1",
+            &["/repo".into()],
+            std::slice::from_ref(&tree),
+            Some(0),
+        )
+        .unwrap();
+        let loaded = load();
+        assert_eq!(
+            loaded.squads.len(),
+            1,
+            "minimal row minted for the keyed lane"
+        );
+        assert_eq!(loaded.squads[0].tab_trees, vec![tree.clone()]);
+        assert_eq!(loaded.squads[0].active_tab, Some(0));
+        // A membership upsert (same identity) preserves the tree lane.
+        upsert("", "k1", &["/repo".into()], &[m("aaaaaaaa")]).unwrap();
+        let after = load();
+        assert_eq!(after.squads.len(), 1);
+        assert_eq!(
+            after.squads[0].tab_trees,
+            vec![tree.clone()],
+            "trees survive upsert"
+        );
+        assert_eq!(after.squads[0].members.len(), 1);
+        // An identity-less squad is skipped, exactly like upsert.
+        set_tab_trees("", "", &[], std::slice::from_ref(&tree), None).unwrap();
+        assert_eq!(load().squads.len(), 1, "no row minted without identity");
+    }
+
+    #[test]
+    fn pre_xcaef_store_loads_without_tab_trees_field() {
+        // Wire tolerance: a store written before x-caef has neither key. It
+        // must load unquarantined (STORE_VERSION unchanged), trees empty, and
+        // restore takes the legacy member/template lanes.
+        let s = Scratch::new("no-tab-trees");
+        let raw = r#"{"version":1,"squads":[{"name":"w","origins":[],"members":[],"created_at":"2026-08-11T00:00:00Z","tab_specs":[]}]}"#;
+        std::fs::write(s.file(), raw).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1, "not quarantined");
+        assert!(loaded.squads[0].tab_trees.is_empty());
+        assert_eq!(loaded.squads[0].active_tab, None);
+        assert!(loaded.notice.is_none());
+    }
+
+    #[test]
     fn upsert_then_load_roundtrips_and_preserves_created_at() {
         let _s = Scratch::new("roundtrip");
         upsert("harden", "", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
@@ -1406,6 +1591,8 @@ mod tests {
                 ],
                 created_at: "2026-07-11T00:00:00Z".into(),
                 tab_specs: vec![],
+                tab_trees: Vec::new(),
+                active_tab: None,
             }],
             ..StoreFile::default()
         };
@@ -1593,6 +1780,8 @@ mod tests {
                     members: vec![m("aaaaaaaa"), m("bbbbbbbb")],
                     created_at: "2026-07-23T00:00:00Z".into(),
                     tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
                 },
                 StoredSquad {
                     name: "fno".into(),
@@ -1601,6 +1790,8 @@ mod tests {
                     members: vec![m("cccccccc")],
                     created_at: "2026-07-26T00:00:00Z".into(),
                     tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
                 },
             ],
             external_lifecycle: vec![],
@@ -1643,6 +1834,8 @@ mod tests {
                     members: vec![m("aaaaaaaa")],
                     created_at: "2026-07-23T00:00:00Z".into(),
                     tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
                 },
                 StoredSquad {
                     name: "two".into(),
@@ -1651,6 +1844,8 @@ mod tests {
                     members: vec![m("bbbbbbbb")],
                     created_at: "2026-07-26T00:00:00Z".into(),
                     tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
                 },
             ],
             external_lifecycle: vec![],
@@ -1997,6 +2192,8 @@ mod tests {
             members: members.iter().copied().map(m).collect(),
             created_at: String::new(),
             tab_specs: Vec::new(),
+            tab_trees: Vec::new(),
+            active_tab: None,
         };
 
         // Named without --include-named -> SkipNamed (AC1-EDGE).
@@ -2155,6 +2352,8 @@ mod tests {
             members: Vec::new(),
             created_at: created_at.into(),
             tab_specs: Vec::new(),
+            tab_trees: Vec::new(),
+            active_tab: None,
         }
     }
 

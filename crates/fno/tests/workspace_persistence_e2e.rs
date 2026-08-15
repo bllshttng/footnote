@@ -73,7 +73,9 @@ fn symptom_rename_survives_restart() {
         name: "w1".into(),
         origin: Some(scratch.home_cwd()),
     });
-    c.wait_layout(10, "workspace w1 appears", |l| l.squads.iter().any(|s| s.name == "w1"));
+    c.wait_layout(10, "workspace w1 appears", |l| {
+        l.squads.iter().any(|s| s.name == "w1")
+    });
     let sid = squad_id(&c, "w1");
     c.cmd(Command::RenameSquad {
         squad: sid,
@@ -88,10 +90,9 @@ fn symptom_rename_survives_restart() {
     // Restore materializes persisted squads on the first attach, after the
     // initial layout: wait for the renamed workspace BY NAME so a slow
     // restore is never misread as a lost one.
-    r.client
-        .wait_layout(15, "renamed workspace restores", |l| {
-            l.squads.iter().any(|s| s.name == "w2")
-        });
+    r.client.wait_layout(15, "renamed workspace restores", |l| {
+        l.squads.iter().any(|s| s.name == "w2")
+    });
     let names: Vec<&str> = r
         .client
         .layout
@@ -101,7 +102,10 @@ fn symptom_rename_survives_restart() {
         .iter()
         .map(|s| s.name.as_str())
         .collect();
-    assert!(names.contains(&"w2"), "renamed workspace came back as {names:?}");
+    assert!(
+        names.contains(&"w2"),
+        "renamed workspace came back as {names:?}"
+    );
     assert!(
         !names.contains(&"w1"),
         "the pre-rename name resurrected alongside the rename: {names:?}"
@@ -120,7 +124,9 @@ fn symptom_hand_split_survives_restart() {
         name: "w".into(),
         origin: Some(scratch.home_cwd()),
     });
-    c.wait_layout(10, "workspace w appears", |l| l.squads.iter().any(|s| s.name == "w"));
+    c.wait_layout(10, "workspace w appears", |l| {
+        l.squads.iter().any(|s| s.name == "w")
+    });
     // A hand split (the prefix-key mutation), the exact topology the template
     // lane never captures: two panes in ONE tab.
     c.cmd(Command::SplitH);
@@ -134,8 +140,9 @@ fn symptom_hand_split_survives_restart() {
     let mut r = restart(&scratch);
     // Restore materializes persisted squads; wait until "w" reappears, then
     // pin its shape: still ONE tab holding TWO panes.
-    r.client
-        .wait_layout(15, "workspace w restores", |l| l.squads.iter().any(|s| s.name == "w"));
+    r.client.wait_layout(15, "workspace w restores", |l| {
+        l.squads.iter().any(|s| s.name == "w")
+    });
     let w = r
         .client
         .layout
@@ -170,14 +177,19 @@ fn symptom_removed_workspace_stays_removed() {
         name: "w".into(),
         origin: Some(scratch.home_cwd()),
     });
-    c.wait_layout(10, "workspace w appears", |l| l.squads.iter().any(|s| s.name == "w"));
+    c.wait_layout(10, "workspace w appears", |l| {
+        l.squads.iter().any(|s| s.name == "w")
+    });
     let sid = squad_id(&c, "w");
     c.cmd(Command::RemoveSquad(sid));
-    c.wait_layout(10, "workspace w removed", |l| !l.squads.iter().any(|s| s.name == "w"));
+    c.wait_layout(10, "workspace w removed", |l| {
+        !l.squads.iter().any(|s| s.name == "w")
+    });
     c.detach();
 
     let mut r = restart(&scratch);
-    r.client.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
+    r.client
+        .wait_layout(10, "squads appear", |l| !l.squads.is_empty());
     // Give a would-be resurrection the same window the other repros give the
     // legitimate restore, so this never passes by reading too early.
     r.client.pump(Duration::from_secs(3));
@@ -216,7 +228,11 @@ fn symptom_stale_live_row_does_not_respawn_a_dead_worker() {
     std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let marker = scratch.0.join("marker");
     let _ = std::fs::remove_file(&marker);
-    let path_with_stub = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let path_with_stub = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
 
     // A pid that is PROVABLY dead: reap a real short-lived child.
     let dead_pid = {
@@ -258,7 +274,9 @@ fn symptom_stale_live_row_does_not_respawn_a_dead_worker() {
     // Restore runs at first attach; give the spawn it should NOT make a
     // moment to have happened.
     c.pump(Duration::from_secs(3));
-    c.wait_layout(10, "workspace w appears", |l| l.squads.iter().any(|s| s.name == "w"));
+    c.wait_layout(10, "workspace w appears", |l| {
+        l.squads.iter().any(|s| s.name == "w")
+    });
 
     // Positive control: the stub is reachable through the server's own spawn
     // path (`pane run`), so an absent `attach` means "not spawned", never
@@ -277,7 +295,10 @@ fn symptom_stale_live_row_does_not_respawn_a_dead_worker() {
     c.pump(Duration::from_secs(2));
 
     let text = std::fs::read_to_string(&marker).unwrap_or_default();
-    assert!(text.contains("boot"), "stub never ran: control failed ({text:?})");
+    assert!(
+        text.contains("boot"),
+        "stub never ran: control failed ({text:?})"
+    );
     assert!(
         !text.contains("attach"),
         "restore spawned `claude attach deadbeef` for a row whose pid ({dead_pid}) is dead: the stale-live registry lie respawning a dead worker"

@@ -1868,7 +1868,10 @@ mod tests {
         let no_pid = reg(
             r#"{"name":"a","cwd":"/w","status":"working","harness":"claude","short_id":"aaaaaaaa"}"#,
         );
-        assert!(stale_live_attach_ids(&no_pid).is_empty(), "no pid -> not stale");
+        assert!(
+            stale_live_attach_ids(&no_pid).is_empty(),
+            "no pid -> not stale"
+        );
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         child.wait().unwrap();
