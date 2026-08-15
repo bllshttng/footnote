@@ -165,10 +165,10 @@ cat > "$RESULT4" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [{"node_id":"ab-aaa111","pr_number":10},{"node_id":"ab-bbb222","pr_number":11}], "failures": []}
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO4" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-echo "$OUT" | grep -q "closed 2 drifted node(s)" \
+grep -q "closed 2 drifted node(s)" <<<"$OUT" \
     || fail "render: reminder missing 'closed 2 drifted node(s)' (got: $OUT)"
-echo "$OUT" | grep -q "ab-aaa111" || fail "render: reminder missing node id ab-aaa111"
-echo "$OUT" | grep -q "ab-bbb222" || fail "render: reminder missing node id ab-bbb222"
+grep -q "ab-aaa111" <<<"$OUT" || fail "render: reminder missing node id ab-aaa111"
+grep -q "ab-bbb222" <<<"$OUT" || fail "render: reminder missing node id ab-bbb222"
 [[ ! -f "$RESULT4" ]] || fail "render: result not consumed (should move to .shown)"
 [[ -f "$RESULT4.shown" ]] || fail "render: consumed result not preserved as .shown"
 pass "render: closed-node reminder emitted; result consumed once"
@@ -184,7 +184,7 @@ cat > "$RESULT5" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [], "failures": []}
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO5" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-echo "$OUT" | grep -q "drifted node" \
+grep -q "drifted node" <<<"$OUT" \
     && fail "render: empty sweep wrongly emitted a reminder (got: $OUT)"
 [[ -f "$RESULT5.shown" ]] || fail "render: empty result not consumed to .shown"
 pass "render: empty sweep is silent and consumed"
@@ -202,10 +202,10 @@ cat > "$RESULT_PM" <<'JSON'
 {"dry_run": false, "candidates": [], "closed": [], "failures": [], "promise_unmet": [{"node_id":"x-dd1","reason":"deferred carve-out cv-99"},{"node_id":"x-dd2","reason":"close_probe failed"}]}
 JSON
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_PM" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-echo "$OUT" | grep -q "held 2 node(s) open on the promise gate" \
+grep -q "held 2 node(s) open on the promise gate" <<<"$OUT" \
     || fail "render: missing promise-gate held-open reminder (got: $OUT)"
-echo "$OUT" | grep -q "x-dd1" || fail "render: reminder missing node id x-dd1"
-echo "$OUT" | grep -q "x-dd2" || fail "render: reminder missing node id x-dd2"
+grep -q "x-dd1" <<<"$OUT" || fail "render: reminder missing node id x-dd1"
+grep -q "x-dd2" <<<"$OUT" || fail "render: reminder missing node id x-dd2"
 [[ ! -f "$RESULT_PM" ]] || fail "render: promise_unmet result not consumed to .shown"
 pass "render: promise-gate held-open reminder emitted; result consumed"
 
@@ -230,7 +230,7 @@ OUT=$(CLAUDE_PROJECT_DIR="$REPO_LEGACY" RECONCILE_THROTTLE_SECONDS=900 bash "$HO
 _RC_LEGACY=$?
 [[ "$_RC_LEGACY" -eq 0 ]] \
     || fail "render/legacy: hook exited $_RC_LEGACY on a result with no sync_catchup"
-echo "$OUT" | grep -q "ab-ccc333" \
+grep -q "ab-ccc333" <<<"$OUT" \
     || fail "render/legacy: reminder missing (got: $OUT)"
 [[ ! -f "$RESULT_LEGACY" ]] \
     || fail "render/legacy: result not consumed - the hook died before the mv"
@@ -338,7 +338,7 @@ printf '{"node_id":"x-1111","pr_url":"https://github.com/o/r/pull/1"}' > "$PENDI
 printf '{"node_id":"x-2222","pr_url":"https://github.com/o/r/pull/2"}' > "$PENDING_DIR/x-2222.json"
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_ADV" RETRO_PENDING_DIR="$PENDING_DIR" \
       RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-echo "$OUT" | grep -q "retro: 2 sentinel(s) pending harvest" \
+grep -q "retro: 2 sentinel(s) pending harvest" <<<"$OUT" \
     || fail "advisory: missing '2 sentinel(s) pending harvest' line (got: $OUT)"
 pass "advisory: pending count line renders"
 
@@ -348,7 +348,7 @@ touch "$REPO_ADV0/.fno/.reconcile-stamp"
 EMPTY_DIR="$WORK/pending-empty"; mkdir -p "$EMPTY_DIR"
 OUT=$(CLAUDE_PROJECT_DIR="$REPO_ADV0" RETRO_PENDING_DIR="$EMPTY_DIR" \
       RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
-echo "$OUT" | grep -q "pending harvest" \
+grep -q "pending harvest" <<<"$OUT" \
     && fail "advisory: emitted a line with zero pending sentinels (got: $OUT)"
 pass "advisory: zero sentinels is silent"
 

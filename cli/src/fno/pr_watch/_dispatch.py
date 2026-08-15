@@ -531,7 +531,7 @@ def _run_tick(
             )
         except ValueError:
             continue
-    normalization = store.normalize_keys(candidate_keys)
+    normalization = store.normalize_keys()
     dropped = list(normalization.dropped)
     delivery_store = WatermarkStore(path=_delivery_state_path(store_path))
     delivery_state = delivery_store.load()
@@ -576,7 +576,6 @@ def _run_tick(
             log.warning("pr-watch: tracked-state sweep failed: %s", exc)
             batch_states = {}
         for key in sorted(batch_keys):
-            swept.add(key)
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
             if current in ("MERGED", "CLOSED"):
@@ -754,14 +753,13 @@ def _run_tick(
                         log.warning("pr-watch: ritual dispatch for PR #%d failed: %s", pr, exc)
                         pm = None
                     if pm is not None and pm.outcome == "already-dispatched":
-                        # marker-exists = a completed hand-off: advance the
-                        # watermark so this PR stops re-deciding. lock-contention
-                        # = another detector holds the lock RIGHT NOW but may
-                        # still fail before writing the marker; do NOT advance,
-                        # so the next tick retries (by then either the marker
-                        # exists -> genuine skip, or the holder released a failed
-                        # claim -> this tick dispatches). Advancing on contention
-                        # would silently drop the ritual if that holder crashed.
+                        # Both branches evict the terminal cache row; retry after
+                        # contention comes from the next tick re-synthesizing a
+                        # fresh entry (merge_dispatched False) for the still-
+                        # discovered candidate. lock-contention = another
+                        # detector holds the lock RIGHT NOW but may still fail
+                        # before writing the marker, so only the marker branch
+                        # records the hand-off in the delivery sidecar.
                         if getattr(pm, "detail", None) == "lock-contention":
                             emit("pr_watch_skipped", {"pr": pr, "reason": "dispatch-in-flight"})
                         else:
@@ -852,6 +850,10 @@ def _run_tick(
                 _drop_cached_terminal(state, dropped, key, obs.state)
 
         finally:
+            # Delivery retries persist per candidate, like store.set's per-write
+            # persist: a mid-tick crash must not reset a terminal PR's retry
+            # count and re-arm unbounded dispatch attempts.
+            delivery_store.persist()
             try:
                 claim.release_pr_lock(pr_lock_key, holder)
             except Exception as exc:
