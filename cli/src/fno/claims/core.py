@@ -785,17 +785,48 @@ def refresh_claim(
     if existing.expires_at is None:
         return None
 
-    new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
-    refreshed = existing.model_copy(update={"expires_at": new_expires})
-
+    # Take the same per-key recovery mutex reap_dead_claims() holds while it
+    # re-verifies and archives a claim it proved dead. Without it,
+    # _atomic_replace happily recreates `path` even if reap already archived
+    # it in the gap between our unlocked read above and this write -
+    # silently resurrecting a claim GC just removed. Contention handling
+    # mirrors acquire_claim's idempotent branch: steal a corpse or wait
+    # briefly, then recurse rather than a bare retry loop.
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    acquired_lock = False
+    recovery_token = ""
     try:
-        _atomic_replace(path, serialize_claim(refreshed))
-    except FileNotFoundError as exc:
-        # File was unlinked between the existence check and the rename.
-        raise ClaimGoneAway(str(path)) from exc
+        try:
+            recovery_lock.mkdir(parents=True)
+            recovery_token = _stamp_owner(recovery_lock)
+            acquired_lock = True
+        except FileExistsError:
+            if not steal_if_stale(recovery_lock):
+                _wait_for_recovery_release(recovery_lock)
+            return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root)
 
-    emit_claim_refreshed(refreshed, previous=existing)
-    return refreshed
+        # Re-verify under the mutex: reap (or a concurrent stale-reclaim)
+        # could have archived or replaced this file since our unlocked read.
+        fresh_existing = read_claim_file(path)
+        if fresh_existing.holder != holder:
+            raise HolderMismatch(expected=holder, actual=fresh_existing.holder, key=key)
+        if fresh_existing.expires_at is None:
+            return None
+
+        new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
+        refreshed = fresh_existing.model_copy(update={"expires_at": new_expires})
+
+        try:
+            _atomic_replace(path, serialize_claim(refreshed))
+        except FileNotFoundError as exc:
+            # File was unlinked between our re-read and the rename.
+            raise ClaimGoneAway(str(path)) from exc
+
+        emit_claim_refreshed(refreshed, previous=fresh_existing)
+        return refreshed
+    finally:
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
 
 
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
@@ -996,9 +1027,6 @@ def _default_reap_roots() -> list[Path]:
     return _dedup_roots([global_claims_root(), None])
 
 
-_classify_for_sweep = classify_for_sweep
-
-
 def reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
@@ -1099,7 +1127,7 @@ def reap_dead_claims(
             # by both this outer scan and the mutex re-verify below, instead
             # of paid twice or three times per claim - the sweep runs on
             # every SessionStart reconcile.
-            provably_dead, bucket = _classify_for_sweep(claim, ts)
+            provably_dead, bucket = classify_for_sweep(claim, ts)
 
             if provably_dead:
                 if not apply:
@@ -1133,7 +1161,7 @@ def reap_dead_claims(
                     if fresh is None:
                         continue
 
-                    fresh_dead, fresh_bucket = _classify_for_sweep(fresh, ts)
+                    fresh_dead, fresh_bucket = classify_for_sweep(fresh, ts)
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
                         continue

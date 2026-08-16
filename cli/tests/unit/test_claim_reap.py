@@ -24,15 +24,16 @@ from typer.testing import CliRunner
 
 from fno.claims.cli import cli
 from fno.claims.core import (
+    ClaimGoneAway,
     ClaimHeldByOther,
-    _classify_for_sweep,
     acquire_claim,
     claim_status,
     list_claims_with_counts,
     reap_dead_claims,
+    refresh_claim,
 )
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
-from fno.claims.staleness import is_provably_dead, now_ms
+from fno.claims.staleness import classify_for_sweep, is_provably_dead, now_ms
 from fno.claims.types import Claim
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
@@ -101,11 +102,10 @@ class TestIsProvablyDead:
 
 
 class TestClassifyForSweepMatchesIsProvablyDead:
-    """_classify_for_sweep is classify_for_sweep (staleness.py), and
-    is_provably_dead is a thin bool-only view of that same function - both
-    now share one implementation rather than being kept in sync by
-    convention. This regression test pins the invariant directly rather
-    than trusting the alias never drifts back apart.
+    """is_provably_dead is a thin bool-only view of classify_for_sweep
+    (staleness.py) - both share one implementation rather than being kept
+    in sync by convention. This regression test pins the invariant
+    directly rather than trusting that never drifts back apart.
     """
 
     @pytest.mark.parametrize(
@@ -143,7 +143,7 @@ class TestClassifyForSweepMatchesIsProvablyDead:
     )
     def test_provably_dead_verdict_matches(self, claim):
         ts = now_ms()
-        provably_dead, _bucket = _classify_for_sweep(claim, ts)
+        provably_dead, _bucket = classify_for_sweep(claim, ts)
         assert provably_dead is is_provably_dead(claim, now=ts)
 
 
@@ -398,6 +398,55 @@ class TestIdempotentReacquireVsReapRecoveryMutex:
             "must not have overwritten the new holder's live claim with a "
             "stale-read idempotent rewrite"
         )
+
+
+# ---------------------------------------------------------------------------
+# refresh_claim vs reap's recovery mutex: a TTL claim reap has proven dead
+# and is archiving must not be resurrected by a concurrent refresh.
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshClaimVsReapRecoveryMutex:
+    def test_refresh_waits_for_held_mutex_and_does_not_resurrect_archived_claim(
+        self, tmp_path
+    ):
+        path = claim_path("k", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        expired = Claim(
+            key="k",
+            holder=HOLDER_A,
+            acquired_at=now_ms() - 120_000,
+            expires_at=now_ms() - 1_000,
+            pid=_dead_pid(),
+            host=socket.gethostname(),
+        )
+        path.write_text(serialize_claim(expired), encoding="utf-8")
+
+        recovery_lock = path.with_name(path.name + ".recovery.d")
+        token = acquire_dir_mutex(recovery_lock, 0)
+        assert token is not None
+
+        result: dict[str, object] = {}
+
+        def _racer() -> None:
+            try:
+                result["claim"] = refresh_claim("k", HOLDER_A, root=tmp_path)
+            except ClaimGoneAway as exc:
+                result["error"] = exc
+
+        racer = threading.Thread(target=_racer)
+        racer.start()
+        time.sleep(0.2)
+        assert racer.is_alive(), "refresh must block on the held recovery mutex"
+
+        # Simulate reap archiving this exact claim while refresh waits.
+        archive_claim(path, ts_ms=now_ms())
+        release_dir_mutex(recovery_lock, token)
+
+        racer.join(timeout=5)
+        assert not racer.is_alive()
+        assert "error" in result, "must not resurrect a claim reap just archived"
+        assert not path.exists()
 
 
 # ---------------------------------------------------------------------------
