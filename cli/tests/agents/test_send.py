@@ -1899,10 +1899,13 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
     lock_path = _agent_lock_path("red", paths.agents_registry_path())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # A real contender: holds the flock past the send's lock_timeout, then
-    # releases inside the queue's grace window. Holding it forever is the
-    # other test; here the point is that the grace acquire succeeds and the
-    # recipient is verified under the lock before anything is written.
+    # A SIMULATED contender: the helper monkeypatches hold_agent_lock so the
+    # first acquire raises and the second succeeds, modelling a holder that
+    # released inside the grace window. No process holds the real flock here;
+    # the cross-process interaction is test_lock.py's, and racing one on wall
+    # time makes this test flaky about which acquire wins. What this test owns
+    # is that the grace acquire succeeds and the recipient is verified under
+    # the lock before anything is written.
     _fail_first_lock_acquire(monkeypatch)
     result = dispatch_send(
         name="red",

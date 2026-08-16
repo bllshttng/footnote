@@ -329,6 +329,12 @@ def _queue_grace_seconds(lock_timeout: float) -> float:
     not wait", and spending 42s on the fallback would answer a question
     nobody asked. Past the ceiling the floor is all that is left, and all the
     identity-consistency read needs.
+
+    The floor outranks the cap below two seconds, so a 0.1s caller still
+    blocks 2.0s here. That is deliberate and the test pins it: the grace
+    window's other job is the identity-consistency read, which a sub-second
+    budget cannot do at all, and a fallback that cannot verify the recipient
+    writes nothing. The cap governs the range where both jobs fit.
     """
     residual = _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S + _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS
     return max(
@@ -7098,6 +7104,17 @@ def dispatch_send(
             return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
     except AgentLockTimeout as exc:
+        # INVARIANT, and it is load-bearing: this handler guards the whole
+        # `with` body, not only the acquire, and the body now ends in a
+        # durable queue that returns exit 0. That is safe ONLY because no
+        # callee inside the block takes a per-agent flock - not _deliver_live,
+        # _switchboard_exchange, _mux_pane_send, _registered_family1_state,
+        # _queue_durable_fallback or _stamp_after_delivery. Add a nested
+        # acquire and a timeout AFTER a confirmed hosted delivery lands here,
+        # queues the same message a second time, and prints a durable receipt
+        # for one that already arrived. Narrow this `try` to the acquire
+        # before adding one.
+        #
         # A durable write needs a VERIFIED recipient, and ONLY the lock
         # verifies one. An unlocked re-read cannot: the contender may be a
         # same-name reclaim that holds the flock and has not committed its
