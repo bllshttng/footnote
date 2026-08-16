@@ -63,14 +63,14 @@ Claim roots are routed like the `fno claim` CLI's `_node_aware_root`: `node:<id>
 
 Opt-in, default off (Locked Decision 3). `auto_continue_enabled()` resolves, highest precedence first:
 
-0. `config.autonomy.enabled` master panic switch off (checked before the env override too - x-aaaf wave 3).
+0. `config.autonomy.enabled` master panic switch off (checked before the env override too).
 1. `FNO_AUTO_CONTINUE` env override (explicit force on/off; tests + same-process).
 2. `config.auto_continue.enabled` in config.toml (project-local overrides global via the deep-merge in `load_settings`).
 3. default `False`.
 
 A malformed `config.auto_continue` block (a non-boolean `enabled`, or a scalar where the block should be a mapping) degrades to disabled rather than raising out of the settings load (AC2-ERR), and any settings-read failure in the resolver is swallowed to `False`.
 
-**The campaign-arm marker file is gone (2026-08, x-aaaf wave 1).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer, `skills/megawalk`, is deleted. The marker had no writer and no expiry, and it silently outranked the live config key - the motivating incident for `fno autonomy status`. The env var above stays the highest-precedence explicit override. A persistent campaign arm has no replacement mechanism today.
+**The campaign-arm marker file is gone (removed 2026-08).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer, `skills/megawalk`, is deleted. The marker had no writer and no expiry, and it silently outranked the live config key - the motivating incident for `fno autonomy status`. The env var above stays the highest-precedence explicit override. A persistent campaign arm has no replacement mechanism today.
 
 ## Triggers
 
