@@ -510,6 +510,46 @@ fn count_ci(haystack: &str, needle: &str) -> usize {
     haystack.to_lowercase().matches(needle).count()
 }
 
+/// Count occurrences of a real `tag` open ANYWHERE in `text` (not just at the
+/// head, unlike [`opens_envelope_tag`]) - case-insensitive, boundary-aware:
+/// an occurrence only counts when followed by whitespace, `>`, or
+/// end-of-input, so `<fno_mailbox>` is not counted alongside a genuine
+/// `<fno_mail ...>` (x-4ce4 codex P2: `count_ci(text, "<fno_mail")` counted
+/// every lookalike substring as a real open tag, so an otherwise-legitimate
+/// wrapped body containing harmless text like `<fno_mailbox>` was rejected
+/// as multi-open).
+fn count_open_tags(text: &str, tag: &str) -> usize {
+    let lower = text.to_lowercase();
+    let tag_lower = tag.to_lowercase();
+    let mut start = 0;
+    let mut n = 0;
+    while let Some(idx) = lower[start..].find(tag_lower.as_str()) {
+        let abs = start + idx;
+        let rest = &lower[abs + tag_lower.len()..];
+        if matches!(
+            rest.chars().next(),
+            Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some('>') | None
+        ) {
+            n += 1;
+        }
+        start = abs + tag_lower.len();
+    }
+    n
+}
+
+/// True if `text` contains a real `<fno_mail` open tag or a `</fno_mail>`
+/// close tag ANYWHERE in the string. Mirrors Python's `contains_fno_mail_tag`
+/// (`cli/src/fno/mail/envelope.py`).
+///
+/// Used by the Rust cross-session producer
+/// (`claude_ask::build_cross_session_container`), which frames a
+/// peer-controlled message that can carry a smuggled tag anywhere in its
+/// body, not only at the start (x-4ce4 codex P1: that producer had no
+/// forgery check at all).
+pub(crate) fn contains_fno_mail_tag_anywhere(text: &str) -> bool {
+    count_open_tags(text, "<fno_mail") > 0 || text.to_lowercase().contains("</fno_mail>")
+}
+
 /// The cap decision for an injected body: `Some(exit_code)` to refuse (caller
 /// returns it without injecting), `None` to proceed. Scoped to UNWRAPPED bodies:
 /// a `<fno_mail>` body is already Python-capped before wrapping, and a
@@ -578,7 +618,7 @@ const FNO_MAIL_TRAILER: &str =
 /// [`forged_envelope_decision`] for why the genuinely close-tag-free relay
 /// single-line variant never reaches this function.
 fn is_well_formed_paired_fno_mail(text: &str) -> bool {
-    if count_ci(text, "<fno_mail") != 1 || count_ci(text, "</fno_mail>") != 1 {
+    if count_open_tags(text, "<fno_mail") != 1 || count_ci(text, "</fno_mail>") != 1 {
         return false;
     }
     let tail = format!("{FNO_MAIL_TRAILER}\n</fno_mail>");
@@ -623,7 +663,7 @@ fn forged_envelope_decision(text: &str) -> Option<i32> {
                 // peer-controlled body text without validating it, so a second
                 // `<fno_mail` open smuggled in there would otherwise pass
                 // through unchecked. Still require exactly one open tag.
-                if count_ci(text, "<fno_mail") != 1 {
+                if count_open_tags(text, "<fno_mail") != 1 {
                     eprintln!(
                         "mail-inject: a close-tag-free <fno_mail> payload has more than \
                          one open tag."
