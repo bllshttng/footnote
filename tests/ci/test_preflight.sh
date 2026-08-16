@@ -468,6 +468,23 @@ echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the ski
 [[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "ticket removed on give-up" || fail "ticket left behind: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+echo "== FIFO queue: a newcomer allocates above surviving tickets, never a dequeued hole =="
+mkdir -p "$LOCKDIR" "$LOCKDIR.queue.d/000002"
+printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
+printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR.queue.d/000002/holder"
+run_pf --wait-timeout 6 >/dev/null 2>&1 & mono_w=$!
+new_ticket=""
+for _i in $(seq 1 60); do
+    new_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '2p')"
+    [[ -n "$new_ticket" ]] && break
+    sleep 0.2
+done
+[[ "$new_ticket" == "000003" ]] && ok "newcomer allocated 000003 above the surviving 000002" || fail "allocation wrong: $new_ticket"
+[[ ! -d "$LOCKDIR.queue.d/000001" ]] && ok "the dequeued 000001 hole was not reused" || fail "000001 reused ahead of 000002"
+wait "$mono_w"; rc=$?
+[[ $rc -eq 3 ]] && ok "the newcomer gave up cleanly" || fail "expected 3 got $rc"
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
 echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
 rm -f "$ATT"   # the prior section minted an attestation for this SHA; reuse would skip the lock
 past="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -477,7 +494,12 @@ printf 'pid=%s started=%s host=x sha=deadbee\n' "$stall_holder" "$past" > "$LOCK
 out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 run_pf --wait-timeout 30 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole from a stalled holder and ran to GREEN" || fail "stall steal failed rc=$rc: $out"
 echo "$out" | grep -q "stalled holder" && ok "the steal is reported as a recorded exception" || fail "no exception line: $out"
-kill "$stall_holder" 2>/dev/null; wait "$stall_holder" 2>/dev/null
+if ! kill -0 "$stall_holder" 2>/dev/null; then
+    ok "the stalled holder's tree was TERMed on the steal"
+else
+    fail "the stalled holder survived the steal"; kill "$stall_holder" 2>/dev/null
+fi
+wait "$stall_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== stall guard: a holder whose tree is making progress is NOT stolen =="

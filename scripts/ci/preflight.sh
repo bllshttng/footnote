@@ -108,8 +108,11 @@ CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
 # Preflight validates the merge head: a result on a branch behind origin/main
 # attests a tree that will never be merged, so waiting on (or running) it is
 # wasted machine time. Checked before reuse and the lock so a stale branch
-# queues for nothing. An unresolvable origin/main is not an error here - fall
+# queues for nothing. Refresh the tracking ref first (best effort, offline
+# safe): a stale ref undercounts and would pass exactly the stale base this
+# exists to refuse. An unresolvable origin/main is not an error here - fall
 # through and run, the same fallback style as the no-merge-base packet skip.
+git -C "$INVOKING_ROOT" fetch origin main --quiet 2>/dev/null || true
 BEHIND_COUNT="$(git -C "$INVOKING_ROOT" rev-list --count "$CANDIDATE_SHA..origin/main" 2>/dev/null || true)"
 if [[ "$BEHIND_COUNT" =~ ^[0-9]+$ ]] && (( BEHIND_COUNT > 0 )); then
     echo "preflight: refusing - HEAD is $BEHIND_COUNT commit(s) behind origin/main." >&2
@@ -373,7 +376,16 @@ QUEUE_POLL_INTERVAL=2
 TICKET=""
 
 enqueue_ticket() {
-    local n=1 candidate
+    # Allocate ABOVE the highest surviving ticket, never in the hole a dequeued
+    # front left: restarting the scan at 1 would reissue number 000001 while
+    # 000002 still waits, putting a newcomer at the front of the queue.
+    local n=1 candidate f
+    for f in "$LOCKDIR.queue.d"/*/; do
+        [[ -d "$f" ]] || continue
+        f="${f##*/}"; f="${f%/}"
+        [[ "$f" =~ ^[0-9]+$ ]] || continue
+        (( 10#$f >= n )) && n=$(( 10#$f + 1 ))
+    done
     while :; do
         candidate="$LOCKDIR.queue.d/$(printf '%06d' "$n")"
         if mkdir "$candidate" 2>/dev/null; then
@@ -457,11 +469,9 @@ STALL_PROBE_SPACING="${PREFLIGHT_STALL_PROBE_SPACING:-120}"   # seconds between 
 STALL_CPU_FLOOR="${PREFLIGHT_STALL_CPU_FLOOR:-1}"       # tree CPU seconds that count as progress
 [[ "$STALL_CPU_FLOOR" =~ ^[0-9]+$ ]] || STALL_CPU_FLOOR=1
 
-holder_tree_cpu() {
-    # Sum accumulated CPU seconds over the holder pid and its descendants: the
-    # wrapper itself idles while its suites compute, so the leaves carry the
-    # progress signal. Unparsable rows read as 0, never as a steal trigger.
-    local pid="$1" ids="" frontier="$1" kids total=0 t rest d hh mm ss
+holder_tree_pids() {
+    # Print the holder pid and every descendant, breadth-first.
+    local pid="$1" ids="" frontier="$1" kids
     while [[ -n "$frontier" ]]; do
         kids="$(ps -eo pid=,ppid= | awk -v parents="$frontier" '
             BEGIN { n = split(parents, p, " "); for (i = 1; i <= n; i++) live[p[i]] = 1 }
@@ -469,8 +479,17 @@ holder_tree_cpu() {
         ids="$ids $frontier"
         frontier="$kids"
     done
-    for pid in $ids; do
-        t="$(ps -o cputime= -p "$pid" 2>/dev/null | tr -d ' ')"
+    echo "$ids"
+}
+
+holder_tree_cpu() {
+    # Sum accumulated CPU seconds over the holder pid and its descendants: the
+    # wrapper itself idles while its suites compute, so the leaves carry the
+    # progress signal. Unparsable rows read as 0, never as a steal trigger.
+    local pid ids="" p total=0 t rest d hh mm ss
+    ids="$(holder_tree_pids "$pid")"
+    for p in $ids; do
+        t="$(ps -o cputime= -p "$p" 2>/dev/null | tr -d ' ')"
         [[ -n "$t" ]] || continue
         # cputime layouts: [[dd-]hh:]mm:ss with an optional .cc fraction.
         rest="${t%%.*}"; d=0; hh=0; mm=0; ss=0
@@ -507,7 +526,10 @@ holder_is_stalled() {
     cpu_now="$(holder_tree_cpu "$pid")"
     delta=$(( cpu_now - ${_STALL_CPU:-0} ))
     _STALL_T="$now"; _STALL_CPU="$cpu_now"
-    (( delta < STALL_CPU_FLOOR ))
+    # A NEGATIVE delta means a baseline child completed and left the sample:
+    # that is turnover, i.e. progress, never a stall. It also covers a ps
+    # hiccup dropping a row, which must fail toward waiting, not stealing.
+    (( delta >= 0 && delta < STALL_CPU_FLOOR ))
 }
 
 # Rename-steal the lock from the holder named by $1 (already condemned as dead
@@ -544,6 +566,18 @@ steal_dead_lock() {
     # the user chasing a pid they can see is not running.
     echo "preflight: cannot reap a dead holder at $LOCKDIR: $mv_err" >&2
     exit 3
+}
+
+# A stall steal must also stop the victim: the condemned tree still exists and,
+# if its blocked I/O ever completes, it would resume resetting and testing the
+# ONE shared preflight worktree under the stealer. Its verdict is already
+# forfeit (the stamp tripwire VOIDs it), so TERM the whole tree - the victim's
+# own EXIT trap then runs and releases nothing it no longer owns.
+signal_holder_tree() {
+    local pid="$1" p
+    for p in $(holder_tree_pids "$pid"); do
+        kill -TERM "$p" 2>/dev/null || true
+    done
 }
 
 acquire_lock() {
@@ -605,7 +639,8 @@ acquire_lock() {
             elif holder_is_stalled "$holder_line"; then
                 if steal_dead_lock "$holder_line"; then
                     dequeue_ticket
-                    echo "preflight: EXCEPTION - stole the lock from stalled holder pid=$holder_pid (alive but not computing; its run VOIDs)" >&2
+                    signal_holder_tree "$holder_pid"
+                    echo "preflight: EXCEPTION - stole the lock from stalled holder pid=$holder_pid (alive but not computing; TERMed its tree; its run VOIDs)" >&2
                     return 0
                 fi
             fi
