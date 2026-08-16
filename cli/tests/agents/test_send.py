@@ -233,14 +233,17 @@ def test_dispatch_send_lock_timeout(tmp_path: Path, monkeypatch) -> None:
 
     cwd = tmp_path / "work"
     cwd.mkdir()
-    with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_send(
-            name="red",
-            message="hello",
-            provider=None,
-            cwd=cwd,
-        )
-    assert exc_info.value.exit_code == 11
+    # A queued message is a durable SUCCESS: cmd_send's stdout contract is one
+    # receipt and exit 0 for every durable outcome, and a nonzero exit would
+    # make a retry-on-failure caller enqueue the same message twice.
+    result = dispatch_send(
+        name="red",
+        message="hello",
+        provider=None,
+        cwd=cwd,
+    )
+    assert result.delivery == "durable"
+    assert result.reason == "agent-lock-timeout"
 
 
 @pytest.mark.parametrize("address", ["red", "abcd1234", "deadbeef"])
@@ -497,7 +500,12 @@ def test_dispatch_send_refuses_same_name_route_change_under_lock(
 def test_cmd_send_lock_timeout_surfaces_on_stderr(
     tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
-    """AC3-ERR (CLI): lock timeout -> nonzero exit, stderr has message."""
+    """A contended send still emits the durable receipt on stdout and exits 0.
+
+    cmd_send's documented contract is one receipt line and exit 0 for every
+    durable outcome. The lock's cause belongs on stderr beside it, not in an
+    exit code a retrying caller reads as "send it again".
+    """
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
@@ -520,11 +528,11 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
         mail_app,
         ["send", "red", "hello", "--cwd", str(cwd)],
     )
-    assert result.exit_code != 0
-    assert result.exit_code == 11
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+    assert len(result.stdout.splitlines()) == 1, result.stdout
+    assert "queued (durable) [agent-lock-timeout]" in result.stdout
     stderr = result.stderr or ""
-    # Some text on stderr about the failure
-    assert len(stderr.strip()) > 0, "stderr must not be empty on lock timeout"
+    assert "lock busy" in stderr, "the live lane's cause must still surface"
 
 
 # ---------------------------------------------------------------------------
@@ -1876,21 +1884,18 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
     with open(lock_path, "a") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
         try:
-            with pytest.raises(DispatchAskError) as exc_info:
-                dispatch_send(
-                    name="red",
-                    message="hello",
-                    provider=None,
-                    cwd=tmp_path,
-                    lock_timeout=0.2,
-                )
+            result = dispatch_send(
+                name="red",
+                message="hello",
+                provider=None,
+                cwd=tmp_path,
+                lock_timeout=0.2,
+            )
         finally:
             fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
 
-    assert exc_info.value.exit_code == 11
-    text = str(exc_info.value)
-    assert "timed out waiting for agent 'red' lock" in text
-    assert "message queued durable as msg-" in text
+    assert result.delivery == "durable"
+    assert result.reason == "agent-lock-timeout"
 
     threads = read_all_threads("abcd1234")
     assert len(threads) == 1, f"the message must survive the timeout: {threads}"
@@ -2045,15 +2050,14 @@ def test_dispatch_send_lock_timeout_keeps_sender_provenance(
     with open(lock_path, "a") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
         try:
-            with pytest.raises(DispatchAskError):
-                dispatch_send(
-                    name="red",
-                    message="hello",
-                    provider=None,
-                    cwd=tmp_path,
-                    lock_timeout=0.2,
-                    from_name="blue",
-                )
+            dispatch_send(
+                name="red",
+                message="hello",
+                provider=None,
+                cwd=tmp_path,
+                lock_timeout=0.2,
+                from_name="blue",
+            )
         finally:
             fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
 
@@ -2097,15 +2101,15 @@ def test_dispatch_send_lock_timeout_refuses_provider_mismatch_before_queuing(
     assert not bus_log_path().exists(), "a refused send must queue nothing"
 
 
-def test_dispatch_send_lock_timeout_error_names_the_holder(
-    tmp_path: Path, monkeypatch
+def test_dispatch_send_lock_timeout_names_the_holder(
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    """The stamp has to reach the user-facing error, not just the exception."""
+    """The stamp has to reach the user, not just the exception object."""
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
     from fno import paths
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.dispatch import dispatch_send
     from fno.agents.lock import hold_agent_lock
     from fno.agents.registry import _agent_lock_path
 
@@ -2122,16 +2126,16 @@ def test_dispatch_send_lock_timeout_error_names_the_holder(
     with open(lock_path, "a") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
         try:
-            with pytest.raises(DispatchAskError) as exc_info:
-                dispatch_send(
-                    name="red",
-                    message="hello",
-                    provider=None,
-                    cwd=tmp_path,
-                    lock_timeout=0.2,
-                )
+            result = dispatch_send(
+                name="red",
+                message="hello",
+                provider=None,
+                cwd=tmp_path,
+                lock_timeout=0.2,
+            )
         finally:
             fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
 
-    assert "held by pid " in str(exc_info.value)
-    assert "message queued durable as msg-" in str(exc_info.value)
+    assert result.delivery == "durable"
+    stderr = capsys.readouterr().err
+    assert "held by pid " in stderr, f"the stamp must reach the user: {stderr}"

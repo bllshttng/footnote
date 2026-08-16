@@ -6937,8 +6937,18 @@ def dispatch_send(
             select_provider(name=timeout_entry.name, requested_provider=provider)
         except ProviderMismatchError as mismatch:
             raise DispatchAskError(str(mismatch), exit_code=2) from mismatch
+        except ValueError as bad_provider:
+            # An unknown --harness is a usage error on the locked path too.
+            # Lock timing must not change which exception the CLI sees.
+            raise DispatchAskError(str(bad_provider), exit_code=2) from bad_provider
+        except (OSError, RegistryVersionError) as unreadable:
+            events.emit("agent_send_failed", stage="registry-read", name=name)
+            raise DispatchAskError(
+                f"registry read failed: {unreadable}",
+                exit_code=12,
+            ) from unreadable
 
-        msg_id, durable_to = _queue_durable_fallback(
+        msg_id, _durable_to = _queue_durable_fallback(
             timeout_entry,
             message,
             from_name,
@@ -6952,16 +6962,22 @@ def dispatch_send(
             msg_id=msg_id,
             delivery="durable",
         )
+        # The message is queued, so this is a durable SUCCESS, not a failure.
+        # cmd_send's stdout contract is one receipt line and exit 0 for every
+        # durable outcome; a nonzero exit here would both break that and make
+        # a retry-on-failure caller enqueue the same message twice. The live
+        # lane's cause rides back as the receipt's reason, and the holder goes
+        # to stderr the way a live-miss demotion notice does.
         print(
-            f"{msg_id} queued (durable) for {durable_to} [agent-lock-timeout]",
+            f"live delivery deferred for {name!r}: "
+            f"lock busy after {exc.timeout}s{exc.holder_note()}",
             file=sys.stderr,
         )
-        raise DispatchAskError(
-            f"timed out waiting for agent {exc.name!r} lock "
-            f"(timeout={exc.timeout}s){exc.holder_note()}; "
-            f"message queued durable as {msg_id}",
-            exit_code=11,
-        ) from exc
+        return DispatchSendResult(
+            msg_id=msg_id,
+            delivery="durable",
+            reason="agent-lock-timeout",
+        )
 
 
 # ---------------------------------------------------------------------------
