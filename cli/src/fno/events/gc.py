@@ -180,8 +180,8 @@ def gc_events(
         path = requested_path.resolve()
         if path == global_events_json().resolve():
             raise ValueError(
-                "refusing to compact the global daemon journal while its bounded "
-                "Branch-B writer remains intentionally unlocked"
+                "refusing to compact the global daemon journal: it is shared "
+                "across projects, so one project's TTL policy must not rewrite it"
             )
         if not path.exists():
             return result

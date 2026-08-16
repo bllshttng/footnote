@@ -202,6 +202,12 @@ EVENTS_MIGRATION_LEASE_FAILED=""
 
 renew_events_migration_dirs() {
   local lock_dir
+  # Length-guarded: bash 3.2 (the stock macOS /bin/bash) treats an empty
+  # array expansion under `set -u` as an unbound variable, and the first
+  # acquire_events_dir contention renews before any dir is held.
+  if (( ${#EVENTS_MIGRATION_DIRS[@]} == 0 )); then
+    return 0
+  fi
   for lock_dir in "${EVENTS_MIGRATION_DIRS[@]}"; do
     renew_events_dir "$lock_dir" "$EVENTS_MIGRATION_TOKEN" || return 1
   done

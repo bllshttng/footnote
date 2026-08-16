@@ -269,7 +269,7 @@ The minimum ephemeral horizon is 672 hours because `human_touch` and claim conte
 
 `fno event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
 
-It also refuses the cross-project global daemon journal. Branch-B intentionally remains a bounded unlocked writer there, so that durable stream is not a GC target.
+It also refuses the cross-project global daemon journal. That journal is shared by every project on the machine, so a single project's TTL policy must not rewrite it.
 
 It preserves gate, durable, undeclared, unknown, and malformed rows. A row whose timestamp fails the canonical UTC syntax enforced by schema validation is preserved too.
 

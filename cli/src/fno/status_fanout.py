@@ -109,6 +109,7 @@ def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, A
     """
     events: list[dict[str, Any]] = []
     skipped = 0
+    since_key = _timestamp_key(since_ts) if since_ts is not None else None
     try:
         with path.open("r", encoding="utf-8") as fh:
             for raw in fh:
@@ -117,7 +118,7 @@ def _read_events(path: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, A
                     if raw.strip():
                         skipped += 1
                     continue
-                if since_ts is None or _timestamp_key(ev["ts"]) >= _timestamp_key(since_ts):
+                if since_key is None or _timestamp_key(ev["ts"]) >= since_key:
                     events.append(ev)
     except FileNotFoundError:
         return [], 0

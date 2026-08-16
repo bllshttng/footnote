@@ -583,7 +583,7 @@ def gc(
     dry_run: bool = typer.Option(False, "--dry-run", "-N", help="report without rewriting"),
 ) -> None:
     """Delete expired explicit-ephemeral rows while preserving all other rows."""
-    from fno.events import RETENTION_MINIMUM_TTL_HOURS
+    from fno.events import RETENTION_MINIMUM_TTL_HOURS, SchemaUnavailableError
     from fno.events.gc import gc_events
     from fno.paths import resolve_repo_root
 
@@ -591,7 +591,13 @@ def gc(
     horizon = ttl_hours if ttl_hours is not None else RETENTION_MINIMUM_TTL_HOURS
     try:
         result = gc_events(resolved, ttl_hours=horizon, dry_run=dry_run)
-    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+        SchemaUnavailableError,
+    ) as exc:
         typer.echo(f"error: event gc failed: {exc}", err=True)
         raise typer.Exit(code=1)
     payload = {**result, "events": str(resolved), "ttl_hours": horizon, "dry_run": dry_run}
