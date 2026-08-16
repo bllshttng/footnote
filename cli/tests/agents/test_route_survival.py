@@ -92,6 +92,22 @@ def test_unrouted_spawn_records_no_route_path(tmp_path, monkeypatch) -> None:
     assert load_registry()[0].route_settings_path is None
 
 
+def test_account_only_spawn_records_no_route_path(tmp_path, monkeypatch) -> None:
+    """An --account worker has no route to restore.
+
+    Its settings file is the scrub floor plus the account's non-profile env,
+    which read_route_settings reads back as "no route" (or, for an api-key
+    account, an endpoint-without-model-tiers unit the composition guard
+    refuses). Stamping it on the row turned every --account worker's revive
+    into an exit-2 refusal telling the operator to re-spawn with --route."""
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(
+        monkeypatch, tmp_path, account_env={"CLAUDE_CONFIG_DIR": "/x/.claude"}
+    )
+    assert load_registry()[0].route_settings_path is None
+
+
 def test_ac7_registry_stores_the_path_never_the_route_contents(tmp_path, monkeypatch) -> None:
     """AC7: the registry file carries a path and no credential."""
     from fno import paths

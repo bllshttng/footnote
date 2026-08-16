@@ -790,18 +790,13 @@ def route_settings_path_for(
     overlay = {
         k: v for k, v in (account_env or {}).items() if k != "CLAUDE_CONFIG_DIR"
     }
-    merged = {**overlay, **(route_env or {})}
-    if route_env and (
-        route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY")
-    ):
-        # The route owns the credential slot: an account credential the route
-        # does not name stays on the scrub floor (""), never baked into the
-        # file against the route's endpoint. Mirrors compose_worker_credentials.
-        from fno.agents.account_env import SECRET_ROUTE_VARS
+    # The same ONE composition rule as the env seams: a self-authed route owns
+    # the credential slot, so an account credential the route does not name
+    # stays on the scrub floor (""), never baked into the file against the
+    # route's endpoint.
+    from fno.agents.account_env import compose_worker_credentials
 
-        for k in SECRET_ROUTE_VARS:
-            if k not in route_env:
-                merged.pop(k, None)
+    merged, _ = compose_worker_credentials(overlay, route_env, {})
     return materialize_route_settings(merged)
 
 

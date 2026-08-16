@@ -1394,10 +1394,14 @@ def _claude_create_path(
     # is the same path bg_create resolves for itself moments later - including
     # the account overlay, else a composed spawn's row names a different file
     # than the worker launched with and a restore silently drops the account's
-    # pinned env.
+    # pinned env. Route-bearing rows only: an account-only file restores as "no
+    # route" (or an incomplete unit the composition guard refuses), so stamping
+    # it broke every --account worker's revive.
     from fno.agents.model_routing import route_settings_path_for
 
-    route_settings_path = route_settings_path_for(route_env, account_env)
+    route_settings_path = (
+        route_settings_path_for(route_env, account_env) if route_env else None
+    )
 
     # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
     # bg_create snapshots dict(os.environ) to build the NEW worker's own

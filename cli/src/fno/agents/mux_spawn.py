@@ -2348,10 +2348,15 @@ def dispatch_spawn_pane(
             return rows
 
         try:
-            if provider == "claude":
-                # account_env included so the row names the same composed file
-                # the wrapper rendered; a route-only stamp would make a later
-                # restore silently drop the account's pinned env.
+            # Route-bearing rows only: the path is the restore contract, and an
+            # account-only file (scrub floor + non-profile env) restores as "no
+            # route" or as an incomplete unit the composition guard refuses,
+            # which turned every --account worker's revive into an exit-2
+            # refusal. account_env is included whenever a route IS present so
+            # the row names the same composed file the wrapper rendered; a
+            # route-only stamp would make a later restore silently drop the
+            # account's pinned env.
+            if provider == "claude" and route_env:
                 route_settings_path = route_settings_path_for(route_env, account_env)
             _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
