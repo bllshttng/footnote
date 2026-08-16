@@ -36,6 +36,13 @@ def test_humanize_age_is_fixed_width_and_covers_days():
     assert _humanize_age(345600) == "  4d"
 
 
+def test_humanize_age_caps_the_day_count_at_three_digits():
+    # 1000+ days would otherwise render "1000d" (5 chars), breaking the
+    # fixed-width-4 invariant the column exists to hold.
+    assert _humanize_age(1000 * 86400) == "999d"
+    assert len(_humanize_age(1000 * 86400)) == 4
+
+
 def test_humanize_age_renders_absent_as_question_mark_not_zero():
     assert _humanize_age(None) == "   ?"
 
