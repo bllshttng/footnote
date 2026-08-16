@@ -555,10 +555,15 @@ holder_pid_recycled() {
 }
 
 path_mtime_s() {
-    # A path's mtime in epoch seconds; empty when stat cannot read it (BSD and
-    # GNU spellings both tried). One helper, one spelling pair: hand-copied
-    # fallbacks in two functions drift apart.
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""
+    # A path's mtime in epoch seconds; empty when stat cannot read it. GNU
+    # first: GNU stat reads -f as --file-system, so a BSD-first spelling
+    # SUCCEEDS there printing prose (a line starting "File: ..."), which then
+    # dies as an unbound variable inside the caller's arithmetic. BSD stat
+    # rejects -c outright and falls through. The numeric guard reads any
+    # surprise spelling as unmeasurable, never as a value.
+    local m
+    m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
+    [[ "$m" =~ ^[0-9]+$ ]] && printf '%s\n' "$m" || echo ""
 }
 
 cancel_requested() {

@@ -486,7 +486,13 @@ fi
 _ACTIVITY_EVIDENCE=""
 
 _stat_mtime() {  # portable epoch-seconds mtime; 0 if absent/unreadable
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+  # GNU first: GNU stat reads -f as --file-system, so a BSD-first spelling
+  # SUCCEEDS there printing prose instead of a number, which then aborts the
+  # (( mt > newest )) arithmetic under set -u. BSD stat rejects -c and falls
+  # through. The numeric guard keeps the "unreadable reads as 0" contract.
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
+  [[ "$m" =~ ^[0-9]+$ ]] && printf '%s\n' "$m" || echo 0
 }
 
 _worktree_has_fresh_activity() {
