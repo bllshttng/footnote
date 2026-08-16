@@ -513,7 +513,9 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
     assert len(result.stdout.splitlines()) == 1, result.stdout
     assert "queued (durable) [agent-lock-timeout]" in result.stdout
     stderr = result.stderr or ""
-    assert "lock busy" in stderr, "the live lane's cause must still surface"
+    # Past tense: the grace acquire only wins because the holder let go, so a
+    # present-tense "lock busy ... held by" would name an owner that released.
+    assert "lock was busy" in stderr, "the live lane's cause must still surface"
     # The holder is any verb on this agent, so the timeout says nothing about
     # the recipient in either direction. The generic durable warning claims
     # "red is not live" and points at `fno agents resume red`, which resurrects

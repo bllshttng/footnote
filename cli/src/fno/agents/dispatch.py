@@ -7212,10 +7212,10 @@ def dispatch_send(
                     )
                     raise DispatchAskError(
                         f"live delivery to {name!r} was not attempted (its "
-                        f"agent lock stayed busy for {exc.timeout}s) and its "
-                        "registry row carries no full harness session id, so "
-                        f"it has no durable address; {_NO_ENVELOPE_CLAUSE}; "
-                        "retry the send",
+                        f"agent lock was busy for {exc.timeout}s, and this "
+                        "queue holds it now), and its registry row carries no "
+                        "full harness session id, so it has no durable "
+                        f"address; {_NO_ENVELOPE_CLAUSE}; retry the send",
                         exit_code=11,
                     ) from exc
 
@@ -7309,9 +7309,15 @@ def dispatch_send(
         # Not for a bus-only row: its queue is the designed destination, so a
         # "live delivery deferred" notice would report a miss that never was.
         if queue_reason == LOCK_TIMEOUT_REASON:
+            # Past tense throughout, and deliberately. Reaching this line
+            # proves the holder RELEASED, because the grace acquire only wins
+            # once it does, so a present-tense "lock busy ... held by pid P"
+            # names an owner that no longer owns it - and `_pid_is_alive`
+            # cannot refuse that pid, which is usually still running. The
+            # exit-11 arm below reads `still_held` for the same reason.
             print(
                 f"live delivery deferred for {name!r}: "
-                f"lock busy after {exc.timeout}s{exc.holder_note()}",
+                f"lock was busy for {exc.timeout}s{exc.holder_note(past=True)}",
                 file=sys.stderr,
             )
         return DispatchSendResult(

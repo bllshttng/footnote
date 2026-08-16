@@ -90,7 +90,7 @@ Send resolves delivery in order:
 | Unknown agent | 16 | `unknown agent '<name>'; spawn it first: fno agents spawn --name <n> --harness <harness>` |
 | Provider mismatch | 2 | mismatch description |
 | Registry read error | 12 | `registry read failed: ...` |
-| Lock timeout, and the holder released inside the grace window | 0 | `live delivery deferred for '<name>': lock busy after Ns (held by pid P since T)`; stdout says `queued (durable) [agent-lock-timeout]` |
+| Lock timeout, and the holder released inside the grace window | 0 | `live delivery deferred for '<name>': lock was busy for Ns (was held by pid P since T)`; stdout says `queued (durable) [agent-lock-timeout]`. Past tense on purpose: reaching this line proves the holder let go, because the grace acquire only wins once it does. |
 | Lock timeout, and the holder never releases | 11 | `timed out waiting for agent '<name>' lock (timeout=Ns + Gs queue grace) ...; recipient identity could not be verified, so no durable envelope was written; retry the send` |
 | Lock timeout, and the row carries no full harness session id | 11 | `live delivery to '<name>' was not attempted ... it has no durable address; no durable envelope was written; retry the send`. Hosted delivery is that row's only lane, so a retry can still deliver it. |
 | Lock timeout, and the row is `bus-only` | 0 | no deferral notice; stdout says `queued (durable) ... [bus-only: recipient polls the bus at each turn boundary]`. Its queue is the designed destination, not a miss. |

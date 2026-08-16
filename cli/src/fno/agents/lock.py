@@ -117,12 +117,16 @@ class AgentLockTimeout(TimeoutError):
             f"lock timeout for agent {name!r} after {timeout}s{self.holder_note()}"
         )
 
-    def holder_note(self) -> str:
+    def holder_note(self, *, past: bool = False) -> str:
         """`" (held by pid N since T)"`, or `""` when the lock carried no stamp.
 
         One formatter, because every caller that rebuilds its own message from
         `name` and `timeout` drops the holder otherwise, and the stamp then
         reaches nobody on the path that matters.
+
+        `past=True` for a caller that has SINCE won the lock. Present tense
+        there names an owner that already released, and `_pid_is_alive` cannot
+        refuse it, because that process is usually still running.
         """
         holder = self.holder
         if not holder:
@@ -139,7 +143,7 @@ class AgentLockTimeout(TimeoutError):
         # does not, so a holder that is not alive is no holder at all.
         if not _pid_is_alive(pid):
             return ""
-        return f" (held by pid {pid} since {acquired_at})"
+        return f" ({'was held' if past else 'held'} by pid {pid} since {acquired_at})"
 
 
 class _LockHandle:

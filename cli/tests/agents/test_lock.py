@@ -467,3 +467,27 @@ def test_holder_note_drops_a_stamp_whose_pid_is_dead() -> None:
         holder={"pid": os.getpid(), "name": "ghost", "acquired_at": "2026-08-15T15:03:11Z"},
     )
     assert f"held by pid {os.getpid()}" in live.holder_note()
+
+
+def test_holder_note_past_tense_for_a_caller_that_won_the_lock() -> None:
+    """A caller that has since acquired must not name a present owner.
+
+    The grace acquire only succeeds because the holder released, so present
+    tense there reports an owner that no longer owns it - and the liveness
+    guard cannot refuse that pid, because the process is usually still up.
+    """
+    import os
+
+    from fno.agents.lock import AgentLockTimeout
+
+    exc = AgentLockTimeout(
+        name="red",
+        timeout=30.0,
+        holder={"pid": os.getpid(), "name": "red", "acquired_at": "2026-08-16T00:00:00Z"},
+    )
+    assert exc.holder_note().startswith(" (held by pid ")
+    assert exc.holder_note(past=True).startswith(" (was held by pid ")
+    # An unstamped lock degrades to nothing in either tense.
+    bare = AgentLockTimeout(name="red", timeout=30.0, holder=None)
+    assert bare.holder_note() == ""
+    assert bare.holder_note(past=True) == ""
