@@ -2407,6 +2407,19 @@ impl View {
             .and_then(|f| f.iter().find(|c| c.name == name))
     }
 
+    /// (x-b2bf) The selected yard citizen's name, for re-anchoring the
+    /// spotlight across a layout push: the crowd follows `layout.agents`
+    /// order, so a scrape that removes or reorders rows before the cursor
+    /// would silently move the spotlight onto a different citizen (the same
+    /// index-vs-identity trap the sideline cursor re-anchors out of).
+    fn yard_selected_name(&self) -> Option<String> {
+        let crowd = self.yard_crowd();
+        let yv = self.yard.as_ref()?;
+        crowd
+            .get(yv.sel.min(crowd.len().saturating_sub(1)))
+            .map(|(name, _, _)| (*name).to_string())
+    }
+
     /// (x-b2bf) The yard overlay's footer state, same three shapes as the
     /// needs fold's.
     fn yard_footer(&self) -> NeedsFooter {
@@ -4508,6 +4521,10 @@ impl View {
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
         let needs_prev = self.answers_selected_id();
+        // (x-b2bf) Same capture for the yard spotlight: the crowd recomputes
+        // from layout.agents, so the selection must follow the citizen, not
+        // the slot.
+        let yard_prev = self.yard_selected_name();
         // (x-b186) Same, for the sideline cursor when the table is status-sorted:
         // a scrape tick that flips one badge RE-ORDERS the rows, so preserving
         // only the numeric index would silently move the cursor onto a different
@@ -4547,6 +4564,25 @@ impl View {
         // in range. An emptied queue keeps the overlay open in its "nothing
         // needs you" state (AC4-EDGE) rather than closing under the user.
         self.reanchor_answers(needs_prev);
+        // Yard spotlight re-anchors by citizen name (x-b2bf): identity first,
+        // index clamp the fallback, so the sprite never jumps animals when a
+        // scrape reorders the roster under an open yard.
+        if self.yard.is_some() {
+            // crowd borrows the whole view (rows by reference), so the
+            // position lookup and the clamp bound resolve before the mut
+            // borrow of the selection.
+            let (found, last) = {
+                let crowd = self.yard_crowd();
+                (
+                    yard_prev.and_then(|name| crowd.iter().position(|(n, _, _)| *n == name)),
+                    crowd.len().saturating_sub(1),
+                )
+            };
+            if let Some(yv) = self.yard.as_mut() {
+                let prev = yv.sel;
+                yv.sel = found.unwrap_or(prev).min(last);
+            }
+        }
         // Navigator re-clamps its cursor when a scrape tick reorders/removes rows
         // under it (x-653d, AC1-FR/AC2-EDGE): the rows recompute from self.layout
         // on every access, so after a push a past-the-end cursor would draw no
@@ -25846,6 +25882,35 @@ mod tests {
         // A blocked row joins the needs queue -> attention eye.
         assert_eq!(crowd[1].1, crate::sprites::Eye::Attention);
         assert_eq!(crowd[1].2, 0); // crown defaults to 0, no hat
+    }
+
+    #[test]
+    fn yard_selection_re_anchors_by_citizen_across_a_scrape() {
+        // sel indexes layout.agents order; a scrape that drops the row BEFORE
+        // the cursor would slide the spotlight onto another citizen. The
+        // selection must follow the citizen, not the slot.
+        let a = blocked_row("aa", 2, None);
+        let b = blocked_row("bb", 3, None);
+        let mut v = view_with_agents(vec![a, b]);
+        v.yard = Some(YardSel {
+            sel: 1,
+            opened_at: std::time::Instant::now(),
+        });
+        assert_eq!(v.yard_selected_name().as_deref(), Some("bb"));
+        let mut next = v.layout.clone();
+        next.agents = vec![next.agents[1].clone()]; // aa exited
+        v.set_layout(next);
+        assert_eq!(
+            v.yard_selected_name().as_deref(),
+            Some("bb"),
+            "spotlight must stay on bb, not clamp onto a wrong citizen"
+        );
+        // Crowd empty (all rows gone): the name capture degrades to None; the
+        // render's own clamp keeps the index in range.
+        let mut none = v.layout.clone();
+        none.agents.clear();
+        v.set_layout(none);
+        assert!(v.yard_selected_name().is_none());
     }
 
     fn yard_item(

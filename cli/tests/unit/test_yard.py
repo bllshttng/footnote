@@ -165,3 +165,24 @@ def test_yard_cli_text_lists_citizens(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert "cli-cat" in r.output
     assert "1 citizens" in r.output
+
+
+def test_yard_cli_corrupt_archive_fails_the_fold_not_fabricates(tmp_path, monkeypatch):
+    # The lenient reader would answer [] and mark every citizen a
+    # first-sighting: a fabricated outcome on the machine surface. The fold
+    # must refuse so the mux overlay shows its degraded notice instead.
+    import fno.agents.registry as registry_mod
+    import fno.paths as paths
+
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda: [_row(name="cli-cat", sid="cli-id")],
+    )
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text("{not json")
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: archive)
+    r = runner.invoke(app, ["yard", "--json"])
+    assert r.exit_code == 1, r.output
+    assert "archive unreadable" in (r.stderr or r.output)
+    assert "first_sighting" not in r.output

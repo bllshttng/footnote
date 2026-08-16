@@ -727,12 +727,20 @@ def yard(
 
     from fno import paths
     from fno.agents.registry import load_registry
-    from fno.graph.store import read_graph
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
     from fno.yard import RARITY_TIERS, fold
 
     rows = load_registry()
     archive_path = paths.graph_archive_json()
-    archive = read_graph(archive_path) if archive_path.exists() else []
+    # Strict on purpose: this is a truth-bound fold, not a browse verb. The
+    # lenient reader turns a corrupt archive into [], which would mark every
+    # citizen a first-sighting - fabricated outcome on the machine surface the
+    # mux renders. Unreadable history fails the fold so the overlay degrades.
+    try:
+        archive = read_graph_strict(archive_path) if archive_path.exists() else []
+    except GraphUnreadableError as exc:
+        typer.secho(f"yard: archive unreadable, fold refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     citizens = fold(rows, archive)
 
     if as_json:

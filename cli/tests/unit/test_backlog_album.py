@@ -174,3 +174,30 @@ def test_absent_archive_is_empty_not_an_error(tmp_path, monkeypatch):
     r = runner.invoke(app, ["backlog", "album", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output) == []
+
+
+def test_legacy_completed_row_without_status_is_a_card(tmp_path, monkeypatch):
+    # Pre-status-stamping sweep shape: completed_at is the terminal fact the
+    # archive subsystem itself reads (archive._is_done). A `ready` default
+    # must not evict a shipped card.
+    archive = _route(tmp_path, monkeypatch)
+    _seed_archive(
+        archive,
+        [
+            {
+                "id": "x-leg0001",
+                "title": "legacy ship",
+                "completed_at": "2026-05-01T00:00:00Z",
+            },
+            {
+                "id": "x-leg0002",
+                "title": "superseded legacy",
+                "completed_at": "2026-05-02T00:00:00Z",
+                "superseded_by": "x-leg0001",
+            },
+        ],
+    )
+    r = runner.invoke(app, ["backlog", "album", "--json"])
+    assert r.exit_code == 0, r.output
+    cards = json.loads(r.output)
+    assert [c["id"] for c in cards] == ["x-leg0001"]

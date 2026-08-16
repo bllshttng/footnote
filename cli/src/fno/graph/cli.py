@@ -9991,7 +9991,13 @@ def cmd_album(
             e
             for e in read_graph(archive_path)
             if isinstance(e, dict)
-            and str(e.get("status") or "") == "done"
+            # Terminal facts, not the persisted field: legacy archived rows
+            # predate status stamping and carry only completed_at, which the
+            # archive subsystem itself treats as done (archive._is_done).
+            and (
+                str(e.get("status") or "") == "done"
+                or bool(e.get("completed_at"))
+            )
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
             and not e.get("superseded_by")
