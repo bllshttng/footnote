@@ -2370,15 +2370,33 @@ fn render_checked(last_reconciled_at: Option<&str>, now: chrono::DateTime<chrono
     }
 }
 
+/// Right-aligned ellipsis truncation, chars not bytes (mirrors Python's
+/// `_truncate`), so a long transcript line cannot own the table.
+fn truncate_cell(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        s.to_string()
+    } else if width <= 1 {
+        s.chars().take(width).collect()
+    } else {
+        let mut t: String = s.chars().take(width - 1).collect();
+        t.push('…');
+        t
+    }
+}
+
 /// Render agents list as a human-readable table (Task 3.1; CHECKED/PID added by
 /// plan ab-70faa65b, Architecture C).
 ///
-/// Columns: NAME HARNESS STATUS CHECKED PID LAST MESSAGE CWD. CHECKED is the
-/// relative age since the last reconcile probe (`never` when unprobed); it
-/// replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid for a
-/// PTY agent (`-` for a one-shot ask, which has no managed process). This is a
-/// functional table; byte-exact match with Python is not required (Python's
-/// table is time-dependent via relative timestamps).
+/// Columns: NAME HARNESS STATUS CHECKED PID EVENT AGE LAST MESSAGE CWD. CHECKED
+/// is the relative age since the last reconcile probe (`never` when unprobed);
+/// it replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid
+/// for a PTY agent (`-` for a one-shot ask, which has no managed process).
+/// EVENT AGE is the relative age of the transcript's newest activity and LAST
+/// MESSAGE the flattened last-turn text (x-1fbb) - beside the state column on
+/// purpose, so a row claiming to be busy while its transcript is hours old
+/// shows the disagreement instead of hiding it. This is a functional table;
+/// byte-exact match with Python is not required (Python's table is
+/// time-dependent via relative timestamps).
 fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     // HARNESS, not PROVIDER: the column has always shown the harness, and the
     // old heading made a claude-hosted worker on a zai route read as running
@@ -2397,6 +2415,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
         "STATUS",
         "CHECKED",
         "PID",
+        "EVENT AGE",
         "LAST MESSAGE",
         "CWD",
     ];
@@ -2405,7 +2424,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     let now = chrono::Utc::now();
 
     // Compute display values for each row
-    let display: Vec<[String; 8]> = rows
+    let display: Vec<[String; 9]> = rows
         .iter()
         .map(|r| {
             let name = r["name"].as_str().unwrap_or("-").to_string();
@@ -2417,9 +2436,25 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
                 .as_u64()
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "-".to_string());
-            let last_msg = r["last_message_at"].as_str().unwrap_or("-").to_string();
+            // `unknown`, not `never`: no transcript was READ, which is an
+            // absent reading, not a claim that no event ever happened.
+            let event_age = match r["last_event_at"].as_str() {
+                Some(ts) => render_checked(Some(ts), now),
+                None => "unknown".to_string(),
+            };
+            // The transcript's LAST turn, not the registry timestamp this
+            // column was wired to for its whole life: that field is null on
+            // many rows while the worker is mid-sentence, so a "last message"
+            // column that never showed a message. Capped so one long line
+            // cannot blow out CWD.
+            let last_msg = r["last_message"]
+                .as_str()
+                .map(|s| truncate_cell(s, 40))
+                .unwrap_or_else(|| "-".to_string());
             let cwd = r["cwd"].as_str().unwrap_or("-").to_string();
-            [name, address, harness, status, checked, pid, last_msg, cwd]
+            [
+                name, address, harness, status, checked, pid, event_age, last_msg, cwd,
+            ]
         })
         .collect();
 
@@ -2433,6 +2468,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
         headers[5].len(),
         headers[6].len(),
         headers[7].len(),
+        headers[8].len(),
     ];
     for row in &display {
         for (i, cell) in row.iter().enumerate() {
@@ -4415,6 +4451,78 @@ mod tests {
         assert!(
             ask_line.contains("never"),
             "unprobed row shows never: {ask_line}"
+        );
+    }
+
+    /// x-1fbb: EVENT AGE renders the transcript's newest-activity age and LAST
+    /// MESSAGE the flattened last-turn text. The registry timestamp this column
+    /// was wired to for its whole life was null on many rows while the worker
+    /// was mid-sentence, so a "last message" column that never showed a
+    /// message. Absent readings render `unknown` / `-`, never a fresh age: an
+    /// unread transcript is not health.
+    ///
+    /// The state fixture key is omitted on purpose (see the address test
+    /// above): the identifier ratchet in check-plan-rung-authority counts over
+    /// inline tests too, and the assertions below never read it.
+    #[test]
+    fn render_list_table_has_event_age_and_last_message_columns() {
+        let fresh = (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
+        let agents = json!([
+            {
+                "name": "live-worker",
+                "address": "aaaa1111",
+                "harness": "claude",
+                "short_id": null,
+                "session_id": null,
+                "cwd": "/home/user/project",
+                "created_at": "2026-05-25T00:00:00Z",
+                "last_message_at": null,
+                "live_status": null,
+                "pid": 99,
+                "last_reconciled_at": "2026-05-25T00:00:00Z",
+                "last_event_at": fresh,
+                "last_message": "[tool_use: Bash] on the pytest run",
+                "log_path": null
+            },
+            {
+                "name": "gone-worker",
+                "address": "bbbb2222",
+                "harness": "claude",
+                "short_id": null,
+                "session_id": null,
+                "cwd": "/home/user/other",
+                "created_at": "2026-05-25T00:00:00Z",
+                "last_message_at": null,
+                "live_status": null,
+                "pid": null,
+                "last_reconciled_at": null,
+                "log_path": null
+            }
+        ]);
+        let table = render_list_table(&agents, &[]);
+        let lines: Vec<&str> = table.lines().collect();
+
+        assert!(
+            lines[0].contains("EVENT AGE") && lines[0].contains("LAST MESSAGE"),
+            "header must carry both new columns, got: {:?}",
+            lines[0]
+        );
+        let live = lines.iter().find(|l| l.contains("live-worker")).unwrap();
+        assert!(live.contains("5s"), "fresh transcript age renders: {live}");
+        assert!(
+            live.contains("[tool_use: Bash] on the pytest run"),
+            "last-turn text renders: {live}"
+        );
+        // No probe answer: an absent reading, rendered as unread - never `0s`,
+        // which would claim the transcript moved seconds ago.
+        let gone = lines.iter().find(|l| l.contains("gone-worker")).unwrap();
+        assert!(
+            gone.contains("unknown"),
+            "absent stamp reads unknown: {gone}"
+        );
+        assert!(
+            !gone.contains("0s"),
+            "absent stamp never reads fresh: {gone}"
         );
     }
 

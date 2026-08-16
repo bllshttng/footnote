@@ -97,6 +97,8 @@ def serialize_entry(
     reachability: Optional[str] = None,
     basis: Optional[str] = None,
     last_activity_age_s: Optional[int] = None,
+    last_event_at: Optional[str] = None,
+    last_message: Optional[str] = None,
 ) -> dict:
     """Produce the canonical dict shape for one agent.
 
@@ -178,6 +180,14 @@ def serialize_entry(
         "reachability": reachability,
         "basis": basis,
         "last_activity_age_s": last_activity_age_s,
+        # The absolute stamp of the newest transcript activity and the flattened
+        # text of the LAST turn (x-1fbb). Both come from the same truth probe as
+        # the age above, so a reader can see WHAT the worker last did and WHEN -
+        # a `working` row whose stamp is hours old is the wedged-worker signal
+        # no store could express. Null when the probe never answered: an absent
+        # reading is never a fresh one.
+        "last_event_at": last_event_at,
+        "last_message": last_message,
     }
 
 
@@ -211,11 +221,13 @@ def render_json(
 
 # --- Human table rendering ---------------------------------------------------
 #
-# Column layout (in order): NAME, ADDRESS, HARNESS, STATUS, LIVE, LAST
-# MESSAGE, CWD. Width auto-sizes to terminal columns. STATUS and LIVE never
+# Column layout (in order): NAME, ADDRESS, HARNESS, STATUS, LIVE, EVENT AGE,
+# LAST MESSAGE, CWD. Width auto-sizes to terminal columns. STATUS and LIVE never
 # truncate — they are short-text columns. NAME and CWD truncate with
-# right-aligned ellipsis if needed; LAST MESSAGE is rendered as a relative-time
-# string from ``last_message_at``.
+# right-aligned ellipsis if needed; LAST MESSAGE is the flattened text of the
+# worker's last transcript turn (capped at 40 chars), and EVENT AGE is the
+# relative age of that transcript's newest activity - next to STATUS on purpose,
+# so a `working` row hours stale is visible as the disagreement it is (x-1fbb).
 #
 # ADDRESS never truncates either, and not for cosmetic reasons: a truncated
 # address is a WRONG address, and mail sent to it queues under a key no drain
@@ -223,7 +235,19 @@ def render_json(
 
 # HARNESS, not PROVIDER: the column has always shown the harness, and the old
 # heading made a claude-hosted worker on a zai route read as running on claude.
-_HEADERS = ("NAME", "ADDRESS", "HARNESS", "STATUS", "LIVE", "LAST MESSAGE", "CWD")
+_HEADERS = (
+    "NAME",
+    "ADDRESS",
+    "HARNESS",
+    "STATUS",
+    "LIVE",
+    "EVENT AGE",
+    "LAST MESSAGE",
+    "CWD",
+)
+# LAST MESSAGE cap: long transcript lines must not blow out the table; CWD and
+# NAME absorb the rest. 40 keeps a one-line gist readable at 120 cols.
+_LAST_MESSAGE_WIDTH = 40
 _HOME_PREFIX_PLACEHOLDER = "~"
 
 
@@ -337,7 +361,14 @@ def render_table(
     display_rows = []
     for row in rows:
         live = row.get("live_status") or "-"
-        last_msg = _relative_time(row.get("last_message_at"))
+        event_age = _relative_time(row.get("last_event_at"))
+        # The transcript's LAST turn, not a registry timestamp: the column spent
+        # its life wired to `last_message_at`, which is null on many rows while
+        # the worker was mid-sentence - a "last message" column that never
+        # showed a message. Cap it so one long line cannot own the table.
+        last_msg = _truncate(
+            row.get("last_message") or "-", _LAST_MESSAGE_WIDTH
+        )
         cwd = _collapse_home(row.get("cwd") or "")
         # Mark a crowned row (US9) with a compact ASCII marker in the name cell -
         # ASCII, not an emoji, so the column-width math (len-based) stays aligned.
@@ -351,6 +382,7 @@ def render_table(
                 "harness": row.get("harness") or "-",
                 "status": row.get("status") or "-",
                 "live": live,
+                "event_age": event_age,
                 "last_message": last_msg,
                 "cwd": cwd,
             }
@@ -364,6 +396,7 @@ def render_table(
         "harness": len("HARNESS"),
         "status": len("STATUS"),
         "live": len("LIVE"),
+        "event_age": len("EVENT AGE"),
         "last_message": len("LAST MESSAGE"),
         "cwd": len("CWD"),
     }
@@ -373,8 +406,8 @@ def render_table(
             col_widths[key] = max(col_widths[key], len(str(r[key])))
 
     # Pad widths produce total row width; check overflow and truncate
-    # NAME / CWD if necessary. The 6 single-space separators contribute 6.
-    pad_total = sum(col_widths.values()) + 6
+    # NAME / CWD if necessary. The 7 single-space separators contribute 7.
+    pad_total = sum(col_widths.values()) + 7
     if pad_total > width:
         overflow = pad_total - width
         # Take from CWD first, then NAME.
@@ -386,7 +419,16 @@ def render_table(
             col_widths["name"] -= name_shrink
 
     def _format_row(values: list[str]) -> str:
-        keys = ["name", "address", "harness", "status", "live", "last_message", "cwd"]
+        keys = [
+            "name",
+            "address",
+            "harness",
+            "status",
+            "live",
+            "event_age",
+            "last_message",
+            "cwd",
+        ]
         cells = []
         for key, val in zip(keys, values):
             cell_text = str(val)
@@ -405,6 +447,7 @@ def render_table(
                     r["harness"],
                     r["status"],
                     r["live"],
+                    r["event_age"],
                     r["last_message"],
                     r["cwd"],
                 ]

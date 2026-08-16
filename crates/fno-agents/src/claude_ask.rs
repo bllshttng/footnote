@@ -126,6 +126,13 @@ pub struct TruthProbe {
     /// from a fired falsifier.
     pub basis: Option<String>,
     pub last_activity_age_s: Option<f64>,
+    /// The absolute ISO8601 stamp of the newest transcript activity, and the
+    /// flattened text of the LAST turn (compact `[tool_use: name]` markers
+    /// included, capped at 200 chars Python-side). Derived by the same probe as
+    /// the age; `None` when the probe did not answer, which is never the same
+    /// claim as "nothing happened".
+    pub last_event_at: Option<String>,
+    pub last_message: Option<String>,
     pub observed_model: serde_json::Value,
 }
 
@@ -342,6 +349,10 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
             .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
         basis: parsed.and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
         last_activity_age_s: parsed.and_then(|value| value.get("last_activity_age_s")?.as_f64()),
+        last_event_at: parsed
+            .and_then(|value| value.get("last_event_at")?.as_str().map(str::to_owned)),
+        last_message: parsed
+            .and_then(|value| value.get("last_message")?.as_str().map(str::to_owned)),
         // Absent on a truth build that predates the field: null rather
         // than a fabricated variant, so a stale `fno` reads as "this
         // probe did not answer" instead of asserting no transcript.
@@ -4219,6 +4230,41 @@ mod tests {
         assert!(stale.reachability.is_none());
         assert!(stale.basis.is_none());
         assert!(stale.last_activity_age_s.is_none());
+    }
+
+    /// The absolute stamp and the LAST-turn text cross the wire beside the
+    /// triple (x-1fbb): the list row's EVENT AGE column and LAST MESSAGE text
+    /// come from this probe, and a parser that dropped either would leave it
+    /// permanently null on the daemon path - a key that is always null being
+    /// the same lie as a missing one.
+    #[test]
+    fn family1_truth_probe_carries_the_last_event_pair() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf '{\"state\":\"working\",\"last_event_at\":\
+             \"2026-08-15T17:00:00+00:00\",\"last_message\":\
+             \"Still growing (101 lines)\"}'",
+        ]);
+        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert_eq!(
+            probe.last_event_at.as_deref(),
+            Some("2026-08-15T17:00:00+00:00")
+        );
+        assert_eq!(
+            probe.last_message.as_deref(),
+            Some("Still growing (101 lines)")
+        );
+
+        // A truth build that predates the pair reads as absent - never as a
+        // fabricated fresh stamp or empty message.
+        let mut old = std::process::Command::new("sh");
+        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
+        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert!(stale.last_event_at.is_none());
+        assert!(stale.last_message.is_none());
     }
 
     #[test]

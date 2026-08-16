@@ -257,6 +257,87 @@ def test_render_table_does_not_crash_on_missing_last_message_at() -> None:
     assert entry.name in out
 
 
+def test_render_table_event_age_column_beside_status() -> None:
+    """x-1fbb: the transcript age renders as its own column next to STATUS, so
+    a row whose store-read state says one thing and whose transcript says
+    another shows both readings instead of resolving the conflict silently."""
+    from datetime import datetime, timedelta, timezone
+
+    fresh = (
+        datetime.now(timezone.utc) - timedelta(seconds=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = [
+        serialize_entry(_claude_entry(), live_status="Working", last_event_at=fresh)
+    ]
+
+    out = render_table(rows)
+
+    assert "EVENT AGE" in out
+    # A freshly-stamped event renders a wall-clock + relative token, not the
+    # bare '-' an absent reading gets.
+    assert "(5s)" in out
+
+
+def test_render_table_event_age_absent_renders_dash_not_fresh() -> None:
+    """The honest-limits rule from the node: a row with no transcript reading
+    must render as unread ('-'), never as fresh - an absent reading is not
+    evidence of health."""
+    rows = [serialize_entry(_claude_entry(), live_status="Working")]
+
+    out = render_table(rows)
+
+    # Columnar slice, not a token split: "EVENT AGE" and "LAST MESSAGE" are
+    # two-word headers, so the header line has more whitespace-separated
+    # tokens than a data row has cells.
+    header, data = out.splitlines()[0], out.splitlines()[1]
+    idx = header.index("EVENT AGE")
+    assert data[idx : idx + len("EVENT AGE")].strip() == "-"
+
+
+def test_render_table_last_message_shows_transcript_text() -> None:
+    """x-1fbb: LAST MESSAGE carries the last transcript turn. The column spent
+    its life wired to `last_message_at` - a timestamp, often null - so it never
+    showed a message; a 429 or a wait line is the actual diagnostic."""
+    rows = [
+        serialize_entry(
+            _claude_entry(name="short"),
+            live_status=None,
+            last_message="[tool_use: Bash] running the suite now",
+        ),
+        # Absent probe reading renders '-', and a long line is capped at 40
+        # chars so one transcript line cannot own the table.
+        serialize_entry(
+            _claude_entry(name="long"),
+            live_status=None,
+            last_message="x" * 120,
+        ),
+    ]
+
+    out = render_table(rows)
+
+    assert "running the suite now" in out
+    assert "…" in out
+    long_cells = [ln for ln in out.splitlines() if "xxxx" in ln]
+    assert len(long_cells[0].split()) > 1, "a capped message must not eat CWD"
+
+
+def test_serialize_entry_carries_the_last_event_pair() -> None:
+    """The stamp and the last-turn text reach the JSON row, and default to None
+    (not to a fabricated fresh reading) when the probe never answered."""
+    row = serialize_entry(
+        _claude_entry(),
+        live_status=None,
+        last_event_at="2026-08-15T17:00:00+00:00",
+        last_message="still on it",
+    )
+    assert row["last_event_at"] == "2026-08-15T17:00:00+00:00"
+    assert row["last_message"] == "still on it"
+
+    default = serialize_entry(_claude_entry(), live_status=None)
+    assert default["last_event_at"] is None
+    assert default["last_message"] is None
+
+
 # ---------------------------------------------------------------------------
 # Shared key-set contract
 #

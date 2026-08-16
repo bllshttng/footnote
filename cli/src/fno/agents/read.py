@@ -151,6 +151,9 @@ def list_agents(
         # Read off the SAME call, before `truth` is rebound below to the
         # unrelated node-claim reading; no second transcript read is paid.
         observed_model = truth.get("observed_model")
+        # The transcript stamp + last turn text, same single read (x-1fbb).
+        last_event_at = truth.get("last_event_at")
+        last_message = truth.get("last_message")
         # One shared derivation, reached from the truth reading already in hand
         # so no second transcript read is paid. `registry_falsifier` owns which
         # falsifier a row actually carries (a mux-pane row carries none); a row
@@ -199,6 +202,8 @@ def list_agents(
             reachability=reach.verdict,
             basis=reach.basis,
             last_activity_age_s=reach.age_s,
+            last_event_at=last_event_at,
+            last_message=last_message,
         )
         row["status"] = rendered_status
         rows.append(row)
