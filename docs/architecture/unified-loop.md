@@ -108,7 +108,9 @@ pub struct GlobalJournalPath(pub PathBuf);   // writes are best-effort
 ```
 
 **Project journal (`<repo-root>/.fno/events.jsonl`) is authoritative.**
+
 Worktrees symlink that path to the canonical checkout's journal, and a write failure there stops dispatch loudly (`LoopError::Journal`).
+
 An unobservable walk that continues spending compute is worse than stopping.
 
 **Global mirror (`~/.fno/events.jsonl`) is best-effort.** A write failure is logged to stderr and never propagated. The project journal is the record; the global mirror is convenience for cross-project tooling.
