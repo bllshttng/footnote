@@ -40,7 +40,16 @@ def _revive_enabled() -> bool:
     ungated behavior). A malformed value degrades to True (never opt-in), but
     a config that fails to load at all degrades to False - the global
     invariant that an unreadable config resolves every gate to off, never on.
+
+    Also stops when ``config.autonomy.enabled`` (the wave-3 master panic
+    switch) is off, checked first. Only reached when the operator did not
+    pass an explicit ``--revive``/``--no-revive`` (that always wins - an
+    explicit human command is not autonomy).
     """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled():
+        return False
     try:
         from fno.config import load_settings
 

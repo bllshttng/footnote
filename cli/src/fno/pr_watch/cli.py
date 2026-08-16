@@ -217,6 +217,9 @@ def tick() -> None:
     settings = load_settings()
     cfg = settings.pr_watch
 
+    # x-aaaf wave 3: the master panic switch outranks pr_watch's own gate too.
+    tick_enabled = cfg.enabled and settings.autonomy.enabled
+
     # A dead tick must not kill the legs below. The receipt contract makes
     # _tick raise on a failed emission even though state is already persisted,
     # so a broken events path would otherwise crash-loop recovery and sync
@@ -233,7 +236,7 @@ def tick() -> None:
             now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             max_age_days=cfg.max_age_days,
             max_retries=cfg.retries,
-            enabled=cfg.enabled,
+            enabled=tick_enabled,
         )
     except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
         tick_failed = str(exc)
@@ -243,7 +246,8 @@ def tick() -> None:
 
     if result is not None:
         if result.disabled:
-            typer.echo("pr-watch tick: config.pr_watch.enabled is false - skipped")
+            reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
+            typer.echo(f"pr-watch tick: {reason} is false - skipped")
         elif result.lock_held:
             typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
         else:

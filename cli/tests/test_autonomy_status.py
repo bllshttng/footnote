@@ -66,12 +66,12 @@ def test_ac1_hp_every_known_spawner_appears(
 
     rows = collect_status(tmp_path)
 
-    # 9 known spawners + groom/restart/evals (x-aaaf wave 2 gated these).
-    assert len(rows) == 12
+    # master switch + 9 known spawners + groom/restart/evals (wave 2 gated these).
+    assert len(rows) == 13
     for r in rows:
         assert r.trigger
         assert r.gate_key
-        assert r.rank in {"env", "config", "default"}
+        assert r.rank in {"env", "config", "default", "autonomy"}
 
 
 def test_ac1_hp_env_override_rank_is_visible(
@@ -112,6 +112,50 @@ def test_previously_ungated_spawners_now_gated_and_default_true(
         assert by_name[name].armed is True
         assert by_name[name].gate_key == gate_key
         assert by_name[name].rank == "config"
+
+
+def test_master_switch_row_present_and_armed_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
+    _write_settings(tmp_path, "schema_version: 1\n")
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    rows = collect_status(tmp_path)
+    master = next(r for r in rows if r.name == "autonomy (master switch)")
+    assert master.armed is True
+    assert master.gate_key == "config.autonomy.enabled"
+
+
+def test_master_switch_off_vetoes_every_other_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x-aaaf wave 3: config.autonomy.enabled=false reports rank "autonomy"
+    on every direct-config-read row it vetoes, not the row's own gate key."""
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
+    _write_settings(tmp_path, "schema_version: 1\nautonomy:\n  enabled: false\n")
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    rows = collect_status(tmp_path)
+    by_name = {r.name: r for r in rows}
+    assert by_name["autonomy (master switch)"].armed is False
+    for name in (
+        "post-merge ritual", "pr_watch (headless PR poll)",
+        "groom (_spawn_groom_worker)", "restart (_revive_orphans)",
+        "evals runner", "blueprint auto-launch",
+        "keep_going (autonomous follow-up)",
+    ):
+        assert by_name[name].armed is False, name
+        assert by_name[name].rank == "autonomy", name
+    for name in (
+        "advance (node-walk)", "spawn_think (context /think)",
+    ):
+        assert by_name[name].armed is False, name
+        assert by_name[name].rank == "autonomy", name
 
 
 def test_format_table_includes_every_row(tmp_path: Path) -> None:

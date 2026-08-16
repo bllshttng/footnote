@@ -39,13 +39,36 @@ class SpawnerStatus:
     trigger: str
     gate_key: str
     armed: Optional[bool]  # None = ungated (no gate exists yet)
-    rank: str  # "env" | "config" | "default" | "ungated"
+    rank: str  # "env" | "config" | "default" | "autonomy" | "ungated"
 
 
 def _settings_for(project_root: Optional[Path]):
     from fno.config import load_settings, load_settings_for_repo
 
     return load_settings_for_repo(Path(project_root)) if project_root else load_settings()
+
+
+def _master_switch_status(project_root: Optional[Path]) -> SpawnerStatus:
+    from fno.config import autonomy_master_enabled
+
+    armed = autonomy_master_enabled(project_root)
+    return SpawnerStatus(
+        "autonomy (master switch)", "every row below", "config.autonomy.enabled", armed,
+        "config" if armed else "default",
+    )
+
+
+def _gate_with_master(
+    project_root: Optional[Path], read_value
+) -> tuple[Optional[bool], str]:
+    """Shared shape for the direct-config-read rows below: the master panic
+    switch is checked FIRST (rank "autonomy" when it vetoes), matching the
+    precedence every resolver-backed spawner already applies to itself."""
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled(project_root):
+        return False, "autonomy"
+    return bool(read_value()), "config"
 
 
 def _advance_status(project_root: Optional[Path]) -> SpawnerStatus:
@@ -103,9 +126,11 @@ def _spawn_think_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 def _post_merge_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
-        armed = bool(_settings_for(project_root).post_merge.enabled)
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).post_merge.enabled
+        )
         return SpawnerStatus(
-            "post-merge ritual", "PR merge", "config.post_merge.enabled", armed, "config",
+            "post-merge ritual", "PR merge", "config.post_merge.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001 - AC9-ERR: never let one row crash the table
         return SpawnerStatus(
@@ -115,10 +140,12 @@ def _post_merge_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 def _pr_watch_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
-        armed = bool(_settings_for(project_root).pr_watch.enabled)
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).pr_watch.enabled
+        )
         return SpawnerStatus(
             "pr_watch (headless PR poll)", "launchd interval tick",
-            "config.pr_watch.enabled", armed, "config",
+            "config.pr_watch.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
@@ -128,12 +155,16 @@ def _pr_watch_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 
 def _keep_going_status(project_root: Optional[Path]) -> SpawnerStatus:
+    from fno.config import autonomy_master_enabled
     from fno.retro.keep_going import _ENV_OVERRIDE, keep_going_enabled
 
-    env = os.environ.get(_ENV_OVERRIDE)
-    rank = "env" if env is not None else "config"
     try:
-        armed = keep_going_enabled(project_root=project_root)
+        if not autonomy_master_enabled(project_root):
+            armed, rank = False, "autonomy"
+        else:
+            env = os.environ.get(_ENV_OVERRIDE)
+            rank = "env" if env is not None else "config"
+            armed = keep_going_enabled(project_root=project_root)
     except Exception:  # noqa: BLE001
         armed, rank = False, "default"
     return SpawnerStatus(
@@ -144,10 +175,12 @@ def _keep_going_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 def _blueprint_auto_launch_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
-        armed = bool(_settings_for(project_root).target.auto_launch_on_blueprint)
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).target.auto_launch_on_blueprint
+        )
         return SpawnerStatus(
             "blueprint auto-launch", "/blueprint completion",
-            "config.target.auto_launch_on_blueprint", armed, "config",
+            "config.target.auto_launch_on_blueprint", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
@@ -158,10 +191,12 @@ def _blueprint_auto_launch_status(project_root: Optional[Path]) -> SpawnerStatus
 
 def _groom_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
-        armed = bool(_settings_for(project_root).groom.enabled)
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).groom.enabled
+        )
         return SpawnerStatus(
             "groom (_spawn_groom_worker)", "fno backlog groom",
-            "config.groom.enabled", armed, "config",
+            "config.groom.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
@@ -172,10 +207,12 @@ def _groom_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 def _restart_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
-        armed = bool(_settings_for(project_root).restart.enabled)
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).restart.enabled
+        )
         return SpawnerStatus(
             "restart (_revive_orphans)", "orphan sweep (fno restart --mux)",
-            "config.restart.enabled", armed, "config",
+            "config.restart.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
@@ -186,9 +223,11 @@ def _restart_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
     try:
-        armed = bool(_settings_for(project_root).evals.enabled)
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).evals.enabled
+        )
         return SpawnerStatus(
-            "evals runner", "fno evals run", "config.evals.enabled", armed, "config",
+            "evals runner", "fno evals run", "config.evals.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
@@ -199,6 +238,7 @@ def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
 def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
     """Resolve every known spawner's armed state through its real resolver."""
     rows = [
+        _master_switch_status(project_root),
         _advance_status(project_root),
         _dispatch_lanes_status(project_root),
         _epic_converge_status(project_root),

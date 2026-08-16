@@ -1730,6 +1730,53 @@ class AgentsBlock(BaseModel):
         return {}
 
 
+class AutonomyBlock(BaseModel):
+    """The one master switch over every autonomous session-starting spawner
+    (nested under 'config.autonomy'). x-aaaf wave 3.
+
+    ``enabled=False`` stops EVERY spawner - the merge-triggered ones
+    (advance, dispatch_lanes, epic converge, reconcile_dispatch), spawn_think,
+    post-merge ritual, pr_watch, keep_going, blueprint auto-launch, and the
+    wave-2 ones (groom, restart, evals) - regardless of that spawner's own
+    gate. It is checked BEFORE any other precedence rank, even an explicit env
+    override: the whole point of a panic switch is that nothing overrides it.
+    A skip caused by this switch stamps rank ``"autonomy"`` on its decision
+    event (distinct from env/config/default) so the log names the master
+    switch as the reason, never leaving it to inference (AC4-HP).
+
+    Default ``True``: shipping this changes nothing for an existing user -
+    every spawner's own gate still governs exactly as before until an
+    operator explicitly arms the panic switch.
+
+    Explicitly NOT a per-dispatcher lever (Alternative A in the design doc,
+    rejected): nine levers multiply the state an operator must hold and
+    guarantee some subset goes stale, which is the same failure with more
+    surface. This is the ONE switch; detail belongs in ``fno autonomy
+    status``, not in a second layer of configuration.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe to True (this field's own default, matching every other
+        wave-2 gate's malformed-value posture): a garbage value must not
+        silently kill every spawner in the install. A config that fails to
+        LOAD at all still resolves every gate to off via each resolver's own
+        try/except - that direction is a resolver-level invariant, not this
+        validator's job."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return True
+
+
 class AutoContinueBlock(BaseModel):
     """Merge-triggered auto-continue settings (nested under 'config.auto_continue').
 
@@ -3175,6 +3222,7 @@ class ConfigBlock(BaseModel):
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
+    autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
@@ -4124,3 +4172,27 @@ def agents_headless_yolo(provider: str) -> bool:
     if block is None:
         return False
     return bool(getattr(block, "headless_yolo", False))
+
+
+def autonomy_master_enabled(project_root: Optional[Path] = None) -> bool:
+    """Resolve ``config.autonomy.enabled``, the ONE panic switch over every
+    autonomous session-starting spawner (x-aaaf wave 3).
+
+    Every spawner-specific resolver (``auto_continue_enabled``,
+    ``think_spawn_enabled``, ``keep_going_enabled``, ``groom_enabled``,
+    ``_revive_enabled``, ``evals_enabled``, and the post-merge / pr_watch /
+    blueprint-auto-launch config reads) calls this FIRST, before its own env
+    override even - a panic switch that something else can still bypass is
+    not a panic switch. Callers that skip because of this return rank
+    ``"autonomy"`` on their decision event rather than falling through to
+    their own env/config/default resolution.
+
+    Fail-safe to False on ANY read failure - an unreadable config resolves
+    every gate to off, never to on (the invariant every resolver in this
+    codebase already applies to itself).
+    """
+    try:
+        settings = load_settings_for_repo(Path(project_root)) if project_root else load_settings()
+        return bool(settings.autonomy.enabled)
+    except Exception:  # noqa: BLE001 - fail-safe to disabled on a read failure
+        return False

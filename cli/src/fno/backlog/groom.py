@@ -56,7 +56,14 @@ def groom_enabled() -> bool:
     silently disable it), but a config that fails to LOAD at all degrades to
     False - the global invariant that an unreadable config resolves every
     gate to off, never to on (Failure Modes/Errors, x-aaaf design doc).
+
+    Also stops when ``config.autonomy.enabled`` (the wave-3 master panic
+    switch) is off, checked first.
     """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled():
+        return False
     try:
         from fno.config import load_settings
 

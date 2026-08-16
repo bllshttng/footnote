@@ -204,6 +204,8 @@ def _think_spawn_resolve(
     rank that supplied it, mirroring advance._auto_continue_resolve.
 
     Precedence (highest first):
+      0. ``config.autonomy.enabled`` master switch off -> rank "autonomy".
+         Checked BEFORE the env override (x-aaaf wave 3 panic switch).
       1. ``FNO_THINK_SPAWN`` env override (explicit force on/off) -> rank "env".
       2. ``config.think_spawn.enabled`` from the node's repo settings
          (``project_root`` when given, else the ambient cwd; local>global)
@@ -213,6 +215,11 @@ def _think_spawn_resolve(
     Fail-safe (AC4-ERR): ANY exception reading settings degrades to
     (False, "default") rather than raising into the node-birth pipeline.
     """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled(project_root):
+        return False, "autonomy"
+
     environ = os.environ if env is None else env
     override = environ.get(_ENV_OVERRIDE)
     if override is not None:

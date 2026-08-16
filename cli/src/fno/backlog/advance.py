@@ -74,6 +74,9 @@ def _auto_continue_resolve(
     """Resolve auto-continue's armed state AND which precedence rank supplied it.
 
     Precedence (highest first):
+      0. ``config.autonomy.enabled`` master switch off -> rank "autonomy".
+         Checked BEFORE the env override: a panic switch something else can
+         bypass is not a panic switch (x-aaaf wave 3).
       1. ``FNO_AUTO_CONTINUE`` env override (explicit force on/off) -> rank "env".
       2. ``config.auto_continue.enabled`` from settings.yaml (local>global via
          load_settings deep-merge) -> rank "config".
@@ -87,6 +90,11 @@ def _auto_continue_resolve(
     Fail-safe (AC2-ERR): ANY exception reading settings degrades to
     (False, "default") rather than raising into the merge ritual.
     """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled(project_root):
+        return False, "autonomy"
+
     env = os.environ.get(_ENV_OVERRIDE)
     if env is not None:
         return env.strip().lower() in _TRUTHY, "env"

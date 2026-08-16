@@ -308,6 +308,35 @@ def test_config_disabled_tick_prints_disabled_not_a_sweep(monkeypatch) -> None:
     assert "open_prs=" not in res.output
 
 
+def test_master_switch_off_names_autonomy_not_pr_watch_in_the_message(monkeypatch) -> None:
+    """x-aaaf wave 3: when the panic switch (not pr_watch's own gate) caused
+    the skip, the printed line must name IT, not the narrower gate."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick", lambda **_kw: TickResult(open_prs=0, acted=0, disabled=True),
+        raising=True,
+    )
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.pr_watch.enabled = True
+    settings.autonomy.enabled = False
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+
+    assert res.exit_code == 0, res.output
+    assert "config.autonomy.enabled is false" in res.output
+
+
 def test_cli_passes_the_resolved_enabled_flag_to_dispatch_tick(monkeypatch) -> None:
     """The CLI must pass config.pr_watch.enabled through, not silently drop it."""
     import typer
