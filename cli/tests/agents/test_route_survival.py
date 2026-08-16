@@ -24,6 +24,12 @@ ROUTE_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
     "ANTHROPIC_AUTH_TOKEN": "zai-secret-token",
     "ANTHROPIC_MODEL": "glm-5.2",
+    # Every tier: the restore relaunch goes through resolve_spawn_route, which
+    # refuses a foreign endpoint without the full model set.
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.2",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.2",
 }
 
 

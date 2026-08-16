@@ -26,6 +26,18 @@ def _setup_tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(k, raising=False)
 
 
+def _route_unit(model: str = "glm-5.2") -> dict[str, str]:
+    """A resolved route as the real resolver emits it: endpoint, auth, and
+    every model tier as one unit (resolve_spawn_route refuses less)."""
+    from fno.agents.model_routing import MODEL_ENV_KEYS
+
+    return {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "secret",
+        **{k: model for k in MODEL_ENV_KEYS},
+    }
+
+
 def test_dispatch_spawn_threads_captured_role_route_to_create_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -41,11 +53,7 @@ def test_dispatch_spawn_threads_captured_role_route_to_create_path(
         return DispatchAskResult(kind="create", short_id="abc12345")
 
     monkeypatch.setattr(dispatch_mod, "_claude_create_path", fake_create)
-    route = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "secret",
-        "ANTHROPIC_MODEL": "business-model",
-    }
+    route = _route_unit("business-model")
     monkeypatch.setattr(model_routing, "resolve_route", lambda *a, **k: route)
 
     result = dispatch_spawn(
@@ -101,11 +109,7 @@ def test_direct_dispatch_spawn_composes_managed_role_route(
     from fno.agents import dispatch as dispatch_mod, model_routing
     from fno.agents.dispatch import DispatchAskResult, dispatch_spawn
 
-    route = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "secret",
-        "ANTHROPIC_MODEL": "glm-5.2",
-    }
+    route = _route_unit()
     captured: Dict[str, Any] = {}
 
     def fake_create(**kw: Any) -> DispatchAskResult:
@@ -155,11 +159,7 @@ def test_direct_pane_spawn_composes_managed_route_before_mux(
         provider="claude",
         cwd=tmp_path,
         role="tidy",
-        route_env={
-            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-            "ANTHROPIC_AUTH_TOKEN": "secret",
-            "ANTHROPIC_MODEL": "glm-5.2",
-        },
+        route_env=_route_unit(),
         runner=runner,
     )
     run_argv = next(a for a in launched if a[1:4] == ["mux", "pane", "run"])
@@ -265,11 +265,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
     from fno.agents.dispatch import DispatchAskResult, dispatch_spawn
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
-    route = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "secret",
-        "ANTHROPIC_MODEL": "business-model",
-    }
+    route = _route_unit("business-model")
     resolutions: list[str | None] = []
 
     def stateful_resolution(role: str | None, **kwargs: Any) -> dict[str, str] | None:
@@ -346,11 +342,7 @@ def test_direct_claude_adapter_composes_managed_route(
         return _Result()
 
     monkeypatch.setattr(claude, "_subprocess_run", fake_run)
-    route = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "secret",
-        "ANTHROPIC_MODEL": "glm-5.2",
-    }
+    route = _route_unit()
     kwargs: dict[str, Any] = {
         "message": "work",
         "cwd": tmp_path,
@@ -388,11 +380,7 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
     """Every routed CLI spawn carries one pre-resolved endpoint/auth/model unit."""
     from fno.agents import dispatch, model_routing, mux_spawn, spawn_gate
 
-    route = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "secret",
-        "ANTHROPIC_MODEL": "glm-5.2",
-    }
+    route = _route_unit()
     resolutions: list[str | None] = []
     received: dict[str, Any] = {}
 
@@ -476,11 +464,7 @@ def test_cmd_spawn_composes_role_route_over_managed_oauth_overlay(
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
-    route = {
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "secret",
-        "ANTHROPIC_MODEL": "glm-5.2",
-    }
+    route = _route_unit()
     monkeypatch.setattr(model_routing, "resolve_route", lambda *_a, **_k: route)
     monkeypatch.setattr(model_routing, "resolve_explicit_route", lambda *_a, **_k: route)
     gate_calls: list[object] = []

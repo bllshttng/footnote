@@ -172,9 +172,15 @@ def resolve_spawn_route(
     credential is refused: it would pair that foreign endpoint with whatever
     OAuth login the account or the ambient slot holds, the one split-brain the
     composition cannot express (endpoint, auth, and model move as one unit).
+    The same refusal fires on a route that sets an endpoint without every
+    :data:`MODEL_ENV_KEYS` entry: the composition scrubs each inherited model
+    var (they are all ``SCRUB_AUTH_VARS`` members) before layering the route,
+    so a missing tier would send Claude's default model id for that tier to a
+    vendor that does not serve it - a "live" receipt that fails its first turn.
     Resolved routes - the role lane, the explicit CLI lane, restored routes -
-    are fail-closed and always carry ``ANTHROPIC_AUTH_TOKEN``, so this fires
-    only on hand-built partial env from a direct in-process caller.
+    are fail-closed and always carry ``ANTHROPIC_AUTH_TOKEN`` plus the whole
+    model set, so this fires only on hand-built partial env from a direct
+    in-process caller.
 
     The managed-OAuth ambient guard that used to live here is gone (measured
     2026-08-15): claude prefers an env credential over a Keychain login, so a
@@ -188,19 +194,33 @@ def resolve_spawn_route(
         if route_env
         else resolve_route(role, notice=notice, business_lookup=business_lookup)
     )
-    if route and route.get("ANTHROPIC_BASE_URL") and not (
-        route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
-    ):
+    if route and route.get("ANTHROPIC_BASE_URL"):
         route_intent = intent or (
             f"routed role {role!r}" if role is not None else "pre-resolved route"
         )
-        raise RouteCompositionError(
-            f"refusing {route_intent}: it sets endpoint "
-            f"{route['ANTHROPIC_BASE_URL']!r} without its own credential, which "
-            "would pair that endpoint with the account's OAuth login; endpoint, "
-            "auth, and model must be selected as one provider route; "
-            "no worker launched."
-        )
+        if not (
+            route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
+        ):
+            raise RouteCompositionError(
+                f"refusing {route_intent}: it sets endpoint "
+                f"{route['ANTHROPIC_BASE_URL']!r} without its own credential, which "
+                "would pair that endpoint with the account's OAuth login; endpoint, "
+                "auth, and model must be selected as one provider route; "
+                "no worker launched."
+            )
+        missing_models = [
+            k for k in MODEL_ENV_KEYS if not (route.get(k) or "").strip()
+        ]
+        if missing_models:
+            raise RouteCompositionError(
+                f"refusing {route_intent}: it sets endpoint "
+                f"{route['ANTHROPIC_BASE_URL']!r} without "
+                f"{', '.join(missing_models)}; the composition scrubs every "
+                "inherited model var before layering the route, so the worker "
+                "would ask that endpoint for Claude's default model and fail on "
+                "its first turn; endpoint, auth, and model must be selected as "
+                "one provider route; no worker launched."
+            )
     return route
 
 
