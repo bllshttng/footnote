@@ -69,7 +69,7 @@ from .core import (
     refresh_claim,
     release_claim,
 )
-from .io import claims_dir, dedup_claims_roots, global_claims_root
+from .io import dedup_claims_roots, global_claims_root
 from fno.tombstones import tombstone_group_cls
 
 
@@ -682,16 +682,28 @@ def list_cmd(
         roots = [global_claims_root(), _node_aware_root(prefix) if prefix else None]
 
     all_rows: list[dict] = []
+    # Display-only: which root a row came from, keyed by claim key rather
+    # than mutated onto the row dict itself, so JSON output stays the bare
+    # pre-x-aeeb claim_status() shape a scripted caller already parses
+    # (x-aeeb review).
+    row_roots: dict[str, str] = {}
     totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "total": 0}
     deduped_roots = dedup_claims_roots(roots)
-    for candidate_root in deduped_roots:
-        cdir = claims_dir(candidate_root)
+    seen_keys: set[str] = set()
+    for candidate_root, cdir in deduped_roots:
         rows, counts = list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         for r in rows:
-            r["root"] = str(cdir)
-        all_rows.extend(rows)
+            # A key present in more than one root (only possible via a bug
+            # elsewhere writing to the wrong root) is one logical claim for
+            # display purposes - first root wins, matching the old
+            # cross-root dedup this rewrite had dropped (x-aeeb review).
+            if r["key"] in seen_keys:
+                continue
+            seen_keys.add(r["key"])
+            all_rows.append(r)
+            row_roots[r["key"]] = str(cdir)
         for k in totals:
             totals[k] += counts[k]
 
@@ -718,7 +730,7 @@ def list_cmd(
     for r in all_rows:
         typer.echo(
             f"{r['state']:9} {r['key']:32} holder={r.get('holder', '-')} "
-            f"pid={r.get('pid', '-')} host={r.get('host', '-')} root={r['root']}"
+            f"pid={r.get('pid', '-')} host={r.get('host', '-')} root={row_roots[r['key']]}"
         )
 
 

@@ -50,7 +50,7 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, is_provably_dead, now_ms
+from .staleness import classify, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import _stamp_owner, release_dir_mutex, steal_if_stale
 from .types import (
@@ -792,7 +792,11 @@ def _list_claims_impl(
     it withheld (x-aeeb AC7).
     """
     cdir = claims_dir(root)
-    counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0}
+    # "free" covers a claim released between iterdir() and claim_status()
+    # below (ClaimGoneAway / a vanished path) - without a bucket for it, that
+    # entry silently drops out of `total` too, instead of being an accounted
+    # non-event (x-aeeb review).
+    counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0}
     if not cdir.is_dir():
         return [], {**counts, "total": 0}
 
@@ -914,6 +918,27 @@ def _default_reap_roots() -> list[Path]:
     return _dedup_roots([global_claims_root(), None])
 
 
+def _classify_for_sweep(claim: Claim, ts: int) -> tuple[bool, str]:
+    """Classify one claim for ``reap_dead_claims``, mirroring
+    :func:`fno.claims.staleness.is_provably_dead`'s own composition
+    (same-machine and ``classify() is STALE``) so the single ``classify()``
+    call is shared by both the outer scan and the mutex re-verify below
+    instead of paid twice or three times per claim, and so a claim's
+    classification stays consistent with the rest of one sweep pass by using
+    the sweep's ``ts`` rather than a fresh clock read each time.
+
+    Returns ``(provably_dead, bucket)`` where ``bucket`` is one of
+    ``"offhost"``/``"suspect"``/``"live"`` - only meaningful when
+    ``provably_dead`` is False.
+    """
+    if not is_same_machine(claim.host, claim.machine_id):
+        return False, "offhost"
+    state = classify(claim, now=ts)
+    if state is ClaimState.STALE:
+        return True, ""
+    return False, "suspect" if state is ClaimState.SUSPECT else "live"
+
+
 def reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
@@ -994,15 +1019,13 @@ def reap_dead_claims(
                 vanished += 1
                 continue
 
-            # Inline is_provably_dead's own composition (is_same_machine and
-            # classify() is STALE) so its classify() call is reused for the
-            # not-dead bucketing below instead of paid twice per claim - the
-            # sweep runs on every SessionStart/megawalk stop hook (x-aeeb
-            # review).
-            same_machine = is_same_machine(claim.host, claim.machine_id)
-            state = classify(claim, now=ts) if same_machine else None
+            # is_same_machine + classify() computed once per claim and reused
+            # by both this outer scan and the mutex re-verify below, instead
+            # of paid twice or three times per claim - the sweep runs on
+            # every SessionStart/megawalk stop hook (x-aeeb review).
+            provably_dead, bucket = _classify_for_sweep(claim, ts)
 
-            if same_machine and state is ClaimState.STALE:
+            if provably_dead:
                 if not apply:
                     would_reap += 1
                     continue
@@ -1010,17 +1033,31 @@ def reap_dead_claims(
                 # Take the same per-key recovery mutex acquire_claim() uses for
                 # its own archive-then-recreate (core.py ~267-371) so this
                 # cannot archive a claim a concurrent legitimate acquirer just
-                # recreated at this path. Non-blocking: an already-held mutex
-                # means a real recovery is in flight, so leave this claim for
-                # the next sweep rather than wait or steal (x-aeeb review).
+                # recreated at this path.
                 recovery_lock = entry.with_name(entry.name + ".recovery.d")
                 recovery_token = ""
                 try:
                     recovery_lock.mkdir(parents=True)
                     recovery_token = _stamp_owner(recovery_lock)
                 except FileExistsError:
-                    vanished += 1
-                    continue
+                    # Steal a corpse left by a crashed reap/acquire (mirrors
+                    # acquire_claim's own recovery path) so a dead owner can
+                    # never permanently block this key from ever being
+                    # reaped again (x-aeeb review). A live owner (steal
+                    # returns False) means a real recovery is in flight;
+                    # leave it for the next sweep rather than wait - reap
+                    # runs on a cadence and blocking here would stall the
+                    # whole sweep.
+                    if not steal_if_stale(recovery_lock):
+                        vanished += 1
+                        continue
+                    try:
+                        recovery_lock.mkdir(parents=True)
+                        recovery_token = _stamp_owner(recovery_lock)
+                    except FileExistsError:
+                        # Someone else won the steal race.
+                        vanished += 1
+                        continue
 
                 try:
                     # Re-read and re-verify under the mutex: the file may
@@ -1035,10 +1072,11 @@ def reap_dead_claims(
                         corrupted += 1
                         continue
 
-                    if not is_provably_dead(fresh, now=now_ms()):
-                        if not is_same_machine(fresh.host, fresh.machine_id):
+                    fresh_dead, fresh_bucket = _classify_for_sweep(fresh, ts)
+                    if not fresh_dead:
+                        if fresh_bucket == "offhost":
                             kept_offhost += 1
-                        elif classify(fresh, now=now_ms()) is ClaimState.SUSPECT:
+                        elif fresh_bucket == "suspect":
                             kept_suspect += 1
                         else:
                             kept_live += 1
@@ -1071,9 +1109,9 @@ def reap_dead_claims(
                 continue
 
             # Not provably dead. Bucket the reason for the report.
-            if not same_machine:
+            if bucket == "offhost":
                 kept_offhost += 1
-            elif state is ClaimState.SUSPECT:
+            elif bucket == "suspect":
                 kept_suspect += 1
             else:
                 kept_live += 1
@@ -1097,4 +1135,4 @@ def reap_dead_claims(
 
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
     """Resolve + dedup an explicit ``--root`` list, returning the claims dirs."""
-    return [claims_dir(r) for r in dedup_claims_roots(roots)]
+    return [cdir for _, cdir in dedup_claims_roots(roots)]

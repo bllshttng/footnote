@@ -142,27 +142,29 @@ def claims_dir(root: Path | None = None) -> Path:
     return base / CLAIMS_DIRNAME
 
 
-def dedup_claims_roots(roots: list[Path | None]) -> list[Path | None]:
+def dedup_claims_roots(roots: list[Path | None]) -> list[tuple[Path | None, Path]]:
     """Dedup candidate claims roots by their resolved ``claims_dir()``.
 
-    Returns the RAW root values (``None`` or ``Path``), not the resolved
-    dirs, so a caller can pass an entry straight back into ``root=`` on
-    ``list_claims_with_counts``/``reap_dead_claims``/etc. A cwd whose
-    canonical repo root IS the global root collapses to one scan, not two;
-    dedup is by ``Path.resolve()`` on the resolved claims dir, never on the
-    raw root arg (``None`` and an equivalent explicit ``Path`` must collapse
-    too). Single source of truth for the both-roots dedup used by
-    ``fno claim list``/``reap`` (x-aeeb review: this logic existed three
-    times with no shared helper).
+    Returns ``(raw_root, resolved_dir)`` pairs: the raw value (``None`` or
+    ``Path``) so a caller can pass an entry straight back into ``root=`` on
+    ``list_claims_with_counts``/``reap_dead_claims``/etc, paired with the
+    already-resolved dir so nothing calls ``claims_dir()`` on the same root
+    twice. A cwd whose canonical repo root IS the global root collapses to
+    one scan, not two; dedup is by ``Path.resolve()`` on the resolved claims
+    dir, never on the raw root arg (``None`` and an equivalent explicit
+    ``Path`` must collapse too). Single source of truth for the both-roots
+    dedup used by ``fno claim list``/``reap`` (x-aeeb review: this logic
+    existed three times with no shared helper).
     """
     seen: set[Path] = set()
-    out: list[Path | None] = []
+    out: list[tuple[Path | None, Path]] = []
     for r in roots:
-        resolved = claims_dir(r).resolve()
+        cdir = claims_dir(r)
+        resolved = cdir.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
-        out.append(r)
+        out.append((r, cdir))
     return out
 
 
