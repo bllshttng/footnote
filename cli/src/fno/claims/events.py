@@ -165,6 +165,17 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
     itself gates on `apply`): a dry-run promises no writes, and this event
     is one.
     """
+    known_keys = {
+        "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
+        "kept_offhost", "corrupted", "vanished", "contended", "reap_failed",
+        "apply", "roots",
+    }
+    extra_keys = summary.keys() - known_keys
+    if extra_keys:
+        # A new bucket in reap_dead_claims's summary that this function does
+        # not yet know to forward would otherwise be silently dropped from
+        # the audit event - fail loud instead so the drift gets fixed here.
+        raise KeyError(f"emit_claim_reap_swept: unrecognized summary key(s) {sorted(extra_keys)}")
     data = {
         "scanned": int(summary["scanned"]),
         "reaped": int(summary["reaped"]),

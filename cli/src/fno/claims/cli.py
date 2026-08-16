@@ -2,7 +2,9 @@
 
 Exit codes:
     0  success
-    1  ClaimHeldByOther (caller should retry later)
+    1  ClaimHeldByOther (caller should retry later); also `reap`'s own
+       distinct overload of 1 - a reapable file's archive move could not be
+       confirmed on re-read (see `reap`'s own docstring, not a retry signal)
     2  validation / input error
     3  ClaimCorrupted or ClaimGoneAway (race during operation)
     4  HolderMismatch (release/refresh wrong holder)

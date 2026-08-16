@@ -13,15 +13,12 @@ from __future__ import annotations
 
 import os
 import socket
-from pathlib import Path
 from unittest.mock import patch
 
 import psutil
 import pytest
 
 from fno.claims.core import (
-    ClaimAlreadyHeld,
-    ClaimCorrupted,
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
@@ -94,6 +91,22 @@ class TestAcquire:
         # acquired_at is refreshed
         assert second.acquired_at >= first.acquired_at
 
+    def test_acquire_contention_recursion_is_bounded(self, tmp_path):
+        """Perpetual recovery-mutex contention must raise, not recurse forever.
+
+        acquire_claim's own holder (idempotent) path always takes the
+        recovery mutex, so patching acquire_dir_mutex to always report
+        "busy" drives a deterministic, PID-liveness-independent path through
+        _retry() every call - proving the ACQUIRE_MAX_ATTEMPTS cap fires
+        rather than growing the Python call stack unbounded.
+        """
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)
+        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
+            with pytest.raises(RuntimeError, match="gave up after"):
+                acquire_claim("k", HOLDER_A, root=tmp_path)
+
     def test_AC4_EDGE_stale_pid_recovered(self, tmp_path):
         """A claim whose holder process is dead is reclaimable by another holder."""
         # Pick a definitely-dead PID and hand-write a claim for it.
@@ -151,7 +164,6 @@ class TestAcquire:
         process on this host is NOT reclaimable - acquire must honor the same
         hybrid liveness as classify(), so a peer parks instead of stealing the
         node from a suspended-but-alive session (AC1-ERR)."""
-        from fno.claims.staleness import now_ms
         # Anchor acquired_at AFTER this process's create_time so is_live's
         # pid-reuse guard (create_time < acquired_at) passes; both timestamps
         # are in the past so the TTL is expired.
@@ -226,6 +238,15 @@ class TestRefresh:
         refreshed = refresh_claim("k", HOLDER_A, ttl_ms=120_000, root=tmp_path)
         assert refreshed is not None
         assert refreshed.expires_at > first.expires_at
+
+    def test_refresh_contention_recursion_is_bounded(self, tmp_path):
+        """Perpetual recovery-mutex contention must raise, not recurse forever."""
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
+            with pytest.raises(RuntimeError, match="gave up after"):
+                refresh_claim("k", HOLDER_A, root=tmp_path)
 
     def test_AC3_FR_refresh_pid_liveness_returns_none(self, tmp_path):
         acquire_claim("k", HOLDER_A, root=tmp_path)  # no TTL

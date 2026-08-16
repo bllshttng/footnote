@@ -8496,10 +8496,12 @@ def cmd_reconcile(
                 typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
 
     # Claim GC. This call site reaches every path that fires reconcile - the
-    # SessionStart reconcile hook, the eval-sweep SessionStart hook (via
-    # scripts/lib/eval-sweep-throttle.sh), and a manual invocation, all
-    # through scripts/lib/reconcile-throttle.sh - so a reaper hook on any one
-    # caller instead would be a guard on one of N reachable paths. --dry-run
+    # SessionStart reconcile hook (scripts/lib/reconcile-throttle.sh) and a
+    # manual invocation - so a reaper hook on any one caller instead would be
+    # a guard on one of N reachable paths. The eval-sweep SessionStart hook
+    # sources reconcile-throttle.sh too, but only to reuse its
+    # _reconcile_resolve_fno helper; it never calls reconcile_maybe_fire, so
+    # it does not reach this reaper. --dry-run
     # propagates to the reaper (one mode contract); best-effort, same posture
     # as sync_catchup above: a reap error is reported and never fails the
     # sweep.

@@ -209,6 +209,7 @@ def acquire_claim(
     host: Optional[str] = None,
     harness: Optional[str] = None,
     root: Optional[Path] = None,
+    _attempt: int = 0,
 ) -> Claim:
     """Try to acquire a claim on ``key`` for ``holder``.
 
@@ -226,6 +227,12 @@ def acquire_claim(
     Inputs are validated up front (key length, ttl bounds, non-empty
     holder). Validation failures raise ClaimValidationError before any
     filesystem write so the lock dir is not polluted with half-bad files.
+
+    ``_attempt`` is internal bookkeeping only (never pass it): each
+    contention/race branch recurses through ``_retry()``, which counts
+    attempts and raises ``RuntimeError`` after ``ACQUIRE_MAX_ATTEMPTS``
+    rather than recursing unbounded, mirroring Rust's bounded
+    ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
     """
     _validate_inputs(key, holder, ttl_ms)
     path = claim_path(key, root=root)
@@ -234,6 +241,11 @@ def acquire_claim(
         # Every contention/race branch below re-dispatches by recursing with
         # the exact same arguments - one definition instead of the same
         # 9-line call restated at each of the seven sites that need it.
+        if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+            raise RuntimeError(
+                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
+                f"contention retries on {key!r}"
+            )
         return acquire_claim(
             key,
             holder,
@@ -244,6 +256,7 @@ def acquire_claim(
             host=host,
             harness=harness,
             root=root,
+            _attempt=_attempt + 1,
         )
 
     new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
@@ -274,6 +287,17 @@ def acquire_claim(
         # stale-reclaim branch below (steal a corpse or wait briefly, then
         # recurse) rather than a bare retry loop, which would spin straight
         # into RecursionError against a genuinely live holder.
+        #
+        # This mkdir-path-build + acquired_lock/recovery_token + try/finally
+        # shape repeats at 5 sites in this file (here, the stale-reclaim
+        # branch below, compare_and_rebind, refresh_claim, and
+        # reap_dead_claims). acquire_dir_mutex already collapsed the inner
+        # mkdir/steal/wait logic each site used to hand-roll; a further
+        # `with recovery_mutex(path) as token:` context manager could
+        # collapse this outer bookkeeping too, but each site's body differs
+        # enough (recurse vs. raise vs. continue on timeout) that it was
+        # judged a separate, larger refactor rather than folded into this
+        # PR's mutex-consolidation and reap-hardening scope.
         recovery_lock = path.with_name(path.name + ".recovery.d")
         acquired_lock = False
         recovery_token = ""
@@ -570,6 +594,11 @@ def compare_and_rebind(
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
 
+# Mirrors Rust's ACQUIRE_MAX_ATTEMPTS (crates/fno-agents/src/claims.rs):
+# acquire_claim/refresh_claim recurse on contention instead of Rust's bounded
+# for-loop, so an attempt counter caps the recursion depth the same way.
+ACQUIRE_MAX_ATTEMPTS = 5
+
 
 def _existing_is_live(existing: Claim) -> bool:
     """Authoritative acquire/recovery liveness predicate.
@@ -673,6 +702,7 @@ def refresh_claim(
     *,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
+    _attempt: int = 0,
 ) -> Optional[Claim]:
     """Extend a TTL claim's expires_at.
 
@@ -680,6 +710,10 @@ def refresh_claim(
     (no expires_at) - the call is a no-op by design; the caller is told
     via the return type rather than an exception so refresh is safe to
     call from a generic timer that does not know the claim's mode.
+
+    ``_attempt`` is internal bookkeeping only (never pass it): on mutex
+    contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
+    ``RuntimeError`` past that), mirroring ``acquire_claim``.
 
     Raises:
         HolderMismatch: existing claim is held by someone else.
@@ -713,7 +747,12 @@ def refresh_claim(
             recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
         )
         if token is None:
-            return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root)
+            if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"refresh_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
+                    f"contention retries on {key!r}"
+                )
+            return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1)
         recovery_token = token
         acquired_lock = True
 
@@ -1036,10 +1075,13 @@ def reap_dead_claims(
             if claim is None:
                 continue
 
-            # is_same_machine + classify() computed once per claim and reused
-            # by both this outer scan and the mutex re-verify below, instead
-            # of paid twice or three times per claim - the sweep runs on
-            # every SessionStart reconcile.
+            # Cheap, lock-free triage: decide whether this claim is even a
+            # reap candidate before paying for a mutex acquire. The mutex
+            # re-verify below does NOT reuse this result - it re-reads the
+            # file and calls classify_for_sweep again on that fresh read,
+            # because the claim may have been archived-and-recreated between
+            # this scan and the lock. Do not "de-duplicate" that second call;
+            # it is the TOCTOU check, not redundant work.
             provably_dead, bucket = classify_for_sweep(claim, ts)
 
             if provably_dead:

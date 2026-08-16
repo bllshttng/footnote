@@ -1458,10 +1458,11 @@ fn recover_stale_locked(
     }
 }
 
-/// Poll for another worker's recovery mutex to clear (mirrors
-/// `core._wait_for_recovery_release`): bounded wait, then the caller retries
-/// acquire regardless. Only reached for a mutex young enough to be honestly
-/// held; corpses are handled by [`steal_if_stale`] before this is called.
+/// Poll for another worker's recovery mutex to clear (mirrors the polling
+/// loop inside Python's `mutex.acquire_dir_mutex`): bounded wait, then the
+/// caller retries acquire regardless. Only reached for a mutex young enough
+/// to be honestly held; corpses are handled by [`steal_if_stale`] before this
+/// is called.
 fn wait_for_recovery_release(recovery_lock: &Path, max_wait: Duration) {
     // symlink_metadata, not exists(): a dangling symlink at the mutex path is
     // AlreadyExists to create_dir but absent to a following stat, so exists()
