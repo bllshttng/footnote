@@ -6572,6 +6572,83 @@ def _queue_durable_fallback(
     return msg_id, durable_recipient
 
 
+def _stamp_after_delivery(
+    name: str,
+    identity: "RecipientIdentity",
+    delivery: str,
+    msg_id: str,
+    *,
+    registry_path: "Path",
+    registry_lock_timeout: float,
+) -> None:
+    """Bump `last_message_at` (and `status` for a hosted send) after delivery.
+
+    Delivery is already complete when this runs, so a failure here cannot make
+    the send retryable, but it must stay visible: a hosted send has no durable
+    envelope to expose the degradation later. Shared by the normal path and the
+    lock-timeout queue so a durable success is booked the same way in both.
+    """
+    try:
+
+        def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
+            out = []
+            for e in entries_list:
+                if e.name == name:
+                    updates: dict = {"last_message_at": _utc_now_iso()}
+                    if delivery == "hosted":
+                        updates["status"] = "live"
+                    out.append(replace(e, **updates))
+                else:
+                    out.append(e)
+            return out
+
+        stamp_written = _update_registry_if_recipient_unchanged(
+            name,
+            identity,
+            _stamp,
+            registry_path=registry_path,
+            registry_lock_timeout=registry_lock_timeout,
+        )
+        if not stamp_written:
+            print(
+                f"registry stamp failed after {delivery} delivery for "
+                f"{name!r}: recipient identity changed; delivery succeeded; "
+                "do not retry",
+                file=sys.stderr,
+            )
+            try:
+                events.emit(
+                    "agent_send_failed",
+                    stage="registry-write",
+                    name=name,
+                    msg_id=msg_id,
+                    delivery=delivery,
+                    reason="recipient_identity_changed",
+                    error="recipient identity changed after delivery",
+                    error_type="RecipientIdentityChanged",
+                )
+            except (OSError, ValueError):
+                pass  # stderr already carries the non-retryable degradation
+    except (OSError, ValueError, RegistryVersionError) as exc:
+        print(
+            f"registry stamp failed after {delivery} delivery for "
+            f"{name!r}: {exc}; delivery succeeded; do not retry",
+            file=sys.stderr,
+        )
+        try:
+            events.emit(
+                "agent_send_failed",
+                stage="registry-write",
+                name=name,
+                msg_id=msg_id,
+                delivery=delivery,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        except (OSError, ValueError):
+            pass  # stderr already carries the non-retryable degradation
+
+
 def dispatch_send(
     name: str,
     message: str,
@@ -6935,69 +7012,15 @@ def dispatch_send(
             if demotion_notice:
                 print(demotion_notice, file=sys.stderr)
 
-            # 4f. Bump registry stamps. Delivery is already complete, so a
-            # failure cannot make the send retryable, but it must stay visible:
-            # hosted sends intentionally have no durable envelope to expose the
-            # degradation later.
-            try:
-
-                def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
-                    out = []
-                    for e in entries_list:
-                        if e.name == name:
-                            updates: dict = {"last_message_at": _utc_now_iso()}
-                            if delivery == "hosted":
-                                updates["status"] = "live"
-                            out.append(replace(e, **updates))
-                        else:
-                            out.append(e)
-                    return out
-
-                stamp_written = _update_registry_if_recipient_unchanged(
-                    name,
-                    selected_identity,
-                    _stamp,
-                    registry_path=registry_path,
-                    registry_lock_timeout=registry_stamp_timeout_seconds,
-                )
-                if not stamp_written:
-                    warning = (
-                        f"registry stamp failed after {delivery} delivery for "
-                        f"{name!r}: recipient identity changed; delivery succeeded; "
-                        "do not retry"
-                    )
-                    print(warning, file=sys.stderr)
-                    try:
-                        events.emit(
-                            "agent_send_failed",
-                            stage="registry-write",
-                            name=name,
-                            msg_id=msg_id,
-                            delivery=delivery,
-                            reason="recipient_identity_changed",
-                            error="recipient identity changed after delivery",
-                            error_type="RecipientIdentityChanged",
-                        )
-                    except (OSError, ValueError):
-                        pass  # stderr already carries the non-retryable degradation
-            except (OSError, ValueError, RegistryVersionError) as exc:
-                print(
-                    f"registry stamp failed after {delivery} delivery for "
-                    f"{name!r}: {exc}; delivery succeeded; do not retry",
-                    file=sys.stderr,
-                )
-                try:
-                    events.emit(
-                        "agent_send_failed",
-                        stage="registry-write",
-                        name=name,
-                        msg_id=msg_id,
-                        delivery=delivery,
-                        error=str(exc),
-                        error_type=type(exc).__name__,
-                    )
-                except (OSError, ValueError):
-                    pass  # stderr already carries the non-retryable degradation
+            # 4f. Bump registry stamps (shared with the lock-timeout queue).
+            _stamp_after_delivery(
+                name,
+                selected_identity,
+                delivery,
+                msg_id,
+                registry_path=registry_path,
+                registry_lock_timeout=registry_stamp_timeout_seconds,
+            )
 
             return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
@@ -7058,28 +7081,48 @@ def dispatch_send(
         except AgentLockTimeout as still_held:
             # Sustained contention: no verified recipient, so nothing is
             # written. Loud and nonzero beats a message delivered to whoever
-            # used to own the name. The node's requirement was "queue durable
-            # OR exit nonzero and say so"; this is the second arm.
+            # used to own the name. The requirement was "queue durable OR exit
+            # nonzero and say so"; this is the second arm.
             events.emit(
                 "agent_send_failed",
                 stage="lock-timeout",
                 name=name,
                 reason="unverified_recipient",
             )
+            # Name the holder that blocked the QUEUE, not the one that blocked
+            # the first acquire. They differ whenever the original holder
+            # released and a third process took the lock inside the grace
+            # window, and reporting the first one points at a process that no
+            # longer owns anything.
             raise DispatchAskError(
                 f"timed out waiting for agent {exc.name!r} lock "
-                f"(timeout={exc.timeout}s){exc.holder_note()}; "
+                f"(timeout={exc.timeout}s){still_held.holder_note()}; "
                 "recipient identity could not be verified, so no durable "
                 "envelope was written; retry the send",
                 exit_code=11,
             ) from still_held
 
-        events.emit(
-            "agent_send_failed",
-            stage="lock-timeout",
+        # A queued message is a delivered outcome, so it books like one: the
+        # done event and the registry stamp both fire, exactly as the normal
+        # durable path does. Emitting only agent_send_failed here left a
+        # successful send reading as a failure in the event trail and left
+        # last_message_at stale, which agent display and project anycast rank
+        # on.
+        _emit_ev(
+            "agent_send_done",
             name=name,
+            provider=timeout_entry.harness,
             msg_id=msg_id,
             delivery="durable",
+            reason="agent-lock-timeout",
+        )
+        _stamp_after_delivery(
+            name,
+            _recipient_identity_key(timeout_entry),
+            "durable",
+            msg_id,
+            registry_path=registry_path,
+            registry_lock_timeout=registry_stamp_timeout_seconds,
         )
         # The message is queued, so this is a durable SUCCESS, not a failure.
         # cmd_send's stdout contract is one receipt line and exit 0 for every

@@ -312,7 +312,7 @@ def test_hold_agent_lock_rejects_path_traversal(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Holder stamp (x-b281): a zero-byte lock is unfalsifiable by inspection
+# Holder stamp: a zero-byte lock is unfalsifiable by inspection
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +394,7 @@ def test_timeout_degrades_when_lock_carries_no_stamp(tmp_path: Path) -> None:
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     ready = tmp_path / "ready.txt"
 
-    # _hold_in_child uses a raw flock and writes nothing: the pre-x-b281 shape.
+    # _hold_in_child uses a raw flock and writes nothing: the unstamped shape.
     proc = multiprocessing.Process(
         target=_hold_in_child,
         args=(str(lock_file), 5.0, str(ready)),

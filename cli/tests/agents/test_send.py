@@ -1861,7 +1861,7 @@ def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypa
 
 
 # ---------------------------------------------------------------------------
-# x-b281: an agent-lock timeout must queue the message, never lose it
+# An agent-lock timeout must queue the message, never lose it
 # ---------------------------------------------------------------------------
 
 
@@ -2303,3 +2303,47 @@ def _fail_first_lock_acquire(
 
     monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _wrapper)
     return calls
+
+
+def test_dispatch_send_lock_timeout_books_the_queue_as_a_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A queued message books like a delivery: done event plus registry stamp.
+
+    Emitting only agent_send_failed left a successful send reading as a failure
+    in the event trail, and left last_message_at stale for the display and the
+    project-anycast ranking that sort on it.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
+    from fno.agents.registry import load_registry
+
+    before = load_registry(paths.agents_registry_path())
+    assert before[0].last_message_at is None
+
+    _fail_first_lock_acquire(monkeypatch)
+    result = dispatch_send(
+        name="red",
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+    )
+    assert result.delivery == "durable"
+
+    events_log = paths.state_dir() / "events.jsonl"
+    body = events_log.read_text(encoding="utf-8") if events_log.exists() else ""
+    done = [
+        json.loads(line)
+        for line in body.splitlines()
+        if json.loads(line).get("kind") == "agent_send_done"
+    ]
+    assert done, f"a queued send must emit agent_send_done: {body}"
+    assert done[-1]["delivery"] == "durable"
+    assert done[-1].get("reason") == "agent-lock-timeout"
+
+    after = load_registry(paths.agents_registry_path())
+    assert after[0].last_message_at is not None, "last_message_at must be stamped"
