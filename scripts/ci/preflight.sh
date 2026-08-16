@@ -574,8 +574,11 @@ cancel_requested() {
     local s="$INVOKING_ROOT/.fno/preflight-cancel" m now
     [[ -e "$s" ]] || return 1
     m="$(path_mtime_s "$s")"
+    # Unmeasurable age obeys nothing and consumes nothing: fail toward waiting,
+    # never toward cancelling on a token whose age cannot be checked.
+    [[ -n "$m" ]] || return 1
     now="$(date +%s)"
-    if [[ -n "$m" ]] && (( now - m > 3600 )); then
+    if (( now - m > 3600 )); then
         rm -f "$s" 2>/dev/null || true
         return 1
     fi
@@ -707,6 +710,11 @@ acquire_lock() {
         echo "preflight: cannot create the wait queue at $LOCKDIR.queue.d" >&2
         exit 3
     }
+    # The give-up message advertises `touch .fno/preflight-cancel`. In a fresh
+    # clone that parent is gitignored and nothing has created it, and a queued
+    # waiter writes nothing under .fno, so the advertised recovery would fail
+    # on a missing directory. Ensure the parent before queueing.
+    mkdir -p "$INVOKING_ROOT/.fno" 2>/dev/null || true
     enqueue_ticket
     skip_hint
     local waited=0 last_print=0

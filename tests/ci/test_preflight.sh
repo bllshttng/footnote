@@ -557,6 +557,7 @@ echo "== cancel: the preflight-cancel sentinel stops a queued waiter and clears 
 # platform while passing on CI's Linux bash 5. The polled sentinel is the
 # cancellation contract that holds everywhere; the traps remain best-effort.
 rm -f "$ATT"   # else reuse exits 0 before the waiter ever queues
+rm -rf "$FIX/.fno"   # fresh clone: no state dir exists until the queued run ensures it
 mkdir -p "$LOCKDIR"
 sleep 600 & cancel_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$cancel_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
@@ -570,6 +571,8 @@ while [[ "$(date +%s)" -lt "$cancel_deadline" ]]; do
     sleep 1
 done
 [[ -n "$cancel_ticket" ]] && ok "the waiter queued a ticket" || fail "waiter never queued (startup starved)"
+[[ -d "$FIX/.fno" ]] && ok "the queued run ensured the sentinel's parent exists" \
+    || fail "fresh checkout: the advertised touch target has no parent"
 touch "$FIX/.fno/preflight-cancel"
 wait "$cancel_w"; rc=$?
 [[ $rc -eq 130 ]] && ok "the sentinel stops a queued waiter with exit 130" || fail "expected 130 got $rc"
