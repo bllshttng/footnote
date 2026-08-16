@@ -2399,7 +2399,12 @@ mod tests {
 
         // A DIFFERENT holder wins the key entirely while the racer waits -
         // the exact scenario the mutex exists to serialize against.
-        let mut other = record(std::process::id() as i32, first.acquired_at + 1, None, &hostname());
+        let mut other = record(
+            std::process::id() as i32,
+            first.acquired_at + 1,
+            None,
+            &hostname(),
+        );
         other.key = "session:idem-race".into();
         other.holder = "pty:other".into();
         std::fs::write(&path, serialize_claim(&other).unwrap()).unwrap();
