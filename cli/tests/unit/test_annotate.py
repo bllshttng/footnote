@@ -120,6 +120,37 @@ def test_ac2_edge_attributed_fno_mail_tag_still_delivers_live(
     assert _read_events(events_path)[0]["data"]["text"] == payload
 
 
+def test_an_unterminated_fno_mail_fragment_still_delivers_live(
+    events_path, claimed_node, monkeypatch
+):
+    # codex (round 10): a finding mentioning `<fno_mail` with no closing '>'
+    # anywhere in the text (e.g. prose cut off mid-example) did not match the
+    # full-tag defang pattern, which requires one, but wrap_fno_mail's own
+    # forged-tag refusal matches on the bare substring alone -- so the
+    # fragment reached wrap_fno_mail() intact and ForgedEnvelopeError still
+    # demoted delivery to deferred, same failure mode as the attributed-tag
+    # case above, just for text that never completes the tag.
+    captured = {}
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda sid, text: captured.setdefault("text", text) or True,
+    )
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda s, t: True)
+
+    payload = 'see <fno_mail from="x" for context'
+    result = core.add_finding(claimed_node, payload, events_path=events_path)
+
+    assert result["delivery"] == "delivered"
+    # The real outer wrap_fno_mail() envelope legitimately opens with
+    # `<fno_mail from="annotate" ...>`; only the operator's own fragment must
+    # be neutralized, so check the defanged body segment specifically.
+    body_start = captured["text"].index("review finding")
+    assert "<fno_mail" not in captured["text"][body_start:]
+    assert "[fno_mail]" in captured["text"]
+    # the recorded event carries the ORIGINAL, un-defanged text
+    assert _read_events(events_path)[0]["data"]["text"] == payload
+
+
 def test_ac1_fr_daemon_down_defers(events_path, claimed_node, monkeypatch):
     """AC1-FR: delivery miss (daemon down) -> deferred, event durable, no raise."""
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda s, t, **_k: False)

@@ -26,6 +26,12 @@ _SYSTEM_REMINDER_DELIM = _re.compile(r"<\s*(/?)\s*system-reminder\s*>", _re.IGNO
 # quoting a real envelope example), so this must not require a bare `<fno_mail>`
 # the way the close tag can: `[^>]*` absorbs whatever attributes are present.
 _FNO_MAIL_OPEN_DELIM = _re.compile(r"<\s*fno_mail\b[^>]*>", _re.IGNORECASE)
+# An open tag with no closing '>' anywhere in the text (e.g. operator prose
+# reading "see <fno_mail from=\"x\" for context") does not match the pattern
+# above, but wrap_fno_mail's own forged-tag refusal matches on the bare
+# substring alone and would still reject it. Catch any such leftover fragment
+# after the full-tag pass so no "<fno_mail" substring survives defang().
+_FNO_MAIL_OPEN_FRAGMENT_DELIM = _re.compile(r"<\s*fno_mail\b", _re.IGNORECASE)
 _FNO_MAIL_CLOSE_DELIM = _re.compile(r"<\s*/\s*fno_mail\s*>", _re.IGNORECASE)
 
 
@@ -33,6 +39,7 @@ def defang(text: str) -> str:
     """Neutralize reminder/mail delimiters in operator text before it is framed."""
     text = _SYSTEM_REMINDER_DELIM.sub(r"[\1system-reminder]", text)
     text = _FNO_MAIL_OPEN_DELIM.sub("[fno_mail]", text)
+    text = _FNO_MAIL_OPEN_FRAGMENT_DELIM.sub("[fno_mail]", text)
     text = _FNO_MAIL_CLOSE_DELIM.sub("[/fno_mail]", text)
     return text
 
