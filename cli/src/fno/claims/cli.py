@@ -2,7 +2,11 @@
 
 Exit codes:
     0  success
-    1  ClaimHeldByOther (caller should retry later)
+    1  ClaimHeldByOther, or acquire/refresh's own contention-retry
+       exhaustion (both mean "transient, caller should retry later"); also
+       `reap`'s own distinct overload of 1 - a reapable file's archive move
+       could not be confirmed on re-read (see `reap`'s own docstring, not a
+       retry signal)
     2  validation / input error
     3  ClaimCorrupted or ClaimGoneAway (race during operation)
     4  HolderMismatch (release/refresh wrong holder)
@@ -51,11 +55,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
 from .core import (
+    ClaimContended,
     ClaimCorrupted,
     ClaimGoneAway,
     ClaimHeldByOther,
@@ -64,10 +69,12 @@ from .core import (
     acquire_claim,
     claim_status,
     force_release_claim,
-    list_claims,
+    list_claims_with_counts,
+    reap_dead_claims,
     refresh_claim,
     release_claim,
 )
+from .io import dedup_claims_roots, global_claims_root
 from fno.tombstones import tombstone_group_cls
 
 
@@ -242,6 +249,12 @@ def acquire(
     except (ClaimCorrupted, ClaimGoneAway) as exc:
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
+    except ClaimContended as exc:
+        # acquire_claim's own contention-retry-exhaustion guard: same
+        # "caller should retry later" semantic as ClaimHeldByOther, so it
+        # gets the same exit code rather than an uncaught traceback.
+        typer.echo(f"contention error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     # do provenance opens at acquire - the one choke point a session killed
     # mid-phase still reaches (release/finalize fire only on a clean terminal).
@@ -626,6 +639,11 @@ def refresh(
     except ClaimCorrupted as exc:
         typer.echo(f"corrupted claim: {exc}", err=True)
         raise typer.Exit(code=3)
+    except ClaimContended as exc:
+        # refresh_claim's own contention-retry-exhaustion guard; same exit
+        # code as acquire's, both mean "transient, caller should retry".
+        typer.echo(f"contention error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     if result is None:
         if json_output:
@@ -653,52 +671,172 @@ def status(
         typer.echo(json.dumps(info, indent=2))
 
 
+def _merge_claims_across_roots(
+    deduped_roots: list[tuple[Optional[Path], Path]],
+    *,
+    prefix: str,
+    include_stale: bool,
+) -> tuple[list[dict], dict[str, str], dict[str, int]]:
+    """Merge per-root claim listings into one best-state-wins view.
+
+    Returns ``(all_rows, row_roots, totals)``. A key present in more than one
+    root (a bug elsewhere writing to the wrong root, or a deliberate
+    FNO_CLAIMS_ROOT migration leaving stale claims under the old root - see
+    the version-skew note on CLAIMS_ROOT_ENV in io.py) is one logical claim,
+    so every purpose (row, root attribution, totals bucket) must agree on
+    ONE winning sighting rather than splitting across roots. That winner is
+    the most informative state seen (live beats suspect beats stale beats
+    corrupted beats free) - a first-scanned root's stale leftover from an
+    old FNO_CLAIMS_ROOT migration must not hide a live claim a later root
+    holds for the same key, which pure first-root-wins did. First root is
+    only the tiebreak between two EQUAL-priority sightings of the same key.
+    """
+    _STATE_PRIORITY = {"live": 0, "suspect": 1, "stale": 2, "corrupted": 3, "free": 4}
+    best_state: dict[str, str] = {}
+    best_root: dict[str, str] = {}
+    best_row: dict[str, Optional[dict]] = {}
+
+    for candidate_root, cdir in deduped_roots:
+        rows, _counts, states_by_key = list_claims_with_counts(
+            prefix=prefix or None, include_stale=include_stale, root=candidate_root,
+        )
+        row_by_key = {r["key"]: r for r in rows}
+        for key, state in states_by_key.items():
+            priority = _STATE_PRIORITY.get(state, len(_STATE_PRIORITY))
+            current = best_state.get(key)
+            # Both sides default to worst-priority (never best): an unrecognized
+            # `current` must stay displaceable by any recognized state, not
+            # freeze the winner the way defaulting to 0 (best) would.
+            if current is not None and priority >= _STATE_PRIORITY.get(
+                current, len(_STATE_PRIORITY)
+            ):
+                continue
+            best_state[key] = state
+            best_root[key] = str(cdir)
+            best_row[key] = row_by_key.get(key)
+
+    all_rows = [row for row in best_row.values() if row is not None]
+    all_rows.sort(key=lambda r: r["key"])
+    row_roots = {key: root for key, root in best_root.items() if best_row.get(key) is not None}
+    # Only stale/corrupted/free ever feed the empty-store message below;
+    # live/suspect/total would just be dead weight summed on every list call.
+    totals = {"stale": 0, "corrupted": 0, "free": 0}
+    for state in best_state.values():
+        if state in totals:
+            totals[state] += 1
+    return all_rows, row_roots, totals
+
+
 @cli.command(name="list")
 def list_cmd(
     prefix: str = typer.Option("", "--prefix", help="Filter keys starting with this prefix"),
     include_stale: bool = typer.Option(False, "--include-stale"),
     json_output: bool = typer.Option(False, "--json", "-J"),
+    root: Optional[Path] = typer.Option(
+        None, "--root", help="Explicit claims root (repo root); overrides the both-roots default"
+    ),
 ) -> None:
     """Enumerate claims under the claims directory.
 
-    Merges the global root (node:/dispatch:/session:/groom: claims live at
-    ~/.fno/claims by default) with the resolved local root. A caller with no
-    --prefix (the common case) has no way to name which root to search, and
-    most claims in practice are global, so scanning only the local root - a
-    near-always-empty directory - silently hid every global claim: 573 files
-    on disk read as "no claims" (measured 2026-08-14). An explicit global
-    --prefix (e.g. node:) already resolved correctly and would resolve to the
-    same root as the global scan here; the root dedup below scans it once.
-    Stale-only piles still need --include-stale: list_claims defaults to
-    live/suspect claims only.
+    Both claims roots (global ~/.fno/claims and the cwd-local root) are
+    always read and merged in one run, --prefix or not - a bare `fno
+    claim list` used to resolve only whichever single root an empty
+    prefix happened to fall to, silently missing the other store (measured:
+    574 lockfiles in a root a bare `list` could never reach).
+    A colon-less or unrecognized --prefix cannot tell which root its keys
+    live in (:func:`fno.claims.io.claims_root_for` returns None for
+    exactly that case), so narrowing to a single guessed root would
+    silently reintroduce the same miss; only an explicit --root narrows.
     """
-    from .io import global_claims_root
-
-    roots: list[Path] = []
-    for r in (global_claims_root(), _node_aware_root(prefix)):
-        if r not in roots:
-            roots.append(r)
-
-    seen: "set[str]" = set()
-    results = []
-    for root in roots:
-        for r in list_claims(prefix=prefix or None, include_stale=include_stale, root=root):
-            if r["key"] in seen:
-                continue
-            seen.add(r["key"])
-            results.append(r)
-    results.sort(key=lambda r: r["key"])
-    if json_output:
-        typer.echo(json.dumps(results))
+    if root is not None:
+        roots: list[Optional[Path]] = [root]
     else:
-        if not results:
-            typer.echo("no claims")
-            return
-        for r in results:
+        # _node_aware_root("") already resolves to None via claims_root_for's
+        # own colon check, so no separate `if prefix` branch is needed here.
+        roots = [global_claims_root(), _node_aware_root(prefix)]
+
+    deduped_roots = dedup_claims_roots(roots)
+    all_rows, row_roots, totals = _merge_claims_across_roots(
+        deduped_roots, prefix=prefix, include_stale=include_stale
+    )
+    n_roots = len(deduped_roots)
+
+    if json_output:
+        # Bare list, matching the original shape: a scripted caller already
+        # does `for r in json.loads(...)`. The filtered-count fix below is a
+        # human-output problem only - JSON already answers unambiguously
+        # (an empty list here really does mean zero rows in this mode).
+        typer.echo(json.dumps(all_rows))
+        return
+
+    if not all_rows:
+        # AC7: a store that is mostly stale must never print the bare
+        # string "no claims" - that reads identically to an empty store.
+        # The --include-stale hint only makes sense when the flag wasn't
+        # already given and there is actually something it would surface -
+        # otherwise it tells the caller to pass a flag they already passed.
+        hint = ""
+        if not include_stale and (totals["stale"] or totals["corrupted"]):
+            hint = "; --include-stale to list them"
+        typer.echo(
+            f"no live claims ({totals['stale']} stale, {totals['corrupted']} corrupted, "
+            f"{totals['free']} released mid-scan across "
+            f"{n_roots} root{'s' if n_roots != 1 else ''}){hint}"
+        )
+        return
+    for r in all_rows:
+        typer.echo(
+            f"{r['state']:9} {r['key']:32} holder={r.get('holder', '-')} "
+            f"pid={r.get('pid', '-')} host={r.get('host', '-')} root={row_roots[r['key']]}"
+        )
+
+
+@cli.command(name="reap")
+def reap_cmd(
+    apply: bool = typer.Option(
+        False, "--apply", help="Archive dead claims. Default is dry-run: report what would be reaped."
+    ),
+    root: Optional[List[Path]] = typer.Option(
+        None,
+        "--root",
+        help="Repeatable. Overrides the default both-roots sweep "
+        "(global ~/.fno/claims + the cwd-local root).",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Archive every provably-dead claim: same-machine, dead/reused pid, no live TTL.
+
+    Not an age cutoff - a claim's holder pid is proven dead by the same
+    three-part proof as :func:`fno.claims.staleness.is_provably_dead`
+    (same-machine, dead/reused pid, no live TTL), never guessed from how
+    old the file is. Dry-run by default; `--apply` archives to `.expired/`
+    and re-reads the store to confirm each move before counting it
+    `reaped` - an exit code alone is not evidence. Exits 1 when
+    any reapable file's move could not be confirmed on that re-read.
+    """
+    summary = reap_dead_claims(roots=list(root) if root else None, apply=apply)
+
+    if json_output:
+        typer.echo(json.dumps(summary))
+    else:
+        for path, reason in summary["reap_failed"]:
+            typer.echo(f"FAILED  {path}  ({reason})", err=True)
+        if apply:
+            typer.echo(f"reaped {summary['reaped']} of {summary['scanned']} scanned")
+        else:
             typer.echo(
-                f"{r['state']:9} {r['key']:32} holder={r.get('holder', '-')} "
-                f"pid={r.get('pid', '-')} host={r.get('host', '-')}"
+                f"would reap {summary['would_reap']} of {summary['scanned']} scanned "
+                "(dry-run; pass --apply)"
             )
+        typer.echo(
+            f"kept: {summary['kept_live']} live, {summary['kept_suspect']} suspect, "
+            f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
+            f"{summary['vanished']} vanished, {summary['contended']} contended  |  "
+            f"roots: {', '.join(summary['roots'])}"
+        )
+
+    if summary["reap_failed"]:
+        raise typer.Exit(code=1)
 
 
 @cli.command(name="session-pid")

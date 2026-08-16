@@ -121,3 +121,43 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
     # (TTL-protected, not stealable).
     return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT
+
+
+def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, str]:
+    """Classify one claim for GC: can its holder be PROVEN dead from this host?
+
+    The single liveness authority for reaping - three conditions, all
+    required:
+
+      1. Same machine, by machine_id (never by hostname - see module header).
+         An off-machine or unverifiable claim cannot be proven dead here.
+      2. Pid absent, or pid reused (create_time > acquired_at). This is
+         exactly what makes ``is_live`` return False for a reason other than
+         being off-machine.
+      3. No live TTL. A dead-pid-but-unexpired claim is SUSPECT, not STALE:
+         the TTL still protects the slot for a respawned worker.
+
+    No age threshold: age is a guess, pid liveness is a measurement, and a
+    measurement beats an inference. GC must never reap on age alone.
+
+    Returns ``(provably_dead, bucket)`` where ``bucket`` is one of
+    ``"offhost"``/``"suspect"``/``"live"`` - only meaningful when
+    ``provably_dead`` is False. A single ``classify()`` call backs both the
+    bool and the bucket, so a caller scanning many claims (or re-verifying
+    one under a mutex) never pays for it twice.
+    """
+    if not is_same_machine(claim.host, claim.machine_id):
+        return False, "offhost"
+    state = classify(claim, now=now)
+    if state is ClaimState.STALE:
+        return True, ""
+    return False, "suspect" if state is ClaimState.SUSPECT else "live"
+
+
+def is_provably_dead(claim: Claim, now: Optional[int] = None) -> bool:
+    """Return True iff a claim's holder can be PROVEN dead from this host.
+
+    A thin bool-only view of :func:`classify_for_sweep` for a caller that
+    only needs the yes/no answer.
+    """
+    return classify_for_sweep(claim, now=now)[0]

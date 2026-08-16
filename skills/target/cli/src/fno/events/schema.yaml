@@ -1107,6 +1107,70 @@ event_types:
           type: string
     consumers: [operator]
 
+  - name: claim_reaped
+    description: "GC archived one provably-dead claim to .expired/. Emitted only after a re-read confirms the source path is gone and the archive path exists."
+    sources: [fno-loop]
+    data:
+      required: [key, holder, pid, host, acquired_at, root, age_ms]
+      properties:
+        key:
+          type: string
+        holder:
+          type: string
+        pid:
+          type: integer
+          description: "The dead/reused pid that proved the claim was reapable."
+        host:
+          type: string
+        acquired_at:
+          type: integer
+        expires_at:
+          type: integer
+        root:
+          type: string
+          description: "Which claims root (global or cwd-local) this file was reaped from."
+        age_ms:
+          type: integer
+          description: "Milliseconds between acquired_at and reap time."
+    consumers: [operator]
+
+  - name: claim_reap_swept
+    description: "One `fno claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
+    sources: [fno-loop]
+    data:
+      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, roots]
+      properties:
+        scanned:
+          type: integer
+        reaped:
+          type: integer
+        would_reap:
+          type: integer
+          description: "Count that classified reapable but apply=False so nothing was written."
+        kept_live:
+          type: integer
+        kept_suspect:
+          type: integer
+        kept_offhost:
+          type: integer
+        corrupted:
+          type: integer
+        vanished:
+          type: integer
+        contended:
+          type: integer
+          description: "Provably-dead but its recovery mutex was held by a genuine live recovery this round - still on disk, left for the next sweep."
+        reap_failed:
+          type: integer
+          description: "Count of files that classified reapable but the post-archive re-read did not confirm the move."
+        apply:
+          type: boolean
+        roots:
+          type: array
+          items:
+            type: string
+    consumers: [operator]
+
   - name: claim_clock_skew_rejected
     retention: ephemeral
     description: "A refresh was rejected because computed expires_at landed in the past."

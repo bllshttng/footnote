@@ -150,11 +150,63 @@ def emit_claim_force_overridden(
 # so adding a helper now would be dead code.
 
 
+def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
+    """GC archived one provably-dead claim. Per-file record."""
+    data = _common(claim)
+    data["root"] = root
+    data["age_ms"] = int(age_ms)
+    _emit(_build("claim_reaped", data))
+
+
+def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
+    """One `fno claim reap --apply` run completed, including a run that
+    reaped nothing - a silent sweep and a dead sweep must not look the
+    same. Callers must not invoke this for a dry-run (reap_dead_claims
+    itself gates on `apply`): a dry-run promises no writes, and this event
+    is one.
+    """
+    known_keys = {
+        "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
+        "kept_offhost", "corrupted", "vanished", "contended", "reap_failed",
+        "apply", "roots",
+    }
+    extra_keys = summary.keys() - known_keys
+    if extra_keys:
+        # A new bucket in reap_dead_claims's summary that this function does
+        # not yet know to forward would otherwise be silently dropped from
+        # the audit event - fail loud instead so the drift gets fixed here.
+        raise KeyError(f"emit_claim_reap_swept: unrecognized summary key(s) {sorted(extra_keys)}")
+    missing_keys = known_keys - summary.keys()
+    if missing_keys:
+        # The reverse drift: a key this function still expects to forward
+        # was removed (or renamed) from reap_dead_claims's summary - the
+        # KeyError below would fire mid-build with a confusing traceback;
+        # fail loud here instead, naming the actual missing key(s).
+        raise KeyError(f"emit_claim_reap_swept: summary missing expected key(s) {sorted(missing_keys)}")
+    data = {
+        "scanned": int(summary["scanned"]),
+        "reaped": int(summary["reaped"]),
+        "would_reap": int(summary["would_reap"]),
+        "kept_live": int(summary["kept_live"]),
+        "kept_suspect": int(summary["kept_suspect"]),
+        "kept_offhost": int(summary["kept_offhost"]),
+        "corrupted": int(summary["corrupted"]),
+        "vanished": int(summary["vanished"]),
+        "contended": int(summary["contended"]),
+        "reap_failed": len(summary["reap_failed"]),
+        "apply": bool(summary["apply"]),
+        "roots": [str(r) for r in summary["roots"]],
+    }
+    _emit(_build("claim_reap_swept", data))
+
+
 __all__ = [
     "CLAIM_SOURCE",
     "emit_claim_acquired",
     "emit_claim_force_overridden",
     "emit_claim_idempotent_reacquired",
+    "emit_claim_reap_swept",
+    "emit_claim_reaped",
     "emit_claim_refreshed",
     "emit_claim_rebound",
     "emit_claim_released",

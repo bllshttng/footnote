@@ -432,6 +432,47 @@ def test_recovery_mutex_corpse_stolen_by_python(tmp_path: Path, monkeypatch) -> 
     assert not mutex.exists()
 
 
+def _live_claim(key: str, holder: str) -> Claim:
+    """A claim genuinely live on this pid/host - the shape the SAME-holder
+    idempotent-reacquire branch requires (distinct from ``_stale_claim``,
+    which is dead-pid and drives the reclaim branch instead)."""
+    return Claim(
+        key=key, holder=holder, acquired_at=now_ms(), pid=os.getpid(),
+        host=__import__("socket").gethostname(), machine_id=py_machine_id() or None,
+    )
+
+
+def test_recovery_mutex_held_rust_idempotent_reacquire_waits(tmp_path: Path) -> None:
+    """The SAME-holder reacquire path also takes the recovery mutex (both
+    langs), not just the dead-pid reclaim path covered above - it must wait
+    for a peer's in-flight reap/recovery rather than racing past it."""
+    write_raw_claim(tmp_path, _live_claim("session:rec-e", "pty:owner"))
+    mutex, releaser = _hold_recovery_mutex(tmp_path, "session:rec-e", seconds=1.0)
+    t0 = time.monotonic()
+    r = rust("acquire", "session:rec-e", tmp_path, tmp_path,
+             "--holder", "pty:owner", "--pid", str(os.getpid()))
+    elapsed = time.monotonic() - t0
+    releaser.join()
+    assert r.returncode == 0, f"idempotent reacquire after mutex release failed: {r.stderr}"
+    assert elapsed >= 0.9, "rust must WAIT on the held mutex for a same-holder reacquire too"
+    assert not mutex.exists()
+
+
+def test_recovery_mutex_held_python_idempotent_reacquire_waits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    write_raw_claim(tmp_path, _live_claim("session:rec-f", "pty:owner"))
+    monkeypatch.chdir(tmp_path)
+    mutex, releaser = _hold_recovery_mutex(tmp_path, "session:rec-f", seconds=1.0)
+    t0 = time.monotonic()
+    claim = acquire_claim("session:rec-f", "pty:owner", pid=os.getpid(), root=tmp_path)
+    elapsed = time.monotonic() - t0
+    releaser.join()
+    assert claim.holder == "pty:owner"
+    assert elapsed >= 0.9, "python must WAIT on the held mutex for a same-holder reacquire too"
+    assert not mutex.exists()
+
+
 # --------------------------------------------------------------------------
 # 9: expires_at absence discipline
 # --------------------------------------------------------------------------

@@ -13,15 +13,13 @@ from __future__ import annotations
 
 import os
 import socket
-from pathlib import Path
 from unittest.mock import patch
 
 import psutil
 import pytest
 
 from fno.claims.core import (
-    ClaimAlreadyHeld,
-    ClaimCorrupted,
+    ClaimContended,
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
@@ -94,6 +92,89 @@ class TestAcquire:
         # acquired_at is refreshed
         assert second.acquired_at >= first.acquired_at
 
+    def test_acquire_contention_recursion_is_bounded(self, tmp_path):
+        """Perpetual recovery-mutex contention must raise, not recurse forever.
+
+        acquire_claim's own holder (idempotent) path always takes the
+        recovery mutex, so patching acquire_dir_mutex to always report
+        "busy" drives a deterministic, PID-liveness-independent path through
+        _retry() every call - proving the ACQUIRE_MAX_ATTEMPTS cap fires
+        rather than growing the Python call stack unbounded.
+        """
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)
+        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
+            with pytest.raises(ClaimContended, match="gave up after"):
+                acquire_claim("k", HOLDER_A, root=tmp_path)
+
+    def test_idempotent_reverify_releases_lock_before_recursing(self, tmp_path):
+        """The idempotent branch's locked re-verify must release the
+        recovery mutex BEFORE recursing (_release_and_retry, not a bare
+        _retry) when the fresh read shows a different holder.
+
+        Python evaluates a `return <expr>` expression before the enclosing
+        `finally` runs, so recursing while `acquired_lock` is still True
+        would have the recursive call poll for the SAME per-key mutex this
+        frame is still sitting on, if the recursion lands back in the
+        stale-reclaim branch (which it does here: the "other" holder found
+        on re-verify has a dead pid). Proven by asserting the mutex is
+        acquired exactly twice with a release between them, never
+        acquire-acquire, and that this resolves without hitting
+        ACQUIRE_MAX_ATTEMPTS.
+        """
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)  # real live claim, holder=HOLDER_A
+
+        dead_pid = 999_999
+        while psutil.pid_exists(dead_pid):
+            dead_pid += 1
+        stale_other = Claim(
+            key="k", holder=HOLDER_B, acquired_at=0, pid=dead_pid,
+            host=socket.gethostname(),
+        )
+
+        real_read = claims_core.read_claim_file
+        call_count = {"n": 0}
+
+        def _read_side_effect(path):
+            call_count["n"] += 1
+            # 1st call: acquire_claim's own top-level unlocked read (real).
+            # 2nd call: the idempotent branch's locked re-verify - simulate
+            # a race where an unlocked writer (e.g. force_release_claim +
+            # a third party's top-level create) swapped in a stale claim
+            # for a different holder between the two reads.
+            if call_count["n"] == 2:
+                return stale_other
+            return real_read(path)
+
+        order = []
+        real_acquire = claims_core.acquire_dir_mutex
+        real_release = claims_core.release_dir_mutex
+
+        def _acquire_side_effect(lock_dir, timeout_s, **kw):
+            order.append("acquire")
+            return real_acquire(lock_dir, timeout_s, **kw)
+
+        def _release_side_effect(lock_dir, token):
+            order.append("release")
+            return real_release(lock_dir, token)
+
+        with patch.object(claims_core, "read_claim_file", side_effect=_read_side_effect), \
+                patch.object(claims_core, "acquire_dir_mutex", side_effect=_acquire_side_effect), \
+                patch.object(claims_core, "release_dir_mutex", side_effect=_release_side_effect):
+            claim = acquire_claim("k", HOLDER_A, root=tmp_path)
+
+        assert claim.holder == HOLDER_A
+        assert order.count("acquire") == 2, order
+        # The release between the two acquires proves the recursive call's
+        # own acquire never contended against this frame's still-held lock.
+        first_acquire = order.index("acquire")
+        second_acquire = order.index("acquire", first_acquire + 1)
+        release_idx = order.index("release")
+        assert first_acquire < release_idx < second_acquire, order
+
     def test_AC4_EDGE_stale_pid_recovered(self, tmp_path):
         """A claim whose holder process is dead is reclaimable by another holder."""
         # Pick a definitely-dead PID and hand-write a claim for it.
@@ -151,7 +232,6 @@ class TestAcquire:
         process on this host is NOT reclaimable - acquire must honor the same
         hybrid liveness as classify(), so a peer parks instead of stealing the
         node from a suspended-but-alive session (AC1-ERR)."""
-        from fno.claims.staleness import now_ms
         # Anchor acquired_at AFTER this process's create_time so is_live's
         # pid-reuse guard (create_time < acquired_at) passes; both timestamps
         # are in the past so the TTL is expired.
@@ -226,6 +306,15 @@ class TestRefresh:
         refreshed = refresh_claim("k", HOLDER_A, ttl_ms=120_000, root=tmp_path)
         assert refreshed is not None
         assert refreshed.expires_at > first.expires_at
+
+    def test_refresh_contention_recursion_is_bounded(self, tmp_path):
+        """Perpetual recovery-mutex contention must raise, not recurse forever."""
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
+            with pytest.raises(ClaimContended, match="gave up after"):
+                refresh_claim("k", HOLDER_A, root=tmp_path)
 
     def test_AC3_FR_refresh_pid_liveness_returns_none(self, tmp_path):
         acquire_claim("k", HOLDER_A, root=tmp_path)  # no TTL
@@ -351,3 +440,45 @@ class TestForceRelease:
         archive = claims_dir(tmp_path) / ".expired"
         assert archive.exists()
         assert any(archive.iterdir())
+
+    def test_force_release_takes_and_releases_recovery_mutex(self, tmp_path):
+        """force_release_claim must take the SAME per-key recovery mutex
+        acquire_claim/refresh_claim/reap_dead_claims take, closing the
+        resurrection race where a concurrent idempotent re-acquire reads the
+        still-present claim under its own lock and writes it back right after
+        this call's archive_claim moves the file away."""
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)
+
+        calls: list[str] = []
+        real_acquire = claims_core.acquire_dir_mutex
+        real_release = claims_core.release_dir_mutex
+
+        def _acquire_spy(*args, **kwargs):
+            calls.append("acquire")
+            return real_acquire(*args, **kwargs)
+
+        def _release_spy(*args, **kwargs):
+            calls.append("release")
+            return real_release(*args, **kwargs)
+
+        with patch.object(claims_core, "acquire_dir_mutex", _acquire_spy), \
+             patch.object(claims_core, "release_dir_mutex", _release_spy):
+            force_release_claim("k", reason="operator override", root=tmp_path)
+
+        assert calls == ["acquire", "release"]
+        assert not claim_path("k", root=tmp_path).exists()
+
+    def test_force_release_still_succeeds_when_mutex_acquire_times_out(self, tmp_path):
+        """A contended recovery mutex must not turn force-release's
+        'always succeeds' administrative-override contract into a raise -
+        it proceeds without the lock on timeout instead."""
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)
+
+        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
+            force_release_claim("k", reason="operator override", root=tmp_path)
+
+        assert not claim_path("k", root=tmp_path).exists()

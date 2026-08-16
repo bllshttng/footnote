@@ -2505,7 +2505,12 @@ def _reacquire_node_claim(
     under its recovery mutex; a live-other race raises ``ClaimHeldByOther``
     (already filtered by the classifier, so this is a defensive backstop that
     parks loudly). Returns the holder now owning the claim."""
-    from fno.claims.core import acquire_claim, ClaimCorrupted, ClaimHeldByOther
+    from fno.claims.core import (
+        ClaimContended,
+        ClaimCorrupted,
+        ClaimHeldByOther,
+        acquire_claim,
+    )
     from fno.claims.io import claims_root_for
     from fno.claims.session_pid import resolve_session_pid
 
@@ -2541,6 +2546,16 @@ def _reacquire_node_claim(
             f"{type(exc).__name__}: {exc}. The claim state is unreadable or "
             f"corrupt; refusing to risk a duplicate claim. Clear it "
             f"(fno claim release {key} --force -R <why>) and retry.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    except ClaimContended as exc:
+        # acquire_claim's own contention-retry-exhaustion guard (e.g. racing a
+        # concurrent reap sweep on the same node:<id> key): same clean-refusal
+        # posture as the other guards above, not an uncaught traceback.
+        typer.echo(
+            f"fno target start: cannot re-acquire {key}: {exc}. "
+            f"Contended by another process; retry shortly.",
             err=True,
         )
         raise typer.Exit(code=1)

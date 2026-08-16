@@ -934,7 +934,7 @@ def _merge_lock() -> Iterator[_MergeLockState]:
     # body throws into the generator must reach the finally-release, never an
     # except-then-yield-again (which would RuntimeError inside contextmanager).
     try:
-        from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
+        from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
         from fno.paths import resolve_canonical_repo_root
 
         key = f"merge:{resolve_canonical_repo_root()}"
@@ -945,7 +945,12 @@ def _merge_lock() -> Iterator[_MergeLockState]:
                 acquire_claim(key, holder, reason="serialized PR merge (LD#9)")
                 release = release_claim
                 break
-            except ClaimHeldByOther:
+            except CLAIM_UNAVAILABLE:
+                # At the exact moment two mergers are racing hardest, the
+                # outer except Exception below yields "unavailable" (lock
+                # disabled entirely), which is the wrong degrade for
+                # contention specifically when the whole point is LD#9's
+                # merge serialization under exactly this condition.
                 if time.monotonic() >= deadline:
                     state = "held"
                     break

@@ -1,6 +1,6 @@
 """High-level claim verbs.
 
-Six operations on top of io + staleness:
+Seven operations on top of io + staleness:
 
     acquire_claim     - try to take a claim; idempotent re-acquire,
                         stale recovery, live-other detection.
@@ -9,6 +9,7 @@ Six operations on top of io + staleness:
     claim_status      - inspect a single key.
     list_claims       - enumerate all live (and optionally stale) claims.
     force_release_claim - administrative override, always succeeds.
+    reap_dead_claims  - archive every provably-dead claim (GC).
 
 Every state-changing verb appends an audit event to ``.fno/events.jsonl``
 through the typed builders in :mod:`fno.claims.events`. Audit-trail
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import os
 import socket
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +28,8 @@ from .events import (
     emit_claim_acquired,
     emit_claim_force_overridden,
     emit_claim_idempotent_reacquired,
+    emit_claim_reap_swept,
+    emit_claim_reaped,
     emit_claim_refreshed,
     emit_claim_rebound,
     emit_claim_released,
@@ -43,12 +45,14 @@ from .io import (
     claim_path,
     claims_dir,
     decode_key,
+    dedup_claims_roots,
+    global_claims_root,
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, now_ms
+from .staleness import classify, classify_for_sweep, now_ms
 from ..harness_identity import resolve_harness_identity
-from ..mutex import _stamp_owner, release_dir_mutex, steal_if_stale
+from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -84,6 +88,34 @@ class ClaimValidationError(ValueError):
     """Inputs to a verb failed validation (ttl out of range, key too long, ...)."""
 
 
+class ClaimContended(Exception):
+    """acquire_claim/refresh_claim gave up after ACQUIRE_MAX_ATTEMPTS
+    contention retries on the same key's recovery mutex.
+
+    A distinct type from ClaimHeldByOther (a live claim is held by someone
+    else) even though a caller usually treats both the same way ("can't have
+    this one right now, retry later") - the recovery mutex being contended
+    says nothing about who, if anyone, ends up holding the claim. Callers
+    that only catch this narrow type cannot accidentally reclassify an
+    unrelated RuntimeError raised deeper in the call stack (pydantic,
+    resolve_harness_identity, serialize_claim, ...) as contention.
+
+    Callers of acquire_claim/refresh_claim should catch this ALONGSIDE
+    ClaimHeldByOther, not instead of it - an except clause naming only one of
+    the two lets the other escape uncaught.
+    """
+
+
+# Every acquire_claim/refresh_claim caller that treats "someone else has this
+# right now" and "the recovery mutex is too busy to tell" the same way
+# ("can't have this one right now, retry/skip") should catch this tuple
+# instead of hand-rolling `except (ClaimHeldByOther, ClaimContended):` plus a
+# restated comment at each site. A caller that needs to read `.holder`/`.pid`/
+# `.host` (ClaimHeldByOther-only attributes) still needs its own separate
+# `except ClaimHeldByOther as exc:` block ahead of this one.
+CLAIM_UNAVAILABLE = (ClaimHeldByOther, ClaimContended)
+
+
 class RebindRefused(Exception):
     """``compare_and_rebind`` refused to move the claim (fail-closed, x-2ccd).
 
@@ -110,7 +142,9 @@ class RebindRefused(Exception):
 
 # Re-export low-level exceptions so callers can ``from fno.claims import ClaimGoneAway``.
 __all__ = [
+    "CLAIM_UNAVAILABLE",
     "ClaimAlreadyHeld",
+    "ClaimContended",
     "ClaimCorrupted",
     "ClaimGoneAway",
     "ClaimHeldByOther",
@@ -122,6 +156,8 @@ __all__ = [
     "compare_and_rebind",
     "force_release_claim",
     "list_claims",
+    "list_claims_with_counts",
+    "reap_dead_claims",
     "refresh_claim",
     "release_claim",
 ]
@@ -203,6 +239,7 @@ def acquire_claim(
     host: Optional[str] = None,
     harness: Optional[str] = None,
     root: Optional[Path] = None,
+    _attempt: int = 0,
 ) -> Claim:
     """Try to acquire a claim on ``key`` for ``holder``.
 
@@ -220,9 +257,57 @@ def acquire_claim(
     Inputs are validated up front (key length, ttl bounds, non-empty
     holder). Validation failures raise ClaimValidationError before any
     filesystem write so the lock dir is not polluted with half-bad files.
+
+    ``_attempt`` is internal bookkeeping only (never pass it): each
+    contention/race branch recurses through ``_retry()``, which counts
+    attempts and raises ``ClaimContended`` after ``ACQUIRE_MAX_ATTEMPTS``
+    rather than recursing unbounded, mirroring Rust's bounded
+    ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
     """
     _validate_inputs(key, holder, ttl_ms)
     path = claim_path(key, root=root)
+    # Unconditional initial value (each branch below reassigns its own):
+    # gives _release_and_retry's `nonlocal` an unambiguous prior binding
+    # rather than relying on mypy tracing every conditional branch.
+    acquired_lock = False
+
+    def _retry() -> Claim:
+        # Every contention/race branch below re-dispatches by recursing with
+        # the exact same arguments - one definition instead of the same
+        # 9-line call restated at each of the seven sites that need it.
+        if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+            raise ClaimContended(
+                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
+                f"contention retries on {key!r}"
+            )
+        return acquire_claim(
+            key,
+            holder,
+            reason=reason,
+            ttl_ms=ttl_ms,
+            metadata=metadata,
+            pid=pid,
+            host=host,
+            harness=harness,
+            root=root,
+            _attempt=_attempt + 1,
+        )
+
+    def _release_and_retry() -> Claim:
+        # `return _retry()` evaluates the recursive acquire_claim() call
+        # BEFORE this frame's own `finally` runs (Python evaluates a
+        # return expression, then unwinds through finally). Recursing while
+        # `acquired_lock` is still True would have the recursive call poll
+        # for the SAME per-key recovery mutex this frame is still sitting
+        # on if it lands back in a mutex-taking branch - self-contention
+        # that only resolves via ACQUIRE_MAX_ATTEMPTS exhaustion instead of
+        # the near-instant re-dispatch (e.g. ClaimHeldByOther) it should.
+        # Release first, from whichever branch currently holds it.
+        nonlocal acquired_lock
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
+            acquired_lock = False
+        return _retry()
 
     new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
     payload = serialize_claim(new_claim)
@@ -240,24 +325,61 @@ def acquire_claim(
     except ClaimGoneAway:
         # Disappeared between collision and read - someone else released
         # while we were looking. Recurse once; if still racy, surface it.
-        return acquire_claim(
-            key,
-            holder,
-            reason=reason,
-            ttl_ms=ttl_ms,
-            metadata=metadata,
-            pid=pid,
-            host=host,
-            harness=harness,
-            root=root,
-        )
+        return _retry()
 
     if existing.holder == holder:
-        # Idempotent re-acquire: refresh pid/host/acquired_at.
-        refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
-        _atomic_replace(path, serialize_claim(refreshed))
-        emit_claim_idempotent_reacquired(refreshed, previous=existing)
-        return refreshed
+        # Idempotent re-acquire: refresh pid/host/acquired_at. Take the same
+        # per-key recovery mutex reap_dead_claims() holds while it re-verifies
+        # and archives this exact file - without it, a respawned worker could
+        # rewrite the file as live in the gap between reap's re-verify and its
+        # archive_claim() call, and reap would archive the fresh write instead
+        # of the dead one it proved. Contention handling mirrors the
+        # stale-reclaim branch below (steal a corpse or wait briefly, then
+        # recurse) rather than a bare retry loop, which would spin straight
+        # into RecursionError against a genuinely live holder.
+        #
+        # This mkdir-path-build + acquired_lock/recovery_token + try/finally
+        # shape repeats at 6 sites in this file (here, the stale-reclaim
+        # branch below, compare_and_rebind, refresh_claim, force_release_claim,
+        # and reap_dead_claims). acquire_dir_mutex already collapsed the inner
+        # mkdir/steal/wait logic each site used to hand-roll; a further
+        # `with recovery_mutex(path) as token:` context manager could
+        # collapse this outer bookkeeping too, but each site's body differs
+        # enough (recurse vs. raise vs. continue on timeout) that it was
+        # judged a separate, larger refactor rather than folded into this
+        # PR's mutex-consolidation and reap-hardening scope.
+        recovery_lock = path.with_name(path.name + ".recovery.d")
+        acquired_lock = False
+        recovery_token = ""
+        try:
+            token = acquire_dir_mutex(
+                recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+            )
+            if token is None:
+                return _retry()
+            recovery_token = token
+            acquired_lock = True
+
+            # Re-verify under the mutex: a concurrent stale-reclaim or reap
+            # archive could have completed between our initial unlocked read
+            # (above) and acquiring this lock, installing a different holder
+            # (or nothing) at this path. Recurse rather than blindly
+            # overwrite whatever is there now - the recursion re-reads and
+            # re-dispatches to whichever branch the fresh state calls for.
+            try:
+                fresh_existing = read_claim_file(path)
+            except ClaimGoneAway:
+                return _release_and_retry()
+            if fresh_existing.holder != holder:
+                return _release_and_retry()
+
+            refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+            _atomic_replace(path, serialize_claim(refreshed))
+            emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
+            return refreshed
+        finally:
+            if acquired_lock:
+                release_dir_mutex(recovery_lock, recovery_token)
 
     # Stale? Try recovery under a mkdir-based recovery mutex so the archive +
     # recreate steps are serialized across concurrent workers. Without the
@@ -269,30 +391,19 @@ def acquire_claim(
         acquired_lock = False
         recovery_token = ""
         try:
-            try:
-                recovery_lock.mkdir(parents=True)
-                recovery_token = _stamp_owner(recovery_lock)
-                acquired_lock = True
-            except FileExistsError:
-                # Another worker is doing recovery -- or died holding the mutex.
-                # Steal a corpse (age-based, rename-atomic) so a killed
-                # recoverer cannot brick this key forever; otherwise wait
-                # briefly. Either way recurse from the top: the recovering
-                # worker will either succeed (we then see live-other) or fail
-                # (we get another shot).
-                if not steal_if_stale(recovery_lock):
-                    _wait_for_recovery_release(recovery_lock)
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+            # Another worker may be doing recovery -- or died holding the
+            # mutex. acquire_dir_mutex steals a corpse (age-based,
+            # rename-atomic) so a killed recoverer cannot brick this key
+            # forever, else polls briefly. Either outcome on timeout means
+            # recurse from the top: the recovering worker will either
+            # succeed (we then see live-other) or fail (we get another shot).
+            token = acquire_dir_mutex(
+                recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+            )
+            if token is None:
+                return _retry()
+            recovery_token = token
+            acquired_lock = True
 
             # Inside the recovery mutex: verify the existing claim is still
             # what we read (a fast-moving releaser could have unlinked it).
@@ -307,17 +418,7 @@ def acquire_claim(
                 try:
                     atomic_create_exclusive(path, payload)
                 except ClaimAlreadyHeld:
-                    return acquire_claim(
-                        key,
-                        holder,
-                        reason=reason,
-                        ttl_ms=ttl_ms,
-                        metadata=metadata,
-                        pid=pid,
-                        host=host,
-                        harness=harness,
-                        root=root,
-                    )
+                    return _release_and_retry()
                 emit_claim_acquired(new_claim)
                 return new_claim
 
@@ -348,17 +449,7 @@ def acquire_claim(
                 # letting the low-level ClaimAlreadyHeld escape acquire_claim's
                 # return-or-ClaimHeldByOther contract; the recursion sees the new
                 # live holder and raises ClaimHeldByOther.
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+                return _release_and_retry()
             emit_claim_stale_reclaimed(new_claim, previous=existing)
             return new_claim
         finally:
@@ -450,26 +541,25 @@ def compare_and_rebind(
     acquired_lock = False
     recovery_token = ""
     try:
-        try:
-            recovery_lock.mkdir(parents=True)
-            recovery_token = _stamp_owner(recovery_lock)
-            acquired_lock = True
-        except FileExistsError:
-            # A peer is mid-recovery, or a recoverer died holding the mutex.
-            # Steal a corpse so a killed peer cannot brick the rebind; else wait.
-            if steal_if_stale(recovery_lock):
-                try:
-                    recovery_lock.mkdir(parents=True)
-                    recovery_token = _stamp_owner(recovery_lock)
-                    acquired_lock = True
-                except FileExistsError:
-                    pass
-            if not acquired_lock:
-                _wait_for_recovery_release(recovery_lock)
-                raise RebindRefused(
-                    "claim recovery mutex busy; retry the resume bind",
-                    state=None,
-                )
+        # A peer may be mid-recovery, or a recoverer died holding the mutex.
+        # acquire_dir_mutex steals a corpse so a killed peer cannot brick the
+        # rebind, else polls until timeout - a mutex that clears well inside
+        # the window (acquire_claim/reap's own archive-then-recreate is a
+        # few-ms critical section) now lets the rebind succeed instead of
+        # refusing on a steal-attempt-then-give-up basis. compare_and_rebind
+        # is a one-shot verb (unlike acquire_claim/refresh_claim it does not
+        # recurse), so a genuine timeout here still refuses rather than
+        # retrying from the top.
+        token = acquire_dir_mutex(
+            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        )
+        if token is None:
+            raise RebindRefused(
+                "claim recovery mutex busy; retry the resume bind",
+                state=None,
+            )
+        recovery_token = token
+        acquired_lock = True
 
         # Inside the mutex: re-read + classify before any mutation.
         try:
@@ -554,28 +644,10 @@ def compare_and_rebind(
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
 
-
-def _wait_for_recovery_release(recovery_lock: Path) -> None:
-    """Poll briefly for a recovery lock to be released by another worker.
-
-    The lock is just a directory; once the holder finishes, it rmdir()s and
-    we can recurse. Only reached for a mutex young enough to be honestly held
-    - a corpse is stolen by ``steal_if_stale`` before this is called.
-    """
-    # lexists, not exists: a dangling symlink at the mutex path is EEXIST to
-    # mkdir but absent to a following stat, so exists() would report the lock
-    # free and send the caller straight back into acquire_claim, recursing
-    # without pause until RecursionError.
-    deadline = time.monotonic() + _RECOVERY_LOCK_MAX_WAIT_S
-    while os.path.lexists(recovery_lock) and time.monotonic() < deadline:
-        time.sleep(_RECOVERY_LOCK_POLL_INTERVAL_S)
-    # Deadline expired with the lock still held, and it is too young to be a
-    # corpse. Do NOT rmdir - the holder may still be inside the critical
-    # section (a slow archive + create on a heavily-loaded filesystem), and
-    # removing it in place would let two workers run archive+create at once.
-    # The waiter recurses into acquire_claim regardless; the next attempt
-    # re-evaluates the claim and either sees the recovered state or tries its
-    # own recovery, stealing the mutex once it ages past the threshold.
+# Mirrors Rust's ACQUIRE_MAX_ATTEMPTS (crates/fno-agents/src/claims.rs):
+# acquire_claim/refresh_claim recurse on contention instead of Rust's bounded
+# for-loop, so an attempt counter caps the recursion depth the same way.
+ACQUIRE_MAX_ATTEMPTS = 5
 
 
 def _existing_is_live(existing: Claim) -> bool:
@@ -680,6 +752,7 @@ def refresh_claim(
     *,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
+    _attempt: int = 0,
 ) -> Optional[Claim]:
     """Extend a TTL claim's expires_at.
 
@@ -688,10 +761,15 @@ def refresh_claim(
     via the return type rather than an exception so refresh is safe to
     call from a generic timer that does not know the claim's mode.
 
+    ``_attempt`` is internal bookkeeping only (never pass it): on mutex
+    contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
+    ``ClaimContended`` past that), mirroring ``acquire_claim``.
+
     Raises:
         HolderMismatch: existing claim is held by someone else.
         ClaimGoneAway: claim was released between read and rewrite.
         ClaimCorrupted: existing file fails parse/schema validation.
+        ClaimContended: mutex contention exhausted ACQUIRE_MAX_ATTEMPTS retries.
     """
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
@@ -704,24 +782,51 @@ def refresh_claim(
     if not path.exists():
         raise ClaimGoneAway(str(path))
 
-    existing = read_claim_file(path)
-    if existing.holder != holder:
-        raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-
-    if existing.expires_at is None:
-        return None
-
-    new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
-    refreshed = existing.model_copy(update={"expires_at": new_expires})
-
+    # Take the same per-key recovery mutex reap_dead_claims() holds while it
+    # re-verifies and archives a claim it proved dead - unconditionally, not
+    # just on contention, and read only once (under the lock). An unlocked
+    # pre-read followed by a second locked re-read would parse the same YAML
+    # file twice on every ordinary call; a single locked read costs one mkdir
+    # (cheap, uncontended) instead. Without the lock, _atomic_replace happily
+    # recreates `path` even if reap already archived it in the gap between a
+    # read and this write - silently resurrecting a claim GC just removed.
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    acquired_lock = False
+    recovery_token = ""
     try:
-        _atomic_replace(path, serialize_claim(refreshed))
-    except FileNotFoundError as exc:
-        # File was unlinked between the existence check and the rename.
-        raise ClaimGoneAway(str(path)) from exc
+        token = acquire_dir_mutex(
+            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        )
+        if token is None:
+            if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+                raise ClaimContended(
+                    f"refresh_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
+                    f"contention retries on {key!r}"
+                )
+            return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1)
+        recovery_token = token
+        acquired_lock = True
 
-    emit_claim_refreshed(refreshed, previous=existing)
-    return refreshed
+        existing = read_claim_file(path)
+        if existing.holder != holder:
+            raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
+        if existing.expires_at is None:
+            return None
+
+        new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
+        refreshed = existing.model_copy(update={"expires_at": new_expires})
+
+        try:
+            _atomic_replace(path, serialize_claim(refreshed))
+        except FileNotFoundError as exc:
+            # File was unlinked between our read and the rename.
+            raise ClaimGoneAway(str(path)) from exc
+
+        emit_claim_refreshed(refreshed, previous=existing)
+        return refreshed
+    finally:
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
 
 
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
@@ -735,12 +840,12 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         error:     string (only when state == corrupted)
     """
     path = claim_path(key, root=root)
-    if not path.exists():
-        return {"key": key, "state": ClaimState.FREE.value}
-
     try:
         claim = read_claim_file(path)
     except ClaimGoneAway:
+        # Covers both "never existed" and "vanished before this read" - a
+        # separate path.exists() pre-check would be a redundant stat, since
+        # read_claim_file already turns a missing file into this same case.
         return {"key": key, "state": ClaimState.FREE.value}
     except ClaimCorrupted as exc:
         return {
@@ -772,6 +877,63 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     return out
 
 
+def _list_claims_impl(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
+    """Shared directory walk for ``list_claims`` and ``list_claims_with_counts``.
+
+    Returns ``(rows, counts, states_by_key)``: ``rows`` is filtered per
+    ``include_stale`` exactly as before; ``counts`` is every state seen
+    while walking, regardless of what ``include_stale`` kept, so a caller
+    can report what it withheld; ``states_by_key`` maps every key seen to
+    its state (also independent of ``include_stale``) so a multi-root
+    caller can dedup its own cross-root totals by key instead of summing
+    ``counts`` blind to a key existing in more than one root.
+    """
+    cdir = claims_dir(root)
+    # "free" covers a claim released between iterdir() and claim_status()
+    # below (ClaimGoneAway / a vanished path) - without a bucket for it, that
+    # entry silently drops out of `total` too, instead of being an accounted
+    # non-event.
+    counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0}
+    if not cdir.is_dir():
+        return [], {**counts, "total": 0}, {}
+
+    out: list[dict[str, Any]] = []
+    states_by_key: dict[str, str] = {}
+    for entry in sorted(cdir.iterdir()):
+        if entry.is_dir():
+            # Skip the .expired archive dir and any future subdirs.
+            continue
+        if not entry.name.endswith(".lock"):
+            continue
+
+        key = decode_key(entry.name)
+        if prefix is not None and not key.startswith(prefix):
+            continue
+
+        status = claim_status(key, root=root)
+        state = status.get("state")
+        if state in counts:
+            counts[state] += 1
+            states_by_key[key] = state
+        # SUSPECT (x-ba4b) is an active, TTL-protected claim - it must count
+        # alongside LIVE so lane accounting (advance._live_lane_domains) does not
+        # under-count a slot held by a respawned worker and over-dispatch.
+        if state in {ClaimState.LIVE.value, ClaimState.SUSPECT.value}:
+            out.append(status)
+        elif include_stale and state in {
+            ClaimState.STALE.value,
+            ClaimState.CORRUPTED.value,
+        }:
+            out.append(status)
+
+    return out, {**counts, "total": sum(counts.values())}, states_by_key
+
+
 def list_claims(
     *,
     prefix: Optional[str] = None,
@@ -787,36 +949,30 @@ def list_claims(
     Corrupted entries are returned with state="corrupted" and an "error"
     key when ``include_stale=True``; they are skipped silently otherwise.
     """
-    cdir = claims_dir(root)
-    if not cdir.is_dir():
-        return []
+    rows, _counts, _states = _list_claims_impl(
+        prefix=prefix, include_stale=include_stale, root=root
+    )
+    return rows
 
-    out: list[dict[str, Any]] = []
-    for entry in sorted(cdir.iterdir()):
-        if entry.is_dir():
-            # Skip the .expired archive dir and any future subdirs.
-            continue
-        if not entry.name.endswith(".lock"):
-            continue
 
-        key = decode_key(entry.name)
-        if prefix is not None and not key.startswith(prefix):
-            continue
+def list_claims_with_counts(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
+    """Like :func:`list_claims`, but also returns the filtered-state counts.
 
-        status = claim_status(key, root=root)
-        state = status.get("state")
-        # SUSPECT (x-ba4b) is an active, TTL-protected claim - it must count
-        # alongside LIVE so lane accounting (advance._live_lane_domains) does not
-        # under-count a slot held by a respawned worker and over-dispatch.
-        if state in {ClaimState.LIVE.value, ClaimState.SUSPECT.value}:
-            out.append(status)
-        elif include_stale and state in {
-            ClaimState.STALE.value,
-            ClaimState.CORRUPTED.value,
-        }:
-            out.append(status)
-
-    return out
+    A store that is 99 percent stale must not render as an
+    empty store. ``counts`` carries ``live``/``suspect``/``stale``/
+    ``corrupted``/``total`` for every lockfile the walk saw, independent of
+    what ``include_stale`` kept in ``rows`` - this is what lets a caller
+    print what it filtered instead of the bare string ``no claims``. The
+    third element, ``states_by_key``, is the same information keyed by
+    claim key so a multi-root caller can dedup a key seen in more than one
+    root before summing.
+    """
+    return _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
 
 
 def force_release_claim(
@@ -838,22 +994,292 @@ def force_release_claim(
         raise ClaimValidationError("reason must be non-empty for force-release")
 
     path = claim_path(key, root=root)
-    if not path.exists():
-        emit_claim_force_overridden(
-            key=key, reason=reason, previous_holder=None, previous_pid=None,
-        )
-        return
 
-    previous: Optional[Claim] = None
+    # Take the same per-key recovery mutex acquire_claim/refresh_claim/
+    # reap_dead_claims all take. Without it, a concurrent idempotent
+    # re-acquire or refresh can read the still-present claim under ITS OWN
+    # lock and then write a fresh copy back via _atomic_replace's
+    # unconditional rename right after this call's archive_claim moves the
+    # file away - silently resurrecting the very claim this override just
+    # removed (the same class of race the other verbs close, just left open
+    # here). A contended mutex is a bounded wait like every other verb, never
+    # a refusal: on timeout, force-release proceeds without it rather than
+    # raising, preserving its "always succeeds" administrative-override
+    # contract - the exposure narrows from "always racy" to "racy only past
+    # a 5s timeout under sustained contention" instead of closing to zero.
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    acquired_lock = False
+    recovery_token = ""
     try:
-        previous = read_claim_file(path)
-    except (ClaimCorrupted, ClaimGoneAway):
-        previous = None
+        token = acquire_dir_mutex(
+            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        )
+        if token is not None:
+            recovery_token = token
+            acquired_lock = True
 
-    archive_claim(path, ts_ms=now_ms())
-    emit_claim_force_overridden(
-        key=key,
-        reason=reason,
-        previous_holder=previous.holder if previous is not None else None,
-        previous_pid=previous.pid if previous is not None else None,
-    )
+        if not path.exists():
+            emit_claim_force_overridden(
+                key=key, reason=reason, previous_holder=None, previous_pid=None,
+            )
+            return
+
+        previous: Optional[Claim] = None
+        try:
+            previous = read_claim_file(path)
+        except (ClaimCorrupted, ClaimGoneAway):
+            previous = None
+
+        archive_claim(path, ts_ms=now_ms())
+        emit_claim_force_overridden(
+            key=key,
+            reason=reason,
+            previous_holder=previous.holder if previous is not None else None,
+            previous_pid=previous.pid if previous is not None else None,
+        )
+    finally:
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
+
+
+def _default_reap_roots() -> list[Path]:
+    """Both claims roots swept by a bare ``fno claim reap`` (AC2).
+
+    Global node claims live at ``claims_dir(global_claims_root())``
+    (``~/.fno/claims`` by default); a repo's own root is
+    ``claims_dir(None)`` (canonical repo root). A cwd whose canonical repo
+    root IS the global root sweeps once, not twice - see
+    :func:`fno.claims.io.dedup_claims_roots`.
+    """
+    return _dedup_roots([global_claims_root(), None])
+
+
+def reap_dead_claims(
+    *,
+    roots: Optional[list[Optional[Path]]] = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Archive every provably-dead claim across one or more claims roots.
+
+    The only mutation missing from the claim lifecycle. Acquire,
+    release, refresh, and force-release all exist; nothing prunes a claim
+    whose holder died without releasing, so a dead session leaks its
+    lockfile forever. This walks every ``.lock`` file in the swept roots,
+    classifies it with :func:`fno.claims.staleness.classify_for_sweep` (the
+    single liveness authority; :func:`~fno.claims.staleness.is_provably_dead`
+    is its bool-only view), and archives the provably-dead ones to
+    ``.expired/``.
+
+    ``roots``, when given, is a list of repo-root arguments passed through
+    to :func:`fno.claims.io.claims_dir` exactly as ``--root`` does for
+    every other claim verb (``None`` means the canonical repo root). When
+    omitted, both default roots are swept in one run (AC2) - sweeping only
+    one is the guard-on-one-of-N-paths trap: 574 of the claims measured on
+    2026-08-14 lived in the root a single-root sweep would have missed.
+
+    With ``apply=False`` (the default), nothing is written; reapable files
+    are counted under ``would_reap`` from the same lock-free classification
+    ``apply=True`` uses before it ever takes the per-key recovery mutex - a
+    dry run never probes that mutex (deliberately: it is cheap, lock-free
+    triage by design), so a claim it counts under ``would_reap`` can still
+    land under ``contended`` in a LATER real apply run if something else
+    holds that key's mutex at that later instant. That gap is no different
+    from any other race between a preview and a separate later action; it is
+    not a promise this call predicts contention outcomes, only that the
+    classification itself (dead vs. live vs. suspect) matches.
+
+    With ``apply=True``, each reapable file is archived and then the store
+    is RE-READ to confirm the move: the source path must be gone and the
+    ``.expired/`` destination must exist. Only that re-read increments
+    ``reaped`` - never the absence of an exception, because ``fno agents
+    rm`` was observed tonight to exit 0 having moved nothing. A file whose
+    source path is still present after the archive call is counted under
+    ``reap_failed`` with its path, and the caller (the ``reap`` CLI verb)
+    exits non-zero when that list is non-empty.
+
+    Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
+    ``kept_live``, ``kept_suspect``, ``kept_offhost``, ``corrupted``,
+    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path, reason)``),
+    ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
+    ``apply=True`` call, including a zero-reap run - a leg that never ran
+    must not look the same as one that ran and found nothing. A dry run
+    fires no event: the "nothing is written" promise above covers the
+    event log too, so `fno backlog reconcile --dry-run`'s own preview
+    contract is not silently broken by the reap it previews.
+    """
+    use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
+
+    ts = now_ms()
+    scanned = 0
+    reaped = 0
+    would_reap = 0
+    kept: dict[str, int] = {"offhost": 0, "suspect": 0, "live": 0}
+    corrupted = 0
+    vanished = 0
+    # A provably-dead claim whose recovery mutex is held by a genuine live
+    # recovery (acquire_dir_mutex returned None on real contention, not a
+    # stealable corpse) - the file is still on disk and still dead, just
+    # left for the next sweep, so it must not be counted as vanished (which
+    # means "gone from the store").
+    contended = 0
+    reap_failed: list[tuple[str, str]] = []
+
+    def _read_or_bucket(entry: Path) -> Optional[Claim]:
+        """Read one claim file for the sweep, or bucket why it can't be read.
+
+        Shared by the outer scan and the mutex re-verify below so the
+        corrupted/vanished handling exists once, not twice.
+        """
+        nonlocal corrupted, vanished
+        try:
+            return read_claim_file(entry)
+        except ClaimCorrupted:
+            # Cannot classify what cannot be parsed; a claim that cannot be
+            # read cannot be proven dead (AC6).
+            corrupted += 1
+            return None
+        except ClaimGoneAway:
+            # A concurrent release between listdir and read is a normal
+            # outcome, not a failure of this run.
+            vanished += 1
+            return None
+
+    for cdir in use_dirs:
+        if not cdir.is_dir():
+            continue
+        root_label = str(cdir)
+        for entry in sorted(cdir.iterdir()):
+            if entry.is_dir():
+                # Skip .expired/ and any future subdir.
+                continue
+            if not entry.name.endswith(".lock"):
+                continue
+
+            scanned += 1
+            claim = _read_or_bucket(entry)
+            if claim is None:
+                continue
+
+            # Cheap, lock-free triage: decide whether this claim is even a
+            # reap candidate before paying for a mutex acquire. The mutex
+            # re-verify below does NOT reuse this result - it re-reads the
+            # file and calls classify_for_sweep again on that fresh read,
+            # because the claim may have been archived-and-recreated between
+            # this scan and the lock. Do not "de-duplicate" that second call;
+            # it is the TOCTOU check, not redundant work.
+            provably_dead, bucket = classify_for_sweep(claim, ts)
+
+            if provably_dead:
+                if not apply:
+                    would_reap += 1
+                    continue
+
+                # Take the same per-key recovery mutex acquire_claim() uses for
+                # its own archive-then-recreate (core.py ~267-371) so this
+                # cannot archive a claim a concurrent legitimate acquirer just
+                # recreated at this path. timeout_s=0: try once, steal a
+                # corpse left by a crashed reap/acquire if the dir is stale,
+                # else give up immediately rather than wait - reap runs on a
+                # cadence and blocking here would stall the whole sweep; a
+                # live owner (no steal) means a real recovery is in flight,
+                # left for the next sweep.
+                recovery_lock = entry.with_name(entry.name + ".recovery.d")
+                recovery_token = acquire_dir_mutex(recovery_lock, 0)
+                if recovery_token is None:
+                    # A live, in-age holder - genuine contention, not a
+                    # corpse (mutex.py's own contract). The file is still on
+                    # disk and still provably dead; "vanished" would wrongly
+                    # tell the operator it is gone from the store.
+                    contended += 1
+                    continue
+
+                try:
+                    # Re-read and re-verify under the mutex: the file may
+                    # have been archived-and-recreated by acquire_claim()
+                    # between our scan and this lock.
+                    fresh = _read_or_bucket(entry)
+                    if fresh is None:
+                        continue
+
+                    fresh_dead, fresh_bucket = classify_for_sweep(fresh, ts)
+                    if not fresh_dead:
+                        kept[fresh_bucket] += 1
+                        continue
+
+                    try:
+                        archive_path = archive_claim(entry, ts_ms=ts)
+                    except OSError as exc:
+                        # A permission error, full disk, or other rename
+                        # failure must not abort the whole sweep - every
+                        # other claim in this and later roots is still
+                        # reapable. Bucket this one and keep scanning,
+                        # matching the "move didn't happen" case below.
+                        reap_failed.append((str(entry), f"archive_claim raised: {exc}"))
+                        continue
+
+                    if archive_path != entry and archive_path.exists():
+                        # archive_path != entry proves archive_claim actually
+                        # computed a distinct .expired/ destination (the
+                        # idempotent-already-gone case returns entry itself
+                        # unchanged); combined with .exists() on that unique,
+                        # ts-suffixed path, that is durable proof THIS call's
+                        # rename succeeded - regardless of what entry.exists()
+                        # says afterward. A fresh, unrelated acquire_claim()
+                        # can legitimately recreate a live claim at the same
+                        # key the instant after this archive completes (its
+                        # top-level atomic_create_exclusive never consults
+                        # this recovery mutex once the path is empty), which
+                        # would make entry.exists() true again with no
+                        # bearing on whether the archive itself worked.
+                        reaped += 1
+                        emit_claim_reaped(
+                            fresh,
+                            root=root_label,
+                            age_ms=max(0, ts - fresh.acquired_at),
+                        )
+                    elif not entry.exists():
+                        # archive_claim's idempotent short-circuit: the
+                        # source was already fully cleared (a concurrent
+                        # reap, or the holder's own delayed release) before
+                        # this call, so it returned the source path itself,
+                        # which does not exist either. The store no longer
+                        # holds it, which is the outcome we wanted; we just
+                        # cannot claim credit for the move.
+                        vanished += 1
+                    else:
+                        # The positive-marker rule: an exit without exception
+                        # is not evidence. The source is still there and no
+                        # archive was created, so the move did not happen
+                        # (AC5).
+                        reap_failed.append(
+                            (str(entry), "archive_claim did not move the file")
+                        )
+                finally:
+                    release_dir_mutex(recovery_lock, recovery_token)
+                continue
+
+            # Not provably dead. Bucket the reason for the report.
+            kept[bucket] += 1
+
+    summary: dict[str, Any] = {
+        "scanned": scanned,
+        "reaped": reaped,
+        "would_reap": would_reap,
+        "kept_live": kept["live"],
+        "kept_suspect": kept["suspect"],
+        "kept_offhost": kept["offhost"],
+        "corrupted": corrupted,
+        "vanished": vanished,
+        "contended": contended,
+        "reap_failed": reap_failed,
+        "apply": apply,
+        "roots": [str(d) for d in use_dirs],
+    }
+    if apply:
+        emit_claim_reap_swept(summary)
+    return summary
+
+
+def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
+    """Resolve + dedup an explicit ``--root`` list, returning the claims dirs."""
+    return [cdir for _, cdir in dedup_claims_roots(roots)]

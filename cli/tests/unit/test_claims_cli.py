@@ -3,30 +3,18 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from fno.claims.cli import cli, _parse_ttl
+from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
+from fno.claims.core import ClaimContended, acquire_claim
+from fno.claims.io import dedup_claims_roots
+
+from .test_claim_reap import _dead_pid  # noqa: F401
 
 
 runner = CliRunner()
-
-
-@pytest.fixture
-def cwd_tmp(tmp_path: Path, monkeypatch):
-    """Change cwd to a tmp path so .fno/claims/ does not pollute the worktree.
-
-    Also pin HOME to the same tmp dir (and clear FNO_CLAIMS_ROOT) so the
-    global node-claim root (~/.fno/claims) coincides with cwd. node:<id>
-    keys now auto-resolve the global root (ab-fcf9cec5); pinning HOME=cwd keeps
-    these tests' cwd-relative lock assertions valid for both node and non-node keys.
-    """
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
 
 
 def test_ttl_parser_seconds_no_unit():
@@ -81,6 +69,37 @@ def test_acquire_conflict_exits_1(cwd_tmp):
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h2"])
     assert result.exit_code == 1
     assert "held by" in result.output
+
+
+def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
+    """acquire_claim's contention-retry-exhaustion ClaimContended must be
+    caught and mapped to exit 1 (same "retry later" code as
+    ClaimHeldByOther), not escape as an uncaught traceback."""
+    import fno.claims.cli as claims_cli
+
+    def _raise(*args, **kwargs):
+        raise ClaimContended("acquire_claim gave up after 5 contention retries on 'k'")
+
+    monkeypatch.setattr(claims_cli, "acquire_claim", _raise)
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
+    assert result.exit_code == 1
+    assert "contention error" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
+    """Same as acquire's: refresh_claim's contention-exhaustion ClaimContended
+    must be caught, not escape as an uncaught traceback."""
+    import fno.claims.cli as claims_cli
+
+    def _raise(*args, **kwargs):
+        raise ClaimContended("refresh_claim gave up after 5 contention retries on 'k'")
+
+    monkeypatch.setattr(claims_cli, "refresh_claim", _raise)
+    result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
+    assert result.exit_code == 1
+    assert "contention error" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_reconcile_pr_reservation_mutex(cwd_tmp):
@@ -257,6 +276,65 @@ def test_list_prefix_node_scans_global_root_once(cwd_tmp):
     assert result.exit_code == 0
     keys = [r["key"] for r in json.loads(result.output)]
     assert keys == ["node:ab-1"]
+
+
+def test_merge_across_roots_first_root_wins_row_and_totals_together(tmp_path):
+    """A key present in two roots with divergent states (e.g. a stale
+    leftover from an older fno that predates FNO_CLAIMS_ROOT-based global
+    routing, sitting alongside a live claim the current fno wrote to the
+    global root - see the version-skew note on CLAIMS_ROOT_ENV in io.py)
+    must be claimed by the SAME root for both the displayed row and the
+    totals bucket. A prior implementation deduped all_rows and totals with
+    two different predicates, so a key could show as a live row (from the
+    first root) while also being counted stale (from the second root) - an
+    internal inconsistency invisible today only because the totals hint text
+    happens to be gated on all_rows being empty."""
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    acquire_claim("k", "holder-a", pid=os.getpid(), root=root_a)
+    acquire_claim("k", "holder-b", pid=_dead_pid(), root=root_b)
+
+    deduped = dedup_claims_roots([root_a, root_b])
+    all_rows, row_roots, totals = _merge_claims_across_roots(
+        deduped, prefix="", include_stale=False
+    )
+
+    assert [r["key"] for r in all_rows] == ["k"]
+    assert all_rows[0]["state"] == "live"
+    assert row_roots["k"] == str(root_a / ".fno" / "claims")
+    assert totals == {"stale": 0, "corrupted": 0, "free": 0}, (
+        "root_a won the key for the row (live); root_b's stale sighting of "
+        "the SAME key must not also land in totals"
+    )
+
+
+def test_merge_across_roots_live_in_second_root_is_not_hidden_by_first_roots_stale(tmp_path):
+    """The opposite ordering from the test above: root_a (scanned first)
+    has a STALE leftover for key 'k'; root_b (scanned second) has a
+    genuinely LIVE claim for the SAME key - e.g. the old FNO_CLAIMS_ROOT
+    left a stale sighting behind while the current root holds the real,
+    active claim. Pure first-root-wins would let root_a's stale sighting
+    dedup away root_b's live one entirely: no row, and root_a's stale gets
+    counted instead - defeating the exact migration scenario this
+    function's own docstring names. The live claim must win regardless of
+    which root was scanned first."""
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    acquire_claim("k", "holder-a", pid=_dead_pid(), root=root_a)
+    acquire_claim("k", "holder-b", pid=os.getpid(), root=root_b)
+
+    deduped = dedup_claims_roots([root_a, root_b])
+    all_rows, row_roots, totals = _merge_claims_across_roots(
+        deduped, prefix="", include_stale=False
+    )
+
+    assert [r["key"] for r in all_rows] == ["k"], (
+        "root_b's live claim must surface as a row even though root_a "
+        "(scanned first) had a stale sighting of the same key"
+    )
+    assert all_rows[0]["state"] == "live"
+    assert row_roots["k"] == str(root_b / ".fno" / "claims")
+    assert totals == {"stale": 0, "corrupted": 0, "free": 0}
 
 
 def test_force_release_succeeds(cwd_tmp):

@@ -52,7 +52,7 @@ from fno.agents.harnesses._claude_session_registry import (
     roster_live,
 )
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
-from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
+from fno.claims import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.io import global_claims_root
 
 OrphanReason = Literal[
@@ -1748,7 +1748,9 @@ def acquire_session_writer_claim(
     SUSPECT instead, which acquire refuses like LIVE until the TTL expires.
 
     Raises :class:`SessionWriterClaimError` when the session is held live by
-    another process (guard 1) or the claim is already held (guard 2).
+    another process (guard 1), the claim is already held (guard 2), or the
+    underlying ``acquire_claim`` gives up after exhausting its contention
+    retries.
     """
     if claude_short_id is not None and session_is_live(claude_short_id):
         raise SessionWriterClaimError(
@@ -1770,6 +1772,17 @@ def acquire_session_writer_claim(
         raise SessionWriterClaimError(
             session_uuid,
             f"single-writer claim already held by {exc.holder} (pid={exc.pid}, host={exc.host})",
+        ) from exc
+    except ClaimContended as exc:
+        # acquire_claim's own contention-retry-exhaustion guard (5 attempts on
+        # sustained concurrent access to the SAME key): same "cannot be
+        # acquired right now" semantic as ClaimHeldByOther above, so callers
+        # that only catch SessionWriterClaimError (_acquire_rung2_guard) still
+        # degrade safely instead of an uncaught traceback aborting `fno mail
+        # send` before its durable fallback can queue the message.
+        raise SessionWriterClaimError(
+            session_uuid,
+            f"single-writer claim contended: {exc}",
         ) from exc
 
 

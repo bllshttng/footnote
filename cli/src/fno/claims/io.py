@@ -142,6 +142,32 @@ def claims_dir(root: Path | None = None) -> Path:
     return base / CLAIMS_DIRNAME
 
 
+def dedup_claims_roots(roots: list[Path | None]) -> list[tuple[Path | None, Path]]:
+    """Dedup candidate claims roots by their resolved ``claims_dir()``.
+
+    Returns ``(raw_root, resolved_dir)`` pairs: the raw value (``None`` or
+    ``Path``) so a caller can pass an entry straight back into ``root=`` on
+    ``list_claims_with_counts``/``reap_dead_claims``/etc, paired with the
+    already-resolved dir so nothing calls ``claims_dir()`` on the same root
+    twice. A cwd whose canonical repo root IS the global root collapses to
+    one scan, not two; dedup is by ``Path.resolve()`` on the resolved claims
+    dir, never on the raw root arg (``None`` and an equivalent explicit
+    ``Path`` must collapse too). Single source of truth for the both-roots
+    dedup used by ``fno claim list``/``reap`` (this logic previously
+    existed three times with no shared helper).
+    """
+    seen: set[Path] = set()
+    out: list[tuple[Path | None, Path]] = []
+    for r in roots:
+        cdir = claims_dir(r)
+        resolved = cdir.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append((r, cdir))
+    return out
+
+
 def encode_key(key: str) -> str:
     """URL-encode a key for use as a filename. Inverse of decode_key."""
     return quote(key, safe="")
@@ -274,6 +300,11 @@ def archive_claim(path: Path, ts_ms: int) -> Path:
     try:
         os.rename(str(path), str(archive))
     except FileNotFoundError:
-        # Another process archived first; harmless.
-        pass
+        # Another process may have won the race and archived to this exact
+        # path first (harmless - report its destination), or `path` vanished
+        # for an unrelated reason and nothing landed at `archive` (report the
+        # original path so a caller's existence check doesn't trust a file
+        # that was never written).
+        if not archive.exists():
+            return path
     return archive

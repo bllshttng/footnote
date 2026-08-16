@@ -180,7 +180,9 @@ def run_sync_canonical(
             lock_key, holder, ttl_ms=_SYNC_CLAIM_TTL_MS,
             reason="post-merge canonical sync", root=canonical,
         )
-    except claims.ClaimHeldByOther:
+    except claims.CLAIM_UNAVAILABLE:
+        # Someone else has this lock right now, not a reason to break this
+        # function's fail-open contract with an uncaught traceback.
         typer.echo(f"post-merge sync: in progress elsewhere for {sha[:12]}; skipping")
         return 0
 
