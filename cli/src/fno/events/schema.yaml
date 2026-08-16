@@ -1135,7 +1135,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_reap_swept
-    description: "One `fno claim reap` run completed, apply or dry-run alike, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same."
+    description: "One `fno claim reap --apply` run completed, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same. Never fires for a dry-run: dry-run's own no-writes promise covers this event too."
     sources: [fno-loop]
     data:
       required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, roots]
