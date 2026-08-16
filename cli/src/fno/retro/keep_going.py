@@ -69,6 +69,8 @@ def keep_going_enabled(
     """Resolve whether the autonomous keep-going engine is armed.
 
     Precedence (mirrors ``spawn_think.think_spawn_enabled``):
+      0. ``config.autonomy.enabled`` master panic switch off -> disabled,
+         checked before the env override even (x-aaaf wave 3).
       1. ``FNO_KEEP_GOING`` env override (explicit force on/off).
       2. ``config.keep_going.enabled`` from the repo settings (local > global).
       3. default False.
@@ -76,6 +78,11 @@ def keep_going_enabled(
     Fail-safe: ANY settings-read error degrades to False rather than raising into
     the harvest pipeline that calls it.
     """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled(project_root):
+        return False
+
     environ = os.environ if env is None else env
     override = environ.get(_ENV_OVERRIDE)
     if override is not None:

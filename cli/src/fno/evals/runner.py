@@ -48,6 +48,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def evals_enabled() -> bool:
+    """Resolve whether the headless grading-worker spawn is armed (x-aaaf wave 2).
+
+    ``config.evals.enabled`` defaults True (matches the spawner's prior,
+    ungated behavior). A malformed value degrades to True (never opt-in), but
+    a config that fails to load at all degrades to False - the global
+    invariant that an unreadable config resolves every gate to off, never on.
+
+    Also stops when ``config.autonomy.enabled`` (the wave-3 master panic
+    switch) is off, checked first.
+    """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled():
+        return False
+    try:
+        from fno.config import load_settings
+
+        return bool(load_settings().evals.enabled)
+    except Exception:  # noqa: BLE001 - fail-safe to disabled on a read failure
+        return False
+
+
 def _git_rev(repo_root: Path, ref: str) -> Optional[str]:
     try:
         proc = subprocess.run(
@@ -181,7 +204,12 @@ def run_task(
             reason = f"fixture checkout failed ({task.repo_fixture}); fixture drift? {exc.stderr or ''}".strip()
 
         if workdir is not None:
-            if task.prompt:
+            if task.prompt and spawn is None and not evals_enabled():
+                # x-aaaf wave 2: the gate only bites the REAL default spawn -
+                # an injected spawn_fn (tests, or a caller with its own
+                # worker) is an explicit invocation, not autonomous.
+                reason = "config.evals.enabled is false"
+            elif task.prompt:
                 spawn_res = spawn_fn(task.prompt, workdir, timeout_s)
                 if not spawn_res.ok:
                     reason = spawn_res.reason

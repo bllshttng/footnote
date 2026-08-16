@@ -279,6 +279,23 @@ fi
 # Step 1: Preconditions (refuse = parked BEFORE any state mutation)
 # ---------------------------------------------------------------------------
 
+# Master switch check (x-aaaf wave 3 follow-up): config.autonomy.enabled
+# outranks every spawner-specific gate, including this one, and is checked
+# first for the same reason autonomy_master_enabled() checks it first in
+# every Python resolver - a panic switch something else can bypass is not
+# a panic switch.
+AUTONOMY_ENABLED="true"
+if declare -F get_config >/dev/null 2>&1; then
+  AUTONOMY_ENABLED=$(get_config "autonomy.enabled" "true")
+fi
+case "$AUTONOMY_ENABLED" in
+  true|True|TRUE|1|yes|on) ;;
+  *)
+    echo "parked $NODE_ID reason=\"config.autonomy.enabled is false\""
+    exit "$_EXIT_PARKED"
+    ;;
+esac
+
 # Config enabled check
 if [ "$HANDOFF_ENABLED" != "true" ]; then
   echo "parked $NODE_ID reason=\"handoff disabled via config\""

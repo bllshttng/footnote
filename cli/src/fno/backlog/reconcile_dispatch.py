@@ -37,6 +37,7 @@ from fno.backlog.advance import (
     EVENT_SKIPPED,
     AdvanceResult,
     SpawnAlreadyRunning,
+    _auto_continue_resolve,
     _claim_is_live,
     _emit,
     _events_path,
@@ -44,7 +45,6 @@ from fno.backlog.advance import (
     _spawn_worker,
     _walker_key,
     _worker_agent_name,
-    auto_continue_enabled,
 )
 
 # The pending sentinel covers the window between the blocker's merge and the
@@ -162,7 +162,8 @@ def _dep_root(dep: dict) -> Optional[str]:
 
 
 def _dispatch_reconcile(
-    dep: dict, root: str, manifest_path: Path, ev_path: Path, verbose: bool
+    dep: dict, root: str, manifest_path: Path, ev_path: Path, verbose: bool,
+    *, rank: Optional[str] = None,
 ) -> AdvanceResult:
     """Dedup + spawn the ``/target --reconcile`` worker for one dependent.
 
@@ -174,6 +175,8 @@ def _dispatch_reconcile(
 
     def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
         data: dict = {"reason": reason, "node_id": node_id, "kind": "reconcile"}
+        if rank:
+            data["rank"] = rank
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -182,9 +185,10 @@ def _dispatch_reconcile(
         )
 
     def failed(error: str) -> AdvanceResult:
-        _emit(
-            EVENT_FAILED, {"node_id": node_id, "kind": "reconcile", "error": error[:200]}, ev_path
-        )
+        data = {"node_id": node_id, "kind": "reconcile", "error": error[:200]}
+        if rank:
+            data["rank"] = rank
+        _emit(EVENT_FAILED, data, ev_path)
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
@@ -231,16 +235,15 @@ def _dispatch_reconcile(
         _safe_release(dispatch_key, holder, dispatch_root)
         return failed(str(exc))
 
-    _emit(
-        EVENT_DISPATCHED,
-        {
-            "node_id": node_id,
-            "short_id": short_id,
-            "kind": "reconcile",
-            "agent_name": _worker_agent_name(node_id, dep.get("slug"), prefix="reconcile"),
-        },
-        ev_path,
-    )
+    dispatched_data = {
+        "node_id": node_id,
+        "short_id": short_id,
+        "kind": "reconcile",
+        "agent_name": _worker_agent_name(node_id, dep.get("slug"), prefix="reconcile"),
+    }
+    if rank:
+        dispatched_data["rank"] = rank
+    _emit(EVENT_DISPATCHED, dispatched_data, ev_path)
     if verbose:
         import sys
 
@@ -248,12 +251,16 @@ def _dispatch_reconcile(
     return AdvanceResult("dispatched", EVENT_DISPATCHED, node_id=node_id, short_id=short_id)
 
 
-def _route_one(dep: dict, ev_path: Path, verbose: bool) -> AdvanceResult:
+def _route_one(
+    dep: dict, ev_path: Path, verbose: bool, *, rank: Optional[str] = None
+) -> AdvanceResult:
     """Route one contract dependent: dispatch, pending-sentinel, or skip."""
     node_id = dep["id"]
 
     def skip(reason: str, detail: Optional[str] = None) -> AdvanceResult:
         data: dict = {"reason": reason, "node_id": node_id, "kind": "reconcile"}
+        if rank:
+            data["rank"] = rank
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
@@ -295,7 +302,7 @@ def _route_one(dep: dict, ev_path: Path, verbose: bool) -> AdvanceResult:
     if manifest.get("reconciled") is True:
         return skip("already-reconciled")
 
-    return _dispatch_reconcile(dep, root, manifest_path, ev_path, verbose)
+    return _dispatch_reconcile(dep, root, manifest_path, ev_path, verbose, rank=rank)
 
 
 def dispatch_reconcile_for_blocker(
@@ -314,7 +321,8 @@ def dispatch_reconcile_for_blocker(
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
 
-    if not auto_continue_enabled(project_root=project_root):
+    armed, rank = _auto_continue_resolve(project_root)
+    if not armed:
         return []
     if _claim_is_live(_walker_key()):
         return []
@@ -325,12 +333,12 @@ def dispatch_reconcile_for_blocker(
         _emit(
             EVENT_SKIPPED,
             {"reason": "dependents-error", "kind": "reconcile",
-             "closed_node_id": closed_node_id, "detail": str(exc)[:200]},
+             "closed_node_id": closed_node_id, "detail": str(exc)[:200], "rank": rank},
             ev_path,
         )
         return [AdvanceResult("skipped", EVENT_SKIPPED, reason="dependents-error", detail=str(exc))]
 
-    return [_route_one(dep, ev_path, verbose) for dep in deps]
+    return [_route_one(dep, ev_path, verbose, rank=rank) for dep in deps]
 
 
 def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceResult]:

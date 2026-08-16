@@ -112,6 +112,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `dispatch.auto_merge` | bool | `false` | advanced | Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false. |
 | `dispatch.on_exhaustion` | str | `defer` | advanced | On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'. |
 | `dispatch.cutover_low_after_minutes` | int | `0` | advanced | Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0. |
+| `autonomy.enabled` | bool | `true` | never | The one master switch over every autonomous session-starting spawner. Defaults true; shipping this changes nothing until explicitly disabled. |
 | `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `keep_going.enabled` | bool | `false` | advanced | Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap). |
 | `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node; actual launches use the shared config.dispatch harness and substrate. |
@@ -140,6 +141,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
 | `pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
 | `pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
+| `groom.enabled` | bool | `true` | never | Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true. |
+| `restart.enabled` | bool | `true` | never | Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true. |
+| `evals.enabled` | bool | `true` | never | Enable the headless eval-suite grading-worker spawn. Defaults true. |
 | `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed. |
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |
 | `recovery.max_nudges` | int | `3` | never | Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately). |

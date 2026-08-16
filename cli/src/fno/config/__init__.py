@@ -1730,6 +1730,58 @@ class AgentsBlock(BaseModel):
         return {}
 
 
+def _coerce_bool_default_true(v: object) -> bool:
+    """Shared body for the four wave-2/3 "never opt-in" gates below
+    (AutonomyBlock, GroomBlock, RestartBlock, EvalsBlock): a garbage value
+    fails safe to True (each block's own default), since these spawners ran
+    unconditionally before their gate existed and a malformed config value
+    must not silently disable one. A config that fails to LOAD at all still
+    resolves every gate to off via each resolver's own try/except - that
+    direction is a resolver-level invariant, not this coercion's job."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v == 1
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "on"}
+    return True
+
+
+class AutonomyBlock(BaseModel):
+    """The one master switch over every autonomous session-starting spawner
+    (nested under 'config.autonomy'). x-aaaf wave 3.
+
+    ``enabled=False`` stops EVERY spawner - the merge-triggered ones
+    (advance, dispatch_lanes, epic converge, reconcile_dispatch), spawn_think,
+    post-merge ritual, pr_watch, keep_going, blueprint auto-launch, and the
+    wave-2 ones (groom, restart, evals) - regardless of that spawner's own
+    gate. It is checked BEFORE any other precedence rank, even an explicit env
+    override: the whole point of a panic switch is that nothing overrides it.
+    A skip caused by this switch stamps rank ``"autonomy"`` on its decision
+    event (distinct from env/config/default) so the log names the master
+    switch as the reason, never leaving it to inference (AC4-HP).
+
+    Default ``True``: shipping this changes nothing for an existing user -
+    every spawner's own gate still governs exactly as before until an
+    operator explicitly arms the panic switch.
+
+    Explicitly NOT a per-dispatcher lever (Alternative A in the design doc,
+    rejected): nine levers multiply the state an operator must hold and
+    guarantee some subset goes stale, which is the same failure with more
+    surface. This is the ONE switch; detail belongs in ``fno autonomy
+    status``, not in a second layer of configuration.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        return _coerce_bool_default_true(v)
+
+
 class AutoContinueBlock(BaseModel):
     """Merge-triggered auto-continue settings (nested under 'config.auto_continue').
 
@@ -2078,6 +2130,66 @@ class PrWatchBlock(BaseModel):
     retries: int = Field(default=3, ge=1)
     max_age_days: int = Field(default=14, ge=1)
     model: str = Field(default="claude-haiku-4-5", min_length=1)
+
+
+class GroomBlock(BaseModel):
+    """Daily backlog-grooming pass settings (nested under 'config.groom').
+
+    x-aaaf wave 2: `fno backlog groom` (`_spawn_groom_worker`,
+    backlog/groom.py:204) previously spawned with no enable key at all, so it
+    could not be turned off. Default ``True`` matches the spawner's CURRENT
+    effective behavior (it always ran) - shipping this gate changes nothing
+    for an existing user until they explicitly disable it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        return _coerce_bool_default_true(v)
+
+
+class RestartBlock(BaseModel):
+    """`fno restart` worker-revival settings (nested under 'config.restart').
+
+    x-aaaf wave 2: `_revive_orphans` (restart.py:90) - respawning claude
+    workers orphaned by a killed mux server - previously had only a per-run
+    `--revive/--no-revive` CLI flag and no durable config gate, so it could
+    not be turned off once and forgotten. Default ``True`` matches the
+    spawner's CURRENT effective behavior: a legitimately unconditional
+    trigger (crash recovery) still gets a gate, it just defaults on.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        return _coerce_bool_default_true(v)
+
+
+class EvalsBlock(BaseModel):
+    """Eval-suite worker settings (nested under 'config.evals').
+
+    x-aaaf wave 2: `evals/runner.py`'s `run_task` spawns a headless grading
+    worker with no enable key at all. Default ``True`` matches its CURRENT
+    effective behavior (it always ran when invoked) - shipping this gate
+    changes nothing until an operator explicitly disables it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        return _coerce_bool_default_true(v)
 
 
 class RecoveryBlock(BaseModel):
@@ -3090,6 +3202,7 @@ class ConfigBlock(BaseModel):
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
+    autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)
     think_spawn: ThinkSpawnBlock = Field(default_factory=ThinkSpawnBlock)
@@ -3097,6 +3210,9 @@ class ConfigBlock(BaseModel):
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
+    groom: GroomBlock = Field(default_factory=GroomBlock)
+    restart: RestartBlock = Field(default_factory=RestartBlock)
+    evals: EvalsBlock = Field(default_factory=EvalsBlock)
     recovery: RecoveryBlock = Field(default_factory=RecoveryBlock)
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
@@ -4036,3 +4152,27 @@ def agents_headless_yolo(provider: str) -> bool:
     if block is None:
         return False
     return bool(getattr(block, "headless_yolo", False))
+
+
+def autonomy_master_enabled(project_root: Optional[Path] = None) -> bool:
+    """Resolve ``config.autonomy.enabled``, the ONE panic switch over every
+    autonomous session-starting spawner (x-aaaf wave 3).
+
+    Every spawner-specific resolver (``auto_continue_enabled``,
+    ``think_spawn_enabled``, ``keep_going_enabled``, ``groom_enabled``,
+    ``_revive_enabled``, ``evals_enabled``, and the post-merge / pr_watch /
+    blueprint-auto-launch config reads) calls this FIRST, before its own env
+    override even - a panic switch that something else can still bypass is
+    not a panic switch. Callers that skip because of this return rank
+    ``"autonomy"`` on their decision event rather than falling through to
+    their own env/config/default resolution.
+
+    Fail-safe to False on ANY read failure - an unreadable config resolves
+    every gate to off, never to on (the invariant every resolver in this
+    codebase already applies to itself).
+    """
+    try:
+        settings = load_settings_for_repo(Path(project_root)) if project_root else load_settings()
+        return bool(settings.autonomy.enabled)
+    except Exception:  # noqa: BLE001 - fail-safe to disabled on a read failure
+        return False

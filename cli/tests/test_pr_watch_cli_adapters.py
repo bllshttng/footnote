@@ -297,6 +297,113 @@ def test_AC6_healthy_tick_still_prints_counts(monkeypatch) -> None:
     assert "lock held" not in res.output
 
 
+def test_config_disabled_tick_prints_disabled_not_a_sweep(monkeypatch) -> None:
+    """x-aaaf wave 2: a disabled tick must not read as an empty sweep either."""
+    from fno.pr_watch._dispatch import TickResult
+
+    res = _run_tick_command(monkeypatch, TickResult(open_prs=0, acted=0, disabled=True))
+
+    assert res.exit_code == 0, res.output
+    assert "config.pr_watch.enabled is false" in res.output
+    assert "open_prs=" not in res.output
+
+
+def test_master_switch_off_names_autonomy_not_pr_watch_in_the_message(monkeypatch) -> None:
+    """x-aaaf wave 3: when the panic switch (not pr_watch's own gate) caused
+    the skip, the printed line must name IT, not the narrower gate."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick", lambda **_kw: TickResult(open_prs=0, acted=0, disabled=True),
+        raising=True,
+    )
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.pr_watch.enabled = True
+    settings.autonomy.enabled = False
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+
+    assert res.exit_code == 0, res.output
+    assert "config.autonomy.enabled is false" in res.output
+
+
+def test_master_switch_off_also_stops_the_recovery_sweep(monkeypatch) -> None:
+    """x-aaaf wave 3: config.recovery.enabled=True alone used to be enough to
+    fire the respawn sweep even with the master switch off -- a guard checked
+    independently of the panic switch it was supposed to obey. Assert the
+    sweep function is never called when autonomy.enabled is False, even
+    though recovery's own gate is armed."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: TickResult(open_prs=0, acted=0, disabled=True),
+        raising=True,
+    )
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.pr_watch.enabled = True
+    settings.autonomy.enabled = False
+    settings.recovery.enabled = True
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    called = []
+    monkeypatch.setattr(
+        "fno.recovery.run_recovery_sweep", lambda *a, **kw: called.append(1), raising=True
+    )
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+
+    assert res.exit_code == 0, res.output
+    assert not called, "recovery sweep must not fire when the master switch is off"
+
+
+def test_cli_passes_the_resolved_enabled_flag_to_dispatch_tick(monkeypatch) -> None:
+    """The CLI must pass config.pr_watch.enabled through, not silently drop it."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    captured: dict = {}
+
+    def _fake_tick(**kw):
+        captured.update(kw)
+        return TickResult(open_prs=0, acted=0)
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.tick", _fake_tick, raising=True)
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.pr_watch.enabled = False
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    CliRunner().invoke(app, [])
+
+    assert captured["enabled"] is False
+
+
 def test_AC6_subsystem_failure_is_not_reported_as_a_held_lock(monkeypatch) -> None:
     """A claims failure must not masquerade as routine contention."""
     from fno.pr_watch._dispatch import TickResult

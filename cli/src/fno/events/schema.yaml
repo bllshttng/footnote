@@ -2546,6 +2546,10 @@ event_types:
         mission:
           type: string
           description: "The epic id whose epic advance / mission drain dispatched this child (x-9608 K1). Present only on a mission dispatch; omitted on the merge-advance and next-node paths."
+        rank:
+          type: string
+          enum: [env, config, default, autonomy]
+          description: "The precedence rank that supplied config.auto_continue's armed value for this decision: env = FNO_AUTO_CONTINUE override, config = settings.yaml, default = neither set (false) (x-aaaf wave 1, AC3-HP). autonomy = the config.autonomy.enabled master panic switch vetoed it, checked before env even (x-aaaf wave 3, AC4-HP). Answers 'what armed this' from the log without inference."
     consumers: [operator]
 
   - name: advance_skipped
@@ -2576,6 +2580,10 @@ event_types:
         detail:
           type: string
           description: "Optional human-readable detail (e.g. the next-error message), truncated."
+        rank:
+          type: string
+          enum: [env, config, default, autonomy]
+          description: "The precedence rank that supplied config.auto_continue's armed value for this decision (x-aaaf wave 1, AC3-HP). See advance_dispatched.rank."
     consumers: [operator]
 
   - name: advance_failed
@@ -2596,6 +2604,10 @@ event_types:
         mission:
           type: string
           description: "The epic id whose epic advance / mission drain attempted this child (x-9608 K1). Present only on a mission dispatch failure."
+        rank:
+          type: string
+          enum: [env, config, default, autonomy]
+          description: "The precedence rank that supplied config.auto_continue's armed value for this decision (x-aaaf wave 1, AC3-HP). See advance_dispatched.rank."
     consumers: [operator]
 
   - name: mission_activated
@@ -2816,6 +2828,10 @@ event_types:
         agent_name:
           type: string
           description: "Spawned agent name (think-<node-id>-<slug>)."
+        rank:
+          type: string
+          enum: [env, config, default, autonomy]
+          description: "The precedence rank that supplied config.think_spawn.enabled's armed value for this decision: env = FNO_THINK_SPAWN override, config = settings.yaml, default = neither set (false) (x-aaaf wave 1, AC3-HP). autonomy = the config.autonomy.enabled master panic switch vetoed it, checked before env even (x-aaaf wave 3, AC4-HP)."
     consumers: [operator]
 
   - name: think_offered
@@ -2841,6 +2857,10 @@ event_types:
         offer_line:
           type: string
           description: "The single copy-pasteable handoff line surfaced to the operator."
+        rank:
+          type: string
+          enum: [env, config, default, autonomy]
+          description: "The precedence rank that supplied config.think_spawn.enabled's armed value for this decision (x-aaaf wave 1, AC3-HP). See think_spawned.rank."
     consumers: [operator]
 
   - name: think_skipped
@@ -2870,6 +2890,10 @@ event_types:
         detail:
           type: string
           description: "Optional human-readable detail (e.g. the spawn error), truncated."
+        rank:
+          type: string
+          enum: [env, config, default, autonomy]
+          description: "The precedence rank that supplied config.think_spawn.enabled's armed value for this decision (x-aaaf wave 1, AC3-HP). See think_spawned.rank."
     consumers: [operator]
 
   - name: pr_watch_dispatched
