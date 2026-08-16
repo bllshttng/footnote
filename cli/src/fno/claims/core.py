@@ -231,6 +231,22 @@ def acquire_claim(
     _validate_inputs(key, holder, ttl_ms)
     path = claim_path(key, root=root)
 
+    def _retry() -> Claim:
+        # Every contention/race branch below re-dispatches by recursing with
+        # the exact same arguments - one definition instead of the same
+        # 9-line call restated at each of the seven sites that need it.
+        return acquire_claim(
+            key,
+            holder,
+            reason=reason,
+            ttl_ms=ttl_ms,
+            metadata=metadata,
+            pid=pid,
+            host=host,
+            harness=harness,
+            root=root,
+        )
+
     new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
     payload = serialize_claim(new_claim)
 
@@ -247,17 +263,7 @@ def acquire_claim(
     except ClaimGoneAway:
         # Disappeared between collision and read - someone else released
         # while we were looking. Recurse once; if still racy, surface it.
-        return acquire_claim(
-            key,
-            holder,
-            reason=reason,
-            ttl_ms=ttl_ms,
-            metadata=metadata,
-            pid=pid,
-            host=host,
-            harness=harness,
-            root=root,
-        )
+        return _retry()
 
     if existing.holder == holder:
         # Idempotent re-acquire: refresh pid/host/acquired_at. Take the same
@@ -280,17 +286,7 @@ def acquire_claim(
             except FileExistsError:
                 if not steal_if_stale(recovery_lock):
                     _wait_for_recovery_release(recovery_lock)
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+                return _retry()
 
             # Re-verify under the mutex: a concurrent stale-reclaim or reap
             # archive could have completed between our initial unlocked read
@@ -301,29 +297,9 @@ def acquire_claim(
             try:
                 fresh_existing = read_claim_file(path)
             except ClaimGoneAway:
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+                return _retry()
             if fresh_existing.holder != holder:
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+                return _retry()
 
             refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
             _atomic_replace(path, serialize_claim(refreshed))
@@ -356,17 +332,7 @@ def acquire_claim(
                 # (we get another shot).
                 if not steal_if_stale(recovery_lock):
                     _wait_for_recovery_release(recovery_lock)
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+                return _retry()
 
             # Inside the recovery mutex: verify the existing claim is still
             # what we read (a fast-moving releaser could have unlinked it).
@@ -381,17 +347,7 @@ def acquire_claim(
                 try:
                     atomic_create_exclusive(path, payload)
                 except ClaimAlreadyHeld:
-                    return acquire_claim(
-                        key,
-                        holder,
-                        reason=reason,
-                        ttl_ms=ttl_ms,
-                        metadata=metadata,
-                        pid=pid,
-                        host=host,
-                        harness=harness,
-                        root=root,
-                    )
+                    return _retry()
                 emit_claim_acquired(new_claim)
                 return new_claim
 
@@ -422,17 +378,7 @@ def acquire_claim(
                 # letting the low-level ClaimAlreadyHeld escape acquire_claim's
                 # return-or-ClaimHeldByOther contract; the recursion sees the new
                 # live holder and raises ClaimHeldByOther.
-                return acquire_claim(
-                    key,
-                    holder,
-                    reason=reason,
-                    ttl_ms=ttl_ms,
-                    metadata=metadata,
-                    pid=pid,
-                    host=host,
-                    harness=harness,
-                    root=root,
-                )
+                return _retry()
             emit_claim_stale_reclaimed(new_claim, previous=existing)
             return new_claim
         finally:
@@ -778,20 +724,14 @@ def refresh_claim(
     if not path.exists():
         raise ClaimGoneAway(str(path))
 
-    existing = read_claim_file(path)
-    if existing.holder != holder:
-        raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-
-    if existing.expires_at is None:
-        return None
-
     # Take the same per-key recovery mutex reap_dead_claims() holds while it
-    # re-verifies and archives a claim it proved dead. Without it,
-    # _atomic_replace happily recreates `path` even if reap already archived
-    # it in the gap between our unlocked read above and this write -
-    # silently resurrecting a claim GC just removed. Contention handling
-    # mirrors acquire_claim's idempotent branch: steal a corpse or wait
-    # briefly, then recurse rather than a bare retry loop.
+    # re-verifies and archives a claim it proved dead - unconditionally, not
+    # just on contention, and read only once (under the lock). An unlocked
+    # pre-read followed by a second locked re-read would parse the same YAML
+    # file twice on every ordinary call; a single locked read costs one mkdir
+    # (cheap, uncontended) instead. Without the lock, _atomic_replace happily
+    # recreates `path` even if reap already archived it in the gap between a
+    # read and this write - silently resurrecting a claim GC just removed.
     recovery_lock = path.with_name(path.name + ".recovery.d")
     acquired_lock = False
     recovery_token = ""
@@ -805,24 +745,22 @@ def refresh_claim(
                 _wait_for_recovery_release(recovery_lock)
             return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root)
 
-        # Re-verify under the mutex: reap (or a concurrent stale-reclaim)
-        # could have archived or replaced this file since our unlocked read.
-        fresh_existing = read_claim_file(path)
-        if fresh_existing.holder != holder:
-            raise HolderMismatch(expected=holder, actual=fresh_existing.holder, key=key)
-        if fresh_existing.expires_at is None:
+        existing = read_claim_file(path)
+        if existing.holder != holder:
+            raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
+        if existing.expires_at is None:
             return None
 
         new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
-        refreshed = fresh_existing.model_copy(update={"expires_at": new_expires})
+        refreshed = existing.model_copy(update={"expires_at": new_expires})
 
         try:
             _atomic_replace(path, serialize_claim(refreshed))
         except FileNotFoundError as exc:
-            # File was unlinked between our re-read and the rename.
+            # File was unlinked between our read and the rename.
             raise ClaimGoneAway(str(path)) from exc
 
-        emit_claim_refreshed(refreshed, previous=fresh_existing)
+        emit_claim_refreshed(refreshed, previous=existing)
         return refreshed
     finally:
         if acquired_lock:
