@@ -52,7 +52,7 @@ from .io import (
 )
 from .staleness import classify, now_ms
 from ..harness_identity import resolve_harness_identity
-from ..mutex import _stamp_owner, release_dir_mutex, steal_if_stale
+from ..mutex import _stamp_owner, acquire_dir_mutex, release_dir_mutex, steal_if_stale
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -1036,31 +1036,19 @@ def reap_dead_claims(
                 # Take the same per-key recovery mutex acquire_claim() uses for
                 # its own archive-then-recreate (core.py ~267-371) so this
                 # cannot archive a claim a concurrent legitimate acquirer just
-                # recreated at this path.
+                # recreated at this path. timeout_s=0: try once, steal a
+                # corpse left by a crashed reap/acquire if the dir is stale,
+                # else give up immediately rather than wait - reap runs on a
+                # cadence and blocking here would stall the whole sweep; a
+                # live owner (no steal) means a real recovery is in flight,
+                # left for the next sweep (x-aeeb review: shares
+                # fno.mutex.acquire_dir_mutex instead of hand-rolling the
+                # same mkdir/steal/retry dance a third time).
                 recovery_lock = entry.with_name(entry.name + ".recovery.d")
-                recovery_token = ""
-                try:
-                    recovery_lock.mkdir(parents=True)
-                    recovery_token = _stamp_owner(recovery_lock)
-                except FileExistsError:
-                    # Steal a corpse left by a crashed reap/acquire (mirrors
-                    # acquire_claim's own recovery path) so a dead owner can
-                    # never permanently block this key from ever being
-                    # reaped again (x-aeeb review). A live owner (steal
-                    # returns False) means a real recovery is in flight;
-                    # leave it for the next sweep rather than wait - reap
-                    # runs on a cadence and blocking here would stall the
-                    # whole sweep.
-                    if not steal_if_stale(recovery_lock):
-                        vanished += 1
-                        continue
-                    try:
-                        recovery_lock.mkdir(parents=True)
-                        recovery_token = _stamp_owner(recovery_lock)
-                    except FileExistsError:
-                        # Someone else won the steal race.
-                        vanished += 1
-                        continue
+                recovery_token = acquire_dir_mutex(recovery_lock, 0)
+                if recovery_token is None:
+                    vanished += 1
+                    continue
 
                 try:
                     # Re-read and re-verify under the mutex: the file may
