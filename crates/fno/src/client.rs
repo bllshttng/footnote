@@ -2455,6 +2455,7 @@ impl View {
     fn open_create(&mut self) {
         self.selector = None;
         self.answers = None;
+        self.yard = None;
         self.search = None;
         self.rename = None;
         self.move_pick = None;
@@ -2473,6 +2474,7 @@ impl View {
     fn open_recruit(&mut self) {
         self.selector = None;
         self.answers = None;
+        self.yard = None;
         self.search = None;
         self.rename = None;
         self.create = None;
@@ -2494,6 +2496,7 @@ impl View {
         self.selector = None;
         self.sel_hover_armed = false;
         self.answers = None;
+        self.yard = None;
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
         // confirm owns the bottom row, and resuming a hidden create overlay
@@ -2523,6 +2526,7 @@ impl View {
     fn open_rename(&mut self, target: RenameTarget) {
         self.selector = None;
         self.answers = None;
+        self.yard = None;
         self.search = None;
         self.move_pick = None;
         self.attach_place = None;
@@ -5600,6 +5604,7 @@ impl View {
         let (mut cur_r, mut cur_c, mut cur_vis) = (0u16, 0u16, false);
         if self.selector.is_none()
             && self.answers.is_none()
+            && self.yard.is_none()
             && self.digest.is_none()
             && self.move_pick.is_none()
             && self.attach_place.is_none()
@@ -7820,6 +7825,11 @@ const NEEDS_CAP: usize = 40;
 /// Re-open cache: a fold younger than this is reused instantly (mashing
 /// `prefix+a` never re-shells - Perspective B).
 const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
+/// (x-b2bf) The yard's re-open cache. Longer than the needs fold's because
+/// the identity leg pays a full Python interpreter start plus an archive
+/// parse for data that is nearly static (species and album history change
+/// on merge cadence, not keystroke cadence).
+const YARD_CACHE_TTL: Duration = Duration::from_secs(60);
 /// Default fold window: the last 24h (the fold also windows server-side).
 const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 
@@ -10375,10 +10385,11 @@ async fn dispatch_event(
                 sel: 0,
                 opened_at: Instant::now(),
             });
+            view.yard_esc.clear();
             view.yard_gen = view.yard_gen.wrapping_add(1);
             let fresh = view
                 .yard_fold_at
-                .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
+                .is_some_and(|t| t.elapsed() < YARD_CACHE_TTL);
             if fresh {
                 view.yard_degraded = false;
             } else {
@@ -16159,12 +16170,17 @@ mod tests {
         let mut view = two_pane_view();
         view.selector = Some(0);
         view.answers = Some(0);
+        view.yard = Some(YardSel {
+            sel: 0,
+            opened_at: Instant::now(),
+        });
         view.open_create();
         assert!(view.selector.is_none(), "create clears an open selector");
         assert!(
             view.answers.is_none(),
             "create clears an open answer overlay"
         );
+        assert!(view.yard.is_none(), "create clears an open yard");
         assert!(view.search.is_none());
         assert_eq!(
             view.create.as_deref(),

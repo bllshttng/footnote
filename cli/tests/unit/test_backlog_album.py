@@ -113,6 +113,40 @@ def test_paging_offset_and_limit(tmp_path, monkeypatch):
     assert [c["id"] for c in cards] == ["x-page003", "x-page002"]
 
 
+def test_json_and_text_carry_a_urlless_pr_number_gift(tmp_path, monkeypatch):
+    archive = _route(tmp_path, monkeypatch)
+    _seed_archive(
+        archive,
+        [
+            {
+                "id": "x-gift001",
+                "title": "number only",
+                "status": "done",
+                "completed_at": "2026-08-14T00:00:00Z",
+                "pr_number": 902,
+            },
+            {
+                "id": "x-url0001",
+                "title": "url only",
+                "status": "done",
+                "completed_at": "2026-08-13T00:00:00Z",
+                "pr_url": "https://github.com/o/r/pull/491",
+            },
+        ],
+    )
+    r = runner.invoke(app, ["backlog", "album", "--json"])
+    assert r.exit_code == 0, r.output
+    cards = {c["id"]: c for c in json.loads(r.output)}
+    assert cards["x-gift001"]["pr_number"] == 902, "machine surface keeps the url-less gift"
+    assert "pr_url" not in cards["x-gift001"]
+    assert cards["x-url0001"]["pr_url"].endswith("/pull/491")
+    # Text mode: pr_number prints verbatim; a url-only card parses the tail.
+    t = runner.invoke(app, ["backlog", "album"])
+    assert t.exit_code == 0, t.output
+    assert "PR #902" in t.output
+    assert "PR 491" in t.output
+
+
 def test_offset_past_the_end_names_the_range_not_an_inverted_one(tmp_path, monkeypatch):
     archive = _route(tmp_path, monkeypatch)
     _seed_archive(

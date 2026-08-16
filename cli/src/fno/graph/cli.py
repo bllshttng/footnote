@@ -10016,6 +10016,11 @@ def cmd_album(
                 "title": e.get("title"),
                 "completed_at": e.get("completed_at"),
             }
+            # Same honesty rule as the text mode: a url-less pr_number is a
+            # real gift (reconcile records the pair independently), so the
+            # machine surface must not drop it when the url is absent.
+            if e.get("pr_number"):
+                card["pr_number"] = e["pr_number"]
             if e.get("pr_url"):
                 card["pr_url"] = e["pr_url"]
             cards.append(card)

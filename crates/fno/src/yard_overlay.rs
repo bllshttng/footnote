@@ -40,18 +40,14 @@ pub struct YardItem {
     pub first_sighting: bool,
 }
 
-/// Resolve the Python `fno` binary: an explicit override, else the sibling
-/// of this executable (the installed layout puts `fno` and `fno-agents` in
-/// the same bin dir), else PATH.
-pub(crate) fn fno_bin() -> PathBuf {
-    if let Some(v) = std::env::var_os("FNO_BIN") {
-        return PathBuf::from(v);
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("fno")))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("fno"))
+/// Resolve the `fno` binary through the server's one resolver
+/// (`$FNO_BIN`, else the running executable - the mux binary forwards
+/// non-native verbs to Python - else PATH). The crate already holds the
+/// never-drift rule for this (connections_view imports the same fn), so a
+/// second resolver with different semantics would let the yard degrade on a
+/// checkout where every sibling leg still works.
+fn fno_bin() -> PathBuf {
+    crate::server::fno_bin()
 }
 
 /// Fold the yard identity leg now. `None` on any failure (timeout, nonzero
@@ -78,8 +74,19 @@ pub async fn fold_now() -> Option<Vec<YardItem>> {
 
 /// Parse the verb's JSON payload. Fails quiet (returns `None`) on
 /// unparseable output so a torn stdout degrades the overlay, not crashes it.
+/// A species index outside the vendored table is the same class of damage:
+/// the two halves of the fold upgrade independently, and `% SPECIES_COUNT`
+/// downstream would fold the skew onto the wrong animal SILENTLY - degrade
+/// loud instead of rendering a citizen as a species it is not.
 fn parse(stdout: &[u8]) -> Option<Vec<YardItem>> {
     let payload: Payload = serde_json::from_slice(stdout).ok()?;
+    if payload
+        .citizens
+        .iter()
+        .any(|c| c.species >= crate::sprites::SPECIES_COUNT)
+    {
+        return None;
+    }
     Some(payload.citizens)
 }
 
@@ -118,6 +125,14 @@ mod tests {
     #[test]
     fn empty_citizens_is_a_clean_fold() {
         assert_eq!(parse(br#"{"citizens":[]}"#).expect("parses").len(), 0);
+    }
+
+    #[test]
+    fn out_of_range_species_degrades_not_masks() {
+        // Python widening SPECIES_COUNT ahead of this binary must read as a
+        // failed fold (visible degrade), never as the wrong animal rendered.
+        let json = br#"{"citizens":[{"id":"i","name":"n","species":18}]}"#;
+        assert!(parse(json).is_none());
     }
 
     #[test]

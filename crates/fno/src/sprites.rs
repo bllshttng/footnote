@@ -461,11 +461,12 @@ pub const SPECIES_FRAMES: [[[&str; SPRITE_H]; FRAME_COUNT]; SPECIES_COUNT] = [
 ];
 
 /// The eye set, in binding order: every variant's glyph is the ONE
-/// status-carrying cell of a sprite. `Sick` (a stale CI verdict) and
-/// `Reserved` (no reading at all) have no producer yet - the CI verdict is a
-/// network read the client does not hold, and unmeasured must not render as
-/// content - so nothing constructs them today; they are carried so the
-/// ordering contract has a home when their producers land.
+/// status-carrying cell of a sprite. `Sick` (a stale CI verdict) has no
+/// producer yet - the CI verdict is a network read the client does not hold -
+/// so nothing constructs it today; it is carried so the ordering contract has
+/// a home when its producer lands. `Reserved` (no reading at all) IS produced
+/// (a row with no badge and no joined need) and renders its hollow glyph
+/// rather than a dimming pass the plain-text grid does not have.
 pub const EYES: [char; 6] = ['\u{b7}', '\u{2726}', '\u{d7}', '\u{25c9}', '@', '\u{b0}'];
 /// The default eye: what a Working, no-need citizen wears, and the glyph the
 /// vendored frames embed at their eye cells.
@@ -504,9 +505,9 @@ impl Eye {
 /// yard exists to refuse.
 pub const HAT_CROWN: &str = "   \\^^^/    ";
 
-/// Rarity tiers, common through legendary. Outcome only: no surface prints
-/// the rank, the frequency, or the bucket boundary that produced a tier.
-pub const RARITY_TIERS: [&str; 5] = ["common", "uncommon", "rare", "epic", "legendary"];
+// No rarity table here: the tier names ride the `fno yard --json` payload as
+// strings, so Python's `fno.yard.RARITY_TIERS` is the one live copy. A Rust
+// mirror would be a second tuple to keep in lockstep for nothing.
 
 pub fn species_name(species: usize) -> &'static str {
     SPECIES_NAMES[species % SPECIES_COUNT]
