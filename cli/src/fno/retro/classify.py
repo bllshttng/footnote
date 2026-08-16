@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 
+from fno.retro.dedup import cv_cite_needle
 from fno.retro.types import (
     KIND_CARVEOUT,
     TIER_INBOX,
@@ -97,7 +98,9 @@ def build_body(item: RawItem, *, cap: int = BODY_CAP) -> str:
     if item.url:
         cite_bits.append(item.url)
     elif item.source_id:
-        cite_bits.append(f"source `{item.source_id}`")
+        # One writer for the cite shape: dedup matches ownership by this exact
+        # needle, so a rewording here would silently break every ownership match.
+        cite_bits.append(cv_cite_needle(item.source_id))
     cite = "Source: " + ", ".join(cite_bits) if cite_bits else ""
 
     # Reserve exact room for the cite + truncation marker so the whole body fits

@@ -400,10 +400,45 @@ class Ritual:
                 closed = [c.get("node_id") for c in (obj.get("closed") or [])
                           if isinstance(c, dict) and c.get("node_id")]
                 self.ctx.node_ids.extend(closed)
-                detail = f"closed={len(closed)}"
+                held = [h.get("node_id") for h in (obj.get("promise_unmet") or [])
+                        if isinstance(h, dict) and h.get("node_id")]
+                errs = len(obj.get("contained_errors") or [])
+                sync_obj = obj.get("sync_catchup") or {}
+                sync_outcome = sync_obj.get("outcome") if isinstance(sync_obj, dict) else None
+                if held:
+                    # Held open, not clean: the PR merged but the promise gate
+                    # refused the close (x-40be). status=ok detail=closed=0
+                    # covered "held seven nodes open"; deferred keeps the work
+                    # visibly owed and names who holds it.
+                    ids = ", ".join(str(h) for h in held[:5])
+                    more = f" +{len(held) - 5}" if len(held) > 5 else ""
+                    self._emit(
+                        "reconcile",
+                        _DEFERRED,
+                        f"closed={len(closed)} held_open={len(held)}: {ids}{more}",
+                    )
+                elif errs or sync_outcome == "failed":
+                    # reconcile exits 0 here (only unresolvable PRs exit 4), so
+                    # the leg is not failed - but cascade-close failures and a
+                    # failed canonical sync must not read as a clean run.
+                    self._emit(
+                        "reconcile",
+                        _OK,
+                        f"closed={len(closed)} contained-errors={errs} "
+                        f"sync={sync_outcome or 'not-run'}",
+                    )
+                elif closed or (obj.get("candidates") or []):
+                    self._emit("reconcile", _OK, f"closed={len(closed)}")
+                elif any(obj.get(k) for k in ("contained_closed", "healed_epics", "reverted")) or sync_outcome in ("synced", "marked"):
+                    # Drift was found and healed without a new close: contained
+                    # nodes / stranded epics / revert stamps / a canonical
+                    # catch-up sync. NOT no-drift - the run mutated state.
+                    self._emit("reconcile", _OK, "healed-only")
+                else:
+                    self._emit("reconcile", _OK, "no-drift")
             except json.JSONDecodeError:
                 detail = "no-op" if not (r.stdout or "").strip() else "non-json"
-            self._emit("reconcile", _OK, detail)
+                self._emit("reconcile", _OK, detail)
         else:
             self._emit("reconcile", _FAILED, f"exit={r.returncode}")
         # Step 2a: plan frontmatter. Idempotent.

@@ -105,6 +105,13 @@ class Carveout:
     # unbuilt" and lands high/p1; hand-filed carveouts default to None (p3).
     # Optional + defaulted so existing JSONL records parse unchanged.
     severity: Optional[str] = None
+    # The node whose worker PROVABLY owned the claim when the row was filed
+    # (live node:<id> claim held by this harness session, manifest fallback).
+    # The close gate blocks only the node stamped here; None (ambient shell,
+    # legacy row) blocks nothing at close time. A FIELD for the same reason
+    # `scope` is one: attribution read from free text can be spoofed by a
+    # mention. Optional + defaulted so existing records parse unchanged.
+    node: Optional[str] = None
 
 
 def _utc_now_iso() -> str:
@@ -138,6 +145,62 @@ def resolve_session_id(repo_root: Path) -> Optional[str]:
     if env_sid and env_sid.strip():
         return env_sid.strip()
     return None
+
+
+def _owning_node_id(repo_root: Path) -> Optional[str]:
+    """The node THIS worker provably owns, as a bare id, or None.
+
+    The claim lockfile is the liveness authority (x-4af4), and it is
+    harness-agnostic: a live ``node:<id>`` claim held by
+    ``target-session:<this harness session>`` names the owner for a codex or
+    gemini executor too, not just claude. init acquires the claim before the
+    manifest exists, and a handoff re-points the claim while a stale manifest
+    would still name the former node - so the claim is consulted FIRST and a
+    mismatch stamps nothing. The manifest match (find_held_node) stays as the
+    fallback for a CLAUDE session whose claim died mid-run while it still
+    holds the worktree manifest; it proves identity via the manifest's
+    claude_session_id, so a codex/gemini worker whose claim expired stamps
+    nothing rather than guessing. Never guesses: zero or 2+ matching claims
+    fall through.
+    """
+    import os
+
+    # Marker names live in ONE place: harness_identity owns the table (its
+    # docstring asks callers not to duplicate it). TARGET_SESSION_ID is the one
+    # extra id init anchors the claim holder on that the table does not carry.
+    from fno.harness_identity import current_session_ids
+
+    candidates = set(current_session_ids())
+    _extra = os.environ.get("TARGET_SESSION_ID")
+    if _extra and _extra.strip():
+        candidates.add(_extra.strip())
+    if candidates:
+        wanted = {f"target-session:{c}" for c in candidates}
+        try:
+            from fno.claims.core import list_claims
+            from fno.claims.io import claims_dir, global_claims_root
+
+            matches = [
+                claim.get("key", "")
+                for claim in list_claims(
+                    prefix="node:", root=claims_dir(global_claims_root())
+                )
+                if (claim.get("holder") or "") in wanted
+            ]
+            if len(matches) == 1 and matches[0].startswith("node:"):
+                return matches[0][len("node:"):]
+        except Exception:
+            pass  # an unreadable claims dir falls to the manifest below
+
+    from fno.agents.whoami import find_held_node
+
+    try:
+        held = find_held_node(str(repo_root), os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    except Exception:
+        # Same invariant as resolve_session_id: a malformed state file must
+        # not break capture. An unattributed row is always fileable.
+        return None
+    return held.split(":", 1)[1] if held else None
 
 
 def truncate_description(text: str, cap: int = DESCRIPTION_CAP) -> Tuple[str, bool]:
@@ -250,6 +313,7 @@ def add_carveout(
         )
     session_id = resolve_session_id(repo_root)
     unscoped = session_id is None
+    owning_node = _owning_node_id(repo_root)
     desc, truncated = truncate_description(description, cap)
 
     cv = Carveout(
@@ -263,6 +327,7 @@ def add_carveout(
         truncated=truncated,
         scope=scope,
         severity=severity,
+        node=owning_node,
     )
 
     from fno.paths import project_log

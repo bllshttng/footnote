@@ -476,10 +476,14 @@ def resolve_promise_evidence(
          later harvest); both land in the same ledger and look identical, which
          is why a deferred item can merge away unnoticed (cv-99ebc0f3 on
          x-44cb). Checked first and independent of the plan so a close is held
-         even when the plan is absent or unreadable. Project-wide over the
-         canonical ledger: a carve-out carries only a session id (no node id),
-         and that session is often a spawned worker of a different harness than
-         the node's own, so per-node attribution is unsound.
+         even when the plan is absent or unreadable. Scoped to the closing
+         node's OWN rows via the ``node`` field stamped at capture time
+         (``find_held_node`` proven ownership): a row filed by another node's
+         session must not hold this close open (x-40be - one unrelated
+         carve-out was blocking every close in the repo). Unattributed rows
+         (legacy, ambient shell, harness without a session id) block nothing
+         at close time; they stay visible via ``fno carveout list`` and the
+         retro sweep, which are the repo-wide backstop.
       B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
          delegated to ``fno-agents probe-run`` (the same runner the loop uses for
          ``done_probes``); a declared gate that cannot be evaluated fails closed.
@@ -495,13 +499,20 @@ def resolve_promise_evidence(
     """
     # Condition D (checked first; independent of the plan): an unharvested
     # `deferred` carve-out is declared scope that did not ship, and it blocks
-    # the close until it becomes a node (harvest) or is force-overridden. See
-    # the docstring for why this is project-wide and why oos-bug/backfill pass.
-    deferred = (carveout_reader or _unharvested_deferred_carveouts)(cwd)
+    # the close until it becomes a node (harvest) or is force-overridden. Only
+    # the closing node's OWN rows (``node`` field, stamped at capture time):
+    # a repo-wide read held every close open on any unrelated row (x-40be).
+    # See the docstring for why unattributed rows block nothing.
+    node_id = str(node.get("id") or "")
+    deferred = [
+        r
+        for r in (carveout_reader or _unharvested_deferred_carveouts)(cwd)
+        if r.get("node") == node_id
+    ]
     if deferred:
         return PromiseVerdict(
             outcome="promise_unmet",
-            reason=_promise_refusal_d(node.get("id", "(unknown)"), deferred),
+            reason=_promise_refusal_d(node_id or "(unknown)", deferred),
         )
 
     plan_path = node.get("plan_path")
@@ -736,7 +747,7 @@ def _promise_refusal_d(node_id: str, deferred: list[dict]) -> str:
     )
     return (
         f"Refused: {node_id} would close with {len(deferred)} unharvested "
-        f"deferred carve-out(s).\n"
+        f"deferred carve-out(s) filed by this node's session.\n"
         f"  A `deferred` carve-out is declared scope that did not ship.\n"
         f"  carve-outs:\n" + "\n".join(rows) + f"{more}\n\n"
         f"  Two legal exits:\n"

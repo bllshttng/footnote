@@ -67,7 +67,7 @@ from typing import Callable, Optional
 
 from fno.carveout.core import BACKFILL_KIND
 from fno.retro.classify import classify_item, derive_title
-from fno.retro.dedup import assign_hashes, content_hash, cv_ids_cited_in_nodes
+from fno.retro.dedup import assign_hashes, content_hash, cv_cite_needle
 from fno.retro.land import MODE_INTERACTIVE, land_candidates
 from fno.retro.types import KIND_CARVEOUT, Candidate, RawItem
 
@@ -143,18 +143,33 @@ def find_tracking_node(
     """Find a node that already tracks this carve-out.
 
     Returns ``(node_id, reason, exact)``. ``exact`` is True only for a
-    provable match (the cv-id quoted verbatim, or an identical retro-triage
-    content hash); a fuzzy subject match returns ``exact=False`` so the caller
-    parks it for review rather than consuming the ledger row on a guess.
+    provable match (the structured ``source `cv-...`` ` cite a filing
+    writes, via :func:`fno.retro.dedup.cv_cite_needle`); a bare cv-id
+    MENTION returns ``exact=False`` naming the mentioning node, so a node
+    that merely describes a carve-out (x-6c67's specimens) parks the row
+    for review instead of letting ``--apply`` consume it on a citation.
+    A fuzzy subject match likewise returns ``exact=False``.
 
     Done nodes count: a carve-out whose work already shipped is tracked, and
     re-filing it would be the duplicate this sweep exists to avoid.
     """
     cv_id = str(rec.get("id") or "")
-    if cv_id and cv_ids_cited_in_nodes(nodes, [cv_id]):
+    if cv_id:
+        needle = cv_cite_needle(cv_id)
+        mention_node: Optional[dict] = None
         for node in nodes:
-            if cv_id in _node_text(node):
+            text = _node_text(node)
+            if needle in text:
                 return str(node.get("id") or ""), f"cv-id cited in {node.get('id')}", True
+            if cv_id in text and mention_node is None:
+                mention_node = node
+        if mention_node is not None:
+            return (
+                str(mention_node.get("id") or ""),
+                f"cv-id mentioned in {mention_node.get('id')} "
+                f"(citation is not ownership)",
+                False,
+            )
 
     # An earlier harvest writes `finding_hash=<h>` into the node's details.
     # Match on the hash alone, ignoring the trailer's source_pr, since this

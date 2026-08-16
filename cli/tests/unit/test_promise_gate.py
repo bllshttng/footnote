@@ -183,8 +183,11 @@ def test_condition_b_failing_probe_refuses(tmp_path: Path):
 # gate, which is the load-bearing kind split.
 
 
-def _cv(cv_id: str, need: str = "a deferred thing") -> dict:
-    return {"id": cv_id, "kind": "deferred", "need": need, "description": need}
+def _cv(cv_id: str, need: str = "a deferred thing", node: str = None) -> dict:
+    rec = {"id": cv_id, "kind": "deferred", "need": need, "description": need}
+    if node:
+        rec["node"] = node
+    return rec
 
 
 def test_condition_d_deferred_carveout_refuses(tmp_path: Path):
@@ -193,13 +196,14 @@ def test_condition_d_deferred_carveout_refuses(tmp_path: Path):
     plan = _write_plan(tmp_path / "p.md", waves=1)
     v = resolve_promise_evidence(
         {"id": "x-d", "plan_path": str(plan)},
-        carveout_reader=lambda cwd: [_cv("cv-99ebc0f3", "item 43 index move")],
+        carveout_reader=lambda cwd: [_cv("cv-99ebc0f3", "item 43 index move", node="x-d")],
     )
     assert v.outcome == "promise_unmet"
     assert v.exit_code == 6
     # The carve-out is named, the scope rationale is stated, and both legal
     # exits (harvest / --force --reason) appear.
     assert "1 unharvested deferred carve-out" in (v.reason or "")
+    assert "filed by this node's session" in (v.reason or "")
     assert "cv-99ebc0f3" in (v.reason or "")
     assert "item 43 index move" in (v.reason or "")
     assert "--force --reason" in (v.reason or "")
@@ -217,6 +221,57 @@ def test_condition_d_empty_ledger_passes(tmp_path: Path):
     assert v.outcome == "ok"
 
 
+def test_condition_d_ignores_other_nodes_carveouts(tmp_path: Path):
+    """x-40be: one unrelated deferred carve-out blocked EVERY close in the repo
+    (four then seven held nodes on PR #813/#819 rituals). A row stamped with
+    another node's id must not hold this close open."""
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", waves=1)
+    v = resolve_promise_evidence(
+        {"id": "x-ffc9", "plan_path": str(plan)},
+        carveout_reader=lambda cwd: [
+            _cv("cv-9075099b", "flag-scan helpers", node="x-8cd5"),
+            _cv("cv-8a43d8e1", "test_done.sh sandbox", node="x-6c67"),
+        ],
+    )
+    assert v.outcome == "ok"
+
+
+def test_condition_d_legacy_unattributed_rows_block_nothing(tmp_path: Path):
+    """Every row filed before the ``node`` field existed carries no stamp.
+    Those rows must not wedge every close forever - they stay visible via
+    ``fno carveout list`` and the retro sweep, which are the repo-wide
+    backstop, not the close gate."""
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", waves=1)
+    v = resolve_promise_evidence(
+        {"id": "x-d", "plan_path": str(plan)},
+        carveout_reader=lambda cwd: [_cv("cv-old0001"), _cv("cv-old0002")],
+    )
+    assert v.outcome == "ok"
+
+
+def test_condition_d_only_the_closing_nodes_rows_count(tmp_path: Path):
+    """A mixed ledger: the closing node's own row refuses, and the refusal
+    names exactly that row, not the foreign ones."""
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", waves=1)
+    v = resolve_promise_evidence(
+        {"id": "x-mine", "plan_path": str(plan)},
+        carveout_reader=lambda cwd: [
+            _cv("cv-theirs", "foreign work", node="x-other"),
+            _cv("cv-mine0", "my declared scope", node="x-mine"),
+        ],
+    )
+    assert v.outcome == "promise_unmet"
+    assert "1 unharvested deferred carve-out" in (v.reason or "")
+    assert "cv-mine0" in (v.reason or "")
+    assert "cv-theirs" not in (v.reason or "")
+
+
 def test_condition_d_fires_on_a_multi_wave_plan(tmp_path: Path):
     from fno.graph._reconcile import resolve_promise_evidence
 
@@ -227,7 +282,7 @@ def test_condition_d_fires_on_a_multi_wave_plan(tmp_path: Path):
     plan = _write_plan(tmp_path / "p.md", waves=2)
     v = resolve_promise_evidence(
         {"id": "x-d", "plan_path": str(plan)},
-        carveout_reader=lambda cwd: [_cv("cv-deadbeef")],
+        carveout_reader=lambda cwd: [_cv("cv-deadbeef", node="x-d")],
     )
     assert v.outcome == "promise_unmet"
     assert "deferred carve-out" in (v.reason or "")
@@ -485,7 +540,16 @@ def test_condition_D_refuses_on_all_three_verbs(routed, tmp_path, monkeypatch):
     monkeypatch.setattr(
         rec,
         "_unharvested_deferred_carveouts",
-        lambda cwd: [{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43"}],
+        lambda cwd: [
+            # Stamped per closing node: condition D is per-node (x-40be), so
+            # a row blocks only the node it names.
+            {"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43",
+             "node": "ab-dc1"},
+            {"id": "cv-99ebc0f4", "kind": "deferred", "need": "item 44",
+             "node": "ab-dc2"},
+            {"id": "cv-99ebc0f5", "kind": "deferred", "need": "item 45",
+             "node": "ab-dc3"},
+        ],
     )
     _merged(monkeypatch)
     from fno.cli import app
@@ -523,7 +587,8 @@ def test_condition_D_force_bypass_closes(routed, tmp_path, monkeypatch):
     monkeypatch.setattr(
         rec,
         "_unharvested_deferred_carveouts",
-        lambda cwd: [{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43"}],
+        lambda cwd: [{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43",
+                      "node": "ab-dc4"}],
     )
     _merged(monkeypatch, target="graph")
     from fno.cli import app

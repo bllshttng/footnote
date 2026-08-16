@@ -69,7 +69,8 @@ Everything above is PER-PR: a trigger names a PR, and the carve-out read is scop
 Two shapes of carve-out fall outside every one of those triggers.
 A carve-out written with no resolvable session (`session_id: null`) never matches a session scope, and an unresolvable owner degrades to read-only rather than filing.
 A PR that merged without ever dropping a sentinel leaves nothing to iterate, so `fno retro run` returns "no retro-pending sentinels to triage" and never opens the ledger.
-Both accumulate silently, and since the close gate's condition D refuses a close on any unharvested `deferred` carve-out, they eventually wedge unrelated nodes.
+
+Both shapes accumulate silently, and condition D no longer wedges unrelated nodes on them. The gate reads only the closing node's OWN rows, stamped on the `node` field at capture time. A row with no stamp blocks no close. The sweep, `fno carveout list`, and the harvest are the repo-wide backstop for those rows.
 
 `fno retro sweep-carveouts` closes that gap by reading the ledger itself, keyed off nothing.
 It is a DRY RUN by default; `--apply` is the only path that writes.
@@ -86,7 +87,8 @@ The trade survives the correction, on narrower grounds.
 A background SessionStart hook that mints backlog nodes unattended is still the wrong shape.
 Cleaning up after it is manual work an operator never asked for.
 A duplicate that nobody notices is worse than one that never lands.
-The measured consequence of the rule stands: condition D keeps refusing closes until a human runs the verb.
+
+The measured consequence of the rule stands for a node's OWN rows: condition D keeps refusing that node's close until a human runs the verb.
 What changed is the escape hatch.
 A bad harvest is now recoverable with `fno backlog remove`, so being wrong here costs an annoyance rather than permanent graph litter.
 
@@ -115,7 +117,7 @@ Each row is matched against every node in the graph, done nodes included, by thr
 
 | Match | Outcome |
 |---|---|
-| cv-id quoted verbatim in a node's title or details (**exact**) | `resolve`: consume the row, file nothing, name the tracking node. This is the ONLY match that consumes. Every carve-out node cites its cv-id, whichever harvest filed it, so it covers a re-run and a PR-harvested node alike. |
+| the structured cite ``source `cv-...` `` in a node's details (**exact**) | `resolve`: consume the row, file nothing, name the tracking node. This is the ONLY match that consumes. Every carve-out node carries that cite, whichever harvest filed it, so it covers a re-run and a PR-harvested node alike. A bare cv-id mention in prose parks instead (`review`): a node that names a carve-out is not tracking it. |
 | an existing `retro-triage` trailer whose `finding_hash` equals the description hash, **ignoring** the trailer's `source_pr` (**ambiguous**) | `review`: the hash covers the description alone, so two carve-outs can share generic text ("unrelated", "no reliable repro") while differing in kind, need and scope. Resolving on that would consume the later row without filing its distinct work. |
 | normalized-title similarity at or above 0.85, minimum 20 chars (**fuzzy**) | `review`: neither filed (would duplicate) nor consumed (a wrong guess loses the work). A human decides, and a parked `deferred` row keeps blocking its close, which is the correct outcome. |
 | the same text already claimed by an earlier row in this same sweep (**within-batch**) | `review`: one blocker carved out from two sessions is still one piece of work. It parks rather than resolving, because the twin's node does not exist yet and nothing is consumed without a node. |

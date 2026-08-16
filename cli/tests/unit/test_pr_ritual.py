@@ -23,11 +23,19 @@ class FakeRunner:
 
     def __init__(self, *, diff_files=0, additions=0, deletions=0,
                  deferred=None, reconcile_closed=None, claim_rc=0,
-                 spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED"):
+                 spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED",
+                 reconcile_held=None, reconcile_candidates=None,
+                 reconcile_contained=None, reconcile_errors=(),
+                 reconcile_sync_outcome=None):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
         self._closed = reconcile_closed or []
+        self._held = reconcile_held or []
+        self._candidates = reconcile_candidates
+        self._contained = reconcile_contained or ()
+        self._errors = reconcile_errors
+        self._sync_outcome = reconcile_sync_outcome
         self._claim_rc = claim_rc
         self._spawn_rc = spawn_rc
         self._rows = agent_rows or []
@@ -53,7 +61,17 @@ class FakeRunner:
             return Result(self._claim_rc, "acquired" if self._claim_rc == 0 else "held", "")
         if sub == "backlog" and "reconcile" in argv:
             import json
-            return Result(0, json.dumps({"closed": [{"node_id": n} for n in self._closed]}), "")
+            payload = {"closed": [{"node_id": n} for n in self._closed]}
+            if self._candidates is not None:
+                payload["candidates"] = [{"node_id": n} for n in self._candidates]
+            payload["promise_unmet"] = [{"node_id": n} for n in self._held]
+            if self._contained:
+                payload["contained_closed"] = list(self._contained)
+            if self._errors:
+                payload["contained_errors"] = list(self._errors)
+            if self._sync_outcome:
+                payload["sync_catchup"] = {"outcome": self._sync_outcome}
+            return Result(0, json.dumps(payload), "")
         if sub == "backlog" and "find" in argv:
             import json
             return Result(0, json.dumps(self._deferred), "")
@@ -244,6 +262,76 @@ def test_run_exits_nonzero_when_a_leg_fails(tmp_path, capsys, monkeypatch):
     # later legs still ran and printed receipts
     assert "step=judgment" in out
     assert "step=reap-rows" in out
+
+
+# --- x-40be: the reconcile receipt says held-open, never ok ----------------
+
+def test_reconcile_held_open_reads_deferred_never_ok(tmp_path, capsys):
+    """The #819 ritual held seven nodes open and printed status=ok: a partial
+    ritual read as a clean one. Held-open work is still owed - the existing
+    _DEFERRED status - and the ids are named so the operator can act."""
+    r = _bare(tmp_path, FakeRunner(reconcile_held=["x-ffc9", "x-6c67"]))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=deferred" in out
+    assert "held_open=2: x-ffc9, x-6c67" in out
+    assert "step=reconcile status=ok" not in out
+
+
+def test_reconcile_closed_still_reads_ok(tmp_path, capsys):
+    r = _bare(tmp_path, FakeRunner(reconcile_closed=["x-1"], reconcile_candidates=["x-1"]))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=ok detail=closed=1" in out
+
+
+def test_reconcile_no_drift_is_distinguishable_from_a_held_close(tmp_path, capsys):
+    """"closed=0" alone covered three outcomes; with candidates empty the
+    receipt now says no-drift (found no node), distinct from held-open."""
+    r = _bare(tmp_path, FakeRunner(reconcile_candidates=[]))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=ok detail=no-drift" in out
+
+
+def test_reconcile_healed_only_is_not_no_drift(tmp_path, capsys):
+    """A heal-only sweep (contained nodes closed, no new drift) mutates the
+    graph; the receipt must not claim nothing was found."""
+    r = _bare(
+        tmp_path,
+        FakeRunner(reconcile_candidates=[], reconcile_contained=["x-h1", "x-h2"]),
+    )
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=ok detail=healed-only" in out
+    assert "no-drift" not in out
+
+
+def test_reconcile_contained_errors_and_failed_sync_are_not_no_drift(tmp_path, capsys):
+    """Cascade-close failures and a failed canonical sync leave reconcile
+    exiting 0 with empty close sets; the receipt must not then claim
+    no-drift, or the failure is observable nowhere but an unread JSON body."""
+    for kwargs, needle in (
+        ({"reconcile_errors": ["x-e1"]}, "closed=0 contained-errors=1 sync=not-run"),
+        ({"reconcile_sync_outcome": "failed"}, "closed=0 contained-errors=0 sync=failed"),
+    ):
+        r = _bare(tmp_path, FakeRunner(reconcile_candidates=[], **kwargs))
+        r.leg_stamp()
+        out = capsys.readouterr().out
+        assert f"step=reconcile status=ok detail={needle}" in out
+        assert "no-drift" not in out
+
+
+def test_reconcile_synced_catchup_reads_healed_only(tmp_path, capsys):
+    """A canonical catch-up sync mutated repo state; that is not no-drift."""
+    r = _bare(
+        tmp_path,
+        FakeRunner(reconcile_candidates=[], reconcile_sync_outcome="synced"),
+    )
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=ok detail=healed-only" in out
+    assert "no-drift" not in out
 
 
 # --- AC2: empty inputs spawn nothing; non-empty spawns headless ----------
