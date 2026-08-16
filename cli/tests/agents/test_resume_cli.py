@@ -1176,6 +1176,72 @@ def test_default_wake_fn_kills_the_process_tree_on_keyboard_interrupt(monkeypatc
     ]
 
 
+def test_default_wake_fn_raises_teardown_unconfirmed_when_pkill_cannot_run(
+    monkeypatch,
+) -> None:
+    """killpg never reaches the pty-attached claude attach child (it
+    setsid()s away before exec), so pkill is the ONLY mechanism that can
+    reach it -- not a backstop. If pkill itself can't run at all (missing
+    binary), teardown has zero visibility into whether that child is still
+    alive. That must surface as a distinct signal, not a plain
+    TimeoutExpired the caller might blindly retry into."""
+    import os as os_mod
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _WakeTeardownUnconfirmed, _default_wake_fn
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
+            return 0
+
+    monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(os_mod, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os_mod, "killpg", lambda pgid, sig: None)
+
+    def _raise(*a, **kw):
+        raise FileNotFoundError("pkill: command not found")
+
+    monkeypatch.setattr(subprocess_mod, "run", _raise)
+
+    with pytest.raises(_WakeTeardownUnconfirmed):
+        _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/cwd")
+
+
+def test_claude_resume_does_not_retry_after_teardown_unconfirmed() -> None:
+    """A second wake_fn call while the first attempt's process tree might
+    still be alive risks two processes injecting into the same pty
+    concurrently -- the retry loop must stop, not retry through it."""
+    from fno.agents.resume_cli import _WakeTeardownUnconfirmed, resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        wake_calls.append(1)
+        raise _WakeTeardownUnconfirmed("teardown unconfirmed")
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert len(wake_calls) == 1, "must not retry after a teardown-unconfirmed signal"
+    assert "teardown unconfirmed" in res.stderr
+
+
 def test_claude_resume_skips_waking_an_already_done_row() -> None:
     """code-review finding: "Done" is a terminal status (KNOWN_LIVE_STATUSES
     in harnesses/claude.py), newly visible via `--all` -- it must be

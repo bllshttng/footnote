@@ -193,7 +193,21 @@ def _script_wrapped_attach(short_id: str) -> str:
     return f"script -qc {shlex.quote(attach_cmd)} /dev/null"
 
 
-def _kill_wake_process_tree(proc: "subprocess.Popen[bytes]", short_id: str) -> None:
+class _WakeTeardownUnconfirmed(Exception):
+    """Raised when a timed-out wake's process tree could not be confirmed dead.
+
+    ``killpg`` never reaches the pty-attached ``claude attach`` child (see
+    :func:`_kill_wake_process_tree`), so ``pkill`` is not a secondary
+    backstop -- it is the ONLY mechanism that can reach it. If ``pkill``
+    itself cannot run at all (missing binary), teardown has zero visibility
+    into whether that child is still alive, and firing a second wake_fn
+    call in that state risks two processes injecting into the same pty
+    concurrently. The retry loop refuses to retry on this signal rather
+    than risk that.
+    """
+
+
+def _kill_wake_process_tree(proc: "subprocess.Popen[bytes]", short_id: str) -> bool:
     """Best-effort teardown of an abandoned wake attempt's process tree.
 
     Shared by the timeout and interrupt paths in ``_default_wake_fn``.
@@ -203,9 +217,17 @@ def _kill_wake_process_tree(proc: "subprocess.Popen[bytes]", short_id: str) -> N
     pgid killed first, and that killpg call does not reach it. Finish the
     job by matching the unique short_id in its command line instead of by
     process-group membership; best-effort (no match is the common case when
-    the process already exited on its own after stdin closed). Best-effort
-    in full: a missing ``pkill`` binary must not swallow the caller's
-    pending re-raise, which is what tells it this attempt was abandoned.
+    the process already exited on its own after stdin closed).
+
+    Returns ``True`` once ``pkill`` has run (whether or not it matched
+    anything -- a miss is the expected, already-exited case above), and
+    ``False`` only when ``pkill`` could not run at all (missing binary),
+    the one case where this function has no visibility into the child's
+    fate. A narrower race -- the child hasn't execve'd into ``claude
+    attach`` yet, so its argv doesn't match even though it is still alive
+    -- is NOT distinguished from a genuine miss; that residual few-second
+    window is accepted the same way the skip-check's own entry-time race
+    is (see ``_resume_claude_wake``'s docstring).
     """
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -218,8 +240,9 @@ def _kill_wake_process_tree(proc: "subprocess.Popen[bytes]", short_id: str) -> N
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _default_wake_fn(
@@ -302,8 +325,13 @@ def _default_wake_fn(
     )
     try:
         proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_wake_process_tree(proc, short_id)
+    except subprocess.TimeoutExpired as exc:
+        if not _kill_wake_process_tree(proc, short_id):
+            raise _WakeTeardownUnconfirmed(
+                f"wake attempt for {short_id} timed out and its process tree "
+                "could not be confirmed dead (pkill unavailable); refusing "
+                "to risk a second concurrent wake"
+            ) from exc
         raise
     except BaseException:
         # Ctrl-C (SIGINT) never reaches this detached tree --
@@ -412,10 +440,14 @@ def _resume_claude_wake(
 
     if not skipped:
         for _attempt in range(_WAKE_ATTEMPTS):
+            teardown_unconfirmed = False
             try:
                 wake_fn(short_id, message=message, route_env=route_env, cwd=cwd)
             except subprocess.TimeoutExpired:
                 last_err = "wake attempt timed out"
+            except _WakeTeardownUnconfirmed as exc:
+                last_err = str(exc)
+                teardown_unconfirmed = True
             except Exception as exc:  # noqa: BLE001 - mapped to the bounded exit-16 report below, not a raw traceback
                 last_err = f"wake attempt failed: {exc}"
             # Read state even after a caught exception: `script`/`claude
@@ -426,6 +458,12 @@ def _resume_claude_wake(
             # score a successful wake as failed.
             after = _state_of()
             if after.lower() == _WAKE_TARGET_STATUS.lower():
+                break
+            if teardown_unconfirmed:
+                # The previous attempt's process tree could not be confirmed
+                # dead (see _WakeTeardownUnconfirmed); firing another wake_fn
+                # call here risks two processes injecting into the same pty
+                # concurrently. Stop retrying rather than risk that.
                 break
             if after.lower() in NOT_BLOCKED_STATUSES_LOWER:
                 # The row settled into Idle/Done between attempts (the
