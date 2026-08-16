@@ -1057,11 +1057,20 @@ def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
         fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
         holder.close()
 
-    assert time.monotonic() - started < 2.0
+    # The claim is that the STAMP lock honored its 0.05s budget, not that the
+    # whole send was fast. Total wall time also carries dispatch_send's two
+    # live-session discovery sweeps, which are unbounded on a loaded machine,
+    # so a 2s total bound flaked while measuring nothing about the stamp. The
+    # message quotes the timeout actually used, which is the precise marker:
+    # the default would print a different number.
     assert result.delivery == "hosted"
     stderr = capsys.readouterr().err
     assert "registry stamp failed after hosted delivery" in stderr
+    assert "registry lock timeout after 0.05s" in stderr
     assert "do not retry" in stderr
+    # Generous ceiling, purely to catch a pathological hang rather than to
+    # time the stamp.
+    assert time.monotonic() - started < 30.0
 
 
 def test_dispatch_send_does_not_stamp_recipient_restamped_during_delivery(

@@ -828,6 +828,20 @@ def test_background_relay_stdio_detach_failure_exits_without_relay(monkeypatch) 
     assert stopped[0][0][3] == "relay-stdio-detach-failed"
 
 
+def _await_content(path: Path, timeout: float = 2.0) -> str:
+    """Return the file's content once it is non-empty, or "" past the deadline."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            content = path.read_text()
+        except OSError:
+            content = ""
+        if content:
+            return content
+        time.sleep(0.01)
+    return ""
+
+
 def test_real_relay_descendant_releases_captured_receipt_pipes(
     tmp_path, monkeypatch
 ) -> None:
@@ -921,16 +935,13 @@ print(f"{result.msg_id} delivered ({result.delivery})")
     assert len(result.stdout.splitlines()) == 1
     assert result.stdout.strip().endswith("delivered (hosted)")
     assert not bus_log_path().exists()
-    marker_deadline = time.monotonic() + 2.0
-    while not relay_marker.exists() and time.monotonic() < marker_deadline:
-        time.sleep(0.01)
-    assert relay_marker.read_text() == "started"
+    # Poll for the CONTENT, not the path. `exists()` goes true the instant the
+    # file is created, so a poll on it can read an empty file the relay has not
+    # finished writing, and the assert fails on '' instead of "started".
+    assert _await_content(relay_marker) == "started"
     assert not relay_finished.exists(), "relay finished before the CLI receipt returned"
     relay_release.write_text("release")
-    finished_deadline = time.monotonic() + 2.0
-    while not relay_finished.exists() and time.monotonic() < finished_deadline:
-        time.sleep(0.01)
-    assert relay_finished.read_text() == "finished"
+    assert _await_content(relay_finished) == "finished"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
