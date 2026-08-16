@@ -249,7 +249,6 @@ _COLUMNS = (
 _COL_KEYS = tuple(key for key, _ in _COLUMNS)
 # HARNESS, not PROVIDER: the column has always shown the harness, and the old
 # heading made a claude-hosted worker on a zai route read as running on claude.
-_HEADERS = tuple(header for _, header in _COLUMNS)
 # LAST MESSAGE cap: long transcript lines must not blow out the table; CWD and
 # NAME absorb the rest. 40 keeps a one-line gist readable at 120 cols.
 _LAST_MESSAGE_WIDTH = 40

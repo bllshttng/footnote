@@ -384,6 +384,34 @@ def test_resolve_degrades_out_of_range_epoch_to_absent_stamp(tmp_path, monkeypat
     assert result["last_event_at"] is None
 
 
+def test_transcript_age_degrades_out_of_range_epoch_as_a_pair(monkeypatch, tmp_path):
+    """The out-of-range guard must null BOTH halves of the pair, not just the
+    stamp: a far-future epoch through `max(0.0, now - mtime)` yields a measured
+    age of 0, which is a freshness claim about a reading that never happened -
+    the exact stamp-says-absent / age-says-fresh disagreement the paired return
+    exists to prevent. Reached through the opencode lane, the one reachable
+    producer of an out-of-range epoch."""
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth, "_opencode_activity_epoch", lambda sid, p: 1_700_000_000_000.0
+    )
+
+    class _RT:
+        resolved = True
+        kind = "opencode-db"
+        transcript_path = str(tmp_path / "store.db")
+
+    monkeypatch.setattr(
+        "fno.provenance.resolver.resolve_transcript", lambda *a, **k: _RT()
+    )
+
+    assert session_truth._transcript_age_s("opencode", "s", "/c", None, None, None) == (
+        None,
+        None,
+    )
+
+
 def test_resolve_last_message_keeps_tool_marker_and_caps_length(tmp_path):
     from fno.agents.session_truth import resolve_session_truth
 

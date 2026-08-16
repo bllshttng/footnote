@@ -149,6 +149,14 @@ def _transcript_age_s(
     except Exception:  # noqa: BLE001 — any read failure -> age unknown (working)
         return None, None
     now = now_s if now_s is not None else time.time()
+    # An epoch datetime cannot represent (a corrupt opencode time_updated, say)
+    # degrades the WHOLE pair, not just the stamp: `max(0.0, now - mtime)` on a
+    # far-future epoch would claim a measured age of 0 beside a null stamp,
+    # the fresh-vs-absent disagreement this paired return exists to prevent.
+    try:
+        datetime.fromtimestamp(mtime, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None, None
     return mtime, max(0.0, now - mtime)
 
 
