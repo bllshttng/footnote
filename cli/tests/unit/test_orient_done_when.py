@@ -173,6 +173,8 @@ def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatc
     rows = "".join(f"100\t0\tfile{i:02d}.py\n" for i in range(20))
 
     def git_out(cwd, *a):
+        if a[0] == "rev-parse":
+            return "sha" if a[-1] == "origin/master^{commit}" else None
         if a[0] != "merge-base":
             return rows
         return "abc123" if a[-1] == "origin/master" else None

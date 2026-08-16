@@ -171,9 +171,10 @@ def test_snapshot_diffs_explicit_base_and_head(tmp_path: Path) -> None:
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "head"], check=True)
 
-    paths, reason = changed_snapshot(tmp_path, base, "HEAD")
+    paths, reason, resolved = changed_snapshot(tmp_path, base, "HEAD")
     assert reason == ""
     assert paths == ["b.txt"]
+    assert resolved == base
 
 
 def test_snapshot_local_mode_falls_back_to_origin_master(tmp_path: Path) -> None:
@@ -190,9 +191,48 @@ def test_snapshot_local_mode_falls_back_to_origin_master(tmp_path: Path) -> None
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "head"], check=True)
 
-    paths, reason = changed_snapshot(tmp_path)
+    paths, reason, resolved = changed_snapshot(tmp_path)
     assert reason == ""
     assert paths == ["b.txt"]
+    # The receipt base names the ref that actually sized the diff.
+    assert resolved == f"origin/master@{base[:12]}"
+
+
+def test_snapshot_local_mode_does_not_fall_back_past_a_resolvable_main(
+    tmp_path: Path,
+) -> None:
+    """origin/main resolves but shares no history with HEAD (unrelated
+    histories), while origin/master is a shared ancestor: the fallback must
+    NOT silently re-base onto master - that would size the packet from a
+    whole era. The run is unevaluated instead."""
+    _git_repo(tmp_path)
+    _write(tmp_path / "a.txt", "one\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "-C", str(tmp_path), "update-ref",
+                    "refs/remotes/origin/master", base], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "checkout", "-q", "--orphan", "other"],
+                   check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "rm", "-rq", "--cached", "."], check=True)
+    _write(tmp_path / "b.txt", "unrelated\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "b.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "orphan"], check=True)
+    unrelated = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "-C", str(tmp_path), "checkout", "-qf", "-B", "work", base],
+                   check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "update-ref",
+                    "refs/remotes/origin/main", unrelated], check=True)
+    _write(tmp_path / "c.txt", "three\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "work"], check=True)
+
+    paths, reason, resolved = changed_snapshot(tmp_path)
+    assert paths == []
+    assert resolved == ""
+    assert "cannot resolve merge-base" in reason
 
 
 def test_snapshot_local_mode_names_the_merge_base_when_both_refs_are_absent(
@@ -206,7 +246,7 @@ def test_snapshot_local_mode_names_the_merge_base_when_both_refs_are_absent(
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
 
-    paths, reason = changed_snapshot(tmp_path)
+    paths, reason, resolved = changed_snapshot(tmp_path)
     assert paths == []
     assert "cannot resolve merge-base" in reason
 
@@ -218,7 +258,7 @@ def test_snapshot_fails_closed_on_an_unresolvable_base(tmp_path: Path) -> None:
     subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
 
-    paths, reason = changed_snapshot(tmp_path, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD")
+    paths, reason, _ = changed_snapshot(tmp_path, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD")
     assert paths == []
     assert "does not resolve" in reason
 
@@ -226,7 +266,7 @@ def test_snapshot_fails_closed_on_an_unresolvable_base(tmp_path: Path) -> None:
 def test_snapshot_refuses_a_half_specified_range(tmp_path: Path) -> None:
     """AC5: --base without --head cannot silently fall back to local mode."""
     _git_repo(tmp_path)
-    paths, reason = changed_snapshot(tmp_path, "HEAD", "")
+    paths, reason, _ = changed_snapshot(tmp_path, "HEAD", "")
     assert paths == []
     assert "both --base and --head" in reason
 

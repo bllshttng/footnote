@@ -1210,9 +1210,25 @@ fn floor_self_review(
 /// non-zero exit) classifies as code with `assumed=true`, so a degraded probe
 /// can never silently disable the obligation the way failing open would. The
 /// `<base>...HEAD` three-dot diff names the branch's own changes (the PR
-/// diff), not changes that landed on the base since the branch point.
+/// diff), not changes that landed on the base since the branch point. A ref
+/// that RESOLVES but yields no readable diff (unrelated histories: the diff
+/// exits 128 "no merge base") never falls through to the other candidate - a
+/// stale pre-migration sibling would size the payload from a whole era.
 fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     for base in ["origin/main", "origin/master"] {
+        let verify = Command::new(git_bin)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{base}^{{commit}}"),
+            ])
+            .current_dir(cwd)
+            .output();
+        match verify {
+            Ok(v) if v.status.success() => {}
+            _ => continue,
+        }
         let range = format!("{base}...HEAD");
         let out = Command::new(git_bin)
             .args(["diff", "--name-only", &range])
@@ -1228,6 +1244,7 @@ fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
                 return (payload_is_code(&paths), false);
             }
         }
+        return (true, true);
     }
     (true, true)
 }
@@ -10905,6 +10922,23 @@ mod tests {
         let (is_code, assumed) = classify_payload(script.to_str().unwrap(), Path::new("."));
         assert!(!is_code);
         assert!(!assumed);
+    }
+
+    #[test]
+    fn self_review_gate_fails_closed_when_main_resolves_but_diffs_fail() {
+        // origin/main RESOLVES but its diff fails (unrelated histories exit
+        // 128 "no merge base"): the fallback must not quietly re-base onto a
+        // sibling origin/master, which can be a stale pre-migration ancestor
+        // and would size the payload from a whole era. Fail closed instead.
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_exec(
+            dir.path(),
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) exit 1 ;;\n  rev-parse*origin/master*) printf 'sha\\n' ;;\n  *origin/master*) printf 'src/lib.rs\\n' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload(script.to_str().unwrap(), Path::new("."));
+        assert!(is_code);
+        assert!(assumed);
     }
 
     #[test]

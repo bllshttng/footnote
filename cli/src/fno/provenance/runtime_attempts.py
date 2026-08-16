@@ -56,7 +56,8 @@ def _default_worktree_roots(repo_root: Path) -> list[Path]:
 
 
 def _commits_ahead(repo_root: Path, branch: Optional[str]) -> Optional[int]:
-    """Commits on ``branch`` ahead of origin/main, or None when unknowable.
+    """Commits on ``branch`` ahead of origin/main (origin/master when main is
+    absent), or None when unknowable.
 
     Affirmative authored-work evidence for the ``interrupted`` label. Best-effort:
     a detached/missing branch or a git failure yields None, not a zero that would
@@ -67,17 +68,20 @@ def _commits_ahead(repo_root: Path, branch: Optional[str]) -> Optional[int]:
     try:
         import subprocess
 
-        res = subprocess.run(
-            ["git", "rev-list", "--count", f"origin/main..{branch}"],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if res.returncode != 0:
-            return None
-        n = res.stdout.strip()
-        return int(n) if n.isdigit() else None
+        for base_ref in ("origin/main", "origin/master"):
+            res = subprocess.run(
+                ["git", "rev-list", "--count", f"{base_ref}..{branch}"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode != 0:
+                continue
+            n = res.stdout.strip()
+            if n.isdigit():
+                return int(n)
+        return None
     except Exception:  # noqa: BLE001
         return None
 
