@@ -10,6 +10,7 @@ overhead, following the pattern in test_dispatch_ask.py.
 from __future__ import annotations
 
 import fcntl
+import multiprocessing
 import json
 import time
 from pathlib import Path
@@ -216,20 +217,9 @@ def test_dispatch_send_lock_timeout(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents import dispatch as dispatch_mod
-    from fno.agents.lock import AgentLockTimeout
+    _fail_first_lock_acquire(monkeypatch)
 
-    # Make hold_agent_lock raise immediately
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _timeout_lock(*args, **kwargs):
-        raise AgentLockTimeout(name="red", timeout=0.1)
-        yield
-
-    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_lock)
-
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.dispatch import dispatch_send
 
     cwd = tmp_path / "work"
     cwd.mkdir()
@@ -509,16 +499,7 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
-    from fno.agents import dispatch as dispatch_mod
-    from fno.agents.lock import AgentLockTimeout
-    from contextlib import contextmanager
-
-    @contextmanager
-    def _timeout_lock(*args, **kwargs):
-        raise AgentLockTimeout(name="red", timeout=0.1)
-        yield
-
-    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_lock)
+    _fail_first_lock_acquire(monkeypatch)
 
     from fno.mail.cli import mail_app
 
@@ -1385,8 +1366,14 @@ def test_dispatch_send_alias_lock_contention_falls_back_before_delivery(
             cwd=tmp_path,
         )
 
-    assert time.monotonic() - started < 2.0
+    # The claim is that the alias lock cannot withhold a send terminal, and
+    # the terminal itself is the marker: the send returned instead of blocking
+    # on a lock another process holds for the whole call. Total wall time also
+    # carries dispatch_send's two live-session discovery sweeps, so a 2s bound
+    # measured those and flaked on a loaded machine. The ceiling below only
+    # catches a hang.
     assert result.delivery == "durable"
+    assert time.monotonic() - started < 30.0
 
 
 @pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
@@ -1874,34 +1861,34 @@ def test_dispatch_send_durable_stamps_wake_daemon_owner(tmp_path: Path, monkeypa
 def test_dispatch_send_agent_lock_timeout_queues_durable(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A real held flock times the send out, and the message still lands.
+    """The holder releases after the timeout, so the queue verifies and lands.
 
-    The positive marker is the thread on the bus. Asserting only the non-zero
-    exit would pass on a send that wrote nothing, which is the defect.
+    The positive marker is the thread on the bus. Asserting only the exit code
+    would pass on a send that wrote nothing, which is the original defect.
     """
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
     from fno import paths
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.dispatch import dispatch_send
     from fno.agents.registry import _agent_lock_path
     from fno.inbox.store import read_all_threads
 
     lock_path = _agent_lock_path("red", paths.agents_registry_path())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(lock_path, "a") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        try:
-            result = dispatch_send(
-                name="red",
-                message="hello",
-                provider=None,
-                cwd=tmp_path,
-                lock_timeout=0.2,
-            )
-        finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    # A real contender: holds the flock past the send's lock_timeout, then
+    # releases inside the queue's grace window. Holding it forever is the
+    # other test; here the point is that the grace acquire succeeds and the
+    # recipient is verified under the lock before anything is written.
+    _fail_first_lock_acquire(monkeypatch)
+    result = dispatch_send(
+        name="red",
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+    )
 
     assert result.delivery == "durable"
     assert result.reason == "agent-lock-timeout"
@@ -1939,19 +1926,15 @@ def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
     lock_path = _agent_lock_path("red", paths.agents_registry_path())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(lock_path, "a") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        try:
-            with pytest.raises(DispatchAskError) as exc_info:
-                dispatch_send(
-                    name="red",
-                    message="hello",
-                    provider=None,
-                    cwd=tmp_path,
-                    lock_timeout=0.2,
-                )
-        finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    _fail_first_lock_acquire(monkeypatch)
+    with pytest.raises(DispatchAskError) as exc_info:
+        dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=0.2,
+        )
 
     assert exc_info.value.exit_code == 12
     assert "no durable envelope was written" in str(exc_info.value)
@@ -1971,7 +1954,6 @@ def test_dispatch_send_lock_timeout_refuses_a_changed_recipient(
     _register_claude_peer()
 
     from fno import paths
-    from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import DispatchAskError, dispatch_send
     from fno.agents.registry import AgentEntry, _agent_lock_path, write_registry
     from fno.inbox.store import read_all_threads
@@ -1979,10 +1961,9 @@ def test_dispatch_send_lock_timeout_refuses_a_changed_recipient(
     lock_path = _agent_lock_path("red", paths.agents_registry_path())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    real_on_wait = dispatch_mod.hold_agent_lock
-
-    def _reclaim_then_wait(*args, **kwargs):
-        # Same name, different session: a reclaim landing while we block.
+    def _reclaim():
+        # Same name, different session: a reclaim committed while we blocked,
+        # visible only once the queue takes the lock.
         write_registry([
             AgentEntry(
                 name="red",
@@ -1994,23 +1975,16 @@ def test_dispatch_send_lock_timeout_refuses_a_changed_recipient(
                 status="live",
             )
         ])
-        return real_on_wait(*args, **kwargs)
 
-    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _reclaim_then_wait)
-
-    with open(lock_path, "a") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        try:
-            with pytest.raises(DispatchAskError) as exc_info:
-                dispatch_send(
-                    name="red",
-                    message="hello",
-                    provider=None,
-                    cwd=tmp_path,
-                    lock_timeout=0.2,
-                )
-        finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    _fail_first_lock_acquire(monkeypatch, on_first=_reclaim)
+    with pytest.raises(DispatchAskError) as exc_info:
+        dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=0.2,
+        )
 
     assert exc_info.value.exit_code == 2
     assert "retry the send" in str(exc_info.value)
@@ -2049,26 +2023,22 @@ def test_dispatch_send_lock_timeout_keeps_sender_provenance(
     ])
 
     from fno import paths
-    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.dispatch import dispatch_send
     from fno.agents.registry import _agent_lock_path
     from fno.inbox.store import read_all_threads
 
     lock_path = _agent_lock_path("red", paths.agents_registry_path())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(lock_path, "a") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        try:
-            dispatch_send(
-                name="red",
-                message="hello",
-                provider=None,
-                cwd=tmp_path,
-                lock_timeout=0.2,
-                from_name="blue",
-            )
-        finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    _fail_first_lock_acquire(monkeypatch)
+    dispatch_send(
+        name="red",
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+        from_name="blue",
+    )
 
     threads = read_all_threads("abcd1234")
     assert len(threads) == 1
@@ -2092,19 +2062,15 @@ def test_dispatch_send_lock_timeout_refuses_provider_mismatch_before_queuing(
     lock_path = _agent_lock_path("red", paths.agents_registry_path())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(lock_path, "a") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
-        try:
-            with pytest.raises(DispatchAskError) as exc_info:
-                dispatch_send(
-                    name="red",
-                    message="hello",
-                    provider="codex",
-                    cwd=tmp_path,
-                    lock_timeout=0.2,
-                )
-        finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    _fail_first_lock_acquire(monkeypatch)
+    with pytest.raises(DispatchAskError) as exc_info:
+        dispatch_send(
+            name="red",
+            message="hello",
+            provider="codex",
+            cwd=tmp_path,
+            lock_timeout=0.2,
+        )
 
     assert exc_info.value.exit_code == 2
     assert not bus_log_path().exists(), "a refused send must queue nothing"
@@ -2132,19 +2098,201 @@ def test_dispatch_send_lock_timeout_names_the_holder(
         stamped = lock_path.read_text()
     assert "pid" in stamped
 
+    _fail_first_lock_acquire(monkeypatch)
+    result = dispatch_send(
+        name="red",
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+    )
+
+    assert result.delivery == "durable"
+    stderr = capsys.readouterr().err
+    assert "held by pid " in stderr, f"the stamp must reach the user: {stderr}"
+
+
+def _hold_lock_then_release(
+    lock_path: str, hold_seconds: float, ready_path: str
+) -> None:
+    """Contender: take the flock, signal, hold, then release."""
+    import fcntl as _fcntl
+    from pathlib import Path as _P
+
+    with open(lock_path, "a") as fh:
+        _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+        _P(ready_path).write_text("held")
+        time.sleep(hold_seconds)
+        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+
+
+def _reclaim_under_lock_then_release(
+    lock_path: str, registry_path: str, hold_seconds: float, ready_path: str
+) -> None:
+    """Contender: take the flock, THEN commit a same-name reclaim, then release.
+
+    This is the race the unlocked re-read could not see. While the flock is
+    held, the replacement row is not yet written, so a reader outside the lock
+    still sees the OLD session and reads "identity unchanged" as verification.
+    """
+    import fcntl as _fcntl
+    import os as _os
+    from pathlib import Path as _P
+
+    with open(lock_path, "a") as fh:
+        _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+        _P(ready_path).write_text("held")
+        time.sleep(hold_seconds)
+        _os.environ["FNO_AGENTS_REGISTRY"] = registry_path
+        from fno.agents.registry import AgentEntry, write_registry
+
+        write_registry([
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="99999999-1111-7222-8333-444455556666",
+                cwd="/tmp",
+                log_path="/tmp/red.log",
+                short_id="99999999",
+                status="live",
+            )
+        ])
+        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+
+
+def test_dispatch_send_lock_timeout_refuses_when_lock_never_frees(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Sustained contention writes nothing, and says nothing was written.
+
+    A durable envelope needs a recipient verified under the lock. Without it,
+    a queue would be aimed at whoever used to own the name.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import _agent_lock_path
+    from fno.bus.log import bus_log_path
+
+    monkeypatch.setattr(dispatch_mod, "_LOCK_TIMEOUT_QUEUE_GRACE_SECONDS", 0.2)
+
+    lock_path = _agent_lock_path("red", paths.agents_registry_path())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
     with open(lock_path, "a") as holder:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
         try:
-            result = dispatch_send(
+            with pytest.raises(DispatchAskError) as exc_info:
+                dispatch_send(
+                    name="red",
+                    message="hello",
+                    provider=None,
+                    cwd=tmp_path,
+                    lock_timeout=0.2,
+                )
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    assert exc_info.value.exit_code == 11
+    text = str(exc_info.value)
+    assert "recipient identity could not be verified" in text
+    assert "no durable envelope was written" in text
+    assert not bus_log_path().exists(), "an unverified recipient must get nothing"
+
+
+def test_dispatch_send_lock_timeout_sees_a_reclaim_committed_under_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The reclaim lands while the contender holds the lock; we must not queue.
+
+    Before the queue took the lock, the re-read ran while the contender still
+    owned it, so it saw the OLD row and read "unchanged" as verified. The
+    message then went to the dead session. Taking the lock makes the
+    replacement visible, and an owner change refuses instead of guessing.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import _agent_lock_path
+    from fno.inbox.store import read_all_threads
+
+    registry_path = paths.agents_registry_path()
+    lock_path = _agent_lock_path("red", registry_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ready = tmp_path / "held"
+    proc = multiprocessing.Process(
+        target=_reclaim_under_lock_then_release,
+        args=(str(lock_path), str(registry_path), 0.8, str(ready)),
+    )
+    proc.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "contender did not take the lock"
+
+        with pytest.raises(DispatchAskError) as exc_info:
+            dispatch_send(
                 name="red",
                 message="hello",
                 provider=None,
                 cwd=tmp_path,
                 lock_timeout=0.2,
             )
-        finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    finally:
+        proc.join(timeout=10)
 
-    assert result.delivery == "durable"
-    stderr = capsys.readouterr().err
-    assert "held by pid " in stderr, f"the stamp must reach the user: {stderr}"
+    # Delivery first: the defect was a message queued to the dead session, so
+    # that is what must be asserted before any wording.
+    assert read_all_threads("abcd1234") == [], "queued to the former owner"
+    assert read_all_threads("99999999") == [], "queued to a guessed new owner"
+    assert exc_info.value.exit_code == 2
+    assert "retry the send" in str(exc_info.value)
+
+
+def _fail_first_lock_acquire(
+    monkeypatch, holder_pid: int = 4711, on_first=None
+) -> dict:
+    """First `hold_agent_lock` times out; later calls take the real lock.
+
+    Models the contender releasing between the send's acquire and the queue's
+    grace acquire. Deterministic on purpose: racing two processes on wall time
+    makes the test flaky about which acquire wins, and the contract under test
+    is "first fails, second verifies", not any particular timing.
+    """
+    from contextlib import contextmanager
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.lock import AgentLockTimeout
+    from fno.agents.lock import hold_agent_lock as _real_hold
+
+    calls = {"n": 0}
+
+    @contextmanager
+    def _wrapper(lock_name, registry_path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            if on_first is not None:
+                # Whatever a contender commits between the send's acquire and
+                # the queue's grace acquire lands here.
+                on_first()
+            raise AgentLockTimeout(
+                name=lock_name,
+                timeout=kwargs.get("timeout", 0.1),
+                holder={
+                    "pid": holder_pid,
+                    "name": lock_name,
+                    "acquired_at": "2026-08-16T00:00:00Z",
+                },
+            )
+        with _real_hold(lock_name, registry_path, **kwargs) as handle:
+            yield handle
+
+    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _wrapper)
+    return calls

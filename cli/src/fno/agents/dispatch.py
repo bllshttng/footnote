@@ -294,6 +294,12 @@ _NAME_MAX_LEN = 128
 _SHORT_ID_NAME_SHAPE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_LOCK_TIMEOUT = 30.0
 
+# Grace window for the post-timeout durable queue. Short on purpose: it asks
+# "did the holder just finish?", it is not a second full wait. A durable write
+# needs the lock because only the lock proves the recipient row is committed,
+# so a queue that cannot take it refuses instead of guessing.
+_LOCK_TIMEOUT_QUEUE_GRACE_SECONDS = 2.0
+
 _FROM_NAME_MAX_LEN = 128
 _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
@@ -6917,44 +6923,78 @@ def dispatch_send(
             return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
     except AgentLockTimeout as exc:
-        # A lock timeout must never lose the message (x-b281): `initial` was
-        # resolved before the lock attempt, so the durable address is already
-        # known and this queue needs no lock. When it too fails (no
-        # harness_session_id, or the bus write itself errors), the raised
-        # DispatchAskError(12) propagates unchanged and says so explicitly.
-        # Re-resolve before queuing. We never held the lock, so the row can
-        # have changed owners while we waited, and queuing from the pre-lock
-        # snapshot strands the message in the former session's mailbox. The
-        # locked path refuses an owner change with exit 2; an unlocked read
-        # cannot do better than the same refusal, and a caller told to retry
-        # loses nothing, unlike a message queued to a dead owner.
-        timeout_entries, timeout_entry = _load_and_resolve_target(canonical_identity)
-
-        # Provider mismatch refuses BEFORE the queue. The locked path checks
-        # this and exits 2 without delivering, so lock contention must not turn
-        # a refused send into a delivered one.
+        # A durable write needs a VERIFIED recipient, and ONLY the lock
+        # verifies one. An unlocked re-read cannot: the contender may be a
+        # same-name reclaim that holds the flock and has not committed its
+        # replacement row yet, so the read returns the OLD identity and the
+        # "identity unchanged" check passes vacuously. Unchanged has two
+        # explanations there - it really is, or the change is not visible yet -
+        # and queuing on that reading strands the message in the dead session's
+        # mailbox. So the queue takes the lock too, on a short grace window
+        # that asks "did the holder just finish?" rather than waiting again.
         try:
-            select_provider(name=timeout_entry.name, requested_provider=provider)
-        except ProviderMismatchError as mismatch:
-            raise DispatchAskError(str(mismatch), exit_code=2) from mismatch
-        except ValueError as bad_provider:
-            # An unknown --harness is a usage error on the locked path too.
-            # Lock timing must not change which exception the CLI sees.
-            raise DispatchAskError(str(bad_provider), exit_code=2) from bad_provider
-        except (OSError, RegistryVersionError) as unreadable:
-            events.emit("agent_send_failed", stage="registry-read", name=name)
-            raise DispatchAskError(
-                f"registry read failed: {unreadable}",
-                exit_code=12,
-            ) from unreadable
+            with hold_agent_lock(
+                canonical_name,
+                registry_path,
+                timeout=_LOCK_TIMEOUT_QUEUE_GRACE_SECONDS,
+            ):
+                # Every resolution that feeds a write happens here, under the
+                # lock, through the same call the normal path uses. An owner
+                # change now REFUSES (exit 2) rather than guessing which
+                # session the caller meant.
+                timeout_entries, timeout_entry = _load_and_resolve_target(
+                    canonical_identity
+                )
 
-        msg_id, _durable_to = _queue_durable_fallback(
-            timeout_entry,
-            message,
-            from_name,
-            timeout_entries,
-            reason="agent-lock-timeout",
-        )
+                # Provider mismatch refuses BEFORE the queue. The locked path
+                # checks this and exits 2 without delivering, so lock
+                # contention must not turn a refused send into a delivered one.
+                try:
+                    select_provider(
+                        name=timeout_entry.name, requested_provider=provider
+                    )
+                except ProviderMismatchError as mismatch:
+                    raise DispatchAskError(str(mismatch), exit_code=2) from mismatch
+                except ValueError as bad_provider:
+                    # An unknown --harness is a usage error on the locked path
+                    # too. Lock timing must not change which exception the CLI
+                    # sees.
+                    raise DispatchAskError(
+                        str(bad_provider), exit_code=2
+                    ) from bad_provider
+                except (OSError, RegistryVersionError) as unreadable:
+                    events.emit("agent_send_failed", stage="registry-read", name=name)
+                    raise DispatchAskError(
+                        f"registry read failed: {unreadable}",
+                        exit_code=12,
+                    ) from unreadable
+
+                msg_id, _durable_to = _queue_durable_fallback(
+                    timeout_entry,
+                    message,
+                    from_name,
+                    timeout_entries,
+                    reason="agent-lock-timeout",
+                )
+        except AgentLockTimeout as still_held:
+            # Sustained contention: no verified recipient, so nothing is
+            # written. Loud and nonzero beats a message delivered to whoever
+            # used to own the name. The node's requirement was "queue durable
+            # OR exit nonzero and say so"; this is the second arm.
+            events.emit(
+                "agent_send_failed",
+                stage="lock-timeout",
+                name=name,
+                reason="unverified_recipient",
+            )
+            raise DispatchAskError(
+                f"timed out waiting for agent {exc.name!r} lock "
+                f"(timeout={exc.timeout}s){exc.holder_note()}; "
+                "recipient identity could not be verified, so no durable "
+                "envelope was written; retry the send",
+                exit_code=11,
+            ) from still_held
+
         events.emit(
             "agent_send_failed",
             stage="lock-timeout",
