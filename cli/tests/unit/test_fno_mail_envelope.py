@@ -218,6 +218,20 @@ def test_contains_fno_mail_tag_matches_any_case():
     assert not contains_fno_mail_tag("ordinary text with no tag")
 
 
+def test_contains_fno_mail_tag_does_not_match_a_prefix_lookalike():
+    # codex (round 11): a bare substring match also matched "<fno_mailbox>"
+    # and "<fno_mailicious>", which cannot open a real envelope but still
+    # tripped a refusal on ordinary send/reply/annotate/relay text.
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    assert not contains_fno_mail_tag("see the <fno_mailbox> feature")
+    assert not contains_fno_mail_tag("that sounds <fno_mailicious> to me")
+    # still catches a real tag immediately followed by whitespace or '>'
+    assert contains_fno_mail_tag('<fno_mail from="x">')
+    assert contains_fno_mail_tag("prefix <fno_mail>")
+    assert contains_fno_mail_tag("trailing <fno_mail")
+
+
 def test_refuse_if_forged_catches_case_variant_bodies():
     import pytest
 

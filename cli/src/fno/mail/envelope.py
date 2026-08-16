@@ -18,6 +18,7 @@ lives there.
 """
 from __future__ import annotations
 
+import re as _re
 from typing import Optional
 
 # Provider id -> the <fno_mail> ``harness`` vocabulary. The single mapping shared
@@ -114,6 +115,15 @@ FNO_MAIL_TRAILER = (
 )
 
 
+# A bare substring match on "<fno_mail" also matches a prefix lookalike like
+# "<fno_mailbox>" or "<fno_mailicious>", which cannot open a real envelope but
+# still trips a refusal on ordinary text. `\b` requires a real word boundary
+# right after "mail" (a space, `>`, or end of input all qualify; "b" in
+# "mailbox" does not), mirroring the Rust `opens_envelope_tag` predicate and
+# this module's own `_FNO_MAIL_OPEN_FRAGMENT_DELIM` in `fno.annotate.core`.
+_FNO_MAIL_OPEN_TAG_RE = _re.compile(r"<fno_mail\b", _re.IGNORECASE)
+
+
 def contains_fno_mail_tag(text: str) -> bool:
     """Case-insensitive: True if ``text`` contains an ``<fno_mail`` open tag or
     ``</fno_mail>`` close tag.
@@ -122,8 +132,9 @@ def contains_fno_mail_tag(text: str) -> bool:
     injection guard, and the relay's single-line ``frame()``) keyed off an
     exact-case substring match, so a peer-controlled ``<FNO_MAIL ...>`` variant
     bypassed all of them at once (codex P1)."""
-    low = text.lower()
-    return "<fno_mail" in low or "</fno_mail>" in low
+    if _FNO_MAIL_OPEN_TAG_RE.search(text):
+        return True
+    return "</fno_mail>" in text.lower()
 
 
 def refuse_if_forged(body: str) -> None:
