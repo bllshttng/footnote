@@ -113,6 +113,25 @@ def test_paging_offset_and_limit(tmp_path, monkeypatch):
     assert [c["id"] for c in cards] == ["x-page003", "x-page002"]
 
 
+def test_offset_past_the_end_names_the_range_not_an_inverted_one(tmp_path, monkeypatch):
+    archive = _route(tmp_path, monkeypatch)
+    _seed_archive(
+        archive,
+        [
+            {
+                "id": "x-one0001",
+                "title": "only",
+                "status": "done",
+                "completed_at": "2026-08-14T00:00:00Z",
+            }
+        ],
+    )
+    r = runner.invoke(app, ["backlog", "album", "--offset", "5"])
+    assert r.exit_code == 0, r.output
+    assert "offset 5 is past the end" in r.output
+    assert "showing 6-5" not in r.output
+
+
 def test_absent_archive_is_empty_not_an_error(tmp_path, monkeypatch):
     _route(tmp_path, monkeypatch)  # never seeded
     r = runner.invoke(app, ["backlog", "album"])

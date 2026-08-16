@@ -8252,10 +8252,17 @@ fn yard_overlay_lines(
                 }
             }
             None => {
-                lines.push(pad_to(
-                    &format!(" ▸ {name} · identity fold pending"),
-                    YARD_OVERLAY_W,
-                ));
+                // No identity for this row. What that MEANS depends on the
+                // fold: still folding says pending; landed says the row has
+                // no registry citizen behind it (a bare shell, a tombstone,
+                // an external roster row) - never "pending" forever, and
+                // never a guessed species either way.
+                let why = match footer {
+                    NeedsFooter::Folding => "identity fold pending".to_string(),
+                    NeedsFooter::Degraded => "identity fold unavailable".to_string(),
+                    NeedsFooter::AsOf => "no yard identity (not a registry citizen)".to_string(),
+                };
+                lines.push(pad_to(&format!(" ▸ {name} · {why}"), YARD_OVERLAY_W));
             }
         }
     }
@@ -9234,6 +9241,16 @@ async fn attach_and_run(
                     .map(|d| d.last_at + PANE_DRAG_TIMEOUT),
             )
             .min();
+        // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
+        // while the overlay is open, wake at the next frame boundary so the
+        // spotlight animates on an otherwise idle terminal (nothing else
+        // redraws there). Re-armed each loop pass, so the cadence holds until
+        // the overlay closes; closed -> no deadline, no wakeups.
+        let yard_tick = view.yard.as_ref().map(|yv| {
+            let step = YARD_FRAME_MS as u64;
+            let elapsed = yv.opened_at.elapsed().as_millis() as u64;
+            yv.opened_at + Duration::from_millis((elapsed / step + 1) * step)
+        });
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -9622,6 +9639,18 @@ async fn attach_and_run(
                 }
             }, if backlog_deadline.is_some() => {
                 view.expire_backlog_pending();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match yard_tick {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if yard_tick.is_some() => {
+                // Frame advance only: compose() recomputes the frame index
+                // from elapsed, so the wake just repaints.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -25883,6 +25912,13 @@ mod tests {
         assert!(degraded
             .iter()
             .any(|l| l.contains("identity fold unavailable")));
+        // Fold landed but this row has no registry citizen behind it (a bare
+        // shell, a tombstone): say so, never "pending" forever, never a guess.
+        let landed = yard_overlay_lines(&crowd, 0, None, 0, NeedsFooter::AsOf);
+        assert!(landed
+            .iter()
+            .any(|l| l.contains("no yard identity (not a registry citizen)")));
+        assert!(!landed.iter().any(|l| l.contains("pending")));
     }
 
     #[test]

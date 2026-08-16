@@ -10026,6 +10026,11 @@ def cmd_album(
         typer.echo("The album is empty.")
         return
 
+    if not page:
+        # An offset past the last card is out of range, not an inverted range.
+        typer.echo(f"album: {len(entries)} shipped, offset {max(offset, 0)} is past the end")
+        return
+
     typer.echo(
         f"album: {len(entries)} shipped, showing {max(offset, 0) + 1}-{max(offset, 0) + len(page)}"
     )
