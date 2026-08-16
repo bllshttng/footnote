@@ -5473,10 +5473,12 @@ impl View {
             let identity = crowd
                 .get(sel)
                 .and_then(|(name, _, _)| self.yard_identity(name));
-            let frame =
-                (yv.opened_at.elapsed().as_millis() / YARD_FRAME_MS) % crate::sprites::FRAME_COUNT as u128;
-            let lines = yard_overlay_lines(&crowd, sel, identity, frame as usize, self.yard_footer());
-            let chrome = chrome::Chrome::new("the yard", Anchor::Center).footer("n/N pick · q close");
+            let frame = (yv.opened_at.elapsed().as_millis() / YARD_FRAME_MS)
+                % crate::sprites::FRAME_COUNT as u128;
+            let lines =
+                yard_overlay_lines(&crowd, sel, identity, frame as usize, self.yard_footer());
+            let chrome =
+                chrome::Chrome::new("the yard", Anchor::Center).footer("n/N pick · q close");
             draw_lines_overlay(
                 &mut cells,
                 rows,
@@ -8202,25 +8204,33 @@ fn yard_overlay_lines(
     frame: usize,
     footer: NeedsFooter,
 ) -> Vec<String> {
-    let mut lines = vec![pad_to(
-        " the yard · n/N pick · q close",
-        YARD_OVERLAY_W,
-    )];
+    let mut lines = vec![pad_to(" the yard · n/N pick · q close", YARD_OVERLAY_W)];
     if crowd.is_empty() {
         // The true failure state of a dispatch system: nothing was sent out.
-        lines.push(pad_to("   the yard is empty - nothing was dispatched", YARD_OVERLAY_W));
+        lines.push(pad_to(
+            "   the yard is empty - nothing was dispatched",
+            YARD_OVERLAY_W,
+        ));
     } else {
         // Crowd row: one eye glyph per citizen, wrapped to the body width.
         let glyphs: String = crowd.iter().map(|(_, e, _)| e.glyph()).collect();
-        for chunk in glyphs.chars().collect::<Vec<_>>().chunks(YARD_OVERLAY_W - 3) {
-            lines.push(pad_to(&format!("   {}", chunk.iter().collect::<String>()), YARD_OVERLAY_W));
+        for chunk in glyphs
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(YARD_OVERLAY_W - 3)
+        {
+            lines.push(pad_to(
+                &format!("   {}", chunk.iter().collect::<String>()),
+                YARD_OVERLAY_W,
+            ));
         }
         lines.push(pad_to("", YARD_OVERLAY_W));
         let sel = sel.min(crowd.len() - 1);
         let (name, eye, crown) = crowd[sel];
         match identity {
             Some(id) => {
-                let mut caption = format!(" ▸ {name} · {}", crate::sprites::species_name(id.species));
+                let mut caption =
+                    format!(" ▸ {name} · {}", crate::sprites::species_name(id.species));
                 if !id.rarity.is_empty() {
                     caption.push_str(&format!(" · {}", id.rarity));
                 }
@@ -8232,7 +8242,10 @@ fn yard_overlay_lines(
                 }
                 lines.push(pad_to(&caption, YARD_OVERLAY_W));
                 if crown >= 1 {
-                    lines.push(pad_to(&format!("  {}", crate::sprites::HAT_CROWN), YARD_OVERLAY_W));
+                    lines.push(pad_to(
+                        &format!("  {}", crate::sprites::HAT_CROWN),
+                        YARD_OVERLAY_W,
+                    ));
                 }
                 for row in crate::sprites::render_frame(id.species, frame, eye) {
                     lines.push(pad_to(&format!("  {row}"), YARD_OVERLAY_W));
@@ -8248,9 +8261,7 @@ fn yard_overlay_lines(
     }
     let footer_line = match footer {
         NeedsFooter::Folding => "   folding identities...".to_string(),
-        NeedsFooter::Degraded => {
-            "   identity fold unavailable - readings only".to_string()
-        }
+        NeedsFooter::Degraded => "   identity fold unavailable - readings only".to_string(),
         NeedsFooter::AsOf => format!("   {} citizens", crowd.len()),
     };
     lines.push(pad_to(&footer_line, YARD_OVERLAY_W));
@@ -25792,7 +25803,13 @@ mod tests {
         assert_eq!(crowd[1].2, 0); // crown defaults to 0, no hat
     }
 
-    fn yard_item(name: &str, species: usize, rarity: &str, crown: u32, first: bool) -> crate::yard_overlay::YardItem {
+    fn yard_item(
+        name: &str,
+        species: usize,
+        rarity: &str,
+        crown: u32,
+        first: bool,
+    ) -> crate::yard_overlay::YardItem {
         crate::yard_overlay::YardItem {
             id: format!("{name}-id"),
             name: name.into(),
@@ -25813,9 +25830,9 @@ mod tests {
         let id = yard_item("b", 3, "common", 0, false);
         let lines = yard_overlay_lines(&crowd, 1, Some(&id), 0, NeedsFooter::AsOf);
         // Crowd row: exactly the two eye glyphs.
-        assert!(lines.iter().any(|l| {
-            l.trim_start() == "\u{b7}@" || l.trim_start().starts_with("\u{b7}@")
-        }));
+        assert!(lines
+            .iter()
+            .any(|l| { l.trim_start() == "\u{b7}@" || l.trim_start().starts_with("\u{b7}@") }));
         // Caption carries identity outcome fields, never a rank or boundary.
         let caption = lines.iter().find(|l| l.contains('▸')).expect("caption");
         assert!(caption.contains("b") && caption.contains("cat") && caption.contains("common"));
@@ -25829,7 +25846,11 @@ mod tests {
                 continue;
             }
             assert!(
-                lines.iter().filter(|l| l.starts_with(&format!("  {row}"))).count() == 1,
+                lines
+                    .iter()
+                    .filter(|l| l.starts_with(&format!("  {row}")))
+                    .count()
+                    == 1,
                 "sprite row {row:?} once"
             );
         }
