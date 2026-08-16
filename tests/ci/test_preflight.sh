@@ -487,10 +487,12 @@ rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
 rm -f "$ATT"   # the prior section minted an attestation for this SHA; reuse would skip the lock
-past="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+# The stamp must sit within the recycle slop of the holder process's real age
+# (a genuinely stalled holder wrote its own stamp): 12s old, STALL_MIN_AGE=10.
+recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p "$LOCKDIR"
 sleep 600 & stall_holder=$!
-printf 'pid=%s started=%s host=x sha=deadbee\n' "$stall_holder" "$past" > "$LOCKDIR/holder"
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$stall_holder" "$recent" > "$LOCKDIR/holder"
 out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 run_pf --wait-timeout 30 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole from a stalled holder and ran to GREEN" || fail "stall steal failed rc=$rc: $out"
 echo "$out" | grep -q "stalled holder" && ok "the steal is reported as a recorded exception" || fail "no exception line: $out"
@@ -508,7 +510,7 @@ echo "== stall guard: a holder whose tree is making progress is NOT stolen =="
 rm -f "$ATT"   # the stall-steal run just minted one for this same SHA
 mkdir -p "$LOCKDIR"
 ( while :; do :; done ) & spin_pid=$!
-printf 'pid=%s started=%s host=x sha=deadbee\n' "$spin_pid" "$past" > "$LOCKDIR/holder"
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$spin_pid" "$recent" > "$LOCKDIR/holder"
 holder_stamp="$(cat "$LOCKDIR/holder")"
 out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 PREFLIGHT_STALL_CPU_FLOOR=0 run_pf --wait-timeout 6 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "a computing holder is waited on, not stolen" || fail "expected 3 got $rc: $out"
@@ -516,6 +518,54 @@ echo "$out" | grep -q "stalled holder" && fail "stole from a progressing holder"
 [[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the computing holder kept its lock" || fail "holder stamp changed"
 kill "$spin_pid" 2>/dev/null; wait "$spin_pid" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
+old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+rm -f "$ATT"
+mkdir -p "$LOCKDIR"
+sleep 600 & recycled_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$recycled_holder" "$old" > "$LOCKDIR/holder"
+out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "stole the recycled holder's lock and ran to GREEN" || fail "recycled steal failed rc=$rc: $out"
+echo "$out" | grep -q "dead holder" && ok "the recycled pid took the dead path, not the stall path" || fail "no dead-holder line: $out"
+kill -0 "$recycled_holder" 2>/dev/null && ok "the innocent recycled process was NOT signaled" || fail "an innocent process was TERMed"
+kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== phantom ticket: a queued ticket stamped by a recycled pid is reaped =="
+mkdir -p "$LOCKDIR.queue.d/000001"
+sleep 600 & phantom_pid=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$phantom_pid" "$old" > "$LOCKDIR.queue.d/000001/holder"
+out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "a phantom front ticket did not wedge a free lock" || fail "phantom wedged the queue rc=$rc: $out"
+[[ ! -d "$LOCKDIR.queue.d/000001" ]] && ok "the phantom ticket was reaped" || fail "phantom ticket survived"
+kill "$phantom_pid" 2>/dev/null; wait "$phantom_pid" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== cancel: SIGINT to a queued waiter exits 130 and removes its ticket =="
+mkdir -p "$LOCKDIR"
+sleep 600 & cancel_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$cancel_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+( cd "$FIX" && exec bash scripts/ci/preflight.sh --wait-timeout 60 >/dev/null 2>&1 ) & cancel_w=$!
+cancel_ticket=""
+for _i in $(seq 1 100); do
+    cancel_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
+    [[ -n "$cancel_ticket" ]] && break
+    sleep 0.2
+done
+[[ -n "$cancel_ticket" ]] && ok "the waiter queued a ticket" || fail "waiter never queued"
+kill -INT "$cancel_w" 2>/dev/null
+wait "$cancel_w"; rc=$?
+[[ $rc -eq 130 ]] && ok "SIGINT while queued exits 130" || fail "expected 130 got $rc"
+[[ ! -d "$LOCKDIR.queue.d/$cancel_ticket" ]] && ok "the cancelled waiter's ticket was removed" || fail "ticket left behind"
+kill "$cancel_holder" 2>/dev/null; wait "$cancel_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== cputime parse: octal-looking fields sum in base 10 =="
+eval "$(sed -n '/^cputime_to_s() {/,/^}/p' "$PREFLIGHT_SRC")"
+[[ "$(cputime_to_s "08:09.40")" == "489" ]] && ok "08:09.40 parses as 489s" || fail "octal parse: $(cputime_to_s "08:09.40")"
+[[ "$(cputime_to_s "1-02:03:04")" == "93784" ]] && ok "day-prefixed durations parse" || fail "day parse: $(cputime_to_s "1-02:03:04")"
+unset -f cputime_to_s
 
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
 for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done

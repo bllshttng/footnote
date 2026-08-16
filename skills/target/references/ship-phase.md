@@ -51,7 +51,9 @@ if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$no
        # RED would repeat the very mislabelling this branching exists to fix.
        case "$retry_rc" in
          0) : ;;
+         3) echo "preflight gave up waiting again - do NOT loop; re-run once with a longer --wait-timeout or set FNO_SKIP_PREFLIGHT=1 and let CI verify"; exit 1 ;;
          5) echo "preflight VOID twice - shared worktree contention, retry later"; exit 1 ;;
+         6) echo "preflight refused a stale base - git fetch origin main && git rebase origin/main, then re-run"; exit 1 ;;
          *) echo "preflight RED - fix before pushing"; exit 1 ;;
        esac ;;
     3) echo "preflight gave up waiting for the lock - do NOT write a retry loop (loops are the contention); re-run once with a longer --wait-timeout or set FNO_SKIP_PREFLIGHT=1 and let CI verify"; exit 1 ;;

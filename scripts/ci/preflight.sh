@@ -408,10 +408,12 @@ enqueue_ticket() {
 dequeue_ticket() { [[ -n "$TICKET" ]] && rm -rf "$TICKET"; TICKET=""; }
 
 ticket_is_dead() {
+    # Dead = the pid is gone OR was recycled (a live but younger process now
+    # owns the number; the ticket's author cannot still be it).
     local line pid
     line="$(cat "$1/holder" 2>/dev/null || echo '')"
     pid="$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-    [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null
+    [[ -n "$pid" ]] && { ! kill -0 "$pid" 2>/dev/null || holder_pid_recycled "$line"; }
 }
 
 # True only for the caller whose ticket is the lowest surviving number.
@@ -485,26 +487,71 @@ holder_tree_pids() {
     echo "$ids"
 }
 
+cputime_to_s() {
+    # Parse ps cputime/etime layouts ([[dd-]hh:]mm:ss with an optional .cc
+    # fraction) to seconds. Every field is forced to base 10: bash reads a
+    # leading zero as octal, so 08 and 09 silently abort the arithmetic and
+    # zero out the sample.
+    local t="$1" rest d=0 hh=0 mm=0 ss=0
+    rest="${t%%.*}"
+    if [[ "$rest" == *-* ]]; then d="${rest%%-*}"; rest="${rest#*-}"; fi
+    case "$(printf '%s' "$rest" | awk -F: '{print NF - 1}')" in
+        0) ss="$rest" ;;
+        1) mm="${rest%%:*}"; ss="${rest##*:}" ;;
+        *) hh="${rest%%:*}"; rest="${rest#*:}"; mm="${rest%%:*}"; ss="${rest##*:}" ;;
+    esac
+    echo $(( 10#$d*86400 + 10#$hh*3600 + 10#$mm*60 + 10#$ss ))
+}
+
 holder_tree_cpu() {
     # Sum accumulated CPU seconds over the holder pid and its descendants: the
     # wrapper itself idles while its suites compute, so the leaves carry the
     # progress signal. Unparsable rows read as 0, never as a steal trigger.
-    local pid ids="" p total=0 t rest d hh mm ss
+    local pid ids="" p total=0 t
     ids="$(holder_tree_pids "$pid")"
     for p in $ids; do
         t="$(ps -o cputime= -p "$p" 2>/dev/null | tr -d ' ')"
         [[ -n "$t" ]] || continue
-        # cputime layouts: [[dd-]hh:]mm:ss with an optional .cc fraction.
-        rest="${t%%.*}"; d=0; hh=0; mm=0; ss=0
-        if [[ "$rest" == *-* ]]; then d="${rest%%-*}"; rest="${rest#*-}"; fi
-        case "$(printf '%s' "$rest" | awk -F: '{print NF - 1}')" in
-            0) ss="$rest" ;;
-            1) mm="${rest%%:*}"; ss="${rest##*:}" ;;
-            *) hh="${rest%%:*}"; rest="${rest#*:}"; mm="${rest%%:*}"; ss="${rest##*:}" ;;
-        esac
-        total=$(( total + d*86400 + hh*3600 + mm*60 + ss ))
+        total=$(( total + $(cputime_to_s "$t") ))
     done
     echo "$total"
+}
+
+process_age_s() {
+    # Age in seconds of the live process owning pid $1, from ps etime. Empty
+    # output means ps cannot see the pid (caller treats as unmeasurable).
+    local t
+    t="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
+    [[ -n "$t" ]] || return 1
+    cputime_to_s "$t"
+}
+
+holder_pid_recycled() {
+    # True when the pid named by a holder/ticket stamp is alive but provably
+    # NOT the process that wrote the stamp: the live process is younger than
+    # the stamp by more than a minute of slop. Bare kill -0 cannot tell a
+    # recycled pid from the original; the confusion both wedges a queue behind
+    # a phantom ticket and would signal an innocent tree on the stall path.
+    local line="$1" pid started proc_age stamp_age
+    pid="$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+    [[ -n "$pid" ]] || return 1
+    proc_age="$(process_age_s "$pid")" || return 1
+    started="$(printf '%s' "$line" | sed -n 's/.*started=\([^ ]*\).*/\1/p')"
+    stamp_age=$(( $(date +%s) - $(date -u -d "$started" +%s 2>/dev/null \
+        || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null \
+        || echo "$(date +%s)") ))
+    (( stamp_age > proc_age + 60 ))
+}
+
+lockdir_abandoned() {
+    # True when an UNSTAMPED lock directory is older than the stamp grace: a
+    # live holder stamps within the mkdir-to-stamp window, so an old empty
+    # lockdir is a corpse that pid checks can never condemn (no pid to read).
+    local m now
+    m="$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo "")"
+    [[ -n "$m" ]] || return 1
+    now="$(date +%s)"
+    (( now - m > 300 ))
 }
 
 holder_is_stalled() {
@@ -592,7 +639,8 @@ acquire_lock() {
     local holder_pid holder_line
     holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
     holder_pid="$(printf '%s' "$holder_line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-    if ! queue_has_waiters && [[ -n "$holder_pid" ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+    if ! queue_has_waiters && [[ -n "$holder_pid" ]] \
+       && { ! kill -0 "$holder_pid" 2>/dev/null || holder_pid_recycled "$holder_line"; }; then
         if steal_dead_lock "$holder_line"; then return 0; fi
         # Lost the race: re-read so we name the live winner rather than the
         # corpse we just reaped.
@@ -622,21 +670,39 @@ acquire_lock() {
     skip_hint
     local waited=0 last_print=0
     while :; do
+        # Cancellation must be polled here, not deferred to the caller: the
+        # signal trap only sets a flag, and this loop can otherwise outwait a
+        # user pressing Ctrl-C for hours. Exit through the EXIT trap so the
+        # ticket and any held lock are released.
+        if [[ "$LOCK_SIGNAL" -eq 1 ]]; then
+            dequeue_ticket
+            echo "preflight: cancelled while queued" >&2
+            exit 130
+        fi
         if am_i_front; then
             if mkdir "$LOCKDIR" 2>/dev/null; then
                 dequeue_ticket
                 finish_lock_acquire
                 return 0
             fi
-            # Front of the queue and still blocked: the holder either runs on
-            # or is dead/stalled. kill -0 cannot see a starved-but-alive
-            # holder, so judge it on tree-CPU progress and steal a stalled one.
+            # Front of the queue and still blocked: the holder either runs on,
+            # or is dead, recycled, abandoned-unstamped, or stalled. kill -0
+            # alone cannot see a starved-but-alive holder or a recycled pid.
             holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
             holder_pid="$(printf '%s' "$holder_line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-            if [[ -n "$holder_pid" ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+            if [[ -n "$holder_pid" ]] \
+               && { ! kill -0 "$holder_pid" 2>/dev/null || holder_pid_recycled "$holder_line"; }; then
                 if steal_dead_lock "$holder_line"; then
                     dequeue_ticket
                     echo "preflight: queue front took a dead holder's lock" >&2
+                    return 0
+                fi
+            elif [[ -z "$holder_line" ]] && lockdir_abandoned "$LOCKDIR"; then
+                # No holder file and none is coming: an unstamped corpse has no
+                # pid to condemn, so age the directory itself.
+                if steal_dead_lock ""; then
+                    dequeue_ticket
+                    echo "preflight: queue front took an abandoned unstamped lock" >&2
                     return 0
                 fi
             elif holder_is_stalled "$holder_line"; then
@@ -682,7 +748,9 @@ trap cleanup EXIT
 # Defer cancellation only across mkdir + holder stamping. Exiting between those
 # commands would leave an acquired lock without a complete cleanup token.
 LOCK_SIGNAL=0
-trap 'LOCK_SIGNAL=1' INT TERM
+# HUP is trapped too: a closed terminal must run the EXIT trap (ticket and
+# lock cleanup), not evaporate the waiter and orphan its ticket in the queue.
+trap 'LOCK_SIGNAL=1' INT TERM HUP
 acquire_lock
 LOCAL_LOCK_ACQUIRED=1
 mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {

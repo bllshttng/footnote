@@ -449,8 +449,37 @@ def ship_batch(
     if evidence_required:
         evidence = check_verification_evidence(cwd=worktree, allow_equivalent=True)
         if not evidence["satisfied"]:
-            preflight = run(["scripts/ci/preflight.sh", "--force"], cwd=worktree)
-            if preflight.returncode != 0:
+            # --wait-timeout stays under _run's 600s subprocess budget: the
+            # preflight queue default (90m) would outlive the runner, whose
+            # SIGKILL bypasses the ticket-cleanup trap and raises an unhandled
+            # TimeoutExpired into the tick.
+            preflight = run(
+                ["scripts/ci/preflight.sh", "--force", "--wait-timeout", "540"],
+                cwd=worktree,
+            )
+            if preflight.returncode == 6:
+                # Stale base: preflight refused before running anything. Take
+                # the same verdict the stale-base guard below enforces, so the
+                # lane abandons and requeues instead of noop-looping on a
+                # refusal only a rebase can clear.
+                from fno.pr._preflight import check_stale_base
+
+                base_code, base_msg = check_stale_base(
+                    base=f"origin/{base}", cwd=worktree
+                )
+                if base_code != 0:
+                    _abandon_and_requeue(domain, members, root)
+                    return ShipResult(
+                        "abandoned", domain,
+                        reason=base_msg or "stale base: preflight refused (exit 6)",
+                        members=members,
+                    )
+                return ShipResult(
+                    "noop", domain,
+                    reason="preflight exit 6 (stale base) but the base check passed; re-run preflight",
+                    members=members,
+                )
+            elif preflight.returncode != 0:
                 return ShipResult(
                     "noop",
                     domain,
