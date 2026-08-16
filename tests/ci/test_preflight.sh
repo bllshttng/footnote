@@ -36,6 +36,9 @@ GLOBAL_EVENTS="$TMP/global-events.jsonl"
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
+# STUB_FNO_SLOW (committed only by the FIFO test) widens the window between a
+# waiter acquiring the lock and finishing its run, so ticket order is observable.
+[[ -f STUB_FNO_SLOW ]] && sleep 4
 if [[ "\$*" == *"paths.worktrees_base"* ]]; then
     echo "$WT_BASE"
     exit 0
@@ -407,12 +410,101 @@ echo "$out" | grep -q "dirty.txt" && ok "lists the dirty file" || fail "did not 
 [[ ! -d "$WT_BASE/repo/preflight" ]] || { [[ -z "$(ls -A "$WT_BASE/repo/preflight" 2>/dev/null)" ]] && ok "no worktree materialized on refusal" || ok "worktree pre-existed (from green run) - refusal touched nothing"; }
 ( cd "$FIX" && rm -f dirty.txt )
 
-echo "== AC2-EDGE: concurrent invocation -> exit 3 with holder =="
+echo "== AC2-EDGE: concurrent invocation (--wait-timeout 0) -> exit 3 with holder =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"  # $$ is alive
-out="$(run_pf 2>&1)"; rc=$?
+out="$(run_pf --wait-timeout 0 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "exit 3 when lock held by a live pid" || fail "expected 3 got $rc"
 echo "$out" | grep -q "lock held" && ok "prints holder info" || fail "no holder info"
+echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hint" || fail "no skip hint"
 rm -rf "$LOCKDIR"
+
+echo "== FIFO queue: waiters are served in arrival order, not by chance =="
+rm -f "$ATT"
+( cd "$FIX" && touch STUB_FNO_SLOW && git add -A && git commit -qm "slow stub sentinel" )
+mkdir -p "$LOCKDIR"
+sleep 600 & fifo_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$fifo_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+run_pf --wait-timeout 90 >/dev/null 2>&1 & w1=$!
+t1=""
+for _i in $(seq 1 100); do
+    t1="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
+    [[ -n "$t1" ]] && break
+    sleep 0.2
+done
+[[ -n "$t1" ]] && ok "first waiter queued a ticket" || fail "first waiter never queued"
+run_pf --wait-timeout 90 >/dev/null 2>&1 & w2=$!
+t2=""
+for _i in $(seq 1 100); do
+    [[ "$(ls "$LOCKDIR.queue.d" 2>/dev/null | wc -l | tr -d ' ')" -ge 2 ]] && break
+    sleep 0.2
+done
+t2="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '2p')"
+[[ -n "$t2" ]] && ok "second waiter queued behind the first" || fail "second waiter never queued"
+rm -rf "$LOCKDIR"   # release: only the front ticket may take it next
+w1_served_first=0
+for _i in $(seq 1 100); do
+    if [[ ! -d "$LOCKDIR.queue.d/$t1" ]]; then w1_served_first=1; break; fi
+    sleep 0.1
+done
+if [[ $w1_served_first -eq 1 && -d "$LOCKDIR.queue.d/$t2" && -d "$LOCKDIR" ]]; then
+    ok "arrival order held: first waiter owns the lock while the second still queues"
+else
+    fail "FIFO violated (w1_served=$w1_served_first t2_queued=$([[ -d "$LOCKDIR.queue.d/$t2" ]] && echo yes || echo no))"
+fi
+wait "$w1"; r1=$?
+wait "$w2"; r2=$?
+[[ $r1 -eq 0 && $r2 -eq 0 ]] && ok "both waiters ran to GREEN after queueing" || fail "waiter outcomes r1=$r1 r2=$r2"
+[[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "queue drained clean" || fail "queue leftovers: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
+kill "$fifo_holder" 2>/dev/null; wait "$fifo_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+( cd "$FIX" && git rm -q STUB_FNO_SLOW && git commit -qm "drop slow stub sentinel" )
+
+echo "== FIFO queue: --wait-timeout expiry exits 3 and cleans up its ticket =="
+mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
+out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "expired wait exits 3" || fail "expected 3 got $rc: $out"
+echo "$out" | grep -q "gave up waiting after 4s" && ok "names the give-up" || fail "no give-up line: $out"
+echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the skip hint" || fail "no skip hint: $out"
+[[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "ticket removed on give-up" || fail "ticket left behind: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
+rm -f "$ATT"   # the prior section minted an attestation for this SHA; reuse would skip the lock
+past="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$LOCKDIR"
+sleep 600 & stall_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$stall_holder" "$past" > "$LOCKDIR/holder"
+out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "stole from a stalled holder and ran to GREEN" || fail "stall steal failed rc=$rc: $out"
+echo "$out" | grep -q "stalled holder" && ok "the steal is reported as a recorded exception" || fail "no exception line: $out"
+kill "$stall_holder" 2>/dev/null; wait "$stall_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== stall guard: a holder whose tree is making progress is NOT stolen =="
+# Floor 0 makes the comparison deterministic on any load: delta >= 0 always,
+# so a measurable holder survives regardless of how starved the box is.
+rm -f "$ATT"   # the stall-steal run just minted one for this same SHA
+mkdir -p "$LOCKDIR"
+( while :; do :; done ) & spin_pid=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$spin_pid" "$past" > "$LOCKDIR/holder"
+holder_stamp="$(cat "$LOCKDIR/holder")"
+out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 PREFLIGHT_STALL_CPU_FLOOR=0 run_pf --wait-timeout 6 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "a computing holder is waited on, not stolen" || fail "expected 3 got $rc: $out"
+echo "$out" | grep -q "stalled holder" && fail "stole from a progressing holder" || ok "no false stall verdict"
+[[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the computing holder kept its lock" || fail "holder stamp changed"
+kill "$spin_pid" 2>/dev/null; wait "$spin_pid" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
+for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done
+git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
+( cd "$FIX" && git reset -q --hard HEAD~3 )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 6 ]] && ok "exit 6 on a stale base" || fail "expected 6 got $rc: $out"
+echo "$out" | grep -q "3 commit(s) behind origin/main" && ok "names the behind count" || fail "no behind count: $out"
+echo "$out" | grep -q "rebase" && ok "tells the caller to rebase" || fail "no rebase guidance: $out"
+[[ ! -d "$LOCKDIR" && ! -d "$LOCKDIR.queue.d" ]] && ok "refused before creating any lock or queue artifact" || fail "lock artifacts left behind"
+git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
 
 echo "== canonical concurrency: a second clone cannot append pending for the same SHA =="
 lock_sha="$(git -C "$FIX" rev-parse HEAD)"
@@ -420,7 +512,7 @@ GLOBAL_RECEIPT_LOCKDIR="$TMP/.preflight-receipt-locks/$lock_sha.d"
 mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
 printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$lock_sha" > "$GLOBAL_RECEIPT_LOCKDIR/holder"
 before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
-out="$(run_pf --force 2>&1)"; rc=$?
+out="$(run_pf --force --wait-timeout 0 2>&1)"; rc=$?
 after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
 [[ $rc -eq 3 ]] && ok "same-candidate global lock refuses the second run" || fail "expected 3 got $rc: $out"
 [[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
@@ -461,8 +553,8 @@ for _round in 1 2 3 4 5; do
     rm -rf "$LOCKDIR"
     rm -f "$ATT"   # else the prior green attestation satisfies the gate and no one contends
     mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"
-    run_pf >/dev/null 2>&1 & p1=$!
-    run_pf >/dev/null 2>&1 & p2=$!
+    run_pf --wait-timeout 0 >/dev/null 2>&1 & p1=$!
+    run_pf --wait-timeout 0 >/dev/null 2>&1 & p2=$!
     wait $p1; r1=$?
     wait $p2; r2=$?
     # winners exit 0 (ran) - losers exit 3 (lock held). Never two winners.
