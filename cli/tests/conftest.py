@@ -124,7 +124,7 @@ def _hermetic_claim_reap(monkeypatch):
         return {
             "scanned": 0, "reaped": 0, "would_reap": 0, "kept_live": 0,
             "kept_suspect": 0, "kept_offhost": 0, "corrupted": 0, "vanished": 0,
-            "reap_failed": [], "apply": apply, "roots": [],
+            "contended": 0, "reap_failed": [], "apply": apply, "roots": [],
         }
 
     monkeypatch.setattr(claims_core, "reap_dead_claims", _noop_reap)

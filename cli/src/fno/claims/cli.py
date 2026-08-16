@@ -722,8 +722,9 @@ def list_cmd(
         # AC7: a store that is mostly stale must never print the bare
         # string "no claims" - that reads identically to an empty store.
         typer.echo(
-            f"no live claims ({totals['stale']} stale, {totals['corrupted']} corrupted "
-            f"across {n_roots} root{'s' if n_roots != 1 else ''}); "
+            f"no live claims ({totals['stale']} stale, {totals['corrupted']} corrupted, "
+            f"{totals['free']} released mid-scan across "
+            f"{n_roots} root{'s' if n_roots != 1 else ''}); "
             f"--include-stale to list them"
         )
         return
@@ -774,7 +775,8 @@ def reap_cmd(
         typer.echo(
             f"kept: {summary['kept_live']} live, {summary['kept_suspect']} suspect, "
             f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
-            f"{summary['vanished']} vanished  |  roots: {', '.join(summary['roots'])}"
+            f"{summary['vanished']} vanished, {summary['contended']} contended  |  "
+            f"roots: {', '.join(summary['roots'])}"
         )
 
     if summary["reap_failed"]:

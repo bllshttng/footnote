@@ -1083,24 +1083,40 @@ def reap_dead_claims(
                         continue
 
                     archive_path = archive_claim(entry, ts_ms=ts)
-                    if not entry.exists() and archive_path.exists():
+                    if archive_path != entry and archive_path.exists():
+                        # archive_path != entry proves archive_claim actually
+                        # computed a distinct .expired/ destination (the
+                        # idempotent-already-gone case returns entry itself
+                        # unchanged); combined with .exists() on that unique,
+                        # ts-suffixed path, that is durable proof THIS call's
+                        # rename succeeded - regardless of what entry.exists()
+                        # says afterward. A fresh, unrelated acquire_claim()
+                        # can legitimately recreate a live claim at the same
+                        # key the instant after this archive completes (its
+                        # top-level atomic_create_exclusive never consults
+                        # this recovery mutex once the path is empty), which
+                        # would make entry.exists() true again with no
+                        # bearing on whether the archive itself worked.
                         reaped += 1
                         emit_claim_reaped(
                             fresh,
                             root=root_label,
                             age_ms=max(0, ts - fresh.acquired_at),
                         )
-                    elif not entry.exists() and not archive_path.exists():
-                        # Some other actor (a concurrent reap, or the holder's
-                        # own delayed release) fully cleared this file between
-                        # our classification and our archive call. The store
-                        # no longer holds it, which is the outcome we wanted;
-                        # we just cannot claim credit for the move.
+                    elif not entry.exists():
+                        # archive_claim's idempotent short-circuit: the
+                        # source was already fully cleared (a concurrent
+                        # reap, or the holder's own delayed release) before
+                        # this call, so it returned the source path itself,
+                        # which does not exist either. The store no longer
+                        # holds it, which is the outcome we wanted; we just
+                        # cannot claim credit for the move.
                         vanished += 1
                     else:
                         # The positive-marker rule: an exit without exception
-                        # is not evidence. The source is still there, so the
-                        # move did not happen (AC5).
+                        # is not evidence. The source is still there and no
+                        # archive was created, so the move did not happen
+                        # (AC5).
                         reap_failed.append(
                             (str(entry), "archive_claim did not move the file")
                         )

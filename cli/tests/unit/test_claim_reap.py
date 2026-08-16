@@ -24,6 +24,7 @@ from fno.claims.cli import cli
 from fno.claims.core import (
     _classify_for_sweep,
     acquire_claim,
+    claim_status,
     list_claims_with_counts,
     reap_dead_claims,
 )
@@ -242,6 +243,32 @@ class TestReapDeadClaims:
         assert len(summary["reap_failed"]) == 1
         assert summary["reap_failed"][0][0] == str(claim_path("k", root=tmp_path))
         assert claim_path("k", root=tmp_path).exists()
+
+    def test_AC5_EDGE_reap_credited_even_if_key_recreated_right_after_archive(
+        self, tmp_path, monkeypatch
+    ):
+        """A fresh, unrelated acquire_claim() recreating the same key the
+        instant after the archive completes must not read as a failed move:
+        entry.exists() flips back to True with no bearing on whether THIS
+        call's own rename worked."""
+        from fno.claims.io import archive_claim as real_archive_claim
+
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+
+        def _archive_then_race(path, ts_ms):
+            result = real_archive_claim(path, ts_ms=ts_ms)
+            acquire_claim("k", "other-holder", pid=os.getpid(), root=tmp_path)
+            return result
+
+        monkeypatch.setattr("fno.claims.core.archive_claim", _archive_then_race)
+
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+
+        assert summary["reaped"] == 1
+        assert summary["reap_failed"] == []
+        status = claim_status("k", root=tmp_path)
+        assert status["state"] == "live"
+        assert status["holder"] == "other-holder"
 
     def test_AC6_EDGE_corrupted_lockfile_counted_never_reaped(self, tmp_path):
         cdir = claims_dir(tmp_path)
