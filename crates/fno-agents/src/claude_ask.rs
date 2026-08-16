@@ -137,11 +137,15 @@ pub struct TruthProbe {
 }
 
 pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
+    family1_truth_probe_retrying(&|| truth_command(handle), Duration::from_secs(5), handle)
+}
+
+fn truth_command(handle: &str) -> std::process::Command {
     let mut command = std::process::Command::new("fno");
     command
         .args(["agents", "truth", handle, "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");
-    family1_truth_probe_with_command(command, Duration::from_secs(5), handle)
+    command
 }
 
 /// The transcript state, LOWERED to `"unreachable"` when the shared verdict
@@ -247,19 +251,76 @@ fn truth_failure_is_routine(detail: &str) -> bool {
     detail.trim() == TRUTH_NOT_FOUND
 }
 
-fn family1_truth_probe_with_command(
-    mut command: std::process::Command,
+/// The words `fno`'s import guard prints when a module under the `fno` package
+/// is missing (`cli/src/fno/_import_guard.py`). Matched rather than reproduced
+/// so the two stay one string apart if it is ever reworded.
+const FNO_IMPORT_WINDOW_MARKER: &str = "is part of fno itself";
+
+/// Whether a failed probe is explained by a reinstall in flight.
+///
+/// `fno update` runs `uv tool install --reinstall`, which rewrites the tree the
+/// probe execs from, so an `fno` module the child had not yet imported can be
+/// absent for the length of the install. This daemon runs the probe once per
+/// tracked session, continuously, so it is the highest-frequency visitor to
+/// that window and was the one printing `WARN: family-1 truth probe ... exited
+/// exit status: 1` on a routine `fno update`.
+///
+/// Keyed on the guard's own dual-cause message, not on the exit status: an
+/// exit-1 that says anything else is a real malfunction and keeps its WARN.
+fn truth_failure_is_transient(detail: &str) -> bool {
+    detail.contains(FNO_IMPORT_WINDOW_MARKER)
+}
+
+/// One probe run, with its WARN line HELD rather than printed.
+///
+/// Holding it is the point: the caller gets to swallow a transient failure and
+/// try again before saying anything, and a run that is not transient prints
+/// exactly the line it printed before this existed.
+struct ProbeRun {
+    probe: Option<TruthProbe>,
+    warn: Option<String>,
+    transient: bool,
+}
+
+/// The probe as production runs it: one run, tolerating ONE transient failure.
+///
+/// One retry, and only for a failure the reinstall window explains. A blind
+/// retry would hide a genuinely broken `fno` behind a doubled probe cost on
+/// every registry row of every sweep; this one costs nothing until the window
+/// is actually open, and a second failure reports normally.
+fn family1_truth_probe_retrying(
+    make_command: &dyn Fn() -> std::process::Command,
     timeout: Duration,
     handle: &str,
 ) -> Option<TruthProbe> {
+    let run = family1_truth_probe_run(make_command(), timeout, handle);
+    if !run.transient {
+        if let Some(warn) = run.warn {
+            eprintln!("{warn}");
+        }
+        return run.probe;
+    }
+    let retry = family1_truth_probe_run(make_command(), timeout, handle);
+    if let Some(warn) = retry.warn {
+        eprintln!("{warn}");
+    }
+    retry.probe
+}
+
+fn family1_truth_probe_run(
+    mut command: std::process::Command,
+    timeout: Duration,
+    handle: &str,
+) -> ProbeRun {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
-            return None;
+            return ProbeRun::failed(format!(
+                "WARN: family-1 truth probe for {handle} failed to start: {error}"
+            ));
         }
     };
     let deadline = Instant::now() + timeout;
@@ -272,22 +333,25 @@ fn family1_truth_probe_with_command(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe for {handle} timed out");
-                return None;
+                return ProbeRun::failed(format!(
+                    "WARN: family-1 truth probe for {handle} timed out"
+                ));
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe for {handle} wait failed: {error}");
-                return None;
+                return ProbeRun::failed(format!(
+                    "WARN: family-1 truth probe for {handle} wait failed: {error}"
+                ));
             }
         }
     }
     let output = match child.wait_with_output() {
         Ok(output) => output,
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {handle} output failed: {error}");
-            return None;
+            return ProbeRun::failed(format!(
+                "WARN: family-1 truth probe for {handle} output failed: {error}"
+            ));
         }
     };
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
@@ -300,12 +364,13 @@ fn family1_truth_probe_with_command(
         // its WARN even though its body is about to be salvaged below.
         let detail =
             family1_truth_failure_detail(&output.stdout, &String::from_utf8_lossy(&output.stderr));
-        if !truth_failure_is_routine(&detail) {
-            eprintln!(
+        let transient = truth_failure_is_transient(&detail);
+        let warn = (!truth_failure_is_routine(&detail)).then(|| {
+            format!(
                 "WARN: family-1 truth probe for {handle} exited {}: {}",
                 output.status, detail
-            );
-        }
+            )
+        });
         // truth writes its full, already-computed verdict to stdout BEFORE
         // deciding the exit code (`cmd_truth` in cli.py), so exit 13
         // (unresolvable handle) still carries a real `{state, reachability,
@@ -317,20 +382,44 @@ fn family1_truth_probe_with_command(
         // standing to assert liveness, so this is monotone-lowering only,
         // exactly like `lower_state_with_verdict` above - it can report
         // done/stalled/unknown, never invent "still working".
-        return match state.as_deref() {
+        let probe = match state.as_deref() {
             Some(s @ ("done" | "stalled" | "unknown")) => {
                 Some(build_truth_probe(parsed.as_ref(), s))
             }
             _ => None,
         };
+        return ProbeRun {
+            probe,
+            warn,
+            transient,
+        };
     }
     match state.as_deref() {
         Some(s @ ("done" | "watching" | "your-move" | "working" | "stalled" | "unknown")) => {
-            Some(build_truth_probe(parsed.as_ref(), s))
+            ProbeRun::ok(build_truth_probe(parsed.as_ref(), s))
         }
-        _ => {
-            eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
-            None
+        _ => ProbeRun::failed(format!(
+            "WARN: family-1 truth probe for {handle} returned malformed output"
+        )),
+    }
+}
+
+impl ProbeRun {
+    fn ok(probe: TruthProbe) -> Self {
+        Self {
+            probe: Some(probe),
+            warn: None,
+            transient: false,
+        }
+    }
+
+    /// A run that produced no verdict. Never transient: the reinstall window is
+    /// read off truth's own exit detail, and these arms never got one.
+    fn failed(warn: String) -> Self {
+        Self {
+            probe: None,
+            warn: Some(warn),
+            transient: false,
         }
     }
 }
@@ -4161,17 +4250,28 @@ mod tests {
         }
     }
 
+    /// One probe run over a shell script, through the SAME entry point
+    /// production uses. Takes the script rather than a built `Command` because
+    /// the retry needs to spawn a fresh one, and a `Command` cannot be reused.
+    fn probe_sh(script: &str, timeout: Duration, handle: &str) -> Option<TruthProbe> {
+        family1_truth_probe_retrying(
+            &|| {
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", script]);
+                command
+            },
+            timeout,
+            handle,
+        )
+    }
+
     /// The state half of a probe, for the tests that only pin the state enum.
-    fn probe_state(
-        command: std::process::Command,
-        timeout: Duration,
-        handle: &str,
-    ) -> Option<String> {
+    fn probe_state(script: &str, timeout: Duration, handle: &str) -> Option<String> {
         // Lowered by the verdict, exactly as `family1_truth_state` does. A raw
         // `.map(|p| p.state)` here would exercise a path production no longer
         // takes, and every state assertion below would pin the pre-verdict
         // reading forever.
-        family1_truth_probe_with_command(command, timeout, handle)
+        probe_sh(script, timeout, handle)
             .map(|p| lower_state_with_verdict(&p.state, p.reachability.as_deref()).to_string())
     }
 
@@ -4180,22 +4280,15 @@ mod tests {
         // One probe answers both halves: the list emitter must not run a second
         // shellout, and must not grow a second transcript reader that could
         // report a different model than the truth verb does for the same worker.
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "printf '{\"state\":\"working\",\"observed_model\":\
-             {\"kind\":\"observed\",\"model\":\"glm-5.2\",\"samples\":300}}'",
-        ]);
-        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+                let probe = probe_sh("printf '{\"state\":\"working\",\"observed_model\":\
+             {\"kind\":\"observed\",\"model\":\"glm-5.2\",\"samples\":300}}'", Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert_eq!(probe.state, "working");
         assert_eq!(probe.observed_model["model"], "glm-5.2");
 
         // A truth build that predates the field yields null, never a fabricated
         // variant: "the probe did not answer" is not "there is no transcript".
-        let mut old = std::process::Command::new("sh");
-        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
-        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+                let stale = probe_sh("printf '{\"state\":\"working\"}'", Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert!(stale.observed_model.is_null());
     }
@@ -4209,13 +4302,8 @@ mod tests {
     /// float parse has to accept one.
     #[test]
     fn family1_truth_probe_carries_the_reachability_triple() {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "printf '{\"state\":\"working\",\"reachability\":\"unreachable\",\
-             \"basis\":\"pane-gone\",\"last_activity_age_s\":143255}'",
-        ]);
-        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+                let probe = probe_sh("printf '{\"state\":\"working\",\"reachability\":\"unreachable\",\
+             \"basis\":\"pane-gone\",\"last_activity_age_s\":143255}'", Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert_eq!(probe.reachability.as_deref(), Some("unreachable"));
         assert_eq!(probe.basis.as_deref(), Some("pane-gone"));
@@ -4223,9 +4311,7 @@ mod tests {
 
         // A truth build too old to emit them reads as absent, never as a
         // fabricated `no-evidence` -- which is a VERDICT, not a missing field.
-        let mut old = std::process::Command::new("sh");
-        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
-        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+                let stale = probe_sh("printf '{\"state\":\"working\"}'", Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert!(stale.reachability.is_none());
         assert!(stale.basis.is_none());
@@ -4239,14 +4325,9 @@ mod tests {
     /// the same lie as a missing one.
     #[test]
     fn family1_truth_probe_carries_the_last_event_pair() {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "printf '{\"state\":\"working\",\"last_event_at\":\
+                let probe = probe_sh("printf '{\"state\":\"working\",\"last_event_at\":\
              \"2026-08-15T17:00:00+00:00\",\"last_message\":\
-             \"Still growing (101 lines)\"}'",
-        ]);
-        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+             \"Still growing (101 lines)\"}'", Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert_eq!(
             probe.last_event_at.as_deref(),
@@ -4259,9 +4340,7 @@ mod tests {
 
         // A truth build that predates the pair reads as absent - never as a
         // fabricated fresh stamp or empty message.
-        let mut old = std::process::Command::new("sh");
-        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
-        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+                let stale = probe_sh("printf '{\"state\":\"working\"}'", Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert!(stale.last_event_at.is_none());
         assert!(stale.last_message.is_none());
@@ -4269,22 +4348,89 @@ mod tests {
 
     #[test]
     fn family1_truth_subprocess_is_bounded_and_validated() {
-        let mut valid = std::process::Command::new("sh");
-        valid.args(["-c", "printf '{\"state\":\"watching\"}'"]);
         assert_eq!(
-            probe_state(valid, Duration::from_secs(1), "h1").as_deref(),
+            probe_state(
+                "printf '{\"state\":\"watching\"}'",
+                Duration::from_secs(1),
+                "h1"
+            )
+            .as_deref(),
             Some("watching")
         );
 
-        let mut invalid = std::process::Command::new("sh");
-        invalid.args(["-c", "printf '{\"state\":\"invented\"}'"]);
-        assert_eq!(probe_state(invalid, Duration::from_secs(1), "h1"), None);
+        assert_eq!(
+            probe_state(
+                "printf '{\"state\":\"invented\"}'",
+                Duration::from_secs(1),
+                "h1"
+            ),
+            None
+        );
 
-        let mut hung = std::process::Command::new("sh");
-        hung.args(["-c", "sleep 5"]);
         let started = Instant::now();
-        assert_eq!(probe_state(hung, Duration::from_millis(50), "h1"), None);
+        assert_eq!(probe_state("sleep 5", Duration::from_millis(50), "h1"), None);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// The reinstall window is tolerated exactly once, and only when the
+    /// failure says it IS the reinstall window.
+    ///
+    /// Pinned as a positive marker: the retry's own answer is returned. An
+    /// assertion that the first failure "went away" would pass just as well if
+    /// the probe had never run twice at all.
+    #[test]
+    fn a_transient_import_failure_is_retried_once() {
+        let dir = std::env::temp_dir().join(format!("fno-x2304-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let flag = dir.join("attempt");
+        let _ = std::fs::remove_file(&flag);
+        // First run reproduces the guard's dual-cause message on stderr and
+        // exits 1, exactly as `fno agents truth` does mid-reinstall; the second
+        // run finds the tree rewritten and answers.
+        let script = format!(
+            "if [ -f {flag} ]; then printf '{{\"state\":\"working\"}}'; else \
+             touch {flag}; \
+             echo \"No module named 'fno.agents.session_truth' \
+             (fno.agents.session_truth is part of fno itself: either this package \
+             was being reinstalled underneath the running process, in which case \
+             retry, or the install is stale)\" >&2; exit 1; fi",
+            flag = flag.display()
+        );
+        let probe = probe_sh(&script, Duration::from_secs(2), "h1");
+        let _ = std::fs::remove_file(&flag);
+        assert_eq!(
+            probe.map(|p| p.state).as_deref(),
+            Some("working"),
+            "the retry's answer must be the one returned"
+        );
+    }
+
+    #[test]
+    fn a_real_malfunction_is_not_retried() {
+        // The discriminator, stated directly: only the guard's own words mark a
+        // failure as the reinstall window. A resolver crash exiting 1 is a real
+        // malfunction and keeps both its single run and its WARN.
+        assert!(truth_failure_is_transient(
+            "No module named 'fno.x' (fno.x is part of fno itself: retry)"
+        ));
+        assert!(!truth_failure_is_transient("resolver-error"));
+        assert!(!truth_failure_is_transient("not-found"));
+        assert!(!truth_failure_is_transient(""));
+
+        // And a script that counts its runs proves the non-transient path spawns once.
+        let dir = std::env::temp_dir().join(format!("fno-x2304-once-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let tally = dir.join("runs");
+        let _ = std::fs::remove_file(&tally);
+        let script = format!(
+            "printf x >> {tally}; printf '{{\"state\":\"unknown\",\"reason\":\
+             \"resolver-error\"}}'; exit 13",
+            tally = tally.display()
+        );
+        let _ = probe_sh(&script, Duration::from_secs(2), "h1");
+        let runs = std::fs::read_to_string(&tally).unwrap_or_default().len();
+        let _ = std::fs::remove_file(&tally);
+        assert_eq!(runs, 1, "a real malfunction must not double the probe cost");
     }
 
     #[test]
@@ -4313,23 +4459,21 @@ mod tests {
         // a genuine resolver-error now resolve identically to "unknown": the
         // warn-vs-quiet split (pinned by the predicate test above) governs
         // stderr noise only, never whether the verdict itself is kept.
-        let mut not_found = std::process::Command::new("sh");
-        not_found.args([
-            "-c",
-            "printf '{\"state\":\"unknown\",\"reason\":\"not-found\"}'; exit 13",
-        ]);
         assert_eq!(
-            probe_state(not_found, Duration::from_secs(1), "ses_1d9e"),
+            probe_state(
+                "printf '{\"state\":\"unknown\",\"reason\":\"not-found\"}'; exit 13",
+                Duration::from_secs(1),
+                "ses_1d9e"
+            ),
             Some("unknown".to_string())
         );
 
-        let mut broken = std::process::Command::new("sh");
-        broken.args([
-            "-c",
-            "printf '{\"state\":\"unknown\",\"reason\":\"resolver-error\"}'; exit 13",
-        ]);
         assert_eq!(
-            probe_state(broken, Duration::from_secs(1), "abcd1234"),
+            probe_state(
+                "printf '{\"state\":\"unknown\",\"reason\":\"resolver-error\"}'; exit 13",
+                Duration::from_secs(1),
+                "abcd1234"
+            ),
             Some("unknown".to_string())
         );
     }
@@ -4340,13 +4484,8 @@ mod tests {
         // with no corroborating identity surface resolves `state: "unknown"`
         // with a genuinely computed `reachability`/`basis` pair, still on
         // exit 13. The salvage must carry those through, not just the state.
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "printf '{\"state\":\"unknown\",\"reason\":\"not-found\",\
-             \"reachability\":\"unreachable\",\"basis\":\"process-gone\"}'; exit 13",
-        ]);
-        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "cx-x-e14b")
+                let probe = probe_sh("printf '{\"state\":\"unknown\",\"reason\":\"not-found\",\
+             \"reachability\":\"unreachable\",\"basis\":\"process-gone\"}'; exit 13", Duration::from_secs(1), "cx-x-e14b")
             .expect("a real computed verdict on exit 13 must not be discarded");
         assert_eq!(probe.state, "unknown");
         assert_eq!(probe.reachability.as_deref(), Some("unreachable"));
@@ -4359,10 +4498,13 @@ mod tests {
         // non-zero exit with a live state, but a failed probe run has no
         // standing to assert liveness either way, so a live-looking state
         // must still fall through to None rather than being trusted.
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "printf '{\"state\":\"working\"}'; exit 13"]);
         assert_eq!(
-            family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1").map(|p| p.state),
+            probe_sh(
+                "printf '{\"state\":\"working\"}'; exit 13",
+                Duration::from_secs(1),
+                "h1"
+            )
+            .map(|p| p.state),
             None,
             "a non-zero exit must never assert a live state"
         );

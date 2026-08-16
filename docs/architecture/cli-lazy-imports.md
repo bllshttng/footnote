@@ -167,14 +167,50 @@ module under the `fno` package says so and names both candidate causes (a
 reinstall in flight, retry; a stale install, `fno update` then `fno doctor`).
 
 **Verify-then-retry.** On an `ImportError` for a module under the `fno` package,
-`_load_real` re-checks whether that module is on disk *now* and, if it is,
-retries the import exactly once. The disk re-check is what separates this from a
+the guard re-checks whether that module is on disk *now* and, if it is, retries
+the import exactly once. The disk re-check is what separates this from a
 hopeful sleep-retry: a genuinely stale or broken install answers "absent", is not
 retried, and fails with the same message as before, so nothing is masked. This
 matters because the window is not rare on a real machine. A box running several
 launchd agents plus live sessions nearly always has an `fno` process mid-flight
 during the few seconds `uv tool install --reinstall` takes, so every `fno update`
 was hitting it.
+
+**Both import paths, one implementation.** Deferring an import happens in two
+places, and for a while the guard covered only the first:
+
+| Path | Who imports | Guarded by |
+|---|---|---|
+| the lazy command group | `_LazyStub._load_real` | the retry inside `_load_real` |
+| `from fno. ...` inside a command body | ~2100 statements, no shared wrapper | a `sys.meta_path` finder |
+
+The second path is the volume one, and it had nothing. `cmd_truth` defers
+`from fno.agents.session_truth import ...` into the function body, so a window
+hit there raised a bare `ModuleNotFoundError` with no retry and no dual-cause
+message. The daemon runs `fno agents truth <handle> --json` once per tracked
+session, continuously, which made it the highest-frequency visitor to the window
+and the source of the `WARN: family-1 truth probe ... exited exit status: 1`
+lines an operator saw during `fno update`.
+
+`fno._import_guard` closes it with one `sys.meta_path` finder, armed from
+`fno/__init__.py`. Appended to the TAIL of `sys.meta_path`, so it is consulted
+only after every ordinary finder has missed; the happy path never reaches it and
+the startup benchmark does not move. It runs the same disk re-check, so the
+retry decision has one implementation rather than a second copy per path -- two
+copies of this logic is the same one-of-N-reachable-paths trap that created the
+gap. Editing 2100 call sites was never the alternative: a guard the next
+deferred import has to remember to opt into is one that decays.
+
+An absent module still fails immediately, now with the dual-cause message
+attached (the finder raises rather than returning `None`, which is the only way
+to reach a function-level import -- nothing wraps those bodies).
+
+**The daemon probe tolerates one transient failure.** `family1_truth_probe`
+(`crates/fno-agents/src/claude_ask.rs`) re-runs the probe once when the failure
+detail carries the guard's own dual-cause wording, and warns only if the second
+run fails too. Keyed on that wording rather than on the exit status: an exit-1
+that says anything else is a real malfunction and keeps its WARN and its single
+run, so this costs nothing until the window is actually open.
 
 **The exposure gap (symptom 3).** `/bin/sh: .../fno-py: No such file or directory`
 fails in the shell before any interpreter starts, so no import-level retry can
