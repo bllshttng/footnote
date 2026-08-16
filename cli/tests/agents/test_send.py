@@ -1926,7 +1926,16 @@ def test_dispatch_send_agent_lock_timeout_queues_durable(
 def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A timeout that cannot queue names the loss instead of implying a receipt."""
+    """A timeout that cannot queue names the loss AND stays retryable.
+
+    The plan pinned exit 12 here, written when this lane had no grace window
+    and no live attempt was reachable either way. Review showed that reads as a
+    permanent registry defect and stops the caller: hosted delivery is this
+    row's only lane, the lock being busy is the whole reason it missed, and
+    before this lane existed the same shape exited 11 and a retry delivered.
+    Exit 11 is also the truer code, since nothing failed to WRITE - there was
+    no durable address to write to.
+    """
     use_tmpdir(monkeypatch, tmp_path)
 
     from fno.agents.registry import AgentEntry, write_registry
@@ -1961,8 +1970,12 @@ def test_dispatch_send_agent_lock_timeout_without_durable_address_says_so(
             lock_timeout=0.2,
         )
 
-    assert exc_info.value.exit_code == 12
-    assert "no durable envelope was written" in str(exc_info.value)
+    text = str(exc_info.value)
+    assert exc_info.value.exit_code == 11, "retryable, not a dead end"
+    assert "no durable envelope was written" in text
+    assert text.count("no durable envelope was written") == 1, text
+    assert "retry the send" in text, text
+    assert "no durable address" in text, text
     assert not bus_log_path().exists()
 
 
@@ -2444,4 +2457,45 @@ def test_queue_grace_covers_the_holder_ceiling_not_a_flat_two_seconds() -> None:
     assert (
         _queue_grace_seconds(_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S + 10)
         == _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS
+    )
+
+
+def test_lock_timeout_queue_keeps_a_bus_only_row_on_its_designed_lane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bus-only row queues by design, so the timeout must not claim a deferral.
+
+    Reporting it as `agent-lock-timeout` hands the sender the recovery ladder -
+    withdraw the copy, then retry live - for a message that is correctly queued
+    and a row whose own policy forbids the live retry. That is this arm's own
+    wrong-cause defect, mirrored onto a different row.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="red",
+            harness="claude",
+            harness_session_id="abcd1234-1111-7222-8333-444455556666",
+            cwd="/tmp",
+            log_path="/tmp/red.log",
+            short_id="abcd1234",
+            status="live",
+            delivery_policy="bus-only",
+        )
+    ])
+
+    from fno.agents.dispatch import BUS_ONLY_POLICY, dispatch_send
+
+    _fail_first_lock_acquire(monkeypatch)
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="red", message="hello", provider=None, cwd=cwd, lock_timeout=0.1
+    )
+
+    assert result.delivery == "durable"
+    assert result.reason == BUS_ONLY_POLICY, (
+        f"a designed-queue row must keep its own reason, got {result.reason!r}"
     )

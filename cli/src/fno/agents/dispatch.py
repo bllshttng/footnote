@@ -7133,6 +7133,10 @@ def dispatch_send(
         # changed" - a false failure on a send that succeeded.
         name = canonical_name
         grace_seconds = _queue_grace_seconds(exc.timeout)
+        # Reassigned under the lock once the row is resolved: a bus-only row
+        # queues by design, not by deferral, and must not wear this lane's
+        # reason. Declared here because the receipt is built after the block.
+        queue_reason = LOCK_TIMEOUT_REASON
         try:
             with hold_agent_lock(
                 canonical_name,
@@ -7190,6 +7194,44 @@ def dispatch_send(
                     transport="direct-cli",
                     from_name_override=from_name,
                 )
+                # A legacy row with no full harness session id has no durable
+                # ADDRESS: hosted delivery is its only lane, and this path
+                # never ran one. Queuing anyway raises exit 12 "cannot queue
+                # durable mail ... no full harness session id", which reads as
+                # a permanent registry defect and stops the caller dead. The
+                # truth is narrower and recoverable, and it is what exit 11
+                # said before this lane existed: the lock was busy, live is
+                # the only lane this row has, retry.
+                if not timeout_entry.harness_session_id:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="durable-address",
+                        name=name,
+                        reason="missing_harness_session_id",
+                        caller_reason=LOCK_TIMEOUT_REASON,
+                    )
+                    raise DispatchAskError(
+                        f"live delivery to {name!r} was not attempted (its "
+                        f"agent lock stayed busy for {exc.timeout}s) and its "
+                        "registry row carries no full harness session id, so "
+                        f"it has no durable address; {_NO_ENVELOPE_CLAUSE}; "
+                        "retry the send",
+                        exit_code=11,
+                    ) from exc
+
+                # A bus-only row's queue is its DESIGNED lane, not a deferral.
+                # Reporting it as a lock timeout hands the sender the recovery
+                # ladder - withdraw, then retry live - for a message that is
+                # correctly queued, against a row whose own policy forbids the
+                # live retry. The normal path branches here; a grace-path queue
+                # that skipped the check mirrored this arm's own wrong-cause
+                # defect onto a different row.
+                queue_reason = (
+                    BUS_ONLY_POLICY
+                    if _delivery_policy_refusal(timeout_entry) == BUS_ONLY_POLICY
+                    else LOCK_TIMEOUT_REASON
+                )
+
                 ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
                 # Mint the id before the started event so started and done name
                 # the same message, as they do on the normal path.
@@ -7209,7 +7251,7 @@ def dispatch_send(
                         from_name,
                         timeout_entries,
                         msg_id=msg_id,
-                        reason=LOCK_TIMEOUT_REASON,
+                        reason=queue_reason,
                     )
                     _emit_ev(
                         "agent_send_done",
@@ -7217,7 +7259,7 @@ def dispatch_send(
                         provider=timeout_entry.harness,
                         msg_id=msg_id,
                         delivery="durable",
-                        reason=LOCK_TIMEOUT_REASON,
+                        reason=queue_reason,
                     )
                 finally:
                     _DISPATCH_CTX.reset(ctx_token)
@@ -7264,15 +7306,18 @@ def dispatch_send(
         # a retry-on-failure caller enqueue the same message twice. The live
         # lane's cause rides back as the receipt's reason, and the holder goes
         # to stderr the way a live-miss demotion notice does.
-        print(
-            f"live delivery deferred for {name!r}: "
-            f"lock busy after {exc.timeout}s{exc.holder_note()}",
-            file=sys.stderr,
-        )
+        # Not for a bus-only row: its queue is the designed destination, so a
+        # "live delivery deferred" notice would report a miss that never was.
+        if queue_reason == LOCK_TIMEOUT_REASON:
+            print(
+                f"live delivery deferred for {name!r}: "
+                f"lock busy after {exc.timeout}s{exc.holder_note()}",
+                file=sys.stderr,
+            )
         return DispatchSendResult(
             msg_id=msg_id,
             delivery="durable",
-            reason=LOCK_TIMEOUT_REASON,
+            reason=queue_reason,
         )
 
 
