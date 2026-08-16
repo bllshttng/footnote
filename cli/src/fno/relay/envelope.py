@@ -32,7 +32,12 @@ import re
 from typing import Optional
 
 from fno.bus.log import Envelope
-from fno.mail.envelope import ForgedEnvelopeError, contains_fno_mail_tag, harness_for_provider
+from fno.mail.envelope import (
+    ForgedEnvelopeError,
+    _refuse_unsafe_attr,
+    contains_fno_mail_tag,
+    harness_for_provider,
+)
 
 # Relay-private meta keys on the bus envelope.
 META_HOP = "hop_count"
@@ -60,16 +65,22 @@ def frame(from_session: str, harness: str, model: Optional[str], body: str) -> s
     the single-line, no-close variant of the ``<fno_mail>`` envelope).
 
     Raises :class:`fno.mail.envelope.ForgedEnvelopeError` if ``body`` contains
-    an ``<fno_mail`` or ``</fno_mail>`` tag. This is the single producer every
-    delivery vehicle's framed line derives from -- the daemon-owned
-    ``worker.submit`` RPC and the claude ``mail-inject`` binary each take an
-    already-framed string built here, so neither downstream check alone can
-    cover a peer-controlled body smuggling a second open tag."""
+    an ``<fno_mail`` or ``</fno_mail>`` tag, or if an attribute value itself
+    could forge a second tag once interpolated -- ``from_session`` rides bus
+    provenance a peer can influence, not a value this function controls. This
+    is the single producer every delivery vehicle's framed line derives from --
+    the daemon-owned ``worker.submit`` RPC and the claude ``mail-inject``
+    binary each take an already-framed string built here, so neither
+    downstream check alone can cover a peer-controlled body or attribute
+    smuggling a second open tag."""
     if contains_fno_mail_tag(body):
         raise ForgedEnvelopeError(
             "relay body contains an <fno_mail> tag. The single-line envelope "
             "frames peer mail; a body cannot contain one."
         )
+    for name, value in (("from", from_session), ("harness", harness), ("model", model)):
+        if value:
+            _refuse_unsafe_attr(name, value)
     one_line = " ".join(body.split())
     model_attr = f' model="{model}"' if model else ""
     return f'<fno_mail from="{from_session}" harness="{harness}"{model_attr}> {one_line}'
