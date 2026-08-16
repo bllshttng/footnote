@@ -295,6 +295,11 @@ pub enum Event {
     /// answers, `n`/`N` cycle the blocked queue, Enter focuses, Esc closes) are
     /// interpreted by the client's view layer, not here (like OpenSelector).
     OpenAnswers,
+    /// Open the yard overlay (prefix+m, x-b2bf): the fleet as f[no]nimals -
+    /// collection - one eye glyph per citizen, one spotlight sprite at a
+    /// time. Overlay-mode keys (`n`/`N` pick, `q`/Esc close) are interpreted
+    /// by the client's view layer, not here (like OpenAnswers).
+    OpenYard,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
     /// (x-b186) Cycle the sideline density slim -> regular -> extended
@@ -760,6 +765,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sideline row selector",
         ),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
+        b(
+            b'm',
+            "yard",
+            OpenYard,
+            Global,
+            "the yard (fleet as a menagerie)",
+        ),
         b(
             b'b',
             "toggle-sideline",

@@ -711,6 +711,57 @@ def cost(ctx: typer.Context) -> None:
 @app.command(
     hidden=True,
     help=(
+        "The yard identity fold: species, rarity tier, crown, and first-sighting "
+        "per registry citizen.\n\n"
+        "Read-only over the agent registry and the graph archive. Consumed by "
+        "the mux yard overlay (fail-open shell-out); `--json` is the machine "
+        "surface, the text mode is a one-line-per-citizen summary. Outcome "
+        "only - never the rank, the frequency, or the boundary."
+    ),
+)
+def yard(
+    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the fold as JSON."),
+) -> None:
+    """Fold the fleet into yard citizens (the f[no]nimals)."""
+    import json as _json
+
+    from fno import paths
+    from fno.agents.registry import load_registry
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
+    from fno.yard import RARITY_TIERS, fold
+
+    rows = load_registry()
+    archive_path = paths.graph_archive_json()
+    # Strict on purpose: this is a truth-bound fold, not a browse verb. The
+    # lenient reader turns a corrupt archive into [], which would mark every
+    # citizen a first-sighting - fabricated outcome on the machine surface the
+    # mux renders. Unreadable history fails the fold so the overlay degrades.
+    try:
+        archive = read_graph_strict(archive_path) if archive_path.exists() else []
+    except GraphUnreadableError as exc:
+        typer.secho(f"yard: archive unreadable, fold refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    citizens = fold(rows, archive)
+
+    if as_json:
+        typer.echo(_json.dumps({"citizens": citizens}, indent=2))
+        return
+    if not citizens:
+        typer.echo("the yard is empty (no registry rows)")
+        return
+    for c in citizens:
+        mark = " NEW" if c["first_sighting"] else ""
+        crown = f" crown {c['crown_level']}" if c["crown_level"] else ""
+        typer.echo(
+            f"{c['name']:<24} species {c['species']:>2}  {c['rarity']:<9}{crown}{mark}"
+        )
+    n_new = sum(1 for c in citizens if c["first_sighting"])
+    typer.echo(f"{len(citizens)} citizens, {n_new} first sighting(s); tiers: {'/'.join(RARITY_TIERS)}")
+
+
+@app.command(
+    hidden=True,
+    help=(
         "Run the internal sigma-review panel on the current diff.\n\n"
         "Reads the diff from --diff path or `git diff HEAD~1` by default.\n"
         "Resolves session_id from --session or target-state.md.\n\n"

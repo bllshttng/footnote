@@ -9959,28 +9959,52 @@ def cmd_archive_dedupe_ids(
 @cli.command(
     "album",
     hidden=True,
-    epilog="Read-only browse over graph-archive.json. `fno backlog get <id>` "
-    "still resolves one archived node by id; `fno backlog unarchive <id>` "
-    "brings one back into the working graph.",
+    epilog="Read-only browse over graph-archive.json: the memento book of "
+    "shipped work. A card with no gift says so - 43% of archived done nodes "
+    "carry no PR, and a gap in the record is itself record. `fno backlog get "
+    "<id>` still resolves one archived node by id; `fno backlog unarchive "
+    "<id>` brings one back into the working graph.",
 )
 def cmd_album(
-    limit: int = typer.Option(20, "--limit", help="Max cards to print, newest first."),
+    limit: int = typer.Option(20, "--limit", help="Cards per page."),
+    offset: int = typer.Option(0, "--offset", help="Skip the first N cards."),
     project: Optional[str] = typer.Option(None, "--project", help="Filter to one project."),
     json_output: bool = typer.Option(
-        False, "--json", "-J", help="Full entries as a JSON array instead of cards."
+        False, "--json", "-J", help="Emit the page as a JSON card array."
     ),
 ) -> None:
-    """Browse shipped work: the archive as a collection, newest first.
+    """Browse shipped work: done nodes from the archive, newest first.
 
     Every archive reader before this was a fallback on a lookup miss - given
     an id you could retrieve one archived node, but nothing let you page
     through what shipped. This is that one read verb, and it adds nothing to
     the archive's shape: the sweep already writes every field a card shows.
+    Done nodes only - the album is merged work, and superseded entries (the
+    214 in the archive against 1741 done) are not ships. Card fields: title,
+    id, completed_at, and pr_url present only when one was recorded.
     """
     from fno.graph.store import read_graph
 
     archive_path = _archive_path()
-    entries = read_graph(archive_path) if archive_path.exists() else []
+    entries = (
+        [
+            e
+            for e in read_graph(archive_path)
+            if isinstance(e, dict)
+            # Terminal facts, not the persisted field: legacy archived rows
+            # predate status stamping and carry only completed_at, which the
+            # archive subsystem itself treats as done (archive._is_done).
+            and (
+                str(e.get("status") or "") == "done"
+                or bool(e.get("completed_at"))
+            )
+            # Superseded is derived from superseded_by (graph/types.py), so a
+            # row can carry both; the album shows shipped work only.
+            and not e.get("superseded_by")
+        ]
+        if archive_path.exists()
+        else []
+    )
     if project:
         entries = [e for e in entries if e.get("project") == project]
 
@@ -9988,26 +10012,58 @@ def cmd_album(
         return e.get("completed_at") or e.get("updated") or e.get("created_at") or ""
 
     entries.sort(key=_sort_key, reverse=True)
-    page = entries[:limit]
+    page = entries[max(offset, 0) : max(offset, 0) + max(limit, 0)]
 
     if json_output:
-        typer.echo(json.dumps(page, indent=2))
+        cards = []
+        for e in page:
+            card = {
+                "id": e.get("id"),
+                "title": e.get("title"),
+                "completed_at": e.get("completed_at"),
+            }
+            # Same honesty rule as the text mode: a url-less pr_number is a
+            # real gift (reconcile records the pair independently), so the
+            # machine surface must not drop it when the url is absent.
+            if e.get("pr_number"):
+                card["pr_number"] = e["pr_number"]
+            if e.get("pr_url"):
+                card["pr_url"] = e["pr_url"]
+            cards.append(card)
+        typer.echo(json.dumps(cards, indent=2))
         return
 
-    if not page:
+    if not entries:
         typer.echo("The album is empty.")
         return
 
+    if not page:
+        # An offset past the last card is out of range, not an inverted range;
+        # an empty page at a valid offset is the zero-width limit, not the offset.
+        if max(offset, 0) >= len(entries):
+            typer.echo(f"album: {len(entries)} shipped, offset {max(offset, 0)} is past the end")
+        else:
+            typer.echo(f"album: {len(entries)} shipped, --limit {limit} shows nothing")
+        return
+
+    typer.echo(
+        f"album: {len(entries)} shipped, showing {max(offset, 0) + 1}-{max(offset, 0) + len(page)}"
+    )
     for e in page:
         ts = _sort_key(e)
         date = ts[:10] if ts else "?"
         title = e.get("title") or e.get("slug") or e.get("id")
-        gift = f" -> {e['pr_url']}" if e.get("pr_url") else " (no gift)"
-        typer.echo(f"{date}  {e.get('id')}  {title}{gift}")
+        if e.get("pr_number"):
+            gift = f"PR #{e['pr_number']}"
+        elif e.get("pr_url"):
+            gift = f"PR {str(e['pr_url']).rstrip('/').rsplit('/', 1)[-1]}"
+        else:
+            gift = "no gift"
+        typer.echo(f"{date}  {e.get('id')}  {title}  {gift}")
 
-    remaining = len(entries) - len(page)
+    remaining = len(entries) - len(page) - max(offset, 0)
     if remaining > 0:
-        typer.echo(f"... {remaining} more. Raise --limit or narrow with --project.")
+        typer.echo(f"... {remaining} more. Raise --limit or page with --offset.")
 
 
 @cli.command(

@@ -181,7 +181,7 @@ crates/fno/build.rs:2
 crates/fno/src/agents_view.rs:94
 crates/fno/src/backlog_view.rs:91
 crates/fno/src/bootstrap.rs:11
-crates/fno/src/client.rs:55
+crates/fno/src/client.rs:56
 crates/fno/src/clipboard.rs:2
 crates/fno/src/connections_view.rs:3
 crates/fno/src/digest_overlay.rs:1
@@ -191,9 +191,11 @@ crates/fno/src/needs_overlay.rs:1
 crates/fno/src/proto.rs:4
 crates/fno/src/pty.rs:1
 crates/fno/src/server.rs:23
+crates/fno/src/sprites.rs:6
 crates/fno/src/squad.rs:6
 crates/fno/src/view_store.rs:4
-crates/fno/src/web.rs:1"
+crates/fno/src/web.rs:1
+crates/fno/src/yard_overlay.rs:4"
 count_status_identifiers() {
     awk '
         {

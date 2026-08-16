@@ -531,25 +531,45 @@ def test_album_sorts_newest_first_and_shows_the_gift(tmp_path, monkeypatch):
     g, archive = _route(tmp_path, monkeypatch)
     _seed(g, [])
     archive.write_text(json.dumps({"entries": [
-        {"id": "ab-old00001", "title": "Old One", "completed_at": "2026-01-01T00:00:00Z"},
-        {"id": "ab-new00001", "title": "New One", "completed_at": "2026-06-01T00:00:00Z",
+        {"id": "ab-old00001", "title": "Old One", "status": "done",
+         "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-new00001", "title": "New One", "status": "done",
+         "completed_at": "2026-06-01T00:00:00Z", "pr_number": 1,
          "pr_url": "https://github.com/x/y/pull/1"},
     ]}) + "\n")
     r = runner.invoke(app, ["backlog", "album"])
     assert r.exit_code == 0, r.output
     lines = [line for line in r.output.splitlines() if line.strip()]
-    assert lines[0].startswith("2026-06-01")
-    assert "-> https://github.com/x/y/pull/1" in lines[0]
-    assert lines[1].startswith("2026-01-01")
-    assert "(no gift)" in lines[1]
+    assert lines[0].startswith("album: 2 shipped")
+    assert lines[1].startswith("2026-06-01")
+    assert "PR #1" in lines[1]
+    assert lines[2].startswith("2026-01-01")
+    assert "no gift" in lines[2]
+
+
+def test_album_excludes_superseded(tmp_path, monkeypatch):
+    g, archive = _route(tmp_path, monkeypatch)
+    _seed(g, [])
+    archive.write_text(json.dumps({"entries": [
+        {"id": "ab-done0001", "title": "Shipped", "status": "done",
+         "completed_at": "2026-06-01T00:00:00Z"},
+        {"id": "ab-super001", "title": "Eclipsed", "status": "superseded",
+         "superseded_by": "ab-done0001", "completed_at": "2026-06-02T00:00:00Z"},
+    ]}) + "\n")
+    r = runner.invoke(app, ["backlog", "album"])
+    assert r.exit_code == 0, r.output
+    assert "ab-done0001" in r.output
+    assert "ab-super001" not in r.output
 
 
 def test_album_project_filter(tmp_path, monkeypatch):
     g, archive = _route(tmp_path, monkeypatch)
     _seed(g, [])
     archive.write_text(json.dumps({"entries": [
-        {"id": "ab-p1", "title": "P1", "completed_at": "2026-01-01T00:00:00Z", "project": "alpha"},
-        {"id": "ab-p2", "title": "P2", "completed_at": "2026-01-02T00:00:00Z", "project": "beta"},
+        {"id": "ab-p1", "title": "P1", "status": "done",
+         "completed_at": "2026-01-01T00:00:00Z", "project": "alpha"},
+        {"id": "ab-p2", "title": "P2", "status": "done",
+         "completed_at": "2026-01-02T00:00:00Z", "project": "beta"},
     ]}) + "\n")
     r = runner.invoke(app, ["backlog", "album", "--project", "alpha"])
     assert r.exit_code == 0, r.output
@@ -561,7 +581,8 @@ def test_album_json_output_and_limit(tmp_path, monkeypatch):
     g, archive = _route(tmp_path, monkeypatch)
     _seed(g, [])
     archive.write_text(json.dumps({"entries": [
-        {"id": f"ab-{i:04d}", "completed_at": f"2026-01-{i:02d}T00:00:00Z"}
+        {"id": f"ab-{i:04d}", "status": "done", "title": f"n{i}",
+         "completed_at": f"2026-01-{i:02d}T00:00:00Z"}
         for i in range(1, 6)
     ]}) + "\n")
     r = runner.invoke(app, ["backlog", "album", "--limit", "2", "--json"])
@@ -569,13 +590,16 @@ def test_album_json_output_and_limit(tmp_path, monkeypatch):
     hits = json.loads(r.output)
     assert len(hits) == 2
     assert hits[0]["id"] == "ab-0005"  # newest first
+    # Cards, not full entries: the gift appears only when recorded.
+    assert hits[0] == {"id": "ab-0005", "title": "n5", "completed_at": "2026-01-05T00:00:00Z"}
 
 
 def test_album_reports_overflow_count(tmp_path, monkeypatch):
     g, archive = _route(tmp_path, monkeypatch)
     _seed(g, [])
     archive.write_text(json.dumps({"entries": [
-        {"id": f"ab-{i:04d}", "completed_at": f"2026-01-{i:02d}T00:00:00Z"}
+        {"id": f"ab-{i:04d}", "status": "done",
+         "completed_at": f"2026-01-{i:02d}T00:00:00Z"}
         for i in range(1, 6)
     ]}) + "\n")
     r = runner.invoke(app, ["backlog", "album", "--limit", "2"])
