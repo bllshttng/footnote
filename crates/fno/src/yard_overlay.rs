@@ -74,7 +74,7 @@ pub async fn fold_now() -> Option<Vec<YardItem>> {
 
 /// Parse the verb's JSON payload. Fails quiet (returns `None`) on
 /// unparseable output so a torn stdout degrades the overlay, not crashes it.
-/// A species index outside the vendored table is the same class of damage:
+/// A species index outside the shipped table is the same class of damage:
 /// the two halves of the fold upgrade independently, and `% SPECIES_COUNT`
 /// downstream would fold the skew onto the wrong animal SILENTLY - degrade
 /// loud instead of rendering a citizen as a species it is not.

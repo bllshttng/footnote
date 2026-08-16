@@ -5465,7 +5465,7 @@ impl View {
                 Some(sel + 1),
             );
         } else if let Some(yv) = &self.yard {
-            // (x-b2bf) The yard: the fleet as a Neko Atsume collection. The
+            // (x-b2bf) The yard: the fleet as f[no]nimals. The
             // crowd is one eye glyph per roster citizen (each glyph computed
             // from that row's own badge/need values); the spotlight is ONE
             // 12-column sprite for the selected citizen, its eye from the
@@ -25872,7 +25872,7 @@ mod tests {
             ("a", crate::sprites::Eye::Working, 0u32),
             ("b", crate::sprites::Eye::Attention, 0),
         ];
-        let id = yard_item("b", 3, "common", 0, false);
+        let id = yard_item("b", 0, "common", 0, false);
         let lines = yard_overlay_lines(&crowd, 1, Some(&id), 0, NeedsFooter::AsOf);
         // Crowd row: exactly the two eye glyphs.
         assert!(lines
@@ -25886,7 +25886,7 @@ mod tests {
         // exactly once (padding trails, so match on the prefix; the sprite's
         // own blank top row is indistinguishable from padding by design),
         // and NO hat row (crown 0) - one sprite, no second block.
-        for row in crate::sprites::render_frame(3, 0, crate::sprites::Eye::Attention) {
+        for row in crate::sprites::render_frame(0, 0, crate::sprites::Eye::Attention) {
             if row.trim().is_empty() {
                 continue;
             }

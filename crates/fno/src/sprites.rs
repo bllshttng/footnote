@@ -1,461 +1,464 @@
-//! The yard's sprite table (x-b2bf), vendored from the operator-supplied
-//! reference (Claude Code's deprecated `/buddy` feature, 2026-08-15). This
-//! file is the repo's copy and the one source of truth; the vault reference
-//! it was generated from is superseded. 18 species x 3 frames x 5 rows x 12
-//! columns of plain monospace text - the same cell grid the mux already
-//! renders, which is why there is no image pipeline to build.
+//! The yard's sprite table (x-b2bf): the f[no]nimals. 18 species x 3 frames
+//! x 5 rows x 12 columns of plain monospace text - the same cell grid the
+//! mux already renders, which is why there is no image pipeline to build.
+//! The art here is ORIGINAL to this repo (the 3x5x12 cell-grid format and
+//! the swapped-eye convention are the format; no prior sprite set's
+//! drawings are copied).
 //!
 //! The rule that keeps a sprite honest: the eye is the ONLY status-carrying
 //! cell, and it is computed at render time from the same badge/need values
 //! the roster row already renders. Same body, different eye - a status
-//! change never redraws the cat, and a sprite cannot disagree with its row
-//! because there is no second lookup table to drift. Everything else on the
-//! sprite (species, frame, hat) is an identity or flavour channel that
+//! change never redraws the animal, and a sprite cannot disagree with its
+//! row because there is no second lookup table to drift. Everything else on
+//! the sprite (species, frame, hat) is an identity or flavour channel that
 //! claims no truth and so cannot lie.
 
-/// Sprite cell geometry, pinned by test against the vendored table.
+/// Sprite cell geometry, pinned by test against the table.
 pub const SPRITE_W: usize = 12;
 pub const SPRITE_H: usize = 5;
 pub const FRAME_COUNT: usize = 3;
 pub const SPECIES_COUNT: usize = 18;
 
 pub const SPECIES_NAMES: [&str; SPECIES_COUNT] = [
-    "duck", "goose", "blob", "cat", "dragon", "octopus", "owl", "penguin", "turtle", "snail",
-    "ghost", "axolotl", "capybara", "cactus", "robot", "rabbit", "mushroom", "chonk",
+    "cat", "crow", "frog", "fox", "whale", "bee", "bat", "crab", "yak", "moth", "sloth", "newt",
+    "hare", "trout", "boar", "ram", "wren", "ibex",
 ];
 
-/// frames[species][frame][row], vendored verbatim from the reference.
+/// frames[species][frame][row]. Original art for the fno yard, drawn
+/// for this repo; the 3x5x12 cell-grid format is the only
+/// inheritance. The eye cells carry `EYE_DEFAULT` ('·');
+/// [`render_frame`] swaps every occurrence for the status eye.
 pub const SPECIES_FRAMES: [[[&str; SPRITE_H]; FRAME_COUNT]; SPECIES_COUNT] = [
-    // duck
-    [
-        [
-            "            ",
-            "    __      ",
-            "  <(\u{b7} )___  ",
-            "   (  ._>   ",
-            "    `--\u{b4}    ",
-        ],
-        [
-            "            ",
-            "    __      ",
-            "  <(\u{b7} )___  ",
-            "   (  ._>   ",
-            "    `--\u{b4}~   ",
-        ],
-        [
-            "            ",
-            "    __      ",
-            "  <(\u{b7} )___  ",
-            "   (  .__>  ",
-            "    `--\u{b4}    ",
-        ],
-    ],
-    // goose
-    [
-        [
-            "            ",
-            "     (\u{b7}>    ",
-            "     ||     ",
-            "   _(__)_   ",
-            "    ^^^^    ",
-        ],
-        [
-            "            ",
-            "    (\u{b7}>     ",
-            "     ||     ",
-            "   _(__)_   ",
-            "    ^^^^    ",
-        ],
-        [
-            "            ",
-            "     (\u{b7}>>   ",
-            "     ||     ",
-            "   _(__)_   ",
-            "    ^^^^    ",
-        ],
-    ],
-    // blob
-    [
-        [
-            "            ",
-            "   .----.   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            "  (      )  ",
-            "   `----\u{b4}   ",
-        ],
-        [
-            "            ",
-            "  .------.  ",
-            " (  \u{b7}  \u{b7}  ) ",
-            " (        ) ",
-            "  `------\u{b4}  ",
-        ],
-        [
-            "            ",
-            "    .--.    ",
-            "   (\u{b7}  \u{b7})   ",
-            "   (    )   ",
-            "    `--\u{b4}    ",
-        ],
-    ],
     // cat
     [
         [
             "            ",
-            "   /\\_/\\    ",
-            "  ( \u{b7}   \u{b7})  ",
-            "  (  \u{3c9}  )   ",
-            "  (\")_(\")   ",
+            "   /\\ /\\    ",
+            "  ( ·   ·)  ",
+            "   (  ω )   ",
+            "  (_)(_)    ",
         ],
         [
             "            ",
-            "   /\\_/\\    ",
-            "  ( \u{b7}   \u{b7})  ",
-            "  (  \u{3c9}  )   ",
-            "  (\")_(\")~  ",
+            "   /\\ /\\    ",
+            "  ( ·   ·)  ",
+            "   (  ω )   ",
+            "  (_)(_)~   ",
         ],
         [
             "            ",
-            "   /\\-/\\    ",
-            "  ( \u{b7}   \u{b7})  ",
-            "  (  \u{3c9}  )   ",
-            "  (\")_(\")   ",
+            "  /\\  /\\    ",
+            "  ( ·   ·)  ",
+            "   (  ω )~  ",
+            "  (_)(_)    ",
         ],
     ],
-    // dragon
+    // crow
     [
         [
             "            ",
-            "  /^\\  /^\\  ",
-            " <  \u{b7}  \u{b7}  > ",
-            " (   ~~   ) ",
-            "  `-vvvv-\u{b4}  ",
+            "     \\/     ",
+            "   <( ·)    ",
+            "    /||\\    ",
+            "   ~  ~     ",
         ],
         [
             "            ",
-            "  /^\\  /^\\  ",
-            " <  \u{b7}  \u{b7}  > ",
-            " (        ) ",
-            "  `-vvvv-\u{b4}  ",
+            "    \\/      ",
+            "   <( ·)~   ",
+            "    /||\\    ",
+            "   ~  ~     ",
         ],
         [
-            "   ~    ~   ",
-            "  /^\\  /^\\  ",
-            " <  \u{b7}  \u{b7}  > ",
-            " (   ~~   ) ",
-            "  `-vvvv-\u{b4}  ",
+            "            ",
+            "     \\/     ",
+            "    (· )>   ",
+            "    /||\\    ",
+            "     ~  ~   ",
         ],
     ],
-    // octopus
+    // frog
     [
         [
             "            ",
-            "   .----.   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            "  (______)  ",
-            "  /\\/\\/\\/\\  ",
+            "  _.._      ",
+            " ( ·  · )   ",
+            " ( ____ )   ",
+            "  _    _    ",
         ],
         [
             "            ",
-            "   .----.   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            "  (______)  ",
-            "  \\/\\/\\/\\/  ",
+            "  _.._      ",
+            " ( ·  · )   ",
+            " ( ____ )   ",
+            "  __   __   ",
         ],
         [
-            "     o      ",
-            "   .----.   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            "  (______)  ",
-            "  /\\/\\/\\/\\  ",
+            "            ",
+            "  -..-      ",
+            " ( ·  - )   ",
+            " ( ____ )   ",
+            "  _    _    ",
         ],
     ],
-    // owl
+    // fox
     [
         [
             "            ",
-            "   /\\  /\\   ",
-            "  ((\u{b7})(\u{b7}))  ",
-            "  (  ><  )  ",
-            "   `----\u{b4}   ",
+            "  /\\   /\\   ",
+            " ( ·\\_/· )  ",
+            "  > ~~~ <   ",
+            "   \\___/    ",
         ],
         [
             "            ",
-            "   /\\  /\\   ",
-            "  ((\u{b7})(\u{b7}))  ",
-            "  (  ><  )  ",
-            "   .----.   ",
+            "  /\\   /\\   ",
+            " ( ·\\_/· )  ",
+            "  > ~~~ >   ",
+            "   \\___/    ",
         ],
         [
             "            ",
-            "   /\\  /\\   ",
-            "  ((\u{b7})(-))  ",
-            "  (  ><  )  ",
-            "   `----\u{b4}   ",
+            "  /\\   /\\   ",
+            " ( ·\\_/· )  ",
+            "  < ~~~ <   ",
+            "   \\___/~   ",
         ],
     ],
-    // penguin
+    // whale
     [
         [
             "            ",
-            "  .---.     ",
-            "  (\u{b7}>\u{b7})     ",
-            " /(   )\\    ",
-            "  `---\u{b4}     ",
+            "   _____    ",
+            "  ( · ___)  ",
+            "   \\____\\   ",
+            "    ~ ~ ~   ",
         ],
         [
             "            ",
-            "  .---.     ",
-            "  (\u{b7}>\u{b7})     ",
-            " |(   )|    ",
-            "  `---\u{b4}     ",
+            "   _____    ",
+            "  ( · ___)  ",
+            "   \\____\\   ",
+            "   ~ ~ ~    ",
         ],
         [
-            "  .---.     ",
-            "  (\u{b7}>\u{b7})     ",
-            " /(   )\\    ",
-            "  `---\u{b4}     ",
+            "            ",
+            "  ______    ",
+            " ( · ___ )  ",
+            "  \\____\\    ",
+            "    ~ ~ ~   ",
+        ],
+    ],
+    // bee
+    [
+        [
+            "            ",
+            "  \\ /       ",
+            " ( ·)@)     ",
+            "  (   )     ",
+            "   ~ ~      ",
+        ],
+        [
+            "            ",
+            "      \\ /   ",
+            "   ((@ (·)  ",
+            "    (   )   ",
+            "     ~ ~    ",
+        ],
+        [
+            "            ",
+            "  \\ /       ",
+            " ( ·)@)     ",
+            "  (   )~    ",
             "   ~ ~      ",
         ],
     ],
-    // turtle
+    // bat
     [
         [
             "            ",
-            "   _,--._   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            " /[______]\\ ",
-            "  ``    ``  ",
+            " \\/     \\/  ",
+            "  ( ·   · ) ",
+            "   \\ --- /  ",
+            "     ^ ^    ",
         ],
         [
             "            ",
-            "   _,--._   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            " /[______]\\ ",
-            "   ``  ``   ",
+            " \\_/\\ /\\_/  ",
+            "  ( ·   · ) ",
+            "   \\ --- /  ",
+            "     ^ ^    ",
         ],
         [
             "            ",
-            "   _,--._   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            " /[======]\\ ",
-            "  ``    ``  ",
+            " \\/     \\/  ",
+            "  ( ·   · ) ",
+            "   / --- \\  ",
+            "     ^ ^    ",
         ],
     ],
-    // snail
+    // crab
     [
         [
             "            ",
-            " \u{b7}    .--.  ",
-            "  \\  ( @ )  ",
-            "   \\_`--\u{b4}   ",
-            "  ~~~~~~~   ",
+            " \\        / ",
+            "  ( ·    · )",
+            "   ) ____ ( ",
+            "  / /  \\ \\  ",
         ],
         [
             "            ",
-            "  \u{b7}   .--.  ",
-            "  |  ( @ )  ",
-            "   \\_`--\u{b4}   ",
-            "  ~~~~~~~   ",
+            " \\        / ",
+            "  ( ·    · )",
+            "   ( ____ ) ",
+            "  / /  \\ \\  ",
         ],
         [
             "            ",
-            " \u{b7}    .--.  ",
-            "  \\  ( @  ) ",
-            "   \\_`--\u{b4}   ",
-            "   ~~~~~~   ",
+            " /        \\ ",
+            "  ( ·    · )",
+            "   ) ____ ( ",
+            "  \\ \\  / /  ",
         ],
     ],
-    // ghost
+    // yak
     [
         [
             "            ",
-            "   .----.   ",
-            "  / \u{b7}  \u{b7} \\  ",
-            "  |      |  ",
-            "  ~`~``~`~  ",
+            "  ^^    ^^  ",
+            " ( · \\_/ · )",
+            "  ) ~~~~ (  ",
+            "  /|    |\\  ",
         ],
         [
             "            ",
-            "   .----.   ",
-            "  / \u{b7}  \u{b7} \\  ",
-            "  |      |  ",
-            "  `~`~~`~`  ",
+            "  ^^    ^^  ",
+            " ( · \\_/ · )",
+            "  ( ~~~~ )  ",
+            "  /|    |\\  ",
         ],
         [
-            "    ~  ~    ",
-            "   .----.   ",
-            "  / \u{b7}  \u{b7} \\  ",
-            "  |      |  ",
-            "  ~~`~~`~~  ",
+            "            ",
+            "  ^^    ^^  ",
+            " ( · \\_/ · )",
+            "  ) ~~~~ (  ",
+            "  /|    |\\~ ",
         ],
     ],
-    // axolotl
+    // moth
     [
         [
             "            ",
-            "}~(______)~{",
-            "}~(\u{b7} .. \u{b7})~{",
-            "  ( .--. )  ",
-            "  (_/  \\_)  ",
+            "  ^  /\\  ^  ",
+            "\\( · || · )/",
+            "  \\  ||  /  ",
+            "     ~~     ",
         ],
         [
             "            ",
-            "~}(______){~",
-            "~}(\u{b7} .. \u{b7}){~",
-            "  ( .--. )  ",
-            "  (_/  \\_)  ",
+            "  ^  \\/  ^  ",
+            "\\( · || · )/",
+            "  \\  ||  /  ",
+            "     ~~     ",
         ],
         [
             "            ",
-            "}~(______)~{",
-            "}~(\u{b7} .. \u{b7})~{",
-            "  (  --  )  ",
-            "  ~_/  \\_~  ",
+            "  ^  /\\  ^  ",
+            "\\( · || · )/",
+            "   \\ || /   ",
+            "     ~~     ",
         ],
     ],
-    // capybara
+    // sloth
     [
         [
             "            ",
-            "  n______n  ",
-            " ( \u{b7}    \u{b7} ) ",
-            " (   oo   ) ",
-            "  `------\u{b4}  ",
-        ],
-        [
-            "            ",
-            "  n______n  ",
-            " ( \u{b7}    \u{b7} ) ",
-            " (   Oo   ) ",
-            "  `------\u{b4}  ",
-        ],
-        [
-            "    ~  ~    ",
-            "  u______n  ",
-            " ( \u{b7}    \u{b7} ) ",
-            " (   oo   ) ",
-            "  `------\u{b4}  ",
-        ],
-    ],
-    // cactus
-    [
-        [
-            "            ",
-            " n  ____  n ",
-            " | |\u{b7}  \u{b7}| | ",
-            " |_|    |_| ",
-            "   |    |   ",
+            "    ____    ",
+            "   ( ·  )   ",
+            "  / o~~o \\  ",
+            " (__)  (_)  ",
         ],
         [
             "            ",
             "    ____    ",
-            " n |\u{b7}  \u{b7}| n ",
-            " |_|    |_| ",
+            "   ( ·  )~  ",
+            "  / o~~o \\  ",
+            " (__)  (_)  ",
+        ],
+        [
+            "            ",
+            "    ____    ",
+            "   ( -  )   ",
+            "  / o~~o \\  ",
+            " (__)  (_)  ",
+        ],
+    ],
+    // newt
+    [
+        [
+            "            ",
+            "      /\\    ",
+            "  ~ (·  )   ",
+            "  ~~ /||\\   ",
+            "    ~  ~    ",
+        ],
+        [
+            "            ",
+            "      /\\    ",
+            "  (·  ) ~   ",
+            "   /||\\ ~~  ",
+            "    ~  ~    ",
+        ],
+        [
+            "            ",
+            "      /\\    ",
+            "  ~ (·  )   ",
+            "   /||\\~    ",
+            "   ~  ~     ",
+        ],
+    ],
+    // hare
+    [
+        [
+            "            ",
+            "  ( \\ / )   ",
+            " ( ·    · ) ",
+            "  (  ..  )  ",
+            "  (\")_(\")   ",
+        ],
+        [
+            "            ",
+            " ( | \\ | )  ",
+            " ( ·    · ) ",
+            "  (  ..  )  ",
+            "  (\")_(\")   ",
+        ],
+        [
+            "            ",
+            "  ( \\ / )   ",
+            " ( ·    · ) ",
+            "  ( .  . )  ",
+            "  (\")_(\")~  ",
+        ],
+    ],
+    // trout
+    [
+        [
+            "            ",
+            "    <\\)     ",
+            "  <( ·   }=<",
+            "    </      ",
+            "   ~ ~      ",
+        ],
+        [
+            "            ",
+            "     \\)>    ",
+            "  >={  · )> ",
+            "    >\\      ",
+            "   ~ ~      ",
+        ],
+        [
+            "            ",
+            "    <\\)     ",
+            "  <( ·   }=<",
+            "    </      ",
+            "     ~ ~    ",
+        ],
+    ],
+    // boar
+    [
+        [
+            "            ",
+            "  ,,    ,,  ",
+            " ( · \\ / · )",
+            "  ( ~~~~ )  ",
+            "  /|    |\\  ",
+        ],
+        [
+            "            ",
+            "  ,,    ,,  ",
+            " ( · \\ / · )",
+            "  ( ~~~~ )~ ",
+            "  /|    |\\  ",
+        ],
+        [
+            "            ",
+            " ,,      ,, ",
+            " ( · \\ / · )",
+            "  ( ~~~~ )  ",
+            "  /|    |\\  ",
+        ],
+    ],
+    // ram
+    [
+        [
+            "            ",
+            " @ @        ",
+            " ( · \\_/ · )",
+            "  ) ~~~~ (  ",
             "   |    |   ",
         ],
         [
-            " n        n ",
-            " |  ____  | ",
-            " | |\u{b7}  \u{b7}| | ",
-            " |_|    |_| ",
+            "            ",
+            "  @ @       ",
+            " ( · \\_/ · )",
+            "  ( ~~~~ )  ",
             "   |    |   ",
         ],
+        [
+            "            ",
+            " @ @        ",
+            " ( · \\_/ · )",
+            "  ) ~~~~ (  ",
+            "   |  | |   ",
+        ],
     ],
-    // robot
+    // wren
     [
         [
             "            ",
-            "   .[||].   ",
-            "  [ \u{b7}  \u{b7} ]  ",
-            "  [ ==== ]  ",
-            "  `------\u{b4}  ",
+            "    ><      ",
+            "   <(· )    ",
+            "    /||\\    ",
+            "   ~~       ",
         ],
         [
             "            ",
-            "   .[||].   ",
-            "  [ \u{b7}  \u{b7} ]  ",
-            "  [ -==- ]  ",
-            "  `------\u{b4}  ",
+            "    ><      ",
+            "  ~ <(· )   ",
+            "    /||\\    ",
+            "     ~~     ",
         ],
         [
-            "     *      ",
-            "   .[||].   ",
-            "  [ \u{b7}  \u{b7} ]  ",
-            "  [ ==== ]  ",
-            "  `------\u{b4}  ",
+            "            ",
+            "     ><     ",
+            "   <(· )~   ",
+            "    /||\\    ",
+            "   ~~       ",
         ],
     ],
-    // rabbit
+    // ibex
     [
         [
             "            ",
-            "   (\\__/)   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            " =(  ..  )= ",
-            "  (\")__(\")  ",
+            " \\\\   //    ",
+            "  ( ·  )    ",
+            "  /~~~~\\    ",
+            "   |  |(\\   ",
         ],
         [
             "            ",
-            "   (|__/)   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            " =(  ..  )= ",
-            "  (\")__(\")  ",
+            " \\\\   //    ",
+            "  ( ·  )~   ",
+            "  /~~~~\\    ",
+            "   |  |(\\   ",
         ],
         [
             "            ",
-            "   (\\__/)   ",
-            "  ( \u{b7}  \u{b7} )  ",
-            " =( .  . )= ",
-            "  (\")__(\")  ",
-        ],
-    ],
-    // mushroom
-    [
-        [
-            "            ",
-            " .-o-OO-o-. ",
-            "(__________)",
-            "   |\u{b7}  \u{b7}|   ",
-            "   |____|   ",
-        ],
-        [
-            "            ",
-            " .-O-oo-O-. ",
-            "(__________)",
-            "   |\u{b7}  \u{b7}|   ",
-            "   |____|   ",
-        ],
-        [
-            "   . o  .   ",
-            " .-o-OO-o-. ",
-            "(__________)",
-            "   |\u{b7}  \u{b7}|   ",
-            "   |____|   ",
-        ],
-    ],
-    // chonk
-    [
-        [
-            "            ",
-            "  /\\    /\\  ",
-            " ( \u{b7}    \u{b7} ) ",
-            " (   ..   ) ",
-            "  `------\u{b4}  ",
-        ],
-        [
-            "            ",
-            "  /\\    /|  ",
-            " ( \u{b7}    \u{b7} ) ",
-            " (   ..   ) ",
-            "  `------\u{b4}  ",
-        ],
-        [
-            "            ",
-            "  /\\    /\\  ",
-            " ( \u{b7}    \u{b7} ) ",
-            " (   ..   ) ",
-            "  `------\u{b4}~ ",
+            "  \\\\ //     ",
+            "  ( ·  )    ",
+            "  /~~~~\\    ",
+            "   |  | )\\  ",
         ],
     ],
 ];
@@ -469,7 +472,7 @@ pub const SPECIES_FRAMES: [[[&str; SPRITE_H]; FRAME_COUNT]; SPECIES_COUNT] = [
 /// rather than a dimming pass the plain-text grid does not have.
 pub const EYES: [char; 6] = ['\u{b7}', '\u{2726}', '\u{d7}', '\u{25c9}', '@', '\u{b0}'];
 /// The default eye: what a Working, no-need citizen wears, and the glyph the
-/// vendored frames embed at their eye cells.
+/// table's frames embed at their eye cells.
 pub const EYE_DEFAULT: char = '\u{b7}';
 
 /// A sprite's status reading, derived at render time from the row's own
@@ -534,7 +537,7 @@ mod tests {
     /// exactly the pinned geometry. A transcription slip fails here, not in a
     /// rendering blit six screens away.
     #[test]
-    fn vendored_table_holds_its_geometry() {
+    fn table_holds_its_geometry() {
         for species in SPECIES_FRAMES.iter() {
             for frame in species.iter() {
                 assert_eq!(frame.len(), SPRITE_H);
@@ -566,7 +569,7 @@ mod tests {
 
     #[test]
     fn render_swaps_every_eye_and_keeps_width() {
-        let rows = render_frame(3, 0, Eye::Gift); // cat
+        let rows = render_frame(0, 0, Eye::Gift); // cat
                                                   // The eye cells live on the cat's face row, not every row.
         assert!(rows.iter().any(|r| r.contains('\u{2726}')));
         assert!(rows.iter().all(|r| !r.contains(EYE_DEFAULT)));

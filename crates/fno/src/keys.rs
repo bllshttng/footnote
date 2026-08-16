@@ -295,7 +295,7 @@ pub enum Event {
     /// answers, `n`/`N` cycle the blocked queue, Enter focuses, Esc closes) are
     /// interpreted by the client's view layer, not here (like OpenSelector).
     OpenAnswers,
-    /// Open the yard overlay (prefix+m, x-b2bf): the fleet as a Neko Atsume
+    /// Open the yard overlay (prefix+m, x-b2bf): the fleet as f[no]nimals -
     /// collection - one eye glyph per citizen, one spotlight sprite at a
     /// time. Overlay-mode keys (`n`/`N` pick, `q`/Esc close) are interpreted
     /// by the client's view layer, not here (like OpenAnswers).

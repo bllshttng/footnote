@@ -722,7 +722,7 @@ def cost(ctx: typer.Context) -> None:
 def yard(
     as_json: bool = typer.Option(False, "--json", "-J", help="Emit the fold as JSON."),
 ) -> None:
-    """Fold the fleet into yard citizens (the Neko Atsume collection)."""
+    """Fold the fleet into yard citizens (the f[no]nimals)."""
     import json as _json
 
     from fno import paths

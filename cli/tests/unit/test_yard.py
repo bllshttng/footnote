@@ -1,4 +1,4 @@
-"""`fno yard`: the identity fold behind the Neko Atsume yard (x-b2bf).
+"""`fno yard`: the identity fold behind the f[no]nimals yard (x-b2bf).
 
 Species stability (full-id key, unsalted hash), the rarity rank's exact
 60/25/10/4/1 shape, and the first-sighting read over the album.
