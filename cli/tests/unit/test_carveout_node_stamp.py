@@ -65,6 +65,19 @@ def test_a_codex_worker_stamps_via_its_claim_not_the_manifest(tmp_path, monkeypa
     assert cv.node == "x-cx01"
 
 
+def test_a_codex_worker_stamps_via_its_thread_id_holder(tmp_path, monkeypatch):
+    """Production shape: init anchors the node claim on CODEX_THREAD_ID (the
+    durable codex identity), not CODEX_SESSION_ID. The holder and the env the
+    stamp reads must intersect or every codex-filed row lands unattributed."""
+    _no_ambient_session(monkeypatch, tmp_path)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-t7")
+    _acquire_node_claim(tmp_path / "claims", "x-cx03", "target-session:thread-t7", monkeypatch)
+    cv, _ = add_carveout(
+        tmp_path, kind="deferred", description="x", storage_root=tmp_path
+    )
+    assert cv.node == "x-cx03"
+
+
 def test_a_claim_held_by_another_session_stamps_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_SESSION_ID", "codex-sess-MINE")
     _acquire_node_claim(tmp_path / "claims", "x-cx02", "target-session:codex-sess-OTHER", monkeypatch)
@@ -104,8 +117,10 @@ def _no_ambient_session(monkeypatch, tmp_path):
     for var in (
         "TARGET_SESSION_ID",
         "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
         "CODEX_SESSION_ID",
         "GEMINI_SESSION_ID",
+        "OPENCODE_SESSION_ID",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-empty"))

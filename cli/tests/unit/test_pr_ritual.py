@@ -24,13 +24,15 @@ class FakeRunner:
     def __init__(self, *, diff_files=0, additions=0, deletions=0,
                  deferred=None, reconcile_closed=None, claim_rc=0,
                  spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED",
-                 reconcile_held=None, reconcile_candidates=None):
+                 reconcile_held=None, reconcile_candidates=None,
+                 reconcile_contained=None):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
         self._closed = reconcile_closed or []
         self._held = reconcile_held or []
         self._candidates = reconcile_candidates
+        self._contained = reconcile_contained or ()
         self._claim_rc = claim_rc
         self._spawn_rc = spawn_rc
         self._rows = agent_rows or []
@@ -60,6 +62,8 @@ class FakeRunner:
             if self._candidates is not None:
                 payload["candidates"] = [{"node_id": n} for n in self._candidates]
             payload["promise_unmet"] = [{"node_id": n} for n in self._held]
+            if self._contained:
+                payload["contained_closed"] = list(self._contained)
             return Result(0, json.dumps(payload), "")
         if sub == "backlog" and "find" in argv:
             import json
@@ -281,6 +285,19 @@ def test_reconcile_no_drift_is_distinguishable_from_a_held_close(tmp_path, capsy
     r.leg_stamp()
     out = capsys.readouterr().out
     assert "step=reconcile status=ok detail=no-drift" in out
+
+
+def test_reconcile_healed_only_is_not_no_drift(tmp_path, capsys):
+    """A heal-only sweep (contained nodes closed, no new drift) mutates the
+    graph; the receipt must not claim nothing was found."""
+    r = _bare(
+        tmp_path,
+        FakeRunner(reconcile_candidates=[], reconcile_contained=["x-h1", "x-h2"]),
+    )
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=ok detail=healed-only" in out
+    assert "no-drift" not in out
 
 
 # --- AC2: empty inputs spawn nothing; non-empty spawns headless ----------

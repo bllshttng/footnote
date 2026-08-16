@@ -163,11 +163,16 @@ def _owning_node_id(repo_root: Path) -> Optional[str]:
     import os
 
     candidates = set()
+    # The same ids init-target-state.sh / _successor_claim_holder anchor the
+    # node:<id> claim holder on. CODEX_THREAD_ID (not CODEX_SESSION_ID) is the
+    # durable codex identity the claim names; opencode has its own marker.
     for var in (
         "TARGET_SESSION_ID",
         "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
         "CODEX_SESSION_ID",
         "GEMINI_SESSION_ID",
+        "OPENCODE_SESSION_ID",
     ):
         val = os.environ.get(var)
         if val and val.strip():
@@ -192,7 +197,12 @@ def _owning_node_id(repo_root: Path) -> Optional[str]:
 
     from fno.agents.whoami import find_held_node
 
-    held = find_held_node(str(repo_root), os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    try:
+        held = find_held_node(str(repo_root), os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    except Exception:
+        # Same invariant as resolve_session_id: a malformed state file must
+        # not break capture. An unattributed row is always fileable.
+        return None
     return held.split(":", 1)[1] if held else None
 
 

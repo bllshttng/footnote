@@ -416,6 +416,11 @@ class Ritual:
                     )
                 elif closed or (obj.get("candidates") or []):
                     self._emit("reconcile", _OK, f"closed={len(closed)}")
+                elif any(obj.get(k) for k in ("contained_closed", "healed_epics", "reverted")):
+                    # Drift was found and healed without a new close: contained
+                    # nodes / stranded epics / revert stamps. NOT no-drift - the
+                    # run mutated the graph.
+                    self._emit("reconcile", _OK, "healed-only")
                 else:
                     self._emit("reconcile", _OK, "no-drift")
             except json.JSONDecodeError:
