@@ -73,11 +73,18 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # is why the direct-read markers belong here and not in the tuples: promoting one
 # to HARNESS_SESSION_MARKERS would silently change resolution precedence and the
 # harness a claim is tagged with.
+#
+# TARGET_SESSION_ID is fno plumbing, not a harness marker: the run id a driver
+# pre-assigns and init adopts verbatim as session id and claim owner. It belongs
+# in the scrub anyway, for the same reason as the markers: carveout/core.py
+# matches live claims through it, so a suite or spawned child that inherits it
+# resolves (or stamps) the live run's identity instead of its own.
 AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     *(marker for marker, _ in HARNESS_SESSION_MARKERS),
     *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
     "CLAUDECODE_SESSION_ID",
     "HERMES_SESSION_ID",
+    "TARGET_SESSION_ID",
 )
 
 

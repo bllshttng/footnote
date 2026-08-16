@@ -116,7 +116,7 @@ def _no_ambient_session(monkeypatch, tmp_path):
     empty tmp root so the machine's real ~/.fno/claims is never read."""
     from fno.harness_identity import AMBIENT_IDENTITY_ENV
 
-    for var in (*AMBIENT_IDENTITY_ENV, "TARGET_SESSION_ID"):
+    for var in AMBIENT_IDENTITY_ENV:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-empty"))
 
