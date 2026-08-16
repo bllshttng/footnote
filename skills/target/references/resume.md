@@ -26,7 +26,7 @@ See [cross-project.md](cross-project.md) for details on the cross-project mocks/
 
 ## Read the builder crumb trail (before re-deriving context)
 
-A prior session (or a self-handoff predecessor) may have left `builder_step` crumbs in the shared `.fno/events.jsonl`. That is the tried/found/fixed/outcome trail from its fix and revision rounds.
+A prior session (or a self-handoff predecessor) can leave `builder_step` crumbs in the shared `.fno/events.jsonl`. That is the tried/found/fixed/outcome trail from its fix and revision rounds.
 
 Read the current node's tail before re-deriving anything so a failed approach is not repeated. A malformed, rotated, or legacy uncorrelated row is skipped, never fatal.
 

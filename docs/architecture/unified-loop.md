@@ -256,7 +256,7 @@ Every worktree resolves its local journal from the worktree root, and setup syml
 
 The project symlink removes the former cross-worktree visibility dependency. The global `~/.fno/events.jsonl` stays a cross-project mirror, not the mechanism that makes sibling worktrees agree.
 
-Two sibling worktrees on the same exact HEAD share attestations by design, and session identity records whether the coverage came from the author or another reviewer.
+Two sibling worktrees on the same exact HEAD share attestations by design. Session identity records whether the coverage came from the author or another reviewer.
 `finalize.rs` reads the project log alone (`coverage_satisfied_in_latest_event`, `covered_head_from_event`) because finalize is invoked by the loop-check that just wrote the event, in that same directory; if finalize ever gains a caller that can stand elsewhere, those two become the same bug.
 
 There is no environment override.
@@ -411,8 +411,10 @@ The walker pre-generates a `session_key` in `gen_session_key()` (shape: `{utc}-m
 Three consequences flow from this:
 
 1. The `termination` event emitted by the worker's stop hook carries `session_id = session_key`, which `Journal::find_termination` matches against `unit.session_key`.
-Cross-worktree delivery works because each worktree journal symlinks to the canonical repository journal, while the global `~/.fno/events.jsonl` mirror remains a fallback for cross-project observation.
-`find_termination` scans the project journal first, then falls back to the global mirror.
+
+   Cross-worktree delivery works because each worktree journal symlinks to the canonical repository journal. The global `~/.fno/events.jsonl` mirror remains a fallback for cross-project observation.
+
+   `find_termination` scans the project journal first, then falls back to the global mirror.
 
 2. The worker's `init-target-state.sh` calls `fno claim acquire node:<id> --holder target-session:<session_key>` with the same holder string the walker used. `core.py:acquire_claim` line 209 treats a same-holder re-acquire as idempotent - it refreshes `pid/host/acquired_at` without blocking, emitting `claim_idempotent_reacquired`.
 

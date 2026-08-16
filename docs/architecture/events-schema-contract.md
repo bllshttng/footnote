@@ -83,7 +83,7 @@ Hook-provided explicit paths resolve a symlink leaf before deriving the marker a
 
 Shell writers and worktree setup age-steal an abandoned owner-token marker after 120 seconds. Active GC and worktree migration renew every held marker lease during long rewrites.
 
-After taking both migration locks, worktree setup rechecks the journal and recovers pending backups even when interruption preceded symlink creation. It also filters favorable gate rows that would supersede an existing canonical verdict for the same valid scalar gate key.
+Worktree setup takes both migration locks, then rechecks the journal and recovers pending backups. An interruption that preceded symlink creation is still recovered. It also filters favorable gate rows that can supersede an existing canonical verdict for the same valid scalar gate key.
 
 Each merged journal is built in a same-directory temporary file and atomically replaces the canonical journal. Interruption or a partial copy cannot leave a torn prefix in the live log.
 
@@ -263,7 +263,7 @@ The schema classifies event types as `ephemeral`, `gate`, or `durable`. An omitt
 
 Ephemeral rows are high-volume operational evidence. Gate rows participate in current-HEAD decisions. Durable rows preserve long-lived lineage.
 
-Declared join pairs must use the same retention class. Schema loading fails if either side is missing or the classes differ.
+Declared join pairs must use the same retention class. If either side is missing, schema loading fails. Differing classes fail loading too.
 
 The minimum ephemeral horizon is 672 hours because `human_touch` and claim context feed the scoreboard's default 28-day window.
 
