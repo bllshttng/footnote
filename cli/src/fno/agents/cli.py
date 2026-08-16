@@ -354,6 +354,19 @@ def cmd_watch(
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
+    passthrough: list[str] | None = typer.Argument(
+        None,
+        help=(
+            "Provider CLI flags after a `--` separator (x-1caa): `spawn \"hi\" "
+            "-- --verbose` forwards --verbose to the harness's own CLI, so a "
+            "flag fno never declared needs no code change. The parser stays "
+            "strict - an unknown fno flag before `--` (e.g. --modle) still "
+            "fails here rather than being silently forwarded. Pane substrate "
+            "only; the tokens ride the composed argv through the same "
+            "refusals (-p/--print, --settings, --session-id) that govern fno's "
+            "own flags."
+        ),
+    ),
     name: str = typer.Option(
         "",
         "--name",
@@ -807,6 +820,15 @@ def cmd_spawn(
             f"--substrate must be one of: pane, bg, headless (got {substrate})",
             file=sys.stderr,
         )
+        raise typer.Exit(code=2)
+    # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
+    # composed-argv refusals live. The seam refuses the explicit-flag spelling
+    # for the Rust-routed lane; this is the same refusal for the Python lane,
+    # including a substrate that arrived by config default after the seam.
+    if passthrough and (substrate != "pane" or once):
+        from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
+
+        print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
     if monitor is not None and monitor != "happy":
@@ -1291,6 +1313,7 @@ def cmd_spawn(
                     route_env=route_env,
                     monitor=monitor,
                     route_provider=route_provider,
+                    passthrough=passthrough,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
