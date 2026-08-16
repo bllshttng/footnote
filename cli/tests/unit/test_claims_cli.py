@@ -86,6 +86,37 @@ def test_acquire_conflict_exits_1(cwd_tmp):
     assert "held by" in result.output
 
 
+def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
+    """acquire_claim's contention-retry-exhaustion RuntimeError must be
+    caught and mapped to exit 1 (same "retry later" code as
+    ClaimHeldByOther), not escape as an uncaught traceback."""
+    import fno.claims.cli as claims_cli
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("acquire_claim gave up after 5 contention retries on 'k'")
+
+    monkeypatch.setattr(claims_cli, "acquire_claim", _raise)
+    result = runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
+    assert result.exit_code == 1
+    assert "contention error" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
+    """Same as acquire's: refresh_claim's contention-exhaustion RuntimeError
+    must be caught, not escape as an uncaught traceback."""
+    import fno.claims.cli as claims_cli
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("refresh_claim gave up after 5 contention retries on 'k'")
+
+    monkeypatch.setattr(claims_cli, "refresh_claim", _raise)
+    result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
+    assert result.exit_code == 1
+    assert "contention error" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_reconcile_pr_reservation_mutex(cwd_tmp):
     """Post-merge ritual reservation: distinct holders race, exactly one wins.
 
@@ -297,6 +328,35 @@ def test_merge_across_roots_first_root_wins_row_and_totals_together(tmp_path):
         "root_a won the key for the row (live); root_b's stale sighting of "
         "the SAME key must not also land in totals"
     )
+
+
+def test_merge_across_roots_live_in_second_root_is_not_hidden_by_first_roots_stale(tmp_path):
+    """The opposite ordering from the test above: root_a (scanned first)
+    has a STALE leftover for key 'k'; root_b (scanned second) has a
+    genuinely LIVE claim for the SAME key - e.g. the old FNO_CLAIMS_ROOT
+    left a stale sighting behind while the current root holds the real,
+    active claim. Pure first-root-wins would let root_a's stale sighting
+    dedup away root_b's live one entirely: no row, and root_a's stale gets
+    counted instead - defeating the exact migration scenario this
+    function's own docstring names. The live claim must win regardless of
+    which root was scanned first."""
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    acquire_claim("k", "holder-a", pid=_dead_pid(), root=root_a)
+    acquire_claim("k", "holder-b", pid=os.getpid(), root=root_b)
+
+    deduped = dedup_claims_roots([root_a, root_b])
+    all_rows, row_roots, totals = _merge_claims_across_roots(
+        deduped, prefix="", include_stale=False
+    )
+
+    assert [r["key"] for r in all_rows] == ["k"], (
+        "root_b's live claim must surface as a row even though root_a "
+        "(scanned first) had a stale sighting of the same key"
+    )
+    assert all_rows[0]["state"] == "live"
+    assert row_roots["k"] == str(root_b / ".fno" / "claims")
+    assert totals == {"stale": 0, "corrupted": 0, "free": 0}
 
 
 def test_force_release_succeeds(cwd_tmp):

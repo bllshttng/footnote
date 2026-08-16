@@ -2,9 +2,11 @@
 
 Exit codes:
     0  success
-    1  ClaimHeldByOther (caller should retry later); also `reap`'s own
-       distinct overload of 1 - a reapable file's archive move could not be
-       confirmed on re-read (see `reap`'s own docstring, not a retry signal)
+    1  ClaimHeldByOther, or acquire/refresh's own contention-retry
+       exhaustion (both mean "transient, caller should retry later"); also
+       `reap`'s own distinct overload of 1 - a reapable file's archive move
+       could not be confirmed on re-read (see `reap`'s own docstring, not a
+       retry signal)
     2  validation / input error
     3  ClaimCorrupted or ClaimGoneAway (race during operation)
     4  HolderMismatch (release/refresh wrong holder)
@@ -246,6 +248,12 @@ def acquire(
     except (ClaimCorrupted, ClaimGoneAway) as exc:
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
+    except RuntimeError as exc:
+        # acquire_claim's own contention-retry-exhaustion guard: same
+        # "caller should retry later" semantic as ClaimHeldByOther, so it
+        # gets the same exit code rather than an uncaught traceback.
+        typer.echo(f"contention error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     # do provenance opens at acquire - the one choke point a session killed
     # mid-phase still reaches (release/finalize fire only on a clean terminal).
@@ -630,6 +638,11 @@ def refresh(
     except ClaimCorrupted as exc:
         typer.echo(f"corrupted claim: {exc}", err=True)
         raise typer.Exit(code=3)
+    except RuntimeError as exc:
+        # refresh_claim's own contention-retry-exhaustion guard; same exit
+        # code as acquire's, both mean "transient, caller should retry".
+        typer.echo(f"contention error: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     if result is None:
         if json_output:
@@ -663,48 +676,48 @@ def _merge_claims_across_roots(
     prefix: str,
     include_stale: bool,
 ) -> tuple[list[dict], dict[str, str], dict[str, int]]:
-    """Merge per-root claim listings into one first-root-wins view.
+    """Merge per-root claim listings into one best-state-wins view.
 
     Returns ``(all_rows, row_roots, totals)``. A key present in more than one
     root (a bug elsewhere writing to the wrong root, or a deliberate
     FNO_CLAIMS_ROOT migration leaving stale claims under the old root - see
-    the version-skew note on CLAIMS_ROOT_ENV in io.py) is one logical claim -
-    first root wins, for every purpose, not just the purpose that root
-    happened to satisfy. A single ``seen_keys`` dedup set, built from
-    ``states_by_key`` (a superset of the row-worthy keys), is what makes that
-    hold: two separate dedup sets - one gated on row-worthy states, one on
-    totals-worthy states - would let a key be claimed by root A for its row
-    but by root B for its totals bucket, showing e.g. a live row while also
-    counting it stale.
+    the version-skew note on CLAIMS_ROOT_ENV in io.py) is one logical claim,
+    so every purpose (row, root attribution, totals bucket) must agree on
+    ONE winning sighting rather than splitting across roots. That winner is
+    the most informative state seen (live beats suspect beats stale beats
+    corrupted beats free) - a first-scanned root's stale leftover from an
+    old FNO_CLAIMS_ROOT migration must not hide a live claim a later root
+    holds for the same key, which pure first-root-wins did. First root is
+    only the tiebreak between two EQUAL-priority sightings of the same key.
     """
-    all_rows: list[dict] = []
-    # Display-only: which root a row came from, keyed by claim key rather
-    # than mutated onto the row dict itself, so JSON output stays the bare
-    # claim_status() shape a scripted caller already parses.
-    row_roots: dict[str, str] = {}
-    # Only stale/corrupted/free ever feed the empty-store message below;
-    # live/suspect/total would just be dead weight summed on every list call.
-    totals = {"stale": 0, "corrupted": 0, "free": 0}
-    seen_keys: set[str] = set()
+    _STATE_PRIORITY = {"live": 0, "suspect": 1, "stale": 2, "corrupted": 3, "free": 4}
+    best_state: dict[str, str] = {}
+    best_root: dict[str, str] = {}
+    best_row: dict[str, Optional[dict]] = {}
+
     for candidate_root, cdir in deduped_roots:
         rows, _counts, states_by_key = list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         row_by_key = {r["key"]: r for r in rows}
-        # states_by_key is a superset of row_by_key's keys (every state seen
-        # while walking, not just the ones include_stale kept), so iterating
-        # it alone dedups both outputs against the same first-root-wins set.
         for key, state in states_by_key.items():
-            if key in seen_keys:
+            priority = _STATE_PRIORITY.get(state, len(_STATE_PRIORITY))
+            current = best_state.get(key)
+            if current is not None and priority >= _STATE_PRIORITY.get(current, 0):
                 continue
-            seen_keys.add(key)
-            if key in row_by_key:
-                all_rows.append(row_by_key[key])
-                row_roots[key] = str(cdir)
-            if state in totals:
-                totals[state] += 1
+            best_state[key] = state
+            best_root[key] = str(cdir)
+            best_row[key] = row_by_key.get(key)
 
+    all_rows = [row for row in best_row.values() if row is not None]
     all_rows.sort(key=lambda r: r["key"])
+    row_roots = {key: root for key, root in best_root.items() if best_row.get(key) is not None}
+    # Only stale/corrupted/free ever feed the empty-store message below;
+    # live/suspect/total would just be dead weight summed on every list call.
+    totals = {"stale": 0, "corrupted": 0, "free": 0}
+    for state in best_state.values():
+        if state in totals:
+            totals[state] += 1
     return all_rows, row_roots, totals
 
 

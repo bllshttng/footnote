@@ -236,6 +236,10 @@ def acquire_claim(
     """
     _validate_inputs(key, holder, ttl_ms)
     path = claim_path(key, root=root)
+    # Unconditional initial value (each branch below reassigns its own):
+    # gives _release_and_retry's `nonlocal` an unambiguous prior binding
+    # rather than relying on mypy tracing every conditional branch.
+    acquired_lock = False
 
     def _retry() -> Claim:
         # Every contention/race branch below re-dispatches by recursing with
@@ -258,6 +262,22 @@ def acquire_claim(
             root=root,
             _attempt=_attempt + 1,
         )
+
+    def _release_and_retry() -> Claim:
+        # `return _retry()` evaluates the recursive acquire_claim() call
+        # BEFORE this frame's own `finally` runs (Python evaluates a
+        # return expression, then unwinds through finally). Recursing while
+        # `acquired_lock` is still True would have the recursive call poll
+        # for the SAME per-key recovery mutex this frame is still sitting
+        # on if it lands back in a mutex-taking branch - self-contention
+        # that only resolves via ACQUIRE_MAX_ATTEMPTS exhaustion instead of
+        # the near-instant re-dispatch (e.g. ClaimHeldByOther) it should.
+        # Release first, from whichever branch currently holds it.
+        nonlocal acquired_lock
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
+            acquired_lock = False
+        return _retry()
 
     new_claim = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
     payload = serialize_claim(new_claim)
@@ -319,9 +339,9 @@ def acquire_claim(
             try:
                 fresh_existing = read_claim_file(path)
             except ClaimGoneAway:
-                return _retry()
+                return _release_and_retry()
             if fresh_existing.holder != holder:
-                return _retry()
+                return _release_and_retry()
 
             refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
             _atomic_replace(path, serialize_claim(refreshed))
@@ -368,7 +388,7 @@ def acquire_claim(
                 try:
                     atomic_create_exclusive(path, payload)
                 except ClaimAlreadyHeld:
-                    return _retry()
+                    return _release_and_retry()
                 emit_claim_acquired(new_claim)
                 return new_claim
 
@@ -399,7 +419,7 @@ def acquire_claim(
                 # letting the low-level ClaimAlreadyHeld escape acquire_claim's
                 # return-or-ClaimHeldByOther contract; the recursion sees the new
                 # live holder and raises ClaimHeldByOther.
-                return _retry()
+                return _release_and_retry()
             emit_claim_stale_reclaimed(new_claim, previous=existing)
             return new_claim
         finally:

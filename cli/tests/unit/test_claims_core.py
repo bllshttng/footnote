@@ -107,6 +107,73 @@ class TestAcquire:
             with pytest.raises(RuntimeError, match="gave up after"):
                 acquire_claim("k", HOLDER_A, root=tmp_path)
 
+    def test_idempotent_reverify_releases_lock_before_recursing(self, tmp_path):
+        """The idempotent branch's locked re-verify must release the
+        recovery mutex BEFORE recursing (_release_and_retry, not a bare
+        _retry) when the fresh read shows a different holder.
+
+        Python evaluates a `return <expr>` expression before the enclosing
+        `finally` runs, so recursing while `acquired_lock` is still True
+        would have the recursive call poll for the SAME per-key mutex this
+        frame is still sitting on, if the recursion lands back in the
+        stale-reclaim branch (which it does here: the "other" holder found
+        on re-verify has a dead pid). Proven by asserting the mutex is
+        acquired exactly twice with a release between them, never
+        acquire-acquire, and that this resolves without hitting
+        ACQUIRE_MAX_ATTEMPTS.
+        """
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)  # real live claim, holder=HOLDER_A
+
+        dead_pid = 999_999
+        while psutil.pid_exists(dead_pid):
+            dead_pid += 1
+        stale_other = Claim(
+            key="k", holder=HOLDER_B, acquired_at=0, pid=dead_pid,
+            host=socket.gethostname(),
+        )
+
+        real_read = claims_core.read_claim_file
+        call_count = {"n": 0}
+
+        def _read_side_effect(path):
+            call_count["n"] += 1
+            # 1st call: acquire_claim's own top-level unlocked read (real).
+            # 2nd call: the idempotent branch's locked re-verify - simulate
+            # a race where an unlocked writer (e.g. force_release_claim +
+            # a third party's top-level create) swapped in a stale claim
+            # for a different holder between the two reads.
+            if call_count["n"] == 2:
+                return stale_other
+            return real_read(path)
+
+        order = []
+        real_acquire = claims_core.acquire_dir_mutex
+        real_release = claims_core.release_dir_mutex
+
+        def _acquire_side_effect(lock_dir, timeout_s, **kw):
+            order.append("acquire")
+            return real_acquire(lock_dir, timeout_s, **kw)
+
+        def _release_side_effect(lock_dir, token):
+            order.append("release")
+            return real_release(lock_dir, token)
+
+        with patch.object(claims_core, "read_claim_file", side_effect=_read_side_effect), \
+                patch.object(claims_core, "acquire_dir_mutex", side_effect=_acquire_side_effect), \
+                patch.object(claims_core, "release_dir_mutex", side_effect=_release_side_effect):
+            claim = acquire_claim("k", HOLDER_A, root=tmp_path)
+
+        assert claim.holder == HOLDER_A
+        assert order.count("acquire") == 2, order
+        # The release between the two acquires proves the recursive call's
+        # own acquire never contended against this frame's still-held lock.
+        first_acquire = order.index("acquire")
+        second_acquire = order.index("acquire", first_acquire + 1)
+        release_idx = order.index("release")
+        assert first_acquire < release_idx < second_acquire, order
+
     def test_AC4_EDGE_stale_pid_recovered(self, tmp_path):
         """A claim whose holder process is dead is reclaimable by another holder."""
         # Pick a definitely-dead PID and hand-write a claim for it.
