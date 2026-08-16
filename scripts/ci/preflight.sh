@@ -51,6 +51,14 @@
 
 set -uo pipefail
 
+# Signal traps arm at the TOP, before any git/network child runs. Untrapped,
+# a SIGINT that arrives while bash waits on a slow foreground child (git ops
+# and the fetch stretch from ~1s to tens of seconds under host load) is
+# swallowed after the child exits, so Ctrl-C silently does nothing. The flag
+# pattern never kills mid-command; the checked points decide what exits.
+LOCK_SIGNAL=0
+trap 'LOCK_SIGNAL=1' INT TERM HUP
+
 PINNED_FMT="1.94.1"   # keep in lockstep with rust-ci.yml RUSTFMT_TOOLCHAIN
 
 RETRY_FAILED=0
@@ -330,6 +338,9 @@ reuse_attestation() {
     # shape, so every field is checkable and --force discards it.
     echo "preflight: GREEN (reused attestation) candidate=$CANDIDATE_SHORT earned=${age_h} ago by pid=${att_pid:-?} host=$att_host"
     echo "preflight: this verdict was earned by a FULL run on this exact SHA; --force re-runs from scratch"
+    # A cancel signal arriving during the reuse check must not be swallowed
+    # into a silent exit-0 GREEN now that the traps arm at the top.
+    [[ "$LOCK_SIGNAL" -eq 1 ]] && exit 130
     exit 0
 }
 
@@ -507,7 +518,7 @@ holder_tree_cpu() {
     # Sum accumulated CPU seconds over the holder pid and its descendants: the
     # wrapper itself idles while its suites compute, so the leaves carry the
     # progress signal. Unparsable rows read as 0, never as a steal trigger.
-    local pid ids="" p total=0 t
+    local pid="$1" ids="" p total=0 t
     ids="$(holder_tree_pids "$pid")"
     for p in $ids; do
         t="$(ps -o cputime= -p "$p" 2>/dev/null | tr -d ' ')"
@@ -543,12 +554,45 @@ holder_pid_recycled() {
     (( stamp_age > proc_age + 60 ))
 }
 
+path_mtime_s() {
+    # A path's mtime in epoch seconds; empty when stat cannot read it. GNU
+    # first: GNU stat reads -f as --file-system, so a BSD-first spelling
+    # SUCCEEDS there printing prose (a line starting "File: ..."), which then
+    # dies as an unbound variable inside the caller's arithmetic. BSD stat
+    # rejects -c outright and falls through. The numeric guard reads any
+    # surprise spelling as unmeasurable, never as a value.
+    local m
+    m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
+    [[ "$m" =~ ^[0-9]+$ ]] && printf '%s\n' "$m" || echo ""
+}
+
+cancel_requested() {
+    # Consume the one-shot cancel sentinel by atomic rename, so only one of N
+    # racing waiters can win a single cancel token. Age-gated: a sentinel
+    # nobody consumed (its wait already timed out or self-resolved) must never
+    # cancel a later, innocent run, so past the grace it is discarded instead.
+    local s="$INVOKING_ROOT/.fno/preflight-cancel" m now
+    [[ -e "$s" ]] || return 1
+    m="$(path_mtime_s "$s")"
+    # Unmeasurable age obeys nothing and consumes nothing: fail toward waiting,
+    # never toward cancelling on a token whose age cannot be checked.
+    [[ -n "$m" ]] || return 1
+    now="$(date +%s)"
+    if (( now - m > 3600 )); then
+        rm -f "$s" 2>/dev/null || true
+        return 1
+    fi
+    mv "$s" "$s.reaped.$$" 2>/dev/null || return 1
+    rm -f "$s.reaped.$$" 2>/dev/null || true
+    return 0
+}
+
 lockdir_abandoned() {
     # True when an UNSTAMPED lock directory is older than the stamp grace: a
     # live holder stamps within the mkdir-to-stamp window, so an old empty
     # lockdir is a corpse that pid checks can never condemn (no pid to read).
     local m now
-    m="$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo "")"
+    m="$(path_mtime_s "$1")"
     [[ -n "$m" ]] || return 1
     now="$(date +%s)"
     (( now - m > 300 ))
@@ -666,17 +710,24 @@ acquire_lock() {
         echo "preflight: cannot create the wait queue at $LOCKDIR.queue.d" >&2
         exit 3
     }
+    # The give-up message advertises `touch .fno/preflight-cancel`. In a fresh
+    # clone that parent is gitignored and nothing has created it, and a queued
+    # waiter writes nothing under .fno, so the advertised recovery would fail
+    # on a missing directory. Ensure the parent before queueing.
+    mkdir -p "$INVOKING_ROOT/.fno" 2>/dev/null || true
     enqueue_ticket
     skip_hint
     local waited=0 last_print=0
     while :; do
-        # Cancellation must be polled here, not deferred to the caller: the
-        # signal trap only sets a flag, and this loop can otherwise outwait a
-        # user pressing Ctrl-C for hours. Exit through the EXIT trap so the
-        # ticket and any held lock are released.
-        if [[ "$LOCK_SIGNAL" -eq 1 ]]; then
+        # Cancellation is POLLED, never signal-only: macOS bash 3.2 does not
+        # run traps for INT/TERM while the shell waits on a child (verified:
+        # neither a foreground sleep, a `sleep & wait`, nor a builtin read
+        # delivers a pending trapped signal there; Linux bash 5 does), so a
+        # signal-only cancel would ignore Ctrl-C for the whole 90m on exactly
+        # the platform this fleet runs.
+        if [[ "$LOCK_SIGNAL" -eq 1 ]] || cancel_requested; then
             dequeue_ticket
-            echo "preflight: cancelled while queued" >&2
+            echo "preflight: cancelled while queued (to cancel a wedged wait: touch $INVOKING_ROOT/.fno/preflight-cancel)" >&2
             exit 130
         fi
         if am_i_front; then
@@ -722,6 +773,7 @@ acquire_lock() {
         if (( waited >= WAIT_TIMEOUT )); then
             dequeue_ticket
             echo "preflight: gave up waiting after ${WAIT_TIMEOUT}s - $holder_line" >&2
+            echo "preflight: to cancel a queued wait instead of timing out: touch $INVOKING_ROOT/.fno/preflight-cancel" >&2
             exit 3
         fi
         sleep "$QUEUE_POLL_INTERVAL"
@@ -745,12 +797,11 @@ cleanup() {
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
 trap cleanup EXIT
-# Defer cancellation only across mkdir + holder stamping. Exiting between those
-# commands would leave an acquired lock without a complete cleanup token.
-LOCK_SIGNAL=0
-# HUP is trapped too: a closed terminal must run the EXIT trap (ticket and
-# lock cleanup), not evaporate the waiter and orphan its ticket in the queue.
-trap 'LOCK_SIGNAL=1' INT TERM HUP
+# The signal traps themselves were armed at the top of the script (see the
+# comment there); this section defers ACTING on the flag only across mkdir +
+# holder stamping, where exiting would leave an acquired lock without a
+# complete cleanup token.
+[[ "$LOCK_SIGNAL" -eq 1 ]] && exit 130
 acquire_lock
 LOCAL_LOCK_ACQUIRED=1
 mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
