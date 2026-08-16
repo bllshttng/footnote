@@ -548,15 +548,17 @@ def _dispatch_one(
             reason=f"mux dispatch for {node_id}",
             root=dispatch_root,
         )
-    except ClaimHeldByOther:
-        return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
-    except ClaimContended:
-        # acquire_claim's own contention-retry-exhaustion guard: same "someone
-        # else has this key right now, retry later" semantic as ClaimHeldByOther
-        # above (contended, not broken), so it gets the same verdict rather than
-        # an uncaught traceback breaking this command's one-JSON-verdict contract
-        # (the mux's `leader+g` shells this expecting a single exec, never a
-        # Python stack trace on stderr).
+    except (ClaimHeldByOther, ClaimContended):
+        # ClaimContended is acquire_claim's own contention-retry-exhaustion
+        # guard: same "someone else has this key right now, retry later"
+        # semantic as ClaimHeldByOther (contended, not broken), so it gets
+        # the same verdict rather than an uncaught traceback breaking this
+        # command's one-JSON-verdict contract (the mux's `leader+g` shells
+        # this expecting a single exec, never a Python stack trace on
+        # stderr). Neither branch reads exception attributes, so - unlike
+        # claims/cli.py's acquire/refresh or target_cli.py's reacquire, which
+        # do read ClaimHeldByOther.holder/.pid/.host and must keep a
+        # separate block - one tuple clause covers both here.
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
 
     # 3. Atomic lane cap (config.parallel.max_lanes). A full cap -> lanes-full:
