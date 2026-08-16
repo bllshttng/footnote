@@ -195,6 +195,22 @@ def test_snapshot_local_mode_falls_back_to_origin_master(tmp_path: Path) -> None
     assert paths == ["b.txt"]
 
 
+def test_snapshot_local_mode_names_the_merge_base_when_both_refs_are_absent(
+    tmp_path: Path,
+) -> None:
+    """No origin/main and no origin/master: the reason names the merge-base
+    failure, not a downstream `git diff <stderr> failed` (stderr from a failed
+    probe must not leak into the base variable)."""
+    _git_repo(tmp_path)
+    _write(tmp_path / "a.txt", "one\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+
+    paths, reason = changed_snapshot(tmp_path)
+    assert paths == []
+    assert "cannot resolve merge-base" in reason
+
+
 def test_snapshot_fails_closed_on_an_unresolvable_base(tmp_path: Path) -> None:
     """AC5: a missing base is an explicit unevaluated result, not an empty diff."""
     _git_repo(tmp_path)

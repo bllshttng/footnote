@@ -888,10 +888,13 @@ def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[s
             return [], f"git diff {base}...{head} failed: {out}"
         return sorted(set(_lines(out))), ""
 
+    # Only a successful probe may set mb: _git returns stderr on failure, so a
+    # leftover error string would slip past the `not mb` gate below.
     mb = ""
     for candidate in ("origin/main", "origin/master"):
-        rc, mb = _git(root, "merge-base", candidate, "HEAD")
-        if rc == 0 and mb:
+        rc, out = _git(root, "merge-base", candidate, "HEAD")
+        if rc == 0 and out:
+            mb = out
             break
     if not mb:
         return [], "cannot resolve merge-base with origin/main or origin/master (fetch it, or pass --base/--head)"
