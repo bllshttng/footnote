@@ -10,7 +10,6 @@ with msg-id), AC6-FR (malformed peers hint -> degrade to registry mapping).
 """
 from __future__ import annotations
 
-import json
 
 import pytest
 from typer.testing import CliRunner
@@ -293,6 +292,39 @@ def test_cli_send_to_project_demoted_peer_reports_peer_not_project(env, tmp_path
     out = res.stdout.strip()
     assert "queued (durable) for alpha" in out
     assert "for project projA" not in out  # would be the misleading mismatch
+
+
+def test_cli_send_to_project_carries_the_lock_timeout_reason(env, tmp_path, runner, monkeypatch):
+    # The anycast lane reaches the same dispatch_send as the by-name lane, so a
+    # cause pinned on one path only is pinned on neither: this lane used to drop
+    # the reason and print the not-live copy over a lock timeout, sending the
+    # reader to resurrect a session that was working fine.
+    from fno.agents import dispatch as dmod
+    from fno.mail.cli import mail_app
+
+    cwd = _project_cwd(tmp_path, "projA")
+    _register("alpha", cwd, status="live")
+
+    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name):
+        return dmod.DispatchSendResult(
+            msg_id="msg-lock01",
+            delivery="durable",
+            reason=dmod.LOCK_TIMEOUT_REASON,
+        )
+
+    monkeypatch.setattr(dmod, "dispatch_send", fake_send)
+
+    res = runner.invoke(mail_app, ["send", "--to-project", "projA", "hi"])
+    combined = res.stdout + (res.stderr or "")
+    assert res.exit_code == 0, combined
+    assert f"[{dmod.LOCK_TIMEOUT_REASON}]" in combined, combined
+    assert "live-miss" not in combined, (
+        f"no live attempt ran, so the receipt must not stamp a live miss: {combined}"
+    )
+    assert "is not live" not in combined, (
+        f"the lock holder is another sender and says nothing about alpha: {combined}"
+    )
+    assert "fno agents resume" not in combined, combined
 
 
 def test_cli_send_to_project_ambiguous_errors(env, tmp_path, runner):

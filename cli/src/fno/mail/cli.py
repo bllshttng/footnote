@@ -1167,7 +1167,10 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "held its lock past the wait); queued durably. The holder was "
             "another SENDER, so this says nothing about whether the recipient "
             "is live: do not resurrect it on this evidence. It reads the "
-            "message when it next drains its inbox."
+            "message when it next drains its inbox.\n"
+            "  a busy peer may not drain soon, so the two rungs that stay open:\n"
+            f"    fno mail send {target} '<message>'  # retry live once the holder releases\n"
+            "    fno mail withdraw <id>      # retract the queued copy"
         )
     elif reason in _LIVE_LANE_FAILURE_REASONS:
         msg = (
@@ -2938,10 +2941,15 @@ def cmd_send(
                     f"[bus-only: recipient polls the bus at each turn boundary]"
                 )
             else:
-                _warn_deferred(result.recipient)
+                # The anycast lane reaches the SAME dispatch_send as the by-name
+                # lane, so it must carry the same cause. Dropping the reason
+                # here printed "is not live ... fno agents resume" over an
+                # agent-lock timeout, which says nothing about the recipient,
+                # and stamped [live-miss] when no live attempt ever ran.
+                _warn_deferred(result.recipient, reason=result.reason)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
-                    f"[project {to_project}] [live-miss]"
+                    f"[project {to_project}] [{result.reason or 'live-miss'}]"
                 )
         else:
             _warn_deferred(to_project, project=True)
