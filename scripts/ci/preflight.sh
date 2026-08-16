@@ -51,6 +51,14 @@
 
 set -uo pipefail
 
+# Signal traps arm at the TOP, before any git/network child runs. Untrapped,
+# a SIGINT that arrives while bash waits on a slow foreground child (git ops
+# and the fetch stretch from ~1s to tens of seconds under host load) is
+# swallowed after the child exits, so Ctrl-C silently does nothing. The flag
+# pattern never kills mid-command; the checked points decide what exits.
+LOCK_SIGNAL=0
+trap 'LOCK_SIGNAL=1' INT TERM HUP
+
 PINNED_FMT="1.94.1"   # keep in lockstep with rust-ci.yml RUSTFMT_TOOLCHAIN
 
 RETRY_FAILED=0
@@ -745,12 +753,11 @@ cleanup() {
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
 }
 trap cleanup EXIT
-# Defer cancellation only across mkdir + holder stamping. Exiting between those
-# commands would leave an acquired lock without a complete cleanup token.
-LOCK_SIGNAL=0
-# HUP is trapped too: a closed terminal must run the EXIT trap (ticket and
-# lock cleanup), not evaporate the waiter and orphan its ticket in the queue.
-trap 'LOCK_SIGNAL=1' INT TERM HUP
+# The signal traps themselves were armed at the top of the script (see the
+# comment there); this section defers ACTING on the flag only across mkdir +
+# holder stamping, where exiting would leave an acquired lock without a
+# complete cleanup token.
+[[ "$LOCK_SIGNAL" -eq 1 ]] && exit 130
 acquire_lock
 LOCAL_LOCK_ACQUIRED=1
 mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
