@@ -2074,10 +2074,11 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
         )
 
     # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
-    # shared size ceiling here before any of the reachable transports can fire.
-    # Under --check the refusal is a usage error (exit 2), never a session
-    # verdict: exit 1 is the not-injectable answer's code.
+    # shared size ceiling and structure gate here before any of the reachable
+    # transports can fire. Under --check the cap refusal is a usage error
+    # (exit 2), never a session verdict: exit 1 is the not-injectable code.
     _enforce_body_cap(stripped, usage=check)
+    _enforce_style(stripped)
 
     # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
     #    resolution (a registry this fno cannot read) is not a miss: it is the
