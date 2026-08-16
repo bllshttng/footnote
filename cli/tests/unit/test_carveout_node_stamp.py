@@ -1,9 +1,11 @@
 """Carveout node stamp: proven session->node attribution at capture time (x-40be).
 
 A deferred row blocks only the close of the node stamped on it, so the stamp
-must be PROVEN ownership (find_held_node: the manifest's claude_session_id
-matches the live process), never a guess. These pin the three capture shapes:
-held node, foreign/stale manifest, ambient shell - plus legacy-row parsing.
+must be PROVEN ownership, never a guess. The claim lockfile is the authority
+(harness-agnostic: a codex or gemini executor's node:<id> claim names the
+owner too), with the manifest match (find_held_node) as the fallback. These
+pin the capture shapes: claimed node, manifest-held node, foreign/stale
+manifest, ambiguous claims, ambient shell - plus legacy-row parsing.
 """
 from __future__ import annotations
 
@@ -26,7 +28,21 @@ def _write_manifest(root, claude_session_id=_SID, graph_node_id="x-40be"):
     (state / "target-state.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _acquire_node_claim(claims_root, node_id, holder, monkeypatch):
+    """Acquire a real node:<id> claim under a tmp global claims root."""
+    from pathlib import Path
+
+    from fno.claims.core import acquire_claim
+    from fno.claims.io import claims_dir
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    return acquire_claim(
+        f"node:{node_id}", holder, ttl_ms=60_000, root=claims_dir(Path(claims_root))
+    )
+
+
 def test_add_carveout_stamps_the_held_node(tmp_path, monkeypatch):
+    _no_ambient_session(monkeypatch, tmp_path)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _SID)
     _write_manifest(tmp_path)
     cv, _ = add_carveout(
@@ -36,9 +52,69 @@ def test_add_carveout_stamps_the_held_node(tmp_path, monkeypatch):
     assert read_carveouts(tmp_path)[0]["node"] == "x-40be"
 
 
+def test_a_codex_worker_stamps_via_its_claim_not_the_manifest(tmp_path, monkeypatch):
+    """The claim path is harness-agnostic (codex P1): a CODEX_SESSION_ID whose
+    node:<id> claim is live stamps the row with no claude env and no manifest
+    at all."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_SESSION_ID", "codex-sess-9")
+    _acquire_node_claim(tmp_path / "claims", "x-cx01", "target-session:codex-sess-9", monkeypatch)
+    cv, _ = add_carveout(
+        tmp_path, kind="deferred", description="x", storage_root=tmp_path
+    )
+    assert cv.node == "x-cx01"
+
+
+def test_a_claim_held_by_another_session_stamps_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_SESSION_ID", "codex-sess-MINE")
+    _acquire_node_claim(tmp_path / "claims", "x-cx02", "target-session:codex-sess-OTHER", monkeypatch)
+    cv, _ = add_carveout(
+        tmp_path, kind="deferred", description="x", storage_root=tmp_path
+    )
+    assert cv.node is None
+
+
+def test_two_matching_claims_are_ambiguous_and_stamp_nothing(tmp_path, monkeypatch):
+    """One session id holding two node claims cannot name THE owner; guessing
+    would stamp the wrong node's close gate. Fall through unattributed."""
+    monkeypatch.setenv("CODEX_SESSION_ID", "codex-sess-2")
+    _acquire_node_claim(tmp_path / "claims", "x-a1", "target-session:codex-sess-2", monkeypatch)
+    _acquire_node_claim(tmp_path / "claims", "x-a2", "target-session:codex-sess-2", monkeypatch)
+    cv, _ = add_carveout(
+        tmp_path, kind="deferred", description="x", storage_root=tmp_path
+    )
+    assert cv.node is None
+
+
+def test_a_stale_claim_falls_back_to_the_manifest(tmp_path, monkeypatch):
+    """Claim dead mid-run but manifest still provably this session: the work
+    still belongs to that node."""
+    _no_ambient_session(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _SID)
+    _write_manifest(tmp_path)
+    cv, _ = add_carveout(
+        tmp_path, kind="deferred", description="x", storage_root=tmp_path
+    )
+    assert cv.node == "x-40be"
+
+
+def _no_ambient_session(monkeypatch, tmp_path):
+    """Hermetic: no harness session envs, and the claims lookup pointed at an
+    empty tmp root so the machine's real ~/.fno/claims is never read."""
+    for var in (
+        "TARGET_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-empty"))
+
+
 def test_mismatched_session_leaves_the_row_unattributed(tmp_path, monkeypatch):
     """A stale or foreign manifest must never stamp a node this process does
     not hold - find_held_node's never-guess rule, pinned at the capture seam."""
+    _no_ambient_session(monkeypatch, tmp_path)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-OTHER")
     _write_manifest(tmp_path)
     cv, _ = add_carveout(
@@ -48,7 +124,7 @@ def test_mismatched_session_leaves_the_row_unattributed(tmp_path, monkeypatch):
 
 
 def test_ambient_shell_files_an_unattributed_row(tmp_path, monkeypatch):
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _no_ambient_session(monkeypatch, tmp_path)
     cv, _ = add_carveout(
         tmp_path, kind="deferred", description="x", storage_root=tmp_path
     )

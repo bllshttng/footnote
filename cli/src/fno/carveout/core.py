@@ -105,11 +105,11 @@ class Carveout:
     # unbuilt" and lands high/p1; hand-filed carveouts default to None (p3).
     # Optional + defaulted so existing JSONL records parse unchanged.
     severity: Optional[str] = None
-    # The node whose session PROVABLY held the claim when the row was filed
-    # (find_held_node: manifest session must match the live process). The close
-    # gate blocks only the node stamped here; None (ambient shell, foreign
-    # harness, legacy row) blocks nothing at close time. A FIELD for the same
-    # reason `scope` is one: attribution read from free text can be spoofed by a
+    # The node whose worker PROVABLY owned the claim when the row was filed
+    # (live node:<id> claim held by this harness session, manifest fallback).
+    # The close gate blocks only the node stamped here; None (ambient shell,
+    # legacy row) blocks nothing at close time. A FIELD for the same reason
+    # `scope` is one: attribution read from free text can be spoofed by a
     # mention. Optional + defaulted so existing records parse unchanged.
     node: Optional[str] = None
 
@@ -148,15 +148,47 @@ def resolve_session_id(repo_root: Path) -> Optional[str]:
 
 
 def _owning_node_id(repo_root: Path) -> Optional[str]:
-    """The node THIS session provably holds, as a bare id, or None.
+    """The node THIS worker provably owns, as a bare id, or None.
 
-    Proven ownership only (find_held_node): the target-state manifest's
-    claude_session_id must match the live process, else None. An ambient
-    shell or a harness without a session id files an unattributed row -
-    never a guess. Returns the bare graph id (``x-40be``), stripping the
-    ``node:`` prefix find_held_node adds.
+    The claim lockfile is the liveness authority (x-4af4), and it is
+    harness-agnostic: a live ``node:<id>`` claim held by
+    ``target-session:<this harness session>`` names the owner for a codex or
+    gemini executor too, not just claude. init acquires the claim before the
+    manifest exists, and a handoff re-points the claim while a stale manifest
+    would still name the former node - so the claim is consulted FIRST and a
+    mismatch stamps nothing. The manifest match (find_held_node) stays as the
+    fallback for a session whose claim died mid-run while it still holds the
+    worktree manifest. Never guesses: zero or 2+ matching claims fall through.
     """
     import os
+
+    candidates = set()
+    for var in (
+        "TARGET_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+    ):
+        val = os.environ.get(var)
+        if val and val.strip():
+            candidates.add(val.strip())
+    if candidates:
+        wanted = {f"target-session:{c}" for c in candidates}
+        try:
+            from fno.claims.core import list_claims
+            from fno.claims.io import claims_dir, global_claims_root
+
+            matches = [
+                claim.get("key", "")
+                for claim in list_claims(
+                    prefix="node:", root=claims_dir(global_claims_root())
+                )
+                if (claim.get("holder") or "") in wanted
+            ]
+            if len(matches) == 1 and matches[0].startswith("node:"):
+                return matches[0][len("node:"):]
+        except Exception:
+            pass  # an unreadable claims dir falls to the manifest below
 
     from fno.agents.whoami import find_held_node
 
