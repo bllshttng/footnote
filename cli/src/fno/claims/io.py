@@ -300,6 +300,11 @@ def archive_claim(path: Path, ts_ms: int) -> Path:
     try:
         os.rename(str(path), str(archive))
     except FileNotFoundError:
-        # Another process archived first; harmless.
-        pass
+        # Another process may have won the race and archived to this exact
+        # path first (harmless - report its destination), or `path` vanished
+        # for an unrelated reason and nothing landed at `archive` (report the
+        # original path so a caller's existence check doesn't trust a file
+        # that was never written).
+        if not archive.exists():
+            return path
     return archive

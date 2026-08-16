@@ -176,6 +176,13 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         # not yet know to forward would otherwise be silently dropped from
         # the audit event - fail loud instead so the drift gets fixed here.
         raise KeyError(f"emit_claim_reap_swept: unrecognized summary key(s) {sorted(extra_keys)}")
+    missing_keys = known_keys - summary.keys()
+    if missing_keys:
+        # The reverse drift: a key this function still expects to forward
+        # was removed (or renamed) from reap_dead_claims's summary - the
+        # KeyError below would fire mid-build with a confusing traceback;
+        # fail loud here instead, naming the actual missing key(s).
+        raise KeyError(f"emit_claim_reap_swept: summary missing expected key(s) {sorted(missing_keys)}")
     data = {
         "scanned": int(summary["scanned"]),
         "reaped": int(summary["reaped"]),

@@ -339,9 +339,9 @@ def acquire_claim(
         # into RecursionError against a genuinely live holder.
         #
         # This mkdir-path-build + acquired_lock/recovery_token + try/finally
-        # shape repeats at 5 sites in this file (here, the stale-reclaim
-        # branch below, compare_and_rebind, refresh_claim, and
-        # reap_dead_claims). acquire_dir_mutex already collapsed the inner
+        # shape repeats at 6 sites in this file (here, the stale-reclaim
+        # branch below, compare_and_rebind, refresh_claim, force_release_claim,
+        # and reap_dead_claims). acquire_dir_mutex already collapsed the inner
         # mkdir/steal/wait logic each site used to hand-roll; a further
         # `with recovery_mutex(path) as token:` context manager could
         # collapse this outer bookkeeping too, but each site's body differs
