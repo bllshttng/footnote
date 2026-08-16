@@ -864,48 +864,61 @@ def _git(root: Path, *args: str) -> tuple[int, str]:
     return p.returncode, (p.stdout if p.returncode == 0 else p.stderr).strip()
 
 
-def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[str], str]:
-    """One deterministic changed-path snapshot -> (paths, unevaluated reason).
+def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[str], str, str]:
+    """One deterministic changed-path snapshot -> (paths, unevaluated reason, resolved base).
 
     Explicit base+head (CI) diffs those exact revisions, so behavior never
     depends on a mutable remote-tracking ref. Local mode diffs the merge-base
     with origin/main (origin/master when main is absent) and adds untracked
     files, which a commit-to-commit diff
     cannot see but which are part of local changed intent. A non-empty reason
-    means the result is UNEVALUATED, never an empty changeset.
+    means the result is UNEVALUATED, never an empty changeset. The resolved
+    base names what actually sized the diff (`origin/master@<sha12>` in local
+    mode, the given base when explicit, "" when unevaluated) so a receipt can
+    never claim a base it did not use.
     """
     if bool(base) != bool(head):
-        return [], "--changed takes both --base and --head, or neither (local mode)"
+        return [], "--changed takes both --base and --head, or neither (local mode)", ""
     if base:
         shas = []
         for rev in (base, head):
             rc, out = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
             if rc != 0 or not out:
-                return [], f"revision {rev!r} does not resolve here (shallow checkout or missing ref)"
+                return [], f"revision {rev!r} does not resolve here (shallow checkout or missing ref)", ""
             shas.append(out)
         rc, out = _git(root, "diff", "--name-only", f"{shas[0]}...{shas[1]}")
         if rc != 0:
-            return [], f"git diff {base}...{head} failed: {out}"
-        return sorted(set(_lines(out))), ""
+            return [], f"git diff {base}...{head} failed: {out}", ""
+        return sorted(set(_lines(out))), "", base
 
-    # Only a successful probe may set mb: _git returns stderr on failure, so a
-    # leftover error string would slip past the `not mb` gate below.
+    # Only an ABSENT ref advances the fallback: a resolvable ref with no
+    # merge-base (unrelated histories) means this branch cannot be sized
+    # against that ref, not that a possibly stale sibling ref should answer
+    # instead - a stale pre-migration origin/master would inflate the packet
+    # with a whole era of main's history. Only a successful probe may set mb:
+    # _git returns stderr on failure, so a leftover error string would slip
+    # past the `not mb` gate below.
     mb = ""
+    won = ""
     for candidate in ("origin/main", "origin/master"):
+        rc, out = _git(root, "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}")
+        if rc != 0 or not out:
+            continue
         rc, out = _git(root, "merge-base", candidate, "HEAD")
         if rc == 0 and out:
             mb = out
-            break
+            won = candidate
+        break
     if not mb:
-        return [], "cannot resolve merge-base with origin/main or origin/master (fetch it, or pass --base/--head)"
+        return [], "cannot resolve merge-base with origin/main or origin/master (fetch it, or pass --base/--head)", ""
     paths: set[str] = set()
     for args in (("diff", "--name-only", mb),
                  ("ls-files", "--others", "--exclude-standard")):
         rc, out = _git(root, *args)
         if rc != 0:
-            return [], f"git {' '.join(args)} failed: {out}"
+            return [], f"git {' '.join(args)} failed: {out}", ""
         paths.update(_lines(out))
-    return sorted(paths), ""
+    return sorted(paths), "", f"{won}@{mb[:12]}"
 
 
 def _conventional_tests(root: Path, stem: str) -> list[str]:
@@ -1078,7 +1091,7 @@ def _write_changed_receipt(path: str, payload: dict) -> None:
 
 def _run_changed(root: Path, opts: dict, env: dict) -> int:
     t0 = time.monotonic()
-    paths, reason = changed_snapshot(root, opts["base"], opts["head"])
+    paths, reason, resolved_base = changed_snapshot(root, opts["base"], opts["head"])
     rc_head, head_sha = _git(root, "rev-parse", "HEAD")
     candidate = head_sha if rc_head == 0 else "unknown"
     print("smoke: mode=CHANGED SUBSET - partial evidence; the full "
@@ -1099,7 +1112,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     steps = _changed_steps(root, selections)
     select_s = time.monotonic() - t0
 
-    print(f"smoke: base={opts['base'] or 'merge-base origin/main|origin/master'} "
+    print(f"smoke: base={opts['base'] or resolved_base} "
           f"head={opts['head'] or candidate[:12]} changed={len(paths)} "
           f"selected={len(steps)} unmapped={len(unmapped)}", flush=True)
     for s in selections:
@@ -1109,7 +1122,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
 
     receipt = {
         "mode": "CHANGED SUBSET", "candidate": candidate,
-        "base": opts["base"] or "merge-base:origin/main|origin/master", "head": opts["head"] or candidate,
+        "base": opts["base"] or resolved_base, "head": opts["head"] or candidate,
         "changed_paths": paths, "unmapped_paths": unmapped,
         "selections": selections, "selected_count": len(steps),
         "unmapped_count": len(unmapped),

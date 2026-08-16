@@ -582,9 +582,15 @@ def _diff_review_level(project_root: Optional[Path]) -> Optional[str]:
 
         base = None
         for candidate in ("origin/main", "origin/master"):
+            # Only an absent ref advances the fallback: a resolvable ref with
+            # no merge-base (unrelated histories) means this branch cannot be
+            # sized, not that the other ref should answer instead.
+            if not _git_out(
+                project_root, "rev-parse", "--verify", f"{candidate}^{{commit}}"
+            ):
+                continue
             base = _git_out(project_root, "merge-base", "HEAD", candidate)
-            if base:
-                break
+            break
         if not base:
             return None
         numstat = _git_out(project_root, "diff", "--numstat", base)
