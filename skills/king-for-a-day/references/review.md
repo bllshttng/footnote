@@ -90,7 +90,7 @@ If it refuses, retry; if it still refuses, report the LITERAL refusal string and
 Verify each finding against source before accepting it. The reviewer is advisory, not authoritative - push back with a file:line argument where you disagree."
 ```
 
-Substitute the worker's own verb from "The verb, per harness" above, arguments and all: claude's order is `/code-review <level> --comment [--fix]`, codex's is bare `/review` - anything after it changes the review target.
+Substitute the worker's own verb from "The verb, per harness" above. Claude's order is `/code-review <level> --comment [--fix]`. Codex's is bare `/review` - anything after it changes the review target.
 
 Three details in that template are load-bearing, so do not smooth them out:
 
