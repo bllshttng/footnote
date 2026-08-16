@@ -21,7 +21,12 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.claims.cli import cli
-from fno.claims.core import acquire_claim, list_claims_with_counts, reap_dead_claims
+from fno.claims.core import (
+    _classify_for_sweep,
+    acquire_claim,
+    list_claims_with_counts,
+    reap_dead_claims,
+)
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import is_provably_dead, now_ms
 from fno.claims.types import Claim
@@ -88,6 +93,55 @@ class TestIsProvablyDead:
             pid=os.getpid(), host=socket.gethostname(),
         )
         assert is_provably_dead(claim) is False
+
+
+class TestClassifyForSweepMatchesIsProvablyDead:
+    """_classify_for_sweep (core.py) inlines is_provably_dead's own
+    composition (same-machine and classify() is STALE) instead of calling
+    it, so a sweep can share one classify() call across the outer scan and
+    the mutex re-verify (x-aeeb review). A parity test pins the two
+    together: if a future change to either composition diverges, this
+    fails instead of reap silently disagreeing with its documented single
+    liveness authority.
+    """
+
+    @pytest.mark.parametrize(
+        "claim",
+        [
+            pytest.param(
+                Claim(
+                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
+                    pid=_dead_pid(), host=socket.gethostname(),
+                ),
+                id="dead_pid_same_machine",
+            ),
+            pytest.param(
+                Claim(
+                    key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
+                    pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
+                ),
+                id="off_machine",
+            ),
+            pytest.param(
+                Claim(
+                    key="k", holder="h", acquired_at=now_ms(), expires_at=now_ms() + 60_000,
+                    pid=_dead_pid(), host=socket.gethostname(),
+                ),
+                id="ttl_protected_suspect",
+            ),
+            pytest.param(
+                Claim(
+                    key="k", holder="h", acquired_at=now_ms(), expires_at=None,
+                    pid=os.getpid(), host=socket.gethostname(),
+                ),
+                id="live",
+            ),
+        ],
+    )
+    def test_provably_dead_verdict_matches(self, claim):
+        ts = now_ms()
+        provably_dead, _bucket = _classify_for_sweep(claim, ts)
+        assert provably_dead is is_provably_dead(claim, now=ts)
 
 
 # ---------------------------------------------------------------------------

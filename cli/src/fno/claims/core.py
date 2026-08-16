@@ -1,6 +1,6 @@
 """High-level claim verbs.
 
-Six operations on top of io + staleness:
+Seven operations on top of io + staleness:
 
     acquire_claim     - try to take a claim; idempotent re-acquire,
                         stale recovery, live-other detection.
@@ -9,6 +9,7 @@ Six operations on top of io + staleness:
     claim_status      - inspect a single key.
     list_claims       - enumerate all live (and optionally stale) claims.
     force_release_claim - administrative override, always succeeds.
+    reap_dead_claims  - archive every provably-dead claim (GC).
 
 Every state-changing verb appends an audit event to ``.fno/events.jsonl``
 through the typed builders in :mod:`fno.claims.events`. Audit-trail
