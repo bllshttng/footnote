@@ -1206,31 +1206,30 @@ fn floor_self_review(
 }
 
 /// `(is_code, assumed)`: classifies the branch's payload, failing CLOSED. An
-/// unreadable diff (no `origin/main`, git missing, any non-zero exit) classifies
-/// as code with `assumed=true`, so a degraded probe can never silently disable
-/// the obligation the way failing open would. `origin/main...HEAD` is the
-/// three-dot diff, so it names the branch's own changes (the PR diff), not
-/// changes that landed on main since the branch point.
+/// unreadable diff (neither `origin/main` nor `origin/master`, git missing, any
+/// non-zero exit) classifies as code with `assumed=true`, so a degraded probe
+/// can never silently disable the obligation the way failing open would. The
+/// `<base>...HEAD` three-dot diff names the branch's own changes (the PR
+/// diff), not changes that landed on the base since the branch point.
 fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
-    let out = Command::new(git_bin)
-        .args(["diff", "--name-only", "origin/main...HEAD"])
-        .current_dir(cwd)
-        .output();
-    let (paths, readable) = match out {
-        Ok(o) if o.status.success() => {
-            let paths = String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>();
-            (paths, true)
+    for base in ["origin/main", "origin/master"] {
+        let range = format!("{base}...HEAD");
+        let out = Command::new(git_bin)
+            .args(["diff", "--name-only", &range])
+            .current_dir(cwd)
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                let paths = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>();
+                return (payload_is_code(&paths), false);
+            }
         }
-        _ => (Vec::new(), false),
-    };
-    if !readable {
-        return (true, true);
     }
-    (payload_is_code(&paths), false)
+    (true, true)
 }
 
 // ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
@@ -10744,6 +10743,32 @@ mod tests {
             classify_payload("definitely-not-a-real-git-binary", Path::new("."));
         assert!(is_code);
         assert!(assumed);
+    }
+
+    #[test]
+    fn self_review_gate_classifies_docs_via_master_fallback() {
+        // A master-default repo: the origin/main probe fails, the origin/master
+        // probe answers, and the payload classifies from that diff (docs-only
+        // waives the obligation) instead of failing closed as assumed code.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("git");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ncase \"$*\" in\n  *origin/main*) exit 1 ;;\n  *origin/master*) printf 'docs/plan.md\\n' ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        make_executable(&script);
+        let (is_code, assumed) = classify_payload(script.to_str().unwrap(), Path::new("."));
+        assert!(!is_code);
+        assert!(!assumed);
+    }
+
+    /// chmod +x for a stub git binary used by the fallback test above.
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
     }
 
     #[test]

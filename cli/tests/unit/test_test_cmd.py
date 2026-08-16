@@ -176,6 +176,25 @@ def test_snapshot_diffs_explicit_base_and_head(tmp_path: Path) -> None:
     assert paths == ["b.txt"]
 
 
+def test_snapshot_local_mode_falls_back_to_origin_master(tmp_path: Path) -> None:
+    """A master-default repo sizes the local diff from origin/master."""
+    _git_repo(tmp_path)
+    _write(tmp_path / "a.txt", "one\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(["git", "-C", str(tmp_path), "update-ref",
+                    "refs/remotes/origin/master", base], check=True)
+    _write(tmp_path / "b.txt", "two\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "head"], check=True)
+
+    paths, reason = changed_snapshot(tmp_path)
+    assert reason == ""
+    assert paths == ["b.txt"]
+
+
 def test_snapshot_fails_closed_on_an_unresolvable_base(tmp_path: Path) -> None:
     """AC5: a missing base is an explicit unevaluated result, not an empty diff."""
     _git_repo(tmp_path)
