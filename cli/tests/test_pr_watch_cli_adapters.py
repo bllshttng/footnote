@@ -337,6 +337,44 @@ def test_master_switch_off_names_autonomy_not_pr_watch_in_the_message(monkeypatc
     assert "config.autonomy.enabled is false" in res.output
 
 
+def test_master_switch_off_also_stops_the_recovery_sweep(monkeypatch) -> None:
+    """x-aaaf wave 3: config.recovery.enabled=True alone used to be enough to
+    fire the respawn sweep even with the master switch off -- a guard checked
+    independently of the panic switch it was supposed to obey. Assert the
+    sweep function is never called when autonomy.enabled is False, even
+    though recovery's own gate is armed."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: TickResult(open_prs=0, acted=0, disabled=True),
+        raising=True,
+    )
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.pr_watch.enabled = True
+    settings.autonomy.enabled = False
+    settings.recovery.enabled = True
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    called = []
+    monkeypatch.setattr(
+        "fno.recovery.run_recovery_sweep", lambda *a, **kw: called.append(1), raising=True
+    )
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+
+    assert res.exit_code == 0, res.output
+    assert not called, "recovery sweep must not fire when the master switch is off"
+
+
 def test_cli_passes_the_resolved_enabled_flag_to_dispatch_tick(monkeypatch) -> None:
     """The CLI must pass config.pr_watch.enabled through, not silently drop it."""
     import typer

@@ -261,8 +261,10 @@ def tick() -> None:
     # socket nudge was removed (a bypass recipient holds it by design), so the
     # sweep no longer resumes idle-but-incomplete sessions. Gated by
     # config.recovery.enabled and wrapped non-fatally so a recovery failure
-    # never breaks the PR-watch tick.
-    if settings.recovery.enabled:
+    # never breaks the PR-watch tick. The master switch (x-aaaf wave 3) outranks
+    # this gate too - a recovery respawn is exactly the "session starts itself"
+    # behavior the panic switch exists to stop.
+    if settings.recovery.enabled and settings.autonomy.enabled:
         try:
             from fno.recovery import run_recovery_sweep
 

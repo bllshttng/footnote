@@ -66,8 +66,9 @@ def test_ac1_hp_every_known_spawner_appears(
 
     rows = collect_status(tmp_path)
 
-    # master switch + 9 known spawners + groom/restart/evals (wave 2 gated these).
-    assert len(rows) == 13
+    # master switch + 9 known spawners + groom/restart/evals (wave 2 gated
+    # these) + recovery sweep (found while building the wave-3 registry ratchet).
+    assert len(rows) == 14
     for r in rows:
         assert r.trigger
         assert r.gate_key
@@ -145,6 +146,7 @@ def test_master_switch_off_vetoes_every_other_row(
     assert by_name["autonomy (master switch)"].armed is False
     for name in (
         "post-merge ritual", "pr_watch (headless PR poll)",
+        "recovery sweep (crash respawn)",
         "groom (_spawn_groom_worker)", "restart (_revive_orphans)",
         "evals runner", "blueprint auto-launch",
         "keep_going (autonomous follow-up)",

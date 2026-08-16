@@ -154,6 +154,26 @@ def _pr_watch_status(project_root: Optional[Path]) -> SpawnerStatus:
         )
 
 
+def _recovery_status(project_root: Optional[Path]) -> SpawnerStatus:
+    """x-aaaf wave 3: found while building the registry ratchet (task 3.3) --
+    recovery.py's crash-recovery respawn had a real config.recovery.enabled
+    gate but was reachable with the master switch off (pr_watch/cli.py checked
+    recovery.enabled alone, never autonomy.enabled). Fixed alongside this row."""
+    try:
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).recovery.enabled
+        )
+        return SpawnerStatus(
+            "recovery sweep (crash respawn)", "pr_watch launchd interval tick",
+            "config.recovery.enabled", armed, rank,
+        )
+    except Exception:  # noqa: BLE001
+        return SpawnerStatus(
+            "recovery sweep (crash respawn)", "pr_watch launchd interval tick",
+            "config.recovery.enabled", False, "default",
+        )
+
+
 def _keep_going_status(project_root: Optional[Path]) -> SpawnerStatus:
     from fno.config import autonomy_master_enabled
     from fno.retro.keep_going import _ENV_OVERRIDE, keep_going_enabled
@@ -246,6 +266,7 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _spawn_think_status(project_root),
         _post_merge_status(project_root),
         _pr_watch_status(project_root),
+        _recovery_status(project_root),
         _keep_going_status(project_root),
         _blueprint_auto_launch_status(project_root),
         # x-aaaf wave 2: previously ungated, now gated - see GroomBlock /
