@@ -1217,7 +1217,12 @@ fn floor_self_review(
 fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     for base in ["origin/main", "origin/master"] {
         let verify = Command::new(git_bin)
-            .args(["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")])
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{base}^{{commit}}"),
+            ])
             .current_dir(cwd)
             .output();
         match verify {
