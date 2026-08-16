@@ -417,7 +417,10 @@ def heal() -> None:
             "pr-watch:heal", holder, ttl_ms=_HEAL_TTL_MS,
             reason="pr-watch SessionStart self-heal", root=heal_root,
         )
-    except claims.ClaimHeldByOther:
+    except (claims.ClaimHeldByOther, claims.ClaimContended):
+        # ClaimContended is acquire_claim's own contention-retry-exhaustion
+        # guard: same "someone else is on it" degrade as ClaimHeldByOther,
+        # not a reason to abort this SessionStart hook with a traceback.
         typer.echo("pr-watch heal: another session is healing; skipped")
         return
     try:

@@ -261,12 +261,15 @@ def run_forever(
     select/inotify wakeup is a latency optimization to add only if a profiler
     asks for it.
     """
-    from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
+    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
 
     holder = holder or f"relay-daemon:{_pid()}"
     try:
         acquire_claim(CLAIM_KEY, holder, reason="cross-session relay daemon")
-    except ClaimHeldByOther:
+    except (ClaimHeldByOther, ClaimContended):
+        # ClaimContended is acquire_claim's own contention-retry-exhaustion
+        # guard: same "another daemon has it right now" degrade as
+        # ClaimHeldByOther, not a reason to crash startup with a traceback.
         emit("relay_daemon_already_running", path=events_path, holder=holder)
         return
 

@@ -615,8 +615,10 @@ def dispatch_post_merge_ritual(
             lock_key, holder, ttl_ms=_POST_MERGE_DISPATCH_TTL_MS,
             reason="post-merge ritual dispatch", root=canonical,
         )
-    except claims.ClaimHeldByOther:
-        # In-flight, NOT done: another holder may still fail before the marker.
+    except (claims.ClaimHeldByOther, claims.ClaimContended):
+        # ClaimContended is acquire_claim's own contention-retry-exhaustion
+        # guard: same "in-flight, not done" degrade as ClaimHeldByOther, not
+        # a reason to crash the merge-dispatch tick loop with a traceback.
         return PostMergeDispatchResult("already-dispatched", pr_number, detail="lock-contention")
 
     try:

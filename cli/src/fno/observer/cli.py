@@ -952,7 +952,7 @@ def _replay(
         typer.echo(f"tool-fault: recorded input for {corpus_item} unresolvable; emitted tool-fault finding.")
         raise typer.Exit(1)
 
-    from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim
+    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
     from fno.observer import isolation
 
     repo_root = _paths.resolve_repo_root()
@@ -976,6 +976,12 @@ def _replay(
             )
         except ClaimHeldByOther as exc:
             typer.echo(f"another replay holds {corpus_item}; exiting without touching its worktree ({exc}).")
+            raise typer.Exit(4)
+        except ClaimContended as exc:
+            # acquire_claim's own contention-retry-exhaustion guard: same
+            # clean-refusal posture as ClaimHeldByOther above, not a reason
+            # to crash through the finally-only outer try with a traceback.
+            typer.echo(f"contention acquiring {corpus_item}'s replay claim; retry shortly ({exc}).")
             raise typer.Exit(4)
 
         if _run_worktree:
