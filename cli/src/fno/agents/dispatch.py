@@ -5627,6 +5627,7 @@ def _mux_followup_path(
     delivery contract in docs/architecture/fno-agents-deliver-gate.md).
     """
     from fno.agents.harnesses.claude import build_cross_session_container
+    from fno.mail.envelope import ForgedEnvelopeError
 
     mux = existing.mux or {}
     ref = f"{mux.get('session')}:{mux.get('pane_id')}"
@@ -5636,7 +5637,10 @@ def _mux_followup_path(
         provider=existing.harness,
         short_id=ref,
     )
-    wrapped = build_cross_session_container(message, from_name)
+    try:
+        wrapped = build_cross_session_container(message, from_name)
+    except ForgedEnvelopeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
     # Peer follow-up is the writer-claim holder's own raw channel: it has no
     # durable floor to demote to, so it keeps the unguarded send (the turn-taken
     # interlock is the mail-delivery lane's guarantee, not this one -- US4 scope).
