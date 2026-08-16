@@ -2728,11 +2728,14 @@ def test_codex_route_config_args_face_the_passthrough_duplicate_check(
         ),
     )
     runner = FakeRunner()
+    # `harness` names the axis the value belongs to (the vocabulary ratchet
+    # prohibits a NEW provider-named binding holding a harness literal).
+    harness = "codex"
     with pytest.raises(DispatchAskError, match="on both sides") as exc:
         _spawn(
             monkeypatch,
             tmp_path,
-            provider="codex",
+            provider=harness,
             role="publisher",
             passthrough=["-c", "model='gpt-personal'"],
             runner=runner,
