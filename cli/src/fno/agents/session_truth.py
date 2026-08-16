@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -108,8 +109,12 @@ def _transcript_age_s(
     codex_sessions_dir: Optional[Path],
     now_s: Optional[float],
     transcript_path: Optional[Path] = None,
-) -> Optional[float]:
-    """Seconds since the session's newest activity, or None if unknowable.
+) -> tuple[Optional[float], Optional[float]]:
+    """``(activity_epoch, age_s)``, either half None if unknowable.
+
+    The epoch is returned alongside the age derived from it so the caller can
+    emit an absolute stamp and a relative age from the SAME read; computing them
+    from two reads is how a stamp and an age disagree about one transcript.
 
     Uses the x-a472 transcript resolver (content-aware across all project dirs),
     so a jsonl age reflects the LIVE transcript, not a stale stub. For opencode
@@ -131,20 +136,28 @@ def _transcript_age_s(
                 codex_sessions_dir=codex_sessions_dir,
             )
             if not rt.resolved or not rt.transcript_path:
-                return None
+                return None, None
             if rt.kind == "opencode-db":
                 activity_mtime = _opencode_activity_epoch(
                     session_id, Path(rt.transcript_path)
                 )
                 if activity_mtime is None:
-                    return None
+                    return None, None
                 mtime = activity_mtime
             else:
                 mtime = Path(rt.transcript_path).stat().st_mtime
     except Exception:  # noqa: BLE001 — any read failure -> age unknown (working)
-        return None
+        return None, None
     now = now_s if now_s is not None else time.time()
-    return max(0.0, now - mtime)
+    # An epoch datetime cannot represent (a corrupt opencode time_updated, say)
+    # degrades the WHOLE pair, not just the stamp: `max(0.0, now - mtime)` on a
+    # far-future epoch would claim a measured age of 0 beside a null stamp,
+    # the fresh-vs-absent disagreement this paired return exists to prevent.
+    try:
+        datetime.fromtimestamp(mtime, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None, None
+    return mtime, max(0.0, now - mtime)
 
 
 def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
@@ -191,13 +204,18 @@ def resolve_session_truth(
 ) -> dict[str, Any]:
     """Resolve ``handle`` and classify its transcript tail. Never raises.
 
-    Returns ``{handle, state, reason, last_activity_age_s, session_id,
-    observed_model, suggestions}``. ``state`` is one of done | watching |
-    your-move | working | stalled | unknown; ``reason`` is set only for
-    ``unknown`` (``not-found`` / ``no-records``); ``observed_model`` is the
-    five-variant reading documented on :func:`observed_model` and is present on
-    every path, including the ``unknown`` ones (a row that cannot be classified
-    still renders)."""
+    Returns ``{handle, state, reason, last_activity_age_s, last_event_at,
+    last_message, session_id, observed_model, suggestions}``. ``state`` is one
+    of done | watching | your-move | working | stalled | unknown; ``reason`` is
+    set only for ``unknown`` (``not-found`` / ``no-records``);
+    ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
+    activity and ``last_message`` the flattened text of the LAST turn (compact
+    ``[tool_use: name]`` markers included, whitespace collapsed, capped at 200
+    chars) - both None on every unknown path, because an unread transcript must
+    render as unread, never as fresh; ``observed_model`` is the five-variant
+    reading documented on :func:`observed_model` and is present on every path,
+    including the ``unknown`` ones (a row that cannot be classified still
+    renders)."""
     from fno.agents.peek import recent_records
 
     resolver = resolve if resolve is not None else _default_resolve
@@ -210,6 +228,8 @@ def resolve_session_truth(
             "state": "unknown",
             "reason": reason,
             "last_activity_age_s": None,
+            "last_event_at": None,
+            "last_message": None,
             "session_id": session_id,
             "observed_model": observed or {"kind": "no-transcript"},
             "suggestions": suggestions or [],
@@ -240,6 +260,20 @@ def resolve_session_truth(
     )
     observed = observed_model(agent, transcript_path)
 
+    # Stat BEFORE reading the tail, so a write that lands between the two reads
+    # can only make the stamp OLDER than the message it describes - the message
+    # may then include a record the stamp predates, which understates freshness.
+    # The other order lets a mid-flight append make an old line read as freshly
+    # emitted, which is the dangerous direction for this pair.
+    mtime, age = _transcript_age_s(
+        agent,
+        sid,
+        cwd,
+        projects_root,
+        codex_sessions_dir,
+        now_s,
+        transcript_path,
+    )
     try:
         records = recent_records(
             agent,
@@ -259,21 +293,32 @@ def resolve_session_truth(
     # Classify the LAST turn, not the last assistant turn: a trailing user turn
     # must clear a stale assistant promise/question (see classify_tail).
     last = records[-1]
-    age = _transcript_age_s(
-        agent,
-        sid,
-        cwd,
-        projects_root,
-        codex_sessions_dir,
-        now_s,
-        transcript_path,
-    )
     state = classify_tail(last.role, last.text, age, stalled_after_s=stalled_after_s)
+    try:
+        last_event_at = (
+            None
+            if mtime is None
+            else datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        )
+    except (ValueError, OverflowError, OSError):
+        # An epoch beyond datetime range (e.g. an opencode time_updated stored
+        # in microseconds) degrades to an absent stamp; raising here would
+        # break the never-raises contract and take the whole list render down
+        # with one corrupt reading.
+        last_event_at = None
+    # The stamp and the message describe the same tail: the absolute stamp comes
+    # from the same epoch the age was derived from and is taken before the tail
+    # is read, so the pair cannot disagree about when the transcript last moved
+    # in the dangerous direction.
     return {
         "handle": handle,
         "state": state,
         "reason": None,
         "last_activity_age_s": None if age is None else int(age),
+        "last_event_at": last_event_at,
+        "last_message": " ".join((last.text or "").split())[:200] or None,
         "session_id": sid,
         "observed_model": observed,
         "suggestions": [],

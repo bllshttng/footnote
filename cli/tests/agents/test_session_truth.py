@@ -321,6 +321,189 @@ def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# last_event_at + last_message: the absolute stamp and the last turn
+#
+# The pair makes a wedged worker legible: a row claiming `working` whose stamp
+# is hours old, with the wait-line it actually ended on. Both come from the
+# same tail read that classified the turn, and both are None on every unknown
+# path - an unread transcript renders as unread, never as fresh.
+# ---------------------------------------------------------------------------
+
+def test_resolve_carries_last_event_stamp_and_last_message(tmp_path):
+    import os
+
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-4e20-0000-0000-000000000000"
+    path = _write_claude_transcript(
+        tmp_path, cwd, sid, ["first turn", ("user", "line one\nline two")]
+    )
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=1_700_000_100.0
+    )
+
+    # The stamp is absolute UTC in the Z-suffix house format (the same shape
+    # registry.py stamps last_message_at with) and agrees with the age by
+    # construction: both come from the same epoch read.
+    assert result["last_event_at"] == "2023-11-14T22:13:20Z"
+    assert result["last_activity_age_s"] == 100
+    # The LAST turn's text, whitespace collapsed.
+    assert result["last_message"] == "line one line two"
+
+
+def test_resolve_degrades_out_of_range_epoch_to_absent_stamp(tmp_path, monkeypatch):
+    """An epoch beyond datetime range must not raise: the module contract says
+    every read degrades, and one corrupt reading must not take down the whole
+    `fno agents list` render (read.py calls this per row with no catch). A
+    filesystem mtime cannot reach the danger zone (ns precision clamps at year
+    2262); the reachable producer is the opencode DB, whose time_updated is
+    divided by 1000 with no range guard, so a microsecond-scale row yields a
+    year-55840 epoch."""
+    from fno.agents import session_truth
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-4e23-0000-0000-000000000000"
+    _write_claude_transcript(tmp_path, cwd, sid, ["turn"])
+
+    monkeypatch.setattr(
+        session_truth,
+        "_transcript_age_s",
+        lambda *a, **k: (1_700_000_000_000.0, 0.0),
+    )
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=1_700_000_100.0
+    )
+
+    assert result["last_event_at"] is None
+
+
+def test_transcript_age_degrades_out_of_range_epoch_as_a_pair(monkeypatch, tmp_path):
+    """The out-of-range guard must null BOTH halves of the pair, not just the
+    stamp: a far-future epoch through `max(0.0, now - mtime)` yields a measured
+    age of 0, which is a freshness claim about a reading that never happened -
+    the exact stamp-says-absent / age-says-fresh disagreement the paired return
+    exists to prevent. Reached through the opencode lane, the one reachable
+    producer of an out-of-range epoch."""
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth, "_opencode_activity_epoch", lambda sid, p: 1_700_000_000_000.0
+    )
+
+    class _RT:
+        resolved = True
+        kind = "opencode-db"
+        transcript_path = str(tmp_path / "store.db")
+
+    monkeypatch.setattr(
+        "fno.provenance.resolver.resolve_transcript", lambda *a, **k: _RT()
+    )
+
+    assert session_truth._transcript_age_s("opencode", "s", "/c", None, None, None) == (
+        None,
+        None,
+    )
+
+
+def test_resolve_last_message_keeps_tool_marker_and_caps_length(tmp_path):
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-4e21-0000-0000-000000000000"
+    d = tmp_path / cwd.replace("/", "-").replace(".", "-")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sid}.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {}},
+                        {"type": "text", "text": "Still growing " + "x" * 250},
+                    ],
+                },
+            }
+        )
+        + "\n"
+    )
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+
+    msg = result["last_message"]
+    # The compact tool marker is inline (the tool half of "what did it last
+    # DO"), and a 270-char line is capped at 200 so one row cannot own a table.
+    assert msg.startswith("[tool_use: Bash] Still growing")
+    assert len(msg) == 200
+
+
+def test_unknown_paths_leave_the_last_event_pair_null(tmp_path):
+    """not-found and no-records both emit the full key set with both new keys
+    None: an absent probe reading is never a fresh stamp or a message."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    def miss(_handle):
+        return None, []
+
+    result = resolve_session_truth("nope", resolve=miss, projects_root=tmp_path)
+    assert result["state"] == "unknown"
+    assert result["last_event_at"] is None
+    assert result["last_message"] is None
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "beadface-4e22-0000-0000-000000000000"
+    _write_claude_transcript(tmp_path, cwd, sid, [])
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+    assert result["state"] == "unknown"
+    assert result["last_event_at"] is None
+    assert result["last_message"] is None
+
+
+def test_truth_verb_json_carries_the_last_event_pair(tmp_path, monkeypatch):
+    """The --json payload is an explicit key allowlist (see the observed_model
+    test above): the resolver's fields reach nobody until _truth_payload copies
+    them across."""
+    from typer.testing import CliRunner
+
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-2222-0000-0000-000000000001"
+    _write_claude_transcript(tmp_path, cwd, sid, ["on the pytest run now"])
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+
+    real = session_truth.resolve_session_truth
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **kw: real(
+            handle, resolve=_resolver(session), projects_root=tmp_path
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["agents", "truth", "w1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["last_message"] == "on the pytest run now"
+    assert payload["last_event_at"]  # absolute ISO8601, present on the wire
+
+
+# ---------------------------------------------------------------------------
 # observed_model: the route a worker is ACTUALLY on, read from its transcript
 #
 # The whole point is that this is DERIVED, never recorded. A route stamped at

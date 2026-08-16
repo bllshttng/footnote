@@ -17,10 +17,10 @@ fno agents list
 A typical human-table view:
 
 ```
-NAME              PROVIDER  STATUS    CHECKED  PID     LAST MESSAGE          CWD
-worker-frontend   claude    live      4m       75742   2026-05-20T17:30:12Z  /Users/foo/code/proj
-worker-migration  codex     live      18s      75810   2026-05-20T17:15:43Z  /Users/foo/code/proj
-worker-design     claude    orphaned  2h       -       2026-05-20T17:00:00Z  /Users/foo/code/proj
+NAME              ADDRESS   HARNESS  STATUS    CHECKED  PID     EVENT AGE  LAST MESSAGE           CWD
+worker-frontend   7f3a2c1d  claude   live      4m       75742   2m         running the suite now  /Users/foo/code/proj
+worker-migration  9b1e44f0  codex    live      18s      75810   18s        [tool_use: Bash] ls    /Users/foo/code/proj
+worker-design     4c8d21ab  claude   orphaned  2h       -       unknown    -                      /Users/foo/code/proj
 ```
 
 Columns:
@@ -28,11 +28,13 @@ Columns:
 | Column | Meaning |
 |---|---|
 | NAME | Agent name (the identifier you pass to `ask` / `logs`). |
-| PROVIDER | The harness: `claude`, `codex`, `gemini`, `opencode`, or `agy`. |
+| ADDRESS | The mailbox address mail can actually reach this worker at; `-` when it has none. |
+| HARNESS | The harness: `claude`, `codex`, `gemini`, `opencode`, or `agy`. |
 | STATUS | The transcript verdict: `live`, `orphaned` (the transcript reads done or stalled), or `unknown` (the probe could not answer). Stored registry status is lifecycle metadata and does not decide this column. |
 | CHECKED | Relative age since the last reconcile probe (`never` when never probed, `?` when the stored timestamp will not parse). |
 | PID | Worker pid for a PTY agent; `-` for a one-shot ask, which has no managed process. |
-| LAST MESSAGE | Timestamp of the most recent successful `ask` follow-up, printed raw (RFC3339). |
+| EVENT AGE | Relative age of the transcript's newest activity, read by the same probe as STATUS; `unknown` when no transcript was read. A `live` row with an hours-old EVENT AGE is the wedged-worker signal. |
+| LAST MESSAGE | Flattened text of the worker's last transcript turn (`[tool_use: name]` markers inline), capped for display; `-` when the probe did not answer. |
 | CWD | Working directory the agent was created in, printed in full. |
 
 ### Filters

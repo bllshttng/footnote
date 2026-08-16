@@ -3889,6 +3889,8 @@ where
                 json!(truth.as_ref().and_then(|t| t.reachability.as_deref())),
                 json!(truth.as_ref().and_then(|t| t.basis.as_deref())),
                 json!(truth.as_ref().and_then(|t| t.last_activity_age_s)),
+                json!(truth.as_ref().and_then(|t| t.last_event_at.as_deref())),
+                json!(truth.as_ref().and_then(|t| t.last_message.as_deref())),
             );
             // A probe that did not answer is the same situation Python's
             // resolver reports as `no-transcript` (its dominant cause here is
@@ -3912,7 +3914,7 @@ where
             true
         })
         .map(|(e, rendered_status, observed_model, evidence)| {
-            let (reachability, basis, last_activity_age_s) = evidence;
+            let (reachability, basis, last_activity_age_s, last_event_at, last_message) = evidence;
             // Return the full row shape matching Python's serialize_entry. The
             // key set is pinned by schemas/agents-list-row.json, asserted here
             // and by the Python test; edit that file before adding a key.
@@ -4022,6 +4024,13 @@ where
                 "reachability": reachability,
                 "basis": basis,
                 "last_activity_age_s": last_activity_age_s,
+                // The absolute stamp of the newest transcript activity and the
+                // flattened LAST-turn text, from the same probe as the age -
+                // the pair that makes a wedged-but-`working` row visible. Null
+                // when the probe never answered, which an absent reading must
+                // render as, never a fresh one.
+                "last_event_at": last_event_at,
+                "last_message": last_message,
                 "live_status": null,
                 // The model this worker is ACTUALLY answering as, from the same
                 // family-1 probe that produced `status` above -- so the daemon
@@ -8711,6 +8720,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             reachability: None,
             basis: None,
             last_activity_age_s: None,
+            last_event_at: None,
+            last_message: None,
             observed_model: Value::Null,
         })
     }
@@ -8725,6 +8736,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
             last_activity_age_s: Some(12.0),
+            last_event_at: Some("2026-08-15T17:00:00+00:00".into()),
+            last_message: Some(
+                "Still growing (101 lines, 26 percent through the pytest run)".into(),
+            ),
             observed_model: Value::Null,
         })
     }
@@ -9080,8 +9095,16 @@ done
         assert_eq!(row["reachability"], "reachable");
         assert_eq!(row["basis"], "transcript");
         assert_eq!(row["last_activity_age_s"], 12.0);
+        // The stamp and the LAST-turn text ride the same probe: a
+        // hard-coded null would satisfy the key-set contract while hiding the
+        // wedged-worker signal the pair exists to expose.
+        assert_eq!(row["last_event_at"], "2026-08-15T17:00:00+00:00");
+        assert_eq!(
+            row["last_message"],
+            "Still growing (101 lines, 26 percent through the pytest run)"
+        );
 
-        // A probe that did not answer leaves all three null. That is NOT the
+        // A probe that did not answer leaves all five null. That is NOT the
         // same as `no-evidence`, which is a verdict this emitter must never
         // invent on the probe's behalf.
         let response = handle_list_with_truth(&ctx, &req, |_handle| None);
@@ -9089,6 +9112,8 @@ done
         assert!(row["reachability"].is_null());
         assert!(row["basis"].is_null());
         assert!(row["last_activity_age_s"].is_null());
+        assert!(row["last_event_at"].is_null());
+        assert!(row["last_message"].is_null());
 
         std::fs::remove_dir_all(home.root()).ok();
     }
@@ -9147,6 +9172,8 @@ done
                 reachability: Some("reachable".into()),
                 basis: Some("transcript".into()),
                 last_activity_age_s: Some(3.5),
+                last_event_at: None,
+                last_message: None,
                 observed_model: json!({
                     "kind": "observed", "model": "glm-5.2", "samples": 300
                 }),
