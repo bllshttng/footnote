@@ -2322,7 +2322,7 @@ fn read_fill<R: Read>(r: &mut R, buf: &mut [u8], committed: bool) -> Result<(), 
     Ok(())
 }
 
-fn is_retryable(e: &std::io::Error) -> bool {
+pub(crate) fn is_retryable(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut

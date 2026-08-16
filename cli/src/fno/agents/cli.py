@@ -1369,6 +1369,13 @@ def cmd_spawn(
                 # Server-authored exact-placement receipt (anchor/direction/
                 # fallback/squad/tab); never synthesized from the request.
                 receipt_obj["placement"] = pane_result.placement
+            if pane_result.recovered:
+                # LD5: this pane was adopted after an unanswered
+                # control read, not created by this run. Proves a booted
+                # session, never that the prompt was consumed - the receipt
+                # must say so rather than reading identically to a normal
+                # spawn.
+                receipt_obj["recovered"] = True
             # Locked Decision 5: name the applied mode so an audit of "why did
             # this worker have edit rights" has a durable answer. Only when set,
             # so the unset receipt is unchanged.
