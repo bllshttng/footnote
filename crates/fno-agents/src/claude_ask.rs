@@ -1936,7 +1936,7 @@ pub fn validate_spawn_inputs(name: &str, from_name: &str) -> Result<(), String> 
     Ok(())
 }
 
-use crate::agent_lock::AgentLock;
+use crate::agent_lock::{holder_note, AgentLock};
 
 /// Stable fno-side log path for `fno agents logs <name>` (`_derive_log_path`).
 fn derive_log_path(home: &AgentsHome, name: &str) -> PathBuf {
@@ -1982,11 +1982,12 @@ pub fn dispatch_claude_ask(
             );
             return AskOutcome::err(
                 // Python: f"lock timeout for agent {name!r} after {timeout}s"
-                // with timeout=30.0 (float) -> "...after 30.0s".
+                // + holder_note(), with timeout=30.0 (float) -> "...after 30.0s".
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );
@@ -2100,9 +2101,10 @@ pub fn dispatch_claude_spawn(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );

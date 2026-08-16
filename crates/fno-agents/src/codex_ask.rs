@@ -797,7 +797,7 @@ fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-use crate::agent_lock::AgentLock;
+use crate::agent_lock::{holder_note, AgentLock};
 
 /// Outcome of `dispatch_codex_ask`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -870,9 +870,10 @@ pub fn dispatch_codex_ask(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {:?} after {:.1}s",
+                    "lock timeout for agent {:?} after {:.1}s{}",
                     name,
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );
@@ -979,9 +980,10 @@ pub fn dispatch_codex_once(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );

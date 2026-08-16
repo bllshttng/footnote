@@ -209,11 +209,11 @@ def test_cmd_send_happy_path_stdout_format(
 
 
 # ---------------------------------------------------------------------------
-# AC3-ERR: lock-timeout -> loud stderr + nonzero (exit 11)
+# AC3-ERR: lock-timeout -> loud stderr, durable queue, exit 0
 # ---------------------------------------------------------------------------
 
 def test_dispatch_send_lock_timeout(tmp_path: Path, monkeypatch) -> None:
-    """AC3-ERR: hold_agent_lock raises AgentLockTimeout -> DispatchAskError exit 11."""
+    """A lock timeout the grace window resolves queues durable, it does not raise."""
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
@@ -2273,7 +2273,7 @@ def test_dispatch_send_lock_timeout_sees_a_reclaim_committed_under_the_lock(
 
 
 def _fail_first_lock_acquire(
-    monkeypatch, holder_pid: int = 4711, on_first=None
+    monkeypatch, holder_pid: "int | None" = None, on_first=None
 ) -> dict:
     """First `hold_agent_lock` times out; later calls take the real lock.
 
@@ -2281,7 +2281,16 @@ def _fail_first_lock_acquire(
     grace acquire. Deterministic on purpose: racing two processes on wall time
     makes the test flaky about which acquire wins, and the contract under test
     is "first fails, second verifies", not any particular timing.
+
+    The fabricated holder defaults to THIS process because `holder_note()`
+    drops a stamp whose pid is not alive. A hardcoded 4711 modelled a live
+    contender with a pid that has been dead the whole time, so the note it
+    produced was one the real code would refuse to print.
     """
+    import os as _os
+
+    if holder_pid is None:
+        holder_pid = _os.getpid()
     from contextlib import contextmanager
 
     from fno.agents import dispatch as dispatch_mod
@@ -2390,3 +2399,38 @@ def test_dispatch_send_lock_timeout_books_an_alias_addressed_send_too(
     assert after[0].last_message_at is not None, "last_message_at must be stamped"
     stderr = capsys.readouterr().err
     assert "registry stamp failed" not in stderr, stderr
+
+
+def test_queue_grace_covers_the_holder_ceiling_not_a_flat_two_seconds() -> None:
+    """The grace window must outlast the holder it is waiting on.
+
+    The holder keeps the flock for its whole live-delivery attempt, budgeted at
+    _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S. A flat 2s window meant a caller who
+    gave up at the default 30s retried for two seconds against a holder running
+    to 40s, missed by eight, and dropped the message the durable lane exists to
+    save: the fallback could not fire in the case that motivated it.
+    """
+    from fno.agents.dispatch import (
+        _DEFAULT_LOCK_TIMEOUT,
+        _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS,
+        _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S,
+        _queue_grace_seconds,
+    )
+
+    default_total = _DEFAULT_LOCK_TIMEOUT + _queue_grace_seconds(_DEFAULT_LOCK_TIMEOUT)
+    assert default_total > _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S, (
+        "a default-timeout caller must outwait the holder's own ceiling, else "
+        f"the durable queue never runs: {default_total} <= "
+        f"{_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S}"
+    )
+
+    # Capped by what the caller already spent: 0.1s means "do not wait", so the
+    # fallback must not turn it into a 42-second one.
+    assert _queue_grace_seconds(0.1) == _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS
+
+    # Past the ceiling there is nothing left to wait out; the floor is all the
+    # identity-consistency read needs.
+    assert (
+        _queue_grace_seconds(_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S + 10)
+        == _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS
+    )

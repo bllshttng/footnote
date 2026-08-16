@@ -1168,9 +1168,11 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "another SENDER, so this says nothing about whether the recipient "
             "is live: do not resurrect it on this evidence. It reads the "
             "message when it next drains its inbox.\n"
-            "  a busy peer may not drain soon, so the two rungs that stay open:\n"
-            f"    fno mail send {target} '<message>'  # retry live once the holder releases\n"
-            "    fno mail withdraw <id>      # retract the queued copy"
+            "  a busy peer may not drain soon, so the two rungs that stay open,\n"
+            "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
+            "  copy still lands at the recipient's next drain:\n"
+            "    fno mail withdraw <id>      # retract the queued copy FIRST\n"
+            f"    fno mail send {target} '<message>'  # then retry live"
         )
     elif reason in _LIVE_LANE_FAILURE_REASONS:
         msg = (
@@ -2561,8 +2563,10 @@ def cmd_send(
     resolves over the registry - one live peer delivers live, none queues
     durable for project X, many errors with the candidate list unless ``--any``.
 
-    The envelope is written durably BEFORE delivery is attempted so it survives
-    every failure path.
+    Delivery is live-inject-FIRST; the durable envelope is the fallback tier,
+    written when the live lane misses or never runs. Sustained agent-lock
+    contention writes nothing and exits 11 - it says so on stderr rather than
+    implying a receipt.
 
     Address it by the ADDRESS column of ``fno agents list`` (or the full session
     id). The NAME column is a spawn label and the discovered lane's LABEL is a

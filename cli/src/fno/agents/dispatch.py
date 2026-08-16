@@ -294,11 +294,34 @@ _NAME_MAX_LEN = 128
 _SHORT_ID_NAME_SHAPE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_LOCK_TIMEOUT = 30.0
 
-# Grace window for the post-timeout durable queue. Short on purpose: it asks
-# "did the holder just finish?", it is not a second full wait. A durable write
+# Floor for the post-timeout durable queue's grace window. A durable write
 # needs the lock because only the lock proves the recipient row is committed,
 # so a queue that cannot take it refuses instead of guessing.
 _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS = 2.0
+
+
+def _queue_grace_seconds(lock_timeout: float) -> float:
+    """Seconds the post-timeout queue waits for the flock before giving up.
+
+    A flat floor loses to the contention it exists to catch. The holder owns
+    the lock for its whole live-delivery attempt, budgeted at
+    `_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S`, so a caller that gave up at the
+    default 30s is usually waiting on a holder still running toward 40s: it
+    would retry for two seconds, miss by eight, and drop the very message it
+    came here to save. The window therefore covers the holder's own worst
+    case, measured from what the caller already waited.
+
+    Capped at that same wait, because the cap is what keeps the rule honest
+    for a caller who asked for a short one: a 0.1s `lock_timeout` means "do
+    not wait", and spending 42s on the fallback would answer a question
+    nobody asked. Past the ceiling the floor is all that is left, and all the
+    identity-consistency read needs.
+    """
+    residual = _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S + _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS
+    return max(
+        _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS,
+        min(residual - lock_timeout, lock_timeout),
+    )
 
 # Receipt reason for a message the lock-timeout lane queued. Exported because
 # the receipt formatter in fno.mail.cli must branch on it: a contended lock
@@ -1903,7 +1926,8 @@ def dispatch_ask(
             name=name,
         )
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -2661,7 +2685,8 @@ def dispatch_spawn(
 
     except AgentLockTimeout as exc:
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -3247,7 +3272,8 @@ def stop_agent(
             "agent_stopped", name=name, provider=pre_provider, claude_exit=None, lock_timeout=True
         )
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -3591,7 +3617,8 @@ def rm_agent(
             lock_timeout=True,
         )
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -6543,7 +6570,9 @@ def _queue_durable_fallback(
             from_name,
             from_session,
             provider_from,
-            to=(durable_recipient or entry.short_id or None),
+            # Never the short_id fallback the caller-built ctx uses: the
+            # refusal above already proved durable_recipient is not None here.
+            to=durable_recipient,
             id=msg_id,
         )
     durable_body = message
@@ -7070,7 +7099,7 @@ def dispatch_send(
             with hold_agent_lock(
                 canonical_name,
                 registry_path,
-                timeout=_LOCK_TIMEOUT_QUEUE_GRACE_SECONDS,
+                timeout=_queue_grace_seconds(exc.timeout),
             ):
                 # Every resolution that feeds a write happens here, under the
                 # lock, through the same call the normal path uses. An owner

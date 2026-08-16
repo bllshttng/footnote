@@ -677,7 +677,7 @@ fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-use crate::agent_lock::AgentLock;
+use crate::agent_lock::{holder_note, AgentLock};
 
 /// Outcome of `dispatch_gemini_ask` (mirror of codex's `AskOutcome`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -739,9 +739,10 @@ pub fn dispatch_gemini_ask(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {:?} after {:.1}s",
+                    "lock timeout for agent {:?} after {:.1}s{}",
                     name,
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );
@@ -845,9 +846,10 @@ pub fn dispatch_gemini_once(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );

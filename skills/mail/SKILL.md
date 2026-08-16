@@ -258,6 +258,9 @@ nothing drains.
 - **Lane** - HOW it travels. Live-inject first, durable bus as the fallback. You
   do not choose this; the delivery model does. A durable receipt names WHY it is
   durable (`[live-miss]`, `[self-send]`, `[param-forced: --kind ...]`).
+  `[agent-lock-timeout]` is the odd one out: another SENDER held the per-agent
+  lock, so no live attempt ran and the token says nothing about the recipient.
+  Do not resurrect it on that evidence, and withdraw before you re-send.
 - **Kind** - a **project-inbox drain contract**, set with `--kind`. The
   recipient project's drain dispatches on it: `heads-up` -> LLM triage (may file
   a graph node with provenance back to your thread); `question` -> drops a

@@ -86,6 +86,24 @@ def _read_holder(lock_file: Path) -> Optional[dict]:
         return None
 
 
+def _pid_is_alive(pid: object) -> bool:
+    """True when `pid` names a live process. A non-int or a dead pid is False.
+
+    `EPERM` means the process exists under another uid, so it counts as alive.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 class AgentLockTimeout(TimeoutError):
     """Raised when `hold_agent_lock` cannot acquire the flock within timeout."""
 
@@ -112,6 +130,14 @@ class AgentLockTimeout(TimeoutError):
         pid = holder.get("pid")
         acquired_at = holder.get("acquired_at")
         if pid is None or not acquired_at:
+            return ""
+        # A stamp only outlives its writer when the write half-failed (the
+        # truncate landed, the line did not) or the holder died between the
+        # two. Naming a dead pid is the 31-hour-corpse misreading this stamp
+        # exists to end, told with more authority than the bare mtime ever
+        # had. An unstamped timeout degrades cleanly; a confidently wrong one
+        # does not, so a holder that is not alive is no holder at all.
+        if not _pid_is_alive(pid):
             return ""
         return f" (held by pid {pid} since {acquired_at})"
 

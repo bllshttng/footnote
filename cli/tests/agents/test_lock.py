@@ -414,3 +414,36 @@ def test_timeout_degrades_when_lock_carries_no_stamp(tmp_path: Path) -> None:
         assert str(exc_info.value) == "lock timeout for agent 'bare' after 1s"
     finally:
         proc.join(timeout=10)
+
+
+def test_holder_note_drops_a_stamp_whose_pid_is_dead() -> None:
+    """A stamp can outlive its writer; naming a dead pid is worse than silence.
+
+    `stamp_holder` truncates before it writes, so a write that fails leaves the
+    file empty and degrades cleanly. A truncate that fails leaves the PREVIOUS
+    holder's line in place, and the waiter then reports a corpse with more
+    authority than the bare mtime this stamp replaced.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from fno.agents.lock import AgentLockTimeout
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+
+    stale = AgentLockTimeout(
+        name="ghost",
+        timeout=1.0,
+        holder={"pid": dead.pid, "name": "ghost", "acquired_at": "2026-08-15T15:03:11Z"},
+    )
+    assert stale.holder_note() == ""
+    assert str(stale) == "lock timeout for agent 'ghost' after 1.0s"
+
+    live = AgentLockTimeout(
+        name="ghost",
+        timeout=1.0,
+        holder={"pid": os.getpid(), "name": "ghost", "acquired_at": "2026-08-15T15:03:11Z"},
+    )
+    assert f"held by pid {os.getpid()}" in live.holder_note()
