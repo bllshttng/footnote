@@ -1315,6 +1315,10 @@ def test_dispatch_send_bus_lock_timeout_is_explicit_exit12(
     assert exc_info.value.exit_code == 12
     assert "bus lock timeout" in text
     assert "no durable envelope was written" in text
+    # Once. BusLockTimeout already ends with the clause, so the wrapper that
+    # guarantees it must not append a second copy at the moment the reader is
+    # deciding whether to re-send.
+    assert text.count("no durable envelope was written") == 1, text
     assert "delivered" not in text
     assert "queued (durable)" not in text
 

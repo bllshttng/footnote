@@ -294,6 +294,10 @@ _NAME_MAX_LEN = 128
 _SHORT_ID_NAME_SHAPE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_LOCK_TIMEOUT = 30.0
 
+# Every refusal that wrote nothing says this, once. The bus-lock timeout
+# already carries it, so a wrapper that appends it blindly says it twice.
+_NO_ENVELOPE_CLAUSE = "no durable envelope was written"
+
 # Floor for the post-timeout durable queue's grace window. A durable write
 # needs the lock because only the lock proves the recipient row is committed,
 # so a queue that cannot take it refuses instead of guessing.
@@ -6616,8 +6620,15 @@ def _queue_durable_fallback(
             msg_id=msg_id,
             caller_reason=reason,
         )
+        # The clause has to appear, and appear once. The bus-lock timeout this
+        # most often wraps already ends with it, so appending unconditionally
+        # stuttered "...; no durable envelope was written; no durable envelope
+        # was written" at the one moment the reader is deciding whether to
+        # re-send.
+        detail = str(exc)
+        tail = "" if _NO_ENVELOPE_CLAUSE in detail else f"; {_NO_ENVELOPE_CLAUSE}"
         raise DispatchAskError(
-            f"durable envelope write failed: {exc}; no durable envelope was written",
+            f"durable envelope write failed: {detail}{tail}",
             exit_code=12,
         ) from exc
     return msg_id, durable_recipient
