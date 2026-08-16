@@ -97,27 +97,29 @@ def seen_species(archive_entries: Iterable) -> set[int]:
     return {species_for(v) for v in ids}
 
 
-def fold(rows: list, archive_entries: Iterable) -> list[dict]:
+def fold(rows: list, archive_entries: Iterable) -> list[dict[str, object]]:
     """Fold registry rows into yard citizens, joined to the album for the mark.
 
     Sorted by name for a deterministic wire order (the overlay joins by name;
     a stable order keeps the spotlight cursor from jumping between renders).
     """
     seen = seen_species(archive_entries)
-    tiers = rarity_tiers(getattr(r, "harness", None) for r in rows)
-    citizens = []
+    harnesses = [h for h in (getattr(r, "harness", None) for r in rows) if isinstance(h, str)]
+    tiers = rarity_tiers(harnesses)
+    citizens: list[dict[str, object]] = []
     for r in rows:
         sp = species_for(citizen_id(r))
+        harness = getattr(r, "harness", None)
         citizens.append(
             {
                 "id": citizen_id(r),
                 "name": getattr(r, "name", ""),
-                "harness": getattr(r, "harness", None),
+                "harness": harness,
                 "species": sp,
-                "rarity": tiers.get(getattr(r, "harness", None), RARITY_TIERS[0]),
+                "rarity": tiers[harness] if isinstance(harness, str) else RARITY_TIERS[0],
                 "crown_level": getattr(r, "crown_level", None) or 0,
                 "first_sighting": sp not in seen,
             }
         )
-    citizens.sort(key=lambda c: c["name"])
+    citizens.sort(key=lambda c: str(c["name"]))
     return citizens
