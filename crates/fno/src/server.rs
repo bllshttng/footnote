@@ -1136,16 +1136,9 @@ pub fn run(socket: PathBuf) -> i32 {
     }
 
     // Stamp the server's own pid beside the socket (x-48a5) so kill-server
-    // can signal a wedged holder without an accepted connection. The start
-    // time rides along so a stale sidecar (a rebind whose rewrite failed,
-    // best-effort like `.ver` above) can never be mistaken for a pid that
-    // was since reused: bare pid alone if this platform cannot supply one.
-    let own_pid = std::process::id();
-    let sidecar_contents = match crate::proto::pid_start_time(own_pid) {
-        Some(start) => format!("{own_pid}:{start}"),
-        None => own_pid.to_string(),
-    };
-    if let Err(e) = std::fs::write(crate::proto::pid_sidecar_path(&socket), sidecar_contents) {
+    // can signal a wedged holder without an accepted connection. Format lives
+    // in proto's write/read pair; best-effort like `.ver` above.
+    if let Err(e) = crate::proto::write_pid_sidecar(&socket) {
         eprintln!("fno mux: warn: could not write pid sidecar: {e}");
     }
 
@@ -9026,11 +9019,13 @@ impl Core {
         }
     }
 
-    /// Kill every pane child: the teardown half of every sanctioned exit path
-    /// (`CoreMsg::Kill`, the idle reaper, SIGTERM/SIGINT - x-48a5). PtyShell
-    /// has no Drop that kills its child, so an exit path that skips this
-    /// leaves pane children to whatever SIGHUP the closing pty master happens
-    /// to deliver; a worker that ignores SIGHUP keeps running.
+    /// Kill every pane child. Called from serve's shutdown choke point (every
+    /// exit path funnels there) and from `CoreMsg::Kill`'s handler; the two
+    /// layers keep their own call because `handle()` must stay correct for
+    /// callers outside serve. PtyShell has no Drop that kills its child, so an
+    /// exit path that skips this leaves pane children to whatever SIGHUP the
+    /// closing pty master happens to deliver; a worker that ignores SIGHUP
+    /// keeps running.
     fn kill_all_panes(&self) {
         for entry in self.panes.values() {
             entry.pty.kill();
@@ -9804,25 +9799,12 @@ async fn serve(
                     && conns_alive.load(std::sync::atomic::Ordering::Acquire) == 0
                 {
                     eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
-                    core.kill_all_panes();
                     break Flow::Shutdown;
                 }
                 idle_deadline = tokio::time::Instant::now() + idle_grace;
             }
-            // SIGTERM/SIGINT tear panes down the way CoreMsg::Kill does
-            // (x-48a5): the arms used to break straight to Shutdown, so a
-            // signal exit left pane children to SIGHUP luck. This only helps
-            // a LIVE loop; a wedged one never reaches the arm, and
-            // kill-server's SIGKILL rung reports the unreaped children
-            // honestly instead.
-            _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => {
-                core.kill_all_panes();
-                break Flow::Shutdown;
-            }
-            _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => {
-                core.kill_all_panes();
-                break Flow::Shutdown;
-            }
+            _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => break Flow::Shutdown,
+            _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => break Flow::Shutdown,
         }
         // Loop-tail choke point (x-4e30): the out_rx/exit_rx arms mutate
         // `clients` via the dead-client sweeps (broadcast_pane /
@@ -9832,6 +9814,13 @@ async fn serve(
         core.publish_client_count();
     };
     if flow == Flow::Shutdown {
+        // Pane teardown lives at this choke point, not in each arm: every
+        // shutdown path funnels through here (CoreMsg::Kill, the idle reaper,
+        // SIGTERM/SIGINT, last-pane-closed), an arm that forgets the call
+        // leaves pane children to SIGHUP luck (x-48a5: the signal arms once
+        // did), and PtyShell::kill is idempotent, so a path whose panes are
+        // already gone pays nothing.
+        core.kill_all_panes();
         // (x-caef) The server is going down: write any dirty topology capture
         // now - this is the "ending fno" moment whose loss is the operator's
         // whole symptom. SIGTERM and the idle exit land here; a -9 cannot be

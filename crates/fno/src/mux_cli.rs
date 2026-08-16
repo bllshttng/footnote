@@ -916,31 +916,22 @@ fn shell_quote(p: &Path) -> String {
 /// operator was trying to run - the recorded incident is a dead `&&` chain
 /// that stranded a restart.
 fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
+    // `;` between kill and rm, not `&&`: several refusal states have no live
+    // holder (pid reused, or dead but unremovable), so `lsof -t` prints
+    // nothing, `kill -9` fails on zero operands, and `&&` would skip the rm
+    // that actually recovers - the remedy must work in the state it names.
+    let rm = proto::session_files(sock)
+        .iter()
+        .map(|p| shell_quote(p))
+        .collect::<Vec<_>>()
+        .join(" ");
     KillOutcome {
         path: KillPath::Unrecoverable,
         note: format!(
-            "fno: {context}\nfno: {reason}\n     next: kill -9 $(lsof -t -U {}) && rm -f {} {} \
-             {}\n     then: fno update && fno restart && fno",
+            "fno: {context}\nfno: {reason}\n     next: kill -9 $(lsof -t -U {}) 2>/dev/null; \
+             rm -f {rm}\n     then: fno update && fno restart && fno",
             shell_quote(sock),
-            shell_quote(sock),
-            shell_quote(&proto::version_sidecar_path(sock)),
-            shell_quote(&proto::pid_sidecar_path(sock)),
         ),
-    }
-}
-
-/// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (x-48a5, the
-/// identity-checked format) or bare `"<pid>"` (a platform `pid_start_time`
-/// cannot supply one for). Tolerant of trailing whitespace/newline. A `:` is
-/// present only when the writer meant to supply a start time, so a present
-/// but unparseable one (a write torn mid-`fs::write`) fails the whole parse
-/// rather than silently degrading to the unverified bare-pid shape - a torn
-/// write must read as corrupt, not as a platform that never verifies.
-fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
-    let s = s.trim();
-    match s.split_once(':') {
-        Some((p, t)) => Some((p.parse().ok()?, Some(t.parse().ok()?))),
-        None => Some((s.parse().ok()?, None)),
     }
 }
 
@@ -991,7 +982,7 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     let pid_sidecar = proto::pid_sidecar_path(sock);
     let parsed = std::fs::read_to_string(&pid_sidecar)
         .ok()
-        .and_then(|s| parse_pid_sidecar(&s));
+        .and_then(|s| proto::parse_pid_sidecar(&s));
     let (pid, recorded_start) = match parsed {
         // Refuse init and ourselves outright: a signal to either is never
         // the recovery this verb owes.
@@ -1050,7 +1041,21 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
             )
         };
     }
-    unsafe { libc::kill(pid, libc::SIGTERM) };
+    // A refused signal exits at once with its real error: EPERM here (the pid
+    // was recycled to a privileged process between the pre-check above and
+    // this signal) would otherwise burn both grace windows and end at a
+    // "still alive after SIGKILL" refusal naming the wrong cause. ESRCH (the
+    // holder died between the checks) falls through: holder_gone confirms it.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        let e = std::io::Error::last_os_error();
+        return refusal(
+            context,
+            &format!("process {pid} could not be signalled (SIGTERM): {e}"),
+            sock,
+        );
+    }
     if holder_gone(pid, sock, SIGTERM_GRACE) {
         return match cleanup_after_death(sock, "died") {
             Ok(()) => KillOutcome {
@@ -1068,7 +1073,18 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     if identity_mismatch(pid, recorded_start) {
         return reused_refusal();
     }
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    // Same read as the SIGTERM rung: refuse on a refused signal instead of
+    // polling a grace window out against a process that was never signalled.
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    {
+        let e = std::io::Error::last_os_error();
+        return refusal(
+            context,
+            &format!("process {pid} could not be signalled (SIGKILL): {e}"),
+            sock,
+        );
+    }
     if holder_gone(pid, sock, SIGKILL_GRACE) {
         return match cleanup_after_death(sock, "died") {
             Ok(()) => KillOutcome {

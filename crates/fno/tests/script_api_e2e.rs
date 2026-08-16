@@ -558,7 +558,7 @@ fn server_publishes_and_removes_its_pid_sidecar() {
     let pid: i32 = loop {
         if let Some(p) = std::fs::read_to_string(&pid_path)
             .ok()
-            .and_then(|t| t.trim().split(':').next()?.parse().ok())
+            .and_then(|t| common::sidecar_pid_field(&t))
         {
             break p;
         }
@@ -642,14 +642,10 @@ fn sigterm_shutdown_kills_pane_children() {
         "pane child {child_pid} live before SIGTERM"
     );
 
-    let server_pid: i32 = std::fs::read_to_string(scratch.0.join("main.pid"))
-        .expect("server pid sidecar")
-        .trim()
-        .split(':')
-        .next()
-        .expect("pid field")
-        .parse()
-        .unwrap();
+    let server_pid: i32 = common::sidecar_pid_field(
+        &std::fs::read_to_string(scratch.0.join("main.pid")).expect("server pid sidecar"),
+    )
+    .expect("pid field");
     unsafe { libc::kill(server_pid, libc::SIGTERM) };
 
     let deadline = Instant::now() + Duration::from_secs(2);

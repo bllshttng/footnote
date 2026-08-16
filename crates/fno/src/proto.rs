@@ -2495,6 +2495,34 @@ pub fn pid_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Write the pid sidecar beside a freshly bound socket: the server's own pid
+/// with its start time when this platform can supply one, else a bare pid
+/// (the two shapes `parse_pid_sidecar` reads). The write/read pair lives here
+/// so writer and parser cannot drift on the format.
+pub fn write_pid_sidecar(socket: &Path) -> std::io::Result<()> {
+    let own_pid = std::process::id();
+    let contents = match pid_start_time(own_pid) {
+        Some(start) => format!("{own_pid}:{start}"),
+        None => own_pid.to_string(),
+    };
+    std::fs::write(pid_sidecar_path(socket), contents)
+}
+
+/// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (x-48a5, the
+/// identity-checked format) or bare `"<pid>"` (a platform `pid_start_time`
+/// cannot supply one for). Tolerant of trailing whitespace/newline. A `:` is
+/// present only when the writer meant to supply a start time, so a present
+/// but unparseable one (a write torn mid-`fs::write`) fails the whole parse
+/// rather than silently degrading to the unverified bare-pid shape - a torn
+/// write must read as corrupt, not as a platform that never verifies.
+pub fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some((p, t)) => Some((p.parse().ok()?, Some(t.parse().ok()?))),
+        None => Some((s.parse().ok()?, None)),
+    }
+}
+
 /// True while `pid` is a zombie: dead but not yet reaped by its parent, so
 /// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
 /// nothing. A bare-init container never reaps an adopted orphan, so waiting
@@ -2541,19 +2569,26 @@ pub fn pid_confirmed_dead(pid: i32) -> bool {
     result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-/// Remove every file a session leaves beside its name: the socket, the
-/// wire-version sidecar, and the pid sidecar. Shared by the server's
+/// Every file a session leaves beside its name: the socket, the wire-version
+/// sidecar, and the pid sidecar. The one list both removal and the operator's
+/// manual recovery command are built from, so a new sidecar cannot join one
+/// and miss the other.
+pub fn session_files(socket: &Path) -> [PathBuf; 3] {
+    [
+        socket.to_path_buf(),
+        version_sidecar_path(socket),
+        pid_sidecar_path(socket),
+    ]
+}
+
+/// Remove every file a session leaves beside its name. Shared by the server's
 /// SocketGuard, kill-server's recovery ladder, and bind_or_probe's stale
 /// takeover so the three cannot drift apart about what a dead session
 /// leaves behind. A file that is already gone is fine (the guard may have
 /// run first); the first other failure is returned so a caller mid-recovery
 /// can report it.
 pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
-    for path in [
-        socket.to_path_buf(),
-        version_sidecar_path(socket),
-        pid_sidecar_path(socket),
-    ] {
+    for path in session_files(socket) {
         if let Err(e) = std::fs::remove_file(&path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(e);

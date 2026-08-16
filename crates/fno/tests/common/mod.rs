@@ -114,6 +114,14 @@ impl Scratch {
     }
 }
 
+/// The pid field of a `.pid` sidecar's contents (`"<pid>:<start_time>"` or a
+/// bare `"<pid>"`): one shared read so the tests hold one copy of the format,
+/// beside the production write/read pair in proto.rs.
+#[allow(dead_code)]
+pub fn sidecar_pid_field(text: &str) -> Option<i32> {
+    text.trim().split(':').next()?.parse().ok()
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         // ClientHarness autospawns a setsid server the harness has no Child
