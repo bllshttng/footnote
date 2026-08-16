@@ -237,7 +237,9 @@ def _enforce_body_cap(body: str) -> None:
 
 def _refuse_forged_envelope(body: str) -> None:
     """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
-    tag (x-4ce4).
+    tag (x-4ce4), with a CLI-friendly error before the body ever reaches
+    ``wrap_fno_mail`` (which enforces the same invariant as the backstop for
+    every producer, not only these CLI entry points).
 
     The envelope's trailer (``wrap_fno_mail``) is only trustworthy if a peer
     cannot forge one: a body containing a close tag followed by a fabricated
@@ -246,13 +248,13 @@ def _refuse_forged_envelope(body: str) -> None:
     than silently stripping or escaping - the body is prose a human reads, and a
     mangled body is worse than a refused send.
     """
-    if "<fno_mail" in body or "</fno_mail>" in body:
-        print(
-            "error: mail body contains an <fno_mail> tag. The envelope frames "
-            "peer mail; a body cannot contain one.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=1)
+    from fno.mail.envelope import ForgedEnvelopeError, refuse_if_forged
+
+    try:
+        refuse_if_forged(body)
+    except ForgedEnvelopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from exc
 
 
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:

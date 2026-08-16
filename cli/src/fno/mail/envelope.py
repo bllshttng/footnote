@@ -77,6 +77,28 @@ FNO_MAIL_TRAILER = (
 )
 
 
+class ForgedEnvelopeError(ValueError):
+    """A body attempted to smuggle an ``<fno_mail`` open or ``</fno_mail>``
+    close tag into a peer envelope (x-4ce4)."""
+
+
+def refuse_if_forged(body: str) -> None:
+    """Raise :class:`ForgedEnvelopeError` if ``body`` contains an ``<fno_mail``
+    open tag or ``</fno_mail>`` close tag.
+
+    Called from :func:`wrap_fno_mail` itself, not only from the CLI entry
+    points that compose a body from user input: a relay-loop continuation
+    (``_wrap_relay_body`` in ``fno.agents.dispatch``) and other producers call
+    the renderer directly, bypassing any check that lives only at the CLI
+    boundary. Putting the check in the shared renderer means every caller gets
+    it for free."""
+    if "<fno_mail" in body or "</fno_mail>" in body:
+        raise ForgedEnvelopeError(
+            "mail body contains an <fno_mail> tag. The envelope frames peer "
+            "mail; a body cannot contain one."
+        )
+
+
 def wrap_fno_mail(
     body: str,
     *,
@@ -98,7 +120,11 @@ def wrap_fno_mail(
 
     This is the form injected over the ``control.sock`` (claude) and stored in
     the durable bus body, so a delivered message is self-recording -- ``grep
-    <fno_mail>`` across transcripts reconstructs the a2a history."""
+    <fno_mail>`` across transcripts reconstructs the a2a history.
+
+    Raises :class:`ForgedEnvelopeError` if ``body`` contains an ``<fno_mail``
+    or ``</fno_mail>`` tag; see :func:`refuse_if_forged`."""
+    refuse_if_forged(body)
     open_tag = fno_mail_open(
         from_=from_, harness=harness, model=model, node=node, to=to, id=id, reply_to=reply_to
     )
