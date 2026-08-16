@@ -16,7 +16,6 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 import psutil
 import pytest
@@ -47,21 +46,6 @@ def _dead_pid() -> int:
     while psutil.pid_exists(dead):
         dead += 1
     return dead
-
-
-@pytest.fixture
-def cwd_tmp(tmp_path: Path, monkeypatch):
-    """Collapse both claims roots (global + cwd-local) onto one tmp dir.
-
-    Mirrors the fixture in test_claims_cli.py: HOME=cwd means
-    global_claims_root() and the canonical-repo-root claims_dir(None) are
-    the SAME directory, so a test can write with plain acquire_claim(root=
-    tmp_path) and know both of `list`/`reap`'s default roots see it.
-    """
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
 
 
 # ---------------------------------------------------------------------------

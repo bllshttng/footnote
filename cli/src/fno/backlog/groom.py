@@ -307,8 +307,7 @@ def run_groom(
     retryable.
     """
     from fno.claims.core import (
-        ClaimContended,
-        ClaimHeldByOther,
+        CLAIM_UNAVAILABLE,
         acquire_claim,
         claim_status,
         release_claim,
@@ -356,11 +355,9 @@ def run_groom(
             reason=f"daily grooming pass {day}",
             root=root,
         )
-    except (ClaimHeldByOther, ClaimContended):
-        # ClaimContended is acquire_claim's own contention-retry-exhaustion
-        # guard: a normal dedup race (two groom invocations close together),
-        # same "already-ran" degrade as ClaimHeldByOther - not a claims
-        # fault, so it must not fall into the generic except below and
+    except CLAIM_UNAVAILABLE:
+        # A normal dedup race (two groom invocations close together), not a
+        # claims fault - must not fall into the generic except below and
         # report a false "failed" status that could trigger alerting.
         return {"status": "already-ran", "day": day, "key": key}
     except Exception as exc:  # noqa: BLE001 - a claims fault must not crash cron

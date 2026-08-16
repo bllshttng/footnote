@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -16,21 +15,6 @@ from .test_claim_reap import _dead_pid  # noqa: F401
 
 
 runner = CliRunner()
-
-
-@pytest.fixture
-def cwd_tmp(tmp_path: Path, monkeypatch):
-    """Change cwd to a tmp path so .fno/claims/ does not pollute the worktree.
-
-    Also pin HOME to the same tmp dir (and clear FNO_CLAIMS_ROOT) so the
-    global node-claim root (~/.fno/claims) coincides with cwd. node:<id>
-    keys now auto-resolve the global root (ab-fcf9cec5); pinning HOME=cwd keeps
-    these tests' cwd-relative lock assertions valid for both node and non-node keys.
-    """
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    yield tmp_path
 
 
 def test_ttl_parser_seconds_no_unit():

@@ -106,6 +106,16 @@ class ClaimContended(Exception):
     """
 
 
+# Every acquire_claim/refresh_claim caller that treats "someone else has this
+# right now" and "the recovery mutex is too busy to tell" the same way
+# ("can't have this one right now, retry/skip") should catch this tuple
+# instead of hand-rolling `except (ClaimHeldByOther, ClaimContended):` plus a
+# restated comment at each site. A caller that needs to read `.holder`/`.pid`/
+# `.host` (ClaimHeldByOther-only attributes) still needs its own separate
+# `except ClaimHeldByOther as exc:` block ahead of this one.
+CLAIM_UNAVAILABLE = (ClaimHeldByOther, ClaimContended)
+
+
 class RebindRefused(Exception):
     """``compare_and_rebind`` refused to move the claim (fail-closed, x-2ccd).
 
@@ -132,6 +142,7 @@ class RebindRefused(Exception):
 
 # Re-export low-level exceptions so callers can ``from fno.claims import ClaimGoneAway``.
 __all__ = [
+    "CLAIM_UNAVAILABLE",
     "ClaimAlreadyHeld",
     "ClaimContended",
     "ClaimCorrupted",

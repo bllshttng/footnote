@@ -31,6 +31,7 @@ Exceptions:
 from __future__ import annotations
 
 from .core import (
+    CLAIM_UNAVAILABLE,
     ClaimAlreadyHeld,
     ClaimContended,
     ClaimCorrupted,
@@ -59,6 +60,7 @@ from .lanes import (
 from .types import Claim, ClaimState
 
 __all__ = [
+    "CLAIM_UNAVAILABLE",
     "Claim",
     "ClaimAlreadyHeld",
     "ClaimContended",

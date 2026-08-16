@@ -32,7 +32,7 @@ from fno.backlog.advance import (
     _next_node,
     _worker_agent_name,
 )
-from fno.claims import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
+from fno.claims import CLAIM_UNAVAILABLE, acquire_claim, release_claim
 from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 from fno.config import load_settings
 
@@ -548,17 +548,11 @@ def _dispatch_one(
             reason=f"mux dispatch for {node_id}",
             root=dispatch_root,
         )
-    except (ClaimHeldByOther, ClaimContended):
-        # ClaimContended is acquire_claim's own contention-retry-exhaustion
-        # guard: same "someone else has this key right now, retry later"
-        # semantic as ClaimHeldByOther (contended, not broken), so it gets
-        # the same verdict rather than an uncaught traceback breaking this
-        # command's one-JSON-verdict contract (the mux's `leader+g` shells
-        # this expecting a single exec, never a Python stack trace on
-        # stderr). Neither branch reads exception attributes, so - unlike
-        # claims/cli.py's acquire/refresh or target_cli.py's reacquire, which
-        # do read ClaimHeldByOther.holder/.pid/.host and must keep a
-        # separate block - one tuple clause covers both here.
+    except CLAIM_UNAVAILABLE:
+        # Neither cause reads exception attributes, so this command's
+        # one-JSON-verdict contract (the mux's `leader+g` shells this
+        # expecting a single exec, never a Python stack trace on stderr)
+        # gets one verdict for both instead of an uncaught traceback.
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
 
     # 3. Atomic lane cap (config.parallel.max_lanes). A full cap -> lanes-full:

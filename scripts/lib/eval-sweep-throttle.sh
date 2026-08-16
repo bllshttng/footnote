@@ -130,9 +130,11 @@ _eval_sweep_paused() {
 
 # _eval_sweep_try_claim <fno_cmd> <key> <holder>
 # Acquire the singleton claim, classifying by `fno claim acquire`'s exit code
-# (claims/cli.py): 0 = acquired (we launch), 1 = ClaimHeldByOther (a live sibling
-# holds it, skip), any other = claim layer error (stale install / usage) so
-# degrade to stamp-only throttling and still fire (AC1-ERR). The holder is unique
+# (claims/cli.py): 0 = acquired (we launch), 1 = someone else has this key
+# right now (either a live sibling holds it, or the recovery mutex on this
+# exact key is contended by concurrent activity) so skip, any other = claim
+# layer error (stale install / usage) so degrade to stamp-only throttling and
+# still fire (AC1-ERR). The holder is unique
 # per fire, so a still-held claim yields 1 rather than an idempotent re-acquire.
 _eval_sweep_try_claim() {
     local fno_cmd="$1" key="$2" holder="$3" rc

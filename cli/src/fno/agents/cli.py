@@ -55,7 +55,7 @@ def _spawn_guard_decision(
 ) -> tuple[dict[str, str], int]:
     """Return the shared family-2 pre-birth verdict without rendering it."""
     from fno.claims.cli import _parse_ttl
-    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim, claim_status
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, claim_status
     from fno.claims.io import claims_root_for
 
     node_key = f"node:{node_id}"
@@ -117,12 +117,10 @@ def _spawn_guard_decision(
             ttl_ms=_parse_ttl(ttl),
             root=claims_root_for(res_key),
         )
-    except (ClaimHeldByOther, ClaimContended):
-        # ClaimContended is acquire_claim's own contention-retry-exhaustion
-        # guard: same "already-running" degrade as ClaimHeldByOther (exit
-        # 0), not the "error" verdict (exit 3) below - a caller shelling out
-        # to this verb under contention must not flip from benign dedup to
-        # an actionable failure.
+    except CLAIM_UNAVAILABLE:
+        # Not the "error" verdict (exit 3) below - a caller shelling out to
+        # this verb under contention must not flip from benign dedup to an
+        # actionable failure.
         return {"verdict": "already-running", "reason": "reservation-held"}, 0
     except Exception as exc:
         return {

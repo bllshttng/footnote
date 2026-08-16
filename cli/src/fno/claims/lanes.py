@@ -32,8 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from .core import (
-    ClaimContended,
-    ClaimHeldByOther,
+    CLAIM_UNAVAILABLE,
     ClaimValidationError,
     acquire_claim,
     list_claims,
@@ -145,14 +144,11 @@ def acquire_lane_slot(
                 metadata=metadata,
                 root=root,
             )
-        except (ClaimHeldByOther, ClaimContended):
-            # ClaimContended is acquire_claim's own contention-retry-exhaustion
-            # guard on THIS slot's key - equally means "can't have this one
-            # right now", so it gets the same "try the next slot" treatment
-            # as an outright ClaimHeldByOther rather than aborting the whole
-            # selection (both CLI callers - `lane-fill` and `dispatch-lanes` -
-            # have no handler above them and would otherwise crash with a
-            # traceback instead of degrading to a smaller/empty selection).
+        except CLAIM_UNAVAILABLE:
+            # Try the next slot rather than aborting the whole selection
+            # (both CLI callers - `lane-fill` and `dispatch-lanes` - have no
+            # handler above them and would otherwise crash with a traceback
+            # instead of degrading to a smaller/empty selection).
             continue  # slot held or contended; try the next
     return None  # cap full: every slot is held or contended
 

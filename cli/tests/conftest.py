@@ -292,6 +292,22 @@ def tmp_megawalk_state_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def cwd_tmp(tmp_path: Path, monkeypatch):
+    """Collapse both claims roots (global + cwd-local) onto one tmp dir.
+
+    HOME=cwd means global_claims_root() and the canonical-repo-root
+    claims_dir(None) are the SAME directory, so a test can write with plain
+    acquire_claim(root=tmp_path) and know both of `list`/`reap`'s default
+    roots see it. Shared by test_claim_reap.py and test_claims_cli.py (both
+    exercise the same claims CLI surface against a hermetic HOME).
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    yield tmp_path
+
+
+@pytest.fixture
 def clean_lock_dir(tmp_path: Path) -> Path:
     """A clean temp directory guaranteed to have no leftover .lock files."""
     lock_dir = tmp_path / "lock_dir"

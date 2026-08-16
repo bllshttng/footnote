@@ -1439,7 +1439,7 @@ def dispatch_lanes(
     lanes are unaffected (Failure Modes: Errors). Returns one receipt dict per
     selected lane (``status`` ``dispatched`` | ``skipped``).
     """
-    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
     from fno.claims.lanes import release_lane_slot
 
     selected = select_lane_fill(
@@ -1493,11 +1493,9 @@ def dispatch_lanes(
                 reason=f"parallel lane dispatch for {node_id}",
                 root=dispatch_root,
             )
-        except (ClaimHeldByOther, ClaimContended):
-            # ClaimContended is acquire_claim's own contention-retry-
-            # exhaustion guard: same dedup outcome as ClaimHeldByOther, not
-            # a claim-error - two advance() passes racing this key is
-            # ordinary contention, not a fault.
+        except CLAIM_UNAVAILABLE:
+            # Two advance() passes racing this key is ordinary contention,
+            # not a fault.
             _skip("already-claimed")
             continue
         except Exception as exc:  # noqa: BLE001
@@ -1891,7 +1889,7 @@ def advance(
         failover_reason = route.reason
 
     # 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
-    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"advance:{os.getpid()}"
@@ -1904,9 +1902,7 @@ def advance(
             reason=f"auto-continue dispatch for {node_id}",
             root=dispatch_root,
         )
-    except (ClaimHeldByOther, ClaimContended):
-        # ClaimContended is acquire_claim's own contention-retry-exhaustion
-        # guard: same dedup outcome as ClaimHeldByOther, not a claim-error.
+    except CLAIM_UNAVAILABLE:
         return skip("already-claimed", node_id=node_id)
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", node_id=node_id, detail=str(exc))
@@ -2202,7 +2198,7 @@ def _converge_one(
     if block_reason:
         return skip(block_reason)
 
-    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"advance:{os.getpid()}"
@@ -2217,9 +2213,7 @@ def _converge_one(
             + (f" (dep of {closed_node_id})" if closed_node_id else ""),
             root=dispatch_root,
         )
-    except (ClaimHeldByOther, ClaimContended):
-        # ClaimContended is acquire_claim's own contention-retry-exhaustion
-        # guard: same dedup outcome as ClaimHeldByOther, not a claim-error.
+    except CLAIM_UNAVAILABLE:
         return skip("already-claimed")
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", detail=str(exc))

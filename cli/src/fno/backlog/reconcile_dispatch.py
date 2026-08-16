@@ -201,7 +201,7 @@ def _dispatch_reconcile(
     if block_reason:
         return skip(block_reason)
 
-    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 
     dispatch_key = f"dispatch:{node_id}"
     holder = f"reconcile:{os.getpid()}"
@@ -214,9 +214,7 @@ def _dispatch_reconcile(
             reason=f"reconcile dispatch for {node_id}",
             root=dispatch_root,
         )
-    except (ClaimHeldByOther, ClaimContended):
-        # ClaimContended is acquire_claim's own contention-retry-exhaustion
-        # guard: same dedup outcome as ClaimHeldByOther, not a claim-error.
+    except CLAIM_UNAVAILABLE:
         return skip("already-claimed")
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", detail=str(exc))
@@ -278,7 +276,7 @@ def _route_one(
         # the first pass will fire when it writes the manifest. Best-effort: a
         # sentinel-write failure degrades to a skip (the first pass's own write
         # re-fire is the belt; the stranded-PR surfacing is the suspenders).
-        from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
+        from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
 
         key = f"reconcile:{node_id}"
         try:
@@ -288,10 +286,7 @@ def _route_one(
                 reason=f"reconcile pending: {node_id} manifest not yet written",
                 root=_claims_root_for(key),
             )
-        except (ClaimHeldByOther, ClaimContended):
-            # ClaimContended is acquire_claim's own contention-retry-
-            # exhaustion guard: same "a sentinel is already pending" outcome
-            # as ClaimHeldByOther, not a sentinel-error.
+        except CLAIM_UNAVAILABLE:
             pass  # a sentinel already pending -> idempotent, nothing to add
         except Exception as exc:  # noqa: BLE001
             return skip("sentinel-error", detail=str(exc))
