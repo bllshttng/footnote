@@ -2034,6 +2034,18 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             usage=True,
         )
 
+    # 2b. Forged envelope (x-4ce4 codex P1): a raw payload starts with "/", so it
+    #     cannot itself be a `<fno_mail>` tag, but it can still smuggle one
+    #     mid-line. The mux lane (`_mux_pane_send` below) pastes this string
+    #     directly and never reaches the Rust mail-inject binary's own check, so
+    #     this is the only door for that lane.
+    if "<fno_mail" in stripped or "</fno_mail>" in stripped:
+        _refused(
+            "payload contains an <fno_mail> tag. The envelope frames peer mail; "
+            "a payload cannot contain one",
+            usage=True,
+        )
+
     # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
     #    resolution (a registry this fno cannot read) is not a miss: it is the
     #    unmeasurable answer, kept apart from "resolved, and there is no path".
