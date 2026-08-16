@@ -187,16 +187,25 @@ def _recovery_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 
 def _keep_going_status(project_root: Optional[Path]) -> SpawnerStatus:
+    """keep_going_enabled() swallows its own settings-read exception and
+    returns a plain False with no rank exposed - calling it here would report
+    whatever rank was guessed BEFORE the call (usually "config"), even when
+    the real cause was an unreadable settings file. Resolve inline instead,
+    like _auto_continue_resolve, so a read failure genuinely reports rank
+    "default" (the exact failure class this module's docstring cites)."""
     from fno.config import autonomy_master_enabled
-    from fno.retro.keep_going import _ENV_OVERRIDE, keep_going_enabled
+    from fno.retro.keep_going import _ENV_OVERRIDE, _TRUTHY
 
     try:
         if not autonomy_master_enabled(project_root):
             armed, rank = False, "autonomy"
         else:
             env = os.environ.get(_ENV_OVERRIDE)
-            rank = "env" if env is not None else "config"
-            armed = keep_going_enabled(project_root=project_root)
+            if env is not None:
+                armed, rank = env.strip().lower() in _TRUTHY, "env"
+            else:
+                settings = _settings_for(project_root)
+                armed, rank = bool(settings.keep_going.enabled), "config"
     except Exception:  # noqa: BLE001
         armed, rank = False, "default"
     return SpawnerStatus(

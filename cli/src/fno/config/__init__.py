@@ -1730,6 +1730,23 @@ class AgentsBlock(BaseModel):
         return {}
 
 
+def _coerce_bool_default_true(v: object) -> bool:
+    """Shared body for the four wave-2/3 "never opt-in" gates below
+    (AutonomyBlock, GroomBlock, RestartBlock, EvalsBlock): a garbage value
+    fails safe to True (each block's own default), since these spawners ran
+    unconditionally before their gate existed and a malformed config value
+    must not silently disable one. A config that fails to LOAD at all still
+    resolves every gate to off via each resolver's own try/except - that
+    direction is a resolver-level invariant, not this coercion's job."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v == 1
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "on"}
+    return True
+
+
 class AutonomyBlock(BaseModel):
     """The one master switch over every autonomous session-starting spawner
     (nested under 'config.autonomy'). x-aaaf wave 3.
@@ -1762,19 +1779,7 @@ class AutonomyBlock(BaseModel):
     @field_validator("enabled", mode="before")
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
-        """Fail-safe to True (this field's own default, matching every other
-        wave-2 gate's malformed-value posture): a garbage value must not
-        silently kill every spawner in the install. A config that fails to
-        LOAD at all still resolves every gate to off via each resolver's own
-        try/except - that direction is a resolver-level invariant, not this
-        validator's job."""
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, int):
-            return v == 1
-        if isinstance(v, str):
-            return v.strip().lower() in {"1", "true", "yes", "on"}
-        return True
+        return _coerce_bool_default_true(v)
 
 
 class AutoContinueBlock(BaseModel):
@@ -2144,17 +2149,7 @@ class GroomBlock(BaseModel):
     @field_validator("enabled", mode="before")
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
-        """Fail-safe: a non-boolean value degrades to True (this gate's
-        CURRENT effective default), mirroring PostMergeBlock.enabled rather
-        than the false-enabled-is-dangerous opt-in blocks above - groom was
-        never opt-in, so a malformed typo must not silently turn it off."""
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, int):
-            return v == 1
-        if isinstance(v, str):
-            return v.strip().lower() in {"1", "true", "yes", "on"}
-        return True
+        return _coerce_bool_default_true(v)
 
 
 class RestartBlock(BaseModel):
@@ -2175,15 +2170,7 @@ class RestartBlock(BaseModel):
     @field_validator("enabled", mode="before")
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
-        """Fail-safe to True (mirrors GroomBlock: never opt-in, so a typo
-        must not silently disable crash-recovery revival)."""
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, int):
-            return v == 1
-        if isinstance(v, str):
-            return v.strip().lower() in {"1", "true", "yes", "on"}
-        return True
+        return _coerce_bool_default_true(v)
 
 
 class EvalsBlock(BaseModel):
@@ -2202,14 +2189,7 @@ class EvalsBlock(BaseModel):
     @field_validator("enabled", mode="before")
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
-        """Fail-safe to True (mirrors GroomBlock)."""
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, int):
-            return v == 1
-        if isinstance(v, str):
-            return v.strip().lower() in {"1", "true", "yes", "on"}
-        return True
+        return _coerce_bool_default_true(v)
 
 
 class RecoveryBlock(BaseModel):

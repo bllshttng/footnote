@@ -872,7 +872,7 @@ class Ritual:
             return 0
         from fno.config import autonomy_master_enabled
 
-        if not autonomy_master_enabled(self.cwd):
+        if not autonomy_master_enabled(self.canon):
             # x-aaaf wave 3: the master panic switch outranks post_merge.enabled
             # too - checked separately so the receipt names WHICH one fired.
             self._emit("config", _SKIPPED, "autonomy.enabled is false; ritual disabled")

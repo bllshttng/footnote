@@ -127,15 +127,6 @@ def auto_continue_enabled(
     return _auto_continue_resolve(project_root)[0]
 
 
-def auto_continue_rank(
-    project: Optional[str] = None,
-    project_root: Optional[Path] = None,
-) -> str:
-    """Return which precedence rank ("env" | "config" | "default") supplied
-    the current auto-continue value, for stamping onto decision events."""
-    return _auto_continue_resolve(project_root)[1]
-
-
 # Decision-event kinds (registered in cli/src/fno/events/schema.yaml).
 EVENT_DISPATCHED = "advance_dispatched"
 EVENT_SKIPPED = "advance_skipped"
@@ -1756,9 +1747,12 @@ def advance(
     and the host op continues.
     """
     ev_path = events_path if events_path is not None else _events_path(project_root)
-    # AC3-HP: resolved once, stamped on every decision event below so "what
-    # armed this" is answerable from the log rather than by inference.
-    rank = auto_continue_rank(project=project, project_root=project_root)
+    # AC3-HP: resolved ONCE (armed AND rank together, like advance_dependents
+    # and advance_epic) and reused below - two independent calls could
+    # observe different env/config state between them (FNO_AUTO_CONTINUE is
+    # deliberately same-process settable, for tests), stamping a rank that
+    # does not describe the armed value it is attached to.
+    armed, rank = _auto_continue_resolve(project_root)
 
     def skip(
         reason: str,
@@ -1794,7 +1788,7 @@ def advance(
         )
 
     # 1. Armed?
-    if not auto_continue_enabled(project=project, project_root=project_root):
+    if not armed:
         return skip("disabled")
 
     # 2. A live walk already owns this project -> let it pick the node up.

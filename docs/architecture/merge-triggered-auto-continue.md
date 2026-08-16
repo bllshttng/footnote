@@ -63,14 +63,14 @@ Claim roots are routed like the `fno claim` CLI's `_node_aware_root`: `node:<id>
 
 Opt-in, default off (Locked Decision 3). `auto_continue_enabled()` resolves, highest precedence first:
 
+0. `config.autonomy.enabled` master panic switch off (checked before the env override too - x-aaaf wave 3).
 1. `FNO_AUTO_CONTINUE` env override (explicit force on/off; tests + same-process).
-2. campaign-arm marker file `.fno/.auto-continue-armed` (written by `/megawalk auto-continue`).
-3. `config.auto_continue.enabled` in config.toml (project-local overrides global via the deep-merge in `load_settings`).
-4. default `False`.
+2. `config.auto_continue.enabled` in config.toml (project-local overrides global via the deep-merge in `load_settings`).
+3. default `False`.
 
 A malformed `config.auto_continue` block (a non-boolean `enabled`, or a scalar where the block should be a mapping) degrades to disabled rather than raising out of the settings load (AC2-ERR), and any settings-read failure in the resolver is swallowed to `False`.
 
-**Why a marker file, not an env var, for the campaign arm (Discretion #4).** The dominant trigger is the *next* session's detached reconcile observing a web merge. An env var set by a live `/megawalk` does not survive to that later process, so the arm has to be persistent state. The env var is retained only as the highest-precedence explicit override.
+**The campaign-arm marker file is gone (2026-08, x-aaaf wave 1).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer no longer exists (`skills/megawalk` is deleted), so the marker had no writer and no expiry while silently outranking the live config key - the motivating incident for `fno autonomy status`. The env var above is retained as the highest-precedence explicit override; a persistent campaign arm has no replacement mechanism today.
 
 ## Triggers
 
@@ -160,7 +160,7 @@ Four kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
 - `cli/src/fno/config/__init__.py` - `AutoContinueBlock`.
 - `cli/src/fno/graph/cli.py` - `fno backlog advance` command + the reconcile trigger (both also call `advance_dependents`); `fno backlog project-root` (the unmapped-project detector G2 uses).
 - `skills/do/references/waves.md`, `skills/do/references/flat.md`, `skills/do/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
-- `skills/pr/references/merged.md`, `skills/megawalk/SKILL.md`, `skills/megawalk/references/argument-parsing.md` - trigger + campaign-arm modifier.
+- `skills/pr/references/merged.md` - trigger (`skills/megawalk` and its campaign-arm modifier are gone, see "Enable resolution" above).
 - `cli/src/fno/events/schema.yaml` - the three event kinds (+ G1 `cross_project` field and reasons).
 - Tests: `cli/tests/unit/test_auto_continue.py`, `cli/tests/unit/test_advance.py`, `cli/tests/unit/test_project_root_cmd.py`, `cli/tests/integration/test_backlog_reconcile.py`.
 
