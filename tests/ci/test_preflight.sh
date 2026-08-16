@@ -504,19 +504,24 @@ fi
 wait "$stall_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
-echo "== stall guard: a holder whose tree is making progress is NOT stolen =="
-# Floor 0 makes the comparison deterministic on any load: delta >= 0 always,
-# so a measurable holder survives regardless of how starved the box is.
+echo "== stall guard: a live, non-stale holder is never stolen =="
+# Floor 0 makes the stall branch unreachable by arithmetic (delta >= 0 can
+# never be < 0), and the holder is the suite's own pid: it cannot die or be
+# recycled mid-test, so neither dead path can fire either. The old fixture
+# used a freshly forked busy-spin holder with a stamp computed a section
+# earlier: under host load the section's runtime exceeded the 60s recycle
+# slop, the stamp then claimed an age the young process could not have, and
+# the (correct) recycled-pid steal fired - failing the code for the fixture's
+# own lie. Progress-vs-stall semantics are pinned by the unit section below.
 rm -f "$ATT"   # the stall-steal run just minted one for this same SHA
 mkdir -p "$LOCKDIR"
-( while :; do :; done ) & spin_pid=$!
-printf 'pid=%s started=%s host=x sha=deadbee\n' "$spin_pid" "$recent" > "$LOCKDIR/holder"
+guard_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$$" "$guard_recent" > "$LOCKDIR/holder"
 holder_stamp="$(cat "$LOCKDIR/holder")"
 out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 PREFLIGHT_STALL_CPU_FLOOR=0 run_pf --wait-timeout 6 2>&1)"; rc=$?
-[[ $rc -eq 3 ]] && ok "a computing holder is waited on, not stolen" || fail "expected 3 got $rc: $out"
-echo "$out" | grep -q "stalled holder" && fail "stole from a progressing holder" || ok "no false stall verdict"
-[[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the computing holder kept its lock" || fail "holder stamp changed"
-kill "$spin_pid" 2>/dev/null; wait "$spin_pid" 2>/dev/null
+[[ $rc -eq 3 ]] && ok "a healthy holder is waited on, not stolen" || fail "expected 3 got $rc: $out"
+echo "$out" | grep -q "stalled holder" && fail "stole from a healthy holder" || ok "no false stall verdict"
+[[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the healthy holder kept its lock" || fail "holder stamp changed"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
@@ -545,23 +550,31 @@ out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
 kill "$phantom_pid" 2>/dev/null; wait "$phantom_pid" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
-echo "== cancel: SIGINT to a queued waiter exits 130 and removes its ticket =="
+echo "== cancel: the preflight-cancel sentinel stops a queued waiter and clears its ticket =="
+# Signals are NOT the asserted path: macOS bash 3.2 does not run INT/TERM
+# traps while waiting on a child (verified against foreground sleep,
+# sleep+wait, and a builtin read), so a SIGINT-asserting test fails on this
+# platform while passing on CI's Linux bash 5. The polled sentinel is the
+# cancellation contract that holds everywhere; the traps remain best-effort.
 rm -f "$ATT"   # else reuse exits 0 before the waiter ever queues
 mkdir -p "$LOCKDIR"
 sleep 600 & cancel_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$cancel_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
 ( cd "$FIX" && exec bash scripts/ci/preflight.sh --wait-timeout 60 >/dev/null 2>&1 ) & cancel_w=$!
+kill -0 "$cancel_w" 2>/dev/null || fail "fixture: the waiter failed to fork under load"
 cancel_ticket=""
-for _i in $(seq 1 100); do
+cancel_deadline=$(( $(date +%s) + 90 ))
+while [[ "$(date +%s)" -lt "$cancel_deadline" ]]; do
     cancel_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
     [[ -n "$cancel_ticket" ]] && break
-    sleep 0.2
+    sleep 1
 done
-[[ -n "$cancel_ticket" ]] && ok "the waiter queued a ticket" || fail "waiter never queued"
-kill -INT "$cancel_w" 2>/dev/null
+[[ -n "$cancel_ticket" ]] && ok "the waiter queued a ticket" || fail "waiter never queued (startup starved)"
+touch "$FIX/.fno/preflight-cancel"
 wait "$cancel_w"; rc=$?
-[[ $rc -eq 130 ]] && ok "SIGINT while queued exits 130" || fail "expected 130 got $rc"
+[[ $rc -eq 130 ]] && ok "the sentinel stops a queued waiter with exit 130" || fail "expected 130 got $rc"
 [[ ! -d "$LOCKDIR.queue.d/$cancel_ticket" ]] && ok "the cancelled waiter's ticket was removed" || fail "ticket left behind"
+[[ ! -e "$FIX/.fno/preflight-cancel" ]] && ok "the sentinel is consumed (one-shot)" || fail "sentinel left behind for the next run"
 kill "$cancel_holder" 2>/dev/null; wait "$cancel_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
@@ -570,6 +583,31 @@ eval "$(sed -n '/^cputime_to_s() {/,/^}/p' "$PREFLIGHT_SRC")"
 [[ "$(cputime_to_s "08:09.40")" == "489" ]] && ok "08:09.40 parses as 489s" || fail "octal parse: $(cputime_to_s "08:09.40")"
 [[ "$(cputime_to_s "1-02:03:04")" == "93784" ]] && ok "day-prefixed durations parse" || fail "day parse: $(cputime_to_s "1-02:03:04")"
 unset -f cputime_to_s
+
+echo "== stall predicate: floor and turnover are arithmetic, not host load =="
+# The progress-vs-stall semantics are pinned here, deterministically: a
+# sleeping holder accumulates no CPU on any load, and floor 0 makes the
+# condemnation branch unreachable by arithmetic (delta >= 0 can never be < 0).
+eval "$(sed -n -e '/^cputime_to_s() {/,/^}/p' -e '/^holder_tree_pids() {/,/^}/p' \
+    -e '/^process_age_s() {/,/^}/p' -e '/^holder_is_stalled() {/,/^}/p' "$PREFLIGHT_SRC")"
+STALL_MIN_AGE=10; STALL_PROBE_SPACING=1; STALL_CPU_FLOOR=0
+unit_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+sleep 600 & unit_a=$!
+line_a="pid=$unit_a started=$unit_recent host=x sha=deadbee"
+holder_is_stalled "$line_a" && fail "condemned before a spaced second sample" \
+    || ok "first sample baselines instead of condemning"
+sleep 1.3
+holder_is_stalled "$line_a" && fail "floor 0 condemned a live holder" \
+    || ok "floor 0 can never condemn (delta >= 0 is not < 0)"
+STALL_CPU_FLOOR=1
+sleep 600 & unit_b=$!
+line_b="pid=$unit_b started=$unit_recent host=x sha=deadbee"
+holder_is_stalled "$line_b" || true   # baseline for the second sleeper
+sleep 1.3
+holder_is_stalled "$line_b" && ok "a zero-CPU holder is condemned after the probe window" \
+    || fail "no-CPU holder not condemned"
+kill "$unit_a" "$unit_b" 2>/dev/null; wait "$unit_a" 2>/dev/null; wait "$unit_b" 2>/dev/null
+unset -f cputime_to_s holder_tree_pids process_age_s holder_is_stalled
 
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
 for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done

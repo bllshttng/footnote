@@ -678,13 +678,17 @@ acquire_lock() {
     skip_hint
     local waited=0 last_print=0
     while :; do
-        # Cancellation must be polled here, not deferred to the caller: the
-        # signal trap only sets a flag, and this loop can otherwise outwait a
-        # user pressing Ctrl-C for hours. Exit through the EXIT trap so the
-        # ticket and any held lock are released.
-        if [[ "$LOCK_SIGNAL" -eq 1 ]]; then
+        # Cancellation is POLLED, never signal-only: macOS bash 3.2 does not
+        # run traps for INT/TERM while the shell waits on a child (verified:
+        # neither a foreground sleep, a `sleep & wait`, nor a builtin read
+        # delivers a pending trapped signal there; Linux bash 5 does), so a
+        # signal-only cancel would ignore Ctrl-C for the whole 90m on exactly
+        # the platform this fleet runs. The sentinel is one-shot: consumed on
+        # read so one cancel does not wedge every later wait.
+        if [[ "$LOCK_SIGNAL" -eq 1 ]] || [[ -e "$INVOKING_ROOT/.fno/preflight-cancel" ]]; then
+            rm -f "$INVOKING_ROOT/.fno/preflight-cancel" 2>/dev/null || true
             dequeue_ticket
-            echo "preflight: cancelled while queued" >&2
+            echo "preflight: cancelled while queued (to cancel a wedged wait: touch $INVOKING_ROOT/.fno/preflight-cancel)" >&2
             exit 130
         fi
         if am_i_front; then
@@ -730,6 +734,7 @@ acquire_lock() {
         if (( waited >= WAIT_TIMEOUT )); then
             dequeue_ticket
             echo "preflight: gave up waiting after ${WAIT_TIMEOUT}s - $holder_line" >&2
+            echo "preflight: to cancel a queued wait instead of timing out: touch $INVOKING_ROOT/.fno/preflight-cancel" >&2
             exit 3
         fi
         sleep "$QUEUE_POLL_INTERVAL"
