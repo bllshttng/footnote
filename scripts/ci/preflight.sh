@@ -551,6 +551,24 @@ holder_pid_recycled() {
     (( stamp_age > proc_age + 60 ))
 }
 
+cancel_requested() {
+    # Consume the one-shot cancel sentinel by atomic rename, so only one of N
+    # racing waiters can win a single cancel token. Age-gated: a sentinel
+    # nobody consumed (its wait already timed out or self-resolved) must never
+    # cancel a later, innocent run, so past the grace it is discarded instead.
+    local s="$INVOKING_ROOT/.fno/preflight-cancel" m now
+    [[ -e "$s" ]] || return 1
+    m="$(stat -f %m "$s" 2>/dev/null || stat -c %Y "$s" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    if (( now - m > 3600 )); then
+        rm -f "$s" 2>/dev/null || true
+        return 1
+    fi
+    mv "$s" "$s.reaped.$$" 2>/dev/null || return 1
+    rm -f "$s.reaped.$$" 2>/dev/null || true
+    return 0
+}
+
 lockdir_abandoned() {
     # True when an UNSTAMPED lock directory is older than the stamp grace: a
     # live holder stamps within the mkdir-to-stamp window, so an old empty
@@ -683,10 +701,8 @@ acquire_lock() {
         # neither a foreground sleep, a `sleep & wait`, nor a builtin read
         # delivers a pending trapped signal there; Linux bash 5 does), so a
         # signal-only cancel would ignore Ctrl-C for the whole 90m on exactly
-        # the platform this fleet runs. The sentinel is one-shot: consumed on
-        # read so one cancel does not wedge every later wait.
-        if [[ "$LOCK_SIGNAL" -eq 1 ]] || [[ -e "$INVOKING_ROOT/.fno/preflight-cancel" ]]; then
-            rm -f "$INVOKING_ROOT/.fno/preflight-cancel" 2>/dev/null || true
+        # the platform this fleet runs.
+        if [[ "$LOCK_SIGNAL" -eq 1 ]] || cancel_requested; then
             dequeue_ticket
             echo "preflight: cancelled while queued (to cancel a wedged wait: touch $INVOKING_ROOT/.fno/preflight-cancel)" >&2
             exit 130

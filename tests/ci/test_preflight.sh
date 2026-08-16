@@ -578,6 +578,49 @@ wait "$cancel_w"; rc=$?
 kill "$cancel_holder" 2>/dev/null; wait "$cancel_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+echo "== cancel guard: a STALE sentinel never cancels a later, innocent waiter =="
+# A sentinel nobody consumed (its wait already ended) must not sit waiting to
+# kill the next queued run: past the one-hour grace the next waiter discards
+# it and keeps waiting.
+mkdir -p "$LOCKDIR"
+sleep 600 & stale_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$stale_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+touch -t 202001010000 "$FIX/.fno/preflight-cancel"   # mtime years old
+out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "a stale sentinel did not cancel the waiter" || fail "stale sentinel cancelled rc=$rc: $out"
+echo "$out" | grep -q "cancelled while queued" && fail "reported a cancellation nobody requested" || ok "no false cancel report"
+[[ ! -e "$FIX/.fno/preflight-cancel" ]] && ok "the stale sentinel was discarded by the next waiter" || fail "stale sentinel left behind"
+kill "$stale_holder" 2>/dev/null; wait "$stale_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== cancel (signal lane): INT still works where bash runs traps =="
+# macOS bash 3.2 never delivers trapped INT while the shell waits on a child,
+# so the signal branch is asserted only on platforms where it can fire (CI's
+# Linux bash 5); the sentinel test above carries the contract everywhere.
+if [[ "$(uname)" != "Darwin" ]]; then
+    rm -f "$ATT"
+    mkdir -p "$LOCKDIR"
+    sleep 600 & sig_holder=$!
+    printf 'pid=%s started=%s host=x sha=deadbee\n' "$sig_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+    ( cd "$FIX" && exec bash scripts/ci/preflight.sh --wait-timeout 60 >/dev/null 2>&1 ) & sig_w=$!
+    sig_ticket=""
+    sig_deadline=$(( $(date +%s) + 90 ))
+    while [[ "$(date +%s)" -lt "$sig_deadline" ]]; do
+        sig_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
+        [[ -n "$sig_ticket" ]] && break
+        sleep 1
+    done
+    [[ -n "$sig_ticket" ]] || fail "signal lane: waiter never queued"
+    kill -INT "$sig_w" 2>/dev/null
+    wait "$sig_w"; rc=$?
+    [[ $rc -eq 130 ]] && ok "SIGINT exits 130 where traps are delivered" || fail "signal lane expected 130 got $rc"
+    [[ ! -d "$LOCKDIR.queue.d/$sig_ticket" ]] && ok "signal-cancelled ticket removed" || fail "signal lane ticket left behind"
+    kill "$sig_holder" 2>/dev/null; wait "$sig_holder" 2>/dev/null
+    rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+else
+    echo "  ok: signal lane skipped on Darwin (bash 3.2 does not deliver trapped INT while waiting; sentinel lane covers the contract)"
+fi
+
 echo "== cputime parse: octal-looking fields sum in base 10 =="
 eval "$(sed -n '/^cputime_to_s() {/,/^}/p' "$PREFLIGHT_SRC")"
 [[ "$(cputime_to_s "08:09.40")" == "489" ]] && ok "08:09.40 parses as 489s" || fail "octal parse: $(cputime_to_s "08:09.40")"
