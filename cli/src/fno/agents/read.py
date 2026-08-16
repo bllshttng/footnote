@@ -130,6 +130,14 @@ def list_agents(
     # events log, shared across rows (not O(rows)).
     loop_check_ages = truth_status.build_loop_check_index()
 
+    # Derived once here, not per-row: claude.py's NOT_BLOCKED_STATUSES_LOWER
+    # (also used by resume_cli.py's wake-skip check) minus "working", since
+    # this fill only wants the ambiguous Idle/missing gap, not the target
+    # status itself -- both used to hand-enumerate independently and had
+    # already drifted out of sync with each other by the time review caught
+    # it.
+    not_blocked_minus_working = claude_mod.NOT_BLOCKED_STATUSES_LOWER - {"working"}
+
     rows: list[dict] = []
     for entry in filtered:
         from fno.agents import session_truth
@@ -169,13 +177,6 @@ def list_agents(
         # ``--all``: a stopped/completed row now arrives in live_map instead
         # of being absent, and without this, its raw supervisor status would
         # silently win over the richer PR/CI-aware truth-status fallback.
-        # Derived from claude.py's NOT_BLOCKED_STATUSES_LOWER (also used by
-        # resume_cli.py's wake-skip check) minus "working", since this fill
-        # only wants the ambiguous Idle/missing gap, not the target status
-        # itself -- both used to hand-enumerate independently and had
-        # already drifted out of sync with each other by the time review
-        # caught it.
-        not_blocked_minus_working = claude_mod.NOT_BLOCKED_STATUSES_LOWER - {"working"}
         if live_status is None or str(live_status).lower() in not_blocked_minus_working:
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:

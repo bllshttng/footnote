@@ -416,8 +416,6 @@ def _resume_claude_wake(
                 wake_fn(short_id, message=message, route_env=route_env, cwd=cwd)
             except subprocess.TimeoutExpired:
                 last_err = "wake attempt timed out"
-            except OSError as exc:
-                last_err = f"wake attempt failed: {exc}"
             except Exception as exc:  # noqa: BLE001 - mapped to the bounded exit-16 report below, not a raw traceback
                 last_err = f"wake attempt failed: {exc}"
             # Read state even after a caught exception: `script`/`claude
