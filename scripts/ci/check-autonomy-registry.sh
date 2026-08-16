@@ -39,10 +39,20 @@ from pathlib import Path
 root = Path(sys.argv[1])
 out = []
 for path in sorted((root / "cli" / "src").rglob("*.py")):
+    # A file can vanish between the glob and the read: under pytest-xdist,
+    # test_ambient_identity_scrub.py copies itself into cli/src/fno/ so the
+    # other tree's conftest collects it, then unlinks it (see the same guard
+    # in cli/tests/test_exit_codes.py). A source file that no longer exists
+    # is not a source file; crashing here reddened the dirty lane on worker
+    # interleaving, not on a real spawner.
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        continue
     rel = path.relative_to(root).as_posix()
     fn = ""
     fn_indent = None
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = text.splitlines()
     for i, line in enumerate(lines):
         if re.match(r"^class [A-Za-z_]", line):
             fn, fn_indent = "", None
@@ -77,7 +87,12 @@ for d in dirs:
             continue
         if rel == "scripts/ci/check-autonomy-registry.sh":
             continue  # self-referential: this script's own text names the marker
-        if "fno agents spawn" in path.read_text(encoding="utf-8"):
+        # Same vanished-file race as the Python block above.
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        if "fno agents spawn" in text:
             out.append(f"{rel}::")
 print("\n".join(out))
 PY
