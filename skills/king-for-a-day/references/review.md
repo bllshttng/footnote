@@ -81,7 +81,7 @@ Send this shape. It is not a style preference: every observed firing used it, an
 ```
 fno mail send <worker-handle> "REVIEW GRANTED for <branch-or-PR>. Invoke this in your session, as a command, against your diff:
 
-    /code-review <level> --comment --fix
+    /<review-verb>
 
 INVOKE IT FOR REAL. Type the verb. Do not substitute fno:code-reviewer, /fno:review, or a Bash approximation.
 
@@ -90,9 +90,11 @@ If it refuses, retry; if it still refuses, report the LITERAL refusal string and
 Verify each finding against source before accepting it. The reviewer is advisory, not authoritative - push back with a file:line argument where you disagree."
 ```
 
+Substitute the worker's own verb from "The verb, per harness" above. Claude's order is `/code-review <level> --comment [--fix]`. Codex's is bare `/review` - anything after it changes the review target.
+
 Three details in that template are load-bearing, so do not smooth them out:
 
-- **The verb sits alone on its own indented line.** Nothing before it on the line, nothing after.
+- **The verb sits alone on its own indented line.** Its own flags can follow it: claude's `<level> --comment [--fix]`, codex's nothing. Prose after a codex `/review` changes the review target.
 - **"INVOKE IT FOR REAL. Type the verb."** A bare verb as the entire message body has been observed failing where this framing fired. That is one observation each way, so it is a lead rather than a mechanism - but it costs nothing to keep and the shape with it has never failed.
 - **Name the substitutes.** `fno:code-reviewer`, `/fno:review`, a Bash approximation - these exactly, not "do not substitute another reviewer". The refusal text forbids these by name, a worker DID quietly take one of them and report success, and a generic prohibition leaves the worker deciding what counts as a substitute.
 

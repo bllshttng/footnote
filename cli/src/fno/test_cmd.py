@@ -869,7 +869,8 @@ def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[s
 
     Explicit base+head (CI) diffs those exact revisions, so behavior never
     depends on a mutable remote-tracking ref. Local mode diffs the merge-base
-    with origin/main and adds untracked files, which a commit-to-commit diff
+    with origin/main (origin/master when main is absent) and adds untracked
+    files, which a commit-to-commit diff
     cannot see but which are part of local changed intent. A non-empty reason
     means the result is UNEVALUATED, never an empty changeset.
     """
@@ -887,9 +888,16 @@ def changed_snapshot(root: Path, base: str = "", head: str = "") -> tuple[list[s
             return [], f"git diff {base}...{head} failed: {out}"
         return sorted(set(_lines(out))), ""
 
-    rc, mb = _git(root, "merge-base", "origin/main", "HEAD")
-    if rc != 0 or not mb:
-        return [], "cannot resolve merge-base with origin/main (fetch it, or pass --base/--head)"
+    # Only a successful probe may set mb: _git returns stderr on failure, so a
+    # leftover error string would slip past the `not mb` gate below.
+    mb = ""
+    for candidate in ("origin/main", "origin/master"):
+        rc, out = _git(root, "merge-base", candidate, "HEAD")
+        if rc == 0 and out:
+            mb = out
+            break
+    if not mb:
+        return [], "cannot resolve merge-base with origin/main or origin/master (fetch it, or pass --base/--head)"
     paths: set[str] = set()
     for args in (("diff", "--name-only", mb),
                  ("ls-files", "--others", "--exclude-standard")):
@@ -1091,7 +1099,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     steps = _changed_steps(root, selections)
     select_s = time.monotonic() - t0
 
-    print(f"smoke: base={opts['base'] or 'merge-base origin/main'} "
+    print(f"smoke: base={opts['base'] or 'merge-base origin/main|origin/master'} "
           f"head={opts['head'] or candidate[:12]} changed={len(paths)} "
           f"selected={len(steps)} unmapped={len(unmapped)}", flush=True)
     for s in selections:
@@ -1101,7 +1109,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
 
     receipt = {
         "mode": "CHANGED SUBSET", "candidate": candidate,
-        "base": opts["base"] or "merge-base:origin/main", "head": opts["head"] or candidate,
+        "base": opts["base"] or "merge-base:origin/main|origin/master", "head": opts["head"] or candidate,
         "changed_paths": paths, "unmapped_paths": unmapped,
         "selections": selections, "selected_count": len(steps),
         "unmapped_count": len(unmapped),

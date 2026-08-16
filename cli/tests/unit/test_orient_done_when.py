@@ -155,6 +155,33 @@ def test_self_review_floor_sizes_the_level_from_the_diff(repo, monkeypatch):
     assert f"/code-review {rc.level_for_diff(20, 2000)} --comment --fix" in line
 
 
+def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatch):
+    # A master-default repo: the origin/main probe comes back empty, so the
+    # sized invocation must come through the origin/master merge-base. The
+    # sibling test feeds every merge-base probe a SHA and never gets there.
+    import fno.review_capability as rc
+    import fno.target.orient as orient
+
+    monkeypatch.setattr(
+        rc,
+        "detect_session",
+        lambda: rc.SessionCapability(
+            harness="claude", substrate="interactive", attended=True
+        ),
+    )
+    root = repo("")
+    rows = "".join(f"100\t0\tfile{i:02d}.py\n" for i in range(20))
+
+    def git_out(cwd, *a):
+        if a[0] != "merge-base":
+            return rows
+        return "abc123" if a[-1] == "origin/master" else None
+
+    monkeypatch.setattr(orient, "_git_out", git_out)
+    line = _done_when_line({}, root)
+    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment --fix" in line
+
+
 def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(
     repo, monkeypatch
 ):
