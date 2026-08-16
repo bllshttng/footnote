@@ -382,7 +382,10 @@ enqueue_ticket() {
     local n=1 candidate f
     for f in "$LOCKDIR.queue.d"/*/; do
         [[ -d "$f" ]] || continue
-        f="${f##*/}"; f="${f%/}"
+        # Strip the trailing slash FIRST: on a path ending in "/", ${f##*/}
+        # removes the whole string and yields empty, silently skipping the
+        # ticket (caught by CI on the first push of this loop).
+        f="${f%/}"; f="${f##*/}"
         [[ "$f" =~ ^[0-9]+$ ]] || continue
         (( 10#$f >= n )) && n=$(( 10#$f + 1 ))
     done
