@@ -972,9 +972,12 @@ def reap_dead_claims(
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
     ``kept_live``, ``kept_suspect``, ``kept_offhost``, ``corrupted``,
     ``vanished``, ``contended``, ``reap_failed`` (list of ``(path, reason)``),
-    ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every call,
-    apply or dry-run, including a zero-reap run - a leg that never ran must
-    not look the same as one that ran and found nothing.
+    ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
+    ``apply=True`` call, including a zero-reap run - a leg that never ran
+    must not look the same as one that ran and found nothing. A dry run
+    fires no event: the "nothing is written" promise above covers the
+    event log too, so `fno backlog reconcile --dry-run`'s own preview
+    contract is not silently broken by the reap it previews.
     """
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
 
@@ -1131,7 +1134,8 @@ def reap_dead_claims(
         "apply": apply,
         "roots": [str(d) for d in use_dirs],
     }
-    emit_claim_reap_swept(summary)
+    if apply:
+        emit_claim_reap_swept(summary)
     return summary
 
 

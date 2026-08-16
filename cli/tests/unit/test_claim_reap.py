@@ -284,7 +284,16 @@ class TestReapDeadClaims:
         assert summary["corrupted"] == 1
         assert bad.exists()
 
-    def test_dry_run_reports_would_reap_and_writes_nothing(self, tmp_path):
+    def test_dry_run_reports_would_reap_and_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # resolve_repo_root() is @cache'd process-wide; some earlier fixture's
+        # first-use import can warm it against the ORIGINAL cwd before this
+        # chdir runs (order-dependent - harmless everywhere except a test
+        # that, like this one, needs append_event's cwd-derived events.jsonl
+        # path to follow the chdir). Clear it post-chdir so the write (or
+        # non-write, which is what this test asserts) lands under tmp_path.
+        from fno.paths import resolve_repo_root
+        resolve_repo_root.cache_clear()
         acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
 
         summary = reap_dead_claims(roots=[tmp_path], apply=False)
@@ -293,6 +302,17 @@ class TestReapDeadClaims:
         assert summary["would_reap"] == 1
         assert summary["reaped"] == 0
         assert claim_path("k", root=tmp_path).exists()
+
+        import json
+
+        events_path = tmp_path / ".fno" / "events.jsonl"
+        # events.jsonl already exists from acquire_claim's own claim_acquired
+        # emission above; what a dry run must NOT add is a claim_reap_swept
+        # entry - that write would break `fno backlog reconcile --dry-run`'s
+        # own preview contract.
+        lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+        swept = [e for e in lines if e["type"] == "claim_reap_swept"]
+        assert swept == []
 
     def test_second_apply_run_is_idempotent(self, tmp_path):
         acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
@@ -306,6 +326,13 @@ class TestReapDeadClaims:
 
     def test_AC8_swept_event_fires_on_a_zero_reap_run(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        # See the comment in test_dry_run_reports_would_reap_and_writes_nothing:
+        # resolve_repo_root()'s process-wide cache can be warmed against the
+        # pre-chdir cwd by an unrelated fixture's first-use import, order-
+        # dependent on what ran earlier in the session. Order-dependent here
+        # means this test passes as part of the suite but fails run alone.
+        from fno.paths import resolve_repo_root
+        resolve_repo_root.cache_clear()
         import json
 
         reap_dead_claims(roots=[tmp_path], apply=True)  # empty root, nothing to reap
