@@ -1035,9 +1035,7 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
             match cleanup_after_death(sock, "is dead") {
                 Ok(()) => KillOutcome {
                     path: KillPath::StaleSocket,
-                    note: format!(
-                        "removed stale socket for session {session:?} (server was dead)"
-                    ),
+                    note: format!("removed stale socket for session {session:?} (server was dead)"),
                 },
                 Err(outcome) => outcome,
             }
