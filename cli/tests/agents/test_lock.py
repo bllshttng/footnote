@@ -355,6 +355,26 @@ def test_acquire_stamps_holder_and_file_does_not_grow(tmp_path: Path) -> None:
     assert holder["acquired_at"].endswith("+00:00")
 
 
+def test_release_clears_the_stamp(tmp_path: Path) -> None:
+    """A released lock file names nobody.
+
+    The stamp is only true while the flock is held. Leaving it behind restages
+    the misreading it exists to end: a released file that still names a pid and
+    a time reads as ownership, and the pid is this process, so the liveness
+    guard cannot refuse it.
+    """
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_file = _agent_lock_path("released", registry_path)
+
+    with hold_agent_lock("released", registry_path):
+        assert "pid" in lock_file.read_text()
+
+    assert lock_file.read_text() == "", "a free lock must carry no holder"
+
+
 def test_timeout_names_the_live_holder(tmp_path: Path) -> None:
     """A waiter that gives up reports which pid holds the lock, and since when."""
     from fno.agents.lock import AgentLockTimeout, hold_agent_lock

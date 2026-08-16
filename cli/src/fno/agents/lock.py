@@ -260,6 +260,18 @@ def hold_agent_lock(
             yield handle
         finally:
             if not handle._detached:
+                # Clear the stamp BEFORE unlocking, while the flock is still
+                # ours. A stamp that outlives its holder is the same lie the
+                # bare mtime told: a released lock file that still names a pid
+                # and a time reads as ownership to anyone inspecting it, and
+                # `_pid_is_alive` cannot refuse it while that pid is still
+                # running (it usually is - it is this process). A zero-byte
+                # file is the honest "nobody holds this".
+                try:
+                    fh.truncate(0)
+                    fh.flush()
+                except OSError:
+                    pass  # diagnostic only; the unlock below is what matters
                 try:
                     fcntl.flock(fh, fcntl.LOCK_UN)
                 except OSError:

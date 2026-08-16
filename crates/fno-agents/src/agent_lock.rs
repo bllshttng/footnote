@@ -134,6 +134,12 @@ impl AgentLock {
 
 impl Drop for AgentLock {
     fn drop(&mut self) {
+        // Clear the stamp BEFORE unlocking, while the flock is still ours. A
+        // stamp that outlives its holder is the same lie the bare mtime told:
+        // a released lock file that still names a pid and a time reads as
+        // ownership, and `pid_is_alive` cannot refuse it while that pid is
+        // still running. Mirror of Python's `hold_agent_lock` release.
+        let _ = self._file.set_len(0);
         // std's inherent File::unlock (stable since Rust 1.89; the crate pins
         // rust-version = 1.89). Mirrors acquire()'s std locking.
         let _ = self._file.unlock();

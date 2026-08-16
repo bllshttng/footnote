@@ -90,8 +90,8 @@ Send resolves delivery in order:
 | Unknown agent | 16 | `unknown agent '<name>'; spawn it first: fno agents spawn --name <n> --harness <harness>` |
 | Provider mismatch | 2 | mismatch description |
 | Registry read error | 12 | `registry read failed: ...` |
-| Lock timeout another send released inside the grace window | 0 | `live delivery deferred for '<name>': lock busy after Ns (held by pid P since T)`; stdout says `queued (durable) [agent-lock-timeout]` |
-| Lock timeout the holder never releases | 11 | `timed out waiting for agent '<name>' lock (timeout=Ns) ...; recipient identity could not be verified, so no durable envelope was written; retry the send` |
+| Lock timeout, and the holder released inside the grace window | 0 | `live delivery deferred for '<name>': lock busy after Ns (held by pid P since T)`; stdout says `queued (durable) [agent-lock-timeout]` |
+| Lock timeout, and the holder never releases | 11 | `timed out waiting for agent '<name>' lock (timeout=Ns + Gs queue grace) ...; recipient identity could not be verified, so no durable envelope was written; retry the send` |
 | Bus lock timeout before durable append | 12 | `bus lock timeout after 5s at <path>; no durable envelope was written` |
 | Durable envelope write failed | 12 | `durable envelope write failed: ...` |
 | Live delivery demoted | 0 | demotion notice on stderr; stdout says `queued (durable)` |

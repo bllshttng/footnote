@@ -308,8 +308,17 @@ def _queue_grace_seconds(lock_timeout: float) -> float:
     `_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S`, so a caller that gave up at the
     default 30s is usually waiting on a holder still running toward 40s: it
     would retry for two seconds, miss by eight, and drop the very message it
-    came here to save. The window therefore covers the holder's own worst
-    case, measured from what the caller already waited.
+    came here to save. The window therefore covers the INJECT budget, measured
+    from what the caller already waited.
+
+    It does NOT cover every holder. The same flock spans a synchronous
+    switchboard hop, whose read budget is `_SWITCHBOARD_READ_TIMEOUT` (130s),
+    so a sender queued behind an A2A hop still exhausts this window and takes
+    the exit-11 arm. Sizing for 130s would make a routine `fno mail send`
+    block over two minutes before saying anything, which is a worse trade than
+    the loud refusal. Narrowing the flock to the registry mutation is the real
+    fix; it is tracked separately, for the reason the block comment in
+    `dispatch_send` gives.
 
     Capped at that same wait, because the cap is what keeps the rule honest
     for a caller who asked for a short one: a 0.1s `lock_timeout` means "do
@@ -7095,11 +7104,12 @@ def dispatch_send(
         # `last_message_at` AND reports the miss as "recipient identity
         # changed" - a false failure on a send that succeeded.
         name = canonical_name
+        grace_seconds = _queue_grace_seconds(exc.timeout)
         try:
             with hold_agent_lock(
                 canonical_name,
                 registry_path,
-                timeout=_queue_grace_seconds(exc.timeout),
+                timeout=grace_seconds,
             ):
                 # Every resolution that feeds a write happens here, under the
                 # lock, through the same call the normal path uses. An owner
@@ -7203,10 +7213,14 @@ def dispatch_send(
             # the first acquire. They differ whenever the original holder
             # released and a third process took the lock inside the grace
             # window, and reporting the first one points at a process that no
-            # longer owns anything.
+            # longer owns anything. Both waits are named for the same reason:
+            # the caller blocked for lock_timeout AND the grace window, so the
+            # first alone understates the block and reads as a tuning knob
+            # that did not do what it says.
             raise DispatchAskError(
                 f"timed out waiting for agent {exc.name!r} lock "
-                f"(timeout={exc.timeout}s){still_held.holder_note()}; "
+                f"(timeout={exc.timeout}s + {grace_seconds}s queue grace)"
+                f"{still_held.holder_note()}; "
                 "recipient identity could not be verified, so no durable "
                 "envelope was written; retry the send",
                 exit_code=11,
