@@ -580,7 +580,7 @@ def gc(
     ttl_hours: Optional[int] = typer.Option(
         None, "--ttl-hours", min=1, help="ephemeral retention horizon in hours"
     ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="report without rewriting"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-N", help="report without rewriting"),
 ) -> None:
     """Delete expired explicit-ephemeral rows while preserving all other rows."""
     from fno.events import RETENTION_MINIMUM_TTL_HOURS

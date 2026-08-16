@@ -139,9 +139,10 @@ emit_event() {
         return
     fi
     _append_bounded_event agy_stop_hook "$line" "$ROOT/.fno/events.jsonl" || true
-    if [[ -n "${HOME:-}" ]]; then
-        _append_bounded_event agy_stop_hook "$line" "$HOME/.fno/events.jsonl" || true
-    fi
+    # Honors an overridden config.state_dir when the shell stub was sourced;
+    # falls back to the default so the helper-missing give-up path still logs.
+    global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
+    _append_bounded_event agy_stop_hook "$line" "$global_events" || true
 }
 
 # Counter path keyed by conversationId (else the state-file session_id) so two

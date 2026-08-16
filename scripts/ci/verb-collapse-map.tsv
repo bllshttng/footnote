@@ -158,6 +158,7 @@ evals report	T1	evals report	1
 evals run	T1	evals run	3
 event audit	T1	event audit	5
 event emit	KEEP	event emit	40	deliberate readability slack for a high-traffic distinct operation
+event gc	T1	event gc	5
 event gate-escape	T1	event gate-escape	3
 event push-parent	T1	event push-parent	3
 executor	KEEP	executor	13	single-leaf group
