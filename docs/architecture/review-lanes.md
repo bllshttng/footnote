@@ -46,10 +46,15 @@ correctly and reviews the right diff without an extra move.
 
 ## Lane 2: raw-inject via `fno mail send --raw`
 
-The front door for triggering a verb in another session (or your own) is `fno mail send --raw`.
-It injects the payload UNWRAPPED at the recipient's prompt line: no `<fno_mail>` envelope, so the slash sits at character 0 and parses as if a human typed it.
-That sidesteps any model-invocation refusal entirely, because this IS the user-invocation path.
-Use it to fire a verb in a live worker (a king firing `/code-review` into a minion), or with `--to-self` to fire one at your own prompt line.
+The documented operator front door for asking another session (or your own) to fire a raw verb is `fno mail send --raw`.
+
+It routes by the recipient's live lane. It either fires the requested operation or names why that lane cannot fire it.
+
+On a prompt-line lane it injects the payload UNWRAPPED. No `<fno_mail>` envelope wraps it, so the slash sits at character 0 and parses like a human keystroke.
+
+That sidesteps any model-invocation refusal. The prompt-line injection IS the user-invocation path.
+
+Use it to fire a verb in a live worker, or with `--to-self` to target the current session through the same router.
 
 ```bash
 # Into a peer:
@@ -81,30 +86,45 @@ It answers whether a PATH exists, never whether the turn lands, since no probe c
 See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Stop hook gates its compact advice on it.
 
 `fno mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
-A claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
-A mux-hosted session injects via `fno mux pane send`, a separate path that never reaches the mail-inject binary.
-So the front door is the single entry point; `mail-inject` is the transport for the daemon lane only, and it cannot target a mux pane.
 
-### Direct binary: scripting against a daemon session (not the agent path)
+A mux-hosted session injects via `fno mux pane send`, regardless of harness. A mux-hosted Codex session is therefore a real prompt-line lane. It can fire `/compact`, `/review`, or any other TUI verb the Codex parser accepts.
 
-The agent path is `fno mail send --raw` above.
-The `mail-inject` binary is reachable directly only for scripting against a daemon session outside the Python CLI, where its STDIN form suits a pipe:
+A Claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
+
+A Codex app-server thread has no prompt line. The Python front door routes the exact verbs `/review` and `/code-review` to the structured `review/start` RPC. It refuses every other raw payload, naming the app-server constraint and the wrapped-send or mux alternatives.
+
+Other non-keystroke daemon lanes keep the generic refusal. A slash submitted through their model-turn RPC arrives as text and does not fire.
+
+`fno mail send --raw` is therefore the single documented raw-payload entry point. The `mail-inject` and `review-start` binaries remain low-level structured or STDIN expert doors, not alternative raw-payload routers.
+
+The `mail-inject` binary remains reachable directly for scripting against a Claude daemon session outside the Python CLI, where its STDIN form suits a pipe:
 
 ```bash
 printf '/code-review <level> --comment --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
 ```
 
-It reads the turn text from STDIN and enforces the brevity cap for the raw/direct lane: `fno mail send --raw` does not cap in Python, so this binary is where that lane, and a direct binary call, get capped.
+It reads the turn text from STDIN and enforces the brevity cap for a direct binary call. The raw lane itself is capped in Python at the `fno mail send --raw` front door. The binary holds the same ceiling for callers that bypass it.
 A shared `FNO_MAIL_BODY_WARN` / `FNO_MAIL_BODY_REFUSE` knob pair keeps the threshold identical to the wrapped-mail cap, so the direct binary is not a way around it.
 The cap skips framed envelopes: a `<fno_mail>` body is already capped in Python before it reaches here, and a `<cross-session-message>` relay hop is internal traffic, not authored mail, so neither is refused here.
 An over-cap unwrapped body is refused before it is delivered; the STDIN form is for piping the turn, not for moving a verbose payload.
-`--session` takes the full session UUID or its 8-hex short id (the roster accepts either); `--harness` is `claude` (the default) or `codex`.
+
+`--session` takes the full session UUID or its 8-hex short id (the roster accepts either). This raw/direct form targets the Claude control-socket lane.
+
 It delivers over the daemon `control.sock` to a live `claude --bg` session, so the target must be an adopted live session: it never lazy-starts one.
+
+The binary's `mail-inject --harness codex` mode submits text through `turn/start`. It is the wrapped-mail transport, not a raw verb transport, because the Codex app-server has no slash parser.
+
+The structured Codex expert door is `fno-agents review-start --session <thread-id> --target <uncommittedChanges|baseBranch:branch|commit:sha|custom:instructions> --delivery inline`.
+
+That direct verb takes an already-structured target rather than a raw payload. The exact-verb allowlist stays Python-only at the raw-payload door, so no second raw-payload door opens in Rust.
+
+When the target repository has no `refs/remotes/origin/HEAD`, a bare `/review` or `/code-review` on a Codex app-server thread refuses and requires `--base`. The router derives `baseBranch` only from that authority. The `--uncommitted` flag remains the explicit working-tree target.
 
 **Discoverability note.** `mail-inject` is a `fno-agents` *binary* verb, not a `fno mail` or `fno agents` (Python CLI) verb.
 It is matched with `matches!` in `crates/fno-agents/src/bin/client.rs`, deliberately, so the routable-verb parity guard does not see it; that keeps it out of `--help` and `CLIENT_VERB_USAGE`.
 So `fno mail --help`, `fno agents --help`, and a grep of the Python tree all report nothing, and a "does this exist?" probe against any of them answers false.
-That is fine now that `fno mail send --raw` is the documented front door: reach for the front door, and the hidden binary verb only matters if you need its STDIN form directly.
+
+When its explicit structured or STDIN contract is the point, use the hidden binary verb. Otherwise reach for `fno mail send --raw` for recipient-aware routing.
 Do not conclude the lane is absent from an empty `--help` or an empty Python-tree search; the binary verb is there.
 
 ## Lane 3: king-mediated mail (fallback)

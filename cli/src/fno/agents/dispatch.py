@@ -6171,6 +6171,81 @@ def _mail_inject_codex(
         return False
 
 
+def _review_start_codex(
+    thread_id: str,
+    target: str,
+    *,
+    audit_payload: str | None = None,
+    audit_sender: str | None = None,
+    audit_target_cwd: str | None = None,
+) -> dict[str, object]:
+    """Start an inline Codex review and preserve its structured outcome receipt."""
+    import json
+
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        return {"delivered": False, "reason": "binary-not-found"}
+    try:
+        argv = [
+            str(binary),
+            "review-start",
+            "--session",
+            thread_id,
+            "--target",
+            target,
+            "--delivery",
+            "inline",
+        ]
+        for flag, value in (
+            ("--audit-payload", audit_payload),
+            ("--audit-sender", audit_sender),
+            ("--audit-target-cwd", audit_target_cwd),
+        ):
+            if value is not None:
+                argv.extend((flag, value))
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return {"delivered": False, "reason": "not-confirmed"}
+    except OSError:
+        return {"delivered": False, "reason": "spawn-failed"}
+    try:
+        receipt = json.loads(proc.stdout.strip())
+    except (ValueError, AttributeError):
+        # Exit 2 with no stdout is the binary's usage arm: a deployed binary
+        # predating this PR's flags rejects the invocation there. Point the
+        # operator at the binary, not the daemon.
+        if proc.returncode == 2 and not proc.stdout.strip():
+            return {"delivered": False, "reason": "stale-binary"}
+        return {"delivered": False, "reason": "rpc-error"}
+    if not isinstance(receipt, dict):
+        return {"delivered": False, "reason": "rpc-error"}
+    delivered = receipt.get("delivered")
+    if delivered is True:
+        turn_id = receipt.get("turn_id")
+        review_thread_id = receipt.get("review_thread_id")
+        if (
+            proc.returncode == 0
+            and isinstance(turn_id, str)
+            and bool(turn_id)
+            and isinstance(review_thread_id, str)
+            and bool(review_thread_id)
+        ):
+            return receipt
+        return {"delivered": False, "reason": "not-confirmed"}
+    if delivered is False:
+        reason = receipt.get("reason")
+        if isinstance(reason, str) and reason:
+            return receipt
+    return {"delivered": False, "reason": "rpc-error"}
+
+
 def keystroke_lane(entry: "AgentEntry") -> tuple[str, bool]:
     """The live delivery lane for a registry row and whether it is a KEYSTROKE
     lane (a prompt-line path where the REPL's slash parser runs before the

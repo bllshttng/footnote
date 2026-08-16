@@ -122,19 +122,32 @@ def test_no_registry_row_is_not_injectable(tmp_path):
 
 
 def test_non_keystroke_lane_is_not_injectable(tmp_path):
-    """A codex peer has no prompt line, so a slash payload could never fire."""
+    """A codex app-server peer has no prompt line.
+
+    A non-review payload can never fire there. A review verb routes to
+    review/start, so its check answer follows the transport: with no
+    deployed binary the answer stays not-injectable rather than
+    promising the RPC path.
+    """
     _write_registry(
         tmp_path,
         [_row(name="me", harness_session_id=SELF_SID),
          _row(name="cx", harness="codex", harness_session_id="sid-cx")],
     )
     out, code = _run(
+        ["cx", "/compact", "--raw", "--check"],
+        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        tmp_path,
+    )
+    assert code == 1, out
+    assert "no prompt line" in out, out
+    out, code = _run(
         ["cx", "/review", "--raw", "--check"],
         {"CLAUDE_CODE_SESSION_ID": SELF_SID},
         tmp_path,
     )
     assert code == 1, out
-    assert "keystroke" in out, out
+    assert out.startswith("not-injectable:"), out
 
 
 def test_check_without_raw_is_refused(tmp_path):
