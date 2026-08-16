@@ -177,10 +177,14 @@ def resolve_spawn_route(
     var (they are all ``SCRUB_AUTH_VARS`` members) before layering the route,
     so a missing tier would send Claude's default model id for that tier to a
     vendor that does not serve it - a "live" receipt that fails its first turn.
-    Resolved routes - the role lane, the explicit CLI lane, restored routes -
-    are fail-closed and always carry ``ANTHROPIC_AUTH_TOKEN`` plus the whole
-    model set, so this fires only on hand-built partial env from a direct
-    in-process caller.
+    Resolved routes - the role lane, the explicit CLI lane - are fail-closed and
+    always carry ``ANTHROPIC_AUTH_TOKEN`` plus the whole model set, so this
+    fires only on hand-built partial env from a direct in-process caller. A
+    restored route is complete only as of the binary that RECORDED it: a
+    settings file written before a tier joined :data:`MODEL_ENV_KEYS` (fable,
+    2026-07-27) reads back without that tier, and this refusal fires on its
+    revive - while the Rust ``resume`` door hands the same file to ``claude
+    --settings`` unchecked, so the two doors disagree on one row.
 
     The managed-OAuth ambient guard that used to live here is gone (measured
     2026-08-15): claude prefers an env credential over a Keychain login, so a

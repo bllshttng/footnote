@@ -1089,8 +1089,8 @@ def cmd_spawn(
 
     # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
     # gate, like --route: a refusal spawns nothing, takes no gate slot, and
-    # leaves the node dispatchable. Contradictions (non-claude provider, --route,
-    # --role) were already refused above, before route resolution.
+    # leaves the node dispatchable. Only a non-claude harness was refused above;
+    # --account composes with --route/--role (x-5ed4).
     account_env: dict[str, str] | None = None
     if account is not None:
         from fno.agents.account_env import resolve_account_overlay_or_exit
