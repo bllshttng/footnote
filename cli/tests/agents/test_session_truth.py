@@ -321,7 +321,7 @@ def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# last_event_at + last_message: the absolute stamp and the last turn (x-1fbb)
+# last_event_at + last_message: the absolute stamp and the last turn
 #
 # The pair makes a wedged worker legible: a row claiming `working` whose stamp
 # is hours old, with the wait-line it actually ended on. Both come from the
@@ -346,12 +346,42 @@ def test_resolve_carries_last_event_stamp_and_last_message(tmp_path):
         "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=1_700_000_100.0
     )
 
-    # The stamp is absolute UTC and agrees with the age by construction: both
-    # come from the same epoch read (1700000000 == 2023-11-14T22:13:20Z).
-    assert result["last_event_at"] == "2023-11-14T22:13:20+00:00"
+    # The stamp is absolute UTC in the Z-suffix house format (the same shape
+    # registry.py stamps last_message_at with) and agrees with the age by
+    # construction: both come from the same epoch read.
+    assert result["last_event_at"] == "2023-11-14T22:13:20Z"
     assert result["last_activity_age_s"] == 100
     # The LAST turn's text, whitespace collapsed.
     assert result["last_message"] == "line one line two"
+
+
+def test_resolve_degrades_out_of_range_epoch_to_absent_stamp(tmp_path, monkeypatch):
+    """An epoch beyond datetime range must not raise: the module contract says
+    every read degrades, and one corrupt reading must not take down the whole
+    `fno agents list` render (read.py calls this per row with no catch). A
+    filesystem mtime cannot reach the danger zone (ns precision clamps at year
+    2262); the reachable producer is the opencode DB, whose time_updated is
+    divided by 1000 with no range guard, so a microsecond-scale row yields a
+    year-55840 epoch."""
+    from fno.agents import session_truth
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "abcdef12-4e23-0000-0000-000000000000"
+    _write_claude_transcript(tmp_path, cwd, sid, ["turn"])
+
+    monkeypatch.setattr(
+        session_truth,
+        "_transcript_age_s",
+        lambda *a, **k: (1_700_000_000_000.0, 0.0),
+    )
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path, now_s=1_700_000_100.0
+    )
+
+    assert result["last_event_at"] is None
 
 
 def test_resolve_last_message_keeps_tool_marker_and_caps_length(tmp_path):

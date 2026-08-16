@@ -4233,7 +4233,7 @@ mod tests {
     }
 
     /// The absolute stamp and the LAST-turn text cross the wire beside the
-    /// triple (x-1fbb): the list row's EVENT AGE column and LAST MESSAGE text
+    /// triple: the list row's EVENT AGE column and LAST MESSAGE text
     /// come from this probe, and a parser that dropped either would leave it
     /// permanently null on the daemon path - a key that is always null being
     /// the same lie as a missing one.

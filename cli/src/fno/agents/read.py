@@ -151,7 +151,7 @@ def list_agents(
         # Read off the SAME call, before `truth` is rebound below to the
         # unrelated node-claim reading; no second transcript read is paid.
         observed_model = truth.get("observed_model")
-        # The transcript stamp + last turn text, same single read (x-1fbb).
+        # The transcript stamp + last turn text, same single read.
         last_event_at = truth.get("last_event_at")
         last_message = truth.get("last_message")
         # One shared derivation, reached from the truth reading already in hand

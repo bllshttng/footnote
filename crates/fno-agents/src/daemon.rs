@@ -4026,9 +4026,9 @@ where
                 "last_activity_age_s": last_activity_age_s,
                 // The absolute stamp of the newest transcript activity and the
                 // flattened LAST-turn text, from the same probe as the age -
-                // the pair that makes a wedged-but-`working` row visible
-                // (x-1fbb). Null when the probe never answered, which an
-                // absent reading must render as, never a fresh one.
+                // the pair that makes a wedged-but-`working` row visible. Null
+                // when the probe never answered, which an absent reading must
+                // render as, never a fresh one.
                 "last_event_at": last_event_at,
                 "last_message": last_message,
                 "live_status": null,
@@ -9095,7 +9095,7 @@ done
         assert_eq!(row["reachability"], "reachable");
         assert_eq!(row["basis"], "transcript");
         assert_eq!(row["last_activity_age_s"], 12.0);
-        // The stamp and the LAST-turn text ride the same probe (x-1fbb): a
+        // The stamp and the LAST-turn text ride the same probe: a
         // hard-coded null would satisfy the key-set contract while hiding the
         // wedged-worker signal the pair exists to expose.
         assert_eq!(row["last_event_at"], "2026-08-15T17:00:00+00:00");

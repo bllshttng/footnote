@@ -2370,6 +2370,12 @@ fn render_checked(last_reconciled_at: Option<&str>, now: chrono::DateTime<chrono
     }
 }
 
+/// Display cap for the LAST MESSAGE cell, kept in step with Python's
+/// `_LAST_MESSAGE_WIDTH` in cli/src/fno/agents/format.py (the two tables are
+/// functional parallels, not byte-exact, but the cap is the one value worth
+/// holding together).
+const LAST_MESSAGE_WIDTH: usize = 40;
+
 /// Right-aligned ellipsis truncation, chars not bytes (mirrors Python's
 /// `_truncate`), so a long transcript line cannot own the table.
 fn truncate_cell(s: &str, width: usize) -> String {
@@ -2392,7 +2398,7 @@ fn truncate_cell(s: &str, width: usize) -> String {
 /// it replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid
 /// for a PTY agent (`-` for a one-shot ask, which has no managed process).
 /// EVENT AGE is the relative age of the transcript's newest activity and LAST
-/// MESSAGE the flattened last-turn text (x-1fbb) - beside the state column on
+/// MESSAGE the flattened last-turn text - beside the state column on
 /// purpose, so a row claiming to be busy while its transcript is hours old
 /// shows the disagreement instead of hiding it. This is a functional table;
 /// byte-exact match with Python is not required (Python's table is
@@ -2449,7 +2455,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
             // cannot blow out CWD.
             let last_msg = r["last_message"]
                 .as_str()
-                .map(|s| truncate_cell(s, 40))
+                .map(|s| truncate_cell(s, LAST_MESSAGE_WIDTH))
                 .unwrap_or_else(|| "-".to_string());
             let cwd = r["cwd"].as_str().unwrap_or("-").to_string();
             [
@@ -2472,7 +2478,10 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
     ];
     for row in &display {
         for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
+            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
+            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
+            // past the intended column and shoves the rest of the row wide.
+            widths[i] = widths[i].max(cell.chars().count());
         }
     }
 
@@ -2536,7 +2545,10 @@ fn render_discovered_section(discovered: &[Value]) -> String {
     ];
     for row in &display {
         for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
+            // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
+            // byte width on non-ASCII text (a CJK cwd, an emoji message) pads
+            // past the intended column and shoves the rest of the row wide.
+            widths[i] = widths[i].max(cell.chars().count());
         }
     }
 
@@ -4454,7 +4466,7 @@ mod tests {
         );
     }
 
-    /// x-1fbb: EVENT AGE renders the transcript's newest-activity age and LAST
+    /// EVENT AGE renders the transcript's newest-activity age and LAST
     /// MESSAGE the flattened last-turn text. The registry timestamp this column
     /// was wired to for its whole life was null on many rows while the worker
     /// was mid-sentence, so a "last message" column that never showed a

@@ -258,7 +258,7 @@ def test_render_table_does_not_crash_on_missing_last_message_at() -> None:
 
 
 def test_render_table_event_age_column_beside_status() -> None:
-    """x-1fbb: the transcript age renders as its own column next to STATUS, so
+    """The transcript age renders as its own column next to STATUS, so
     a row whose store-read state says one thing and whose transcript says
     another shows both readings instead of resolving the conflict silently."""
     from datetime import datetime, timedelta, timezone
@@ -295,7 +295,7 @@ def test_render_table_event_age_absent_renders_dash_not_fresh() -> None:
 
 
 def test_render_table_last_message_shows_transcript_text() -> None:
-    """x-1fbb: LAST MESSAGE carries the last transcript turn. The column spent
+    """LAST MESSAGE carries the last transcript turn. The column spent
     its life wired to `last_message_at` - a timestamp, often null - so it never
     showed a message; a 429 or a wait line is the actual diagnostic."""
     rows = [

@@ -252,6 +252,20 @@ def resolve_session_truth(
     )
     observed = observed_model(agent, transcript_path)
 
+    # Stat BEFORE reading the tail, so a write that lands between the two reads
+    # can only make the stamp OLDER than the message it describes - the message
+    # may then include a record the stamp predates, which understates freshness.
+    # The other order lets a mid-flight append make an old line read as freshly
+    # emitted, which is the dangerous direction for this pair.
+    mtime, age = _transcript_age_s(
+        agent,
+        sid,
+        cwd,
+        projects_root,
+        codex_sessions_dir,
+        now_s,
+        transcript_path,
+    )
     try:
         records = recent_records(
             agent,
@@ -271,29 +285,31 @@ def resolve_session_truth(
     # Classify the LAST turn, not the last assistant turn: a trailing user turn
     # must clear a stale assistant promise/question (see classify_tail).
     last = records[-1]
-    mtime, age = _transcript_age_s(
-        agent,
-        sid,
-        cwd,
-        projects_root,
-        codex_sessions_dir,
-        now_s,
-        transcript_path,
-    )
     state = classify_tail(last.role, last.text, age, stalled_after_s=stalled_after_s)
-    # The stamp and the message come from the same tail read that classified the
-    # turn; the absolute stamp from the same epoch the age was derived from, so
-    # the pair cannot disagree about when the transcript last moved (x-1fbb).
+    try:
+        last_event_at = (
+            None
+            if mtime is None
+            else datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        )
+    except (ValueError, OverflowError, OSError):
+        # An epoch beyond datetime range (e.g. an opencode time_updated stored
+        # in microseconds) degrades to an absent stamp; raising here would
+        # break the never-raises contract and take the whole list render down
+        # with one corrupt reading.
+        last_event_at = None
+    # The stamp and the message describe the same tail: the absolute stamp comes
+    # from the same epoch the age was derived from and is taken before the tail
+    # is read, so the pair cannot disagree about when the transcript last moved
+    # in the dangerous direction.
     return {
         "handle": handle,
         "state": state,
         "reason": None,
         "last_activity_age_s": None if age is None else int(age),
-        "last_event_at": (
-            None
-            if mtime is None
-            else datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-        ),
+        "last_event_at": last_event_at,
         "last_message": " ".join((last.text or "").split())[:200] or None,
         "session_id": sid,
         "observed_model": observed,
