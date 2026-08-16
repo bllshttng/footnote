@@ -364,14 +364,17 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     PTY host retires at G4; a silent fallback there is exactly what AC1-ERR
     forbids). ``pane`` is the default, so an absent ``--substrate`` counts.
     The scan stops at ``--argv`` like the other raw-args scans so a payload
-    token can never masquerade as our flag.
+    token can never masquerade as our flag, and at a bare ``--`` fence for the
+    same reason (x-1caa: fenced tokens are provider passthrough - a fenced
+    ``-p`` must not flip a pane-default spawn onto the binary route, past
+    every pane guard).
     """
     if verb != "spawn":
         return False
     substrate = "pane"
     it = iter(args)
     for a in it:
-        if a == "--argv":
+        if a == "--argv" or a == "--":
             break
         if a in ("--once", "-o", "--headless", "-p"):
             # The headless spellings (--once/-o and --headless/-p): a one-shot,

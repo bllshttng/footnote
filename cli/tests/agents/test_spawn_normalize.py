@@ -351,6 +351,38 @@ def test_off_pane_substrate_refuses_multi_token_passthrough(substrate_args):
 
 def test_off_pane_single_fenced_seed_untouched():
     # One fenced token stays the seed even on bg: the refusal is scoped to
-    # multi-token passthrough, never to the flag-shaped-seed idiom.
+    # passthrough, never to the flag-shaped-seed idiom (one fenced token, NO
+    # message before the fence).
     out = _norm(["spawn", "--name", "w", "--substrate", "bg", "--", "--flag seed"])
     assert out == ["spawn", "--name", "w", "--substrate", "bg", "--", "--flag seed"]
+
+
+def test_single_fenced_token_beside_a_message_is_passthrough_on_bg():
+    # With a MESSAGE before the fence, even one fenced token can only be
+    # passthrough - on bg/headless that is the unguarded Rust lane, refused by
+    # name instead of silently folded into the seed text there.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _norm(
+            ["spawn", "--name", "w", "--substrate", "bg", "hi", "--", "--verbose"],
+            stderr=err,
+        )
+    assert exc.value.code == 2
+    assert "pane-only" in err.getvalue()
+
+
+def test_fenced_provider_resume_is_not_fnos_resume():
+    # A fenced `--resume` is the provider's flag: it must not trigger fno's
+    # implied-bg substrate nor the uuid validation meant for fno's own flag.
+    out = _norm(["spawn", "hi", "--", "--resume", UUID])
+    assert "--substrate" not in out
+    assert out[-2:] == ["--resume", UUID]
+
+
+def test_implied_bg_substrate_splices_before_the_fence():
+    # --resume plus a fenced seed: the implied `--substrate bg` lands in the
+    # fno head, never past the fence where click would read it as passthrough
+    # positionals and lose the lane.
+    out = _norm(["spawn", "-r", UUID, "--", "--flag seed"])
+    assert out.index("--substrate") < out.index("--")
+    assert out[out.index("--substrate") + 1] == "bg"

@@ -2710,6 +2710,37 @@ def test_codex_pane_maps_business_role_error_before_launch(tmp_path: Path, monke
     assert runner.calls == []
 
 
+def test_codex_route_config_args_face_the_passthrough_duplicate_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-1caa: the route's `-c` config args splice AFTER build_pane_argv, so
+    the in-arm duplicate check never saw them; a passthrough naming one is a
+    named refusal, never a silent last-wins against the route's own setting."""
+    from fno.agents import model_routing
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setattr(
+        model_routing,
+        "resolve_codex_route",
+        lambda role, **kwargs: model_routing.CodexRoute(
+            env={"OPENAI_API_KEY": "business-key"},
+            config_args=["-c", "model='gpt-business'"],
+        ),
+    )
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="on both sides") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="codex",
+            role="publisher",
+            passthrough=["-c", "model='gpt-personal'"],
+            runner=runner,
+        )
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
 def test_routed_claude_pane_launches_through_happy_when_enabled(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -3075,6 +3106,16 @@ def test_ac3_passthrough_hits_the_happy_refusals(
         ("claude", {"name": "peer"}, ["--name", "reviewer"]),
         ("gemini", {"yolo": True}, ["--yolo"]),
         ("opencode", {"yolo": True}, ["--auto"]),
+        # Alias spellings of an axis fno already emitted: same defect, the
+        # exact-name check alone would let both ride (gemini always
+        # materializes one of --yolo/--approval-mode; --yolo is an alias of
+        # opencode's --auto).
+        ("gemini", {}, ["--yolo"]),
+        ("gemini", {"yolo": True}, ["--approval-mode", "yolo"]),
+        ("opencode", {"yolo": True}, ["--yolo"]),
+        # gemini's message rides behind `-i`, appended AFTER the splice: the
+        # emitted set must carry it or a passthrough -i adds a second prompt.
+        ("gemini", {}, ["-i", "joke"]),
     ],
 )
 def test_ac4_duplicated_flag_is_a_named_refusal(
@@ -3102,7 +3143,12 @@ def test_ac4_duplicated_flag_is_a_named_refusal(
 
 @pytest.mark.parametrize(
     ("provider", "tok"),
-    [("agy", ["-p"]), ("agy", ["--print"]), ("opencode", ["run"])],
+    [
+        ("agy", ["-p"]),
+        ("agy", ["--print"]),
+        ("codex", ["exec"]),  # headless subcommand, same class as opencode run
+        ("opencode", ["run"]),
+    ],
 )
 def test_ac5_headless_form_tokens_refused_on_the_composed_argv(
     tmp_path: Path, monkeypatch, provider: str, tok: list[str]

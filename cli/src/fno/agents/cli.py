@@ -826,12 +826,9 @@ def cmd_spawn(
     # for the Rust-routed lane; this is the same refusal for the Python lane,
     # including a substrate that arrived by config default after the seam.
     if passthrough and (substrate != "pane" or once):
-        print(
-            "passthrough after -- is pane-only; the bg/headless argv builders "
-            "carry none of the pane's provider refusals, so the tokens cannot "
-            "be forwarded. Use --substrate pane (the default) or drop them.",
-            file=sys.stderr,
-        )
+        from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
+
+        print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
     if monitor is not None and monitor != "happy":

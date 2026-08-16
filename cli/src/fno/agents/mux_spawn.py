@@ -832,6 +832,7 @@ def pane_passthrough_tokens(
 #: maintenance burden passthrough exists to remove.
 PANE_HEADLESS_FORM_TOKENS: Mapping[str, tuple[str, ...]] = {
     "agy": ("-p", "--print"),  # agy's headless form: prints, exits, kills the pane
+    "codex": ("exec",),  # headless subcommand (the --headless help pairs it with claude -p)
     "opencode": ("run",),  # headless subcommand; the positional is a project path
 }
 
@@ -974,13 +975,21 @@ def build_pane_argv(
             argv += ["--model", model]
         # Permission tokens are computed before the passthrough splice so the
         # duplicate-flag refusal sees them (they append after the -i pair, past
-        # the splice position). Output order is unchanged.
+        # the splice position). Output order is unchanged. The emitted set also
+        # carries the -i flag itself (it rides after the splice) and BOTH
+        # permission spellings: the axis is always materialized here under one
+        # of the two names, so an alias-shaped passthrough (--yolo against an
+        # --approval-mode arm or the reverse) is a named refusal, never a
+        # silent last-wins.
         perm = (
             permission_pane_tokens("gemini", permission_mode)
             if permission_mode
             else (["--yolo"] if yolo else ["--approval-mode", "default"])
         )
-        argv += pane_passthrough_tokens(passthrough, [*argv, *perm])
+        emitted = [*argv, *perm, "--yolo", "--approval-mode"]
+        if message:
+            emitted.append("-i")
+        argv += pane_passthrough_tokens(passthrough, emitted)
         if message:
             # argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -i
             # value form is pinned by tests and left as-is).
@@ -1039,13 +1048,19 @@ def build_pane_argv(
             argv += ["--model", _default_model]
         argv += tier3
         # Computed before the splice (like gemini) so the duplicate refusal sees
-        # the permission tokens that append after the splice position.
+        # the permission tokens that append after the splice position. When the
+        # axis is set, --auto's hidden aliases (--yolo /
+        # --dangerously-skip-permissions, per the arm comment above) count as
+        # the same flag: a passthrough carrying one is a second source.
         perm = (
             permission_pane_tokens("opencode", permission_mode)
             if permission_mode
             else (["--auto"] if yolo else [])
         )
-        argv += pane_passthrough_tokens(passthrough, [*argv, *perm])
+        emitted = [*argv, *perm]
+        if perm:
+            emitted += ["--yolo", "--dangerously-skip-permissions"]
+        argv += pane_passthrough_tokens(passthrough, emitted)
         argv += perm
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
@@ -1949,6 +1964,11 @@ def dispatch_spawn_pane(
     )
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
+        # x-1caa: the route's config args splice AFTER build_pane_argv, so the
+        # in-arm duplicate-flag check never saw them; re-run it against the
+        # route tokens or a passthrough `-c`/`--model` flag is a silent
+        # last-wins against the route's own setting.
+        pane_passthrough_tokens(passthrough, codex_route.config_args)
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
