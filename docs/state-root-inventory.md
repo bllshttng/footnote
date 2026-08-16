@@ -67,6 +67,7 @@ One file per session, per day, or per throttle window.
 | `.think-spawn-daily.json` | `provenance/spawn_think.py` | daily, overwritten |
 | `.think-offer-cursor` | `hooks/born-with-why-offer-inject.sh` | single file |
 | `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/loopcheck.rs` | consumed by the reader |
+| `.preflight-cancel` | `scripts/ci/preflight.sh` | consumed by the reader (one-shot; stale after one hour) |
 | `.reconcile-stamp`, `.reconcile-result.json`, `.shown` | `scripts/lib/reconcile-throttle.sh`, `hooks/reconcile-session-start.sh` | throttle window |
 | `.plan-sync-watermark` | `plan/cli.py` | single file |
 | `.path-migration-done` | `setup/migrate_paths.py` | one-shot sentinel |

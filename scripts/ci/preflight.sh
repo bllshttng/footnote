@@ -338,6 +338,9 @@ reuse_attestation() {
     # shape, so every field is checkable and --force discards it.
     echo "preflight: GREEN (reused attestation) candidate=$CANDIDATE_SHORT earned=${age_h} ago by pid=${att_pid:-?} host=$att_host"
     echo "preflight: this verdict was earned by a FULL run on this exact SHA; --force re-runs from scratch"
+    # A cancel signal arriving during the reuse check must not be swallowed
+    # into a silent exit-0 GREEN now that the traps arm at the top.
+    [[ "$LOCK_SIGNAL" -eq 1 ]] && exit 130
     exit 0
 }
 
@@ -551,6 +554,13 @@ holder_pid_recycled() {
     (( stamp_age > proc_age + 60 ))
 }
 
+path_mtime_s() {
+    # A path's mtime in epoch seconds; empty when stat cannot read it (BSD and
+    # GNU spellings both tried). One helper, one spelling pair: hand-copied
+    # fallbacks in two functions drift apart.
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""
+}
+
 cancel_requested() {
     # Consume the one-shot cancel sentinel by atomic rename, so only one of N
     # racing waiters can win a single cancel token. Age-gated: a sentinel
@@ -558,9 +568,9 @@ cancel_requested() {
     # cancel a later, innocent run, so past the grace it is discarded instead.
     local s="$INVOKING_ROOT/.fno/preflight-cancel" m now
     [[ -e "$s" ]] || return 1
-    m="$(stat -f %m "$s" 2>/dev/null || stat -c %Y "$s" 2>/dev/null || echo 0)"
+    m="$(path_mtime_s "$s")"
     now="$(date +%s)"
-    if (( now - m > 3600 )); then
+    if [[ -n "$m" ]] && (( now - m > 3600 )); then
         rm -f "$s" 2>/dev/null || true
         return 1
     fi
@@ -574,7 +584,7 @@ lockdir_abandoned() {
     # live holder stamps within the mkdir-to-stamp window, so an old empty
     # lockdir is a corpse that pid checks can never condemn (no pid to read).
     local m now
-    m="$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo "")"
+    m="$(path_mtime_s "$1")"
     [[ -n "$m" ]] || return 1
     now="$(date +%s)"
     (( now - m > 300 ))

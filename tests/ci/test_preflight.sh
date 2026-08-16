@@ -651,6 +651,23 @@ sleep 1.3
 holder_is_stalled "$line_b" && ok "a zero-CPU holder is condemned after the probe window" \
     || fail "no-CPU holder not condemned"
 kill "$unit_a" "$unit_b" 2>/dev/null; wait "$unit_a" 2>/dev/null; wait "$unit_b" 2>/dev/null
+# Pin the sampler itself: before its pid-argument fix every sample summed 0
+# (an unbound local under set -u), which floor arithmetic cannot distinguish
+# from a truly idle tree - so assert REAL positive CPU from a busy tree.
+# Four spinners over 15s yield >= 1 integer CPU-second even at load ~400
+# (measured ~1s per spinner per 20s at load 380); fewer or shorter would
+# truncate to zero on a starved box.
+unit_spin_pids=""
+for _s in 1 2 3 4; do ( while :; do :; done ) & unit_spin_pids="$unit_spin_pids $!"; done
+unit_sum_start=0
+for _p in $unit_spin_pids; do unit_sum_start=$(( unit_sum_start + $(holder_tree_cpu "$_p") )); done
+sleep 15
+unit_sum_end=0
+for _p in $unit_spin_pids; do unit_sum_end=$(( unit_sum_end + $(holder_tree_cpu "$_p") )); done
+for _p in $unit_spin_pids; do kill "$_p" 2>/dev/null; wait "$_p" 2>/dev/null; done
+[[ $(( unit_sum_end - unit_sum_start )) -ge 1 ]] \
+    && ok "the tree-CPU sampler measures real progress (delta=$(( unit_sum_end - unit_sum_start ))s)" \
+    || fail "sampler read no progress from a busy tree (delta=$(( unit_sum_end - unit_sum_start ))s)"
 unset -f cputime_to_s holder_tree_pids holder_tree_cpu process_age_s holder_is_stalled
 
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
