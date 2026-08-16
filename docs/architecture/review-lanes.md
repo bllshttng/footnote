@@ -361,11 +361,11 @@ fno agents spawn --name <name>-review "/code-review <size> for PR <n> against ma
   --permission-mode bypassPermissions --cwd <an isolated reviewer worktree>
 ```
 
-The reviewer worktree must run `scripts/setup/setup-worktree.sh`, which symlinks its `.fno/events.jsonl` to the repository's canonical journal.
-That shared journal lets the reviewer remain isolated from the author's files while its exact-HEAD attestation is visible to the author's loop-check.
-A `--fix` that touches only documentation now carries rather than invalidates, so the freshness rule is not the reason this constraint stands; the tree-corruption specimens are.
-NO `--fix` remains the review contract: the author applies findings and re-attests, and the reviewer's prior attestation is then stale by design.
-Two worktrees at the same exact HEAD can see each other's attestations, so session identity remains part of the coverage origin and HEAD movement invalidates the shared evidence.
+The reviewer worktree must run `scripts/setup/setup-worktree.sh`. That script symlinks its `.fno/events.jsonl` to the repository's canonical journal.
+The shared journal lets the reviewer stay isolated from the author's files. Its exact-HEAD attestation is still visible to the author's loop-check.
+A `--fix` that touches only documentation now carries rather than invalidates. The freshness rule is therefore not the reason this constraint stands. The tree-corruption specimens are.
+NO `--fix` remains the review contract. The author applies findings and re-attests. The reviewer's prior attestation is then stale by design.
+Two worktrees at the same exact HEAD can see each other's attestations. Session identity stays part of the coverage origin, and HEAD movement invalidates the shared evidence.
 
 The lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author spawns a claude reviewer (or vice versa), so "different session" can mean "different model".
 The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the lane's headline value, `other_session`, is silently unreachable.

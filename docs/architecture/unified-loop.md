@@ -247,9 +247,9 @@ The reachable merge paths it governs:
 | `gh pr merge` (raw GitHub) | not footnote-gated; the human is the authority on a non-auto-merge repo |
 
 One source also has to mean one *location*.
-Every worktree resolves its local journal from the worktree root, and setup symlinks that file to the canonical checkout's journal so an isolated reviewer, author, merge, and reconcile all observe the same repository evidence.
-`review_coverage` still goes to **both** the project and global logs, carrying the full `host/owner/repo` identity so cross-project readers cannot confuse repositories with the same final path segment.
-The project symlink removes the former cross-worktree visibility dependency, while `~/.fno/events.jsonl` remains the cross-project mirror rather than the mechanism that makes sibling worktrees agree.
+Every worktree resolves its local journal from the worktree root, and setup symlinks that file to the canonical checkout's journal. An isolated reviewer, author, merge, and reconcile all observe the same repository evidence.
+`review_coverage` still goes to **both** the project and global logs with the full `host/owner/repo` identity. Cross-project readers cannot confuse repositories sharing a final path segment.
+The project symlink removes the former cross-worktree visibility dependency. The global `~/.fno/events.jsonl` stays a cross-project mirror, not the mechanism that makes sibling worktrees agree.
 Two sibling worktrees on the same exact HEAD share attestations by design, and session identity records whether the coverage came from the author or another reviewer.
 `finalize.rs` reads the project log alone (`coverage_satisfied_in_latest_event`, `covered_head_from_event`) because finalize is invoked by the loop-check that just wrote the event, in that same directory; if finalize ever gains a caller that can stand elsewhere, those two become the same bug.
 

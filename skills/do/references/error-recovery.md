@@ -155,7 +155,7 @@ fno event emit --type builder_step \
   || echo "warning: builder_step crumb not recorded (continuing)" >&2
 ```
 
-Truncate `tried`/`found`/`fix` to ~500 chars each; `node_id`/`tried`/`outcome` required, `found`/`fix` optional. Degrade, never block.
+Truncate `tried`/`found`/`fix` to ~500 chars each. `node_id`/`tried`/`outcome` required, `found`/`fix` optional. Degrade, never block.
 
 ## Partial Wave Failure (Detailed)
 
