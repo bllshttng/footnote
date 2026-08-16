@@ -1136,13 +1136,16 @@ pub fn run(socket: PathBuf) -> i32 {
     }
 
     // Stamp the server's own pid beside the socket (x-48a5) so kill-server
-    // can signal a wedged holder without an accepted connection. Best-effort
-    // like `.ver` above: a write failure only means recovery falls back to
-    // the verb's refusal naming the manual kill.
-    if let Err(e) = std::fs::write(
-        crate::proto::pid_sidecar_path(&socket),
-        std::process::id().to_string(),
-    ) {
+    // can signal a wedged holder without an accepted connection. The start
+    // time rides along so a stale sidecar (a rebind whose rewrite failed,
+    // best-effort like `.ver` above) can never be mistaken for a pid that
+    // was since reused: bare pid alone if this platform cannot supply one.
+    let own_pid = std::process::id();
+    let sidecar_contents = match crate::proto::pid_start_time(own_pid) {
+        Some(start) => format!("{own_pid}:{start}"),
+        None => own_pid.to_string(),
+    };
+    if let Err(e) = std::fs::write(crate::proto::pid_sidecar_path(&socket), sidecar_contents) {
         eprintln!("fno mux: warn: could not write pid sidecar: {e}");
     }
 

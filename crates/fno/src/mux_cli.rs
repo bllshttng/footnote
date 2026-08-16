@@ -901,6 +901,16 @@ fn plain_unrecoverable(msg: String) -> KillOutcome {
     }
 }
 
+/// POSIX single-quote a path for the copy-pasteable recovery command below:
+/// wraps it in `'...'`, escaping any embedded `'` as `'\''`. A session name
+/// only refuses `/` and NUL (`proto::socket_path`), so a name (and the mux
+/// dir it sits under) can legally carry spaces or shell metacharacters that
+/// would otherwise split the command or run unintended syntax when copied
+/// into a shell (x-48a5).
+fn shell_quote(p: &Path) -> String {
+    format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
+}
+
 /// The refusal: what failed, why, and the exact commands to run next. A
 /// failure here leaves no working mux, so it must carry the chain the
 /// operator was trying to run - the recorded incident is a dead `&&` chain
@@ -911,11 +921,22 @@ fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
         note: format!(
             "fno: {context}\nfno: {reason}\n     next: kill -9 $(lsof -t -U {}) && rm -f {} {} \
              {}\n     then: fno update && fno restart && fno",
-            sock.display(),
-            sock.display(),
-            proto::version_sidecar_path(sock).display(),
-            proto::pid_sidecar_path(sock).display(),
+            shell_quote(sock),
+            shell_quote(sock),
+            shell_quote(&proto::version_sidecar_path(sock)),
+            shell_quote(&proto::pid_sidecar_path(sock)),
         ),
+    }
+}
+
+/// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (x-48a5, the
+/// identity-checked format) or bare `"<pid>"` (a platform `pid_start_time`
+/// cannot supply one for). Tolerant of trailing whitespace/newline.
+fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some((p, t)) => Some((p.parse().ok()?, t.parse().ok())),
+        None => Some((s.parse().ok()?, None)),
     }
 }
 
@@ -925,20 +946,21 @@ fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
 /// the server wrote at bind, SIGTERM it, SIGKILL it, and clean up what it
 /// leaves.
 ///
-/// Pid reuse ceiling: a SIGKILLed server leaves its `.pid` sidecar behind
-/// (no guard runs), so a recycled pid plus a socket rebound by something
-/// else is the one shape that could aim a signal at the wrong process. The
-/// entry-state proof plus the sanity checks on the pid close it in practice;
-/// the upgrade if it ever bites is a start-time stamp in the sidecar.
+/// Pid reuse is closed by identity, not just sanity checks: a SIGKILLed
+/// server leaves its `.pid` sidecar behind (no guard runs), and a rebind's
+/// rewrite of it is best-effort like `.ver`, so a stale sidecar can survive
+/// with a pid that has since been reused. The sidecar's start time (below)
+/// proves the live process at that pid is the one that wrote it before any
+/// signal is sent.
 fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     let pid_sidecar = proto::pid_sidecar_path(sock);
-    let pid = std::fs::read_to_string(&pid_sidecar)
+    let parsed = std::fs::read_to_string(&pid_sidecar)
         .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok());
-    let pid = match pid {
+        .and_then(|s| parse_pid_sidecar(&s));
+    let (pid, recorded_start) = match parsed {
         // Refuse init and ourselves outright: a signal to either is never
         // the recovery this verb owes.
-        Some(p) if p > 1 && p as u32 != std::process::id() => p,
+        Some((p, start)) if p > 1 && p as u32 != std::process::id() => (p, start),
         _ => {
             return refusal(
                 context,
@@ -951,6 +973,24 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
             );
         }
     };
+    if let Some(recorded) = recorded_start {
+        // Identity check: only a sidecar the current bind actually wrote
+        // carries a start time that matches the live process at this pid.
+        // Anything else - the pid gone, or reused by an unrelated process -
+        // refuses rather than guesses.
+        if proto::pid_start_time(pid as u32) != Some(recorded) {
+            return refusal(
+                context,
+                &format!(
+                    "the pid sidecar at {} names process {pid}, but its recorded start time \
+                     no longer matches a live process there; the pid was likely reused, so \
+                     it will not be signalled.",
+                    pid_sidecar.display()
+                ),
+                sock,
+            );
+        }
+    }
     if unsafe { libc::kill(pid, 0) } != 0 {
         let e = std::io::Error::last_os_error();
         return if e.raw_os_error() == Some(libc::ESRCH) {
@@ -1015,11 +1055,13 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
 }
 
 /// Poll every 50ms for the holder's death until `grace` runs out. Death is
-/// evidenced by EITHER the pid answering ESRCH OR the session socket
-/// vanishing (a clean exit's SocketGuard unlinks it): a child of the calling
-/// process - the e2e harness's server - zombies after death and keeps
-/// answering `kill(pid, 0)` until its parent reaps it, while the real mux
-/// server is never a child of kill-server.
+/// evidenced by the pid answering ESRCH, the pid being a zombie, or the
+/// session socket vanishing (a clean exit's SocketGuard unlinks it). The
+/// zombie check matters because `kill(pid, 0)` keeps succeeding on any
+/// zombie regardless of who calls it, not only its parent: a bare-init
+/// container that never reaps an adopted orphan would otherwise never
+/// converge here, waiting out every grace window for an ESRCH that can only
+/// come after a reap that never happens (x-48a5).
 fn holder_gone(pid: i32, sock: &Path, grace: Duration) -> bool {
     let deadline = Instant::now() + grace;
     loop {
@@ -1029,6 +1071,9 @@ fn holder_gone(pid: i32, sock: &Path, grace: Duration) -> bool {
         if unsafe { libc::kill(pid, 0) } != 0
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         {
+            return true;
+        }
+        if proto::pid_is_zombie(pid) {
             return true;
         }
         if !sock.exists() {
@@ -4206,6 +4251,30 @@ mod tests {
             "refusal names the recovery chain: {}",
             out.note
         );
+    }
+
+    #[test]
+    fn kill_server_refuses_a_stale_sidecar_whose_pid_was_reused() {
+        let session = "w5";
+        let sock = wedged_listener(session);
+        let pid = orphan_holder(false);
+        // A start time that cannot match the live process at `pid`: proves
+        // the ladder checks identity, not merely "does something answer
+        // this pid" (x-48a5, a rebind whose sidecar rewrite failed can
+        // leave a stale pid that has since been reused).
+        std::fs::write(proto::pid_sidecar_path(&sock), format!("{pid}:1")).unwrap();
+
+        let out = kill_server_inner(session, &sock);
+
+        assert_eq!(out.path, KillPath::Unrecoverable);
+        assert_eq!(out.exit_code(), EXIT_ERROR);
+        assert!(alive(pid), "a mismatched sidecar must never be signalled");
+        assert!(
+            out.note.contains("reused"),
+            "refusal names the identity mismatch: {}",
+            out.note
+        );
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     }
 
     // -- pane verb parsing (the socket-free grammar) -----------------------

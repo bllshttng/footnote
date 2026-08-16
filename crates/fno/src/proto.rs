@@ -2450,9 +2450,83 @@ pub fn version_sidecar_path(socket: &Path) -> PathBuf {
 /// written by the server at bind with its own pid (x-48a5) so `kill-server`
 /// can signal a wedged holder without an accepted connection - the
 /// connected-peer route cannot serve a connect that never completes. Skipped
-/// by [`session_names`]'s `.sock` filter, the same reason `.ver` is.
+/// by [`session_names`]'s `.sock` filter, the same reason `.ver` is. Content is
+/// `"<pid>:<start_time>"` (see [`pid_start_time`]) when the platform can supply
+/// a start time, else bare `"<pid>"`.
 pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
     socket.with_extension("pid")
+}
+
+/// Process start time in this OS's own units: a per-host, per-boot quantity
+/// meaningful only compared for equality against a value captured for the
+/// SAME pid, never converted to wall-clock time. Lets a pid sidecar prove it
+/// still names the process that wrote it rather than one that reused the pid
+/// after that process exited (x-48a5): a stale sidecar can survive a rebind
+/// whose rewrite failed (best-effort, like the `.ver` sidecar), so the pid
+/// alone is not proof of identity.
+#[cfg(target_os = "linux")]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::pid_t,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn pid_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
+/// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
+/// nothing. A bare-init container never reaps an adopted orphan, so waiting
+/// out a grace window for ESRCH there never converges (x-48a5); a zombie
+/// must read as gone the moment it is observed.
+#[cfg(target_os = "linux")]
+pub fn pid_is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+pub fn pid_is_zombie(pid: i32) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::pid_t,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    written == size && info.pbi_status == libc::SZOMB
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn pid_is_zombie(_pid: i32) -> bool {
+    false
 }
 
 /// Remove every file a session leaves beside its name: the socket, the

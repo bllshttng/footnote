@@ -553,10 +553,12 @@ fn server_publishes_and_removes_its_pid_sidecar() {
 
     let pid_path = scratch.0.join("main.pid");
     let deadline = Instant::now() + Duration::from_secs(5);
+    // Content is "<pid>:<start_time>" (x-48a5) or bare "<pid>" on a platform
+    // pid_start_time cannot supply one for; only the pid field matters here.
     let pid: i32 = loop {
         if let Some(p) = std::fs::read_to_string(&pid_path)
             .ok()
-            .and_then(|t| t.trim().parse().ok())
+            .and_then(|t| t.trim().split(':').next()?.parse().ok())
         {
             break p;
         }
@@ -643,6 +645,9 @@ fn sigterm_shutdown_kills_pane_children() {
     let server_pid: i32 = std::fs::read_to_string(scratch.0.join("main.pid"))
         .expect("server pid sidecar")
         .trim()
+        .split(':')
+        .next()
+        .expect("pid field")
         .parse()
         .unwrap();
     unsafe { libc::kill(server_pid, libc::SIGTERM) };
