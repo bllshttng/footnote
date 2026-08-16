@@ -429,7 +429,7 @@ class GateRefused(SystemExit):
 def _acquire_gate_mutex(holder: str) -> bool:
     """One attempt at the spawn-gate mutex. True = held. Errors fail open."""
     try:
-        from fno.claims.core import ClaimHeldByOther, acquire_claim
+        from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
 
         try:
             acquire_claim(
@@ -439,7 +439,12 @@ def _acquire_gate_mutex(holder: str) -> bool:
                 root=_gate_claims_root(),
             )
             return True
-        except ClaimHeldByOther:
+        except (ClaimHeldByOther, ClaimContended):
+            # ClaimContended is acquire_claim's own contention-retry-
+            # exhaustion guard: same "not held" outcome as ClaimHeldByOther -
+            # must not fall to the outer except below, which proceeds
+            # UNSERIALIZED on a claims-layer fault. Contention is the
+            # opposite: someone else has it, so this attempt fails closed.
             return False
     except Exception as exc:
         _warn(f"spawn-gate: mutex unavailable ({exc}); proceeding unserialized")

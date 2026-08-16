@@ -52,8 +52,22 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+WITH_TIMEOUT_LIB="$PLUGIN_ROOT/scripts/lib/with-timeout.sh"
+# Unlike the three documented silent-no-op paths below (not-holder,
+# throttled, no manifest - each a legitimate "nothing to do" state), a
+# missing/unreadable/broken with-timeout.sh is an infrastructure fault: every
+# future refresh on every tool call would silently no-op forever with zero
+# diagnostic trail otherwise (AGENTS.md pitfall: never let an absence read
+# the same as "correctly did nothing").
+if [[ ! -r "$WITH_TIMEOUT_LIB" ]]; then
+  echo "claim-heartbeat: $WITH_TIMEOUT_LIB missing or unreadable; refresh skipped" >&2
+  exit 0
+fi
 # shellcheck source=scripts/lib/with-timeout.sh
-source "$PLUGIN_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+if ! source "$WITH_TIMEOUT_LIB"; then
+  echo "claim-heartbeat: $WITH_TIMEOUT_LIB failed to load (syntax error?); refresh skipped" >&2
+  exit 0
+fi
 
 # Refresh at most once per THROTTLE seconds of activity. Well under the claim's
 # default 2h TTL, so an actively-working session stays LIVE with wide margin.

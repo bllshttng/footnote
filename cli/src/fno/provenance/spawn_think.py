@@ -1399,7 +1399,7 @@ def maybe_spawn_think(
     #    via a per-(node, reason) TTL bridge token so two triggers observing the
     #    SAME moment spawn at most one, while a node born + later retro'd still
     #    dispatches once per moment (AC4-FR).
-    from fno.claims.core import ClaimHeldByOther, acquire_claim
+    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim
 
     # The dedup token carries the same per-invocation discriminator as the worker
     # name (C/x-0a9c) so two DIFFERENT conversations dispatching the same node are
@@ -1415,7 +1415,9 @@ def maybe_spawn_think(
             dispatch_key, holder, ttl_ms=_DISPATCH_TTL_MS,
             reason=f"context /think dispatch ({reason}) for {node_id}",
         )
-    except ClaimHeldByOther:
+    except (ClaimHeldByOther, ClaimContended):
+        # ClaimContended is acquire_claim's own contention-retry-exhaustion
+        # guard: same dedup outcome as ClaimHeldByOther, not a claim-error.
         return skip("already-claimed", presence=presence)
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", presence=presence, detail=str(exc))

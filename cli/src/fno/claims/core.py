@@ -1067,8 +1067,15 @@ def reap_dead_claims(
     2026-08-14 lived in the root a single-root sweep would have missed.
 
     With ``apply=False`` (the default), nothing is written; reapable files
-    are counted under ``would_reap`` so a dry run reports exactly what an
-    apply run would do.
+    are counted under ``would_reap`` from the same lock-free classification
+    ``apply=True`` uses before it ever takes the per-key recovery mutex - a
+    dry run never probes that mutex (deliberately: it is cheap, lock-free
+    triage by design), so a claim it counts under ``would_reap`` can still
+    land under ``contended`` in a LATER real apply run if something else
+    holds that key's mutex at that later instant. That gap is no different
+    from any other race between a preview and a separate later action; it is
+    not a promise this call predicts contention outcomes, only that the
+    classification itself (dead vs. live vs. suspect) matches.
 
     With ``apply=True``, each reapable file is archived and then the store
     is RE-READ to confirm the move: the source path must be gone and the

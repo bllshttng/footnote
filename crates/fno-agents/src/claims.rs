@@ -1610,6 +1610,16 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     // would block every renewal until some other path cleared it, which is the
     // permanent-wedge shape this mutex's stealing exists to prevent, so retry
     // once past a stale one.
+    //
+    // Deliberately NOT the bounded ACQUIRE_MAX_ATTEMPTS retry loop `acquire`/
+    // `idempotent_reacquire_guarded` use below: real (non-corpse) contention
+    // here gives up on this single attempt, same as before this file's other
+    // functions gained that loop. That asymmetry is intentional, not a
+    // parity gap with Python's refresh_claim (which does retry then raises
+    // ClaimContended) - the comment above already justifies it: a caller
+    // renews on a regular cadence, so one missed renewal only shortens the
+    // lease rather than losing it, unlike a one-shot acquire/refresh call
+    // where giving up means the operation itself failed.
     let token = if std::fs::create_dir(&recovery_lock).is_ok() {
         stamp_owner(&recovery_lock)
     } else if steal_if_stale(&recovery_lock) && std::fs::create_dir(&recovery_lock).is_ok() {

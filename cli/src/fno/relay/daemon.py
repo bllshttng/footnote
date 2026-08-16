@@ -332,7 +332,7 @@ def daemon_deliver(
     end (the live substrate is the ``FNO_LIVE_RELAY`` gate, AC-E4-5); the claim
     guard and the resolution/capture primitives are unit-tested.
     """
-    from fno.claims.core import ClaimHeldByOther, acquire_claim, release_claim  # noqa: PLC0415
+    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim  # noqa: PLC0415
     from fno.relay.roundtrip import (  # noqa: PLC0415
         deliver_attached, deliver_session, deliver_worker, interactive_claim_holder,
         resolve_attached_short_id, resolve_worker_short_id,
@@ -397,6 +397,18 @@ def daemon_deliver(
             raise RuntimeError(
                 f"relay_deliver_failed: session:{sid} held by {exc.holder!r}, not the daemon "
                 f"interactive lane ({holders}); refusing to route"
+            )
+        except ClaimContended as exc:
+            # acquire_claim's own contention-retry-exhaustion guard: unlike
+            # ClaimHeldByOther, there is no exc.holder to match against a
+            # candidate lane - the recovery mutex itself is contended, not a
+            # live claim we can identify. Guessing a candidate without that
+            # confirmation risks injecting into the WRONG session, so this
+            # raises the same relay_deliver_failed shape as the other
+            # cannot-confidently-route cases above rather than blind-routing.
+            raise RuntimeError(
+                f"relay_deliver_failed: session:{sid} routing probe contended "
+                f"(recovery mutex busy, holder undetermined): {exc}"
             )
         # Free (or stale-reclaimed): no host -> no handle. Drop the probe claim so
         # the relay is never a second holder, then refuse.
