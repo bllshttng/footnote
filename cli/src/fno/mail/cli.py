@@ -1145,7 +1145,14 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
     naming none, because it sends the reader to diagnose a recipient that was
     never the problem. A None/unreachable reason keeps the honest not-live line.
 
+    A lock timeout gets its own arm for the same reason. The lock is held by
+    ANOTHER SENDER, so it says nothing about the recipient's liveness, and the
+    not-live copy would send the reader to resurrect a session that is working
+    fine.
+
     Warning only - the durable enqueue succeeded, so exit stays 0."""
+    from fno.agents.dispatch import LOCK_TIMEOUT_REASON
+
     if project:
         msg = (
             f"mail: project inbox {target} has no live drain; queued durably as "
@@ -1153,6 +1160,14 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "and may never do so\n"
             "  this is NOT delivery. Address a live session instead: "
             "`fno agents top` to find one, then `fno mail send <short-id>`"
+        )
+    elif reason == LOCK_TIMEOUT_REASON:
+        msg = (
+            f"mail: live delivery to {target} was not attempted (another send "
+            "held its lock past the wait); queued durably. The holder was "
+            "another SENDER, so this says nothing about whether the recipient "
+            "is live: do not resurrect it on this evidence. It reads the "
+            "message when it next drains its inbox."
         )
     elif reason in _LIVE_LANE_FAILURE_REASONS:
         msg = (

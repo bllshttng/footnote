@@ -4,8 +4,13 @@
 //! copies in `claude_ask`, `codex_ask` and `gemini_ask`, and the holder stamp
 //! landed on one of them first. A stamp on one of N reachable implementations
 //! is decorative: the other two leave a previous holder's JSON in the file, so
-//! a waiter reports a dead pid as the live owner. Every harness takes the same
-//! lock, so every harness must take it through here.
+//! a waiter reports a dead pid as the live owner. Any harness that takes this
+//! lock must take it through here.
+//!
+//! Not every harness does. `agy_ask` and `opencode_ask` acquire no per-agent
+//! lock at all, so concurrent same-agent asks on those two do NOT serialize
+//! (pre-existing; unchanged by the consolidation above). Wiring them up is a
+//! behavior change for those lanes, not a refactor, so it is not done here.
 //!
 //! Byte-compatible with the Python side (`fno.agents.lock`), which takes the
 //! same flock on the same path and parses the stamp written below.

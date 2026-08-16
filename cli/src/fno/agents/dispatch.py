@@ -300,6 +300,12 @@ _DEFAULT_LOCK_TIMEOUT = 30.0
 # so a queue that cannot take it refuses instead of guessing.
 _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS = 2.0
 
+# Receipt reason for a message the lock-timeout lane queued. Exported because
+# the receipt formatter in fno.mail.cli must branch on it: a contended lock
+# means the recipient was BUSY, and the generic "not live" copy would send the
+# reader to resurrect a session that is working fine.
+LOCK_TIMEOUT_REASON = "agent-lock-timeout"
+
 _FROM_NAME_MAX_LEN = 128
 _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
@@ -6481,12 +6487,18 @@ def _queue_durable_fallback(
     *,
     msg_id: Optional[str] = None,
     reason: Optional[str] = None,
+    mail_ctx: "Optional[_MailCtx]" = None,
 ) -> "tuple[str, str]":
     """Write the <fno_mail> envelope to the durable bus.
 
     Returns ``(msg_id, durable_recipient)``. The recipient rides back so a
     caller's receipt line names the handle this actually wrote to, without
     re-deriving it from an Optional field the refusal below already narrowed.
+
+    ``mail_ctx`` is the envelope the caller already built. Pass it whenever one
+    exists: rebuilding it here would re-run ``resolve_self_model``, a transcript
+    scan, and a live send that then falls back would stamp the durable copy with
+    a model resolved separately from the one the live turn carried.
 
     Raises DispatchAskError(12) when the row has no harness_session_id, or
     when the bus write fails; both messages say that no durable envelope
@@ -6526,13 +6538,14 @@ def _queue_durable_fallback(
             getattr(sender_entry, "harness_session_id", None)
             or getattr(sender_entry, "short_id", None)
         )
-    mail_ctx = _build_mail_ctx(
-        from_name,
-        from_session,
-        provider_from,
-        to=(durable_recipient or entry.short_id or None),
-        id=msg_id,
-    )
+    if mail_ctx is None:
+        mail_ctx = _build_mail_ctx(
+            from_name,
+            from_session,
+            provider_from,
+            to=(durable_recipient or entry.short_id or None),
+            id=msg_id,
+        )
     durable_body = message
     if mail_ctx is not None:
         durable_body = wrap_fno_mail(
@@ -6675,7 +6688,7 @@ def dispatch_send(
     3. Resolve the address to its registry primary key, then acquire that
        per-agent flock (hold_agent_lock) with timeout. A timeout retries the
        acquire on a short grace window and queues the message durable when it
-       wins (delivery="durable", reason="agent-lock-timeout", exit 0); only
+       wins (delivery="durable", reason=LOCK_TIMEOUT_REASON, exit 0); only
        sustained contention, which leaves the recipient unverified, exits 11
        with nothing written.
     4. INSIDE the flock:
@@ -6924,7 +6937,14 @@ def dispatch_send(
                 lock-timeout handler below uses, so a message queued from inside
                 the lock and one queued after failing to acquire it share one
                 envelope-construction and error path."""
-                _queue_durable_fallback(existing, message, from_name, entries, msg_id=msg_id)
+                _queue_durable_fallback(
+                    existing,
+                    message,
+                    from_name,
+                    entries,
+                    msg_id=msg_id,
+                    mail_ctx=mail_ctx,
+                )
 
             # 4d/4e. Live-inject-first, durable fallback. The context stash ensures
             # started/done share one request_id + caller attribution (mirrors the
@@ -7083,12 +7103,61 @@ def dispatch_send(
                         exit_code=12,
                     ) from unreadable
 
-                msg_id, _durable_to = _queue_durable_fallback(
-                    timeout_entry,
-                    message,
-                    from_name,
-                    timeout_entries,
-                    reason="agent-lock-timeout",
+                # A queued message is a delivered outcome, so it books like
+                # one: started/done and the registry stamp all fire, exactly as
+                # the normal durable path does. Emitting only agent_send_failed
+                # here left a successful send reading as a failure in the event
+                # trail and left last_message_at stale, which agent display and
+                # project anycast rank on.
+                #
+                # All of it stays INSIDE the lock, like the normal path: a stamp
+                # written after release can lose a same-name reclaim race and
+                # print "recipient identity changed" over a send that succeeded.
+                ctx_for_timeout = build_context(
+                    to_name=name,
+                    to_provider=timeout_entry.harness,
+                    transport="direct-cli",
+                    from_name_override=from_name,
+                )
+                ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
+                # Mint the id before the started event so started and done name
+                # the same message, as they do on the normal path.
+                from fno.inbox.store import generate_msg_id
+
+                msg_id = generate_msg_id()
+                try:
+                    _emit_ev(
+                        "agent_send_started",
+                        name=name,
+                        provider=timeout_entry.harness,
+                        msg_id=msg_id,
+                    )
+                    msg_id, _durable_to = _queue_durable_fallback(
+                        timeout_entry,
+                        message,
+                        from_name,
+                        timeout_entries,
+                        msg_id=msg_id,
+                        reason=LOCK_TIMEOUT_REASON,
+                    )
+                    _emit_ev(
+                        "agent_send_done",
+                        name=name,
+                        provider=timeout_entry.harness,
+                        msg_id=msg_id,
+                        delivery="durable",
+                        reason=LOCK_TIMEOUT_REASON,
+                    )
+                finally:
+                    _DISPATCH_CTX.reset(ctx_token)
+
+                _stamp_after_delivery(
+                    name,
+                    _recipient_identity_key(timeout_entry),
+                    "durable",
+                    msg_id,
+                    registry_path=registry_path,
+                    registry_lock_timeout=registry_stamp_timeout_seconds,
                 )
         except AgentLockTimeout as still_held:
             # Sustained contention: no verified recipient, so nothing is
@@ -7114,28 +7183,6 @@ def dispatch_send(
                 exit_code=11,
             ) from still_held
 
-        # A queued message is a delivered outcome, so it books like one: the
-        # done event and the registry stamp both fire, exactly as the normal
-        # durable path does. Emitting only agent_send_failed here left a
-        # successful send reading as a failure in the event trail and left
-        # last_message_at stale, which agent display and project anycast rank
-        # on.
-        _emit_ev(
-            "agent_send_done",
-            name=name,
-            provider=timeout_entry.harness,
-            msg_id=msg_id,
-            delivery="durable",
-            reason="agent-lock-timeout",
-        )
-        _stamp_after_delivery(
-            name,
-            _recipient_identity_key(timeout_entry),
-            "durable",
-            msg_id,
-            registry_path=registry_path,
-            registry_lock_timeout=registry_stamp_timeout_seconds,
-        )
         # The message is queued, so this is a durable SUCCESS, not a failure.
         # cmd_send's stdout contract is one receipt line and exit 0 for every
         # durable outcome; a nonzero exit here would both break that and make
@@ -7150,7 +7197,7 @@ def dispatch_send(
         return DispatchSendResult(
             msg_id=msg_id,
             delivery="durable",
-            reason="agent-lock-timeout",
+            reason=LOCK_TIMEOUT_REASON,
         )
 
 
