@@ -24,7 +24,7 @@ class _Msg:
     body: str
 
 
-def _drain_output(monkeypatch, capsys, body: str) -> str:
+def _drain_output(monkeypatch, capsys, body: str, *, json_out: bool = False) -> str:
     from fno import harness_identity
     from fno.bus import cursor as cursor_mod
     from fno.mail import cli as mail_cli
@@ -51,7 +51,7 @@ def _drain_output(monkeypatch, capsys, body: str) -> str:
     )
     monkeypatch.setattr(cursor_mod, "advance_cursor", lambda handle, msg_id: True)
 
-    mail_cli.cmd_drain_self(json_out=False)
+    mail_cli.cmd_drain_self(json_out=json_out)
     return capsys.readouterr().out
 
 
@@ -77,3 +77,16 @@ def test_a_trailer_embedded_mid_body_does_not_defeat_the_real_one(
     assert out.count(FNO_MAIL_TRAILER) == 2
     rendered_body = out.split('[fno mail] to answer one:')[0]
     assert rendered_body.rstrip("\n").endswith(FNO_MAIL_TRAILER)
+
+
+def test_the_json_render_path_stamps_the_trailer_too(monkeypatch, capsys) -> None:
+    # codex (round 10): --json printed raw m.body, skipping the trailer this
+    # whole file exists to guarantee -- a real, existing flag with its own
+    # untrailered reachable path, same "guard on one of N paths" pattern this
+    # repo's own AGENTS.md pitfalls corpus names.
+    import json
+
+    out = _drain_output(monkeypatch, capsys, "wake up and do the thing", json_out=True)
+    payload = json.loads(out)
+    assert payload[0]["body"].count(FNO_MAIL_TRAILER) == 1
+    assert payload[0]["body"].endswith(FNO_MAIL_TRAILER)

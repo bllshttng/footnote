@@ -3511,11 +3511,34 @@ def cmd_drain_self(
     job_to_print = [m for m in job_msgs if not _already_landed(m)]
     job_skipped = [m for m in job_msgs if _already_landed(m)]
 
+    # A live-injected send already carries FNO_MAIL_TRAILER inside `wrap_fno_mail`'s
+    # `<fno_mail>` envelope, but a durable inbox-kind send (heads-up/question/fyi)
+    # never routes through that wrapper. Stamp the trailer here, the one
+    # chokepoint every drained body passes through regardless of output shape,
+    # so both the text render and `--json` carry the authority boundary
+    # regardless of which lane produced the body.
+    # A live-injected send stores the full paired envelope durably (body
+    # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
+    # needs both shapes: the bare trailer, and the trailer immediately
+    # before a terminal close tag.
+    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+
+    def _render_body(body: str) -> str:
+        # A durable heads-up body is sender-controlled, so a plain `in`
+        # check is satisfiable by embedding the trailer text mid-body and
+        # placing an outward-action instruction after it: the render would
+        # then treat the body as already stamped and skip the real
+        # terminal trailer. Require the stripped body to END with it.
+        text = body.rstrip("\n")
+        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
+            return text
+        return f"{text}\n{FNO_MAIL_TRAILER}"
+
     if json_out:
         out = [
             {
                 "id": m.id, "from": m.from_, "to": m.to,
-                "kind": m.kind, "ts": m.ts, "body": m.body,
+                "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
             }
             for m in to_print
         ]
@@ -3523,34 +3546,12 @@ def cmd_drain_self(
             out.append(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
-                    "kind": m.kind, "ts": m.ts, "body": m.body,
+                    "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
                     "job": job_addr or "",
                 }
             )
         print(json.dumps(out, ensure_ascii=False))
     else:
-        # A live-injected send already carries FNO_MAIL_TRAILER inside `wrap_fno_mail`'s
-        # `<fno_mail>` envelope, but a durable inbox-kind send (heads-up/question/fyi)
-        # never routes through that wrapper. Stamp the trailer here, the one
-        # chokepoint every drained body passes through, so this render always
-        # carries the authority boundary regardless of which lane produced the body.
-        # A live-injected send stores the full paired envelope durably (body
-        # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
-        # needs both shapes: the bare trailer, and the trailer immediately
-        # before a terminal close tag.
-        _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
-
-        def _render_body(body: str) -> str:
-            # A durable heads-up body is sender-controlled, so a plain `in`
-            # check is satisfiable by embedding the trailer text mid-body and
-            # placing an outward-action instruction after it: the render would
-            # then treat the body as already stamped and skip the real
-            # terminal trailer. Require the stripped body to END with it.
-            text = body.rstrip("\n")
-            if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
-                return text
-            return f"{text}\n{FNO_MAIL_TRAILER}"
-
         if to_print:
             print(f"[fno mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
