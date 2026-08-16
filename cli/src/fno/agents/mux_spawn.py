@@ -135,7 +135,7 @@ class MuxSpawnResult:
     # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
     # + squad/tab the split landed in. None unless `--at` pinned the origin.
     placement: Optional[dict] = None
-    # LD5 (x-c692): true only when this pane was adopted after `pane run`'s
+    # LD5: true only when this pane was adopted after `pane run`'s
     # control read went unanswered. A painted frame plus a captured session id
     # proves the provider booted with the argv it was given; it does NOT prove
     # the prompt was consumed (x-7ebd is the sibling failure for that). Callers
@@ -1320,10 +1320,24 @@ _WAIT_EXITED = 12
 #: `fno mux pane run` exit code when the mux never answered the control read
 #: (crates/fno EXIT_CONTROL_UNANSWERED). The verb REACHED the server, so
 #: unlike every other non-zero code this does not prove the pane is absent.
-#: x-c692's plan named 15, but that is EXIT_TARGET_NOT_IDLE (already taken by
-#: the block-pipe idle guard) - the Rust side lands the new code at 20, the
-#: next free slot after EXIT_NO_CLIENT.
 _MUX_CONTROL_UNANSWERED = 20
+
+
+def _pid_started_at_or_after(pid: int, since_s: float) -> bool:
+    """True iff `pid`'s wall-clock start time is at/after `since_s` (both real
+    Unix epoch seconds). ``spawn_gate._process_start_time`` is NOT usable here:
+    it is documented as "the incarnation token in the Rust registry's units",
+    an opaque value meant only for equality against a previously recorded
+    token (Linux: `/proc/<pid>/stat` clock ticks since boot; macOS: epoch
+    microseconds) - comparing either against an epoch-seconds bound is
+    nonsense. False on any read failure: a process this cannot date is not a
+    provable match."""
+    try:
+        import psutil
+
+        return psutil.Process(pid).create_time() >= since_s
+    except Exception:
+        return False
 
 
 def _reconcile_unanswered_run(
@@ -1385,8 +1399,6 @@ def _reconcile_unanswered_run(
             exit_code=1,
         )
 
-    from fno.agents.spawn_gate import _process_start_time
-
     since_s = spawn_started_ms / 1000
     candidates = []
     for row in rows:
@@ -1395,8 +1407,7 @@ def _reconcile_unanswered_run(
         pid = row.get("child_pid")
         if pid is None:
             continue
-        start = _process_start_time(int(pid))
-        if start is None or start < since_s:
+        if not _pid_started_at_or_after(int(pid), since_s):
             continue
         if row.get("pane_id") in claimed_pane_ids:
             continue
@@ -2204,8 +2215,16 @@ def dispatch_spawn_pane(
             # The verb reached the server; only the reply did not come back
             # (LD2). Reconcile instead of asserting no pane was created - the
             # reconcile itself never retries the run (LD1).
+            #
+            # Scoped to THIS mux session: pane ids are allocated independently
+            # per server starting at 1, and registry identity is the
+            # (session, pane_id) pair, so an unscoped set would wrongly treat
+            # a different session's pane 1 as already claiming this session's
+            # pane 1.
             claimed_pane_ids = {
-                e.mux.get("pane_id") for e in entries if isinstance(e.mux, dict)
+                e.mux.get("pane_id")
+                for e in entries
+                if isinstance(e.mux, dict) and e.mux.get("session") == session
             }
             pane_id = _reconcile_unanswered_run(
                 session, cwd, spawn_started_ms, claimed_pane_ids, runner

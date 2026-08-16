@@ -1370,7 +1370,7 @@ def cmd_spawn(
                 # fallback/squad/tab); never synthesized from the request.
                 receipt_obj["placement"] = pane_result.placement
             if pane_result.recovered:
-                # LD5 (x-c692): this pane was adopted after an unanswered
+                # LD5: this pane was adopted after an unanswered
                 # control read, not created by this run. Proves a booted
                 # session, never that the prompt was consumed - the receipt
                 # must say so rather than reading identically to a normal

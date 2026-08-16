@@ -3300,7 +3300,7 @@ def test_ac7_cli_refuses_passthrough_off_pane(
     assert "pane-only" in result.output
 
 
-# -- x-c692: an unanswered control read is reconciled, never asserted absent --
+# -- an unanswered control read is reconciled, never asserted absent --
 #
 # `mux pane run` exiting `_MUX_CONTROL_UNANSWERED` means the verb reached the
 # server and the reply never came back - not that no pane was created. These
@@ -3309,19 +3309,31 @@ def test_ac7_cli_refuses_passthrough_off_pane(
 # let a recovered pane earn its row without proving it actually started.
 
 
-def _far_future_start_time(_pid: object) -> int:
-    # Always "after" any spawn_started_ms sampled during the test, so the
-    # reconcile's freshness filter never rejects the fake pid on timing alone.
-    return 9_999_999_999
+def _patch_process_create_time_far_future(monkeypatch) -> None:
+    """`_pid_started_at_or_after` calls ``psutil.Process(pid).create_time()``
+    directly (wall-clock epoch seconds) - NOT `spawn_gate._process_start_time`,
+    whose opaque per-platform incarnation-token units (boot-relative clock
+    ticks on Linux, epoch microseconds on macOS) are not comparable to
+    ``spawn_started_ms`` at all. Patch the real seam so the fake pid always
+    reads as "after" any `spawn_started_ms` sampled during the test."""
+    import psutil
+
+    class _FakeProc:
+        def __init__(self, _pid: int) -> None:
+            pass
+
+        def create_time(self) -> float:
+            return 9_999_999_999.0
+
+    monkeypatch.setattr(psutil, "Process", _FakeProc)
 
 
 def test_unanswered_run_recovers_the_single_matching_pane(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from fno.agents import spawn_gate
     from fno.agents.mux_spawn import _MUX_CONTROL_UNANSWERED
 
-    monkeypatch.setattr(spawn_gate, "_process_start_time", _far_future_start_time)
+    _patch_process_create_time_far_future(monkeypatch)
     ls_stdout = json.dumps(
         [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
     )
@@ -3358,14 +3370,89 @@ def test_unanswered_run_with_no_matching_pane_refuses_cleanly(
     assert load_registry() == []
 
 
-def test_unanswered_run_with_two_matching_panes_refuses_naming_both(
+def test_unanswered_run_rejects_a_stale_pid_by_real_wall_clock(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from fno.agents import spawn_gate
+    """The freshness filter must compare real epoch-seconds process start
+    times, not `spawn_gate._process_start_time`'s opaque incarnation-token
+    units - a stale pid whose wall-clock start predates the spawn must still
+    be rejected even though it shares this spawn's cwd."""
+    import psutil
+
     from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
     from fno.agents.registry import load_registry
 
-    monkeypatch.setattr(spawn_gate, "_process_start_time", _far_future_start_time)
+    class _StaleProc:
+        def __init__(self, _pid: int) -> None:
+            pass
+
+        def create_time(self) -> float:
+            return 1.0  # long before any spawn_started_ms this test samples
+
+    monkeypatch.setattr(psutil, "Process", _StaleProc)
+    ls_stdout = json.dumps(
+        [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
+    )
+    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, runner=runner)
+
+    assert "no pane was created" in str(exc.value)
+    assert load_registry() == []
+
+
+def test_unanswered_run_claimed_pane_id_is_scoped_to_this_mux_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A registry row's pane_id is only 'claimed' within ITS OWN mux session:
+    pane ids are allocated independently per server starting at 1, so a row
+    parked in a different session must never suppress a same-numbered,
+    same-cwd candidate in the session actually being reconciled."""
+    from fno.agents.mux_spawn import _MUX_CONTROL_UNANSWERED
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    _patch_process_create_time_far_future(monkeypatch)
+    ls_stdout = json.dumps(
+        [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
+    )
+    runner = FakeRunner(
+        run_returncode=_MUX_CONTROL_UNANSWERED,
+        ls_stdout=ls_stdout,
+        # Non-empty read -> readiness "ready" (LD4's bar for a recovered pane).
+        read_stdout="$ ",
+    )
+
+    use_tmpdir(monkeypatch, tmp_path)
+    # A live row already owns pane_id 9, but in a DIFFERENT mux session -
+    # this must not be read as "pane 9 in *this* session is claimed".
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="other-worker",
+                cwd=str(tmp_path),
+                log_path=str(tmp_path / "other-worker.log"),
+                harness="claude",
+                mux={"session": "some-other-session", "pane_id": 9},
+            )
+        ]
+    )
+
+    result, _ = _spawn(monkeypatch, tmp_path, runner=runner)
+
+    assert result.pane_id == 9
+    assert result.recovered is True
+    assert any(r.name == "peer" and r.mux == {"session": "main", "pane_id": 9} for r in load_registry())
+
+
+def test_unanswered_run_with_two_matching_panes_refuses_naming_both(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
+    from fno.agents.registry import load_registry
+
+    _patch_process_create_time_far_future(monkeypatch)
     ls_stdout = json.dumps(
         [
             {"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242},
@@ -3408,11 +3495,10 @@ def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
     one has no session id to show for itself (the default FakeRunner db/codex
     seams both miss), so it must be reaped rather than written live-only the
     way a NORMAL (non-recovered) codex miss is."""
-    from fno.agents import spawn_gate
     from fno.agents.mux_spawn import DispatchAskError, _MUX_CONTROL_UNANSWERED
     from fno.agents.registry import load_registry
 
-    monkeypatch.setattr(spawn_gate, "_process_start_time", _far_future_start_time)
+    _patch_process_create_time_far_future(monkeypatch)
     ls_stdout = json.dumps(
         [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
     )

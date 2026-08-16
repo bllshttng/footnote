@@ -884,7 +884,9 @@ fn version_probe(session: &str, sock: &Path) -> VersionVerdict {
         stream,
         ControlVerb::PaneLs,
         PROBE_TIMEOUT,
-        control_reply_deadline(PROBE_TIMEOUT),
+        // A doctor probe wants its own tight bound respected, not the
+        // extended window: no extra time past PROBE_TIMEOUT.
+        PROBE_TIMEOUT,
         session,
     ) {
         Ok(ServerMsg::PaneList { .. }) => VersionVerdict::Ok,
@@ -1495,7 +1497,7 @@ pub const EXIT_NOT_FOUND: i32 = 16; // where: the fno_id is not in the registry 
 pub const EXIT_NOT_PANE_HOSTED: i32 = 17; // where: in registry but hosts no live pane (x-d865)
 pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not be read (x-d865)
 pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x-3e17)
-pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown (x-c692)
+pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1514,17 +1516,21 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 /// verb has already reached the server and must never be sent twice.
 const CONTROL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Total time a `send_control` caller keeps polling for a reply, derived once
-/// per call site rather than widening the twelve-row verb table. `pane wait`'s
-/// read timeout is the CALLER's stated patience (`--timeout` plus 2s), and
-/// exceeding it is a real answer, so it gets no extra window; every other verb
-/// carries the arbitrary `CONTROL_TIMEOUT`/`PROBE_TIMEOUT` constant, which is
-/// the only deadline worth waiting past.
-fn control_reply_deadline(read_timeout: Duration) -> Duration {
-    if read_timeout == CONTROL_TIMEOUT {
-        CONTROL_REPLY_DEADLINE
-    } else {
+/// The reply deadline for `dispatch()`'s own `send_control` call. `pane
+/// wait`'s read timeout is the CALLER's stated patience (`--timeout` plus
+/// 2s), and exceeding it is a real answer, so it gets no extra window - `
+/// is_wait` must come from matching the verb's TYPE (`ControlVerb::PaneWait`),
+/// never inferred from `read_timeout`'s value: a duration-equality check
+/// misclassified `pane wait --timeout 8` (whose read timeout computes to
+/// exactly `CONTROL_TIMEOUT`) as a non-wait verb and gave it 30s instead of
+/// respecting its 10s bound. Every other call site in this module passes the
+/// fixed `CONTROL_REPLY_DEADLINE` directly; only `dispatch()` has more than
+/// one verb behind one code path, so only it needs this split named.
+fn reply_deadline_for(is_wait: bool, read_timeout: Duration) -> Duration {
+    if is_wait {
         read_timeout
+    } else {
+        CONTROL_REPLY_DEADLINE
     }
 }
 
@@ -1995,7 +2001,7 @@ fn run_on_existing_server(
         stream,
         verb,
         CONTROL_TIMEOUT,
-        control_reply_deadline(CONTROL_TIMEOUT),
+        CONTROL_REPLY_DEADLINE,
         &session,
     ) {
         Ok(reply) => render_reply(reply, json, false, None),
@@ -2586,7 +2592,7 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
         stream,
         ControlVerb::PaneWhere { fno_id },
         CONTROL_TIMEOUT,
-        control_reply_deadline(CONTROL_TIMEOUT),
+        CONTROL_REPLY_DEADLINE,
         &session,
     ) {
         Ok(reply) => render_reply(reply, json, false, None),
@@ -2701,6 +2707,12 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
 
     let is_run = matches!(verb, ControlVerb::PaneRun { .. });
     let is_ls = matches!(verb, ControlVerb::PaneLs);
+    // Named explicitly from the verb, never inferred from read_timeout's
+    // VALUE: `pane wait --timeout 8` computes a 10s read_timeout (timeout_ms
+    // + 2s) that collides with the CONTROL_TIMEOUT constant, and a duration
+    // equality check would misread that as "not a wait" and hand it the 30s
+    // extended window instead of respecting its own 10s bound.
+    let is_wait = matches!(verb, ControlVerb::PaneWait { .. });
     let stream = if is_run {
         match crate::client::connect_or_spawn(sock) {
             Ok(s) => s,
@@ -2749,7 +2761,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
         stream,
         verb,
         read_timeout,
-        control_reply_deadline(read_timeout),
+        reply_deadline_for(is_wait, read_timeout),
         session,
     ) {
         Ok(reply) => render_reply(reply, json, command_done_requested, ls_fno_id.as_deref()),
@@ -3241,7 +3253,7 @@ fn control_roundtrip(sock: &Path, session: &str, verb: ControlVerb) -> Result<Se
         stream,
         verb,
         CONTROL_TIMEOUT,
-        control_reply_deadline(CONTROL_TIMEOUT),
+        CONTROL_REPLY_DEADLINE,
         session,
     )
     .map_err(|e| e.to_string())
@@ -4568,7 +4580,30 @@ mod tests {
         assert!(err.contains("no command markers"), "{err}");
     }
 
-    // -- send_control: an unanswered read is UNKNOWN, not failed (x-c692) --
+    #[test]
+    fn reply_deadline_for_preserves_a_pane_wait_bound_that_collides_with_control_timeout() {
+        // `pane wait --timeout 8` computes read_timeout = 8s + 2s = 10s,
+        // exactly CONTROL_TIMEOUT. A duration-equality check would misread
+        // this as "not a wait" and hand it the 30s extended window; is_wait
+        // must come from the verb's type, so this stays bounded at its own
+        // 10s regardless of the coincidence.
+        let collided = Duration::from_secs(8) + Duration::from_secs(2);
+        assert_eq!(collided, CONTROL_TIMEOUT);
+        assert_eq!(reply_deadline_for(true, collided), collided);
+        // A non-wait verb always gets the fixed extended window.
+        assert_eq!(
+            reply_deadline_for(false, CONTROL_TIMEOUT),
+            CONTROL_REPLY_DEADLINE
+        );
+        // pane wait with an unrelated timeout still gets its own bound, not
+        // the extended window, whether or not it happens to collide.
+        assert_eq!(
+            reply_deadline_for(true, Duration::from_secs(3)),
+            Duration::from_secs(3)
+        );
+    }
+
+    // -- send_control: an unanswered read is UNKNOWN, not failed --
 
     /// A unique short-lived scratch socket path. No tempfile dep: pid + test
     /// name is unique enough for a test process (sun_path stays short - the

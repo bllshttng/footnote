@@ -2222,7 +2222,7 @@ fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
 // ---------------------------------------------------------------------------
 
 /// `fno mux pane run` exit code when the mux never answered the control read
-/// (crates/fno `EXIT_CONTROL_UNANSWERED`, x-c692). Duplicated here rather than
+/// (crates/fno `EXIT_CONTROL_UNANSWERED`). Duplicated here rather than
 /// imported: this crate does not depend on `fno`, and `fno mux pane run` is
 /// invoked as a subprocess, not a library call.
 const MUX_CONTROL_UNANSWERED: i32 = 20;
@@ -2231,9 +2231,9 @@ const MUX_CONTROL_UNANSWERED: i32 = 20;
 /// stderr message. Kept pure so the exit-code split is mechanically testable
 /// without mutating PATH or shelling out (parse_heal_token_output's pattern).
 ///
-/// `EXIT_CONTROL_UNANSWERED` gets the truthful "may have started" message
-/// (x-c692 change 4): the verb REACHED the server, so "(no pane started)" is
-/// false for this code alone. Adoption stays in the Python spawn path's
+/// `EXIT_CONTROL_UNANSWERED` gets the truthful "may have started" message:
+/// the verb REACHED the server, so "(no pane started)" is false for this
+/// code alone. Adoption stays in the Python spawn path's
 /// `_reconcile_unanswered_run` (one place owns candidate matching); this
 /// launcher only names the inspect command, on the same reasoning.
 fn mux_pane_run_failure_message(
