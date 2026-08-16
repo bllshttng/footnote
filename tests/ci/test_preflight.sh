@@ -589,7 +589,8 @@ echo "== stall predicate: floor and turnover are arithmetic, not host load =="
 # sleeping holder accumulates no CPU on any load, and floor 0 makes the
 # condemnation branch unreachable by arithmetic (delta >= 0 can never be < 0).
 eval "$(sed -n -e '/^cputime_to_s() {/,/^}/p' -e '/^holder_tree_pids() {/,/^}/p' \
-    -e '/^process_age_s() {/,/^}/p' -e '/^holder_is_stalled() {/,/^}/p' "$PREFLIGHT_SRC")"
+    -e '/^holder_tree_cpu() {/,/^}/p' -e '/^process_age_s() {/,/^}/p' \
+    -e '/^holder_is_stalled() {/,/^}/p' "$PREFLIGHT_SRC")"
 STALL_MIN_AGE=10; STALL_PROBE_SPACING=1; STALL_CPU_FLOOR=0
 unit_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
 sleep 600 & unit_a=$!
@@ -607,7 +608,7 @@ sleep 1.3
 holder_is_stalled "$line_b" && ok "a zero-CPU holder is condemned after the probe window" \
     || fail "no-CPU holder not condemned"
 kill "$unit_a" "$unit_b" 2>/dev/null; wait "$unit_a" 2>/dev/null; wait "$unit_b" 2>/dev/null
-unset -f cputime_to_s holder_tree_pids process_age_s holder_is_stalled
+unset -f cputime_to_s holder_tree_pids holder_tree_cpu process_age_s holder_is_stalled
 
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
 for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done

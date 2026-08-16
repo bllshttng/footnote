@@ -515,7 +515,7 @@ holder_tree_cpu() {
     # Sum accumulated CPU seconds over the holder pid and its descendants: the
     # wrapper itself idles while its suites compute, so the leaves carry the
     # progress signal. Unparsable rows read as 0, never as a steal trigger.
-    local pid ids="" p total=0 t
+    local pid="$1" ids="" p total=0 t
     ids="$(holder_tree_pids "$pid")"
     for p in $ids; do
         t="$(ps -o cputime= -p "$p" 2>/dev/null | tr -d ' ')"
