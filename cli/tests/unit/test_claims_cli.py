@@ -5,13 +5,14 @@ import json
 import os
 from pathlib import Path
 
-import psutil
 import pytest
 from typer.testing import CliRunner
 
 from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
 from fno.claims.core import acquire_claim
 from fno.claims.io import dedup_claims_roots
+
+from .test_claim_reap import _dead_pid  # noqa: F401
 
 
 runner = CliRunner()
@@ -291,13 +292,6 @@ def test_list_prefix_node_scans_global_root_once(cwd_tmp):
     assert result.exit_code == 0
     keys = [r["key"] for r in json.loads(result.output)]
     assert keys == ["node:ab-1"]
-
-
-def _dead_pid() -> int:
-    dead = 999_999
-    while psutil.pid_exists(dead):
-        dead += 1
-    return dead
 
 
 def test_merge_across_roots_first_root_wins_row_and_totals_together(tmp_path):

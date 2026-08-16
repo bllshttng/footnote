@@ -22,7 +22,9 @@
 # `refresh_claim` takes the same per-key recovery mutex as `reap`/`acquire`
 # (closes a resurrection race - see core.py), so on rare contention with a
 # concurrent reap sweep or acquire on the SAME key this call can wait up to
-# ~5s before returning; the stamp-file throttle above keeps that window rare.
+# ~25s before returning (ACQUIRE_MAX_ATTEMPTS=5 retries x the mutex's own
+# 5s wait each, core.py) rather than failing fast; the stamp-file throttle
+# above keeps that window rare.
 
 set -uo pipefail
 

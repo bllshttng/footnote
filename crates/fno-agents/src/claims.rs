@@ -1271,6 +1271,19 @@ fn idempotent_reacquire(
 /// release its own mutex cycle entirely in the gap between our caller's
 /// unlocked read and this function's own (uncontended) mkdir(), so the file
 /// on disk may no longer belong to `holder` by the time we get here.
+/// Hand-rolls the same mkdir/AlreadyExists/steal-or-wait acquire as
+/// [`acquire_dir_mutex`] (and [`recover_stale`] below, its pre-existing
+/// sibling) rather than calling that shared helper: NOT an oversight.
+/// acquire_dir_mutex's generic loop treats a NotFound error (parent dir
+/// vanished) the same as any other transient error - sleep and retry
+/// until the deadline - where this pattern instead fast-paths NotFound to
+/// an immediate Retry with no wait (the claims dir itself is gone;
+/// exclusive-create recreates it from the top). Routing through
+/// acquire_dir_mutex as-is would silently turn that fast path into a real
+/// wait. recover_stale hand-rolls the identical block for the same
+/// reason; consolidating both onto one helper needs that helper to gain
+/// the fast path first, verified against acquire_dir_mutex's other
+/// callers (the events-log and maintenance-dir locks), not a 1-line swap.
 fn idempotent_reacquire_guarded(
     path: &Path,
     key: &str,
