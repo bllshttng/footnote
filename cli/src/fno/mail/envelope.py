@@ -114,6 +114,18 @@ FNO_MAIL_TRAILER = (
 )
 
 
+def contains_fno_mail_tag(text: str) -> bool:
+    """Case-insensitive: True if ``text`` contains an ``<fno_mail`` open tag or
+    ``</fno_mail>`` close tag.
+
+    Case-insensitive because every reachable check (this one, the Rust
+    injection guard, and the relay's single-line ``frame()``) keyed off an
+    exact-case substring match, so a peer-controlled ``<FNO_MAIL ...>`` variant
+    bypassed all of them at once (codex P1)."""
+    low = text.lower()
+    return "<fno_mail" in low or "</fno_mail>" in low
+
+
 def refuse_if_forged(body: str) -> None:
     """Raise :class:`ForgedEnvelopeError` if ``body`` contains an ``<fno_mail``
     open tag or ``</fno_mail>`` close tag.
@@ -124,7 +136,7 @@ def refuse_if_forged(body: str) -> None:
     the renderer directly, bypassing any check that lives only at the CLI
     boundary. Putting the check in the shared renderer means every caller gets
     it for free."""
-    if "<fno_mail" in body or "</fno_mail>" in body:
+    if contains_fno_mail_tag(body):
         raise ForgedEnvelopeError(
             "mail body contains an <fno_mail> tag. The envelope frames peer "
             "mail; a body cannot contain one."

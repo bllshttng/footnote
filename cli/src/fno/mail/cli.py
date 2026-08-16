@@ -2108,7 +2108,9 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     #     lane (`_mux_pane_send` below) pastes this string directly and never
     #     reaches the Rust mail-inject binary's own check, so this is the only
     #     door for that lane.
-    if "<fno_mail" in stripped or "</fno_mail>" in stripped:
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    if contains_fno_mail_tag(stripped):
         _refused(
             "payload contains an <fno_mail> tag. The envelope frames peer mail; "
             "a payload cannot contain one",

@@ -32,7 +32,7 @@ import re
 from typing import Optional
 
 from fno.bus.log import Envelope
-from fno.mail.envelope import ForgedEnvelopeError, harness_for_provider
+from fno.mail.envelope import ForgedEnvelopeError, contains_fno_mail_tag, harness_for_provider
 
 # Relay-private meta keys on the bus envelope.
 META_HOP = "hop_count"
@@ -65,7 +65,7 @@ def frame(from_session: str, harness: str, model: Optional[str], body: str) -> s
     ``worker.submit`` RPC and the claude ``mail-inject`` binary each take an
     already-framed string built here, so neither downstream check alone can
     cover a peer-controlled body smuggling a second open tag."""
-    if "<fno_mail" in body or "</fno_mail>" in body:
+    if contains_fno_mail_tag(body):
         raise ForgedEnvelopeError(
             "relay body contains an <fno_mail> tag. The single-line envelope "
             "frames peer mail; a body cannot contain one."
