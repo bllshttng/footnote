@@ -217,7 +217,9 @@ def test_ship_runs_preflight_to_produce_missing_batch_receipt(
     result = B.ship_batch(domain="code", root=tmp_path, run=gh)
 
     assert result.action == "shipped"
-    assert ["scripts/ci/preflight.sh", "--force"] in gh.calls
+    # --wait-timeout stays under the runner's 600s subprocess budget; the bare
+    # default (90m queue wait) would outlive the tick and leak a queue ticket.
+    assert ["scripts/ci/preflight.sh", "--force", "--wait-timeout", "540"] in gh.calls
     assert any(call[:3] == ["gh", "pr", "create"] for call in gh.calls)
 
 
