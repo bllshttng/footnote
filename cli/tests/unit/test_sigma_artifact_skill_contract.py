@@ -77,8 +77,32 @@ def test_carry_forward_revalidates_prior_findings_before_verdict() -> None:
     assert "--inspect-sigma" in window
     assert "abstain band" in window
     assert "cannot be `ready-to-merge`" in window
+    # A failed inspection must never read as an empty prior report: the
+    # narrowed scope is unproven and the round re-runs at full scope.
+    assert "INSPECT=failed" in window
+    assert "Never read a failed inspection as an empty prior report" in window
+    assert "Re-run this round at full scope" in window
     attestation = sigma.index("### Step 6c: Emit the reviewers-gate attestation")
     assert "cumulative across rounds up to this head" in sigma[attestation:]
+
+
+def test_conditional_agents_receive_full_diff_context() -> None:
+    selection = (
+        ROOT / "skills/review/references/agent-selection.md"
+    ).read_text(encoding="utf-8")
+    conditional = selection.index("## Conditional Agents")
+    browser = selection.index("## Browser Testing")
+    window = selection[conditional:browser]
+    # Every dispatched reviewer path carries the context list, not just the
+    # base agents: four conditional prompts, four context lines.
+    assert window.count("${fullDiffFiles}") == 4
+    for agent in (
+        "fno:ux-flow-tester",
+        "fno:multi-device-checker",
+        "fno:type-design-analyzer",
+        "fno:integration-test-analyzer",
+    ):
+        assert agent in window
 
 
 def test_report_and_artifact_record_scope() -> None:

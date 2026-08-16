@@ -132,13 +132,17 @@ This agent catches recurring issues — if a reviewer flagged the same pattern o
 ```typescript
 Task({
   subagent_type: "fno:ux-flow-tester",
-  prompt: `Test user journeys for: ${frontendFiles}`,
+  prompt: `Test user journeys in the files changed since the last reviewed head: ${frontendFiles}
+The rest of this PR, already reviewed in a prior round (context only): ${fullDiffFiles}
+When a journey crosses into a prior-reviewed file, follow it there.`,
   description: "Test UX flows"
 })
 
 Task({
   subagent_type: "fno:multi-device-checker",
-  prompt: `Check responsive design for: ${frontendFiles}`,
+  prompt: `Check responsive design in the files changed since the last reviewed head: ${frontendFiles}
+The rest of this PR, already reviewed in a prior round (context only): ${fullDiffFiles}
+When a layout rule spans a prior-reviewed file, open it.`,
   description: "Check multi-device"
 })
 ```
@@ -147,13 +151,17 @@ Task({
 ```typescript
 Task({
   subagent_type: "fno:type-design-analyzer",
-  prompt: `Analyze type design for: ${backendFiles}`,
+  prompt: `Analyze type design in the files changed since the last reviewed head: ${backendFiles}
+The rest of this PR, already reviewed in a prior round (context only): ${fullDiffFiles}
+When an invariant spans a prior-reviewed file, open it.`,
   description: "Analyze types"
 })
 
 Task({
   subagent_type: "fno:integration-test-analyzer",
-  prompt: `Analyze integration tests for: ${backendFiles}`,
+  prompt: `Analyze integration tests for the files changed since the last reviewed head: ${backendFiles}
+The rest of this PR, already reviewed in a prior round (context only): ${fullDiffFiles}
+When a journey test covers a prior-reviewed file, read it.`,
   description: "Analyze integration tests"
 })
 ```

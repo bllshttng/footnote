@@ -233,6 +233,30 @@ def test_read_last_head_returns_stored_head(tmp_path: Path) -> None:
     assert result.head_sha == "head-b"
 
 
+def test_read_last_head_rejects_reason_without_base(tmp_path: Path) -> None:
+    from fno.review.artifact import read_sigma_last_head
+
+    path = tmp_path / "reviews/fno/reviews/x-bfbb/sigma.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\nschema: sigma-review/v1\nnode: x-bfbb\npr_number: 42\n"
+        "head_sha: head-b\nreview_round: round-b\n"
+        "scope_reason: incremental\n---\n\n- **P1** - bug\n",
+        encoding="utf-8",
+    )
+    result = read_sigma_last_head(
+        reviews_root=tmp_path / "reviews",
+        project="fno",
+        node="x-bfbb",
+        pr_number=42,
+    )
+    # A scope reason without its base proves nothing about cumulative
+    # coverage; the pair is validated together or the head is not trusted.
+    assert result.status == "rejected"
+    assert result.head_sha is None
+    assert "scope_base" in result.reason
+
+
 def test_read_last_head_ignores_unscoped_artifacts(tmp_path: Path) -> None:
     from fno.review.artifact import publish_sigma_artifact, read_sigma_last_head
 

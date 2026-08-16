@@ -241,6 +241,11 @@ def read_sigma_last_head(
         return LastHeadResult(
             "unscoped", None, f"artifact carries no valid scope reason: {reason!r}"
         )
+    base = metadata.get("scope_base")
+    if not isinstance(base, str) or not _SAFE_COMPONENT.fullmatch(base):
+        return LastHeadResult(
+            "rejected", None, f"scope_base is missing or invalid: {base!r}"
+        )
 
     head = metadata.get("head_sha")
     # Same grammar the writer enforces: never surface a partial or placeholder

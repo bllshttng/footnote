@@ -213,14 +213,20 @@ On every `incremental` round, run this step between the panel results and the ve
 
 When its cited quote still validates at the current head, a prior blocking finding is unaddressed. That is the checkable definition of unaddressed.
 
-1. Read the prior round's report. `PRIOR_HEAD` satisfies the inspect validator's expected head by construction, so the existing read surface returns the body:
+1. Read the prior round's report. `PRIOR_HEAD` satisfies the inspect validator's expected head by construction, so the existing read surface returns the body. Keep the exit status: it decides what an empty result means.
 
    ```bash
-   PRIOR_REPORT=$(fno review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
-     --sigma-head "$PRIOR_HEAD" --json 2>/dev/null || true)
+   if PRIOR_REPORT=$(fno review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
+     --sigma-head "$PRIOR_HEAD" --json 2>/dev/null); then
+     INSPECT=ok
+   else
+     INSPECT=failed
+   fi
    ```
 
-   An empty `PRIOR_REPORT` is not an error. It means there is nothing to carry. The round proceeds on its own findings alone.
+   With `INSPECT=ok` and no critical or high findings in the body, there is nothing to carry. The round proceeds on its own findings alone.
+
+   With `INSPECT=failed`, the prior report was not readable. The narrowed scope is unproven, so a live blocking finding can sit in the unread report. Never read a failed inspection as an empty prior report. Re-run this round at full scope (`SCOPE_BASE=$MERGE_BASE`) before any verdict. No attestation can be emitted from the incomplete round.
 
 2. For each **critical** or **high** finding in the prior body, spawn the same Haiku cite-or-drop validator as Step 3b. Run it against the CURRENT head. Those two severities are the ones that block.
    - quote still matches at the cited `file:line` -> the finding is **unresolved**. Carry it verbatim into this round's report and verdict. Tag it `carried from round <id>` under Critical/High Issues.
