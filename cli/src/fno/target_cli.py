@@ -2734,7 +2734,14 @@ def start(
                 err=True,
             )
 
-    base_label = "in-place" if in_place else native_base
+    if in_place:
+        base_label = "in-place"
+    elif native_policy is not None:
+        base_label = native_base
+    else:
+        # The ordinary worktree path never binds native_base (that is the
+        # codex-native branch above); resolve the same verified ref locally.
+        base_label = _remote_base_ref(repo_root)
 
     # Idempotent re-run from canonical: a manifest already in the worktree means
     # init has run (write-once) - skip it, never double-claim or error.

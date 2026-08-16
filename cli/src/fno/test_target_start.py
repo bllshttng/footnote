@@ -234,11 +234,16 @@ def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
-    monkeypatch.setattr(
-        target_cli,
-        "_git_out",
-        lambda cwd, *args: str(canonical) if args == ("rev-parse", "--show-toplevel") else None,
-    )
+    def _git_out_stub(cwd, *args):
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(canonical)
+        if args == ("rev-parse", "--verify", "origin/main^{commit}"):
+            # The ordinary-path base_label resolution verifies the ref ensure
+            # built the worktree from.
+            return "base-sha-0001"
+        return None
+
+    monkeypatch.setattr(target_cli, "_git_out", _git_out_stub)
     monkeypatch.setattr(
         target_cli,
         "_codex_session_meta",
