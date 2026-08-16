@@ -424,7 +424,8 @@ class Ritual:
                     self._emit(
                         "reconcile",
                         _OK,
-                        f"closed={len(closed)} contained-errors={errs} sync={sync_outcome}",
+                        f"closed={len(closed)} contained-errors={errs} "
+                        f"sync={sync_outcome or 'not-run'}",
                     )
                 elif closed or (obj.get("candidates") or []):
                     self._emit("reconcile", _OK, f"closed={len(closed)}")

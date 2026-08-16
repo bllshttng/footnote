@@ -311,15 +311,15 @@ def test_reconcile_contained_errors_and_failed_sync_are_not_no_drift(tmp_path, c
     """Cascade-close failures and a failed canonical sync leave reconcile
     exiting 0 with empty close sets; the receipt must not then claim
     no-drift, or the failure is observable nowhere but an unread JSON body."""
-    for kwargs in (
-        {"reconcile_errors": ["x-e1"]},
-        {"reconcile_sync_outcome": "failed"},
+    for kwargs, needle in (
+        ({"reconcile_errors": ["x-e1"]}, "closed=0 contained-errors=1 sync=not-run"),
+        ({"reconcile_sync_outcome": "failed"}, "closed=0 contained-errors=0 sync=failed"),
     ):
         r = _bare(tmp_path, FakeRunner(reconcile_candidates=[], **kwargs))
         r.leg_stamp()
         out = capsys.readouterr().out
-        assert "step=reconcile status=ok detail=no-drift" not in out
-        assert "contained-errors=1 sync=None" in out or "sync=failed" in out
+        assert f"step=reconcile status=ok detail={needle}" in out
+        assert "no-drift" not in out
 
 
 def test_reconcile_synced_catchup_reads_healed_only(tmp_path, capsys):
