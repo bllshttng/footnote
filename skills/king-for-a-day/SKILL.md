@@ -167,7 +167,8 @@ The fallbacks, and why they rank below: `fno mail send <name>` reaches a registe
 A live inject writes nothing to the bus; the durable envelope is written only when the inject misses, so it survives a dead recipient as recovery, not delivery.
 **Treat any receipt that is not `delivered (hosted)` as not delivered: re-resolve the handle and send again, do not re-queue.**
 And do not settle for the queue when the peer is merely idle - the handle you mailed is the same id these take, so bring it back and get the answer now:
-`fno agents peek <short-id>` (alive?) · `resume <short-id>` (idle -> live, then re-send) · `attach <short-id>` (drive it yourself, claude).
+
+`fno agents peek <short-id>` (alive?) · `resume <short-id>` (wakes it, claude, or resumes it, other harnesses, then re-send) · `attach <short-id>` (drive it yourself, claude).
 
 Match the terminal to the message: a send that changes the recipient's next action - a ruling, an instruction, a decision they must act on - must terminate `delivered (hosted)` or `delivered (woken)`; a pure ack or FYI may rest durable, but only when the receipt names a live drain owner (`live-drain` / `wake-daemon` / `inbox-drain`). A `dead-letter` owner means nothing drains it, so a durable rest there is silent loss.
 
@@ -182,7 +183,8 @@ Config is the consent: merge only when `auto_merge.enabled` (or the project's eq
 This is the difference between a track that walks and one that silently wedges, so check it before you conclude a wave is stuck.
 
 **Take over.**
-`fno agents attach <name>` joins a running session interactively (claude only); `resume` restarts one in its recorded cwd via the provider's own resume CLI; `stop` ends it.
+
+`fno agents attach <name>` joins a running session interactively, claude only. `resume` restarts a codex, gemini, or opencode row through the provider's own resume CLI. For a claude row that is still supervised (blocked at a prompt or idle), resume wakes it headlessly in place with no attach or exec. It then checks the state moved. A claude row whose process has exited relaunches instead via `claude --resume`, which execs. `stop` ends it.
 `stop` and `peek` work everywhere, so on a non-claude provider observe with `peek` and end with `stop`.
 Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 

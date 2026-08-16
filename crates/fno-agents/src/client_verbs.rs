@@ -1879,7 +1879,17 @@ where
     let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
     if live && !short_id.is_empty() {
-        eprintln!("fno agents resume: {name} is live - attaching");
+        // Deliberately silent on mechanism: the caller (`run_resume`) decides
+        // AFTER this returns whether the row gets --print-command'd, the
+        // Python headless wake-and-verify delegation, or (a mux pane row
+        // never reaches this arm, so that leaves) nothing else -- an
+        // "attaching" claim printed here was true when this arm always led
+        // to a bare `claude attach` exec, and stayed on the screen after the
+        // delegation replaced that exec with a wake that never attaches at
+        // all. The caller's own downstream output (the printed command, or
+        // fno-py's before -> after line) is what actually describes what
+        // happened.
+        eprintln!("fno agents resume: {name} is live");
         Ok((
             vec!["claude".into(), "attach".into(), short_id.into()],
             None,
@@ -2010,6 +2020,25 @@ fn acquire_resume_session_claim(
     root: Option<&Path>,
     ttl_ms: Option<u64>,
 ) -> Result<(), (i32, String)> {
+    acquire_named_session_claim(&format!("session:{uuid}"), uuid, root, ttl_ms)
+}
+
+/// Used directly by the dead-row `claude --resume` relaunch (keyed
+/// `session:{uuid}`). The live-row headless wake uses the matching
+/// `resume-attach:{short_id}` key too, but acquires it Python-side
+/// (`resume_cli.py`'s `_resume_claude_wake`, gated on skip-eligibility) --
+/// this Rust arm delegates the wake itself and does not call this function
+/// for that key. Two different key prefixes by design: a live wake and a
+/// dead relaunch are mutually exclusive outcomes of one truth-state read,
+/// never racing each other for the same row, but two concurrent resumes
+/// both landing on the SAME arm for the same row do race -- each key only
+/// needs to guard against its own arm's double-writer.
+fn acquire_named_session_claim(
+    key: &str,
+    label: &str,
+    root: Option<&Path>,
+    ttl_ms: Option<u64>,
+) -> Result<(), (i32, String)> {
     use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
     let holder = format!("resume:{}", std::process::id());
     let opts = AcquireOpts {
@@ -2018,18 +2047,18 @@ fn acquire_resume_session_claim(
         ttl_ms: ttl_ms.map(|t| t as i64),
         ..Default::default()
     };
-    match acquire(&format!("session:{uuid}"), &holder, opts) {
+    match acquire(key, &holder, opts) {
         AcquireOutcome::Acquired(_) => Ok(()),
         AcquireOutcome::HeldByOther { holder, pid, host } => Err((
             11,
             format!(
-                "fno agents resume: session {uuid} is held live by another writer \
+                "fno agents resume: session {label} is held live by another writer \
                  ({holder}, pid={pid}, host={host}); not opening a second writer on one transcript."
             ),
         )),
         AcquireOutcome::Error(e) => Err((
             12,
-            format!("fno agents resume: could not claim session {uuid}: {e}"),
+            format!("fno agents resume: could not claim session {label}: {e}"),
         )),
     }
 }
@@ -2257,34 +2286,79 @@ fn mux_pane_run_failure_message(
     )
 }
 
+/// True for the one `claude_resume_argv_with_truth` arm that returns
+/// `(["claude", "attach", short_id], None)`: a live, short_id-addressable
+/// claude row with no mux ref. `claim_uuid` is `Some` only on the dead-relaunch
+/// arm; every other arm already returns `Err` before this is checked.
+fn should_delegate_claude_live_attach(
+    harness: &str,
+    claim_uuid: &Option<String>,
+    mux_session: &Option<String>,
+) -> bool {
+    harness == "claude" && claim_uuid.is_none() && mux_session.is_none()
+}
+
 /// `fno-agents resume <name> [--print-command]` -- resume an agent in its
 /// recorded cwd via the provider's resume CLI (`os.execvp` equivalent), or
 /// print the shell snippet with `--print-command`. Mirrors Python `resume_logic`.
-pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
+/// Pure parse of `resume`'s argv: `NAME [--print-command] [--message|-m VALUE]`.
+/// `--message`/`-m` (Python's `cmd_resume`) only matters on the claude
+/// live-attach delegation in `run_resume`, but it must be ACCEPTED here or
+/// every `fno agents resume <name> --message ...` invocation dies with exit 2
+/// before that delegation is ever reached -- resume auto-routes to this
+/// binary by default (`RUST_CLIENT_VERBS`), so this parser is the only door.
+/// Extracted as a pure function (mirrors `should_delegate_claude_live_attach`)
+/// so the flag grammar is unit-testable without an `AgentsHome`/registry
+/// fixture; on error it prints the same diagnostic `run_resume` used to print
+/// inline and returns the exit code to propagate.
+fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), i32> {
     let mut name: Option<String> = None;
     let mut print_command = false;
-    for a in rest {
+    let mut message: Option<String> = None;
+    // Every sibling parser in this file (`parse_trace_args`, `parse_logs_args`)
+    // expands `--flag=value` into `--flag value` before iterating; without it
+    // `--message=continue` falls into the `starts_with("--")` unknown-flag arm
+    // instead of being recognized.
+    let rest = expand_eq(rest);
+    let mut iter = rest.iter();
+    while let Some(a) = iter.next() {
         match a.as_str() {
             "--print-command" => print_command = true,
+            "--message" | "-m" => {
+                message = Some(match iter.next() {
+                    Some(v) => v.clone(),
+                    None => {
+                        eprintln!("fno-agents: {a} needs a value");
+                        return Err(2);
+                    }
+                });
+            }
             other if other.starts_with("--") => {
                 eprintln!("fno-agents: unknown resume flag: {other}");
-                return 2;
+                return Err(2);
             }
             other => {
                 if name.is_some() {
                     eprintln!("fno-agents: resume takes one NAME (got extra: {other})");
-                    return 2;
+                    return Err(2);
                 }
                 name = Some(other.to_string());
             }
         }
     }
-    let name = match name {
-        Some(n) => n,
+    match name {
+        Some(n) => Ok((n, print_command, message)),
         None => {
             eprintln!("fno-agents: resume needs a <name>");
-            return 2;
+            Err(2)
         }
+    }
+}
+
+pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
+    let (name, print_command, message) = match parse_resume_args(rest) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
 
     let entries = match read_registry_entries(&home.registry_json()) {
@@ -2428,10 +2502,11 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 0;
     }
 
-    // Validate cwd for BOTH paths before claiming or launching. A deleted
-    // worktree is a cleanup job, not a resume. The exec path re-checks via
-    // set_current_dir below (race-free for its own chdir), but bailing here
-    // means a gone cwd never acquires the session claim on the failure path.
+    // Validate cwd for ALL paths before claiming, delegating, or launching. A
+    // deleted worktree is a cleanup job, not a resume. The exec path
+    // re-checks via set_current_dir below (race-free for its own chdir), but
+    // bailing here means a gone cwd never acquires the session claim, and
+    // never burns a wake attempt, on the failure path.
     if !Path::new(cwd).is_dir() {
         eprintln!(
             "fno agents resume: cwd {} for {} is no longer reachable. Run `fno agents rm {}` to clean up.",
@@ -2440,6 +2515,69 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             name
         );
         return 13;
+    }
+
+    // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
+    // this arm (the dead-relaunch arm above sets Some(uuid); the two error
+    // arms already returned). A bare `claude attach` exec here has no pty,
+    // no route-settings restore, and no post-exec verification -- the same
+    // gap the Python fallback (`resume_cli.py::_resume_claude_wake`) closed.
+    // Delegating to it rather than re-deriving that pty/bracketed-paste/
+    // retry recipe natively keeps ONE implementation instead of two: a fix
+    // landed only here would leave `fno agents resume` (this binary) fixed
+    // and `fno-agents resume` still printing "Attaching..." and exiting,
+    // which is the guard-on-one-of-N-paths trap this repo already tracks.
+    if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
+        // No claim acquired here (unlike the dead-relaunch arm below):
+        // acquiring it unconditionally, before knowing whether the row is
+        // even skip-eligible (already Working/Idle/Done, needing no wake at
+        // all), raced two concurrent no-op resumes into a spurious "held by
+        // another writer" on a lock that guards a pty write neither was
+        // making. That skip decision requires the live-status truth-read
+        // this arm deliberately does not duplicate (see above); re-deriving
+        // it here just to gate the claim would be the same duplicate-truth
+        // problem this delegation exists to avoid. `resume_cli.py`'s own
+        // `_resume_claude_wake` acquires the identical `resume-attach:
+        // {short_id}` key itself, gated on that same skip check, once exec'd
+        // below -- the wake this arm delegates to stays guarded either way,
+        // whether reached through this Rust delegation or as the standalone
+        // Python entrypoint (FNO_AGENTS_RUNTIME=python, no Rust binary
+        // installed), which never runs this arm at all.
+        // Route through `fno` (the wrapper every install puts on PATH, which
+        // resolves the `fno-py` console script by absolute path -- see
+        // crates/fno/src/bootstrap.rs), not a bare `fno-py`: this binary has
+        // no PATH-robust resolver of its own, and a bare `fno-py` fails on a
+        // cargo-only install where only the mux (`fno`) is on PATH (the same
+        // gap cli/src/fno/_subprocess_util.py's `fno_py_cmd()` closes on the
+        // Python side). `FNO_AGENTS_RUNTIME=python` pins the child to Python
+        // dispatch, mirroring `token_helper_output` above -- without it,
+        // `resume` (in RUST_CLIENT_VERBS) would auto-route straight back into
+        // this same binary and loop.
+        //
+        // exec(), not status(): this REPLACES the process rather than
+        // spawning a child, matching every other `Command::new("fno")...exec()`
+        // delegation in this crate (`bin/client.rs:523-534`, `:544-554`) --
+        // same exit-127-on-failure convention, and it sidesteps process-group
+        // signal-propagation questions a spawned child would raise, since
+        // there is no separate child to propagate a signal to.
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("fno");
+        command
+            // --cwd carries the EnterWorktree-resolved cwd computed above
+            // (`resolved_cwd`), not the raw registry value: Python has no
+            // equivalent of `resolve_resume_cwd` and would otherwise re-derive
+            // the stale pre-EnterWorktree cwd from the registry entry itself.
+            .args(["agents", "resume", &name, "--cwd", cwd])
+            .env("FNO_AGENTS_RUNTIME", "python");
+        if let Some(msg) = &message {
+            command.args(["--message", msg]);
+        }
+        let err = command.exec();
+        eprintln!(
+            "fno agents resume: delegating {name} to fno-py failed: {err}. \
+             Install the fno front door or run `fno-py agents resume {name}` directly."
+        );
+        return 127;
     }
 
     // Guard a dead-row `claude --resume` with the session single-writer claim
@@ -4108,6 +4246,75 @@ mod tests {
     }
 
     #[test]
+    fn live_claude_attach_delegates_dead_and_non_claude_and_mux_do_not() {
+        // The live-attach arm ((["claude","attach",short_id], None)) is the one
+        // this binary used to exec bare, with no pty/route/verification. It is
+        // the only combination that should delegate to `fno-py agents resume`.
+        assert!(should_delegate_claude_live_attach("claude", &None, &None,));
+        // Dead-relaunch arm carries Some(uuid) -> Rust already restores the
+        // route and relaunches itself; must not also delegate.
+        assert!(!should_delegate_claude_live_attach(
+            "claude",
+            &Some("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".to_string()),
+            &None,
+        ));
+        // A mux-hosted row relaunches through the pane path; must not delegate
+        // even if some future change ever paired it with claim_uuid == None.
+        assert!(!should_delegate_claude_live_attach(
+            "claude",
+            &None,
+            &Some("session-1".to_string()),
+        ));
+        // Every non-claude harness keeps its own provider resume CLI.
+        assert!(!should_delegate_claude_live_attach("codex", &None, &None));
+    }
+
+    #[test]
+    fn resume_args_accept_message_flag_long_and_short() {
+        // code-review finding: --message/-m must not die with "unknown resume
+        // flag" -- resume auto-routes to this binary by default, so this
+        // parser is the only door the claude wake's --message option has.
+        let (name, print_command, message) = parse_resume_args(&[
+            "alpha".to_string(),
+            "--message".to_string(),
+            "continue please".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(name, "alpha");
+        assert!(!print_command);
+        assert_eq!(message.as_deref(), Some("continue please"));
+
+        let (name, _, message) =
+            parse_resume_args(&["-m".to_string(), "hi".to_string(), "beta".to_string()]).unwrap();
+        assert_eq!(name, "beta");
+        assert_eq!(message.as_deref(), Some("hi"));
+
+        // No --message given: still parses, message is None (unchanged
+        // pre-fix behavior for every other flag combination).
+        let (name, print_command, message) =
+            parse_resume_args(&["gamma".to_string(), "--print-command".to_string()]).unwrap();
+        assert_eq!(name, "gamma");
+        assert!(print_command);
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn resume_args_message_flag_needs_a_value() {
+        assert_eq!(
+            parse_resume_args(&["alpha".to_string(), "--message".to_string()]),
+            Err(2)
+        );
+    }
+
+    #[test]
+    fn resume_args_still_rejects_unknown_flags() {
+        assert_eq!(
+            parse_resume_args(&["alpha".to_string(), "--bogus".to_string()]),
+            Err(2)
+        );
+    }
+
+    #[test]
     fn claude_resume_dead_arm_restores_a_recorded_route_or_refuses() {
         // x-ae2d: the dead arm RELAUNCHES, so it is the one door on this verb
         // that can lose a route. Untested, the branch is a guard on paper: the
@@ -4453,6 +4660,53 @@ mod tests {
             rec.expires_at.is_some(),
             "a TTL claim records an expiry; a PID-only claim would not"
         );
+    }
+
+    #[test]
+    fn acquire_named_session_claim_guards_resume_attach_keys() {
+        // The live-attach delegation itself acquires no claim (Python's
+        // `_resume_claude_wake` does, gated on skip-eligibility, once exec'd)
+        // -- but the "resume-attach:{short_id}" key format this exercises is
+        // still the shared contract: Python's own claim uses the identical
+        // key so the two runtimes contend for the same lock on the same row
+        // whichever one ends up acquiring it. Verify that key independently
+        // refuses a second concurrent writer, the same contract
+        // acquire_resume_session_claim already has for its own key.
+        use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
+        let short_id = "deadbeef";
+        let root = cv_tmpdir();
+
+        // A different live writer already holds the claim (matching this
+        // process's own holder string would just re-acquire, not conflict).
+        let pre = acquire(
+            &format!("resume-attach:{short_id}"),
+            "other-writer",
+            AcquireOpts {
+                root: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pre, AcquireOutcome::Acquired(_)));
+
+        let err = acquire_named_session_claim(
+            &format!("resume-attach:{short_id}"),
+            short_id,
+            Some(root.path()),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, 11);
+        assert!(err.1.contains("held live by another writer"));
+
+        // A different short_id: an unrelated row's wake is never blocked by
+        // this one's claim.
+        let other = acquire_named_session_claim(
+            "resume-attach:other-id",
+            "other-id",
+            Some(root.path()),
+            None,
+        );
+        assert!(other.is_ok());
     }
 
     #[test]

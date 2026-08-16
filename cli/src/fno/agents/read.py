@@ -116,10 +116,10 @@ def list_agents(
     # this layer trusts the contract and does not add a broad catch
     # that would also swallow programmer errors (AttributeError /
     # TypeError / ImportError).
+    from fno.agents.harnesses import claude as claude_mod
+
     live_map: dict[str, dict] = {}
     if any(e.harness == "claude" for e in filtered):
-        from fno.agents.harnesses import claude as claude_mod
-
         live_map, augment_warnings = claude_mod.claude_agents_json()
         warnings.extend(augment_warnings)
 
@@ -129,6 +129,14 @@ def list_agents(
     # harness Working / Needs input (Locked Decision 1). One tail read of the
     # events log, shared across rows (not O(rows)).
     loop_check_ages = truth_status.build_loop_check_index()
+
+    # Derived once here, not per-row: claude.py's NOT_BLOCKED_STATUSES_LOWER
+    # (also used by resume_cli.py's wake-skip check) minus "working", since
+    # this fill only wants the ambiguous Idle/missing gap, not the target
+    # status itself -- both used to hand-enumerate independently and had
+    # already drifted out of sync with each other by the time review caught
+    # it.
+    not_blocked_minus_working = claude_mod.NOT_BLOCKED_STATUSES_LOWER - {"working"}
 
     rows: list[dict] = []
     for entry in filtered:
@@ -160,12 +168,16 @@ def list_agents(
             live_status = (live_map.get(entry.short_id) or {}).get(
                 "live_status"
             )
-        # The provider normalizes every claude spelling, so "Idle" is what
-        # arrives here. The case-insensitive compare is defensive: a live_map
-        # from any other producer that skipped that normalization would
-        # otherwise silently disable this fill, which is how a lowercase "idle"
-        # slipped past a Title-case-only check once already.
-        if live_status is None or str(live_status).lower() == "idle":
+        # The provider normalizes every claude spelling, so "Idle"/"Done" is
+        # what arrives here. The case-insensitive compare is defensive: a
+        # live_map from any other producer that skipped that normalization
+        # would otherwise silently disable this fill, which is how a
+        # lowercase "idle" slipped past a Title-case-only check once already.
+        # "Done" joined this set once ``claude_agents_json`` started passing
+        # ``--all``: a stopped/completed row now arrives in live_map instead
+        # of being absent, and without this, its raw supervisor status would
+        # silently win over the richer PR/CI-aware truth-status fallback.
+        if live_status is None or str(live_status).lower() in not_blocked_minus_working:
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(

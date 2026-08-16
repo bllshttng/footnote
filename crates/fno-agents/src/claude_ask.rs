@@ -141,9 +141,9 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
 /// affirmatively falsified the row.
 ///
 /// `resume` and the attach pointer read this and match on `working | watching |
-/// your-move` to decide "is live - attaching". Transcript state alone cannot see
-/// a dead process, so a session whose process died forty minutes ago still reads
-/// `working` and resume attaches to nothing. Passing the falsified case through
+/// your-move` to decide "is live". Transcript state alone cannot see a dead
+/// process, so a session whose process died forty minutes ago still reads
+/// `working` and resume wakes/attaches to nothing. Passing the falsified case through
 /// as a state neither arm matches drops both callers into their inconclusive
 /// branch (refuse / no pointer), which is the safe answer.
 ///
@@ -2943,7 +2943,7 @@ mod tests {
     /// `resume` matches on the STATE, so the verdict has to reach it through
     /// that channel or the falsifier is decorative on this path: a session whose
     /// process died forty minutes ago still reads `working` and resume prints
-    /// "is live - attaching" at nothing.
+    /// "is live" and wakes/attaches at nothing.
     #[test]
     fn an_unreachable_verdict_lowers_a_would_be_live_state() {
         assert_eq!(

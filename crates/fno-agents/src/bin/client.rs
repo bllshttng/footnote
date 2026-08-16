@@ -2597,7 +2597,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "drive-authority [--json]",
     "trace [options]",
     "ping",
-    "resume <name> [--print-command]",
+    "resume <name> [--print-command] [--message/-m <text>]",
     "adopt <session-id>",
     "attach <name>",
     "logs <name> [--follow] [options]",

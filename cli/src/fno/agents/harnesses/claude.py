@@ -1180,6 +1180,15 @@ _FOLLOW_POLL_INTERVAL = 0.5
 # through unchanged so consumers that already adapted aren't blocked on us.
 KNOWN_LIVE_STATUSES = frozenset({"Working", "Needs input", "Idle", "Done"})
 
+# The "not blocked" subset of KNOWN_LIVE_STATUSES -- every status except
+# "Needs input", lowercased for case-insensitive callers. Single source for
+# resume_cli.py's wake-skip check and read.py's live_status fill-in gate,
+# which used to each hand-enumerate this same subset and had already drifted
+# out of sync with each other by the time review caught it.
+NOT_BLOCKED_STATUSES_LOWER = frozenset(
+    s.lower() for s in KNOWN_LIVE_STATUSES if s != "Needs input"
+)
+
 # The INPUT vocabulary: every spelling observed from a real binary, mapped onto
 # the output set. Widening the output set instead (accepting "blocked" as its
 # own value) is what let raw lowercase leak to every consumer, so `Needs input`
@@ -1303,7 +1312,12 @@ def claude_agents_json(
     which spelling the binary used; an unmapped value passes through with a
     drift warning.
     """
-    argv = ["claude", "agents", "--json"]
+    # `claude agents --json` alone omits stopped/completed rows (57 of
+    # 133 seen live on a real fleet); every reconcile/orphan sweep reading this
+    # map was blind to exactly the rows it needed to inspect. `--all` is the
+    # fix; there is no narrower flag that keeps only live rows visible, and no
+    # caller here wants that narrower view anyway.
+    argv = ["claude", "agents", "--json", "--all"]
 
     try:
         result = _subprocess_run(
