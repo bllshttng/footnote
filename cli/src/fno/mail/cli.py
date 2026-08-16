@@ -1176,7 +1176,10 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "  copy still lands at the recipient's next drain:\n"
             f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
             "    fno mail withdraw <id>      # retract the queued copy FIRST\n"
-            f"    fno mail send {target} '<message>'  # then retry live"
+            f"    fno mail send {target} '<message>'  # then retry live\n"
+            "  a withdraw that refuses because the recipient already claimed\n"
+            "  the message is telling you it LANDED. Stop there: re-sending on\n"
+            "  top of that is the double delivery this ladder exists to avoid."
         )
     elif reason in _LIVE_LANE_FAILURE_REASONS:
         msg = (

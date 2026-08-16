@@ -491,3 +491,33 @@ def test_holder_note_past_tense_for_a_caller_that_won_the_lock() -> None:
     bare = AgentLockTimeout(name="red", timeout=30.0, holder=None)
     assert bare.holder_note() == ""
     assert bare.holder_note(past=True) == ""
+
+
+def test_stamp_timestamp_shape_does_not_vary_with_a_zero_microsecond() -> None:
+    """The stamp renders ONE shape, including the once-in-a-million acquire.
+
+    A bare `isoformat()` drops the microseconds field when it is exactly zero,
+    writing 25 chars instead of 32. The Rust twin renders one fixed shape and
+    its test pins the length, so the drift would show up only on the Python
+    side, and only on the rare acquire nobody reproduces.
+    """
+    import json
+    import re
+    import tempfile
+    from datetime import datetime, timezone
+
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    with tempfile.TemporaryDirectory() as td:
+        reg = Path(td) / "registry.json"
+        with hold_agent_lock("shaped", reg):
+            stamped = json.loads(_agent_lock_path("shaped", reg).read_text())
+
+    at = stamped["acquired_at"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00", at), at
+    assert len(at) == 32, at
+    # The exact boundary the bare call gets wrong.
+    zero_us = datetime(2026, 8, 16, 12, 34, 56, 0, tzinfo=timezone.utc)
+    assert len(zero_us.isoformat()) == 25, "the trap this pins is real"
+    assert len(zero_us.isoformat(timespec="microseconds")) == 32

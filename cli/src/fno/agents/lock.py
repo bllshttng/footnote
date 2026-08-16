@@ -251,7 +251,15 @@ def hold_agent_lock(
                     {
                         "pid": os.getpid(),
                         "name": name,
-                        "acquired_at": datetime.now(timezone.utc).isoformat(),
+                        # timespec pinned: a bare isoformat() DROPS the
+                        # microseconds field when it happens to be zero, so
+                        # the stamp is 25 chars roughly one acquire in a
+                        # million and 32 the rest of the time. The Rust twin
+                        # renders one fixed shape, and this is the side that
+                        # varies.
+                        "acquired_at": datetime.now(timezone.utc).isoformat(
+                            timespec="microseconds"
+                        ),
                     }
                 )
                 + "\n"
