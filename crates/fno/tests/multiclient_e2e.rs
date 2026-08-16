@@ -145,6 +145,7 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
     let pane_a = a
         .wait_layout(10, "first layout", |l| l.panes.len() == 1)
         .focus;
+    a.wait_prompt(pane_a);
     let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
     b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
 
@@ -155,6 +156,7 @@ fn multiclient_independent_views_frames_for_viewers_only_and_reanchor() {
         l.squads.first().map(|s| (s.tabs.len(), s.active_tab)) == Some((2, 1))
     });
     let pane_b = lb.focus;
+    b.wait_prompt(pane_b);
     assert_ne!(pane_b, pane_a);
     let la = a.wait_layout(10, "a sees 2 tabs", |l| {
         l.squads.first().map(|s| s.tabs.len()) == Some(2)
@@ -297,7 +299,7 @@ fn multiclient_server_outlives_client_crash_mid_command() {
     b.cmd(Command::SplitH);
     drop(b); // gone before reading the Layout the split produces
 
-    let l = a.wait_layout(10, "split stands + regrown", |l| {
+    let l = a.wait_layout(30, "split stands + regrown", |l| {
         l.panes.len() == 2 && l.area == (40, 120)
     });
     a.input(b"echo consistent#\r");

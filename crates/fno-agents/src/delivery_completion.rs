@@ -3,7 +3,6 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -387,13 +386,9 @@ pub fn emit_verdict(
         "source": "target",
         "data": data,
     });
-    let Ok(mut line) = serde_json::to_vec(&envelope) else {
-        return false;
-    };
-    line.push(b'\n');
-    let durable = append(project_events, &line);
+    let durable = append(project_events, &envelope);
     if project_events != global_events {
-        let _ = append(global_events, &line);
+        let _ = append(global_events, &envelope);
     }
     durable
 }
@@ -414,39 +409,19 @@ pub fn emit_terminal(
             "message": message
         },
     });
-    let Ok(mut line) = serde_json::to_vec(&envelope) else {
-        return false;
-    };
-    line.push(b'\n');
-    let durable = append(project_events, &line);
+    let durable = append(project_events, &envelope);
     if project_events != global_events {
-        let _ = append(global_events, &line);
+        let _ = append(global_events, &envelope);
     }
     durable
 }
 
-fn append(path: &Path, line: &[u8]) -> bool {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(mut file) => match file.write_all(line) {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!(
-                    "delivery completion: append {} failed: {error}",
-                    path.display()
-                );
-                false
-            }
-        },
+fn append(path: &Path, event: &Value) -> bool {
+    match crate::claims::append_event_line(path, event, std::time::Duration::from_secs(2)) {
+        Ok(()) => true,
         Err(error) => {
             eprintln!(
-                "delivery completion: open {} failed: {error}",
+                "delivery completion: append {} failed: {error}",
                 path.display()
             );
             false

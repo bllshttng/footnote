@@ -151,11 +151,11 @@ When marking a task BLOCKED, scan remaining waves for dependent tasks:
 
 ```bash
 fno event emit --type builder_step \
-  -d '{"tried":"<what the first attempt did>","found":"<why it failed>","fix":"<what changed on retry>","outcome":"worked|failed|abandoned"}' \
+  -d '{"node_id":"<current node id>","tried":"<what the first attempt did>","found":"<why it failed>","fix":"<what changed on retry>","outcome":"worked|failed|abandoned"}' \
   || echo "warning: builder_step crumb not recorded (continuing)" >&2
 ```
 
-Truncate `tried`/`found`/`fix` to ~500 chars each; `tried`/`outcome` required, `found`/`fix` optional. Degrade, never block.
+Truncate `tried`/`found`/`fix` to ~500 chars each. `node_id`/`tried`/`outcome` required, `found`/`fix` optional. Degrade, never block.
 
 ## Partial Wave Failure (Detailed)
 

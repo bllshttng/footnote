@@ -62,6 +62,18 @@ gates:
 
 event_types:
 
+  - name: event_migration_landed
+    retention: durable
+    description: "A worktree-local journal segment landed in the canonical journal. Its deterministic migration id survives GC rewrites so crash recovery cannot replay the segment after later appends."
+    sources: [migration]
+    data:
+      required: [migration_id]
+      properties:
+        migration_id:
+          type: string
+          description: "SHA-256 over the pending backup path and bytes, stable for every retry of that migration."
+    consumers: [scripts/setup/setup-worktree.sh]
+
   - name: phase_transition
     description: "A gate flipped to true (gate_bearing=true) OR an audit-only phase boundary crossed (gate_bearing=false)."
     sources: [target, megawalk, fno-loop, hook]
@@ -191,6 +203,7 @@ event_types:
     consumers: [scripts/ci/preflight.sh, fno pr, fno worker ship, fno-agents verify-evidence]
 
   - name: review_attestation
+    retention: gate
     description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, verdict == pass, and `review_freshness(head_sha, current HEAD)` is not Stale (x-5b99/x-62a1). That last clause used to be a bare `head_sha == current HEAD`, which made addressing a review destroy the proof the review happened - a mandatory pre-merge rebase cost a full re-review even though it changed no code. Freshness is now decided from the PR's own code-diff identity, so a pass carries across a rebase or a documentation-only advance and dies on any real code change. Head-pinning is still mandatory and the fail-closed direction is unchanged: an absent head_sha, an unresolvable commit, or any git failure is Stale. An unused-import removal is a `.py` change and still costs a re-review; no classifier here parses Python. NOTE what this event does and does not prove: the review verb emits nothing itself, and this event is written by a script that records the reviewer name and verdict it was PASSED. It proves a commit was pinned, never that a review happened."
     sources: [target, subagent, hook, test]
     data:
@@ -227,6 +240,7 @@ event_types:
     consumers: [fno-agents loop-check]
 
   - name: review_coverage
+    retention: gate
     description: "Per-reviewer coverage verdicts for one gate evaluation (x-0eaf). Coverage is the count of `reviewed` verdicts across two producer axes - github_app review objects and local_attestation head-pinned passes - and is distinct from the objection predicate (a quota refusal is not a pass, and silence is not coverage). Computed at read time from observed evidence, never cached. A head-pinned local pass makes coverage known even when the bot read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed."
     sources: [target, hook]
     data:
@@ -905,6 +919,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_acquired
+    retention: ephemeral
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
     sources: [fno-loop, target, megawalk, megatron, hook]
     data:
@@ -934,6 +949,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_released
+    retention: ephemeral
     description: "A claim was released by its owner. Lock file unlinked."
     sources: [fno-loop, target, megawalk, megatron, hook]
     data:
@@ -957,6 +973,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_refreshed
+    retention: ephemeral
     description: "A TTL claim's expires_at was extended by its owner."
     sources: [fno-loop, target, megawalk, megatron]
     data:
@@ -980,6 +997,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_stale_reclaimed
+    retention: ephemeral
     description: "A stale claim was recovered by a new holder. Old file archived to .expired/."
     sources: [fno-loop, target, megawalk, megatron]
     data:
@@ -1007,6 +1025,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_force_overridden
+    retention: ephemeral
     description: "Operator administratively dropped a claim regardless of owner."
     sources: [fno-loop, hook]
     data:
@@ -1026,6 +1045,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_idempotent_reacquired
+    retention: ephemeral
     description: "Same holder re-acquired a key it already owns (resume/restart path)."
     sources: [fno-loop, target, megawalk, megatron]
     data:
@@ -1049,6 +1069,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_rebound
+    retention: ephemeral
     description: "A native target resume rebound a same-holder local claim whose prior PID was dead to the resumed durable PID (x-2ccd). Distinct from claim_idempotent_reacquired (a live same-holder refresh) and claim_stale_reclaimed (a new holder taking a stale claim)."
     sources: [fno-loop, target]
     data:
@@ -1087,6 +1108,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_clock_skew_rejected
+    retention: ephemeral
     description: "A refresh was rejected because computed expires_at landed in the past."
     sources: [fno-loop, target, megawalk, megatron]
     data:
@@ -1403,6 +1425,7 @@ event_types:
           description: "Arbitrary daemon state snapshot."
 
   - name: agent_spawned
+    retention: durable
     description: "A new PTY-managed agent worker process was spawned."
     sources: [daemon]
     data:
@@ -2134,6 +2157,7 @@ event_types:
     consumers: [operator, fno decide list]
 
   - name: agent_raw_inject
+    retention: durable
     description: "Provenance record for an UNWRAPPED injection: a payload delivered to a live session without the <fno_mail> envelope, so the transcript no longer carries the agent-authored marker. Emitted at the transport (the mail-inject binary and the mux pane send), keyed on 'payload does not start with <fno_mail', so it covers fno mail send --raw, a direct fno-agents mail-inject, and any future caller. Moves x-f26c's greppability property from the transcript to the ledger: an unwrapped injection has no envelope to grep, so this event is the audit trail. Best-effort; an events-write failure never breaks an injection."
     sources: [daemon]
     data:
@@ -2376,6 +2400,7 @@ event_types:
     consumers: [operator, megawalk]
 
   - name: node_closed
+    retention: durable
     description: "Emitted by the unified loop runtime after EVERY queue.close() call, including resume-guard closes (no dispatch occurred), normal termination closes, and per-unit cap parks. Provides per-unit close visibility in the event stream so TUI and progress-line consumers see close outcomes without polling queue state. The legacy node_complete and node_parked kinds (megawalk.py) map to this."
     sources: [loop]
     data:
@@ -2497,6 +2522,7 @@ event_types:
     consumers: [operator]
 
   - name: advance_dispatched
+    retention: durable
     description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target --no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into its own project root (cross_project=false, RC1/x-33b2; work-map resolved, recorded cwd as fallback). Surfaced in the next SessionStart reconcile reminder line."
     sources: [backlog]
     data:
@@ -2761,6 +2787,7 @@ event_types:
     consumers: [operator]
 
   - name: think_spawned
+    retention: durable
     description: "Emitted by a dispatch trigger (x-6a10 born-with-why birth, or x-122a A2 lifecycle: work-start / retro-at-done) when an away/headless session spawns a fire-and-forget context-carrying /think bg worker for the node. The node is then stamped with the spawned think's session pointer."
     sources: [backlog]
     data:
@@ -3077,7 +3104,25 @@ event_types:
           type: string
           description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
 
+  - name: operator_initiated
+    retention: durable
+    description: "An action completed while a human held a drive-authority window. The action remains successful if this best-effort audit emit fails."
+    sources: [target, backlog, hook, test]
+    data:
+      required: [action_type]
+      properties:
+        action_type:
+          type: string
+          description: "Specific operator-authored action that completed, such as backlog_done_operator_initiated."
+        task_id:
+          type: string
+          description: "Backlog node affected by the action, when applicable."
+        gate:
+          type: string
+          description: "Gate affected by the action, when applicable."
+
   - name: human_touch
+    retention: ephemeral
     description: "A human steered an agent-managed node (W4 touch telemetry). Emitted at exactly three choke points: mux keystroke injection into an agent pane (source=inject, coalesced per pane), answer-queue submission (source=answer), and a manual merge (source=merge: tty `fno pr merge` or reconcile closing an out-of-band merge). Observing never counts; steering always counts. Emit is fire-and-forget non-fatal: a failed emit must never touch the steering path."
     sources: [daemon, target, backlog, test]
     data:
@@ -3531,11 +3576,14 @@ event_types:
     consumers: [parent handle via mail bus, x-05da peek, third-party observers]
 
   - name: builder_step
-    description: "An attempt-grained builder crumb inside a fix loop: tried X, found Y, fixed with Z, outcome. The high-signal subset between task_started and task_done - a successor session (or human) reads the tail to avoid repeating a failed approach. Advisory (never gate-bearing); a failed emit degrades warn-once and never blocks the build. Legacy-tolerant envelope (NOT the x-dbaf family): payload lives entirely in data (envelope keys frozen, x-0f7f)."
+    description: "An attempt-grained builder crumb inside a fix loop: tried X, found Y, fixed with Z, outcome. The high-signal subset between task_started and task_done - a successor session (or human) reads the node-correlated tail to avoid repeating a failed approach. Advisory (never gate-bearing); a failed emit degrades warn-once and never blocks the build. Legacy-tolerant envelope (NOT the x-dbaf family): payload lives entirely in data (envelope keys frozen, x-0f7f)."
     sources: [target, subagent]
     data:
-      required: [tried, outcome]
+      required: [node_id, tried, outcome]
       properties:
+        node_id:
+          type: string
+          description: "Backlog node whose attempt produced this crumb; required because the journal is shared across worktrees."
         tried:
           type: string
           description: "What the attempt did, truncated to ~500 chars by the emit instruction."
@@ -3548,7 +3596,7 @@ event_types:
         outcome:
           type: string
           enum: [worked, failed, abandoned]
-          description: "Result of the attempt. Enum is documented for the emit instruction and the consumer's outcome match; only the two required fields are validator-enforced (advisory crumb)."
+          description: "Result of the attempt. Enum is documented for the emit instruction and the consumer's outcome match; required fields are validator-enforced (advisory crumb)."
     consumers: [target resume, self-handoff successor, postmortem]
 
   # ── approval / effect lifecycle family (x-4530) ─────────────────────────
@@ -3828,6 +3876,12 @@ event_types:
 limits:
   max_data_bytes: 65536
   data_size_encoding: compact-json-ascii-v1
+
+retention:
+  default: durable
+  minimum_ephemeral_ttl_hours: 672
+  joins:
+    - [agent_spawned, agent_raw_inject]
 
 # ── a2a status-breakpoint protocol family (x-dbaf) ──────────────────────────
 # The four types above carry an EXTENDED envelope: routable fields live at

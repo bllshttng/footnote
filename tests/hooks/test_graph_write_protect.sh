@@ -116,6 +116,25 @@ expect "fixture graph.json editable" approve \
 # ── Extra: unrelated Edit (no token) approved ─────────────────────────────────
 expect "unrelated Edit approved" approve \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/src/main.py","old_string":"a","new_string":"b"}}'
+
+# An artifact edit during this agent's drive window is allowed and emits the
+# canonical operator audit event rather than the legacy event shape.
+_DRIVE_STUB=$(mktemp -d)
+_DRIVE_EVENTS="$_DRIVE_STUB/events.jsonl"
+cat > "$_DRIVE_STUB/fno" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"sessions":[{"short_id":"drive-test"}]}'
+SH
+chmod +x "$_DRIVE_STUB/fno"
+_DRIVE_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/artifacts/proof.md","old_string":"a","new_string":"b"}}' \
+  | PATH="$_DRIVE_STUB:$PATH" FNO_AGENTS_SELF_SHORT_ID=drive-test EVENTS_FILE="$_DRIVE_EVENTS" bash "$GUARD" 2>/dev/null)
+if [[ "$_DRIVE_OUT" == "{}" ]] \
+  && jq -e 'select(.type == "operator_initiated" and .source == "hook" and .data.action_type == "artifact_edited_operator_initiated" and .data.file_path == "/proj/.fno/artifacts/proof.md")' "$_DRIVE_EVENTS" >/dev/null 2>&1; then
+  pass "artifact edit emits canonical operator audit"
+else
+  fail "artifact edit canonical operator audit: verdict=$_DRIVE_OUT events=$(cat "$_DRIVE_EVENTS" 2>/dev/null)"
+fi
+rm -rf "$_DRIVE_STUB"
 _ALLOW_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/src/main.py"}}' | bash "$GUARD")
 if [[ "$_ALLOW_OUT" == "{}" ]]; then pass "Codex allow response is an empty object"; else fail "Codex allow response: $_ALLOW_OUT"; fi
 # ── Extra: cp ONTO graph.json (destination) blocked; cp FROM graph.json approved

@@ -14,7 +14,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn python3() -> Option<String> {
@@ -135,20 +135,32 @@ fn python_lock_blocks_rust_nonblocking() {
             .unwrap();
     }
 
-    // Python holds LOCK_EX for ~1s in a background process.
+    // Python holds LOCK_EX until Rust confirms the contended acquire.
     let script = format!(
         r#"
-import fcntl, time
+import fcntl, sys
 f = open({path:?}, "a+")
 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-time.sleep(1.0)
+print("LOCKED", flush=True)
+sys.stdin.readline()
 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 "#,
         path = path.to_string_lossy()
     );
-    let mut child = Command::new(&py).arg("-c").arg(script).spawn().unwrap();
-    // Give python time to acquire.
-    std::thread::sleep(Duration::from_millis(300));
+    let mut child = Command::new(&py)
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+        &mut ready,
+    )
+    .unwrap();
+    assert_eq!(ready.trim(), "LOCKED");
 
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -165,6 +177,7 @@ fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     );
 
     // After python releases, Rust acquires (blocking) successfully.
+    child.stdin.take().unwrap().write_all(b"\n").unwrap();
     let _ = child.wait();
     file.lock()
         .expect("Rust should acquire after Python releases");

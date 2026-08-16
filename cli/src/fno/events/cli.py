@@ -1,4 +1,5 @@
 """fno event subcommands - emit and audit."""
+
 from __future__ import annotations
 
 import json
@@ -41,11 +42,13 @@ def _event_callback(
     ctx: typer.Context,
     json_output: bool = typer.Option(
         False,
-        "--json", "-J",
+        "--json",
+        "-J",
         help="Output structured JSON to stdout. Diagnostics go to stderr.",
     ),
 ) -> None:
     from fno.handoff.output import merge_json_flag
+
     merge_json_flag(ctx, json_output)
 
 
@@ -86,7 +89,7 @@ def _read_manifest_fields(state_path: Path) -> dict[str, str]:
         for key in ("session_id", "graph_node_id"):
             prefix = f"{key}:"
             if stripped.startswith(prefix):
-                val = stripped[len(prefix):].strip().strip('"').strip()
+                val = stripped[len(prefix) :].strip().strip('"').strip()
                 if val and val != "null":
                     fields.setdefault(key, val)
     return fields
@@ -215,7 +218,9 @@ def _push_to_parent(
     try:
         result = subprocess.run(
             ["fno", "mail", "send", parent, msg],
-            check=False, capture_output=True, timeout=20,
+            check=False,
+            capture_output=True,
+            timeout=20,
         )
     except FileNotFoundError:
         typer.echo("push: note: fno unavailable, skipped parent push", err=True)
@@ -238,8 +243,12 @@ def push_parent(
     event_type: str = typer.Option(..., "--type", "-t", help="blocked | run_summary"),
     run: Optional[str] = typer.Option(None, "--run", help="target-run id referenced in the notice"),
     node: Optional[str] = typer.Option(None, "--node", help="backlog node id"),
-    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="one-line reason / termination"),
-    parent: Optional[str] = typer.Option(None, "--parent", help="explicit parent handle (else registry-resolved)"),
+    reason: Optional[str] = typer.Option(
+        None, "--reason", "-R", help="one-line reason / termination"
+    ),
+    parent: Optional[str] = typer.Option(
+        None, "--parent", help="explicit parent handle (else registry-resolved)"
+    ),
 ) -> None:
     """Push a status-breakpoint notice to the parent handle (x-dbaf push leg).
 
@@ -260,7 +269,9 @@ def push_parent(
 @cli.command()
 def emit(
     ctx: typer.Context,
-    type_: str = typer.Option(..., "--type", "-t", help="canonical event type (must appear in events-schema.yaml)"),
+    type_: str = typer.Option(
+        ..., "--type", "-t", help="canonical event type (must appear in events-schema.yaml)"
+    ),
     data: Optional[str] = typer.Option(
         None,
         "--data",
@@ -280,7 +291,9 @@ def emit(
         None, "--parent", help="parent spawn-lineage handle (x-dbaf family; when spawned)"
     ),
     outcome: Optional[str] = typer.Option(
-        None, "--outcome", help="return-contract outcome (x-dbaf family; task_done/run_summary only)"
+        None,
+        "--outcome",
+        help="return-contract outcome (x-dbaf family; task_done/run_summary only)",
     ),
     project: Optional[str] = typer.Option(
         None, "--project", help="project the work belongs to (x-dbaf family; envelope coordinate)"
@@ -299,9 +312,7 @@ def emit(
     state_path: Optional[Path] = typer.Option(
         None, "--state", help="path to target-state.md (for source auto-detection)"
     ),
-    events_path: Optional[Path] = typer.Option(
-        None, "--events", help="path to events.jsonl"
-    ),
+    events_path: Optional[Path] = typer.Option(None, "--events", help="path to events.jsonl"),
 ) -> None:
     """Emit a single canonical event to events.jsonl.
 
@@ -358,6 +369,7 @@ def emit(
     # if repo discovery fails entirely (e.g. invoked outside any git repo).
     try:
         from fno.paths import resolve_repo_root
+
         repo_root = resolve_repo_root()
         default_state = repo_root / ".fno" / "target-state.md"
         default_events = repo_root / ".fno" / "events.jsonl"
@@ -560,13 +572,51 @@ def gate_escape(
 
 
 @cli.command()
+def gc(
+    ctx: typer.Context,
+    events_path: Optional[Path] = typer.Option(
+        None, "--events", help="path to events.jsonl (default: worktree root)"
+    ),
+    ttl_hours: Optional[int] = typer.Option(
+        None, "--ttl-hours", min=1, help="ephemeral retention horizon in hours"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", "-N", help="report without rewriting"),
+) -> None:
+    """Delete expired explicit-ephemeral rows while preserving all other rows."""
+    from fno.events import RETENTION_MINIMUM_TTL_HOURS, SchemaUnavailableError
+    from fno.events.gc import gc_events
+    from fno.paths import resolve_repo_root
+
+    resolved = events_path or (resolve_repo_root() / ".fno" / "events.jsonl")
+    horizon = ttl_hours if ttl_hours is not None else RETENTION_MINIMUM_TTL_HOURS
+    try:
+        result = gc_events(resolved, ttl_hours=horizon, dry_run=dry_run)
+    except (
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+        SchemaUnavailableError,
+    ) as exc:
+        typer.echo(f"error: event gc failed: {exc}", err=True)
+        raise typer.Exit(code=1)
+    payload = {**result, "events": str(resolved), "ttl_hours": horizon, "dry_run": dry_run}
+    if bool(ctx.obj and ctx.obj.get("json", False)):
+        typer.echo(json.dumps(payload))
+    else:
+        typer.echo(
+            "event gc: "
+            f"scanned={result['scanned']} deleted={result['deleted']} "
+            f"kept={result['kept']} malformed={result['malformed']}"
+        )
+
+
+@cli.command()
 def audit(
     ctx: typer.Context,
     session_id: str = typer.Option(..., "--session-id", help="session ID to audit"),
     strict: bool = typer.Option(False, "--strict", help="check for required event sequences"),
-    events_path: Optional[Path] = typer.Option(
-        None, "--events", help="path to events.jsonl"
-    ),
+    events_path: Optional[Path] = typer.Option(None, "--events", help="path to events.jsonl"),
 ) -> None:
     """Audit events for a session. Use --strict to check for gaps."""
     from fno.events.log import audit_session

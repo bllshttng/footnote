@@ -908,27 +908,40 @@ print(f"{result.msg_id} delivered ({result.delivery})")
     env["FNO_TEST_RELAY_MARKER"] = str(relay_marker)
     env["FNO_TEST_RELAY_RELEASE"] = str(relay_release)
     env["FNO_TEST_RELAY_FINISHED"] = str(relay_finished)
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=8,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=8,
+            check=False,
+        )
+    finally:
+        relay_release.touch()
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(result.stdout.splitlines()) == 1
     assert result.stdout.strip().endswith("delivered (hosted)")
     assert not bus_log_path().exists()
     marker_deadline = time.monotonic() + 2.0
-    while not relay_marker.exists() and time.monotonic() < marker_deadline:
+    while time.monotonic() < marker_deadline:
+        try:
+            if relay_marker.read_text() == "started":
+                break
+        except OSError:
+            pass
         time.sleep(0.01)
     assert relay_marker.read_text() == "started"
     assert not relay_finished.exists(), "relay finished before the CLI receipt returned"
     relay_release.write_text("release")
     finished_deadline = time.monotonic() + 2.0
-    while not relay_finished.exists() and time.monotonic() < finished_deadline:
+    while time.monotonic() < finished_deadline:
+        try:
+            if relay_finished.read_text() == "finished":
+                break
+        except OSError:
+            pass
         time.sleep(0.01)
     assert relay_finished.read_text() == "finished"
 

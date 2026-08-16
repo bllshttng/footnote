@@ -689,16 +689,15 @@ fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
 /// envelope is kind-flat with a 500-byte payload cap, either of which would
 /// break record parity for these events.
 ///
-/// Serializes on the cross-language `events.jsonl.lock.d` mkdir mutex (the
-/// convention `fno.events.append_event` and the shell writers share), with a
-/// short bounded wait: this runs on daemon hot paths, so a wedged lock means
-/// we log and skip rather than block. The lockfile write is authoritative;
-/// this log is observability only.
+/// Serializes on the cross-language `events.jsonl.lock.d` mkdir mutex shared
+/// with `fno.events.append_event` and the loop Journal. The shell writers do
+/// not take this lock and instead cap their fixed-shape serialized lines below
+/// the atomic append bound. This path uses a short bounded wait because it runs
+/// on daemon hot paths; a wedged lock logs and skips rather than blocking. The
+/// lockfile write is authoritative; this log is observability only.
 fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String, Value>) {
-    let base = events_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let events_path = base.join(".fno/events.jsonl");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let events_path = claim_events_path(events_dir, &cwd);
     let event = json!({
         "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         "type": type_name,
@@ -708,6 +707,13 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
     if let Err(e) = append_event_line(&events_path, &event, Duration::from_secs(2)) {
         eprintln!("claims: failed to emit {type_name:?}: {e}");
     }
+}
+
+fn claim_events_path(events_dir: Option<&Path>, cwd: &Path) -> PathBuf {
+    events_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| crate::paths::worktree_repo_root(cwd))
+        .join(".fno/events.jsonl")
 }
 
 /// Age past which a mkdir mutex dir is a corpse left by a killed holder.
@@ -758,6 +764,7 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     // path, so what we move may be a LIVE lock. The owner token is the identity
     // check (inode recycling fooled the old inode+mtime compare).
     let before_token = read_owner(lock_dir);
+    let before_modified = before.modified().ok();
     // Unique per attempt (see the Python twin): one name per pid means a reap
     // dir left by a failed cleanup collides forever, silently disabling every
     // future steal by this process.
@@ -773,9 +780,10 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
     ));
     match std::fs::rename(lock_dir, &reaped) {
         Ok(()) => {
-            // A live lock swapped in between the age check and the rename
-            // carries a different owner token: put it back and lose properly.
-            if !same_owner(&reaped, &before_token) {
+            // A live lock swapped in carries a different owner token; a holder
+            // that renewed after the age read keeps its token but changes the
+            // directory mtime. Either signal means put it back and lose.
+            if !same_stale_lease(&reaped, &before_token, before_modified) {
                 // A restored dir was disturbed once already: its holder may
                 // have released into the gap, leaving a lock nobody will
                 // remove. A fresh mtime would shield that orphan for the full
@@ -919,6 +927,14 @@ fn same_owner(path: &Path, before_token: &str) -> bool {
     after.is_empty() || after == before_token
 }
 
+fn same_stale_lease(path: &Path, before_token: &str, before_modified: Option<SystemTime>) -> bool {
+    same_owner(path, before_token)
+        && std::fs::symlink_metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            == before_modified
+}
+
 /// Delete a reaped mutex, usually a directory but possibly a symlink
 /// (`remove_dir_all` fails on one).
 fn remove_reaped(path: &Path) {
@@ -935,31 +951,75 @@ fn remove_reaped(path: &Path) {
     }
 }
 
-fn append_event_line(
+pub(crate) fn append_event_line(
     events_path: &Path,
     event: &Value,
     lock_timeout: Duration,
 ) -> Result<(), String> {
-    if let Some(parent) = events_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
+    line.push(b'\n');
+    loop {
+        // Setup can replace a local journal with a canonical-journal symlink
+        // while this writer waits on the old mutex. Re-resolve after acquiring
+        // and retry whenever the leaf changed during that handoff.
+        let resolved_path =
+            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+        if let Some(parent) = resolved_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let lock_dir = resolved_path.with_file_name(format!(
+            "{}.lock.d",
+            resolved_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "events.jsonl".into())
+        ));
+        let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
+            .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
+        let current_path =
+            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+        if current_path != resolved_path {
+            release_dir_mutex(&lock_dir, &token);
+            continue;
+        }
+        let res = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&resolved_path)
+            .and_then(|mut f| f.write_all(&line))
+            .map_err(|e| e.to_string());
+        release_dir_mutex(&lock_dir, &token);
+        return res;
     }
-    let lock_dir = events_path.with_file_name(format!(
-        "{}.lock.d",
-        events_path
+}
+
+fn event_maintenance_dir(events_path: &Path) -> PathBuf {
+    let resolved_path =
+        std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+    resolved_path.with_file_name(format!(
+        "{}.gc.d",
+        resolved_path
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "events.jsonl".into())
-    ));
-    let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
-        .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
-    let res = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(events_path)
-        .and_then(|mut f| writeln!(f, "{event}"))
-        .map_err(|e| e.to_string());
-    release_dir_mutex(&lock_dir, &token);
-    res
+    ))
+}
+
+pub(crate) fn event_maintenance_active(events_path: &Path) -> bool {
+    std::fs::symlink_metadata(event_maintenance_dir(events_path)).is_ok()
+}
+
+pub(crate) fn wait_for_event_maintenance(events_path: &Path) {
+    let maintenance_dir = event_maintenance_dir(events_path);
+    loop {
+        if std::fs::symlink_metadata(&maintenance_dir).is_err() {
+            return;
+        }
+        if let Some(token) = acquire_dir_mutex(&maintenance_dir, Duration::from_secs(2), true) {
+            release_dir_mutex(&maintenance_dir, &token);
+            return;
+        }
+    }
 }
 
 /// Shared data fields for claim events (mirrors `events._common`, including
@@ -1552,6 +1612,24 @@ mod tests {
         text.lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn default_claim_events_path_resolves_from_repo_subdirectory() {
+        let td = TempDir::new().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(td.path())
+            .status()
+            .unwrap()
+            .success());
+        let nested = td.path().join("crates/fno/src");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            claim_events_path(None, &nested),
+            td.path().canonicalize().unwrap().join(".fno/events.jsonl")
+        );
     }
 
     // ---- lease renewal (x-ba4b) -----------------------------------------
@@ -2400,6 +2478,46 @@ mod tests {
     }
 
     #[test]
+    fn event_append_retries_when_setup_retargets_leaf_while_waiting() {
+        let td = TempDir::new().unwrap();
+        let local = td.path().join("worktree-events.jsonl");
+        std::fs::write(&local, b"").unwrap();
+        let canonical = td.path().join("canonical-events.jsonl");
+        std::fs::write(&canonical, b"").unwrap();
+        let local_lock = td.path().join("worktree-events.jsonl.lock.d");
+        let canonical_lock = td.path().join("canonical-events.jsonl.lock.d");
+        std::fs::create_dir(&local_lock).unwrap();
+        std::fs::create_dir(&canonical_lock).unwrap();
+
+        let writer_path = local.clone();
+        let writer = std::thread::spawn(move || {
+            append_event_line(
+                &writer_path,
+                &json!({"ts": "t", "type": "handoff"}),
+                Duration::from_secs(5),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::rename(&local, td.path().join("local-backup.jsonl")).unwrap();
+        std::os::unix::fs::symlink(&canonical, &local).unwrap();
+        std::fs::remove_dir_all(&local_lock).unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            std::fs::metadata(&canonical).unwrap().len(),
+            0,
+            "writer bypassed the canonical mutex after the symlink handoff"
+        );
+
+        std::fs::remove_dir_all(&canonical_lock).unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&canonical).unwrap().lines().count(),
+            1
+        );
+    }
+
+    #[test]
     fn release_after_steal_leaves_new_holder_intact() {
         // AC2: a holder whose lock was stolen mid-write must not delete the new
         // holder's lock on release. This is the wrongful-delete vector the owner
@@ -2427,6 +2545,22 @@ mod tests {
         // The new holder releases cleanly (token matches -> remove_dir_all).
         release_dir_mutex(&lock, &new_holder);
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn renewal_after_age_read_is_not_classified_as_stale() {
+        let td = TempDir::new().unwrap();
+        let lock = td.path().join("events.jsonl.lock.d");
+        let token = acquire_dir_mutex(&lock, Duration::from_secs(5), true).unwrap();
+        age_dir(&lock, STALE_MUTEX_STEAL.as_secs() + 60);
+        let before = std::fs::symlink_metadata(&lock).unwrap();
+        let before_modified = before.modified().ok();
+
+        age_dir(&lock, 0);
+        assert_eq!(read_owner(&lock), token);
+        assert!(!same_stale_lease(&lock, &token, before_modified));
+
+        release_dir_mutex(&lock, &token);
     }
 
     #[test]

@@ -443,7 +443,7 @@ class TestCursorConcurrency:
         for p in procs:
             p.start()
         for p in procs:
-            p.join(timeout=20)
+            p.join(timeout=30)
             assert p.exitcode == 0, f"worker failed: {p.exitcode}"
 
         # 20 advances at sticky=1, N=10 walks the index 20 times.

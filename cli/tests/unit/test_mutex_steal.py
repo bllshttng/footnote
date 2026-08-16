@@ -6,6 +6,7 @@ Covers the design-doc ACs for the two mutexes that share the disease:
 The live incident these guard against: a process died holding both, and every
 waiter spun against the corpse for eight days.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,7 +28,13 @@ from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import now_ms
 from fno.claims.types import Claim
 from fno.events import append_event, mission_started
-from fno.mutex import STALE_MUTEX_STEAL_S, acquire_dir_mutex, release_dir_mutex, steal_if_stale
+from fno.mutex import (
+    STALE_MUTEX_STEAL_S,
+    acquire_dir_mutex,
+    release_dir_mutex,
+    renew_dir_mutex,
+    steal_if_stale,
+)
 
 HOLDER_A = "target-session:sid-a"
 HOLDER_B = "target-session:sid-b"
@@ -69,16 +76,12 @@ def test_threshold_matches_the_rust_constant():
     constant would leave every other test green while the two implementations
     disagreed about which locks are corpses.
     """
-    root = next(
-        (p for p in Path(__file__).resolve().parents if (p / "crates").is_dir()), None
-    )
+    root = next((p for p in Path(__file__).resolve().parents if (p / "crates").is_dir()), None)
     if root is None:
         pytest.skip("crates/ not present (installed-wheel test run)")
 
     src = (root / "crates/fno-agents/src/claims.rs").read_text(encoding="utf-8")
-    m = re.search(
-        r"const STALE_MUTEX_STEAL: Duration = Duration::from_secs\((\d+)\)", src
-    )
+    m = re.search(r"const STALE_MUTEX_STEAL: Duration = Duration::from_secs\((\d+)\)", src)
     assert m, "STALE_MUTEX_STEAL not found in claims.rs (renamed or reshaped?)"
     assert int(m.group(1)) == STALE_MUTEX_STEAL_S
 
@@ -323,6 +326,18 @@ class TestStealHelper:
 
 
 class TestEventsMutex:
+    def test_default_event_path_anchors_to_repo_root(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        subdir = repo / "nested" / "source"
+        subdir.mkdir(parents=True)
+        monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+        monkeypatch.chdir(subdir)
+
+        append_event(_event())
+
+        assert (repo / ".fno/events.jsonl").exists()
+        assert not (subdir / ".fno/events.jsonl").exists()
+
     def test_AC1_HP_corpse_stolen_and_event_lands(self, tmp_path):
         events = tmp_path / "events.jsonl"
         lock = tmp_path / "events.jsonl.lock.d"
@@ -341,6 +356,44 @@ class TestEventsMutex:
 
         with pytest.raises(TimeoutError, match="events.jsonl lock timeout"):
             append_event(_event(), events_path=events, lock_timeout_seconds=1)
+
+    def test_symlinked_journal_uses_target_mutex(self, tmp_path):
+        canonical = tmp_path / "canonical-events.jsonl"
+        canonical.touch()
+        linked = tmp_path / "worktree-events.jsonl"
+        linked.symlink_to(canonical)
+        (tmp_path / "canonical-events.jsonl.lock.d").mkdir()
+
+        with pytest.raises(TimeoutError, match="canonical-events.jsonl.lock.d"):
+            append_event(_event(), events_path=linked, lock_timeout_seconds=0.1)
+
+        assert canonical.read_text() == ""
+
+    def test_journal_retries_when_setup_retargets_leaf_while_waiting(self, tmp_path, monkeypatch):
+        local = tmp_path / "worktree-events.jsonl"
+        local.touch()
+        canonical = tmp_path / "canonical-events.jsonl"
+        canonical.touch()
+        acquired: list[Path] = []
+
+        def acquire(lock_dir: Path, timeout_seconds: float) -> str:
+            acquired.append(lock_dir)
+            if len(acquired) == 1:
+                local.unlink()
+                local.symlink_to(canonical)
+            return f"token-{len(acquired)}"
+
+        monkeypatch.setattr("fno.events.acquire_dir_mutex", acquire)
+        monkeypatch.setattr("fno.events.release_dir_mutex", lambda *_: None)
+
+        append_event(_event(), events_path=local, lock_timeout_seconds=1)
+
+        assert acquired == [
+            tmp_path / "worktree-events.jsonl.lock.d",
+            tmp_path / "canonical-events.jsonl.lock.d",
+        ]
+        assert local.is_symlink()
+        assert canonical.read_text().count("\n") == 1
 
     def test_AC3_FR_concurrent_stealers_both_land(self, tmp_path):
         """Exactly one rename wins; both events land as whole lines.
@@ -439,6 +492,50 @@ class TestEventsMutex:
         release_dir_mutex(lock, new_token)
         assert not lock.exists()
 
+    def test_long_holder_can_renew_its_lease(self, tmp_path):
+        lock = tmp_path / "events.jsonl.lock.d"
+        token = acquire_dir_mutex(lock, 5)
+        assert token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+
+        assert renew_dir_mutex(lock, token) is True
+        assert time.time() - lock.lstat().st_mtime < STALE_MUTEX_STEAL_S
+
+        release_dir_mutex(lock, token)
+
+    def test_renewal_between_age_check_and_rename_is_not_stolen(
+        self, tmp_path, monkeypatch
+    ):
+        lock = tmp_path / "events.jsonl.lock.d"
+        token = acquire_dir_mutex(lock, 5)
+        assert token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+        real_rename = mutex.os.rename
+
+        def renew_then_rename(source, destination):
+            assert renew_dir_mutex(source, token) is True
+            return real_rename(source, destination)
+
+        monkeypatch.setattr(mutex.os, "rename", renew_then_rename)
+
+        assert steal_if_stale(lock) is False
+        assert lock.exists()
+        assert (lock / "owner").read_text() == token
+
+        release_dir_mutex(lock, token)
+
+    def test_non_owner_cannot_renew_a_lease(self, tmp_path):
+        lock = tmp_path / "events.jsonl.lock.d"
+        token = acquire_dir_mutex(lock, 5)
+        assert token is not None
+        _age(lock, STALE_MUTEX_STEAL_S + 60)
+        stale_mtime = lock.lstat().st_mtime
+
+        assert renew_dir_mutex(lock, "different-owner") is False
+        assert lock.lstat().st_mtime == stale_mtime
+
+        release_dir_mutex(lock, token)
+
 
 class TestRecoveryMutex:
     def _write_stale_claim(self, tmp_path: Path, key: str) -> Path:
@@ -487,8 +584,7 @@ class TestRecoveryMutex:
         _wait_for_recovery_release(recovery_lock)
 
         assert time.monotonic() - started >= 1.0, (
-            "waiter returned instantly on a dangling mutex; the caller would "
-            "recurse without pause"
+            "waiter returned instantly on a dangling mutex; the caller would recurse without pause"
         )
 
     def test_AC4_EDGE_fresh_recovery_lock_is_respected(self, tmp_path):

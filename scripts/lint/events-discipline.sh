@@ -3,8 +3,8 @@
 #
 # Three rules to keep the events.jsonl substrate honest:
 #
-#   bypass-echo:        bare `echo {...} >> .fno/events.jsonl`
-#                       outside scripts/migrate-events-shape.py
+#   bypass-append:      direct shell `>> .../.fno/events.jsonl` outside the
+#                       common event helper
 #   soft-outside-hooks: `--soft` flag in cli/ or skills/ (allowed under hooks/)
 #   unwrapped-set-gate: `bash .../set-gate.sh ...` not wrapped in
 #                       `if !`/`||`/`&&` and not under `set -e` at file scope
@@ -33,26 +33,24 @@ cd "$REPO_ROOT" || {
 violations=0
 remediation() { printf '  remediation: %s\n' "$1" >&2; }
 
-# Rule 1: bypass-echo
-# Match an `echo "{...}" >> .*events.jsonl` line. We require a `}` in the
-# echoed content as a heuristic to skip e.g. logging/print lines that
-# contain "events.jsonl" but are not JSON appends.
+# Rule 1: bypass-append
+# Match any executable shell line that appends directly to a literal
+# events.jsonl path. The common helper appends through an events_path variable,
+# so every literal append is a reachable bypass regardless of echo/printf/cat.
 #
 # Exclusions:
-#   - scripts/migrate-events-shape.py (legitimate rewrite path)
 #   - scripts/lint/events-discipline.sh (this lint itself; the diagnostic
 #     string contains the same pattern so a substring match would self-flag)
 #   - tests/ (lint fixtures + test-bash-validator harnesses)
 while IFS= read -r hit; do
     [[ -z "$hit" ]] && continue
-    echo "events bypass at $hit: bare 'echo {...} >> .fno/events.jsonl' write" >&2
-    remediation "use scripts/lib/events.sh::emit_event_raw instead"
+    echo "events bypass at $hit: direct shell append to .fno/events.jsonl" >&2
+    remediation "use scripts/lib/events.sh::emit_event_raw or _append_bounded_event instead"
     violations=$((violations + 1))
 done < <(
-    grep -rEn '^[[:space:]]*echo[[:space:]]+["'"'"'].*\}.*>>[[:space:]]*[^[:space:]]*events\.jsonl' \
-        --include='*.sh' --include='*.bash' --include='*.py' --include='*.md' \
-        cli/ skills/ scripts/ 2>/dev/null \
-        | grep -v 'scripts/migrate-events-shape.py' \
+    grep -rEn '^[[:space:]]*[^#].*>>[[:space:]]*.*([/"]events\.jsonl|\$\{?EVENTS(_LOG|_FILE)?\}?)' \
+        --include='*.sh' --include='*.bash' \
+        cli/ skills/ scripts/ hooks/ 2>/dev/null \
         | grep -v 'scripts/lint/events-discipline.sh' \
         | grep -v '/tests/' \
         || true

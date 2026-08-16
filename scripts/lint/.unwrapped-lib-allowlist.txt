@@ -8,6 +8,10 @@ fno-python.sh
 flock.sh
 events.sh
 events-validate.sh
+# Sourced by scripts/lib/events.sh and the hook emitters for the shared
+# GC/maintenance rendezvous (owner-token markers, shell-writer registration).
+# Pure sourcing library; no standalone CLI of its own.
+events-lock.sh
 state-parser.sh
 transcript-parser.sh
 worktree-manager.sh

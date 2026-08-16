@@ -27,7 +27,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
 use tempfile::TempDir;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -503,6 +504,158 @@ fn journal_write_failure_is_fatal() {
         result.is_err(),
         "journal write failure to project path must be fatal (Err)"
     );
+}
+
+#[test]
+fn journal_waits_for_shared_dir_mutex() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("events.jsonl.lock.d");
+    fs::create_dir(&lock_dir).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let thread_barrier = Arc::clone(&barrier);
+    let thread_events = project_events.clone();
+    let handle = std::thread::spawn(move || {
+        let journal = Journal::new_raw(thread_events, global_events);
+        thread_barrier.wait();
+        journal.append(
+            "mutex_probe",
+            serde_json::json!({"payload": "x".repeat(8_000)}),
+        )
+    });
+
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !project_events.exists(),
+        "Journal appended while the cross-language events mutex was held"
+    );
+
+    fs::remove_dir_all(lock_dir).unwrap();
+    handle.join().unwrap().unwrap();
+    let lines = read_jsonl(&project_events);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["type"], "mutex_probe");
+}
+
+#[test]
+fn journal_waits_through_expected_maintenance_contention() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("events.jsonl.lock.d");
+    let maintenance_dir = dir.path().join("events.jsonl.gc.d");
+    fs::create_dir(&lock_dir).unwrap();
+    fs::create_dir(&maintenance_dir).unwrap();
+
+    let handle = std::thread::spawn(move || {
+        Journal::new_raw(project_events, global_events)
+            .append("maintenance_probe", serde_json::json!({}))
+    });
+
+    std::thread::sleep(Duration::from_millis(2_300));
+    assert!(
+        !handle.is_finished(),
+        "expected maintenance contention aborted the active loop"
+    );
+
+    fs::remove_dir_all(lock_dir).unwrap();
+    fs::remove_dir_all(maintenance_dir).unwrap();
+    handle.join().unwrap().unwrap();
+    assert_eq!(
+        count_events(&dir.path().join("events.jsonl"), "maintenance_probe"),
+        1
+    );
+}
+
+#[test]
+fn journal_retries_when_maintenance_marker_disappears_near_timeout() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("events.jsonl.lock.d");
+    let maintenance_dir = dir.path().join("events.jsonl.gc.d");
+    fs::create_dir(&lock_dir).unwrap();
+    fs::create_dir(&maintenance_dir).unwrap();
+
+    let handle = std::thread::spawn(move || {
+        Journal::new_raw(project_events, global_events)
+            .append("maintenance_handoff_probe", serde_json::json!({}))
+    });
+
+    std::thread::sleep(Duration::from_millis(1_900));
+    fs::remove_dir_all(maintenance_dir).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    fs::remove_dir_all(lock_dir).unwrap();
+
+    handle.join().unwrap().unwrap();
+    assert_eq!(
+        count_events(
+            &dir.path().join("events.jsonl"),
+            "maintenance_handoff_probe"
+        ),
+        1
+    );
+}
+
+#[test]
+fn symlinked_journal_waits_for_target_mutex() {
+    let dir = TempDir::new().unwrap();
+    let canonical_events = dir.path().join("canonical-events.jsonl");
+    fs::write(&canonical_events, b"").unwrap();
+    let worktree_events = dir.path().join("worktree-events.jsonl");
+    std::os::unix::fs::symlink(&canonical_events, &worktree_events).unwrap();
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("canonical-events.jsonl.lock.d");
+    fs::create_dir(&lock_dir).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let thread_barrier = Arc::clone(&barrier);
+    let handle = std::thread::spawn(move || {
+        let journal = Journal::new_raw(worktree_events, global_events);
+        thread_barrier.wait();
+        journal.append("symlink_mutex_probe", serde_json::json!({}))
+    });
+
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(fs::metadata(&canonical_events).unwrap().len(), 0);
+
+    fs::remove_dir_all(lock_dir).unwrap();
+    handle.join().unwrap().unwrap();
+    assert_eq!(count_events(&canonical_events, "symlink_mutex_probe"), 1);
+}
+
+#[test]
+fn journal_project_lock_timeout_is_fatal() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
+    let journal = Journal::new_raw(project_events, global_events);
+
+    let result = journal.append("timeout_probe", serde_json::json!({}));
+    assert!(
+        matches!(result, Err(LoopError::Journal(ref message)) if message.contains("lock timeout")),
+        "project journal lock timeout must stop the walk loudly: {result:?}"
+    );
+}
+
+#[test]
+fn journal_global_lock_timeout_is_best_effort() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+    fs::create_dir(dir.path().join("global-events.jsonl.lock.d")).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events.clone());
+
+    journal
+        .append("timeout_probe", serde_json::json!({}))
+        .expect("a blocked global mirror must not fail the project journal");
+    assert_eq!(count_events(&project_events, "timeout_probe"), 1);
+    assert!(!global_events.exists());
 }
 
 // ── test 9: envelope shape ────────────────────────────────────────────────────

@@ -26,20 +26,19 @@ See [cross-project.md](cross-project.md) for details on the cross-project mocks/
 
 ## Read the builder crumb trail (before re-deriving context)
 
-A prior session (or a self-handoff predecessor) may have left `builder_step`
-crumbs in the worktree-local `.fno/events.jsonl` - the tried/found/fixed/outcome
-trail from its fix and revision rounds. Read the tail before re-deriving anything
-so a failed approach is not repeated. events.jsonl is worktree-local and
-single-node, so no node filter is needed; a malformed or rotated line is skipped,
-never fatal.
+A prior session (or a self-handoff predecessor) can leave `builder_step` crumbs in the shared `.fno/events.jsonl`. That is the tried/found/fixed/outcome trail from its fix and revision rounds.
+
+Read the current node's tail before re-deriving anything so a failed approach is not repeated. A malformed, rotated, or legacy uncorrelated row is skipped, never fatal.
 
 ```bash
 EVENTS=".fno/events.jsonl"
+NODE_ID="$(awk '/^graph_node_id:[[:space:]]*/ { sub(/^graph_node_id:[[:space:]]*/, ""); gsub(/["'\''\r]/, ""); print; exit }' .fno/target-state.md)"
 # Parse each line independently (`-R` + `fromjson?`): a malformed or non-object
 # line mid-file is skipped, not fatal - a bare `jq -c 'select(...)'` aborts the
 # whole stream at the first bad line and silently drops every crumb after it.
 CRUMBS="$( { [ -f "$EVENTS.1" ] && cat "$EVENTS.1"; [ -f "$EVENTS" ] && cat "$EVENTS"; } 2>/dev/null \
-  | jq -Rc 'fromjson? | select(.type? == "builder_step")' 2>/dev/null )"
+  | jq -Rc --arg node "$NODE_ID" \
+    'fromjson? | select(.type? == "builder_step" and .data.node_id? == $node)' 2>/dev/null )"
 N="$(printf '%s' "$CRUMBS" | grep -c . || true)"
 if [ "${N:-0}" -gt 0 ]; then
   LAST="$(printf '%s\n' "$CRUMBS" | tail -1 | jq -r '.data.outcome // "?"' 2>/dev/null)"

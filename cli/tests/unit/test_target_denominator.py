@@ -127,7 +127,8 @@ def test_deliverables_flag_reaches_the_manifest_writer_env(
         returncode = 0
 
     def _fake_run(cmd, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        if "env" in kwargs:
+            captured["env"] = kwargs["env"]
         return _Proc()
 
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "absent.yaml"))
@@ -163,7 +164,8 @@ def test_omitting_deliverables_does_not_set_the_env_carrier(
         returncode = 0
 
     def _fake_run(cmd, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        if "env" in kwargs:
+            captured["env"] = kwargs["env"]
         return _Proc()
 
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "absent.yaml"))
@@ -342,4 +344,3 @@ def test_init_never_refuses_a_node_with_a_bound_plan(
     r = CliRunner().invoke(app, ["target", "init", "--plan-path", str(tmp_path / "plan.md")])
     assert r.exit_code == 0, r.output
     assert "no scope denominator" not in r.output
-
