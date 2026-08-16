@@ -44,14 +44,19 @@ def test_body_stays_within_the_cap_with_a_long_need():
     assert "Blocked on:" in c.body
 
 
-def test_cv_id_quoted_in_a_node_resolves_instead_of_filing():
+def test_a_bare_cv_id_mention_parks_rather_than_resolving():
+    """x-6c67 shape: a node whose prose merely NAMES a carve-out id (a specimen
+    section, a leak report) is not tracking that work. Resolving on a mention
+    let `--apply` consume rows whose work never shipped; the row now parks in
+    review naming the mentioning node."""
     cv = _cv("cv-11112222", "migrate the spawn adapters")
     nodes = [{"id": "x-1234", "title": "spawn seam", "details": "tracks cv-11112222"}]
 
     (item,) = plan_sweep([cv], nodes)
 
-    assert item.disposition == DISPOSITION_RESOLVE
+    assert item.disposition == DISPOSITION_REVIEW
     assert item.node_id == "x-1234"
+    assert "citation is not ownership" in (item.match_reason or "")
 
 
 def test_a_bare_description_hash_parks_rather_than_consuming():
@@ -311,6 +316,19 @@ def test_cv_id_scan_does_not_match_an_unrelated_node():
     node = {"id": "x-other", "title": "unrelated", "details": "cites cv-99999999"}
 
     assert cv_ids_cited_in_nodes([node], ["cv-cross001"]) == set()
+
+
+def test_cv_id_scan_requires_the_structured_cite_not_a_bare_mention():
+    """The helper counts OWNERSHIP (the ``source `cv-...` `` cite a filing
+    writes), not presence. A bare mention - the x-6c67 citations - must not
+    make the PR-scoped harvest skip filing either."""
+    from fno.retro.dedup import cv_ids_cited_in_nodes
+
+    mention = {"id": "x-6c67", "title": "ambient state", "details": "cv-cross001 leaked into the sandbox"}
+    owner = {"id": "x-home", "title": "work", "details": "Source: source `cv-cross001`"}
+
+    assert cv_ids_cited_in_nodes([mention], ["cv-cross001"]) == set()
+    assert cv_ids_cited_in_nodes([owner], ["cv-cross001"]) == {"cv-cross001"}
 
 
 def test_render_never_prints_a_count_for_an_unreadable_ledger():

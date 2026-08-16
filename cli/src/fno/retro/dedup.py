@@ -66,10 +66,22 @@ def assign_hashes(candidates: Iterable[Candidate]) -> list[Candidate]:
     return out
 
 
+def cv_cite_needle(cv_id: str) -> str:
+    """The structured cite string a FILING writes for ``cv_id``.
+
+    ``build_body`` emits ``source `cv-XXXXXXXX``` inside a filed node's
+    Source line - one shape, one writer. Ownership, not mention: a node whose
+    prose merely names a cv-id (x-6c67's descriptive citations) is not
+    tracking that work, and consuming its ledger row on a mention would
+    silently drop work that never shipped.
+    """
+    return f"source `{cv_id}`"
+
+
 def cv_ids_cited_in_nodes(
     nodes: Iterable[dict], cv_ids: Iterable[str]
 ) -> "set[str]":
-    """Which of ``cv_ids`` are already cited verbatim by some node.
+    """Which of ``cv_ids`` a node owns, by the structured cite a filing writes.
 
     The content-hash key is ``{source_pr}:{hash}``, so a node the PR-independent
     sweep filed (``source_pr=None``) and the same finding arriving later through
@@ -77,16 +89,18 @@ def cv_ids_cited_in_nodes(
     work and both file. The cv-id is the one identifier stable across that
     boundary: every carve-out node cites it, whichever harvest filed it. Shared
     by both harvest paths so neither can drift into filing what the other
-    already tracks.
+    already tracks. A cite means the needle from :func:`cv_cite_needle`, never
+    a bare id mention.
     """
     wanted = {str(c) for c in cv_ids if c}
     if not wanted:
         return set()
+    needles = {cv: cv_cite_needle(cv) for cv in wanted}
     found: set[str] = set()
     for node in nodes:
         text = f"{node.get('title') or ''}\n{node.get('details') or ''}"
         for cv in wanted - found:
-            if cv in text:
+            if needles[cv] in text:
                 found.add(cv)
         if found == wanted:
             break

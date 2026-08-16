@@ -319,9 +319,12 @@ def list_carveouts(
             need = r.get("need")
             first = (str(r.get("description") or "").splitlines() or [""])[0]
             suffix = f"  (need: {need})" if need else ""
+            # The owning node is whose close this row blocks (the gate is
+            # per-node); unattributed rows block no close, so show the split.
+            owner = f"  (node: {r.get('node')})" if r.get("node") else ""
             cid = r.get("id") or "?"
             kind_val = r.get("kind") or "?"
-            typer.echo(f"{cid} [{kind_val}] {first}{suffix}")
+            typer.echo(f"{cid} [{kind_val}] {first}{suffix}{owner}")
 
 
 @carveout_app.command(

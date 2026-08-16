@@ -400,10 +400,27 @@ class Ritual:
                 closed = [c.get("node_id") for c in (obj.get("closed") or [])
                           if isinstance(c, dict) and c.get("node_id")]
                 self.ctx.node_ids.extend(closed)
-                detail = f"closed={len(closed)}"
+                held = [h.get("node_id") for h in (obj.get("promise_unmet") or [])
+                        if isinstance(h, dict) and h.get("node_id")]
+                if held:
+                    # Held open, not clean: the PR merged but the promise gate
+                    # refused the close (x-40be). status=ok detail=closed=0
+                    # covered "held seven nodes open"; deferred keeps the work
+                    # visibly owed and names who holds it.
+                    ids = ", ".join(str(h) for h in held[:5])
+                    more = f" +{len(held) - 5}" if len(held) > 5 else ""
+                    self._emit(
+                        "reconcile",
+                        _DEFERRED,
+                        f"closed={len(closed)} held_open={len(held)}: {ids}{more}",
+                    )
+                elif closed or (obj.get("candidates") or []):
+                    self._emit("reconcile", _OK, f"closed={len(closed)}")
+                else:
+                    self._emit("reconcile", _OK, "no-drift")
             except json.JSONDecodeError:
                 detail = "no-op" if not (r.stdout or "").strip() else "non-json"
-            self._emit("reconcile", _OK, detail)
+                self._emit("reconcile", _OK, detail)
         else:
             self._emit("reconcile", _FAILED, f"exit={r.returncode}")
         # Step 2a: plan frontmatter. Idempotent.
