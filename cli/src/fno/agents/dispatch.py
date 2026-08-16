@@ -6594,17 +6594,19 @@ def _queue_durable_fallback(
             to=durable_recipient,
             id=msg_id,
         )
-    durable_body = message
-    if mail_ctx is not None:
-        durable_body = wrap_fno_mail(
-            message,
-            from_=mail_ctx.from_,
-            harness=mail_ctx.harness,
-            model=mail_ctx.model,
-            node=mail_ctx.node,
-            to=mail_ctx.to,
-            id=mail_ctx.id,
-        )
+    # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
+    # fills one whenever the caller passed none, so the envelope is always
+    # wrapped from here on. The guard that used to stand here read as a real
+    # unwrapped-body path and there is none.
+    durable_body = wrap_fno_mail(
+        message,
+        from_=mail_ctx.from_,
+        harness=mail_ctx.harness,
+        model=mail_ctx.model,
+        node=mail_ctx.node,
+        to=mail_ctx.to,
+        id=mail_ctx.id,
+    )
     try:
         write_new_thread(
             recipient=durable_recipient,
@@ -7219,6 +7221,19 @@ def dispatch_send(
                         exit_code=11,
                     ) from exc
 
+                # It does NOT retry the live lane from here, and that is a
+                # decision rather than an omission - five review passes have
+                # read it as one, so it is written down. The block holds a
+                # verified row and could inject. It does not, because an
+                # inject here runs to the same 40s budget WHILE HOLDING this
+                # flock, on a send that has already waited out one holder: it
+                # would push a routine send past 80s and make the next sender
+                # time out on us, which is the contention that caused this bug.
+                # The sender is not stranded either way - the message is
+                # durable and the receipt names withdraw-then-resend. Moving
+                # live delivery in here belongs with narrowing the flock, and
+                # is tracked with it.
+                #
                 # A bus-only row's queue is its DESIGNED lane, not a deferral.
                 # Reporting it as a lock timeout hands the sender the recovery
                 # ladder - withdraw, then retry live - for a message that is

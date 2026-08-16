@@ -96,7 +96,11 @@ fn stamp_holder(file: &std::fs::File, name: &str) {
     let line = serde_json::json!({
         "pid": std::process::id(),
         "name": name,
-        "acquired_at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        // Python writes `datetime.now(timezone.utc).isoformat()`, so microseconds
+        // and a `+00:00` offset. A bare `...SZ` here rendered the SAME holder
+        // line in two shapes depending on which language took the lock, under a
+        // module header claiming byte-compatibility.
+        "acquired_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false),
     });
     let _ = writeln!(handle, "{}", line);
     let _ = handle.flush();
@@ -181,6 +185,11 @@ mod tests {
                 parsed["acquired_at"].as_str().unwrap(),
                 "1999-01-01T00:00:00Z"
             );
+            // Same rendering as Python's `datetime.isoformat()`, so one holder
+            // line does not read two ways depending on who took the lock.
+            let at = parsed["acquired_at"].as_str().unwrap();
+            assert!(at.ends_with("+00:00"), "offset, not a bare Z: {at}");
+            assert_eq!(at.len(), 32, "microsecond precision, like Python: {at}");
         }
         let _ = fs::remove_dir_all(&dir);
     }
