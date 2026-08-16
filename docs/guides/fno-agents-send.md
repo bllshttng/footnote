@@ -35,7 +35,7 @@ or
 msg-3a7f1c2e queued (durable) [not-confirmed]
 ```
 
-The bracketed reason on a durable line is the live lane's own cause. When no live lane ran at all, the reason reads `live-miss`, except for one case: `agent-lock-timeout` means another SENDER held the per-agent lock past the wait, so no live attempt was made and the token says nothing about the recipient's liveness. Withdraw the queued copy before re-sending, or the recipient gets it twice.
+The bracketed reason on a durable line is the live lane's own cause. When no live lane ran at all, the reason reads `live-miss`. One token is the exception. `agent-lock-timeout` means another SENDER held the per-agent lock past the wait. No live attempt was made, so the token says nothing about whether the recipient is live. Withdraw the queued copy before you re-send, or the recipient gets it twice.
 
 `delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` inject succeeded (claude, via the `fno-agents mail-inject` verb, which pastes and submits a wire-level CR).
 `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain.
