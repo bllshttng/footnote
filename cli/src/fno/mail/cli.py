@@ -3532,9 +3532,20 @@ def cmd_drain_self(
         # never routes through that wrapper. Stamp the trailer here, the one
         # chokepoint every drained body passes through, so this render always
         # carries the authority boundary regardless of which lane produced the body.
+        # A live-injected send stores the full paired envelope durably (body
+        # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
+        # needs both shapes: the bare trailer, and the trailer immediately
+        # before a terminal close tag.
+        _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+
         def _render_body(body: str) -> str:
+            # A durable heads-up body is sender-controlled, so a plain `in`
+            # check is satisfiable by embedding the trailer text mid-body and
+            # placing an outward-action instruction after it: the render would
+            # then treat the body as already stamped and skip the real
+            # terminal trailer. Require the stripped body to END with it.
             text = body.rstrip("\n")
-            if FNO_MAIL_TRAILER in text:
+            if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
                 return text
             return f"{text}\n{FNO_MAIL_TRAILER}"
 
