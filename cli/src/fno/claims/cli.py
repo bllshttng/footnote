@@ -64,7 +64,6 @@ from .core import (
     acquire_claim,
     claim_status,
     force_release_claim,
-    list_claims,
     list_claims_with_counts,
     reap_dead_claims,
     refresh_claim,
