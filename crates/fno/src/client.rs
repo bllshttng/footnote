@@ -2413,8 +2413,11 @@ impl View {
     /// would silently move the spotlight onto a different citizen (the same
     /// index-vs-identity trap the sideline cursor re-anchors out of).
     fn yard_selected_name(&self) -> Option<String> {
-        let crowd = self.yard_crowd();
+        // The None-check first: this runs on every layout push (set_layout
+        // captures the name before the swap), so a closed yard must not pay
+        // the crowd build.
         let yv = self.yard.as_ref()?;
+        let crowd = self.yard_crowd();
         crowd
             .get(yv.sel.min(crowd.len().saturating_sub(1)))
             .map(|(name, _, _)| (*name).to_string())

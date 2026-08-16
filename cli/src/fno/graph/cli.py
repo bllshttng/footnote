@@ -10038,8 +10038,12 @@ def cmd_album(
         return
 
     if not page:
-        # An offset past the last card is out of range, not an inverted range.
-        typer.echo(f"album: {len(entries)} shipped, offset {max(offset, 0)} is past the end")
+        # An offset past the last card is out of range, not an inverted range;
+        # an empty page at a valid offset is the zero-width limit, not the offset.
+        if max(offset, 0) >= len(entries):
+            typer.echo(f"album: {len(entries)} shipped, offset {max(offset, 0)} is past the end")
+        else:
+            typer.echo(f"album: {len(entries)} shipped, --limit {limit} shows nothing")
         return
 
     typer.echo(
