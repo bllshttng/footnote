@@ -2124,7 +2124,7 @@ fn read_pr_info(
         let checks_out = Command::new(gh_bin)
             .args(["pr", "checks"])
             .args(&sel)
-            .args(["--json", "name,state,bucket,startedAt"])
+            .args(["--json", "name,state,bucket,startedAt,workflow"])
             .current_dir(cwd)
             .output()
             .map_err(|e| ("pr_checks".to_string(), e.to_string()))?;
@@ -2450,7 +2450,11 @@ fn read_pr_info(
     })
 }
 
-/// Latest run per check name, keyed on when the run was TRIGGERED. A
+/// Latest run per (check name, workflow), keyed on when the run was
+/// TRIGGERED. The key is the pair, not the name alone: several workflows in
+/// this repo define a job literally named `self-test`, and a name-only key
+/// would fold an unrelated workflow's cancelled or failing `self-test` into
+/// whichever workflow's `self-test` started latest, hiding the real result. A
 /// superseding run always starts later but need not finish later, so
 /// `startedAt` is the only honest recency key; list order is not one. A
 /// missing timestamp sorts oldest and loses to any timestamped sibling. On a
@@ -2464,6 +2468,9 @@ fn latest_per_name(checks: &Value) -> Value {
     };
     fn ts_of(v: &Value) -> &str {
         v.get("startedAt").and_then(|t| t.as_str()).unwrap_or("")
+    }
+    fn workflow_of(v: &Value) -> &str {
+        v.get("workflow").and_then(|w| w.as_str()).unwrap_or("")
     }
     fn is_fail(v: &Value) -> bool {
         matches!(
@@ -2479,8 +2486,10 @@ fn latest_per_name(checks: &Value) -> Value {
     for c in arr {
         let name = c.get("name").and_then(|n| n.as_str()).map(str::to_string);
         let slot = name.as_deref().and_then(|nm| {
-            kept.iter()
-                .position(|k| k.get("name").and_then(|n| n.as_str()) == Some(nm))
+            kept.iter().position(|k| {
+                k.get("name").and_then(|n| n.as_str()) == Some(nm)
+                    && workflow_of(k) == workflow_of(c)
+            })
         });
         match slot {
             None => kept.push(c.clone()),
@@ -5810,7 +5819,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
             // Get CI
             let ci = match Command::new(gh_bin)
-                .args(["pr", "checks", "--json", "name,state,bucket,startedAt"])
+                .args([
+                    "pr",
+                    "checks",
+                    "--json",
+                    "name,state,bucket,startedAt,workflow",
+                ])
                 .current_dir(&cwd)
                 .output()
             {
@@ -11316,6 +11330,25 @@ mod tests {
         ]);
         let deduped = latest_per_name(&tie);
         assert_eq!(failing_check_names(&deduped), vec!["ci".to_string()]);
+    }
+
+    #[test]
+    fn latest_per_name_keeps_same_name_checks_from_different_workflows() {
+        // codex P1: several workflows in this repo define a job literally
+        // named "self-test". A name-only key folds a cancelled self-test
+        // from one workflow into a passing self-test from another, hiding
+        // the real failure behind an unrelated workflow's pass. The key
+        // must be (name, workflow), so both entries survive the dedup.
+        let checks = serde_json::json!([
+            {"name": "self-test", "bucket": "cancel", "workflow": "control-plane-doc-colocation",
+             "startedAt": "2026-08-15T01:00:00Z"},
+            {"name": "self-test", "bucket": "pass", "workflow": "loc-ratchet",
+             "startedAt": "2026-08-15T00:00:00Z"},
+        ]);
+        let deduped = latest_per_name(&checks);
+        assert_eq!(deduped.as_array().unwrap().len(), 2);
+        assert!(ci_has_pending_checks(&deduped));
+        assert_eq!(failing_check_names(&deduped), vec!["self-test".to_string()]);
     }
 
     #[test]

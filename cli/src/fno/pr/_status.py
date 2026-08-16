@@ -283,21 +283,35 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         + "\n"
     )
     # Same discipline as the unresolved-findings note below: a number a human
-    # would misread gets its instruction beside it, on stderr. A cancelled
-    # latest run keeps settled false, and without this note "red but not
-    # settled" reads as a contradiction instead of the answer.
+    # would misread gets its instruction beside it, on stderr. An unsettled
+    # entry has two distinct causes and they need distinct instructions: a
+    # completed-but-markerless entry (cancelled or stale) says push again,
+    # while a still-running entry says wait. Conflating them told a human on
+    # an ordinary in-progress PR to rerun a workflow that never failed. Both
+    # notes read the actual `verdict`, never a hardcoded "red": a run of
+    # unsettled entries that are all still-running settles as `pending`, not
+    # `red`, and the note must not claim otherwise.
     if counts.get("unsettled"):
-        names = ", ".join(
-            str(c.get("name") or c.get("context") or "?")
-            for c in _latest_per_name(rollup)
-            if not _has_settled_marker(c)
-        )
-        sys.stderr.write(
-            f"note: {counts['unsettled']} check(s) produced no result (cancelled or "
-            f"stale): {names}. The verdict is still red, and settled stays false "
-            "because a cancelled run is an ABSENT result, not a terminal one. "
-            "Push again or rerun the workflow; do not read this PR as decided.\n"
-        )
+        unsettled_now = [c for c in _latest_per_name(rollup) if not _has_settled_marker(c)]
+        absent = [
+            c for c in unsettled_now if str(c.get("status") or "").upper() in ("", "COMPLETED")
+        ]
+        running = [c for c in unsettled_now if c not in absent]
+        if absent:
+            names = ", ".join(str(c.get("name") or c.get("context") or "?") for c in absent)
+            sys.stderr.write(
+                f"note: {len(absent)} check(s) produced no result (cancelled or stale): "
+                f"{names}. The verdict is {verdict}, and settled stays false because a "
+                "cancelled run is an ABSENT result, not a terminal one. "
+                "Push again or rerun the workflow. Do not read this PR as decided.\n"
+            )
+        if running:
+            names = ", ".join(str(c.get("name") or c.get("context") or "?") for c in running)
+            sys.stderr.write(
+                f"note: {len(running)} check(s) are still queued or running: {names}. "
+                f"The verdict is {verdict}, and settled stays false until every latest run "
+                "finishes. Wait for the run to finish. Do not start a new one.\n"
+            )
     # Say what to DO about a non-zero counter, on stderr so the JSON contract is
     # untouched. Answering a finding does NOT clear it: a review thread stays
     # unresolved until it is resolved EXPLICITLY, so a PR whose every finding has

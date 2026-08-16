@@ -184,7 +184,7 @@ def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     assert out["checks"]["unsettled"] == 1
     # The instruction travels with the number: which check, and what to do.
     assert "ci" in err
-    assert "do not read this PR as decided" in err
+    assert "do not read this pr as decided" in err.lower()
 
 
 def test_ac2_all_concluded_passes_stay_settled(monkeypatch, capsys):
@@ -248,6 +248,48 @@ def test_ac5_failure_is_a_real_result_and_settles(monkeypatch, capsys):
     assert out["verdict"] == "red"
     assert out["settled"] is True
     assert out["checks"]["unsettled"] == 0
+
+
+def test_pending_check_gets_a_wait_note_never_a_push_again_note(monkeypatch, capsys):
+    """codex P2: an ordinary in-progress check (status QUEUED, no conclusion
+    yet) is unsettled but was NOT cancelled or stale. The note must say
+    "still queued or running" and "wait", never "cancelled or stale" and
+    "push again" - that instruction belongs to a completed-but-markerless
+    entry alone. The verdict in the note must read the real pending verdict,
+    never a hardcoded red."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "ci", "status": "QUEUED", "conclusion": None}],
+    )
+    assert code == 2
+    assert out["verdict"] == "pending"
+    assert out["settled"] is False
+    assert "still queued or running" in err
+    assert "wait for the run" in err.lower()
+    assert "cancelled or stale" not in err
+    assert "push again" not in err.lower()
+
+
+def test_pending_and_cancelled_get_their_own_distinct_notes(monkeypatch, capsys):
+    """Both causes can coexist in one rollup and must not blend into one
+    instruction: the cancelled check says push again, the pending check
+    says wait, and each name appears only in its own note."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED"},
+            {"name": "smoke", "status": "IN_PROGRESS", "conclusion": None},
+        ],
+    )
+    assert code == 1
+    assert out["checks"]["unsettled"] == 2
+    assert "cancelled or stale" in err
+    assert "still queued or running" in err
+    cancelled_note, pending_note = err.split("\n", 1)
+    assert "ci" in cancelled_note and "smoke" not in cancelled_note
+    assert "smoke" in pending_note and "ci" not in pending_note
 
 
 def test_latest_in_progress_over_earlier_success_is_pending():
