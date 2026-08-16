@@ -246,6 +246,33 @@ class TestReapDeadClaims:
         assert summary["reap_failed"][0][0] == str(claim_path("k", root=tmp_path))
         assert claim_path("k", root=tmp_path).exists()
 
+    def test_archive_claim_oserror_reported_not_raised_and_sweep_continues(
+        self, tmp_path, monkeypatch
+    ):
+        """A permission error, full disk, or other rename failure inside
+        archive_claim must not abort the whole sweep - every other dead
+        claim is still reapable."""
+        from fno.claims.io import archive_claim as real_archive_claim
+
+        acquire_claim("bad", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        acquire_claim("good", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+
+        def _archive_or_raise(path, ts_ms):
+            if "bad" in str(path):
+                raise OSError("simulated permission denied")
+            return real_archive_claim(path, ts_ms=ts_ms)
+
+        monkeypatch.setattr("fno.claims.core.archive_claim", _archive_or_raise)
+
+        summary = reap_dead_claims(roots=[tmp_path], apply=True)
+
+        assert summary["reaped"] == 1
+        assert len(summary["reap_failed"]) == 1
+        assert "bad" in summary["reap_failed"][0][0]
+        assert "simulated permission denied" in summary["reap_failed"][0][1]
+        assert claim_path("bad", root=tmp_path).exists()
+        assert not claim_path("good", root=tmp_path).exists()
+
     def test_AC5_EDGE_reap_credited_even_if_key_recreated_right_after_archive(
         self, tmp_path, monkeypatch
     ):

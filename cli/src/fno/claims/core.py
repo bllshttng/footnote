@@ -469,9 +469,13 @@ def compare_and_rebind(
     try:
         # A peer may be mid-recovery, or a recoverer died holding the mutex.
         # acquire_dir_mutex steals a corpse so a killed peer cannot brick the
-        # rebind, else polls briefly; a compare_and_rebind is a one-shot verb
-        # (unlike acquire_claim/refresh_claim it does not recurse), so a
-        # timeout here refuses rather than retrying from the top.
+        # rebind, else polls until timeout - a mutex that clears well inside
+        # the window (acquire_claim/reap's own archive-then-recreate is a
+        # few-ms critical section) now lets the rebind succeed instead of
+        # refusing on a steal-attempt-then-give-up basis. compare_and_rebind
+        # is a one-shot verb (unlike acquire_claim/refresh_claim it does not
+        # recurse), so a genuine timeout here still refuses rather than
+        # retrying from the top.
         token = acquire_dir_mutex(
             recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
         )
@@ -1075,7 +1079,17 @@ def reap_dead_claims(
                         kept[fresh_bucket] += 1
                         continue
 
-                    archive_path = archive_claim(entry, ts_ms=ts)
+                    try:
+                        archive_path = archive_claim(entry, ts_ms=ts)
+                    except OSError as exc:
+                        # A permission error, full disk, or other rename
+                        # failure must not abort the whole sweep - every
+                        # other claim in this and later roots is still
+                        # reapable. Bucket this one and keep scanning,
+                        # matching the "move didn't happen" case below.
+                        reap_failed.append((str(entry), f"archive_claim raised: {exc}"))
+                        continue
+
                     if archive_path != entry and archive_path.exists():
                         # archive_path != entry proves archive_claim actually
                         # computed a distinct .expired/ destination (the
