@@ -24,13 +24,14 @@ from typer.testing import CliRunner
 
 from fno.claims.cli import cli
 from fno.claims.core import (
+    ClaimHeldByOther,
     _classify_for_sweep,
     acquire_claim,
     claim_status,
     list_claims_with_counts,
     reap_dead_claims,
 )
-from fno.claims.io import claim_path, claims_dir, read_claim_file, serialize_claim
+from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.staleness import is_provably_dead, now_ms
 from fno.claims.types import Claim
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
@@ -359,6 +360,44 @@ class TestIdempotentReacquireVsReapRecoveryMutex:
         racer.join(timeout=5)
         assert not racer.is_alive()
         assert result["claim"].pid == os.getpid()
+
+    def test_idempotent_reacquire_revalidates_stale_read_before_lock_acquired(
+        self, tmp_path, monkeypatch
+    ):
+        """A different holder can win the key in the gap between acquire_claim's
+        initial UNLOCKED read and its own (uncontended) recovery_lock.mkdir() -
+        the winner's own mutex cycle has already finished and released by then,
+        so our mkdir() succeeds immediately with no contention to wait out. The
+        idempotent path must re-read under its own lock rather than trust the
+        now-stale ``existing`` it read before ever touching the mutex."""
+        from fno.claims import core as claims_core
+
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        real_read = claims_core.read_claim_file
+        calls = {"n": 0}
+
+        def _read_then_race(p):
+            calls["n"] += 1
+            rec = real_read(p)
+            if calls["n"] == 1 and rec.holder == HOLDER_A:
+                # A different holder's stale-reclaim completes (and releases
+                # its own recovery mutex) entirely between this unlocked read
+                # and our own mkdir() attempt below.
+                archive_claim(p, ts_ms=now_ms())
+                acquire_claim("k", "other-holder", pid=os.getpid(), root=tmp_path)
+            return rec
+
+        monkeypatch.setattr(claims_core, "read_claim_file", _read_then_race)
+
+        with pytest.raises(ClaimHeldByOther) as exc_info:
+            acquire_claim("k", HOLDER_A, pid=os.getpid(), root=tmp_path)
+        assert exc_info.value.holder == "other-holder"
+
+        status = claim_status("k", root=tmp_path)
+        assert status["holder"] == "other-holder", (
+            "must not have overwritten the new holder's live claim with a "
+            "stale-read idempotent rewrite"
+        )
 
 
 # ---------------------------------------------------------------------------

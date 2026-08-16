@@ -291,9 +291,43 @@ def acquire_claim(
                     harness=harness,
                     root=root,
                 )
+
+            # Re-verify under the mutex: a concurrent stale-reclaim or reap
+            # archive could have completed between our initial unlocked read
+            # (above) and acquiring this lock, installing a different holder
+            # (or nothing) at this path. Recurse rather than blindly
+            # overwrite whatever is there now - the recursion re-reads and
+            # re-dispatches to whichever branch the fresh state calls for.
+            try:
+                fresh_existing = read_claim_file(path)
+            except ClaimGoneAway:
+                return acquire_claim(
+                    key,
+                    holder,
+                    reason=reason,
+                    ttl_ms=ttl_ms,
+                    metadata=metadata,
+                    pid=pid,
+                    host=host,
+                    harness=harness,
+                    root=root,
+                )
+            if fresh_existing.holder != holder:
+                return acquire_claim(
+                    key,
+                    holder,
+                    reason=reason,
+                    ttl_ms=ttl_ms,
+                    metadata=metadata,
+                    pid=pid,
+                    host=host,
+                    harness=harness,
+                    root=root,
+                )
+
             refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
             _atomic_replace(path, serialize_claim(refreshed))
-            emit_claim_idempotent_reacquired(refreshed, previous=existing)
+            emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
             return refreshed
         finally:
             if acquired_lock:

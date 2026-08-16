@@ -1195,14 +1195,10 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
         };
 
         if existing.holder == holder {
-            return idempotent_reacquire(
-                &path,
-                key,
-                holder,
-                &opts,
-                &existing,
-                events_dir.as_deref(),
-            );
+            match idempotent_reacquire_guarded(&path, key, holder, &opts, events_dir.as_deref()) {
+                RecoverResult::Done(outcome) => return outcome,
+                RecoverResult::Retry => continue,
+            }
         }
 
         // Suspect (TTL-unexpired, dead pid) refuses exactly like Live: the TTL
@@ -1259,6 +1255,70 @@ fn idempotent_reacquire(
     );
     emit_claim_event(events_dir, "claim_idempotent_reacquired", data);
     AcquireOutcome::Acquired(refreshed)
+}
+
+/// Idempotent re-acquire under the shared `.recovery.d` mutex (mirrors
+/// `core.acquire_claim`'s idempotent branch). Without this, a Rust worker's
+/// unguarded write could race a Python `reap_dead_claims()` sweep: reap takes
+/// this same mutex to re-verify a claim is still dead immediately before
+/// archiving it, but nothing stopped a respawned worker from rewriting the
+/// file as live in that exact window, so reap would archive the fresh write
+/// instead of the dead claim it proved. Taking the mutex here closes that
+/// gap the same way `recover_stale` already closes it for stale-reclaim.
+///
+/// Re-reads under the lock rather than trusting the caller's `existing`: a
+/// different holder's stale-reclaim (or reap's archive) can complete and
+/// release its own mutex cycle entirely in the gap between our caller's
+/// unlocked read and this function's own (uncontended) mkdir(), so the file
+/// on disk may no longer belong to `holder` by the time we get here.
+fn idempotent_reacquire_guarded(
+    path: &Path,
+    key: &str,
+    holder: &str,
+    opts: &AcquireOpts,
+    events_dir: Option<&Path>,
+) -> RecoverResult {
+    let recovery_lock = path.with_file_name(format!(
+        "{}.recovery.d",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let token = match std::fs::create_dir(&recovery_lock) {
+        Ok(()) => stamp_owner(&recovery_lock),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !steal_if_stale(&recovery_lock) {
+                wait_for_recovery_release(&recovery_lock, RECOVERY_LOCK_MAX_WAIT);
+            }
+            return RecoverResult::Retry;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RecoverResult::Retry,
+        Err(e) => return RecoverResult::Done(AcquireOutcome::Error(e.to_string())),
+    };
+
+    let fresh_existing = match read_claim_file(path) {
+        Ok(rec) => rec,
+        Err(ReadError::GoneAway) => {
+            // Vanished while we held the lock - let the top-level create win
+            // the now-empty path.
+            release_dir_mutex(&recovery_lock, &token);
+            return RecoverResult::Retry;
+        }
+        Err(ReadError::Corrupted(e)) => {
+            release_dir_mutex(&recovery_lock, &token);
+            return RecoverResult::Done(AcquireOutcome::Error(e));
+        }
+    };
+    if fresh_existing.holder != holder {
+        // A different holder won the key between our caller's unlocked read
+        // and this lock - re-classify from scratch instead of overwriting it.
+        release_dir_mutex(&recovery_lock, &token);
+        return RecoverResult::Retry;
+    }
+
+    let outcome = idempotent_reacquire(path, key, holder, opts, &fresh_existing, events_dir);
+    release_dir_mutex(&recovery_lock, &token);
+    RecoverResult::Done(outcome)
 }
 
 enum RecoverResult {
@@ -2305,6 +2365,50 @@ mod tests {
         let out = acquire("session:x", "pty:waiter", opts_in(&td));
         releaser.join().unwrap();
         assert!(matches!(out, AcquireOutcome::Acquired(_)), "{out:?}");
+    }
+
+    #[test]
+    fn idempotent_reacquire_waits_for_held_recovery_mutex_and_revalidates() {
+        let td = TempDir::new().unwrap();
+        let first = match acquire("session:idem-race", "pty:me", opts_in(&td)) {
+            AcquireOutcome::Acquired(r) => r,
+            other => panic!("{other:?}"),
+        };
+        let path = lockfile(&td, "session:idem-race");
+        let mutex = path.with_file_name(format!(
+            "{}.recovery.d",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        // Simulate another worker actively recovering this key.
+        std::fs::create_dir(&mutex).unwrap();
+
+        let mut o = opts_in(&td);
+        o.pid = Some(4242);
+        let racer = std::thread::spawn(move || acquire("session:idem-race", "pty:me", o));
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !racer.is_finished(),
+            "idempotent re-acquire must block on the held recovery mutex"
+        );
+        let still_old = read_claim_file(&path).unwrap();
+        assert_eq!(
+            still_old.pid, first.pid,
+            "the on-disk claim must not be rewritten while the recovery mutex is held"
+        );
+
+        // A DIFFERENT holder wins the key entirely while the racer waits -
+        // the exact scenario the mutex exists to serialize against.
+        let mut other = record(std::process::id() as i32, first.acquired_at + 1, None, &hostname());
+        other.key = "session:idem-race".into();
+        other.holder = "pty:other".into();
+        std::fs::write(&path, serialize_claim(&other).unwrap()).unwrap();
+        std::fs::remove_dir(&mutex).unwrap();
+
+        match racer.join().unwrap() {
+            AcquireOutcome::HeldByOther { holder, .. } => assert_eq!(holder, "pty:other"),
+            outcome => panic!("must not overwrite the new holder's live claim: {outcome:?}"),
+        }
     }
 
     #[test]
