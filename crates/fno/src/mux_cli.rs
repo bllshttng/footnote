@@ -2596,7 +2596,11 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
         &session,
     ) {
         Ok(reply) => render_reply(reply, json, false, None),
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux where: {e}");
+            EXIT_CONTROL_UNANSWERED
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux where: {e}");
             EXIT_ERROR
         }
@@ -3246,17 +3250,26 @@ fn pipe_block_gate(meta: Option<&proto::BlockMeta>) -> Result<(), String> {
 
 /// One control round-trip on a fresh one-shot connection (the pane verbs'
 /// connect + [`send_control`], factored so `block pipe` can do two in a row).
-fn control_roundtrip(sock: &Path, session: &str, verb: ControlVerb) -> Result<ServerMsg, String> {
+/// Timeouts are parameters, not the hardcoded constants, so a test can force
+/// `Unanswered` in milliseconds instead of waiting out `CONTROL_REPLY_DEADLINE`.
+fn control_roundtrip_with_timeouts(
+    sock: &Path,
+    session: &str,
+    verb: ControlVerb,
+    read_timeout: Duration,
+    reply_deadline: Duration,
+) -> Result<ServerMsg, ControlError> {
     let stream = std::os::unix::net::UnixStream::connect(sock)
-        .map_err(|e| format!("cannot reach session {session:?}: {e}"))?;
-    send_control(
-        stream,
-        verb,
-        CONTROL_TIMEOUT,
-        CONTROL_REPLY_DEADLINE,
-        session,
-    )
-    .map_err(|e| e.to_string())
+        .map_err(|e| ControlError::Fatal(format!("cannot reach session {session:?}: {e}")))?;
+    send_control(stream, verb, read_timeout, reply_deadline, session)
+}
+
+fn control_roundtrip(
+    sock: &Path,
+    session: &str,
+    verb: ControlVerb,
+) -> Result<ServerMsg, ControlError> {
+    control_roundtrip_with_timeouts(sock, session, verb, CONTROL_TIMEOUT, CONTROL_REPLY_DEADLINE)
 }
 
 /// `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json]
@@ -3305,7 +3318,11 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: unexpected server reply: {other:?}");
             return EXIT_ERROR;
         }
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
@@ -3351,7 +3368,11 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: unexpected server reply: {other:?}");
             return EXIT_ERROR;
         }
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
@@ -3491,7 +3512,11 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: unexpected server reply: {other:?}");
             return EXIT_ERROR;
         }
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
@@ -4733,5 +4758,38 @@ mod tests {
         };
         assert_eq!(exit, EXIT_CONTROL_UNANSWERED);
         assert_ne!(EXIT_CONTROL_UNANSWERED, EXIT_ERROR);
+    }
+
+    #[test]
+    fn control_roundtrip_surfaces_unanswered_not_a_flattened_string() {
+        // `where_` and `block pipe` both dispatch through control_roundtrip,
+        // not send_control directly, so a fix that only touches send_control's
+        // callers in `dispatch`/`run_on_existing_server` leaves this path
+        // asserting no pane exists on a mere timeout - exactly the P1 review
+        // found. Pin the typed error, not a stringified one, all the way
+        // through control_roundtrip.
+        let sock = control_test_sock("roundtrip-unanswered");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        let result = control_roundtrip_with_timeouts(
+            &sock,
+            "test-session",
+            ControlVerb::PaneLs,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert!(
+            matches!(result, Err(ControlError::Unanswered(_))),
+            "expected Unanswered, got {result:?}"
+        );
     }
 }
