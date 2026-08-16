@@ -16,19 +16,27 @@
 #   - at most once per THROTTLE window (a stamp-file mtime gate makes almost
 #     every tool call a cheap stat+exit; only an aging claim shells `fno`).
 #
-# Never fails the tool call: silent no-op on not-holder / throttled / no
+# Never blocks the tool call: silent no-op on not-holder / throttled / no
 # manifest; a refresh error logs to stderr and still exits 0. Touches the claim
 # lockfile only (via `fno claim refresh`) - never the immutable manifest.
 # `refresh_claim` takes the same per-key recovery mutex as `reap`/`acquire`
 # (closes a resurrection race - see core.py), so on rare contention with a
 # concurrent reap sweep or acquire on the SAME key this call can wait up to
 # ~25s before returning (ACQUIRE_MAX_ATTEMPTS=5 retries x the mutex's own
-# 5s wait each, core.py) rather than failing fast; the stamp-file throttle
-# above keeps that window rare.
+# 5s wait each, core.py) rather than failing fast. The stamp-file throttle
+# above keeps that window rare, but "rare" is not "never" - a PostToolUse
+# hook that can hang the tool call for 25s once in a while still breaks the
+# "NEVER blocks" contract this file promises, so the call itself is bounded
+# below with the shared `with_timeout` (scripts/lib/with-timeout.sh): a
+# refresh that would otherwise wait out the mutex instead times out and logs,
+# same non-fatal outcome as any other refresh failure.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$PLUGIN_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
 # Refresh at most once per THROTTLE seconds of activity. Well under the claim's
 # default 2h TTL, so an actively-working session stays LIVE with wide margin.
@@ -152,9 +160,14 @@ if [[ "$HOLDER" != "$CLAIM_HOLDER" ]]; then
   exit 0
 fi
 
-# We hold it: renew the TTL. Best-effort - a failure logs but never blocks.
-if ! fno claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" >/dev/null 2>&1; then
-  echo "claim-heartbeat: refresh failed for node:$NODE_ID (non-fatal)" >&2
+# We hold it: renew the TTL. Best-effort - a failure (including a bound
+# firing on held-mutex contention) logs but never blocks the tool call past
+# REFRESH_TIMEOUT.
+REFRESH_TIMEOUT="${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}"
+if ! with_timeout "$REFRESH_TIMEOUT" \
+    fno claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" \
+    >/dev/null 2>&1; then
+  echo "claim-heartbeat: refresh failed or timed out for node:$NODE_ID (non-fatal)" >&2
 fi
 touch "$STAMP" 2>/dev/null || true
 exit 0

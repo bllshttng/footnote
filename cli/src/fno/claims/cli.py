@@ -60,6 +60,7 @@ from typing import List, Optional
 import typer
 
 from .core import (
+    ClaimContended,
     ClaimCorrupted,
     ClaimGoneAway,
     ClaimHeldByOther,
@@ -248,7 +249,7 @@ def acquire(
     except (ClaimCorrupted, ClaimGoneAway) as exc:
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
-    except RuntimeError as exc:
+    except ClaimContended as exc:
         # acquire_claim's own contention-retry-exhaustion guard: same
         # "caller should retry later" semantic as ClaimHeldByOther, so it
         # gets the same exit code rather than an uncaught traceback.
@@ -638,7 +639,7 @@ def refresh(
     except ClaimCorrupted as exc:
         typer.echo(f"corrupted claim: {exc}", err=True)
         raise typer.Exit(code=3)
-    except RuntimeError as exc:
+    except ClaimContended as exc:
         # refresh_claim's own contention-retry-exhaustion guard; same exit
         # code as acquire's, both mean "transient, caller should retry".
         typer.echo(f"contention error: {exc}", err=True)

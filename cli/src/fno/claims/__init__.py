@@ -21,6 +21,7 @@ The six verbs are exposed at module level for direct Python import:
 
 Exceptions:
     ClaimAlreadyHeld - low-level: file existed when atomic-create raced
+    ClaimContended  - acquire/refresh gave up after exhausting contention retries
     ClaimHeldByOther - high-level: live claim held by a different holder
     HolderMismatch  - release/refresh with the wrong holder while strict
     ClaimCorrupted  - claim file present but unparseable
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 from .core import (
     ClaimAlreadyHeld,
+    ClaimContended,
     ClaimCorrupted,
     ClaimGoneAway,
     ClaimHeldByOther,
@@ -59,6 +61,7 @@ from .types import Claim, ClaimState
 __all__ = [
     "Claim",
     "ClaimAlreadyHeld",
+    "ClaimContended",
     "ClaimCorrupted",
     "ClaimGoneAway",
     "ClaimHeldByOther",

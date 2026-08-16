@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from .core import (
+    ClaimContended,
     ClaimHeldByOther,
     ClaimValidationError,
     acquire_claim,
@@ -144,8 +145,8 @@ def acquire_lane_slot(
                 metadata=metadata,
                 root=root,
             )
-        except (ClaimHeldByOther, RuntimeError):
-            # RuntimeError is acquire_claim's own contention-retry-exhaustion
+        except (ClaimHeldByOther, ClaimContended):
+            # ClaimContended is acquire_claim's own contention-retry-exhaustion
             # guard on THIS slot's key - equally means "can't have this one
             # right now", so it gets the same "try the next slot" treatment
             # as an outright ClaimHeldByOther rather than aborting the whole

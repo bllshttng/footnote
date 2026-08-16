@@ -19,6 +19,7 @@ import psutil
 import pytest
 
 from fno.claims.core import (
+    ClaimContended,
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
@@ -104,7 +105,7 @@ class TestAcquire:
 
         acquire_claim("k", HOLDER_A, root=tmp_path)
         with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
-            with pytest.raises(RuntimeError, match="gave up after"):
+            with pytest.raises(ClaimContended, match="gave up after"):
                 acquire_claim("k", HOLDER_A, root=tmp_path)
 
     def test_idempotent_reverify_releases_lock_before_recursing(self, tmp_path):
@@ -312,7 +313,7 @@ class TestRefresh:
 
         acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
         with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
-            with pytest.raises(RuntimeError, match="gave up after"):
+            with pytest.raises(ClaimContended, match="gave up after"):
                 refresh_claim("k", HOLDER_A, root=tmp_path)
 
     def test_AC3_FR_refresh_pid_liveness_returns_none(self, tmp_path):

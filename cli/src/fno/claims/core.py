@@ -88,6 +88,20 @@ class ClaimValidationError(ValueError):
     """Inputs to a verb failed validation (ttl out of range, key too long, ...)."""
 
 
+class ClaimContended(Exception):
+    """acquire_claim/refresh_claim gave up after ACQUIRE_MAX_ATTEMPTS
+    contention retries on the same key's recovery mutex.
+
+    A distinct type from ClaimHeldByOther (a live claim is held by someone
+    else) even though a caller usually treats both the same way ("can't have
+    this one right now, retry later") - the recovery mutex being contended
+    says nothing about who, if anyone, ends up holding the claim. Callers
+    that only catch this narrow type cannot accidentally reclassify an
+    unrelated RuntimeError raised deeper in the call stack (pydantic,
+    resolve_harness_identity, serialize_claim, ...) as contention.
+    """
+
+
 class RebindRefused(Exception):
     """``compare_and_rebind`` refused to move the claim (fail-closed, x-2ccd).
 
@@ -115,6 +129,7 @@ class RebindRefused(Exception):
 # Re-export low-level exceptions so callers can ``from fno.claims import ClaimGoneAway``.
 __all__ = [
     "ClaimAlreadyHeld",
+    "ClaimContended",
     "ClaimCorrupted",
     "ClaimGoneAway",
     "ClaimHeldByOther",
@@ -230,7 +245,7 @@ def acquire_claim(
 
     ``_attempt`` is internal bookkeeping only (never pass it): each
     contention/race branch recurses through ``_retry()``, which counts
-    attempts and raises ``RuntimeError`` after ``ACQUIRE_MAX_ATTEMPTS``
+    attempts and raises ``ClaimContended`` after ``ACQUIRE_MAX_ATTEMPTS``
     rather than recursing unbounded, mirroring Rust's bounded
     ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
     """
@@ -246,7 +261,7 @@ def acquire_claim(
         # the exact same arguments - one definition instead of the same
         # 9-line call restated at each of the seven sites that need it.
         if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
-            raise RuntimeError(
+            raise ClaimContended(
                 f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
                 f"contention retries on {key!r}"
             )
@@ -733,12 +748,13 @@ def refresh_claim(
 
     ``_attempt`` is internal bookkeeping only (never pass it): on mutex
     contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
-    ``RuntimeError`` past that), mirroring ``acquire_claim``.
+    ``ClaimContended`` past that), mirroring ``acquire_claim``.
 
     Raises:
         HolderMismatch: existing claim is held by someone else.
         ClaimGoneAway: claim was released between read and rewrite.
         ClaimCorrupted: existing file fails parse/schema validation.
+        ClaimContended: mutex contention exhausted ACQUIRE_MAX_ATTEMPTS retries.
     """
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
@@ -768,7 +784,7 @@ def refresh_claim(
         )
         if token is None:
             if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
-                raise RuntimeError(
+                raise ClaimContended(
                     f"refresh_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
                     f"contention retries on {key!r}"
                 )

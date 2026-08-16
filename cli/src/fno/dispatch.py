@@ -32,7 +32,7 @@ from fno.backlog.advance import (
     _next_node,
     _worker_agent_name,
 )
-from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
+from fno.claims import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 from fno.config import load_settings
 
@@ -550,7 +550,7 @@ def _dispatch_one(
         )
     except ClaimHeldByOther:
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
-    except RuntimeError:
+    except ClaimContended:
         # acquire_claim's own contention-retry-exhaustion guard: same "someone
         # else has this key right now, retry later" semantic as ClaimHeldByOther
         # above (contended, not broken), so it gets the same verdict rather than

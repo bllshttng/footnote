@@ -52,7 +52,7 @@ from fno.agents.harnesses._claude_session_registry import (
     roster_live,
 )
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
-from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
+from fno.claims import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.io import global_claims_root
 
 OrphanReason = Literal[
@@ -1783,7 +1783,7 @@ def acquire_session_writer_claim(
             session_uuid,
             f"single-writer claim already held by {exc.holder} (pid={exc.pid}, host={exc.host})",
         ) from exc
-    except RuntimeError as exc:
+    except ClaimContended as exc:
         # acquire_claim's own contention-retry-exhaustion guard (5 attempts on
         # sustained concurrent access to the SAME key): same "cannot be
         # acquired right now" semantic as ClaimHeldByOther above, so callers

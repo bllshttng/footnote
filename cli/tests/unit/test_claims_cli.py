@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
-from fno.claims.core import acquire_claim
+from fno.claims.core import ClaimContended, acquire_claim
 from fno.claims.io import dedup_claims_roots
 
 from .test_claim_reap import _dead_pid  # noqa: F401
@@ -88,13 +88,13 @@ def test_acquire_conflict_exits_1(cwd_tmp):
 
 
 def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
-    """acquire_claim's contention-retry-exhaustion RuntimeError must be
+    """acquire_claim's contention-retry-exhaustion ClaimContended must be
     caught and mapped to exit 1 (same "retry later" code as
     ClaimHeldByOther), not escape as an uncaught traceback."""
     import fno.claims.cli as claims_cli
 
     def _raise(*args, **kwargs):
-        raise RuntimeError("acquire_claim gave up after 5 contention retries on 'k'")
+        raise ClaimContended("acquire_claim gave up after 5 contention retries on 'k'")
 
     monkeypatch.setattr(claims_cli, "acquire_claim", _raise)
     result = runner.invoke(cli, ["acquire", "k", "--holder", "h1"])
@@ -104,12 +104,12 @@ def test_acquire_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypa
 
 
 def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypatch):
-    """Same as acquire's: refresh_claim's contention-exhaustion RuntimeError
+    """Same as acquire's: refresh_claim's contention-exhaustion ClaimContended
     must be caught, not escape as an uncaught traceback."""
     import fno.claims.cli as claims_cli
 
     def _raise(*args, **kwargs):
-        raise RuntimeError("refresh_claim gave up after 5 contention retries on 'k'")
+        raise ClaimContended("refresh_claim gave up after 5 contention retries on 'k'")
 
     monkeypatch.setattr(claims_cli, "refresh_claim", _raise)
     result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
