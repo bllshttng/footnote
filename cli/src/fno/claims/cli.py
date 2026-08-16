@@ -69,7 +69,7 @@ from .core import (
     refresh_claim,
     release_claim,
 )
-from .io import claims_dir, global_claims_root
+from .io import claims_dir, dedup_claims_roots, global_claims_root
 from fno.tombstones import tombstone_group_cls
 
 
@@ -666,30 +666,26 @@ def list_cmd(
 ) -> None:
     """Enumerate claims under the claims directory.
 
-    With no --prefix and no --root, both claims roots (global
-    ~/.fno/claims and the cwd-local root) are read and merged in one run -
-    a bare `fno claim list` used to resolve only whichever single root an
-    empty prefix happened to fall to, silently missing the other store
-    (x-aeeb specimen 1: 574 lockfiles in a root a bare `list` could never
-    reach). A --prefix narrows to the root that key kind actually lives
-    in, as before; an explicit --root always wins.
+    Both claims roots (global ~/.fno/claims and the cwd-local root) are
+    always read and merged in one run, --prefix or not - a bare `fno
+    claim list` used to resolve only whichever single root an empty
+    prefix happened to fall to, silently missing the other store (x-aeeb
+    specimen 1: 574 lockfiles in a root a bare `list` could never reach).
+    A colon-less or unrecognized --prefix cannot tell which root its keys
+    live in (:func:`fno.claims.io.claims_root_for` returns None for
+    exactly that case), so narrowing to a single guessed root would
+    silently reintroduce the same miss; only an explicit --root narrows.
     """
     if root is not None:
         roots: list[Optional[Path]] = [root]
-    elif prefix:
-        roots = [_node_aware_root(prefix)]
     else:
-        roots = [global_claims_root(), None]
+        roots = [global_claims_root(), _node_aware_root(prefix) if prefix else None]
 
     all_rows: list[dict] = []
     totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "total": 0}
-    seen_dirs: set[Path] = set()
-    for candidate_root in roots:
+    deduped_roots = dedup_claims_roots(roots)
+    for candidate_root in deduped_roots:
         cdir = claims_dir(candidate_root)
-        resolved = cdir.resolve()
-        if resolved in seen_dirs:
-            continue
-        seen_dirs.add(resolved)
         rows, counts = list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
@@ -699,7 +695,8 @@ def list_cmd(
         for k in totals:
             totals[k] += counts[k]
 
-    n_roots = len(seen_dirs)
+    all_rows.sort(key=lambda r: r["key"])
+    n_roots = len(deduped_roots)
 
     if json_output:
         # Bare list, matching the pre-x-aeeb shape: a scripted caller already

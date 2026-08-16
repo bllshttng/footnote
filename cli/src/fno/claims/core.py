@@ -45,6 +45,7 @@ from .io import (
     claim_path,
     claims_dir,
     decode_key,
+    dedup_claims_roots,
     global_claims_root,
     read_claim_file,
     serialize_claim,
@@ -907,19 +908,10 @@ def _default_reap_roots() -> list[Path]:
     Global node claims live at ``claims_dir(global_claims_root())``
     (``~/.fno/claims`` by default); a repo's own root is
     ``claims_dir(None)`` (canonical repo root). A cwd whose canonical repo
-    root IS the global root sweeps once, not twice - dedup is by
-    ``Path.resolve()`` on the resolved claims dir, not on the raw root arg.
+    root IS the global root sweeps once, not twice - see
+    :func:`fno.claims.io.dedup_claims_roots`.
     """
-    candidates = [claims_dir(global_claims_root()), claims_dir(None)]
-    seen: set[Path] = set()
-    out: list[Path] = []
-    for cdir in candidates:
-        resolved = cdir.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        out.append(cdir)
-    return out
+    return _dedup_roots([global_claims_root(), None])
 
 
 def reap_dead_claims(
@@ -1002,39 +994,86 @@ def reap_dead_claims(
                 vanished += 1
                 continue
 
-            if is_provably_dead(claim, now=ts):
+            # Inline is_provably_dead's own composition (is_same_machine and
+            # classify() is STALE) so its classify() call is reused for the
+            # not-dead bucketing below instead of paid twice per claim - the
+            # sweep runs on every SessionStart/megawalk stop hook (x-aeeb
+            # review).
+            same_machine = is_same_machine(claim.host, claim.machine_id)
+            state = classify(claim, now=ts) if same_machine else None
+
+            if same_machine and state is ClaimState.STALE:
                 if not apply:
                     would_reap += 1
                     continue
 
-                archive_path = archive_claim(entry, ts_ms=ts)
-                if not entry.exists() and archive_path.exists():
-                    reaped += 1
-                    emit_claim_reaped(
-                        claim,
-                        root=root_label,
-                        age_ms=max(0, ts - claim.acquired_at),
-                    )
-                elif not entry.exists() and not archive_path.exists():
-                    # Some other actor (a concurrent reap, or the holder's
-                    # own delayed release) fully cleared this file between
-                    # our classification and our archive call. The store
-                    # no longer holds it, which is the outcome we wanted;
-                    # we just cannot claim credit for the move.
+                # Take the same per-key recovery mutex acquire_claim() uses for
+                # its own archive-then-recreate (core.py ~267-371) so this
+                # cannot archive a claim a concurrent legitimate acquirer just
+                # recreated at this path. Non-blocking: an already-held mutex
+                # means a real recovery is in flight, so leave this claim for
+                # the next sweep rather than wait or steal (x-aeeb review).
+                recovery_lock = entry.with_name(entry.name + ".recovery.d")
+                recovery_token = ""
+                try:
+                    recovery_lock.mkdir(parents=True)
+                    recovery_token = _stamp_owner(recovery_lock)
+                except FileExistsError:
                     vanished += 1
-                else:
-                    # The positive-marker rule: an exit without exception
-                    # is not evidence. The source is still there, so the
-                    # move did not happen (AC5).
-                    reap_failed.append(
-                        (str(entry), "archive_claim did not move the file")
-                    )
+                    continue
+
+                try:
+                    # Re-read and re-verify under the mutex: the file may
+                    # have been archived-and-recreated by acquire_claim()
+                    # between our scan and this lock.
+                    try:
+                        fresh = read_claim_file(entry)
+                    except ClaimGoneAway:
+                        vanished += 1
+                        continue
+                    except ClaimCorrupted:
+                        corrupted += 1
+                        continue
+
+                    if not is_provably_dead(fresh, now=now_ms()):
+                        if not is_same_machine(fresh.host, fresh.machine_id):
+                            kept_offhost += 1
+                        elif classify(fresh, now=now_ms()) is ClaimState.SUSPECT:
+                            kept_suspect += 1
+                        else:
+                            kept_live += 1
+                        continue
+
+                    archive_path = archive_claim(entry, ts_ms=ts)
+                    if not entry.exists() and archive_path.exists():
+                        reaped += 1
+                        emit_claim_reaped(
+                            fresh,
+                            root=root_label,
+                            age_ms=max(0, ts - fresh.acquired_at),
+                        )
+                    elif not entry.exists() and not archive_path.exists():
+                        # Some other actor (a concurrent reap, or the holder's
+                        # own delayed release) fully cleared this file between
+                        # our classification and our archive call. The store
+                        # no longer holds it, which is the outcome we wanted;
+                        # we just cannot claim credit for the move.
+                        vanished += 1
+                    else:
+                        # The positive-marker rule: an exit without exception
+                        # is not evidence. The source is still there, so the
+                        # move did not happen (AC5).
+                        reap_failed.append(
+                            (str(entry), "archive_claim did not move the file")
+                        )
+                finally:
+                    release_dir_mutex(recovery_lock, recovery_token)
                 continue
 
             # Not provably dead. Bucket the reason for the report.
-            if not is_same_machine(claim.host, claim.machine_id):
+            if not same_machine:
                 kept_offhost += 1
-            elif classify(claim, now=ts) is ClaimState.SUSPECT:
+            elif state is ClaimState.SUSPECT:
                 kept_suspect += 1
             else:
                 kept_live += 1
@@ -1057,14 +1096,5 @@ def reap_dead_claims(
 
 
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
-    """Resolve + dedup an explicit ``--root`` list the same way the default is."""
-    seen: set[Path] = set()
-    out: list[Path] = []
-    for r in roots:
-        cdir = claims_dir(r)
-        resolved = cdir.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        out.append(cdir)
-    return out
+    """Resolve + dedup an explicit ``--root`` list, returning the claims dirs."""
+    return [claims_dir(r) for r in dedup_claims_roots(roots)]
