@@ -744,3 +744,106 @@ def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch)
     # The stale fno hint must NOT be attached to a third-party failure.
     assert "fno doctor" not in flat, combined
     assert "_mid_reinstall" not in flat, combined
+
+
+# ---------------------------------------------------------------------------
+# x-2304: the meta_path finder, covering the deferred imports written inside
+# command bodies (which never route through _load_real)
+# ---------------------------------------------------------------------------
+
+def test_the_window_finder_is_armed_by_importing_fno():
+    """Arming happens in ``fno/__init__.py``, so every entry into the package
+    gets it -- there is no later hook the ~2100 function-level ``from fno. ...``
+    imports all pass through.  Pinned as a positive marker (the finder is IN
+    ``sys.meta_path``) rather than as the absence of a failure."""
+    import sys as _sys
+
+    import fno
+    from fno._import_guard import _ReinstallWindowFinder
+
+    armed = [f for f in _sys.meta_path if isinstance(f, _ReinstallWindowFinder)]
+    assert len(armed) == 1, _sys.meta_path
+    # Last, so it is consulted only after every ordinary finder has missed.
+    assert isinstance(_sys.meta_path[-1], _ReinstallWindowFinder)
+    # Idempotent: a second import must not stack a second copy.
+    importlib.reload(fno)
+    assert sum(isinstance(f, _ReinstallWindowFinder) for f in _sys.meta_path) == 1
+
+
+def test_finder_retries_a_module_that_lands_on_disk_mid_import(tmp_path, monkeypatch):
+    """A module absent when the ordinary finders looked, and present a moment
+    later, imports -- which is the whole reinstall window.
+
+    The real import machinery runs: ``PathFinder`` genuinely misses (the file
+    does not exist yet), the finder re-checks, and the module loads.  Wrapping
+    ``_find_spec_now`` is the CLOCK, not the logic under test: it decides the
+    instant the reinstall finishes.  Writing the file before the import instead
+    would prove nothing, because ``PathFinder`` would find it on the first pass
+    and this finder would never be consulted."""
+    import fno
+    from fno import _import_guard as guard
+
+    monkeypatch.setattr(fno, "__path__", [*fno.__path__, str(tmp_path)])
+    real_find = guard._find_spec_now
+    rechecks = []
+
+    def finish_the_reinstall(name):
+        rechecks.append(name)
+        (tmp_path / "late_window.py").write_text("VALUE = 42\n", encoding="utf-8")
+        return real_find(name)
+
+    monkeypatch.setattr(guard, "_find_spec_now", finish_the_reinstall)
+    try:
+        assert importlib.import_module("fno.late_window").VALUE == 42
+    finally:
+        sys.modules.pop("fno.late_window", None)
+    # Exactly once: the re-check is the retry, and there is no second look.
+    assert rechecks == ["fno.late_window"]
+
+
+def test_finder_does_not_retry_an_absent_module_and_names_both_causes(monkeypatch):
+    """A genuinely stale install must still fail immediately.
+
+    Two assertions, and the second is the load-bearing one: the disk is
+    consulted exactly ONCE, so an absent module is never waited on.  Drop that
+    and this becomes the blind sleep-retry that ``cli-lazy-imports.md``
+    rejects, which masks a broken install as a transient one."""
+    from fno import _import_guard as guard
+
+    real_find = guard._find_spec_now
+    rechecks = []
+
+    def spy(name):
+        rechecks.append(name)
+        return real_find(name)
+
+    monkeypatch.setattr(guard, "_find_spec_now", spy)
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        importlib.import_module("fno._x2304_never_written")
+
+    assert rechecks == ["fno._x2304_never_written"]
+    message = str(excinfo.value)
+    assert "reinstalled underneath the running process" in message
+    assert "fno doctor" in message
+
+
+def test_finder_leaves_a_third_party_module_alone():
+    """The finder must not decorate someone else's missing dependency, and must
+    not answer for a package that merely starts with the letters ``fno``."""
+    for absent in ("rich_x2304_absent", "fnord_x2304_absent"):
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            importlib.import_module(absent)
+        assert "fno doctor" not in str(excinfo.value)
+
+
+def test_the_hint_is_stated_once_when_the_finder_already_said_it():
+    """``_load_real`` appends the hint to whatever it caught, and what it now
+    catches is the finder's own already-hinted error.  Two copies of one
+    diagnosis in one line reads as two separate findings."""
+    from fno._import_guard import _hint_for_name, _import_failure_hint
+
+    already = ModuleNotFoundError(
+        f"No module named 'fno.gone'{_hint_for_name('fno.gone')}", name="fno.gone"
+    )
+    assert _import_failure_hint(already) == ""
+    assert _import_failure_hint(ModuleNotFoundError("boom", name="fno.gone")) != ""

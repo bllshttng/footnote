@@ -47,7 +47,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 7.25x | 29 | 4 | `cli/src/fno/claims/hostid.py:136` | `is_same_machine` |
 | 6.12x | 49 | 8 | `cli/src/fno/graph/maintain.py:513` | `is_stale_ready` |
 | 5.25x | 21 | 4 | `cli/src/fno/graph/_intake.py:1167` | `resolve_git_roots` |
-| 5.0x | 20 | 4 | `cli/src/fno/_lazy_group.py:58` | `_module_is_now_on_disk` |
+| 5.0x | 20 | 4 | `cli/src/fno/_import_guard.py:55` | `_find_spec_now` |
 | 4.8x | 24 | 5 | `cli/src/fno/agents/events.py:78` | `emit_with_context` |
 | 4.4x | 22 | 5 | `cli/src/fno/retro/cli.py:72` | `_resolve_pr_session_ids` |
 | 4.2x | 21 | 5 | `cli/src/fno/agents/harnesses/codex.py:266` | `_effective_yolo` |
@@ -87,7 +87,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 2.75x | 11 | 4 | `cli/src/fno/plan/_ownership.py:36` | `assert_blueprint_can_write` |
 | 2.75x | 11 | 4 | `cli/src/fno/relay/roundtrip.py:324` | `submit_via_worker` |
 | 2.71x | 19 | 7 | `cli/src/fno/graph/_constants.py:273` | `_rank_band` |
-| 2.67x | 16 | 6 | `cli/src/fno/_lazy_group.py:87` | `_import_failure_hint` |
+| 2.67x | 16 | 6 | `cli/src/fno/_import_guard.py:90` | `_hint_for_name` |
 | 2.6x | 13 | 5 | `cli/src/fno/config/__init__.py:1686` | `_coerce_enabled` |
 | 2.6x | 39 | 15 | `cli/src/fno/config/__init__.py:3793` | `load_settings` |
 | 2.57x | 18 | 7 | `cli/src/fno/graph/cli.py:6372` | `_release_contained_children` |

@@ -41,6 +41,17 @@ import typer
 import typer.core
 import typer.main
 
+# The reinstall-window helpers live in ``fno._import_guard`` so the
+# ``sys.meta_path`` finder installed there and ``_load_real`` below share ONE
+# implementation of "re-check the disk, then retry once".  Bound as module-level
+# names rather than reached through the module, so a test can monkeypatch them
+# here.
+from fno._import_guard import (
+    _import_failure_hint,
+    _is_fno_module,
+    _module_is_now_on_disk,
+)
+
 if TYPE_CHECKING:
     pass
 
@@ -132,73 +143,6 @@ def collapse_click_group(group: click.Group, *, keep: set[str]) -> click.Group:
     group._fno_collapsed_original_list_commands = original_list_commands  # type: ignore[attr-defined]
     group._fno_collapsed_original_get_command = original_get_command  # type: ignore[attr-defined]
     return group
-
-
-def _is_fno_module(name: str) -> bool:
-    """True for our own package, false for a third-party dependency.
-
-    The discriminator for every reinstall-window behavior below: a missing
-    third-party dependency is a genuinely broken install and must neither be
-    retried nor collect reinstall speculation.  Written as an exact-or-dotted
-    match so a package merely BEGINNING with those three letters (``fnord``)
-    is not mistaken for ours.
-    """
-    return name == "fno" or name.startswith("fno.")
-
-
-def _module_is_now_on_disk(name: str) -> bool:
-    """True when ``name`` resolves RIGHT NOW, after dropping the finder caches.
-
-    The import that just failed proves nothing about the present: a reinstall
-    replaces the package tree between two statements, so a module absent one
-    moment is present the next.  Re-checking is what keeps the retry in
-    ``_load_real`` falsifiable rather than a hopeful sleep -- a genuinely
-    missing module answers False here and fails exactly as it does today.
-
-    ``invalidate_caches()`` is belt-and-braces, and the honest scope is small:
-    ``FileFinder`` memoizes a directory listing but re-lists when the directory
-    mtime changes, which covers a reinstall on any filesystem with fine mtime
-    granularity (measured: APFS self-invalidates, so this call is not what makes
-    the check work there).  It is kept for the cases that granularity does not
-    cover -- a coarse-mtime filesystem where the rewrite lands inside one mtime
-    tick -- and because it is the documented thing to do when files change
-    underneath a running process.  It costs microseconds, on an error path only.
-    """
-    import importlib.util
-
-    importlib.invalidate_caches()
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, AttributeError, ValueError):
-        # A parent package that is itself mid-replacement cannot answer the
-        # question; treat "cannot tell" as "no" so we never retry on a guess.
-        return False
-
-
-def _import_failure_hint(exc: ImportError) -> str:
-    """Suffix explaining a missing ``fno`` submodule, or "" for anything else.
-
-    Because imports here happen at INVOCATION time, a subcommand's module is
-    read off disk long after startup -- so ``uv tool install --reinstall``
-    (which ``fno update`` runs) replaces the package underneath a running
-    process and every not-yet-imported subcommand fails for the length of the
-    install.  Two very different things produce that same ModuleNotFoundError
-    and they need opposite responses: a reinstall in flight (transient, retry)
-    or a stale/incomplete install (persistent, reinstall properly).  Naming only
-    the flattering transient one would assert a cause we have not established,
-    so name both and let the reader discriminate by whether it recurs.
-
-    Gated on the missing module being ours: a missing third-party dependency is
-    a genuinely broken install and must not collect reinstall speculation.
-    """
-    name = getattr(exc, "name", None) or ""
-    if not _is_fno_module(name):
-        return ""
-    return (
-        f" ({name} is part of fno itself: either this package was being "
-        "reinstalled underneath the running process, in which case retry, or "
-        "the install is stale, in which case run `fno update` then `fno doctor`)"
-    )
 
 
 # ---------------------------------------------------------------------------
