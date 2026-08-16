@@ -4,8 +4,11 @@
 ## Code Review Report
 
 **Change Type Detected:** [backend/frontend/full-stack/docs-only/other]
-**Files Changed:** [count]
+**Review Scope:** [full (first-round) / full (rules-changed) / full (history-rewritten) / incremental (since `<short-sha>`, `<N>` file(s))]
+**Files Changed:** [count - files in the review scope. The full PR diff is `<count>` files]
 **Commits Reviewed:** [count]
+
+_The scope line separates what the panel analyzed from what it carried as context. The static checks below always run project-wide. Typecheck, lint, build, and the anti-pattern scan are never narrowed by scope. An incremental round re-validated prior blocking findings at this head (Step 3c). Its coverage is cumulative across rounds, not a fresh single-pass read of the whole diff._
 
 ---
 
