@@ -10751,24 +10751,14 @@ mod tests {
         // probe answers, and the payload classifies from that diff (docs-only
         // waives the obligation) instead of failing closed as assumed code.
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("git");
-        std::fs::write(
-            &script,
+        let script = write_exec(
+            dir.path(),
+            "git",
             "#!/bin/sh\ncase \"$*\" in\n  *origin/main*) exit 1 ;;\n  *origin/master*) printf 'docs/plan.md\\n' ;;\n  *) exit 1 ;;\nesac\n",
-        )
-        .unwrap();
-        make_executable(&script);
+        );
         let (is_code, assumed) = classify_payload(script.to_str().unwrap(), Path::new("."));
         assert!(!is_code);
         assert!(!assumed);
-    }
-
-    /// chmod +x for a stub git binary used by the fallback test above.
-    fn make_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
     }
 
     #[test]
