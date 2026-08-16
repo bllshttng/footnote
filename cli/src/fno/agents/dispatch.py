@@ -6673,7 +6673,11 @@ def dispatch_send(
     1. Validate name / message / from_name (same rules as dispatch_ask).
     2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
     3. Resolve the address to its registry primary key, then acquire that
-       per-agent flock (hold_agent_lock) with timeout (exit 11).
+       per-agent flock (hold_agent_lock) with timeout. A timeout retries the
+       acquire on a short grace window and queues the message durable when it
+       wins (delivery="durable", reason="agent-lock-timeout", exit 0); only
+       sustained contention, which leaves the recipient unverified, exits 11
+       with nothing written.
     4. INSIDE the flock:
        a. Reload and re-resolve; unknown or changed identity refuses.
        b. Provider mismatch -> exit 2.
@@ -7034,6 +7038,14 @@ def dispatch_send(
         # and queuing on that reading strands the message in the dead session's
         # mailbox. So the queue takes the lock too, on a short grace window
         # that asks "did the holder just finish?" rather than waiting again.
+        #
+        # The locked path rebinds `name` to the registry primary key before it
+        # emits or stamps anything; this path never entered that block, so it
+        # must do the same. Everything below keys on the name: a stamp keyed to
+        # the caller's alias matches no row, so it silently skips
+        # `last_message_at` AND reports the miss as "recipient identity
+        # changed" - a false failure on a send that succeeded.
+        name = canonical_name
         try:
             with hold_agent_lock(
                 canonical_name,

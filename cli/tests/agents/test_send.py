@@ -2099,8 +2099,10 @@ def test_dispatch_send_lock_timeout_names_the_holder(
     lock_path = _agent_lock_path("red", registry_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stamp the file the way a real holder does, then hold it from a second
-    # open so the send genuinely blocks.
+    # Prove a real holder stamps the file at all; the lock is released again
+    # here, and the blocked acquire below is simulated. Reading a REAL stamp
+    # off a REAL contender is test_lock.py's test_timeout_names_the_live_holder;
+    # what this test owns is the last hop, that the note reaches stderr.
     with hold_agent_lock("red", registry_path):
         stamped = lock_path.read_text()
     assert "pid" in stamped
@@ -2347,3 +2349,37 @@ def test_dispatch_send_lock_timeout_books_the_queue_as_a_success(
 
     after = load_registry(paths.agents_registry_path())
     assert after[0].last_message_at is not None, "last_message_at must be stamped"
+
+
+def test_dispatch_send_lock_timeout_books_an_alias_addressed_send_too(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A short-id address books the same way a bare name does.
+
+    The locked path rebinds `name` to the registry primary key; the timeout
+    path never runs that block. Keyed to the caller's alias, the stamp matched
+    no row, so `last_message_at` stayed stale and the miss was reported as
+    "recipient identity changed" - a failure line printed over a send that
+    succeeded.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents.dispatch import dispatch_send
+    from fno.agents.registry import load_registry
+
+    _fail_first_lock_acquire(monkeypatch)
+    result = dispatch_send(
+        name="abcd1234",  # the short-id, a first-class address form
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+        lock_timeout=0.2,
+    )
+    assert result.delivery == "durable"
+
+    after = load_registry(paths.agents_registry_path())
+    assert after[0].last_message_at is not None, "last_message_at must be stamped"
+    stderr = capsys.readouterr().err
+    assert "registry stamp failed" not in stderr, stderr
