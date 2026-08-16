@@ -30,6 +30,23 @@
 # below with the shared `with_timeout` (scripts/lib/with-timeout.sh): a
 # refresh that would otherwise wait out the mutex instead times out and logs,
 # same non-fatal outcome as any other refresh failure.
+#
+# REFRESH_TIMEOUT (5s default) is deliberately shorter than refresh_claim's
+# own ~25s graceful contention-exhaustion budget above: this hook only cares
+# about bounding wall-clock, not about letting refresh_claim's own
+# ClaimContended path run to completion, so the external kill firing first is
+# the intended outcome under real contention, not a bug. It also means a kill
+# CAN land while refresh_claim holds the recovery mutex (Python's default
+# SIGTERM disposition does not run `finally`), orphaning `.recovery.d`. That
+# window is narrow - only the fast read+atomic-rewrite after the mutex is
+# already acquired, not the (much longer) wait to acquire it - and self-heals
+# via the existing corpse-steal path (`steal_if_stale`, mutex.py,
+# STALE_MUTEX_STEAL_S=120s), the same bounded-recovery mechanism every other
+# stale mutex in this file relies on. Narrowing that window further would
+# mean either raising REFRESH_TIMEOUT back toward 25s+ (reintroducing the
+# hang this bound exists to prevent) or making the CLI's own SIGTERM handling
+# interruption-safe globally - a materially larger change than this hook's
+# scope.
 
 set -uo pipefail
 
