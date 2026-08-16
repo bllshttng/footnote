@@ -8,10 +8,13 @@ the in-progress case (a CheckRun with `status != COMPLETED` has an empty
 (verdict `unknown`, never red). The rollup arrives over REST (`fno.pr._rest`)
 so the read spends the idle core budget, never the shared GraphQL one.
 
-Exit codes (so a caller can branch without re-parsing the JSON):
-    0  green    - settled, every check passed
-    1  red      - settled, at least one check failed
-    2  pending  - not settled (a check still queued/running)
+Exit codes (so a caller can branch without re-parsing the JSON). The code is
+always the VERDICT's code, which answers "may this merge"; the `settled` field
+answers the different question "is anything left to wait for", and the two are
+allowed to disagree - a cancelled latest run is red AND unsettled:
+    0  green    - every check passed
+    1  red      - at least one check failed or was cancelled
+    2  pending  - a check is still queued/running
     3  unknown  - no checks on the PR
     4  error    - could not fetch PR state (no PR, gh error, bad JSON)
     127 gh missing
@@ -40,6 +43,11 @@ _FAIL_STATES = {
     "STALE",
     "ERROR",
 }
+# Conclusions that prove a result EXISTS. Deliberately _FAIL_STATES minus
+# CANCELLED and STALE: those two say the run was taken away, not that it
+# reached a verdict, so the answer to "wait or act" is still "wait for, or
+# trigger, a newer run". They stay in _FAIL_STATES because the verdict is red.
+_SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
 
 
 def _alt(*vals: Any) -> Any:
@@ -68,6 +76,19 @@ def _classify(check: dict) -> str:
         return "fail"
     # PENDING / EXPECTED / REQUESTED / unknown / empty -> not settled.
     return "pending"
+
+
+def _has_settled_marker(check: dict) -> bool:
+    """True iff this entry carries a POSITIVE marker that a result exists.
+
+    Never the absence of a pending sibling: an empty rollup and an all-green
+    one both have zero pending entries, and only one of them is decided.
+    """
+    status = str(check.get("status") or "").upper()
+    if status and status != "COMPLETED":
+        return False
+    raw = str(_alt(check.get("conclusion"), check.get("state"), "")).upper()
+    return raw in _SETTLED_STATES
 
 
 def _entry_ts(check: dict) -> str:
@@ -157,11 +178,22 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     Classifies only the latest run per check name so a superseded CANCELLED run
     (left in the rollup by a force/amend push) no longer yields a false red.
     `counts["total"]` is the deduped count, the honest check total.
+    `counts["unsettled"]` counts latest runs with NO settled marker (an absent
+    result: cancelled, stale, still running), and `settled` is derived from it
+    positively elsewhere - never from the absence of a pending run.
     """
     deduped = _latest_per_name(rollup)
-    counts = {"total": len(deduped), "pass": 0, "fail": 0, "pending": 0}
+    counts = {
+        "total": len(deduped),
+        "pass": 0,
+        "fail": 0,
+        "pending": 0,
+        "unsettled": 0,
+    }
     for c in deduped:
         counts[_classify(c)] += 1
+        if not _has_settled_marker(c):
+            counts["unsettled"] += 1
     if not deduped:
         return ("unknown", 3, counts)
     if counts["fail"]:
@@ -233,7 +265,10 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             {
                 "pr": pr,
                 "verdict": verdict,
-                "settled": verdict in ("green", "red"),
+                # total > 0 is load bearing: an empty rollup and an all-green
+                # one both have zero unsettled entries, and only one of them
+                # is decided. Existence must be stated, not inherited.
+                "settled": counts["total"] > 0 and counts["unsettled"] == 0,
                 "green": green,
                 "pr_state": pr_json.get("state"),
                 "checks": counts,
@@ -247,6 +282,36 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         )
         + "\n"
     )
+    # Same discipline as the unresolved-findings note below: a number a human
+    # would misread gets its instruction beside it, on stderr. An unsettled
+    # entry has two distinct causes and they need distinct instructions: a
+    # completed-but-markerless entry (cancelled or stale) says push again,
+    # while a still-running entry says wait. Conflating them told a human on
+    # an ordinary in-progress PR to rerun a workflow that never failed. Both
+    # notes read the actual `verdict`, never a hardcoded "red": a run of
+    # unsettled entries that are all still-running settles as `pending`, not
+    # `red`, and the note must not claim otherwise.
+    if counts.get("unsettled"):
+        unsettled_now = [c for c in _latest_per_name(rollup) if not _has_settled_marker(c)]
+        absent = [
+            c for c in unsettled_now if str(c.get("status") or "").upper() in ("", "COMPLETED")
+        ]
+        running = [c for c in unsettled_now if c not in absent]
+        if absent:
+            names = ", ".join(str(c.get("name") or c.get("context") or "?") for c in absent)
+            sys.stderr.write(
+                f"note: {len(absent)} check(s) produced no result (cancelled or stale): "
+                f"{names}. The verdict is {verdict}, and settled stays false because a "
+                "cancelled run is an ABSENT result, not a terminal one. "
+                "Push again or rerun the workflow. Do not read this PR as decided.\n"
+            )
+        if running:
+            names = ", ".join(str(c.get("name") or c.get("context") or "?") for c in running)
+            sys.stderr.write(
+                f"note: {len(running)} check(s) are still queued or running: {names}. "
+                f"The verdict is {verdict}, and settled stays false until every latest run "
+                "finishes. Wait for the run to finish. Do not start a new one.\n"
+            )
     # Say what to DO about a non-zero counter, on stderr so the JSON contract is
     # untouched. Answering a finding does NOT clear it: a review thread stays
     # unresolved until it is resolved EXPLICITLY, so a PR whose every finding has
