@@ -99,6 +99,10 @@ class ClaimContended(Exception):
     that only catch this narrow type cannot accidentally reclassify an
     unrelated RuntimeError raised deeper in the call stack (pydantic,
     resolve_harness_identity, serialize_claim, ...) as contention.
+
+    Callers of acquire_claim/refresh_claim should catch this ALONGSIDE
+    ClaimHeldByOther, not instead of it - an except clause naming only one of
+    the two lets the other escape uncaught.
     """
 
 
