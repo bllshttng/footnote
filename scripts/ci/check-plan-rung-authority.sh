@@ -191,7 +191,7 @@ crates/fno/src/needs_overlay.rs:1
 crates/fno/src/proto.rs:4
 crates/fno/src/pty.rs:1
 crates/fno/src/server.rs:23
-crates/fno/src/sprites.rs:5
+crates/fno/src/sprites.rs:6
 crates/fno/src/squad.rs:6
 crates/fno/src/view_store.rs:4
 crates/fno/src/web.rs:1
