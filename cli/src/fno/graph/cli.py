@@ -8495,13 +8495,14 @@ def cmd_reconcile(
             if not json_out:
                 typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
 
-    # Claim GC. This call site reaches every path that fires
-    # reconcile - the SessionStart hook, the megawalk stop hook, and a
-    # manual invocation, all through scripts/lib/reconcile-throttle.sh - so
-    # a reaper hook on any one caller instead would be a guard on one of N
-    # reachable paths. --dry-run propagates to the reaper (one mode
-    # contract); best-effort, same posture as sync_catchup above: a reap
-    # error is reported and never fails the sweep.
+    # Claim GC. This call site reaches every path that fires reconcile - the
+    # SessionStart reconcile hook, the eval-sweep SessionStart hook (via
+    # scripts/lib/eval-sweep-throttle.sh), and a manual invocation, all
+    # through scripts/lib/reconcile-throttle.sh - so a reaper hook on any one
+    # caller instead would be a guard on one of N reachable paths. --dry-run
+    # propagates to the reaper (one mode contract); best-effort, same posture
+    # as sync_catchup above: a reap error is reported and never fails the
+    # sweep.
     claim_reap: dict = {"outcome": "not-run"}
     try:
         from fno.claims.core import reap_dead_claims
@@ -8509,9 +8510,23 @@ def cmd_reconcile(
         _reap = reap_dead_claims(apply=not dry_run)
         claim_reap = {"outcome": "ok", **_reap}
         _count = _reap["would_reap"] if dry_run else _reap["reaped"]
-        if _count and not json_out:
-            _verb = "would archive" if dry_run else "archived"
-            typer.echo(f"claim reap: {_verb} {_count} dead claim(s)", err=True)
+        _failed = _reap.get("reap_failed") or []
+        if not json_out:
+            if _count:
+                _verb = "would archive" if dry_run else "archived"
+                typer.echo(f"claim reap: {_verb} {_count} dead claim(s)", err=True)
+            if _failed:
+                # A provably-dead claim whose archive move never completed is
+                # not the same as zero dead claims found - the reaped=0 count
+                # above stays silent about it, so this must not be gated on
+                # _count (AC5's "positive marker" rule applies to output too).
+                _paths = ", ".join(p for p, _ in _failed[:3])
+                _more = "..." if len(_failed) > 3 else ""
+                typer.echo(
+                    f"warning: claim reap left {len(_failed)} dead claim(s) "
+                    f"un-archived (move did not complete): {_paths}{_more}",
+                    err=True,
+                )
     except Exception as _reap_exc:  # noqa: BLE001 - never abort the sweep
         claim_reap = {"outcome": "error", "detail": str(_reap_exc)[:200]}
         if not json_out:

@@ -51,7 +51,7 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, now_ms
+from .staleness import classify, classify_for_sweep, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import _stamp_owner, acquire_dir_mutex, release_dir_mutex, steal_if_stale
 from .types import (
@@ -260,11 +260,44 @@ def acquire_claim(
         )
 
     if existing.holder == holder:
-        # Idempotent re-acquire: refresh pid/host/acquired_at.
-        refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
-        _atomic_replace(path, serialize_claim(refreshed))
-        emit_claim_idempotent_reacquired(refreshed, previous=existing)
-        return refreshed
+        # Idempotent re-acquire: refresh pid/host/acquired_at. Take the same
+        # per-key recovery mutex reap_dead_claims() holds while it re-verifies
+        # and archives this exact file - without it, a respawned worker could
+        # rewrite the file as live in the gap between reap's re-verify and its
+        # archive_claim() call, and reap would archive the fresh write instead
+        # of the dead one it proved. Contention handling mirrors the
+        # stale-reclaim branch below (steal a corpse or wait briefly, then
+        # recurse) rather than a bare retry loop, which would spin straight
+        # into RecursionError against a genuinely live holder.
+        recovery_lock = path.with_name(path.name + ".recovery.d")
+        acquired_lock = False
+        recovery_token = ""
+        try:
+            try:
+                recovery_lock.mkdir(parents=True)
+                recovery_token = _stamp_owner(recovery_lock)
+                acquired_lock = True
+            except FileExistsError:
+                if not steal_if_stale(recovery_lock):
+                    _wait_for_recovery_release(recovery_lock)
+                return acquire_claim(
+                    key,
+                    holder,
+                    reason=reason,
+                    ttl_ms=ttl_ms,
+                    metadata=metadata,
+                    pid=pid,
+                    host=host,
+                    harness=harness,
+                    root=root,
+                )
+            refreshed = _make_claim(key, holder, ttl_ms, reason, metadata, pid, host, harness)
+            _atomic_replace(path, serialize_claim(refreshed))
+            emit_claim_idempotent_reacquired(refreshed, previous=existing)
+            return refreshed
+        finally:
+            if acquired_lock:
+                release_dir_mutex(recovery_lock, recovery_token)
 
     # Stale? Try recovery under a mkdir-based recovery mutex so the archive +
     # recreate steps are serialized across concurrent workers. Without the
@@ -784,13 +817,16 @@ def _list_claims_impl(
     prefix: Optional[str] = None,
     include_stale: bool = False,
     root: Optional[Path] = None,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
     """Shared directory walk for ``list_claims`` and ``list_claims_with_counts``.
 
-    Returns ``(rows, counts)``: ``rows`` is filtered per ``include_stale``
-    exactly as before; ``counts`` is every state seen while walking,
-    regardless of what ``include_stale`` kept, so a caller can report what
-    it withheld.
+    Returns ``(rows, counts, states_by_key)``: ``rows`` is filtered per
+    ``include_stale`` exactly as before; ``counts`` is every state seen
+    while walking, regardless of what ``include_stale`` kept, so a caller
+    can report what it withheld; ``states_by_key`` maps every key seen to
+    its state (also independent of ``include_stale``) so a multi-root
+    caller can dedup its own cross-root totals by key instead of summing
+    ``counts`` blind to a key existing in more than one root.
     """
     cdir = claims_dir(root)
     # "free" covers a claim released between iterdir() and claim_status()
@@ -799,9 +835,10 @@ def _list_claims_impl(
     # non-event.
     counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0}
     if not cdir.is_dir():
-        return [], {**counts, "total": 0}
+        return [], {**counts, "total": 0}, {}
 
     out: list[dict[str, Any]] = []
+    states_by_key: dict[str, str] = {}
     for entry in sorted(cdir.iterdir()):
         if entry.is_dir():
             # Skip the .expired archive dir and any future subdirs.
@@ -817,6 +854,7 @@ def _list_claims_impl(
         state = status.get("state")
         if state in counts:
             counts[state] += 1
+            states_by_key[key] = state
         # SUSPECT (x-ba4b) is an active, TTL-protected claim - it must count
         # alongside LIVE so lane accounting (advance._live_lane_domains) does not
         # under-count a slot held by a respawned worker and over-dispatch.
@@ -828,7 +866,7 @@ def _list_claims_impl(
         }:
             out.append(status)
 
-    return out, {**counts, "total": sum(counts.values())}
+    return out, {**counts, "total": sum(counts.values())}, states_by_key
 
 
 def list_claims(
@@ -846,7 +884,9 @@ def list_claims(
     Corrupted entries are returned with state="corrupted" and an "error"
     key when ``include_stale=True``; they are skipped silently otherwise.
     """
-    rows, _counts = _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
+    rows, _counts, _states = _list_claims_impl(
+        prefix=prefix, include_stale=include_stale, root=root
+    )
     return rows
 
 
@@ -855,14 +895,17 @@ def list_claims_with_counts(
     prefix: Optional[str] = None,
     include_stale: bool = False,
     root: Optional[Path] = None,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
     """Like :func:`list_claims`, but also returns the filtered-state counts.
 
     A store that is 99 percent stale must not render as an
     empty store. ``counts`` carries ``live``/``suspect``/``stale``/
     ``corrupted``/``total`` for every lockfile the walk saw, independent of
     what ``include_stale`` kept in ``rows`` - this is what lets a caller
-    print what it filtered instead of the bare string ``no claims``.
+    print what it filtered instead of the bare string ``no claims``. The
+    third element, ``states_by_key``, is the same information keyed by
+    claim key so a multi-root caller can dedup a key seen in more than one
+    root before summing.
     """
     return _list_claims_impl(prefix=prefix, include_stale=include_stale, root=root)
 
@@ -919,25 +962,7 @@ def _default_reap_roots() -> list[Path]:
     return _dedup_roots([global_claims_root(), None])
 
 
-def _classify_for_sweep(claim: Claim, ts: int) -> tuple[bool, str]:
-    """Classify one claim for ``reap_dead_claims``, mirroring
-    :func:`fno.claims.staleness.is_provably_dead`'s own composition
-    (same-machine and ``classify() is STALE``) so the single ``classify()``
-    call is shared by both the outer scan and the mutex re-verify below
-    instead of paid twice or three times per claim, and so a claim's
-    classification stays consistent with the rest of one sweep pass by using
-    the sweep's ``ts`` rather than a fresh clock read each time.
-
-    Returns ``(provably_dead, bucket)`` where ``bucket`` is one of
-    ``"offhost"``/``"suspect"``/``"live"`` - only meaningful when
-    ``provably_dead`` is False.
-    """
-    if not is_same_machine(claim.host, claim.machine_id):
-        return False, "offhost"
-    state = classify(claim, now=ts)
-    if state is ClaimState.STALE:
-        return True, ""
-    return False, "suspect" if state is ClaimState.SUSPECT else "live"
+_classify_for_sweep = classify_for_sweep
 
 
 def reap_dead_claims(
@@ -951,12 +976,10 @@ def reap_dead_claims(
     release, refresh, and force-release all exist; nothing prunes a claim
     whose holder died without releasing, so a dead session leaks its
     lockfile forever. This walks every ``.lock`` file in the swept roots,
-    classifies it with :func:`_classify_for_sweep`, which mirrors
-    :func:`fno.claims.staleness.is_provably_dead`'s three-part proof (the
-    single liveness authority - see that function) but shares one
-    ``classify()`` call across a claim's scan and re-verify instead of
-    calling the bool-only predicate twice, and archives the provably-dead
-    ones to ``.expired/``.
+    classifies it with :func:`fno.claims.staleness.classify_for_sweep` (the
+    single liveness authority; :func:`~fno.claims.staleness.is_provably_dead`
+    is its bool-only view), and archives the provably-dead ones to
+    ``.expired/``.
 
     ``roots``, when given, is a list of repo-root arguments passed through
     to :func:`fno.claims.io.claims_dir` exactly as ``--root`` does for
@@ -991,9 +1014,7 @@ def reap_dead_claims(
     scanned = 0
     reaped = 0
     would_reap = 0
-    kept_live = 0
-    kept_suspect = 0
-    kept_offhost = 0
+    kept: dict[str, int] = {"offhost": 0, "suspect": 0, "live": 0}
     corrupted = 0
     vanished = 0
     # A provably-dead claim whose recovery mutex is held by a genuine live
@@ -1003,6 +1024,26 @@ def reap_dead_claims(
     # means "gone from the store").
     contended = 0
     reap_failed: list[tuple[str, str]] = []
+
+    def _read_or_bucket(entry: Path) -> Optional[Claim]:
+        """Read one claim file for the sweep, or bucket why it can't be read.
+
+        Shared by the outer scan and the mutex re-verify below so the
+        corrupted/vanished handling exists once, not twice.
+        """
+        nonlocal corrupted, vanished
+        try:
+            return read_claim_file(entry)
+        except ClaimCorrupted:
+            # Cannot classify what cannot be parsed; a claim that cannot be
+            # read cannot be proven dead (AC6).
+            corrupted += 1
+            return None
+        except ClaimGoneAway:
+            # A concurrent release between listdir and read is a normal
+            # outcome, not a failure of this run.
+            vanished += 1
+            return None
 
     for cdir in use_dirs:
         if not cdir.is_dir():
@@ -1016,23 +1057,14 @@ def reap_dead_claims(
                 continue
 
             scanned += 1
-            try:
-                claim = read_claim_file(entry)
-            except ClaimCorrupted:
-                # Cannot classify what cannot be parsed; a claim that
-                # cannot be read cannot be proven dead (AC6).
-                corrupted += 1
-                continue
-            except ClaimGoneAway:
-                # A concurrent release between listdir and read is a
-                # normal outcome, not a failure of this run.
-                vanished += 1
+            claim = _read_or_bucket(entry)
+            if claim is None:
                 continue
 
             # is_same_machine + classify() computed once per claim and reused
             # by both this outer scan and the mutex re-verify below, instead
             # of paid twice or three times per claim - the sweep runs on
-            # every SessionStart/megawalk stop hook.
+            # every SessionStart reconcile.
             provably_dead, bucket = _classify_for_sweep(claim, ts)
 
             if provably_dead:
@@ -1063,23 +1095,13 @@ def reap_dead_claims(
                     # Re-read and re-verify under the mutex: the file may
                     # have been archived-and-recreated by acquire_claim()
                     # between our scan and this lock.
-                    try:
-                        fresh = read_claim_file(entry)
-                    except ClaimGoneAway:
-                        vanished += 1
-                        continue
-                    except ClaimCorrupted:
-                        corrupted += 1
+                    fresh = _read_or_bucket(entry)
+                    if fresh is None:
                         continue
 
                     fresh_dead, fresh_bucket = _classify_for_sweep(fresh, ts)
                     if not fresh_dead:
-                        if fresh_bucket == "offhost":
-                            kept_offhost += 1
-                        elif fresh_bucket == "suspect":
-                            kept_suspect += 1
-                        else:
-                            kept_live += 1
+                        kept[fresh_bucket] += 1
                         continue
 
                     archive_path = archive_claim(entry, ts_ms=ts)
@@ -1125,20 +1147,15 @@ def reap_dead_claims(
                 continue
 
             # Not provably dead. Bucket the reason for the report.
-            if bucket == "offhost":
-                kept_offhost += 1
-            elif bucket == "suspect":
-                kept_suspect += 1
-            else:
-                kept_live += 1
+            kept[bucket] += 1
 
     summary: dict[str, Any] = {
         "scanned": scanned,
         "reaped": reaped,
         "would_reap": would_reap,
-        "kept_live": kept_live,
-        "kept_suspect": kept_suspect,
-        "kept_offhost": kept_offhost,
+        "kept_live": kept["live"],
+        "kept_suspect": kept["suspect"],
+        "kept_offhost": kept["offhost"],
         "corrupted": corrupted,
         "vanished": vanished,
         "contended": contended,

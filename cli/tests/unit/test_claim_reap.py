@@ -14,6 +14,8 @@ import os
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import psutil
@@ -28,9 +30,10 @@ from fno.claims.core import (
     list_claims_with_counts,
     reap_dead_claims,
 )
-from fno.claims.io import claim_path, claims_dir, serialize_claim
+from fno.claims.io import claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.staleness import is_provably_dead, now_ms
 from fno.claims.types import Claim
+from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 
 HOLDER_A = "target-session:sid-a"
@@ -97,13 +100,11 @@ class TestIsProvablyDead:
 
 
 class TestClassifyForSweepMatchesIsProvablyDead:
-    """_classify_for_sweep (core.py) inlines is_provably_dead's own
-    composition (same-machine and classify() is STALE) instead of calling
-    it, so a sweep can share one classify() call across the outer scan and
-    the mutex re-verify. A parity test pins the two
-    together: if a future change to either composition diverges, this
-    fails instead of reap silently disagreeing with its documented single
-    liveness authority.
+    """_classify_for_sweep is classify_for_sweep (staleness.py), and
+    is_provably_dead is a thin bool-only view of that same function - both
+    now share one implementation rather than being kept in sync by
+    convention. This regression test pins the invariant directly rather
+    than trusting the alias never drifts back apart.
     """
 
     @pytest.mark.parametrize(
@@ -319,6 +320,48 @@ class TestReapDeadClaims:
 
 
 # ---------------------------------------------------------------------------
+# acquire_claim's idempotent re-acquire vs reap's recovery mutex: a
+# respawned worker refreshing the same holder string must not have its live
+# write clobbered by a concurrent reap sweep that proved the OLD pid dead.
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentReacquireVsReapRecoveryMutex:
+    def test_idempotent_reacquire_waits_for_reaps_recovery_mutex(self, tmp_path):
+        acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
+        path = claim_path("k", root=tmp_path)
+        recovery_lock = path.with_name(path.name + ".recovery.d")
+
+        # Simulate reap holding this key's recovery mutex mid-archive (the
+        # exact window between its re-verify and its archive_claim() call).
+        token = acquire_dir_mutex(recovery_lock, 0)
+        assert token is not None
+
+        result: dict[str, object] = {}
+
+        def _racer() -> None:
+            result["claim"] = acquire_claim("k", HOLDER_A, pid=os.getpid(), root=tmp_path)
+
+        racer = threading.Thread(target=_racer)
+        racer.start()
+        time.sleep(0.2)
+        try:
+            assert racer.is_alive(), "idempotent re-acquire must block on the held mutex"
+            still_dead = read_claim_file(path)
+            assert still_dead.pid == _dead_pid(), (
+                "the on-disk claim must not have been rewritten while reap's "
+                "recovery mutex was held - that write would race a concurrent "
+                "archive"
+            )
+        finally:
+            release_dir_mutex(recovery_lock, token)
+
+        racer.join(timeout=5)
+        assert not racer.is_alive()
+        assert result["claim"].pid == os.getpid()
+
+
+# ---------------------------------------------------------------------------
 # list_claims_with_counts / `fno claim list`: the reader must not lie
 # ---------------------------------------------------------------------------
 
@@ -329,7 +372,7 @@ class TestReaderReportsFilteredCount:
             acquire_claim(f"k{i}", HOLDER_A, pid=_dead_pid(), root=tmp_path)
         acquire_claim("k-live", HOLDER_A, pid=os.getpid(), root=tmp_path)
 
-        rows, counts = list_claims_with_counts(root=tmp_path)
+        rows, counts, states_by_key = list_claims_with_counts(root=tmp_path)
 
         on_disk = len(list(claims_dir(tmp_path).glob("*.lock")))
         assert on_disk == 6
@@ -337,6 +380,9 @@ class TestReaderReportsFilteredCount:
         assert counts["stale"] == 5
         assert counts["live"] == 1
         assert len(rows) == 1, "default include_stale=False shows only the live row"
+        assert len(states_by_key) == 6, "states_by_key covers every entry, not just rows"
+        assert states_by_key["k-live"] == "live"
+        assert states_by_key["k0"] == "stale"
 
     def test_cli_list_does_not_print_bare_no_claims_string(self, cwd_tmp):
         for i in range(3):

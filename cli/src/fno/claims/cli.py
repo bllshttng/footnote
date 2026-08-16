@@ -688,11 +688,14 @@ def list_cmd(
     # than mutated onto the row dict itself, so JSON output stays the bare
     # claim_status() shape a scripted caller already parses.
     row_roots: dict[str, str] = {}
-    totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0, "total": 0}
+    # Only stale/corrupted/free ever feed the empty-store message below;
+    # live/suspect/total would just be dead weight summed on every list call.
+    totals = {"stale": 0, "corrupted": 0, "free": 0}
     deduped_roots = dedup_claims_roots(roots)
     seen_keys: set[str] = set()
+    seen_total_keys: set[str] = set()
     for candidate_root, cdir in deduped_roots:
-        rows, counts = list_claims_with_counts(
+        rows, _counts, states_by_key = list_claims_with_counts(
             prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         for r in rows:
@@ -704,8 +707,14 @@ def list_cmd(
             seen_keys.add(r["key"])
             all_rows.append(r)
             row_roots[r["key"]] = str(cdir)
-        for k in totals:
-            totals[k] += counts[k]
+        # Dedup by key, not a blind counts sum: a key present in more than
+        # one root would otherwise be double-counted in totals even though
+        # all_rows above only shows it once (same first-root-wins rule).
+        for key, state in states_by_key.items():
+            if state not in totals or key in seen_total_keys:
+                continue
+            seen_total_keys.add(key)
+            totals[state] += 1
 
     all_rows.sort(key=lambda r: r["key"])
     n_roots = len(deduped_roots)
@@ -721,11 +730,16 @@ def list_cmd(
     if not all_rows:
         # AC7: a store that is mostly stale must never print the bare
         # string "no claims" - that reads identically to an empty store.
+        # The --include-stale hint only makes sense when the flag wasn't
+        # already given and there is actually something it would surface -
+        # otherwise it tells the caller to pass a flag they already passed.
+        hint = ""
+        if not include_stale and (totals["stale"] or totals["corrupted"]):
+            hint = "; --include-stale to list them"
         typer.echo(
             f"no live claims ({totals['stale']} stale, {totals['corrupted']} corrupted, "
             f"{totals['free']} released mid-scan across "
-            f"{n_roots} root{'s' if n_roots != 1 else ''}); "
-            f"--include-stale to list them"
+            f"{n_roots} root{'s' if n_roots != 1 else ''}){hint}"
         )
         return
     for r in all_rows:
