@@ -103,12 +103,38 @@ def test_emit_operator_initiated_envelope_and_data(tmp_path: Path) -> None:
         task_id="ab-12345678",
     )
     rec = json.loads(events.read_text().strip())
-    # Envelope matches the bash emit_event siblings ({timestamp,source,type,data}),
-    # NOT the validated {ts,...} stream, so an auditor greps one project stream.
-    assert set(rec) == {"timestamp", "source", "type", "data"}
+    assert set(rec) == {"ts", "source", "type", "data"}
     assert rec["source"] == "backlog"
-    assert rec["type"] == "backlog_done_operator_initiated"
-    assert rec["data"] == {"task_id": "ab-12345678"}
+    assert rec["type"] == "operator_initiated"
+    assert rec["data"] == {
+        "action_type": "backlog_done_operator_initiated",
+        "task_id": "ab-12345678",
+    }
+
+
+def test_emit_operator_initiated_uses_coordinated_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fno.events
+    from fno.drive_authority import emit_operator_initiated
+
+    events = tmp_path / ".fno" / "events.jsonl"
+    appended: list[tuple[dict, Path]] = []
+    monkeypatch.setattr(
+        fno.events,
+        "append_event",
+        lambda event, events_path: appended.append((event, events_path)),
+    )
+
+    emit_operator_initiated(
+        "backlog_done_operator_initiated",
+        events_path=events,
+        task_id="ab-12345678",
+    )
+
+    assert len(appended) == 1
+    assert appended[0][1] == events
+    assert appended[0][0]["type"] == "operator_initiated"
 
 
 def test_emit_operator_initiated_appends(tmp_path: Path) -> None:
@@ -120,6 +146,7 @@ def test_emit_operator_initiated_appends(tmp_path: Path) -> None:
     lines = events.read_text().strip().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["data"]["gate"] == "quality_check_passed"
+    assert json.loads(lines[0])["data"]["action_type"] == "gate_set_operator_initiated"
     # Unspecified source defaults to "target".
     assert json.loads(lines[1])["source"] == "target"
 

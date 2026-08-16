@@ -851,6 +851,26 @@ def _derive_log_path(name: str) -> Path:
     return paths.state_dir() / "agents" / "logs" / f"{name}.log"
 
 
+def _touch_log_path(name: str) -> Optional[Path]:
+    """Create (or reuse) the log file a mint site is about to record as a
+    registry row's ``log_path`` (x-7bcd AC4): a ``log_path`` pointing at
+    nothing is a claim, not evidence, so the file must exist before the row
+    does. Returns ``None`` on a failed create (disk full, EROFS, a
+    permission error) instead of raising or returning a path nothing backs,
+    mirroring ``claude_ask.rs``'s ``log_file_created`` gate, so a caller
+    records this leg only when it is real. Shared by every mint site
+    (dispatch.py, mux_spawn.py) so the mkdir+touch idiom lives in exactly
+    one place.
+    """
+    log_path = _derive_log_path(name)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+    except OSError:
+        return None
+    return log_path
+
+
 def _codex_output_path(name: str) -> Path:
     """Tee target for the codex provider's JSONL stream (Locked Decision 8).
 
@@ -1468,13 +1488,11 @@ def _claude_create_path(
     # log_path pointing at nothing is a claim, not evidence, and the
     # resolvable-handle guard only checks the field is non-empty, not that
     # the file exists.
-    log_path = _derive_log_path(name)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.touch(exist_ok=True)
+    touched_log_path = _touch_log_path(name)
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),
-        log_path=str(log_path),
+        log_path=str(touched_log_path) if touched_log_path is not None else "",
         short_id=short_id,
         # Canonical identity at birth (x-ec59): a bg claude row is born routable
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
@@ -1562,7 +1580,7 @@ def _claude_create_path(
                 f"to {name} (succession). You no longer hold it.",
                 file=sys.stderr,
             )
-    except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+    except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
         # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
         # but no registry row names it, so without this the orphan's later
         # death would join no birth in the daemon log.
@@ -6151,6 +6169,81 @@ def _mail_inject_codex(
         return bool(json.loads(proc.stdout.strip()).get("delivered"))
     except (ValueError, AttributeError):
         return False
+
+
+def _review_start_codex(
+    thread_id: str,
+    target: str,
+    *,
+    audit_payload: str | None = None,
+    audit_sender: str | None = None,
+    audit_target_cwd: str | None = None,
+) -> dict[str, object]:
+    """Start an inline Codex review and preserve its structured outcome receipt."""
+    import json
+
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        return {"delivered": False, "reason": "binary-not-found"}
+    try:
+        argv = [
+            str(binary),
+            "review-start",
+            "--session",
+            thread_id,
+            "--target",
+            target,
+            "--delivery",
+            "inline",
+        ]
+        for flag, value in (
+            ("--audit-payload", audit_payload),
+            ("--audit-sender", audit_sender),
+            ("--audit-target-cwd", audit_target_cwd),
+        ):
+            if value is not None:
+                argv.extend((flag, value))
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return {"delivered": False, "reason": "not-confirmed"}
+    except OSError:
+        return {"delivered": False, "reason": "spawn-failed"}
+    try:
+        receipt = json.loads(proc.stdout.strip())
+    except (ValueError, AttributeError):
+        # Exit 2 with no stdout is the binary's usage arm: a deployed binary
+        # predating this PR's flags rejects the invocation there. Point the
+        # operator at the binary, not the daemon.
+        if proc.returncode == 2 and not proc.stdout.strip():
+            return {"delivered": False, "reason": "stale-binary"}
+        return {"delivered": False, "reason": "rpc-error"}
+    if not isinstance(receipt, dict):
+        return {"delivered": False, "reason": "rpc-error"}
+    delivered = receipt.get("delivered")
+    if delivered is True:
+        turn_id = receipt.get("turn_id")
+        review_thread_id = receipt.get("review_thread_id")
+        if (
+            proc.returncode == 0
+            and isinstance(turn_id, str)
+            and bool(turn_id)
+            and isinstance(review_thread_id, str)
+            and bool(review_thread_id)
+        ):
+            return receipt
+        return {"delivered": False, "reason": "not-confirmed"}
+    if delivered is False:
+        reason = receipt.get("reason")
+        if isinstance(reason, str) and reason:
+            return receipt
+    return {"delivered": False, "reason": "rpc-error"}
 
 
 def keystroke_lane(entry: "AgentEntry") -> tuple[str, bool]:

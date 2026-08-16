@@ -58,8 +58,9 @@ def _window_for(model: str) -> int:
     # against 2 "glm-5.2[1m]". _last_usage reads the LAST assistant line, which
     # is almost always the bare form, so the 1M generation needs an explicit
     # bare-id entry or the reading silently falls to 200K and overstates pressure
-    # ~5x (the read that halted a target run at 26% real as 133%).
-    if "glm-5.2" in model:
+    # ~5x (the read that halted a target run at 26% real as 133%). One entry per
+    # 1M-capable GLM generation; glm-5.3 joined with the 5.3 defaults move.
+    if "glm-5.2" in model or "glm-5.3" in model:
         return 1_000_000
     if "haiku" in model:
         return 200_000  # Haiku 4.5 is 200K

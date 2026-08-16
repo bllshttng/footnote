@@ -42,8 +42,11 @@ use crate::loopcheck::TerminationReason;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ── newtype wrappers for Journal paths (F9) ───────────────────────────────────
 
@@ -250,16 +253,12 @@ impl Journal {
             "source": "loop",
             "data": data,
         });
-        let mut line = serde_json::to_string(&env)
-            .map_err(|e| LoopError::Journal(format!("serialize {event_type}: {e}")))?;
-        line.push('\n');
-
         // Write to project file - FATAL on failure.
-        self.append_to_file(&self.project_path, &line, true)?;
+        self.append_to_file(&self.project_path, &env, true)?;
 
         // Mirror to global file - best-effort (warn, never fatal).
         if self.project_path != self.global_path {
-            if let Err(e) = self.append_to_file(&self.global_path, &line, false) {
+            if let Err(e) = self.append_to_file(&self.global_path, &env, false) {
                 eprintln!("loop-runtime: global mirror write failed (non-fatal): {e}");
             }
         }
@@ -267,40 +266,28 @@ impl Journal {
         Ok(())
     }
 
-    /// Open `path` in append+create mode and write `line`. If `fatal` is true,
-    /// returns `Err(LoopError::Journal)` on failure; otherwise returns `Ok`.
-    fn append_to_file(&self, path: &Path, line: &str, fatal: bool) -> Result<(), LoopError> {
-        // Ensure parent directory exists.
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                let msg = format!("create_dir_all {}: {e}", parent.display());
-                if fatal {
-                    return Err(LoopError::Journal(msg));
-                } else {
-                    return Err(LoopError::Io(e));
+    /// Append through the same bounded mkdir mutex as canonical Python and Rust claims writers.
+    fn append_to_file(&self, path: &Path, event: &Value, fatal: bool) -> Result<(), LoopError> {
+        let mut retried_after_timeout = false;
+        loop {
+            match crate::claims::append_event_line(path, event, JOURNAL_LOCK_TIMEOUT) {
+                Ok(()) => return Ok(()),
+                Err(message)
+                    if fatal
+                        && message.contains("events.jsonl lock timeout")
+                        && crate::claims::event_maintenance_active(path) =>
+                {
+                    crate::claims::wait_for_event_maintenance(path);
                 }
-            }
-        }
-
-        match fs::OpenOptions::new().create(true).append(true).open(path) {
-            Ok(mut f) => {
-                if let Err(e) = f.write_all(line.as_bytes()) {
-                    let msg = format!("write to {}: {e}", path.display());
-                    if fatal {
-                        return Err(LoopError::Journal(msg));
-                    } else {
-                        return Err(LoopError::Io(e));
-                    }
+                Err(message)
+                    if fatal
+                        && message.contains("events.jsonl lock timeout")
+                        && !retried_after_timeout =>
+                {
+                    retried_after_timeout = true;
                 }
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!("open {}: {e}", path.display());
-                if fatal {
-                    Err(LoopError::Journal(msg))
-                } else {
-                    Err(LoopError::Io(e))
-                }
+                Err(message) if fatal => return Err(LoopError::Journal(message)),
+                Err(message) => return Err(LoopError::Io(std::io::Error::other(message))),
             }
         }
     }

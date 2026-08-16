@@ -2,13 +2,20 @@
 # hooks/inside-leg-report.sh -- the inside leg (inside-out E3.2).
 #
 # A per-turn hook that pushes structured agent state OUTWARD so a grid pane badge
-# is fact, not a scrape guess. Wired to two Claude Code events in hooks.json:
-#   UserPromptSubmit -> state=working   (the turn started)
-#   Stop             -> state=done       (the turn finished)
-# The desired state is the first argument ($1). `blocked` is in the contract but
-# has no natural Claude Code hook trigger yet (no Notification event wired), so
-# E3.2 emits working/done only; a future permission/idle trigger can push blocked
-# through the same verb.
+# is fact, not a scrape guess. The desired state is the first argument ($1).
+# Wired to three Claude Code events in hooks.json:
+#   Notification     -> state=blocked  (a permission prompt or an idle wait for
+#                        input -- both are the same state, Waiting, for a
+#                        reader; the payload's `message` carries the reason)
+#   PreToolUse        -> state=working  (a tool call is proof the worker is
+#                        unblocked and running -- the first thing that happens
+#                        after a permission approval, which fires no
+#                        UserPromptSubmit of its own)
+#   UserPromptSubmit  -> state=working  (the turn started)
+#   Stop              -> state=done     (the turn finished)
+# This is Claude-only: no other harness (codex, agy, opencode) emits a
+# permission-prompt hook event, so those rows keep the screen-manifest
+# backstop unchanged rather than gaining a Waiting producer.
 #
 # Chain: this hook -> `fno agents report` (the thin verb) -> agent.report RPC ->
 # the daemon STORES the latest state on the matching claude row. The match keys
@@ -84,22 +91,33 @@ import sys, json, time
 try:
     d = json.load(sys.stdin)
     sid = d.get("session_id") or "" if isinstance(d, dict) else ""
+    msg = (d.get("message") or "") if isinstance(d, dict) else ""
+    event = (d.get("hook_event_name") or "") if isinstance(d, dict) else ""
 except Exception:
     sys.exit(0)
 if not sid:
     sys.exit(0)
-print(f"{sid}\t{time.monotonic_ns()}")
+msg = msg.replace("\t", " ").replace("\n", " ")
+event = event.replace("\t", " ").replace("\n", " ")
+print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}")
 ' <<<"$INPUT" 2>/dev/null) || PARSED=""
 
 # Keep marker emission INDEPENDENT of the parse: on a malformed/empty payload (or
 # no python3) SESSION_ID stays empty and the pane host still emits via the
 # presence-gate degrade. Only the state report (which needs both fields) is
-# skipped, below. A clean parse yields "<session_id>\t<seq>".
+# skipped, below. A clean parse yields "<session_id>\t<seq>\t<message>\t<event>";
+# message is empty for every event that doesn't carry one (all but Notification).
 SESSION_ID=""
 SEQ=""
+MESSAGE=""
+HOOK_EVENT=""
 if [[ "$PARSED" == *$'\t'* ]]; then
   SESSION_ID="${PARSED%%$'\t'*}"
-  SEQ="${PARSED##*$'\t'}"
+  REST="${PARSED#*$'\t'}"
+  SEQ="${REST%%$'\t'*}"
+  REST="${REST#*$'\t'}"
+  MESSAGE="${REST%%$'\t'*}"
+  HOOK_EVENT="${REST#*$'\t'}"
 fi
 
 # Turn boundary -> OSC 133 marker, mux panes only, and only from THE pane host.
@@ -116,6 +134,27 @@ fi
 TTY_SINK="${FNO_TURN_MARKER_TTY:-/dev/tty}"
 emit_marker() { { with_timeout 2 printf '%b' "$1" >>"$TTY_SINK"; } 2>/dev/null || true; }
 
+# Hardened rendezvous directory shared by the first-writer pin (is_pane_host)
+# and the state-transition gate (should_report). Prefer the per-user runtime
+# dir (XDG_RUNTIME_DIR, or macOS's per-user $TMPDIR); the shared /tmp last
+# resort is hardened so a hostile pre-created dir on a multi-user box cannot
+# hijack either consumer. Echoes the dir path on success. Create atomically
+# with restricted perms (-m 700): no loose-perms window and no check-then-create
+# TOCTOU (plain `mkdir`, no -p, fails if the path exists, even as a symlink).
+# On a pre-existing path, trust it only if it is a real, self-owned,
+# non-symlink dir, and force 700 there since we did not create it. The parent
+# (base) always exists, so -p is unnecessary. A non-zero return means "anomaly,
+# degrade to the caller's fail-open behavior" -- never write somewhere unsafe.
+runtime_pin_dir() {
+  local base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+  local dir="${base%/}/fno-turn-pins-${EUID:-0}"
+  if ! mkdir -m 700 "$dir" 2>/dev/null; then
+    [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || return 1
+    chmod 700 "$dir" 2>/dev/null || true
+  fi
+  printf '%s\n' "$dir"
+}
+
 # First-writer session-identity gate: only the claude pty.rs spawned INTO the
 # pane emits. It fires its first C at turn start, BEFORE it can spawn a nested
 # `claude -p`, so it always wins the pin; the nested session (which inherits
@@ -125,22 +164,7 @@ emit_marker() { { with_timeout 2 printf '%b' "$1" >>"$TTY_SINK"; } 2>/dev/null |
 # key carries FNO_PANE_EPOCH because pane ids recycle across server restarts.
 is_pane_host() {
   [[ -z "${FNO_PANE_EPOCH:-}" || -z "$SESSION_ID" ]] && return 0
-  # Rendezvous dir must be a real, self-owned directory. Prefer the per-user
-  # runtime dir (XDG_RUNTIME_DIR, or macOS's per-user $TMPDIR); the shared /tmp
-  # last resort is hardened so a hostile pre-created dir on a multi-user box
-  # cannot hijack the pin. Any anomaly degrades to the presence gate (return 0)
-  # rather than writing somewhere unsafe.
-  local base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
-  local dir="${base%/}/fno-turn-pins-${EUID:-0}"
-  # Create atomically with restricted perms (-m 700): no loose-perms window and
-  # no check-then-create TOCTOU (plain `mkdir`, no -p, fails if the path exists,
-  # even as a symlink). On a pre-existing path, trust it only if it is a real,
-  # self-owned, non-symlink dir, and force 700 there since we did not create it.
-  # The parent (base) always exists, so -p is unnecessary.
-  if ! mkdir -m 700 "$dir" 2>/dev/null; then
-    [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || return 0
-    chmod 700 "$dir" 2>/dev/null || true
-  fi
+  local dir; dir="$(runtime_pin_dir)" || return 0
   # Every pin path component is env-controlled, so a hostile env could smuggle
   # `/` or `..` to steer the write outside the dir. FNO_PANE/FNO_PANE_EPOCH are
   # numeric by contract (pty.rs), so require digits (degrade-to-emit otherwise);
@@ -174,7 +198,16 @@ REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 
 if [[ -n "${FNO_PANE:-}" ]] && is_pane_host; then
   case "$STATE" in
-    working) emit_marker '\033]133;C\007' ;;
+    working)
+      # A turn-start `working` (UserPromptSubmit) opens a new turn-marker
+      # block; a mid-turn `working` (PreToolUse, `blocked`'s inverse -- fires
+      # on EVERY tool call) must NOT, or one turn with N tool calls would
+      # fragment into N sub-blocks. Gated on the SOURCE EVENT, not the state:
+      # a malformed/empty payload leaves HOOK_EVENT empty, which is not
+      # "PreToolUse", so the presence-gate degrade still emits (unchanged
+      # T10 behavior).
+      [[ "$HOOK_EVENT" != "PreToolUse" ]] && emit_marker '\033]133;C\007'
+      ;;
     done)
       emit_marker '\033]133;D;0\007'
       # Continuation re-open: a blocked Stop (the /target loop) keeps the leg
@@ -195,6 +228,57 @@ fi
 # already emitted the marker above, so just skip the report here.
 [[ -z "$SESSION_ID" || -z "$SEQ" ]] && exit 0
 
+# Transition gate: `PreToolUse` fires on EVERY tool call, and an unconditional
+# report there is a socket RPC + a flock'd registry write per call -- a write
+# storm at footnote's tool-call rate. Skip the report when the recorded state
+# AND reason for this session already match what is about to be sent AND the
+# record is younger than the refresh ceiling; otherwise send. The reason is
+# part of the match, not just the state: two `blocked` reports 30s apart with
+# different reasons (a fresh permission prompt after an idle-wait
+# notification) must both land, or the daemon's stored reason goes stale for
+# up to the ceiling while the operator's Waiting notification still names the
+# first prompt. The ceiling is the defence against a sidecar that says
+# `working` while the registry lost the row to a daemon restart: the state
+# re-asserts itself within two minutes rather than latching silent forever
+# (half the reader TTL pattern from scrape.rs's REFRESH_AFTER_SECS).
+# Fail OPEN in both directions -- an unreadable/unwritable record means send;
+# the gate is an optimisation and must never be the reason a state goes
+# unreported. The daemon's seq gate stays the ordering authority: a report
+# that is never sent cannot lose a seq race, so skipping one here cannot
+# regress a row.
+#
+# The record is written by mark_reported(), called ONLY after a successful
+# send (below) -- never here. Persisting "sent" before the RPC is confirmed
+# would suppress every same-state retry for up to the ceiling on a timeout or
+# a temporarily-down daemon socket, leaving the daemon stale for a worker
+# that is still running: the gate must fail open on send failure too, not
+# just on a missing/unwritable record.
+STATE_REFRESH_AFTER_SECS=120
+state_record_path() {
+  local dir; dir="$(runtime_pin_dir)" || return 1
+  local safe_sid="${SESSION_ID//[\/.]/_}"
+  printf '%s\n' "${dir}/state-${safe_sid}"
+}
+should_report() {
+  local record; record="$(state_record_path)" || return 0
+  local prev_state="" prev_epoch="" prev_message=""
+  if [[ -r "$record" ]]; then
+    read -r prev_state prev_epoch prev_message <"$record" 2>/dev/null || true
+  fi
+  local now; now=$(date +%s 2>/dev/null) || return 0
+  if [[ "$prev_state" == "$STATE" && "$prev_message" == "$MESSAGE" && "$prev_epoch" =~ ^[0-9]+$ ]]; then
+    local age=$((now - prev_epoch))
+    [[ "$age" -ge 0 && "$age" -lt "$STATE_REFRESH_AFTER_SECS" ]] && return 1
+  fi
+  return 0
+}
+mark_reported() {
+  local record; record="$(state_record_path)" || return 0
+  local now; now=$(date +%s 2>/dev/null) || return 0
+  printf '%s %s %s\n' "$STATE" "$now" "$MESSAGE" >"$record" 2>/dev/null || true
+}
+should_report || exit 0
+
 # Resolve the fno-agents binary, most-local first (mirrors target-stop-hook.sh).
 BIN=""
 if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
@@ -209,10 +293,14 @@ fi
 # No binary -> nothing to report to; stay silent (the inside leg is best-effort).
 [[ -z "$BIN" ]] && exit 0
 
-with_timeout 2 "$BIN" report \
-  --session-id "$SESSION_ID" \
-  --seq "$SEQ" \
-  --state "$STATE" \
-  >/dev/null 2>&1 || true
+# The daemon already stores `reason` and already uses it as the notify body,
+# so a non-empty Notification message reaches the operator's Waiting
+# notification with no further plumbing.
+REPORT_ARGS=(--session-id "$SESSION_ID" --seq "$SEQ" --state "$STATE")
+[[ -n "$MESSAGE" ]] && REPORT_ARGS+=(--reason "$MESSAGE")
+
+if with_timeout 2 "$BIN" report "${REPORT_ARGS[@]}" >/dev/null 2>&1; then
+  mark_reported
+fi
 
 exit 0

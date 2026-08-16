@@ -12,10 +12,13 @@ Both are designed for easy testing: discovery accepts an ``entries`` list
 rather than reading the graph directly, and ``read_pr_state`` accepts an
 injectable ``runner`` so tests can stub gh without a live network call.
 """
+
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -28,6 +31,10 @@ from fno.graph._reconcile import (
     query_pr_merge_state,
     repo_slug_from_url,
 )
+
+log = logging.getLogger(__name__)
+
+_TRACKED_PR_LIST_LIMIT = 10_000
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,7 @@ class PrObservation:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _resolve_repo_dir(node: dict) -> Optional[Path]:
     """Resolve a node's cwd to an existing local git checkout, or None.
 
@@ -143,7 +151,7 @@ def _max_review_ts(reviews: list[dict], reviewers: list[str]) -> Optional[str]:
     for review in reviews:
         if not isinstance(review, dict):
             continue
-        author = (review.get("author") or {})
+        author = review.get("author") or {}
         login = author.get("login") or ""
         # Reviews use 'submittedAt'; comments use 'createdAt'
         ts = review.get("submittedAt") or review.get("createdAt") or ""
@@ -160,9 +168,8 @@ def _max_review_ts(reviews: list[dict], reviewers: list[str]) -> Optional[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def _node_watchable(
-    node: dict, *, now_iso: Optional[str], max_age_days: int
-) -> bool:
+
+def _node_watchable(node: dict, *, now_iso: Optional[str], max_age_days: int) -> bool:
     """Whether the watcher should still poll this node's PR(s).
 
     A node is watchable when it is open, OR it is done-at-PR-green
@@ -340,3 +347,93 @@ def read_pr_state(
         opened_at=opened_at,
         merge_sha=merge_state.merge_sha,
     )
+
+
+def read_tracked_pr_states(
+    keys: set[str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    timeout_s: float = 30.0,
+    limit: int = _TRACKED_PR_LIST_LIMIT,
+) -> dict[str, str]:
+    """Read tracked states and discover all currently open PRs in those repos.
+
+    One ``gh pr list`` per repository avoids hundreds of per-PR subprocesses on
+    the first cleanup tick. Every requested key is returned; a repository read
+    failure, malformed response, or truncated absence yields ``UNKNOWN`` so the
+    caller can stop asserting a remembered OPEN state without deleting on an
+    outage. Successful repo reads also return every OPEN PR, even when it was
+    absent from the cache, so the swept snapshot converges to repository truth.
+    """
+    from fno.pr_watch._state import make_watermark_key, parse_watermark_key
+
+    grouped: dict[str, set[int]] = defaultdict(set)
+    states: dict[str, str] = {}
+    for key in keys:
+        parsed = parse_watermark_key(key)
+        if parsed is None:
+            continue
+        repo, number = parsed
+        canonical = make_watermark_key(repo_slug=repo, pr_number=number)
+        grouped[repo].add(number)
+        states[canonical] = "UNKNOWN"
+
+    for repo, requested in sorted(grouped.items()):
+        cmd = [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,state",
+        ]
+        try:
+            result = runner(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_s,
+            )
+            if result.returncode != 0:
+                raise ReconcileError(
+                    (result.stderr or "").strip() or f"gh exited {result.returncode}"
+                )
+            rows = json.loads(result.stdout or "[]")
+            if not isinstance(rows, list):
+                raise ReconcileError("gh pr list stdout was not a JSON list")
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, ReconcileError) as exc:
+            log.warning("pr-watch: tracked-state sweep failed for %s: %s", repo, exc)
+            continue
+
+        returned: set[int] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_number = row.get("number")
+            row_state = row.get("state")
+            if not isinstance(row_number, int):
+                continue
+            state = row_state if row_state in ("OPEN", "CLOSED", "MERGED") else "UNKNOWN"
+            if row_number not in requested and state != "OPEN":
+                continue
+            key = make_watermark_key(repo_slug=repo, pr_number=row_number)
+            states[key] = state
+            returned.add(row_number)
+
+        missing = requested - returned
+        if missing:
+            detail = "possibly truncated" if len(rows) >= limit else "not returned"
+            log.warning(
+                "pr-watch: %s did not resolve %d tracked PR(s) (%s)",
+                repo,
+                len(missing),
+                detail,
+            )
+
+    return states

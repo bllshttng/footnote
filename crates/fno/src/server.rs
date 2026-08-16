@@ -547,6 +547,17 @@ enum CoreMsg {
     AgentTails {
         tails: HashMap<String, String>,
     },
+    /// (v48) A fresh name -> reachability-evidence map from the off-loop truth
+    /// probe (`fno agents list --json`, one process for the whole fleet).
+    /// Replaces the map wholesale; a failed probe sends nothing so the last
+    /// good map stands until the next success. `seq` is the probe's launch
+    /// order (review finding: a probe can outlive the next tick's probe under
+    /// load, and without a sequence guard the LATE result would win and
+    /// silently revert the map to a stale reading until the next success).
+    AgentTruth {
+        map: HashMap<String, TruthReading>,
+        seq: u64,
+    },
     /// (x-6f77) A fresh board-ordered work-queue card set from the off-loop graph
     /// reader, claim-overlaid (x-54fa). Sent only when the set changed; the core
     /// stores it and re-pushes layouts so the sideline backlog lane tracks
@@ -1138,6 +1149,59 @@ struct PendingRestore {
 /// is a generous few-second grace for restored sessions to register.
 const MAX_RESTORE_ATTEMPTS: u32 = 30;
 
+/// (v48) How often the off-loop task re-probes the fleet's reachability
+/// evidence. One CLI process per interval; the ages it yields feed a 600s
+/// attention threshold, so a refresh cadence two orders of magnitude below
+/// that threshold cannot change a row's tier, only polish its displayed age.
+const TRUTH_PROBE_EVERY: Duration = Duration::from_secs(10);
+
+/// (v48) One whole-fleet reachability probe: `fno agents list --json`, the
+/// surface whose row shape already pins the triple. Join key is the registry
+/// name, the same field both list lanes and this server's registry rows
+/// carry. `None` on any failure (no binary, unparseable output) so the caller
+/// can keep the last good map rather than blanking every row on one miss.
+/// Rows whose probe fields are null still enter the map: a probe that did not
+/// answer for one row is that row's absence, not the fleet's.
+fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
+    let out = std::process::Command::new("fno")
+        .args(["agents", "list", "--json"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let mut map = HashMap::new();
+    for row in parsed.get("agents")?.as_array()? {
+        // A malformed row is skipped, not fatal: one bad entry must not cost
+        // the whole fleet its readings.
+        let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = name.to_string();
+        let basis = row
+            .get("basis")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let age_s = row
+            .get("last_activity_age_s")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as u64);
+        map.insert(name, TruthReading { basis, age_s });
+    }
+    Some(map)
+}
+
+/// (v48) One registry row's reachability evidence, as the off-loop probe read
+/// it: which basis answered and the transcript age it measured. The verdict
+/// word is deliberately absent - it is derivable from the basis and it is the
+/// half of the triple that reads healthy for a worker dead under two hours.
+#[derive(Debug, Clone, Default)]
+struct TruthReading {
+    basis: Option<String>,
+    age_s: Option<u64>,
+}
+
 struct Core {
     session: Session,
     panes: HashMap<u64, PaneEntry>,
@@ -1182,6 +1246,18 @@ struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
+    /// (v48) Latest registry-name -> reachability-evidence map from the
+    /// off-loop truth probe, joined into each agent row's `basis` /
+    /// `last_activity_age_s` at layout time. Kept-whole on a failed probe: the
+    /// alternative (clearing on failure) would flap every row to "no reading"
+    /// on one miss. A name absent from the map has no probe answer, which the
+    /// client reads as absence, never as urgency.
+    truth_by_name: HashMap<String, TruthReading>,
+    /// (v48) The `seq` of the last-applied `CoreMsg::AgentTruth`. Probes run
+    /// concurrently off-loop and can complete out of launch order under load;
+    /// a message whose `seq` is not newer is dropped rather than allowed to
+    /// overwrite a fresher map with a stale one.
+    truth_seq: u64,
     /// Latest board-ordered work-queue cards (x-6f77), from the off-loop graph
     /// reader; packed into every `Layout` for the sideline backlog lane.
     backlog: Vec<BacklogCard>,
@@ -5769,6 +5845,18 @@ impl Core {
             .cloned()
     }
 
+    /// The reachability evidence halves a registry-backed row carries on the
+    /// wire: `None` until a probe has answered for that name. Rows with no
+    /// registry entry (bare panes, tombstones, external lifecycle) never call
+    /// these - there is nothing to probe.
+    fn truth_basis(&self, name: &str) -> Option<String> {
+        self.truth_by_name.get(name).and_then(|t| t.basis.clone())
+    }
+
+    fn truth_age(&self, name: &str) -> Option<u64> {
+        self.truth_by_name.get(name).and_then(|t| t.age_s)
+    }
+
     fn agent_rows(&self) -> Vec<AgentRow> {
         let mut out = Vec::new();
         // Which registry agents a pane row already claimed (so they don't
@@ -5865,6 +5953,8 @@ impl Core {
                                 tail: self.compose_tail(a),
                                 crown_level: a.crown_level,
                                 crown_scope: a.crown_scope.clone(),
+                                basis: self.truth_basis(&a.name),
+                                last_activity_age_s: self.truth_age(&a.name),
                             }
                         }
                         None => {
@@ -5900,9 +5990,12 @@ impl Core {
                                 updated_at: None,
                                 pr: None,
                                 tail: None,
-                                // A bare shell pane has no registry entry, so no crown.
+                                // A bare shell pane has no registry entry, so
+                                // no crown and no reachability probe either.
                                 crown_level: None,
                                 crown_scope: None,
+                                basis: None,
+                                last_activity_age_s: None,
                             }
                         }
                     };
@@ -5947,7 +6040,9 @@ impl Core {
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
-                    });
+                        basis: self.truth_basis(&a.name),
+                        last_activity_age_s: self.truth_age(&a.name),
+                    })
                 }
                 None => {
                     // Truly paneless (bg/headless/daemon/roster). Its attach map
@@ -5991,7 +6086,9 @@ impl Core {
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
-                    });
+                        basis: self.truth_basis(&a.name),
+                        last_activity_age_s: self.truth_age(&a.name),
+                    })
                 }
             }
         }
@@ -6032,10 +6129,13 @@ impl Core {
                     updated_at: None,
                     pr: None,
                     tail: None,
-                    // A dead-member tombstone has no registry entry, so no crown.
+                    // A dead-member tombstone has no registry entry, so no
+                    // crown and no reachability reading.
                     crown_level: None,
                     crown_scope: None,
-                });
+                    basis: None,
+                    last_activity_age_s: None,
+                })
             }
         }
         // 4. External-lifecycle tombstone rows (x-7561): a persisted external
@@ -6104,10 +6204,14 @@ impl Core {
                 updated_at: None,
                 pr: None,
                 tail: None,
-                // An external-daemon row is not an fno-registry worker: no crown.
+                // An external-daemon row is not an fno-registry worker: no
+                // crown, and its liveness lives in its own daemon, so no
+                // reachability reading either.
                 crown_level: None,
                 crown_scope: None,
-            });
+                basis: None,
+                last_activity_age_s: None,
+            })
         }
         out
     }
@@ -8825,6 +8929,20 @@ impl Core {
                 self.push_layout(false);
                 Flow::Continue
             }
+            CoreMsg::AgentTruth { map, seq } => {
+                // A late-arriving older probe must not clobber a fresher one
+                // (review finding: probes run concurrently off-loop with no
+                // ordering guarantee between completions).
+                if seq <= self.truth_seq {
+                    return Flow::Continue;
+                }
+                self.truth_seq = seq;
+                self.truth_by_name = map;
+                // Only the attention order and the age column moved: re-push
+                // the layout without re-emitting frames.
+                self.push_layout(false);
+                Flow::Continue
+            }
             CoreMsg::AgentRows {
                 rows,
                 branches,
@@ -9094,6 +9212,8 @@ async fn serve(
         agents: Vec::new(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
+        truth_by_name: HashMap::new(),
+        truth_seq: 0,
         backlog: Vec::new(),
         backlog_lanes: Vec::new(),
         backlog_stale: false,
@@ -9139,6 +9259,10 @@ async fn serve(
             // map pushed, so an unchanged result stays off the wire.
             let mut last_uuids: Vec<String> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
+            let mut last_truth = Instant::now();
+            // (v48) Launch order for AgentTruth probes, so an out-of-order
+            // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
+            let mut truth_probe_seq: u64 = 0;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Stat + conditional read of one file behind an mtime+len gate,
@@ -9180,6 +9304,28 @@ async fn serve(
                 }
                 if *count_rx.borrow() == 0 {
                     continue; // no viewer -> skip both file reads entirely
+                }
+                // (v48) Reachability evidence, one `fno agents list --json`
+                // process for the whole fleet on a slow sub-interval. Each
+                // probe runs as its own task so a slow CLI start never stalls
+                // the 1s registry tick; a failed probe sends nothing and the
+                // last good map stands. Ages are measured at probe time, so
+                // between probes a row's displayed age lags by at most this
+                // interval - invisible next to the 600s threshold it feeds.
+                if last_truth.elapsed() >= TRUTH_PROBE_EVERY {
+                    last_truth = Instant::now();
+                    truth_probe_seq += 1;
+                    let seq = truth_probe_seq;
+                    let tx = core_tx.clone();
+                    tokio::spawn(async move {
+                        if let Some(map) = tokio::task::spawn_blocking(probe_truth_map)
+                            .await
+                            .ok()
+                            .flatten()
+                        {
+                            let _ = tx.send(CoreMsg::AgentTruth { map, seq }).await;
+                        }
+                    });
                 }
                 let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
                 let (roster_stamp, roster_raw) =
@@ -17151,6 +17297,8 @@ mod tests {
             agents: Vec::new(),
             branch_by_cwd: HashMap::new(),
             tail_by_session: HashMap::new(),
+            truth_by_name: HashMap::new(),
+            truth_seq: 0,
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,

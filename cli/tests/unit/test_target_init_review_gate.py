@@ -773,7 +773,8 @@ def test_init_marks_the_gate_as_already_run_for_the_script(
         returncode = 0
 
     def _fake_run(cmd, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
+        if "env" in kwargs:
+            captured["env"] = kwargs["env"]
         return _Proc()
 
     monkeypatch.setattr("fno.target_cli.subprocess.run", _fake_run)

@@ -34,14 +34,14 @@ import time
 import uuid as _uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
     _capture_spawn_trigger,
-    _derive_log_path,
+    _touch_log_path,
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
@@ -52,6 +52,7 @@ from fno.agents.registry import (
     AgentStatus,
     RegistryVersionError,
     TERMINAL_STATUSES,
+    _has_resolvable_handle,
     load_registry,
     update_registry,
 )
@@ -80,7 +81,7 @@ _DEFAULT_SESSION = "main"
 #: overrides. ponytail: a code table, not a config knob, until the set outgrows
 #: a literal.
 _PER_HARNESS_DEFAULT_MODEL = {
-    "opencode": "z-ai/glm-5.2",
+    "opencode": "z-ai/glm-5.3",
 }
 
 
@@ -134,6 +135,12 @@ class MuxSpawnResult:
     # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
     # + squad/tab the split landed in. None unless `--at` pinned the origin.
     placement: Optional[dict] = None
+    # LD5: true only when this pane was adopted after `pane run`'s
+    # control read went unanswered. A painted frame plus a captured session id
+    # proves the provider booted with the argv it was given; it does NOT prove
+    # the prompt was consumed (x-7ebd is the sibling failure for that). Callers
+    # must render this receipt as "recovered", never "spawned".
+    recovered: bool = False
 
 
 def _fno_bin() -> str:
@@ -787,6 +794,73 @@ def _backfill_codex_session_id(
     return None
 
 
+def pane_passthrough_tokens(
+    passthrough: Optional[Sequence[str]],
+    emitted: Sequence[str],
+) -> list[str]:
+    """Validate `--` passthrough tokens against what fno itself emitted, for
+    splicing into a provider arm (x-1caa).
+
+    A passthrough token naming a flag the arm already carries is a named
+    refusal, never a silent last-wins: two sources for one value make the
+    spawn receipt disagree with the process. ``emitted`` is every option token
+    the arm will carry, INCLUDING the tail spliced after the passthrough
+    position (gemini/opencode permission tokens), minus the message. The
+    ``--`` fence itself and value tokens are not flags; an ``=``-joined flag
+    compares by its name.
+    """
+    if not passthrough:
+        return []
+    emitted_flags = {
+        tok.split("=", 1)[0] for tok in emitted if tok.startswith("-") and tok != "--"
+    }
+    for tok in passthrough:
+        if not tok.startswith("-"):
+            continue
+        flag = tok.split("=", 1)[0]
+        if flag in emitted_flags:
+            raise DispatchAskError(
+                f"refusing {flag} on both sides: fno emitted it from its own "
+                "flag and the passthrough carries it too. Two sources for one "
+                "value is the defect, not the collision. Drop one.",
+                exit_code=2,
+            )
+    return list(passthrough)
+
+
+#: x-1caa: provider tokens that turn a pane into a dead one-shot, promoted from
+#: the comments on the arms below into guards now that passthrough hands the
+#: operator the exact token each comment warned about. Bare tokens match too -
+#: opencode's `run` is a subcommand, not a flag. claude is deliberately absent:
+#: its row stays enforced by :func:`claude_argv_is_interactive` so the D2
+#: billing guard keeps its name and its existing test. A provider with no row
+#: forwards everything on purpose; enumerating each CLI's flag surface is the
+#: maintenance burden passthrough exists to remove.
+PANE_HEADLESS_FORM_TOKENS: Mapping[str, tuple[str, ...]] = {
+    "agy": ("-p", "--print"),  # agy's headless form: prints, exits, kills the pane
+    "codex": ("exec",),  # headless subcommand (the --headless help pairs it with claude -p)
+    "opencode": ("run",),  # headless subcommand; the positional is a project path
+}
+
+
+def refuse_pane_headless_form(provider: str, argv: Sequence[str]) -> None:
+    """Refuse a composed pane argv carrying a provider's headless-form token
+    (x-1caa). Checked on the COMPOSED argv next to the claude billing guard, so
+    a token reaches this check whichever side of ``--`` it came from."""
+    refused = PANE_HEADLESS_FORM_TOKENS.get(provider)
+    if not refused:
+        return
+    for tok in argv:
+        if tok in refused:
+            raise DispatchAskError(
+                f"refusing to pane-host {provider} with {tok!r}: that is "
+                f"{provider}'s headless form - it answers once and exits, "
+                "killing the pane at birth. Use --substrate headless for a "
+                "one-shot.",
+                exit_code=2,
+            )
+
+
 def build_pane_argv(
     provider: str,
     message: str,
@@ -801,6 +875,7 @@ def build_pane_argv(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     name: Optional[str] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -823,7 +898,13 @@ def build_pane_argv(
     pane worker on one box shows the SAME string in any session list that reads
     it - N distinct workers collapse onto one row and the list cannot route.
     Only claude is wired: the other pane arms have no verified equivalent flag,
-    and guessing one fails the spawn rather than degrading."""
+    and guessing one fails the spawn rather than degrading.
+
+    ``passthrough`` (x-1caa): tokens after a ``--`` on the spawn command line,
+    spliced INSIDE the arm - upstream of the composed-argv refusals in
+    :func:`dispatch_spawn_pane` - so they inherit the same guards fno's own
+    flags pass through, rather than appending past them. Absent/empty composes
+    a byte-identical argv."""
     if message.strip().startswith(("/", "$fno:")):
         message = normalize_command(message, provider)
 
@@ -852,6 +933,7 @@ def build_pane_argv(
         if effort:
             argv += effort_tokens("claude", effort)
         argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         if message:
             # The seed rides behind `--` so a leading-flag seed ("--model x
             # ...") reaches claude as the prompt positional instead of dying
@@ -882,6 +964,7 @@ def build_pane_argv(
         if effort:
             argv += effort_tokens("codex", effort)
         argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         if message:
             # Same fence as the claude arm: clap itself prescribes `--` ("to
             # pass ... as a value, use '-- ...'"), so a leading-flag seed is
@@ -896,14 +979,28 @@ def build_pane_argv(
         argv = ["gemini", "--skip-trust"]
         if model:
             argv += ["--model", model]
+        # Permission tokens are computed before the passthrough splice so the
+        # duplicate-flag refusal sees them (they append after the -i pair, past
+        # the splice position). Output order is unchanged. The emitted set also
+        # carries the -i flag itself (it rides after the splice) and BOTH
+        # permission spellings: the axis is always materialized here under one
+        # of the two names, so an alias-shaped passthrough (--yolo against an
+        # --approval-mode arm or the reverse) is a named refusal, never a
+        # silent last-wins.
+        perm = (
+            permission_pane_tokens("gemini", permission_mode)
+            if permission_mode
+            else (["--yolo"] if yolo else ["--approval-mode", "default"])
+        )
+        emitted = [*argv, *perm, "--yolo", "--approval-mode"]
+        if message:
+            emitted.append("-i")
+        argv += pane_passthrough_tokens(passthrough, emitted)
         if message:
             # argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -i
             # value form is pinned by tests and left as-is).
             argv += ["-i", message]
-        if permission_mode:
-            argv += permission_pane_tokens("gemini", permission_mode)
-        else:
-            argv += ["--yolo"] if yolo else ["--approval-mode", "default"]
+        argv += perm
         return argv
     if provider == "agy":
         if effort:
@@ -924,6 +1021,7 @@ def build_pane_argv(
         if model:
             argv += ["--model", model]
         argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         if message:
             # Deliberately unfenced: agy has no clean end-of-options. Probed
             # 2026-08-15, `agy -p -- "<prompt>"` folds the flag text AND the
@@ -955,10 +1053,21 @@ def build_pane_argv(
         if _default_model:
             argv += ["--model", _default_model]
         argv += tier3
-        if permission_mode:
-            argv += permission_pane_tokens("opencode", permission_mode)
-        elif yolo:
-            argv.append("--auto")
+        # Computed before the splice (like gemini) so the duplicate refusal sees
+        # the permission tokens that append after the splice position. When the
+        # axis is set, --auto's hidden aliases (--yolo /
+        # --dangerously-skip-permissions, per the arm comment above) count as
+        # the same flag: a passthrough carrying one is a second source.
+        perm = (
+            permission_pane_tokens("opencode", permission_mode)
+            if permission_mode
+            else (["--auto"] if yolo else [])
+        )
+        emitted = [*argv, *perm]
+        if perm:
+            emitted += ["--yolo", "--dangerously-skip-permissions"]
+        argv += pane_passthrough_tokens(passthrough, emitted)
+        argv += perm
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
@@ -1207,6 +1316,119 @@ def _lookup_child_pid(
 #: `fno mux pane wait` exit code when the pane's child exited mid-wait
 #: (crates/fno EXIT_WAIT_EXITED). The readiness gate treats it as launch failure.
 _WAIT_EXITED = 12
+
+#: `fno mux pane run` exit code when the mux never answered the control read
+#: (crates/fno EXIT_CONTROL_UNANSWERED). The verb REACHED the server, so
+#: unlike every other non-zero code this does not prove the pane is absent.
+_MUX_CONTROL_UNANSWERED = 20
+
+
+def _pid_started_at_or_after(pid: int, since_s: float) -> bool:
+    """True iff `pid`'s wall-clock start time is at/after `since_s` (both real
+    Unix epoch seconds). ``spawn_gate._process_start_time`` is NOT usable here:
+    it is documented as "the incarnation token in the Rust registry's units",
+    an opaque value meant only for equality against a previously recorded
+    token (Linux: `/proc/<pid>/stat` clock ticks since boot; macOS: epoch
+    microseconds) - comparing either against an epoch-seconds bound is
+    nonsense. False on any read failure: a process this cannot date is not a
+    provable match."""
+    try:
+        import psutil
+
+        return psutil.Process(pid).create_time() >= since_s
+    except Exception:
+        return False
+
+
+def _reconcile_unanswered_run(
+    session: str,
+    cwd: Path,
+    spawn_started_ms: int,
+    claimed_pane_ids: set,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> int:
+    """After ``mux pane run`` exits ``_MUX_CONTROL_UNANSWERED``, decide whether a
+    pane exists rather than asserting it does not (LD2/LD3). Never retries the
+    run (LD1): the verb already reached the server, and re-sending it risks a
+    second pane and a second worker.
+
+    Enumerates the session's panes and looks for exactly one candidate that
+    matches this spawn: same cwd, a live child pid whose start time is at or
+    after ``spawn_started_ms``, and not already claimed by a registry row.
+    Zero, one, or many candidates get three different, honest answers. An
+    empty or unparseable listing is UNKNOWN, never proof of absence - see
+    ``_pane_absent_from_listing``'s docstring for why ``pane ls`` prints ``[]``
+    and exits 0 when the session socket is refused or absent.
+
+    Returns the adopted ``pane_id`` on exactly one candidate; raises
+    ``DispatchAskError`` (never a registry row) on every other outcome.
+    """
+    proc: Optional["subprocess.CompletedProcess[str]"] = None
+    detail = ""
+    try:
+        proc = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
+    except DispatchAskError as exc:
+        detail = str(exc)
+    else:
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip()
+
+    rows: Optional[list] = None
+    if proc is not None and proc.returncode == 0:
+        try:
+            parsed = json.loads(proc.stdout or "")
+        except (ValueError, TypeError):
+            detail = f"unparseable pane ls output: {(proc.stdout or '').strip()!r}"
+        else:
+            if isinstance(parsed, list):
+                rows = parsed
+            else:
+                detail = f"unexpected pane ls output: {(proc.stdout or '').strip()!r}"
+
+    if not rows:
+        # Covers the ls call failing outright, a non-zero exit, unparseable
+        # output, and a genuinely empty listing - all four read the same way
+        # here: the mux never answered the run AND could not be asked
+        # afterward, so whether a pane exists stays UNKNOWN, not disproven.
+        suffix = f" ({detail})" if detail else ""
+        raise DispatchAskError(
+            f"the mux never answered 'pane run' for session {session!r}, and "
+            f"'pane ls' could not confirm whether a pane exists{suffix}; a "
+            f"pane may be live - inspect with 'fno mux pane ls --session "
+            f"{session}' before retrying.",
+            exit_code=1,
+        )
+
+    since_s = spawn_started_ms / 1000
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("cwd") != str(cwd):
+            continue
+        pid = row.get("child_pid")
+        if pid is None:
+            continue
+        if not _pid_started_at_or_after(int(pid), since_s):
+            continue
+        if row.get("pane_id") in claimed_pane_ids:
+            continue
+        candidates.append(row)
+
+    if not candidates:
+        raise DispatchAskError(
+            f"no pane was created; the mux never answered and no pane in "
+            f"{session!r} matches this spawn. Retry, or use --substrate bg.",
+            exit_code=1,
+        )
+    if len(candidates) > 1:
+        ids = ", ".join(str(c.get("pane_id")) for c in candidates)
+        raise DispatchAskError(
+            f"the mux never answered and {len(candidates)} panes in "
+            f"{session!r} match this spawn ({ids}); cannot tell them apart - "
+            f"inspect with 'fno mux pane ls --session {session}' before "
+            "retrying.",
+            exit_code=1,
+        )
+    return int(candidates[0]["pane_id"])
 
 
 def _pane_absent_from_listing(
@@ -1712,6 +1934,7 @@ def dispatch_spawn_pane(
     route_provider: Optional[str] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
+    passthrough: Optional[Sequence[str]] = None,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
 
@@ -1856,9 +2079,15 @@ def dispatch_spawn_pane(
         tools=tools,
         deny_tools=deny_tools,
         name=name,
+        passthrough=passthrough,
     )
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
+        # x-1caa: the route's config args splice AFTER build_pane_argv, so the
+        # in-arm duplicate-flag check never saw them; re-run it against the
+        # route tokens or a passthrough `-c`/`--model` flag is a silent
+        # last-wins against the route's own setting.
+        pane_passthrough_tokens(passthrough, codex_route.config_args)
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
@@ -1866,6 +2095,10 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
+    # x-1caa: same choke point as the billing guard above, reading the composed
+    # argv so a passthrough token faces the identical check an fno-emitted one
+    # would (a splice inside build_pane_argv, never an append past the guards).
+    refuse_pane_headless_form(provider, argv)
     # The outer env wrapper is not merely a scrub: it SETS the whole route in
     # happy's own environment, and happy merges that into its claude child. So
     # the wrapper is what delivers the credential, and --claude-env carries only
@@ -1976,7 +2209,28 @@ def dispatch_spawn_pane(
             runner,
             env={**os.environ, "FNO_MUX_SHELL_INTEGRATION": _shell_integration()},
         )
-        if proc.returncode != 0:
+        placement_receipt: Optional[dict] = None
+        recovered = False
+        if proc.returncode == _MUX_CONTROL_UNANSWERED:
+            # The verb reached the server; only the reply did not come back
+            # (LD2). Reconcile instead of asserting no pane was created - the
+            # reconcile itself never retries the run (LD1).
+            #
+            # Scoped to THIS mux session: pane ids are allocated independently
+            # per server starting at 1, and registry identity is the
+            # (session, pane_id) pair, so an unscoped set would wrongly treat
+            # a different session's pane 1 as already claiming this session's
+            # pane 1.
+            claimed_pane_ids = {
+                e.mux.get("pane_id")
+                for e in entries
+                if isinstance(e.mux, dict) and e.mux.get("session") == session
+            }
+            pane_id = _reconcile_unanswered_run(
+                session, cwd, spawn_started_ms, claimed_pane_ids, runner
+            )
+            recovered = True
+        elif proc.returncode != 0:
             # G1 contract: non-zero exit == no pane was created, so refusing
             # here leaves no half-created state anywhere (AC1-ERR).
             detail = (proc.stderr or proc.stdout or "").strip()
@@ -1986,8 +2240,7 @@ def dispatch_spawn_pane(
                 "there is no daemon-PTY fallback)",
                 exit_code=1,
             )
-        placement_receipt: Optional[dict] = None
-        if exact:
+        elif exact:
             try:
                 payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
                 pane_id = int(payload["pane_id"])
@@ -2017,7 +2270,7 @@ def dispatch_spawn_pane(
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
 
-        if exact:
+        if exact or recovered:
             # Interactive readiness gate (x-6928): hold the registry row and the
             # success receipt until the provider proves it launched. An early
             # exit (AC5-ERR) reaps ONLY this pane - the mux's tree normalization
@@ -2026,7 +2279,16 @@ def dispatch_spawn_pane(
             readiness, readiness_detail = _await_interactive_readiness(
                 session, pane_id, runner
             )
-            if readiness == "failed":
+            # LD4: a recovered pane has no launch receipt behind it, so "alive
+            # and unpainted" (readiness == "live") is not enough proof - only
+            # "ready" (a painted frame) earns the row. A normal exact-placement
+            # spawn keeps its existing, weaker bar (live or ready both pass).
+            if readiness == "failed" or (recovered and readiness != "ready"):
+                if recovered and readiness != "failed":
+                    readiness_detail = (
+                        f"recovered pane never proved it started (readiness "
+                        f"{readiness!r}, not ready)"
+                    )
                 reaped, cleanup_detail = _reap_spawned_pane(
                     session, pane_id, runner
                 )
@@ -2155,6 +2417,38 @@ def dispatch_spawn_pane(
                 harness=provider,
                 cwd=str(cwd),
                 reason="happy owns the claude session id; awaiting SessionStart restamp",
+            )
+
+        # LD4: a recovered pane earns its row only by proving it started. The
+        # readiness gate above already required a painted frame (not merely a
+        # live child); this closes the other half. A non-happy claude spawn
+        # already has session_uuid minted up front (pin_session) and the happy
+        # route reaps on its own registration-wait failure below regardless of
+        # `recovered` - so only opencode/codex, whose ids are DISCOVERED, can
+        # reach here with a live pane and no proof of identity. The normal
+        # (non-recovered) path tolerates that miss and logs
+        # `agent_session_id_uncaptured` because the pane is known-good from its
+        # own launch receipt; a recovered pane has no such receipt, so the same
+        # miss here is the exact orphan this node exists to prevent.
+        if (
+            recovered
+            and not pane_died
+            and provider in ("codex", "opencode")
+            and session_uuid is None
+        ):
+            reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+            if reaped:
+                raise DispatchAskError(
+                    f"agent {name!r} recovered pane {pane_id} in session "
+                    f"{session!r} never proved a {provider} session id; pane "
+                    "reaped, no registry row written",
+                    exit_code=1,
+                )
+            raise DispatchAskError(
+                f"agent {name!r} recovered pane {pane_id} never proved a "
+                f"{provider} session id; pane may still exist in session "
+                f"{session!r} because cleanup failed: {cleanup_detail}",
+                exit_code=1,
             )
 
         # Crown stamp (US9): the grantor is the spawning session (the parent edge
@@ -2310,15 +2604,15 @@ def dispatch_spawn_pane(
             # log file so the row always has a resolvable handle and the
             # guard never refuses a live pane's registry write.
             final_log_path = death_log_path
-            if (
-                not final_log_path
-                and stored_session_uuid is None
-                and not (child_pid is not None and pid_start_time is not None)
+            if not _has_resolvable_handle(
+                pid=child_pid,
+                pid_start_time=pid_start_time,
+                log_path=final_log_path,
+                harness=provider,
+                harness_session_id=stored_session_uuid,
             ):
-                fallback_path = _derive_log_path(name)
-                fallback_path.parent.mkdir(parents=True, exist_ok=True)
-                fallback_path.touch(exist_ok=True)
-                final_log_path = str(fallback_path)
+                touched_log_path = _touch_log_path(name)
+                final_log_path = str(touched_log_path) if touched_log_path is not None else ""
             rows.append(
                 AgentEntry(
                     name=name,
@@ -2535,4 +2829,5 @@ def dispatch_spawn_pane(
         log_path=death_log_path,
         effective_message=effective_message,
         placement=placement_receipt,
+        recovered=recovered,
     )

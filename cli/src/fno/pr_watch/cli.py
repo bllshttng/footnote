@@ -54,7 +54,9 @@ def _resolve_fno_binary() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _emit_event(event_type: str, data: dict[str, Any], *, events_path: Optional[Path] = None) -> None:
+def _emit_event(
+    event_type: str, data: dict[str, Any], *, events_path: Optional[Path] = None
+) -> bool:
     """Append a canonical event envelope to events.jsonl.
 
     Uses fno.events._build + fno.events.append_event (the same path the
@@ -74,13 +76,15 @@ def _emit_event(event_type: str, data: dict[str, Any], *, events_path: Optional[
             events_path = state_dir() / "events.jsonl"
         except Exception as exc:
             log.warning("pr-watch: could not resolve state_dir for events path: %s", exc)
-            return
+            return False
     try:
         from fno.events import _build, append_event
         event = _build(event_type, "daemon", data)
         append_event(event, events_path)
+        return True
     except Exception as exc:
         log.warning("pr-watch: emit %s failed: %s", event_type, exc)
+        return False
 
 
 def _notify_parked(message: str) -> None:
@@ -213,23 +217,36 @@ def tick() -> None:
     settings = load_settings()
     cfg = settings.pr_watch
 
-    result = _tick(
-        claim=ClaimAdapter(),
-        emit=_emit_event,
-        reviewers_for=_reviewers_for,
-        notify=lambda message, **_kw: _notify_parked(message),
-        post_merge_readiness_fn=post_merge_readiness,
-        now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        max_age_days=cfg.max_age_days,
-        max_retries=cfg.retries,
-    )
-
-    if result.lock_held:
-        typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
-    else:
-        typer.echo(
-            f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+    # A dead tick must not kill the legs below. The receipt contract makes
+    # _tick raise on a failed emission even though state is already persisted,
+    # so a broken events path would otherwise crash-loop recovery and sync
+    # catch-up, which ride this same launchd cadence. Fail the exit code at
+    # the end instead, mirroring how those legs wrap their own failures.
+    tick_failed = None
+    try:
+        result = _tick(
+            claim=ClaimAdapter(),
+            emit=_emit_event,
+            reviewers_for=_reviewers_for,
+            notify=lambda message, **_kw: _notify_parked(message),
+            post_merge_readiness_fn=post_merge_readiness,
+            now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            max_age_days=cfg.max_age_days,
+            max_retries=cfg.retries,
         )
+    except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
+        tick_failed = str(exc)
+        log.warning("pr-watch: tick failed: %s", exc)
+        typer.echo(f"pr-watch tick: failed: {exc}", err=True)
+        result = None
+
+    if result is not None:
+        if result.lock_held:
+            typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
+        else:
+            typer.echo(
+                f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+            )
 
     # Session recovery rides this same launchd cadence: a sweep over
     # footnote-launched bg /target sessions that rotates providers on swap-class
@@ -242,7 +259,10 @@ def tick() -> None:
         try:
             from fno.recovery import run_recovery_sweep
 
-            n = run_recovery_sweep(settings.recovery, emit=_emit_event)
+            def emit_recovery(event_type: str, data: dict) -> None:
+                _emit_event(event_type, data)
+
+            n = run_recovery_sweep(settings.recovery, emit=emit_recovery)
             typer.echo(f"recovery sweep: candidates={n}")
         except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
             log.warning("pr-watch: recovery sweep failed: %s", exc)
@@ -284,6 +304,9 @@ def tick() -> None:
                 _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
     except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
         log.warning("pr-watch: sync catch-up failed: %s", exc)
+
+    if tick_failed is not None:
+        raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

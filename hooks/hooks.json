@@ -41,6 +41,26 @@
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/bg-process-guard.py"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh working"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|agent_needs_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh blocked"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

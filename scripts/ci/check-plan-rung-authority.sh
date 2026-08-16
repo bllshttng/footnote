@@ -144,18 +144,18 @@ EXPECTED_RUST_STATUS_IDENTIFIERS="crates/fno-agents/build.rs:2
 crates/fno-agents/src/active_backlog.rs:23
 crates/fno-agents/src/agents_config.rs:1
 crates/fno-agents/src/bin/client.rs:63
-crates/fno-agents/src/claims.rs:9
+crates/fno-agents/src/claims.rs:10
 crates/fno-agents/src/claude_adopt.rs:3
 crates/fno-agents/src/claude_ask.rs:9
 crates/fno-agents/src/client.rs:25
-crates/fno-agents/src/client_verbs.rs:72
+crates/fno-agents/src/client_verbs.rs:75
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:145
+crates/fno-agents/src/daemon.rs:154
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:49
-crates/fno-agents/src/gc.rs:22
+crates/fno-agents/src/gc.rs:31
 crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
 crates/fno-agents/src/lib.rs:12
@@ -165,7 +165,7 @@ crates/fno-agents/src/manifest.rs:2
 crates/fno-agents/src/needs.rs:1
 crates/fno-agents/src/nudge.rs:1
 crates/fno-agents/src/opencode_ask.rs:1
-crates/fno-agents/src/paths.rs:3
+crates/fno-agents/src/paths.rs:5
 crates/fno-agents/src/protocol.rs:5
 crates/fno-agents/src/provider.rs:6
 crates/fno-agents/src/readiness.rs:13
@@ -181,7 +181,7 @@ crates/fno/build.rs:2
 crates/fno/src/agents_view.rs:94
 crates/fno/src/backlog_view.rs:91
 crates/fno/src/bootstrap.rs:11
-crates/fno/src/client.rs:56
+crates/fno/src/client.rs:55
 crates/fno/src/clipboard.rs:2
 crates/fno/src/connections_view.rs:3
 crates/fno/src/digest_overlay.rs:1
@@ -190,9 +190,9 @@ crates/fno/src/link.rs:11
 crates/fno/src/needs_overlay.rs:1
 crates/fno/src/proto.rs:4
 crates/fno/src/pty.rs:1
-crates/fno/src/server.rs:22
+crates/fno/src/server.rs:23
 crates/fno/src/squad.rs:6
-crates/fno/src/view_store.rs:2
+crates/fno/src/view_store.rs:4
 crates/fno/src/web.rs:1"
 count_status_identifiers() {
     awk '

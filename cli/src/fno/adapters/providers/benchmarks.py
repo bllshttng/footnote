@@ -47,9 +47,8 @@ REACHABILITY: dict[str, tuple[str, str]] = {
     "claude-opus-4-8": ("claude", "claude-opus-4-8"),
     "claude-sonnet-5": ("claude", "claude-sonnet-5"),
     "claude-haiku-4-5": ("claude", "claude-haiku-4-5"),
-    "glm-5.2": ("claude", "glm-5.2"),
+    "glm-5.3": ("claude", "glm-5.3"),
     "glm-4.7": ("claude", "glm-4.7"),
-    "glm-4.5-air": ("claude", "glm-4.5-air"),
     "gpt-5.5": ("codex", "gpt-5.5"),
     "gpt-5.4": ("codex", "gpt-5.4"),
 }
@@ -62,8 +61,8 @@ STATIC_TIERS: dict[str, list[str]] = {
     # gpt-5.5 is the current codex flagship (high); gpt-5.4, the prior flagship,
     # sits a band down (medium). Both route on the codex harness.
     "high": ["claude-opus-4-8", "gpt-5.5"],
-    "medium": ["claude-sonnet-5", "gpt-5.4", "glm-5.2"],
-    "low": ["glm-4.7", "glm-4.5-air", "claude-haiku-4-5"],
+    "medium": ["claude-sonnet-5", "gpt-5.4", "glm-5.3"],
+    "low": ["glm-4.7", "claude-haiku-4-5"],
 }
 
 

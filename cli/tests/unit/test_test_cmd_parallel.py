@@ -68,6 +68,17 @@ def test_smoke_suite_uses_loadgroup_scheduler():
     assert "-n auto --maxprocesses=4 --dist=loadgroup" in pytest_step
 
 
+def test_changed_packet_caps_auto_workers() -> None:
+    selections = [
+        {"kind": "pytest", "target": f"cli/tests/unit/test_{index}.py"}
+        for index in range(4)
+    ]
+
+    pytest_step = test_cmd._changed_steps(Path.cwd(), selections)[0][2]
+
+    assert "-n auto --maxprocesses=4 --dist=loadgroup" in pytest_step
+
+
 def test_known_parallel_racers_are_marked_and_grouped(pytestconfig):
     conftest_path = (Path(__file__).parents[1] / "conftest.py").resolve()
     plugin = next(
@@ -91,11 +102,17 @@ def test_known_parallel_racers_are_marked_and_grouped(pytestconfig):
         "test_ac3hp_concurrent_writes_never_surface_corruption"
     )
     ordinary = _Item("cli/tests/unit/test_fno_test_cmd.py::test_repo_root_finds_checkout")
+    target_init = _Item(
+        "tests/hooks/test_init_target_state_skip_flags.py::"
+        "test_flat_skip_flags_per_size_profile[S]"
+    )
 
-    hook([racer, ordinary])
+    hook([racer, target_init, ordinary])
 
     assert [marker.name for marker in racer.markers] == ["serial", "xdist_group"]
     assert racer.markers[1].kwargs == {"name": "serial"}
+    assert [marker.name for marker in target_init.markers] == ["serial", "xdist_group"]
+    assert target_init.markers[1].kwargs == {"name": "serial"}
     assert ordinary.markers == []
 
 

@@ -42,7 +42,8 @@ if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$no
   scripts/ci/preflight.sh; pf_rc=$?
   # Branch on the code. Collapsing every non-zero into "RED" is what sends a
   # loop hunting a test failure that does not exist: 5 means the run lost the
-  # shared worktree and earned no verdict at all, and 3 means it never started.
+  # shared worktree and earned no verdict at all, 3 means it queued for the
+  # lock and gave up at --wait-timeout, and 6 means the base is stale.
   case "$pf_rc" in
     0) : ;;
     5) scripts/ci/preflight.sh; retry_rc=$?
@@ -50,10 +51,13 @@ if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$no
        # RED would repeat the very mislabelling this branching exists to fix.
        case "$retry_rc" in
          0) : ;;
+         3) echo "preflight gave up waiting again - do NOT loop; re-run once with a longer --wait-timeout or set FNO_SKIP_PREFLIGHT=1 and let CI verify"; exit 1 ;;
          5) echo "preflight VOID twice - shared worktree contention, retry later"; exit 1 ;;
+         6) echo "preflight refused a stale base - git fetch origin main && git rebase origin/main, then re-run"; exit 1 ;;
          *) echo "preflight RED - fix before pushing"; exit 1 ;;
        esac ;;
-    3) echo "another preflight holds the lock - retry when it finishes"; exit 1 ;;
+    3) echo "preflight gave up waiting for the lock - do NOT write a retry loop (loops are the contention); re-run once with a longer --wait-timeout or set FNO_SKIP_PREFLIGHT=1 and let CI verify"; exit 1 ;;
+    6) echo "preflight refused a stale base - git fetch origin main && git rebase origin/main, then re-run"; exit 1 ;;
     *) echo "preflight RED - fix before pushing"; exit 1 ;;
   esac
 fi

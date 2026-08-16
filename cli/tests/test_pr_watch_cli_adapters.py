@@ -34,7 +34,12 @@ def test_emit_event_writes_real_event_to_events_jsonl(tmp_path: Path) -> None:
     from fno.events import validate
 
     events_path = tmp_path / "events.jsonl"
-    _emit_event("pr_watch_tick", {"open_prs": 0, "acted": 0}, events_path=events_path)
+    _emit_event(
+        "pr_watch_tick",
+        {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+         "dropped_count": 0, "dropped": {}},
+        events_path=events_path,
+    )
 
     assert events_path.exists(), "events.jsonl was not created"
     lines = events_path.read_text().strip().splitlines()
@@ -74,8 +79,6 @@ def test_emit_event_logs_warning_on_write_failure(tmp_path: Path, caplog: pytest
     """AC2-ERR: unwritable events path triggers a warning log, not a silent pass or raise."""
     from fno.pr_watch.cli import _emit_event
 
-    # Unwritable path: a file where a directory is expected
-    bad_path = tmp_path / "not-a-dir" / "events.jsonl"
     # Don't create the parent so mkdir will fail if parent doesn't exist
     # Actually parent needs to fail in a way that can't be mkdir'd
     # Point at a path whose parent is a FILE, not a dir
@@ -85,8 +88,14 @@ def test_emit_event_logs_warning_on_write_failure(tmp_path: Path, caplog: pytest
 
     with caplog.at_level(logging.WARNING, logger="fno.pr_watch.cli"):
         # Must NOT raise
-        _emit_event("pr_watch_tick", {"open_prs": 0, "acted": 0}, events_path=bad_events_path)
+        result = _emit_event(
+            "pr_watch_tick",
+            {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+             "dropped_count": 0, "dropped": {}},
+            events_path=bad_events_path,
+        )
 
+    assert result is False
     # Must have logged a warning
     assert any("pr-watch" in r.message and "emit" in r.message for r in caplog.records), (
         f"expected a warning log mentioning 'pr-watch' and 'emit'; got: {[r.message for r in caplog.records]}"
@@ -306,3 +315,32 @@ def test_AC6_subsystem_failure_is_not_reported_as_a_held_lock(monkeypatch) -> No
     assert "unavailable" in res.output
     assert "No space left on device" in res.output
     assert "open_prs=" not in res.output
+
+
+def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) -> None:
+    """A raised tick fails the command but never the recovery and sync legs."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+
+    def _boom(**_kw):
+        raise RuntimeError("pr-watch tick receipt emission failed")
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.tick", _boom, raising=True)
+
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    res = CliRunner().invoke(app, [])
+
+    assert "pr-watch tick: failed:" in res.output
+    assert res.exit_code == 1
+    # A controlled failure exit, not the RuntimeError escaping the command:
+    # reaching SystemExit proves the composed legs ran to the end.
+    assert isinstance(res.exception, SystemExit), repr(res.exception)

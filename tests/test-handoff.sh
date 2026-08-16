@@ -420,6 +420,11 @@ echo ""
 echo "=== Scenario 1: AC1-HP happy path ==="
 SBX="$(make_sandbox s1)"
 
+printf '%s\n' \
+  '{"ts":"2026-06-05T11:58:00Z","type":"builder_step","source":"target","data":{"node_id":"ab-deadbeef","tried":"foreign attempt","outcome":"failed"}}' \
+  '{"ts":"2026-06-05T11:59:00Z","type":"builder_step","source":"target","data":{"node_id":"ab-12345678","tried":"current attempt","outcome":"worked"}}' \
+  >> "$SBX/.fno/events.jsonl"
+
 CALL_LOG="$SBX/call-log"
 HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
 
@@ -449,6 +454,9 @@ check_file_exists "AC1-HP: per-session sentinel exists" \
 # Handoff brief artifact
 check_file_exists "AC1-HP: handoff brief artifact exists" \
   "$SBX/.fno/artifacts/handoff/blueprint-do-${SESSION_ID}.md"
+brief=$(cat "$SBX/.fno/artifacts/handoff/blueprint-do-${SESSION_ID}.md")
+check_contains "AC1-HP: current-node builder crumb reaches successor" "current attempt" "$brief"
+check_not_contains "AC1-HP: foreign-node builder crumb stays isolated" "foreign attempt" "$brief"
 
 # events.jsonl contains delegated event
 set +e

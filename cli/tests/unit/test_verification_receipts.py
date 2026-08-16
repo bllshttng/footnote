@@ -689,6 +689,22 @@ def test_local_verification_policy_preserves_explicit_exemptions(
     assert local_verification_required(cwd=str(tmp_path)) == (True, "required")
 
 
+def test_root_readme_is_docs_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = tmp_path / "scripts" / "ci" / "preflight.sh"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/bin/sh\n")
+    runner.chmod(0o755)
+
+    def readme_git(args, *_args, **_kwargs):
+        output = "100755 blob abc\tscripts/ci/preflight.sh\n" if args[0] == "ls-tree" else "README.md\n"
+        return type("Result", (), {"returncode": 0, "stdout": output})()
+
+    monkeypatch.setattr("fno.pr._preflight._git", readme_git)
+    assert local_verification_required(cwd=str(tmp_path)) == (False, "docs-only")
+
+
 @pytest.mark.parametrize(
     "runtime_markdown",
     [

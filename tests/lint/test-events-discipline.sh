@@ -39,6 +39,24 @@ rc=$?
 [[ $rc -eq 0 ]] || { echo "FAIL AC1-HP rc=$rc out=$out"; fail=1; }
 cleanup "$d"
 
+# AC2-ERR indirect event-log variables are writer bypasses too.
+d=$(make_fixture)
+echo 'echo "$line" >> "$EVENTS_LOG"' > "$d/hooks/bad-variable.sh"
+out=$(cd "$d" && bash "$LINT" 2>&1)
+rc=$?
+[[ $rc -eq 1 ]] || { echo "FAIL AC2-variable-append rc=$rc out=$out"; fail=1; }
+[[ "$out" == *"events bypass at"* ]] || { echo "FAIL AC2-variable-append diag: $out"; fail=1; }
+cleanup "$d"
+
+# AC2-ERR append redirections need not have whitespace before the target.
+d=$(make_fixture)
+echo 'echo "$line" >>"$EVENTS_FILE"' > "$d/hooks/bad-no-space-variable.sh"
+out=$(cd "$d" && bash "$LINT" 2>&1)
+rc=$?
+[[ $rc -eq 1 ]] || { echo "FAIL AC2-no-space-variable-append rc=$rc out=$out"; fail=1; }
+[[ "$out" == *"events bypass at"* ]] || { echo "FAIL AC2-no-space-variable-append diag: $out"; fail=1; }
+cleanup "$d"
+
 # AC2-ERR bypass-echo
 d=$(make_fixture)
 echo 'echo "{\"type\":\"foo\"}" >> .fno/events.jsonl' > "$d/skills/bad.sh"
@@ -46,6 +64,15 @@ out=$(cd "$d" && bash "$LINT" 2>&1)
 rc=$?
 [[ $rc -eq 1 ]] || { echo "FAIL AC2-bypass rc=$rc out=$out"; fail=1; }
 [[ "$out" == *"events bypass at"* ]] || { echo "FAIL AC2-bypass diag: $out"; fail=1; }
+cleanup "$d"
+
+# AC2-ERR direct printf append from a hook is the same writer bypass.
+d=$(make_fixture)
+echo 'printf "%s\\n" "$line" >> "${ROOT}/.fno/events.jsonl"' > "$d/hooks/bad.sh"
+out=$(cd "$d" && bash "$LINT" 2>&1)
+rc=$?
+[[ $rc -eq 1 ]] || { echo "FAIL AC2-hook-printf rc=$rc out=$out"; fail=1; }
+[[ "$out" == *"events bypass at"* ]] || { echo "FAIL AC2-hook-printf diag: $out"; fail=1; }
 cleanup "$d"
 
 # AC4-EDGE: migrate-events-shape.py is allowed (legitimate rewrite)

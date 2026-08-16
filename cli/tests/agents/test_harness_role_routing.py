@@ -69,8 +69,8 @@ def test_cheap_role_merges_zai_env(
     env = captured["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
-    assert env["ANTHROPIC_MODEL"] == "glm-5.2"
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"  # cheap bg tier
+    assert env["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"  # cheap bg tier
     assert "ANTHROPIC_API_KEY" not in env  # stale key cleared on route
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env  # subscription token cleared too
     # FNO_AGENT_* injection still happens alongside the route.

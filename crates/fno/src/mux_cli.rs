@@ -868,7 +868,7 @@ enum VersionVerdict {
 /// is frozen and version-independent, so it cannot detect skew). Sends the
 /// read-only `PaneLs` verb - lists panes, mutates nothing - so doctor stays
 /// side-effect free (AC6-ERR).
-fn version_probe(sock: &Path) -> VersionVerdict {
+fn version_probe(session: &str, sock: &Path) -> VersionVerdict {
     // Bounded connect: a wedged server (never accepts) reads as Unqueryable
     // via the generic arm below, never as Stale, and never hangs doctor.
     let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
@@ -880,13 +880,21 @@ fn version_probe(sock: &Path) -> VersionVerdict {
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
-    match send_control(stream, ControlVerb::PaneLs, PROBE_TIMEOUT) {
+    match send_control(
+        stream,
+        ControlVerb::PaneLs,
+        PROBE_TIMEOUT,
+        // A doctor probe wants its own tight bound respected, not the
+        // extended window: no extra time past PROBE_TIMEOUT.
+        PROBE_TIMEOUT,
+        session,
+    ) {
         Ok(ServerMsg::PaneList { .. }) => VersionVerdict::Ok,
         Ok(ServerMsg::Err { code, msg }) if code == err_code::VERSION_SKEW => {
             VersionVerdict::Skew(msg)
         }
         Ok(_) => VersionVerdict::Unqueryable("unexpected control reply".into()),
-        Err(e) => VersionVerdict::Unqueryable(e),
+        Err(e) => VersionVerdict::Unqueryable(e.to_string()),
     }
 }
 
@@ -1134,7 +1142,7 @@ fn gather_checks() -> Vec<Check> {
         Ok(names) => {
             let dir = proto::mux_dir();
             checks.extend(session_checks(&names, |name| {
-                version_probe(&dir.join(format!("{name}.sock")))
+                version_probe(name, &dir.join(format!("{name}.sock")))
             }));
         }
         Err(e) => checks.push(Check {
@@ -1489,6 +1497,7 @@ pub const EXIT_NOT_FOUND: i32 = 16; // where: the fno_id is not in the registry 
 pub const EXIT_NOT_PANE_HOSTED: i32 = 17; // where: in registry but hosts no live pane (x-d865)
 pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not be read (x-d865)
 pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x-3e17)
+pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1498,6 +1507,32 @@ const DEFAULT_WAIT_TIMEOUT_S: u64 = 30;
 /// deadline (`timeout_ms` + slack) so the bounded server wait is never cut
 /// short by the client's read timeout.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Total time a control caller keeps reading a reply that has not arrived.
+/// The per-read bound (CONTROL_TIMEOUT) says when the socket goes quiet; this
+/// says when the client stops believing an answer is still coming. A read that
+/// consumed nothing leaves the frame boundary intact (proto::read_fill), so
+/// polling again is safe - it is the ONE thing that is safe here, because the
+/// verb has already reached the server and must never be sent twice.
+const CONTROL_REPLY_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The reply deadline for `dispatch()`'s own `send_control` call. `pane
+/// wait`'s read timeout is the CALLER's stated patience (`--timeout` plus
+/// 2s), and exceeding it is a real answer, so it gets no extra window - `
+/// is_wait` must come from matching the verb's TYPE (`ControlVerb::PaneWait`),
+/// never inferred from `read_timeout`'s value: a duration-equality check
+/// misclassified `pane wait --timeout 8` (whose read timeout computes to
+/// exactly `CONTROL_TIMEOUT`) as a non-wait verb and gave it 30s instead of
+/// respecting its 10s bound. Every other call site in this module passes the
+/// fixed `CONTROL_REPLY_DEADLINE` directly; only `dispatch()` has more than
+/// one verb behind one code path, so only it needs this split named.
+fn reply_deadline_for(is_wait: bool, read_timeout: Duration) -> Duration {
+    if is_wait {
+        read_timeout
+    } else {
+        CONTROL_REPLY_DEADLINE
+    }
+}
 
 /// Resolve `pane run --cwd` to an absolute path CLIENT-side. The server is a
 /// detached daemon with its own cwd, so a RELATIVE path would resolve against
@@ -1962,9 +1997,19 @@ fn run_on_existing_server(
             return EXIT_ERROR;
         }
     };
-    match send_control(stream, verb, CONTROL_TIMEOUT) {
+    match send_control(
+        stream,
+        verb,
+        CONTROL_TIMEOUT,
+        CONTROL_REPLY_DEADLINE,
+        &session,
+    ) {
         Ok(reply) => render_reply(reply, json, false, None),
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux: {e}");
+            EXIT_CONTROL_UNANSWERED
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux: {e}");
             EXIT_ERROR
         }
@@ -2543,9 +2588,19 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     };
-    match send_control(stream, ControlVerb::PaneWhere { fno_id }, CONTROL_TIMEOUT) {
+    match send_control(
+        stream,
+        ControlVerb::PaneWhere { fno_id },
+        CONTROL_TIMEOUT,
+        CONTROL_REPLY_DEADLINE,
+        &session,
+    ) {
         Ok(reply) => render_reply(reply, json, false, None),
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux where: {e}");
+            EXIT_CONTROL_UNANSWERED
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux where: {e}");
             EXIT_ERROR
         }
@@ -2656,6 +2711,12 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
 
     let is_run = matches!(verb, ControlVerb::PaneRun { .. });
     let is_ls = matches!(verb, ControlVerb::PaneLs);
+    // Named explicitly from the verb, never inferred from read_timeout's
+    // VALUE: `pane wait --timeout 8` computes a 10s read_timeout (timeout_ms
+    // + 2s) that collides with the CONTROL_TIMEOUT constant, and a duration
+    // equality check would misread that as "not a wait" and hand it the 30s
+    // extended window instead of respecting its own 10s bound.
+    let is_wait = matches!(verb, ControlVerb::PaneWait { .. });
     let stream = if is_run {
         match crate::client::connect_or_spawn(sock) {
             Ok(s) => s,
@@ -2700,26 +2761,59 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             ..
         }
     );
-    match send_control(stream, verb, read_timeout) {
+    match send_control(
+        stream,
+        verb,
+        read_timeout,
+        reply_deadline_for(is_wait, read_timeout),
+        session,
+    ) {
         Ok(reply) => render_reply(reply, json, command_done_requested, ls_fno_id.as_deref()),
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux pane: {e}");
+            EXIT_CONTROL_UNANSWERED
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux pane: {e}");
             EXIT_ERROR
         }
     }
 }
 
+/// The outcome of a control exchange that did not return a reply.
+#[derive(Debug)]
+enum ControlError {
+    /// The exchange failed and nothing is running because of it.
+    Fatal(String),
+    /// The verb reached the server and no reply came back inside the deadline.
+    /// The server's side of the exchange is UNKNOWN, not failed.
+    Unanswered(String),
+}
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlError::Fatal(s) | ControlError::Unanswered(s) => write!(f, "{s}"),
+        }
+    }
+}
+
 /// Write the control verb, read exactly one reply. A closed connection with no
 /// reply means the server could not parse a v4 Control - almost certainly a
-/// pre-v4 server (AC4-FR): report it loudly, naming this client's proto.
+/// pre-v4 server (AC4-FR): report it loudly, naming this client's proto. A
+/// read that times out with nothing consumed is polled again up to
+/// `reply_deadline`: the verb has already reached the server, so re-sending it
+/// (rather than continuing to read) would risk a second pane (LD1).
 fn send_control(
     stream: std::os::unix::net::UnixStream,
     verb: ControlVerb,
     read_timeout: Duration,
-) -> Result<ServerMsg, String> {
+    reply_deadline: Duration,
+    session: &str,
+) -> Result<ServerMsg, ControlError> {
     let mut w = stream
         .try_clone()
-        .map_err(|e| format!("socket setup failed: {e}"))?;
+        .map_err(|e| ControlError::Fatal(format!("socket setup failed: {e}")))?;
     write_msg_sync(
         &mut w,
         &ClientMsg::Control {
@@ -2728,17 +2822,37 @@ fn send_control(
             verb,
         },
     )
-    .map_err(|e| format!("could not send the control verb: {e}"))?;
+    .map_err(|e| ControlError::Fatal(format!("could not send the control verb: {e}")))?;
     let mut r = stream;
     let _ = r.set_read_timeout(Some(read_timeout));
-    match read_msg_sync::<_, ServerMsg>(&mut r) {
-        Ok(msg) => Ok(msg),
-        Err(crate::proto::ProtoError::Closed) => Err(format!(
-            "no response from the server; it may predate v4 control verbs \
-             (this client speaks proto {PROTO_VERSION}). Restart the server \
-             (fno mux kill-server) and retry."
-        )),
-        Err(e) => Err(format!("control read failed: {e}")),
+
+    let deadline = Instant::now() + reply_deadline;
+    loop {
+        match read_msg_sync::<_, ServerMsg>(&mut r) {
+            Ok(msg) => return Ok(msg),
+            Err(crate::proto::ProtoError::Closed) => {
+                return Err(ControlError::Fatal(format!(
+                    "no response from the server; it may predate v4 control verbs \
+                     (this client speaks proto {PROTO_VERSION}). Restart the server \
+                     (fno mux kill-server) and retry."
+                )))
+            }
+            Err(crate::proto::ProtoError::Io(e)) if crate::proto::is_retryable(&e) => {
+                // Nothing of the frame was consumed, so the stream is still
+                // positioned at a boundary and the reply may yet land. Never
+                // re-send the verb (LD1): the server may already be acting on it.
+                if Instant::now() < deadline {
+                    continue;
+                }
+                return Err(ControlError::Unanswered(format!(
+                    "the mux server accepted this command but sent no reply within \
+                     {}s. Whether it ran is UNKNOWN, not failed: check with \
+                     `fno mux pane ls --session {session}` before retrying.",
+                    reply_deadline.as_secs()
+                )));
+            }
+            Err(e) => return Err(ControlError::Fatal(format!("control read failed: {e}"))),
+        }
     }
 }
 
@@ -3136,10 +3250,26 @@ fn pipe_block_gate(meta: Option<&proto::BlockMeta>) -> Result<(), String> {
 
 /// One control round-trip on a fresh one-shot connection (the pane verbs'
 /// connect + [`send_control`], factored so `block pipe` can do two in a row).
-fn control_roundtrip(sock: &Path, session: &str, verb: ControlVerb) -> Result<ServerMsg, String> {
+/// Timeouts are parameters, not the hardcoded constants, so a test can force
+/// `Unanswered` in milliseconds instead of waiting out `CONTROL_REPLY_DEADLINE`.
+fn control_roundtrip_with_timeouts(
+    sock: &Path,
+    session: &str,
+    verb: ControlVerb,
+    read_timeout: Duration,
+    reply_deadline: Duration,
+) -> Result<ServerMsg, ControlError> {
     let stream = std::os::unix::net::UnixStream::connect(sock)
-        .map_err(|e| format!("cannot reach session {session:?}: {e}"))?;
-    send_control(stream, verb, CONTROL_TIMEOUT)
+        .map_err(|e| ControlError::Fatal(format!("cannot reach session {session:?}: {e}")))?;
+    send_control(stream, verb, read_timeout, reply_deadline, session)
+}
+
+fn control_roundtrip(
+    sock: &Path,
+    session: &str,
+    verb: ControlVerb,
+) -> Result<ServerMsg, ControlError> {
+    control_roundtrip_with_timeouts(sock, session, verb, CONTROL_TIMEOUT, CONTROL_REPLY_DEADLINE)
 }
 
 /// `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json]
@@ -3188,7 +3318,11 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: unexpected server reply: {other:?}");
             return EXIT_ERROR;
         }
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
@@ -3234,7 +3368,11 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: unexpected server reply: {other:?}");
             return EXIT_ERROR;
         }
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
@@ -3374,7 +3512,11 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux block: unexpected server reply: {other:?}");
             return EXIT_ERROR;
         }
-        Err(e) => {
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux block: {e}");
+            return EXIT_CONTROL_UNANSWERED;
+        }
+        Err(ControlError::Fatal(e)) => {
             eprintln!("fno mux block: {e}");
             return EXIT_ERROR;
         }
@@ -4461,5 +4603,193 @@ mod tests {
         // mid-command) is refused: block pipe is a typed-block verb.
         let err = pipe_block_gate(Some(&meta(None, true, false, true))).unwrap_err();
         assert!(err.contains("no command markers"), "{err}");
+    }
+
+    #[test]
+    fn reply_deadline_for_preserves_a_pane_wait_bound_that_collides_with_control_timeout() {
+        // `pane wait --timeout 8` computes read_timeout = 8s + 2s = 10s,
+        // exactly CONTROL_TIMEOUT. A duration-equality check would misread
+        // this as "not a wait" and hand it the 30s extended window; is_wait
+        // must come from the verb's type, so this stays bounded at its own
+        // 10s regardless of the coincidence.
+        let collided = Duration::from_secs(8) + Duration::from_secs(2);
+        assert_eq!(collided, CONTROL_TIMEOUT);
+        assert_eq!(reply_deadline_for(true, collided), collided);
+        // A non-wait verb always gets the fixed extended window.
+        assert_eq!(
+            reply_deadline_for(false, CONTROL_TIMEOUT),
+            CONTROL_REPLY_DEADLINE
+        );
+        // pane wait with an unrelated timeout still gets its own bound, not
+        // the extended window, whether or not it happens to collide.
+        assert_eq!(
+            reply_deadline_for(true, Duration::from_secs(3)),
+            Duration::from_secs(3)
+        );
+    }
+
+    // -- send_control: an unanswered read is UNKNOWN, not failed --
+
+    /// A unique short-lived scratch socket path. No tempfile dep: pid + test
+    /// name is unique enough for a test process (sun_path stays short - the
+    /// limit is ~104 bytes on macOS).
+    fn control_test_sock(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("fno-control-{}-{name}.sock", std::process::id()))
+    }
+
+    #[test]
+    fn control_send_polls_past_a_read_timeout_and_recovers() {
+        // A fake server that accepts, reads the Control frame, sleeps past two
+        // per-read timeouts, then replies - proving send_control polled again
+        // rather than treating the first EAGAIN as fatal.
+        let sock = control_test_sock("recovers");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            write_msg_sync(&mut s, &ServerMsg::PaneList { panes: vec![] }).unwrap();
+        });
+
+        let stream = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        let started = Instant::now();
+        let result = send_control(
+            stream,
+            ControlVerb::PaneLs,
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+            "test-session",
+        );
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert!(
+            matches!(result, Ok(ServerMsg::PaneList { .. })),
+            "expected a recovered reply, got {result:?}"
+        );
+        // Proves it polled again rather than returning on the first EAGAIN:
+        // the reply only landed after one read timeout had already elapsed.
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "elapsed {elapsed:?} is under one read timeout; the retry never happened"
+        );
+    }
+
+    #[test]
+    fn control_send_gives_up_honestly_when_nothing_ever_arrives() {
+        // A fake server that reads the Control frame and never replies. The
+        // client must give up as UNKNOWN, not fatal, and must never re-send
+        // the verb (LD1) - asserted by the server counting exactly one frame.
+        let sock = control_test_sock("unanswered");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let frames_read = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let frames_read_srv = frames_read.clone();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            frames_read_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Never reply; hold the connection open past the client's deadline.
+            std::thread::sleep(Duration::from_secs(2));
+        });
+
+        let stream = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        let started = Instant::now();
+        let result = send_control(
+            stream,
+            ControlVerb::PaneLs,
+            Duration::from_millis(100),
+            Duration::from_millis(500),
+            "test-session",
+        );
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        match result {
+            Err(ControlError::Unanswered(msg)) => {
+                assert!(msg.contains("UNKNOWN"), "{msg}");
+                assert!(msg.contains("pane ls"), "{msg}");
+            }
+            other => panic!("expected Unanswered, got {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "elapsed {elapsed:?} is under the reply deadline"
+        );
+        assert_eq!(
+            frames_read.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "LD1: the verb must never be re-sent while a reply may still be coming"
+        );
+    }
+
+    #[test]
+    fn control_unanswered_exits_control_unanswered_not_error() {
+        // The dispatch path (pane run/send/kill) must map Unanswered to its
+        // own exit code, distinct from EXIT_ERROR, so a caller can tell "no
+        // reply" from every other control failure.
+        let sock = control_test_sock("exit-code");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            std::thread::sleep(Duration::from_secs(1));
+        });
+
+        let stream = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        let result = send_control(
+            stream,
+            ControlVerb::PaneLs,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+            "test-session",
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        let exit = match result {
+            Err(ControlError::Unanswered(_)) => EXIT_CONTROL_UNANSWERED,
+            Err(ControlError::Fatal(_)) => EXIT_ERROR,
+            Ok(_) => EXIT_OK,
+        };
+        assert_eq!(exit, EXIT_CONTROL_UNANSWERED);
+        assert_ne!(EXIT_CONTROL_UNANSWERED, EXIT_ERROR);
+    }
+
+    #[test]
+    fn control_roundtrip_surfaces_unanswered_not_a_flattened_string() {
+        // `where_` and `block pipe` both dispatch through control_roundtrip,
+        // not send_control directly, so a fix that only touches send_control's
+        // callers in `dispatch`/`run_on_existing_server` leaves this path
+        // asserting no pane exists on a mere timeout - exactly the P1 review
+        // found. Pin the typed error, not a stringified one, all the way
+        // through control_roundtrip.
+        let sock = control_test_sock("roundtrip-unanswered");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let _msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        let result = control_roundtrip_with_timeouts(
+            &sock,
+            "test-session",
+            ControlVerb::PaneLs,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert!(
+            matches!(result, Err(ControlError::Unanswered(_))),
+            "expected Unanswered, got {result:?}"
+        );
     }
 }

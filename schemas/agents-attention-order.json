@@ -1,0 +1,108 @@
+{
+  "$comment": "Canonical attention-order fixture: one set of synthetic fleet rows plus the ONE name order every surface must produce from it. Three implementations sort by evidence of neglect and none of them can share code with the others (the crates do not link, the CLI is Python): the mux ranker in crates/fno/src/client.rs, the agent.list projection in crates/fno-agents/src/daemon.rs, and the Python serializer in cli/src/fno/agents/format.py. All three assert against this file; changing the ORDER means editing the expected_order here first, and a serializer that disagrees fails its own test. Row fields: basis / last_activity_age_s / reachability are the reachability evidence all three read; exited / unmeasured are mux-protocol fields the list lanes ignore; need is the needs-me fold kind only the mux reads (the list surfaces have no fold). The 'need-decision' row is the seam test: the Decision kind has no producer yet, and the fixture is the only thing proving its seat is reserved and ranked first - do not delete it because 'no real row has this'.",
+  "rows": [
+    {
+      "name": "need-decision",
+      "basis": "transcript",
+      "last_activity_age_s": 1800,
+      "reachability": "reachable",
+      "exited": false,
+      "unmeasured": false,
+      "need": "decision"
+    },
+    {
+      "name": "need-mail",
+      "basis": "transcript",
+      "last_activity_age_s": 1500,
+      "reachability": "reachable",
+      "exited": false,
+      "unmeasured": false,
+      "need": "mail_question"
+    },
+    {
+      "name": "stalled-silent",
+      "basis": "silent",
+      "last_activity_age_s": 7200,
+      "reachability": "unknown",
+      "exited": false,
+      "unmeasured": false
+    },
+    {
+      "name": "aaa-twin",
+      "basis": "silent",
+      "last_activity_age_s": 60,
+      "reachability": "unknown",
+      "exited": false,
+      "unmeasured": false
+    },
+    {
+      "name": "zzz-twin",
+      "basis": "silent",
+      "last_activity_age_s": 60,
+      "reachability": "unknown",
+      "exited": false,
+      "unmeasured": false
+    },
+    {
+      "name": "newborn",
+      "basis": "no-evidence",
+      "last_activity_age_s": null,
+      "reachability": "unknown",
+      "exited": false,
+      "unmeasured": false
+    },
+    {
+      "name": "sleeper",
+      "basis": null,
+      "last_activity_age_s": 9000,
+      "reachability": null,
+      "exited": true,
+      "unmeasured": true
+    },
+    {
+      "name": "worker",
+      "basis": "transcript",
+      "last_activity_age_s": 30,
+      "reachability": "reachable",
+      "exited": false,
+      "unmeasured": false
+    },
+    {
+      "name": "ghost",
+      "basis": "transcript",
+      "last_activity_age_s": null,
+      "reachability": "reachable",
+      "exited": false,
+      "unmeasured": false
+    },
+    {
+      "name": "reaper",
+      "basis": "process-gone",
+      "last_activity_age_s": 40000,
+      "reachability": "unreachable",
+      "exited": true,
+      "unmeasured": false
+    },
+    {
+      "name": "tombstone",
+      "basis": "exit-recorded",
+      "last_activity_age_s": 100,
+      "reachability": "unreachable",
+      "exited": true,
+      "unmeasured": true
+    }
+  ],
+  "expected_order": [
+    "need-decision",
+    "need-mail",
+    "stalled-silent",
+    "aaa-twin",
+    "zzz-twin",
+    "newborn",
+    "sleeper",
+    "worker",
+    "ghost",
+    "reaper",
+    "tombstone"
+  ]
+}

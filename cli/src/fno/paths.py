@@ -281,7 +281,7 @@ def _slug_from_git_remote(project_root: Optional[Path]) -> Optional[str]:
             capture_output=True,
             text=True,
             check=False,
-            timeout=2,
+            timeout=30,
         )
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None

@@ -158,6 +158,48 @@ def test_argv_boundary_not_scanned():
     assert out[-3:] == ["tool", "--model", "x"]
 
 
+def test_passthrough_fence_not_scanned():
+    # x-1caa: a provider flag after a bare `--` fence is not fno's flag (same
+    # contract as the --argv payload), so the config default still injects -
+    # and injects BEFORE the fence, never into the passthrough tail.
+    out = _inject(["spawn", "w", "--", "--model", "x"], model="cfg")
+    assert out.index("--model") < out.index("--")
+    assert out[out.index("--model") + 1] == "cfg"
+    assert out[-3:] == ["--", "--model", "x"]
+
+
+def test_permission_mode_fence_not_scanned():
+    # x-1caa: a fenced --permission-mode is the PROVIDER's flag, so it must not
+    # suppress the config permission default (the same suppression shape the
+    # name-mint head scan fixes for --name).
+    out = _inject(["spawn", "hi", "--", "--permission-mode", "plan"],
+                  permission_mode="acceptEdits")
+    assert out.index("--permission-mode") < out.index("--")
+    assert out[out.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_profile_seed_survives_a_passthrough_fence():
+    # x-1caa: the seed is the pre-fence MESSAGE; reading the first fenced token
+    # instead silently dropped the profile layer for every passthrough spawn.
+    out = _inject(
+        ["spawn", "/review the PR", "--", "--verbose"],
+        profiles={"review": {"model": "m2"}},
+    )
+    assert out.index("--model") < out.index("--")
+    assert out[out.index("--model") + 1] == "m2"
+
+
+def test_config_default_substrate_refuses_passthrough_after_injection():
+    # x-1caa AC7: a substrate that arrives by CONFIG default reroutes to the
+    # Rust lane before the Python CLI's own refusal can run, so the gate
+    # re-runs on the post-injection argv at the seam.
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(["spawn", "hi", "--", "--verbose"], substrate="headless", err=err)
+    assert exc.value.code == 2
+    assert "pane-only" in err.getvalue()
+
+
 def test_value_flag_value_not_misread_as_our_flag():
     # `--cwd --model` -> "--model" is the cwd VALUE, not a model flag; config injects.
     out = _inject(["spawn", "w", "--cwd", "--model"], model="cfg")

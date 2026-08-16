@@ -91,18 +91,26 @@ fi
 SESSION_ID=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null \
     | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
 
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}}"
+EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
+# shellcheck source=../scripts/lib/events.sh
+[[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
+
 # Append an event to both project + global logs WITHOUT jq (this runs on the
 # jq-missing give-up path too). Fields are hook-internal and safe to interpolate.
 emit_event_both() {
     local etype="$1" data="$2" ts line global_events
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
     line="{\"ts\":\"${ts}\",\"type\":\"${etype}\",\"source\":\"hook\",\"data\":${data}}"
+    if ! declare -F _append_bounded_event >/dev/null 2>&1; then
+        echo "target stop-hook: event helper unavailable; skipping ${etype}" >&2
+        return
+    fi
     # Honors an overridden config.state_dir when a caller has sourced the shell
     # stub; falls back to the default so the jq-missing give-up path still logs.
     global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
-    mkdir -p "${REPO_ROOT}/.fno" "$(dirname "$global_events")" 2>/dev/null || true
-    echo "$line" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
-    echo "$line" >> "$global_events" 2>/dev/null || true
+    _append_bounded_event target_stop_hook "$line" "${REPO_ROOT}/.fno/events.jsonl" || true
+    _append_bounded_event target_stop_hook "$line" "$global_events" || true
 }
 
 # Checker unavailable for an ACTIVE session: bounded-block, then loud give-up.

@@ -29,7 +29,7 @@ Claude Code internally requests the opus/sonnet/haiku/fable tiers (background
 tasks use haiku). Setting ``ANTHROPIC_MODEL`` + EVERY ``ANTHROPIC_DEFAULT_*`` tier
 var to the routed model sends the WHOLE worker to the secondary provider, so no
 Anthropic usage is recorded (AC1-HP). The background (haiku) tier defaults to
-the provider's cheaper ``haiku_model`` (zai -> ``glm-4.5-air``) so judgment-light
+the provider's cheaper ``haiku_model`` (zai -> ``glm-4.7``) so judgment-light
 background traffic runs cheap on the SAME secondary provider; opus/sonnet stay
 on the role model. A provider with no ``haiku_model`` keeps the role model on
 every tier. Operators can further differentiate any tier via ``extra_env``.
@@ -80,14 +80,16 @@ DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/anthropic"
 # reasoning-bearing work; a current flagship GLM does real work. Pin a cheaper
 # model per role via the roles map. Kept in lockstep with the schema default
 # (drift-guarded by test_config_defaults_match_module_constants).
-DEFAULT_SECONDARY_MODEL = "glm-5.2"
+DEFAULT_SECONDARY_MODEL = "glm-5.3"
 
 # Cheaper model for the background (haiku) tier of the built-in zai provider.
 # Claude Code runs background tasks on haiku; routing the haiku tier to this
 # cheaper GLM keeps judgment-light background traffic cheap while opus/sonnet
 # stay on the role model. Kept in lockstep with the schema default
-# (drift-guarded by test_config_defaults_match_module_constants).
-DEFAULT_ZAI_HAIKU_MODEL = "glm-4.5-air"
+# (drift-guarded by test_config_defaults_match_module_constants). glm-4.7 is
+# the vendor's recommended background model; glm-4.5-air left the coding-plan
+# supported set and now fails with a model-not-found error.
+DEFAULT_ZAI_HAIKU_MODEL = "glm-4.7"
 
 # Auto-compact threshold injected on [1m]-routed workers. It is the
 # compaction THRESHOLD, not a window selector: the [1m] variant already selects
@@ -246,7 +248,7 @@ def is_anthropic_model(model: str) -> bool:
     Pinning a tier to a specific Anthropic model
     (``ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-1``) is a supported Claude
     Code customization, not a vendor conflict: endpoint and model still agree.
-    Only a FOREIGN vendor's id (``glm-5.2[1m]``, ``deepseek-...``) creates the
+    Only a FOREIGN vendor's id (``glm-5.3[1m]``, ``deepseek-...``) creates the
     split this module guards against.
     """
     name = model.strip().lower()
@@ -421,12 +423,12 @@ def _parse_target(raw: str) -> Optional[tuple[str, str]]:
     """Parse a ``"provider/model"`` (or legacy ``"provider,model"``) target into
     (provider, model).
 
-    Slash is the canonical, ecosystem-standard form (``zai/glm-5.2[1m]``); comma
+    Slash is the canonical, ecosystem-standard form (``zai/glm-5.3[1m]``); comma
     is still accepted for the existing peer-lane / built-in values and any config
     written before the switch, so nothing already configured breaks. A comma, if
     present, wins as the separator (it never appears inside a model id, so it is
     unambiguous); otherwise the FIRST slash splits, which keeps a namespaced model
-    id intact (``zai/z-ai/glm-5.2`` -> provider ``zai``, model ``z-ai/glm-5.2``).
+    id intact (``zai/z-ai/glm-5.3`` -> provider ``zai``, model ``z-ai/glm-5.3``).
 
     Returns None for a malformed value (fail-safe; caller degrades to primary)."""
     raw = raw.strip()
@@ -611,7 +613,7 @@ def _route_for_target(
     for k in MODEL_ENV_KEYS:
         route[k] = model
     # Item 1: route the background (haiku) tier to the provider's cheaper
-    # haiku_model (zai -> glm-4.5-air). Still the SAME secondary provider
+    # haiku_model (zai -> glm-4.7). Still the SAME secondary provider
     # (base_url + token), so the whole worker stays off Anthropic; only the
     # background model is cheaper. A provider with no haiku_model keeps the role
     # model on the haiku tier (no regression, never an empty/invalid id).
@@ -643,7 +645,7 @@ def resolve_explicit_route(
     """Resolve the routed ``ANTHROPIC_*`` env for an explicit ``provider,model``.
 
     The peer lane (``config.review.peers`` entry ``{provider: claude, model:
-    "zai,glm-5.2"}``) names its route directly rather than via a role, so it
+    "zai,glm-5.3"}``) names its route directly rather than via a role, so it
     bypasses both the role->target lookup AND the ``PROTECTED_ROLES`` / global
     ``enabled`` role-auto-routing policy (an explicit peer opt-in is not
     auto-routing). It reuses the SAME provider-registry key/env logic as

@@ -7,6 +7,7 @@ by the inspectable `--dry-run` path.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import types
 from pathlib import Path
@@ -2252,3 +2253,286 @@ def test_update_refreshes_the_groom_agent_too(monkeypatch) -> None:
     src = inspect.getsource(update.update_command)
     assert '"pr-watch", "refresh"' in src
     assert '"backlog", "groom", "--refresh-agent"' in src
+
+
+# ---------------------------------------------------------------------------
+# update_readiness: AC1-HP, AC2-HP, AC3-HP, AC4-EDGE
+# ---------------------------------------------------------------------------
+
+
+def _write_proto_version(repo_root: Path, version: int) -> None:
+    proto_dir = repo_root / "crates" / "fno" / "src"
+    proto_dir.mkdir(parents=True, exist_ok=True)
+    (proto_dir / "proto.rs").write_text(
+        f"pub const PROTO_VERSION: u32 = {version};\n", encoding="utf-8"
+    )
+
+
+def _readiness_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    installed_rev: str = "aaa1111",
+    source_rev: str = "bbb2222",
+    source_wire: int = 47,
+) -> Path:
+    """Wire installed/source revs + a fake source checkout's proto.rs. Returns
+    the source (``cli/``) dir the resolver will see."""
+    from fno import doctor
+
+    src = tmp_path / "cli"
+    src.mkdir()
+    _write_proto_version(tmp_path, source_wire)
+
+    monkeypatch.setattr(doctor, "_read_marker", lambda: installed_rev)
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
+    monkeypatch.setattr(doctor, "_source_rev", lambda source: source_rev)
+    monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/fno")
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    return src
+
+
+def _make_runner(mux_rows=None, mux_rc=0, agent_rows=None, agent_rc=0):
+    def _run(cmd, **kwargs):
+        if cmd[1:3] == ["mux", "ls"]:
+            return types.SimpleNamespace(
+                returncode=mux_rc, stdout=json.dumps(mux_rows if mux_rows is not None else [])
+            )
+        if cmd[1:3] == ["agents", "list"]:
+            return types.SimpleNamespace(
+                returncode=agent_rc,
+                stdout=json.dumps(agent_rows if agent_rows is not None else []),
+            )
+        if cmd[0] == "git":
+            return types.SimpleNamespace(returncode=0, stdout="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    return _run
+
+
+def test_update_readiness_no_bump_wire_unchanged(monkeypatch, tmp_path) -> None:
+    """AC1-HP: wire unchanged -> not a bump, guidance names surviving shells."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}]
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["update_ready"] is True
+    assert result["wire"]["bump"] is False
+    assert result["shells"] == 14
+    assert result["shells_ended"] == 0
+    assert result["degraded"] is None
+    assert "survive" in result["guidance"]
+    assert "14" in result["guidance"]
+
+
+def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_path) -> None:
+    """AC2-HP: differing wire_version -> bump, guidance names ended shells and
+    revivable worker count."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
+        agent_rows=[
+            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "live"},
+            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "live"},
+            {"name": "w3", "harness": "codex", "session_id": "s3", "status": "live"},
+            {"name": "w4", "harness": "claude", "session_id": None, "status": "live"},
+        ],
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["wire"]["bump"] is True
+    assert result["shells"] == 14
+    assert result["shells_ended"] == 14
+    assert result["revivable"] == 2
+    assert "WIRE BUMP" in result["guidance"]
+    assert "14" in result["guidance"]
+    assert "2" in result["guidance"]
+
+
+def test_update_readiness_revivable_excludes_non_live_rows(monkeypatch, tmp_path) -> None:
+    """P2 (codex on PR #881): a claude worker with a resumable session but a
+    non-live registry status was never actually orphaned by a restart, so it
+    must not inflate the `--revive` count - same candidate scope as
+    `_revive_orphans`' `pre_live` snapshot in restart.py."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=48)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
+        agent_rows=[
+            {"name": "w1", "harness": "claude", "session_id": "s1", "status": "live"},
+            {"name": "w2", "harness": "claude", "session_id": "s2", "status": "exited"},
+        ],
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["revivable"] == 1
+
+
+def test_update_readiness_not_ready_when_revs_match(monkeypatch, tmp_path) -> None:
+    """AC3-HP: installed_rev == source_rev -> update_ready False."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    runner = _make_runner(mux_rows=[])
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["update_ready"] is False
+    assert result["guidance"].strip()
+
+
+def test_update_readiness_degraded_when_mux_ls_fails(monkeypatch, tmp_path) -> None:
+    """AC4-EDGE: `fno mux ls --json` failing degrades, guidance names the failed
+    input, never asserts shells survive, and never states a false shell count -
+    a fetch that never happened is not evidence of zero live shells."""
+    _readiness_env(monkeypatch, tmp_path)
+    runner = _make_runner(mux_rc=1)
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["degraded"] is not None
+    assert "mux ls" in result["degraded"]
+    assert result["wire"]["bump"] is True
+    assert result["guidance"].strip()
+    assert "survive" not in result["guidance"]
+    assert "unknown number of live shells" in result["guidance"]
+
+
+def test_update_readiness_degraded_when_agents_list_fails(monkeypatch, tmp_path) -> None:
+    """AC4-EDGE: `fno agents list --json` failing names an unknown revivable
+    count, not a false zero, even though mux ls itself succeeded.
+
+    P2 (codex on PR #881): the wire itself was read successfully and matches
+    (source_wire=47 == the one live row's wire_version), so `wire.bump` is
+    correctly False - the degraded-input wording must say "wire unchanged",
+    not the "unknown, treated as a bump" line reserved for a genuinely
+    unreadable wire. A degraded `agents list` is unrelated to the wire."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=47)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 47}],
+        agent_rc=1,
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["degraded"] is not None
+    assert "agents list" in result["degraded"]
+    assert result["wire"]["bump"] is False
+    assert "unknown number of workers" in result["guidance"]
+    assert "14 live shell(s)" in result["guidance"]
+    assert "wire unchanged" in result["guidance"]
+    assert "treated as a wire bump" not in result["guidance"]
+
+
+def test_update_readiness_degraded_when_source_wire_unreadable(monkeypatch, tmp_path) -> None:
+    """AC4-EDGE: an unreadable source proto.rs degrades and is named."""
+    from fno import doctor
+
+    src = tmp_path / "cli"
+    src.mkdir()
+    # No crates/fno/src/proto.rs written at all.
+    monkeypatch.setattr(doctor, "_read_marker", lambda: "aaa1111")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
+    monkeypatch.setattr(doctor, "_source_rev", lambda source: "bbb2222")
+    monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/fno")
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+    runner = _make_runner(mux_rows=[])
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["degraded"] is not None
+    assert "PROTO_VERSION" in result["degraded"]
+    assert result["guidance"].strip()
+
+
+def test_update_readiness_never_empty_guidance_on_full_failure(monkeypatch, tmp_path) -> None:
+    """AC4-EDGE: every input unavailable still yields a non-empty guidance
+    sentence naming the failure, never an empty string."""
+    from fno import doctor
+
+    monkeypatch.setattr(doctor, "_read_marker", lambda: None)
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
+    monkeypatch.setattr(update.shutil, "which", lambda name: None)
+    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
+
+    result = update.update_readiness(runner=_make_runner())
+
+    assert result["guidance"].strip() != ""
+    assert result["degraded"] is not None
+    assert result["update_ready"] is False
+
+
+def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
+    """`fno update --check` prints the readiness payload and installs nothing."""
+    src = _readiness_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        update,
+        "update_readiness",
+        lambda source=None: {"update_ready": True, "guidance": "update ready aaa1111 - stub"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["update", "--check"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["update_ready"] is True
+    assert "guidance" in payload
+
+
+def test_update_check_rejects_dry_run_combo() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["update", "--check", "--dry-run"])
+    assert result.exit_code != 0
+
+
+def test_update_check_rejects_force_combo() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["update", "--check", "--force"])
+    assert result.exit_code != 0
+
+
+def test_update_check_direct_call_does_not_false_positive_on_optioninfo(monkeypatch, tmp_path) -> None:
+    """Regression: a direct call passing only `check=True` (the same calling
+    convention `doctor.py` already uses for this function) must not raise, even
+    though `dry_run`/`force` are left as their un-normalized Typer `OptionInfo`
+    defaults - those are truthy objects, and the combo guard must not mistake
+    them for an explicit `--dry-run`/`--force`."""
+    monkeypatch.setattr(update, "update_readiness", lambda source=None: {"guidance": "stub"})
+
+    # No exception: dry_run/force must normalize to False like rust/no_rust/check do.
+    update.update_command(check=True)
+
+
+def test_update_readiness_not_ready_ignores_unrelated_degraded_input(monkeypatch, tmp_path) -> None:
+    """Regression: when both revs are confidently known and match (nothing to
+    update), an unrelated degraded input (mux ls failing) must not produce
+    "treated as a wire bump ... at risk" guidance - there is no update for
+    anything to be at risk from."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="same", source_rev="same")
+    runner = _make_runner(mux_rc=1)
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["update_ready"] is False
+    assert "up to date" in result["guidance"]
+    assert "at risk" not in result["guidance"]
+    assert "wire bump" not in result["guidance"].lower()
+
+
+def test_update_readiness_shells_and_revivable_none_when_unknown(monkeypatch, tmp_path) -> None:
+    """Regression (AC4-EDGE): the structured JSON fields must carry the same
+    "unknown, not zero" honesty as the guidance prose - a consumer reading
+    `shells`/`revivable` directly (not parsing `guidance`) must not see a false
+    zero for a count that was never fetched."""
+    _readiness_env(monkeypatch, tmp_path)
+    runner = _make_runner(mux_rc=1, agent_rc=1)
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["shells"] is None
+    assert result["shells_ended"] is None
+    assert result["sessions"] is None
+    assert result["revivable"] is None

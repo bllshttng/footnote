@@ -33,13 +33,22 @@ _SERIAL_TEST_SUFFIXES = frozenset(
     }
 )
 
+_SERIAL_TEST_FILES = frozenset(
+    {
+        "tests/hooks/test_init_target_state_skip_flags.py",
+    }
+)
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Keep filed parallel racers on one worker without skipping them."""
     for item in items:
         nodeid = item.nodeid.replace("\\", "/")
-        if any(nodeid.endswith(suffix) for suffix in _SERIAL_TEST_SUFFIXES):
+        serial_file = nodeid.split("::", 1)[0]
+        if serial_file in _SERIAL_TEST_FILES or any(
+            nodeid.endswith(suffix) for suffix in _SERIAL_TEST_SUFFIXES
+        ):
             item.add_marker(pytest.mark.serial)
             item.add_marker(pytest.mark.xdist_group(name="serial"))
 

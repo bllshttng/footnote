@@ -562,7 +562,9 @@ def test_render_truth_names_the_observed_model():
     line = render_truth(
         _truth_result({"kind": "observed", "model": "glm-5.2", "samples": 300})
     )
-    assert line == "truth 569d8d39: working on glm-5.2 (active, last activity 6s ago)"
+    # The age is fixed-width (4), so a short one carries leading spaces here
+    # too - column alignment is worth a double space in prose.
+    assert line == "truth 569d8d39: working on glm-5.2 (active, last activity   6s ago)"
 
 
 def test_render_truth_no_model_yet_does_not_read_as_healthy():
@@ -579,7 +581,7 @@ def test_render_truth_omits_the_clause_when_there_is_no_transcript():
     from fno.agents.session_truth import render_truth
 
     line = render_truth(_truth_result({"kind": "no-transcript"}))
-    assert line == "truth 569d8d39: working (active, last activity 6s ago)"
+    assert line == "truth 569d8d39: working (active, last activity   6s ago)"
 
 
 def test_render_truth_says_so_when_the_transcript_is_unreadable():

@@ -250,7 +250,7 @@ fn default_true() -> bool {
 /// - the CLI door onto the focus trunk the TUI already owns. New variants, not
 /// additive fields, so a v45 server cannot deserialize a `PaneFocus`; the
 /// handshake is what stops the skew.
-pub const PROTO_VERSION: u32 = 47;
+pub const PROTO_VERSION: u32 = 48;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -997,6 +997,27 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
+    /// (v48) Which question the row's reachability evidence answered: the
+    /// basis half of the reachability triple (`transcript`, `silent`,
+    /// `no-evidence`, or a falsifier name like `process-gone`). The verdict
+    /// half of the triple is deliberately NOT carried: it is derivable from
+    /// the basis, and it is a low-pass filter that reads `reachable` for
+    /// anything dead under two hours - sorting on it would put tonight's
+    /// nine dead workers below every live one. `None` when no probe has
+    /// answered (a server older than v48 never sends the field; the row then
+    /// ranks in the neutral tier, never as urgent). `#[serde(default)]`
+    /// keeps a v47 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// (v48) Seconds since the row's last transcript activity, measured by
+    /// the reachability probe at its last run - the one surface that never
+    /// lied about a live session. `updated_at` is a registry stamp that
+    /// reconciliation can refresh with no worker activity behind it; this
+    /// field is the honest age. `None` = the probe did not answer, and an
+    /// absent reading sorts youngest (never floats a row to the top).
+    /// `#[serde(default)]` keeps a v47 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_age_s: Option<u64>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -2301,7 +2322,7 @@ fn read_fill<R: Read>(r: &mut R, buf: &mut [u8], committed: bool) -> Result<(), 
     Ok(())
 }
 
-fn is_retryable(e: &std::io::Error) -> bool {
+pub(crate) fn is_retryable(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -2840,7 +2861,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 47);
+        assert_eq!(PROTO_VERSION, 48);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3125,6 +3146,8 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        basis: None,
+                        last_activity_age_s: None,
                     },
                     AgentRow {
                         squad: None,
@@ -3148,6 +3171,8 @@ mod tests {
                         tail: None,
                         crown_level: None,
                         crown_scope: None,
+                        basis: None,
+                        last_activity_age_s: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),

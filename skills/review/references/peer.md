@@ -26,17 +26,9 @@ It is advisory by default, can satisfy an identity-free local peer gate with `--
   - PR number -> review `gh pr diff <N>`.
   - branch name -> review that branch's diff vs base.
   - nothing -> review the current branch vs base (`origin/main` unless overridden).
-- **provider** (optional, trailing word): `codex` (default) or `gemini`. A bare
-  peer whose provider **matches the invoking harness** is rejected - it is the
-  author's own model, so it cannot be a cross-model second opinion (see Hard
-  rules). The invoking harness is read from the ambient markers in precedence
-  order `$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` >
-  `$GEMINI_SESSION_ID` (the shared order in `harness_identity.py` / `claims.rs`):
-  a claude session rejects a bare `claude`, a codex session a bare `codex`, a
-  gemini session a bare `gemini`. A **routed** peer IS allowed: a
-  `config.review.peers` entry of the form `{provider: claude, model: "zai,glm-5.2"}`
-  runs the claude CLI as transport over a genuinely different model (GLM via
-  z.ai), which satisfies the distinct-model trust invariant (see step 3b).
+- **provider** (optional, trailing word): `codex` (default) or `gemini`. A bare peer whose provider **matches the invoking harness** is rejected. It is the author's own model, so it cannot be a cross-model second opinion (see Hard rules). The invoking harness is read from the ambient markers in precedence order `$CODEX_THREAD_ID` > `$CLAUDE_CODE_SESSION_ID` > `$CODEX_SESSION_ID` > `$GEMINI_SESSION_ID`. The shared order lives in `harness_identity.py` / `claims.rs`. A claude session rejects a bare `claude`, a codex session a bare `codex`, a gemini session a bare `gemini`.
+
+  A **routed** peer IS allowed. A `config.review.peers` entry of the form `{provider: claude, model: "zai,glm-5.3"}` runs the claude CLI as transport over a genuinely different model (GLM via z.ai). That satisfies the distinct-model trust invariant (see step 3b).
 - **base** (optional): override the diff base (default `origin/main`).
 - **`adversarial`** (optional token, anywhere in the args): swaps the brief from
   defect-hunting to a design-challenge framing (`MODE=adversarial`; default
@@ -234,16 +226,14 @@ fno agents spawn --harness "$PROVIDER" --headless -t 300 --name "peer-$TARGET" "
 
 ### 3b. GENERATE (routed claude -> GLM) - claude CLI as transport (x-ef41)
 
-For a `config.review.peers` entry `{provider: claude, model: "<rprov>,<rmodel>"}`
-(e.g. `zai,glm-5.2`), do NOT `fno agents spawn` - the claude CLI is only the
-transport; the review model is the routed one (GLM via z.ai). Run `claude -p` with
-the routed `ANTHROPIC_*` env built by the SAME model-routing layer the spawn path
-uses (`resolve_explicit_route`), so the z.ai env-var contract lives in one place
-and is never hand-rolled here. Clear the parent Anthropic credential first (exactly
-as `harnesses/claude.py` does) or a lingering key sends the run back to Anthropic:
+For a `config.review.peers` entry `{provider: claude, model: "<rprov>,<rmodel>"}` (e.g. `zai,glm-5.3`), do NOT `fno agents spawn`. The claude CLI is only the transport. The review model is the routed one (GLM via z.ai).
+
+Run `claude -p` with the routed `ANTHROPIC_*` env built by the SAME model-routing layer the spawn path uses (`resolve_explicit_route`). The z.ai env-var contract then lives in one place and is never hand-rolled here.
+
+Clear the parent Anthropic credential first (exactly as `harnesses/claude.py` does) or a lingering key sends the run back to Anthropic:
 
 ```bash
-# $BRIEF = the review prompt (step 2); "zai,glm-5.2" = the peers entry's `model`.
+# $BRIEF = the review prompt (step 2); "zai,glm-5.3" = the peers entry's `model`.
 # PY must run on the interpreter that has `fno` importable. A bare system python3
 # lacks fno's deps (ModuleNotFoundError: pydantic), so do NOT default to it: probe
 # for a working interpreter and FAIL LOUD if none is found. Override with
@@ -258,7 +248,7 @@ if [ -z "$PYBIN" ]; then
   echo "no interpreter with fno importable - set FNO_PYTHON to the fno tool venv python (or run under 'uv run --project <fno-src>')" >&2
   # abstain like any failed peer; do NOT fall back to a same-model review.
 else
-GLM_REVIEW="$("$PYBIN" - "$BRIEF" "zai,glm-5.2" <<'PY'
+GLM_REVIEW="$("$PYBIN" - "$BRIEF" "zai,glm-5.3" <<'PY'
 import sys, os, subprocess
 from fno.agents.model_routing import resolve_explicit_route
 brief = open(sys.argv[1]).read()

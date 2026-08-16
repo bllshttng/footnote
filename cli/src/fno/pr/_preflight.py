@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import time
 import re
 import stat
 import sys
@@ -732,7 +733,7 @@ def local_verification_required(
     non_docs = [
         path
         for path in changed.stdout.splitlines()
-        if path and not path.startswith(("docs/", "internal/"))
+        if path and path != "README.md" and not path.startswith(("docs/", "internal/"))
     ]
     return (True, "required") if non_docs else (False, "docs-only")
 
@@ -752,26 +753,36 @@ def _verification_read_lock(repo: str):
         return
     lock = common / ".preflight.lock.d"
     stamp = f"pid={os.getpid()} kind=evidence-reader"
-    try:
-        lock.mkdir()
-        (lock / "holder").write_text(stamp + "\n", encoding="utf-8")
-    except FileExistsError:
-        yield "preflight transition in progress"
-        return
-    except OSError as exc:
-        cleanup_errors: list[str] = []
+    # The writer lock is now held across queued preflights, not only across
+    # single runs, so a reader that one-shot fails on FileExistsError refuses
+    # ships for however long the queue drains. Retry briefly instead: the
+    # writer releases between runs and 15 x 2s covers a handoff.
+    acquired = False
+    detail: Optional[str] = None
+    for _attempt in range(15):
         try:
-            (lock / "holder").unlink(missing_ok=True)
-        except OSError as cleanup_exc:
-            cleanup_errors.append(str(cleanup_exc))
-        try:
-            lock.rmdir()
-        except OSError as cleanup_exc:
-            cleanup_errors.append(str(cleanup_exc))
-        detail = f"verification lock unavailable: {exc}"
-        if cleanup_errors:
-            detail += f"; partial acquisition cleanup failed: {'; '.join(cleanup_errors)}"
-        yield detail
+            lock.mkdir()
+            (lock / "holder").write_text(stamp + "\n", encoding="utf-8")
+            acquired = True
+            break
+        except FileExistsError:
+            time.sleep(2.0)
+        except OSError as exc:
+            cleanup_errors: list[str] = []
+            try:
+                (lock / "holder").unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                cleanup_errors.append(str(cleanup_exc))
+            try:
+                lock.rmdir()
+            except OSError as cleanup_exc:
+                cleanup_errors.append(str(cleanup_exc))
+            detail = f"verification lock unavailable: {exc}"
+            if cleanup_errors:
+                detail += f"; partial acquisition cleanup failed: {'; '.join(cleanup_errors)}"
+            break
+    if not acquired:
+        yield detail or "preflight transition in progress"
         return
     try:
         yield None

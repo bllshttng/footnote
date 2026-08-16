@@ -213,18 +213,23 @@ impl Density {
 #[serde(rename_all = "snake_case")]
 pub enum AgentSort {
     /// Tree order: rows stay under their squad.
-    #[default]
     Squad,
-    /// Severity bands, worst first - the same ordering authority the needs-me
-    /// queue uses.
-    Status,
+    /// Attention order: evidence of neglect first (needs fold rank, then
+    /// stale-live over working, then longest-silent). The default, because a
+    /// table the operator adjudicates exists to answer "who needs me". The
+    /// old `status` name is kept as a serde alias so a stored preference
+    /// written before the rename keeps pointing at this variant rather than
+    /// silently resetting to the tree order.
+    #[default]
+    #[serde(alias = "status")]
+    Attention,
 }
 
 impl AgentSort {
     pub fn toggle(self) -> AgentSort {
         match self {
-            AgentSort::Squad => AgentSort::Status,
-            AgentSort::Status => AgentSort::Squad,
+            AgentSort::Squad => AgentSort::Attention,
+            AgentSort::Attention => AgentSort::Squad,
         }
     }
 }
@@ -648,12 +653,14 @@ mod tests {
     #[test]
     fn prefs_default_then_round_trip() {
         let _s = Scratch::new("prefs-roundtrip");
-        // AC7-FR: a missing file is not an error, it is the defaults.
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad, None));
-        save_prefs(Density::Extended, AgentSort::Status);
+        // AC7-FR: a missing file is not an error, it is the defaults. The
+        // default sort is attention (evidence of neglect first); only a stored
+        // preference can return the table to tree order.
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Attention, None));
+        save_prefs(Density::Extended, AgentSort::Squad);
         assert_eq!(
             load_prefs(),
-            (Density::Extended, AgentSort::Status, None),
+            (Density::Extended, AgentSort::Squad, None),
             "save_prefs leaves width untouched"
         );
     }
@@ -663,9 +670,12 @@ mod tests {
         // x-2e86 US1: a dragged width persists, and shares the file with
         // density/sort without either clobbering the other (one locked RMW).
         let _s = Scratch::new("width-roundtrip");
-        save_prefs(Density::Slim, AgentSort::Status);
+        save_prefs(Density::Slim, AgentSort::Attention);
         save_width(45);
-        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status, Some(45)));
+        assert_eq!(
+            load_prefs(),
+            (Density::Slim, AgentSort::Attention, Some(45))
+        );
         // A later density write keeps the width; a later width write keeps the
         // density.
         save_prefs(Density::Extended, AgentSort::Squad);
@@ -686,10 +696,10 @@ mod tests {
         // mutation so a reader never sees a mode paired with a stale width.
         let _s = Scratch::new("preset-atomic");
         save_width(45); // a prior dragged width
-        save_preset(Density::Extended, AgentSort::Status, 70);
+        save_preset(Density::Extended, AgentSort::Attention, 70);
         assert_eq!(
             load_prefs(),
-            (Density::Extended, AgentSort::Status, Some(70)),
+            (Density::Extended, AgentSort::Attention, Some(70)),
             "the preset overwrote both the mode and the dragged width"
         );
     }
@@ -705,7 +715,7 @@ mod tests {
             r#"{"version":1,"sections":{},"density":"regular","width":"wide"}"#,
         )
         .unwrap();
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad, None));
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Attention, None));
         save_width(28);
         assert_eq!(load_prefs().2, Some(28));
     }
@@ -720,12 +730,12 @@ mod tests {
                 .into_iter()
                 .collect();
         save(&chosen);
-        save_prefs(Density::Slim, AgentSort::Status);
-        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status, None));
+        save_prefs(Density::Slim, AgentSort::Attention);
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Attention, None));
         assert_eq!(load()[&SectionKey::Elsewhere], SectionView::Collapsed);
         // And the reverse order.
         save(&chosen);
-        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Status, None));
+        assert_eq!(load_prefs(), (Density::Slim, AgentSort::Attention, None));
     }
 
     #[test]
@@ -738,10 +748,10 @@ mod tests {
             r#"{"version":1,"sections":{},"density":"holographic","sort":"status"}"#,
         )
         .unwrap();
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Status, None));
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Attention, None));
         // Wholly corrupt file: still the defaults, still no panic.
         std::fs::write(view_path(), "{ not json").unwrap();
-        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Squad, None));
+        assert_eq!(load_prefs(), (Density::Regular, AgentSort::Attention, None));
         // And the next gesture writes cleanly over it.
         save_prefs(Density::Extended, AgentSort::Squad);
         assert_eq!(load_prefs().0, Density::Extended);
@@ -756,7 +766,7 @@ mod tests {
         // Three presses return to the start: the cycle is closed.
         let d = Density::Regular;
         assert_eq!(d.next().next().next(), d);
-        assert_eq!(AgentSort::Squad.toggle(), AgentSort::Status);
-        assert_eq!(AgentSort::Status.toggle(), AgentSort::Squad);
+        assert_eq!(AgentSort::Squad.toggle(), AgentSort::Attention);
+        assert_eq!(AgentSort::Attention.toggle(), AgentSort::Squad);
     }
 }

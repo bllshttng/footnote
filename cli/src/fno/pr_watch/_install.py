@@ -13,6 +13,7 @@ Design constraints (locked):
   - ProcessType = Background
   - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
 """
+
 from __future__ import annotations
 
 import json
@@ -62,6 +63,7 @@ def retire_legacy_postmerge_agents(launch_agents_dir: Path) -> list[str]:
         except OSError as exc:
             receipts.append(f"could not remove legacy watcher plist {plist}: {exc}")
     return receipts
+
 
 _PLIST_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,8 +133,7 @@ _PLIST_TEMPLATE = """\
 def _xml_escape(value: str) -> str:
     """Escape characters that are illegal in XML text/attribute values."""
     return (
-        value
-        .replace("&", "&amp;")
+        value.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
@@ -386,23 +387,28 @@ def _launchctl_is_loaded() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _discover_open_pr_count() -> int:
-    """Return the number of open-PR candidates from the live graph.  Best-effort."""
-    try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-        from fno.pr_watch._discover import discover_open_prs
+def _observed_open_pr_count(state_path: Optional[Path] = None) -> int:
+    """Count OPEN records from the cache most recently measured by a tick."""
+    if state_path is None:
+        try:
+            from fno.pr_watch._state import pr_watcher_state_path
 
-        gpath = graph_json()
-        if not gpath.exists():
+            state_path = pr_watcher_state_path()
+        except Exception:
             return 0
-        entries = read_graph(gpath)
-        # Match the tick's grace window so the status count reflects what is
-        # actually watched (done-at-PR-green nodes stay watched through merge).
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return len(discover_open_prs(entries, now_iso=now_iso))
-    except Exception:
+    if not state_path.exists():
         return 0
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    return sum(
+        1
+        for entry in data.values()
+        if isinstance(entry, dict) and entry.get("last_seen_state") == "OPEN"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +601,7 @@ def status(
     typer.echo(f"Last tick:    {last_tick_ts or '(no tick recorded)'}")
 
     # Open PRs
-    open_count = _discover_open_pr_count()
+    open_count = _observed_open_pr_count(state_path)
     typer.echo(f"Open PRs:     {open_count}")
 
     # Parked PRs from watermark store
@@ -614,6 +620,7 @@ def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
         # Default path
         try:
             from fno.paths import state_dir
+
             events_path = state_dir() / "events.jsonl"
         except Exception:
             return None
@@ -641,29 +648,36 @@ def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
 
 
 def _parked_prs(state_path: Optional[Path]) -> dict:
-    """Return a dict of {key: park_reason} for all parked PRs."""
+    """Return observed-cache and pending-delivery parked outcomes."""
     if state_path is None:
         try:
             from fno.pr_watch._state import pr_watcher_state_path
+
             state_path = pr_watcher_state_path()
         except Exception:
             return {}
 
-    if not state_path.exists():
-        return {}
+    from fno.pr_watch._dispatch import _delivery_state_path
 
-    try:
-        data = json.loads(state_path.read_text(encoding="utf-8"))
+    delivery_path = _delivery_state_path(state_path)
+    parked = {}
+    for path, label in ((state_path, ""), (delivery_path, " [delivery]")):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
         if not isinstance(data, dict):
-            return {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-    return {
-        key: entry.get("parked")
-        for key, entry in data.items()
-        if isinstance(entry, dict) and entry.get("parked")
-    }
+            continue
+        parked.update(
+            {
+                f"{key}{label}": entry.get("parked")
+                for key, entry in data.items()
+                if isinstance(entry, dict) and entry.get("parked")
+            }
+        )
+    return parked
 
 
 # ---------------------------------------------------------------------------

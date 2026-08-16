@@ -1035,7 +1035,7 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
     if pytest_targets:
         targets = sorted(set(pytest_targets))
         # xdist costs more than it saves on a handful of files.
-        par = " -n auto" if len(targets) > 3 else ""
+        par = " -n auto --maxprocesses=4 --dist=loadgroup" if len(targets) > 3 else ""
         steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
                       f"uv run --project cli pytest --tb=short -q{par} "
                       + " ".join(shlex.quote(t) for t in targets)))

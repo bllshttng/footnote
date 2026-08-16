@@ -10,17 +10,20 @@ without a live claude / gh / launchd / filesystem.
 
 See the task 1.2 spec for the full contract.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from fno import _subprocess_util
+from fno.events import MAX_DATA_BYTES as _EVENT_MAX_DATA_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +66,140 @@ class TickResult:
     # five days, so it gets its own state instead of a zero count.
     lock_held: bool = False
     lock_holder: str = ""
+
+
+# Receipts chunk below the authoritative event ceiling (fno.events reads it
+# from schema.yaml), leaving envelope headroom, so the two budgets move together.
+_INLINE_RECEIPT_MAX_BYTES = _EVENT_MAX_DATA_BYTES - _EVENT_MAX_DATA_BYTES // 4
+
+
+def _compact_keys(keys: list[str] | set[str]) -> dict[str, list[Any]]:
+    """Name many PRs compactly as ``repo -> [numbers]`` for event receipts."""
+    from fno.pr_watch._state import parse_watermark_key
+
+    grouped: dict[str, list[Any]] = {}
+    unqualified: list[str] = []
+    for key in keys:
+        parsed = parse_watermark_key(key)
+        if parsed is None:
+            unqualified.append(str(key))
+            continue
+        repo, number = parsed
+        grouped.setdefault(repo, []).append(number)
+    compact = {repo: sorted(set(numbers)) for repo, numbers in sorted(grouped.items())}
+    if unqualified:
+        compact["_unqualified"] = sorted(set(unqualified))
+    return compact
+
+
+def _compact_drops(dropped: list[dict[str, Any]]) -> dict[str, dict[str, list[Any]]]:
+    """Group removed keys by reason while retaining every exact PR identity."""
+    by_reason: dict[str, list[str]] = {}
+    for row in dropped:
+        reason = str(row.get("reason") or "unknown")
+        by_reason.setdefault(reason, []).append(str(row.get("key") or ""))
+    return {reason: _compact_keys(keys) for reason, keys in sorted(by_reason.items())}
+
+
+def _drop_cached_terminal(
+    state: dict[str, dict], dropped: list[dict[str, Any]], key: str, current: str
+) -> None:
+    """Receipt a terminal removal only when this tick actually removed a row."""
+    if state.pop(key, None) is not None:
+        dropped.append({"key": key, "reason": current.lower(), "state": current})
+
+
+def _receipt_detail_items(receipt: dict[str, Any]) -> list[dict[str, str]]:
+    """Flatten an oversized receipt into exact, independently chunkable facts."""
+    items: list[dict[str, str]] = []
+    for repo, numbers in receipt["swept"].items():
+        for number in numbers:
+            key = str(number) if repo == "_unqualified" else f"{repo}#{number}"
+            items.append({"action": "swept", "key": key})
+    for reason, compact in receipt["dropped"].items():
+        for repo, numbers in compact.items():
+            for number in numbers:
+                key = str(number) if repo == "_unqualified" else f"{repo}#{number}"
+                items.append({"action": "dropped", "key": key, "reason": reason})
+    for row in receipt["normalized"]:
+        items.append(
+            {"action": "normalized", "key": str(row["from"]), "target": str(row["to"])}
+        )
+    for key in receipt["failed"]:
+        items.append({"action": "failed", "key": str(key)})
+    return items
+
+
+def _chunk_receipt_items(items: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    """Pack exact facts below the event payload ceiling with ample envelope room."""
+    chunks: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    current_bytes = 256
+    for item in items:
+        item_bytes = len(json.dumps(item, separators=(",", ":")).encode("utf-8")) + 1
+        if current and current_bytes + item_bytes > _INLINE_RECEIPT_MAX_BYTES:
+            chunks.append(current)
+            current = []
+            current_bytes = 256
+        current.append(item)
+        current_bytes += item_bytes
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _emit_tick_receipt(
+    emit: Callable[[str, dict], Optional[bool]], receipt: dict[str, Any]
+) -> None:
+    """Emit one inline receipt or bounded exact-detail chunks plus a summary."""
+    encoded = json.dumps(receipt, separators=(",", ":")).encode("utf-8")
+    if len(encoded) <= _INLINE_RECEIPT_MAX_BYTES:
+        if emit("pr_watch_tick", receipt) is False:
+            raise RuntimeError("pr-watch tick receipt emission failed")
+        return
+
+    receipt_id = uuid.uuid4().hex
+    chunks = _chunk_receipt_items(_receipt_detail_items(receipt))
+    for index, items in enumerate(chunks, start=1):
+        emitted = emit(
+            "pr_watch_sweep_chunk",
+            {
+                "receipt_id": receipt_id,
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+                "item_count": len(items),
+                "items": items,
+            },
+        )
+        if emitted is False:
+            raise RuntimeError(
+                f"pr-watch sweep receipt chunk {index}/{len(chunks)} emission failed"
+            )
+
+    summary = dict(receipt)
+    summary.update(
+        {
+            "swept": {},
+            "dropped": {},
+            "normalized": [],
+            "failed": [],
+            "receipt_id": receipt_id,
+            "receipt_chunks": len(chunks),
+        }
+    )
+    if emit("pr_watch_tick", summary) is False:
+        raise RuntimeError("pr-watch tick receipt summary emission failed")
+
+
+def _delivery_state_path(store_path: Optional[Path]) -> Path:
+    """Keep delivery retries separate from the observed PR-state cache."""
+    if store_path is None:
+        from fno.pr_watch._state import pr_watcher_state_path
+
+        base = pr_watcher_state_path()
+    else:
+        base = Path(store_path)
+    return base.with_name(f"{base.stem}-delivery{base.suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +253,7 @@ def fire_skill(
     is a failure.
     """
     worker_timeout = (
-        timeout_s
-        if timeout_s is not None
-        else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
+        timeout_s if timeout_s is not None else _TIMEOUT_FOR_VERB.get(verb, _DEFAULT_FIRE_TIMEOUT)
     )
     wrapper_timeout = worker_timeout + _SPAWN_TIMEOUT_GRACE
     seam_cmd = os.environ.get(env_seam)
@@ -239,13 +374,14 @@ def tick(
     graph_path: Optional[Path] = None,
     discover_fn: Optional[Callable] = None,
     read_pr_state_fn: Optional[Callable] = None,
+    read_tracked_states_fn: Optional[Callable] = None,
     # Watermark store
     store_path: Optional[Path] = None,
     # Dispatch
     fire_skill_fn: Optional[Callable] = None,
     dispatch_ritual_fn: Optional[Callable] = None,
     # I/O seams
-    emit: Optional[Callable[[str, dict], None]] = None,
+    emit: Optional[Callable[[str, dict], Optional[bool]]] = None,
     reviewers_for: Optional[Callable[[Path], list]] = None,
     claim: Optional[Any] = None,
     notify: Optional[Callable] = None,
@@ -264,13 +400,12 @@ def tick(
     Step overview (see spec for full contract):
         1.  Acquire tick-level lock.  If held -> return immediately (no events).
         2.  Discover open PR candidates from the graph.
-        3.  For each candidate: skip (no-checkout / live-claimed) OR decide /
-            dispatch / persist.
-        4.  Emit ``pr_watch_tick`` heartbeat with aggregate counts.
-        5.  Release tick lock.
+        3.  Normalize and re-read the complete tracked cache from GitHub.
+        4.  For actionable candidates: decide and dispatch.
+        5.  Persist once and emit ``pr_watch_tick`` with the sweep receipt.
+        6.  Release tick lock.
     """
     import datetime
-
 
     if now_iso is None:
         now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -283,16 +418,28 @@ def tick(
         dispatch_ritual_fn if dispatch_ritual_fn is not None else _default_dispatch_ritual
     )
     _reviewers_for = reviewers_for if reviewers_for is not None else (lambda _: [])
-    _post_merge = post_merge_readiness_fn if post_merge_readiness_fn is not None else _noop_readiness
+    _post_merge = (
+        post_merge_readiness_fn if post_merge_readiness_fn is not None else _noop_readiness
+    )
     # Bind the grace window into the default discover so a PR stays watchable
     # across the PR-green -> merge window (test seams inject their own
     # single-arg discover_fn and control candidates directly).
     _discover = (
         discover_fn
         if discover_fn is not None
-        else (lambda entries: _default_discover(entries, now_iso=now_iso, max_age_days=max_age_days))
+        else (
+            lambda entries: _default_discover(entries, now_iso=now_iso, max_age_days=max_age_days)
+        )
     )
     _read_state = read_pr_state_fn if read_pr_state_fn is not None else _default_read_pr_state
+    if read_tracked_states_fn is not None:
+        _read_tracked_states = read_tracked_states_fn
+    elif read_pr_state_fn is not None:
+
+        def _read_tracked_states(keys):
+            return _tracked_states_from_reader(keys, _read_state)
+    else:
+        _read_tracked_states = _default_read_tracked_states
     _max_retries = max_retries if max_retries is not None else _MAX_RETRIES
 
     holder = f"pr-watch:{os.getpid()}"
@@ -322,6 +469,7 @@ def tick(
             store_path=store_path,
             discover_fn=_discover,
             read_pr_state_fn=_read_state,
+            read_tracked_states_fn=_read_tracked_states,
             fire_skill_fn=_fire,
             dispatch_ritual_fn=_dispatch_ritual,
             emit=_emit,
@@ -347,6 +495,7 @@ def _run_tick(
     store_path,
     discover_fn,
     read_pr_state_fn,
+    read_tracked_states_fn,
     fire_skill_fn,
     dispatch_ritual_fn,
     emit,
@@ -372,7 +521,85 @@ def _run_tick(
 
     store = WatermarkStore(path=store_path)
     # Load once up-front; resets to {} on corruption (baseline discipline)
-    store.load()
+    state = store.load()
+
+    candidate_keys: set[str] = set()
+    for cand in candidates:
+        try:
+            candidate_keys.add(
+                make_watermark_key(repo_slug=cand.repo_slug, pr_number=cand.pr_number)
+            )
+        except ValueError:
+            continue
+    normalization = store.normalize_keys()
+    dropped = list(normalization.dropped)
+    delivery_store = WatermarkStore(path=_delivery_state_path(store_path))
+    delivery_state = delivery_store.load()
+    # Prune only on a healthy discovery. A zero-candidate tick is the graph
+    # hiccup signature, and pruning on it would wipe every terminal PR's
+    # retry facts at once; retention costs one tick until a real candidate
+    # confirms the graph is readable.
+    prunable = set(delivery_state) - candidate_keys if candidate_keys else set()
+    for stale_key in prunable:
+        pruned = delivery_state.pop(stale_key, None)
+        if pruned is not None:
+            # A delivery record is the only persistence of a terminal PR's
+            # retry/parked facts; its removal needs the same receipt every
+            # other removal gets, or retries-exhausted merges vanish silently.
+            # Delivery records carry retries/parked only, never an observed
+            # state, so no "state" field here; the reason names the removal.
+            dropped.append({"key": stale_key, "reason": "delivery-pruned"})
+    swept: set[str] = set()
+    failed: set[str] = set()
+
+    # Discovery is not a retention oracle. Batch every record that cannot need
+    # transition dispatch: graph-orphaned, already merged-dispatched, or parked.
+    # This turns the 943-entry repair tick into one gh list per repository while
+    # leaving the handful of actionable candidates on the rich observation path.
+    batch_keys = {
+        key
+        for key, entry in state.items()
+        if key not in candidate_keys or entry.get("merge_dispatched") or entry.get("parked")
+    }
+    batch_terminal: set[str] = set()
+    batch_baselined: set[str] = set()
+    query_keys = batch_keys | candidate_keys
+    if query_keys:
+        # The batch reader attempts every qualified key up front. Record that
+        # positive fact even when a later per-PR lock prevents rich dispatch
+        # observation for one candidate.
+        swept.update(query_keys)
+        try:
+            batch_states = read_tracked_states_fn(query_keys)
+        except Exception as exc:  # noqa: BLE001 - receipt names the outage
+            log.warning("pr-watch: tracked-state sweep failed: %s", exc)
+            batch_states = {}
+        for key in sorted(batch_keys):
+            current = batch_states.get(key, "UNKNOWN")
+            entry = state[key]
+            if current in ("MERGED", "CLOSED"):
+                _drop_cached_terminal(state, dropped, key, current)
+                batch_terminal.add(key)
+            else:
+                entry["last_seen_state"] = current
+                if current == "UNKNOWN":
+                    failed.add(key)
+        for key, current in sorted(batch_states.items()):
+            if current == "OPEN" and key not in state:
+                # Stamp the baseline clock, not None: decide() treats a None
+                # review watermark as "never observed" and fires on any
+                # pre-existing review activity on the next rich read. now_iso
+                # suppresses exactly the activity that predates tracking,
+                # matching the first-seen discipline the rich baseline kept.
+                state[key] = {
+                    "last_review_ts": now_iso,
+                    "last_seen_state": "OPEN",
+                    "merge_dispatched": False,
+                    "retries": 0,
+                    "parked": None,
+                }
+                swept.add(key)
+                batch_baselined.add(key)
 
     acted = 0
     skipped = 0
@@ -380,18 +607,24 @@ def _run_tick(
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
-        key = make_watermark_key(repo_slug=slug, pr_number=pr)
-
-        # Skip: no local checkout
-        if cand.repo_dir is None:
-            emit("pr_watch_skipped", {"pr": pr, "reason": "no-checkout"})
+        try:
+            key = make_watermark_key(repo_slug=slug, pr_number=pr)
+        except ValueError:
+            emit("pr_watch_skipped", {"pr": pr, "reason": "unresolvable-repo"})
             skipped += 1
             continue
-
-        # Skip: node has a live session claim
-        if claim.is_node_live(cand.node_id):
-            emit("pr_watch_skipped", {"pr": pr, "reason": "claimed"})
-            skipped += 1
+        if key in batch_terminal:
+            continue
+        if key in batch_baselined:
+            if cand.repo_dir is None:
+                emit("pr_watch_skipped", {"pr": pr, "reason": "no-checkout"})
+                skipped += 1
+            elif claim.is_node_live(cand.node_id):
+                emit("pr_watch_skipped", {"pr": pr, "reason": "claimed"})
+                skipped += 1
+            continue
+        batched_entry = state.get(key)
+        if key in batch_keys and isinstance(batched_entry, dict) and batched_entry.get("parked"):
             continue
 
         # Per-PR concurrency guard
@@ -406,22 +639,45 @@ def _run_tick(
         try:
             # Fetch current state
             try:
-                reviewers = reviewers_for(cand.repo_dir)
+                reviewers = reviewers_for(cand.repo_dir) if cand.repo_dir else []
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
+                swept.add(key)
+                failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
-                # Transient: leave watermark unchanged, continue to next PR
+                swept.add(key)
+                failed.add(key)
+                stale = state.get(key)
+                if isinstance(stale, dict):
+                    stale["last_seen_state"] = "UNKNOWN"
                 continue
 
             entry = store.get(key)
 
             # Guard: a corrupt non-dict entry is treated as absent (re-baseline).
             if entry is not None and not isinstance(entry, dict):
-                log.warning("pr-watch: corrupt watermark entry for %s (not a dict); re-baselining", key)
+                log.warning(
+                    "pr-watch: corrupt watermark entry for %s (not a dict); re-baselining", key
+                )
                 entry = None
 
+            skip_reason = None
+            if cand.repo_dir is None:
+                skip_reason = "no-checkout"
+            elif claim.is_node_live(cand.node_id):
+                skip_reason = "claimed"
+
+            if skip_reason:
+                emit("pr_watch_skipped", {"pr": pr, "reason": skip_reason})
+                skipped += 1
+                if entry is not None:
+                    entry["last_seen_state"] = obs.state
+                    if obs.state in ("MERGED", "CLOSED"):
+                        _drop_cached_terminal(state, dropped, key, obs.state)
+                continue
+
             # First-seen baseline: record state without firing
-            if entry is None:
+            if entry is None and obs.state not in ("MERGED", "CLOSED"):
                 baseline = {
                     "last_review_ts": obs.latest_review_ts,
                     "last_seen_state": obs.state,
@@ -432,8 +688,26 @@ def _run_tick(
                 store.set(key, baseline)
                 log.debug("pr-watch: first-seen PR #%d baselined as %s", pr, obs.state)
                 continue
+            if entry is None and obs.state == "MERGED":
+                # Terminal records never live in the cache, but a graph-backed
+                # merged candidate must still retry an idempotent ritual after
+                # a transient dispatch failure or lock contention.
+                pending = delivery_state.get(key)
+                pending = pending if isinstance(pending, dict) else {}
+                entry = {
+                    "last_review_ts": obs.latest_review_ts,
+                    "last_seen_state": "MERGED",
+                    "merge_dispatched": False,
+                    "retries": pending.get("retries", 0),
+                    "parked": pending.get("parked"),
+                }
+            if entry is None:
+                continue
 
-            # Skip parked PRs entirely
+            # Suppression only. A parked entry synthesized from the delivery
+            # sidecar (a retries-exhausted merge) must not dispatch again.
+            # Parked STATE entries never reach here; the batch loop above
+            # owns their observation and terminal eviction.
             if entry.get("parked"):
                 continue
 
@@ -448,7 +722,7 @@ def _run_tick(
             decision = decide(
                 obs,
                 watermark=entry,
-                reviewers=reviewers_for(cand.repo_dir),
+                reviewers=reviewers,
                 merge_ready=merge_ready,
                 now_iso=now_iso,
                 max_age_days=max_age_days,
@@ -459,7 +733,8 @@ def _run_tick(
 
             elif decision.kind == "park":
                 entry["parked"] = decision.reason
-                store.set(key, entry)
+                if obs.state not in ("MERGED", "CLOSED"):
+                    store.set(key, entry)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
             elif decision.kind in ("merge", "review"):
@@ -477,21 +752,21 @@ def _run_tick(
                         log.warning("pr-watch: ritual dispatch for PR #%d failed: %s", pr, exc)
                         pm = None
                     if pm is not None and pm.outcome == "already-dispatched":
-                        # marker-exists = a completed hand-off: advance the
-                        # watermark so this PR stops re-deciding. lock-contention
-                        # = another detector holds the lock RIGHT NOW but may
-                        # still fail before writing the marker; do NOT advance,
-                        # so the next tick retries (by then either the marker
-                        # exists -> genuine skip, or the holder released a failed
-                        # claim -> this tick dispatches). Advancing on contention
-                        # would silently drop the ritual if that holder crashed.
+                        # Both branches evict the terminal cache row; retry after
+                        # contention comes from the next tick re-synthesizing a
+                        # fresh entry (merge_dispatched False) for the still-
+                        # discovered candidate. lock-contention = another
+                        # detector holds the lock RIGHT NOW but may still fail
+                        # before writing the marker, so only the marker branch
+                        # records the hand-off in the delivery sidecar.
                         if getattr(pm, "detail", None) == "lock-contention":
                             emit("pr_watch_skipped", {"pr": pr, "reason": "dispatch-in-flight"})
                         else:
                             entry["merge_dispatched"] = True
-                            store.set(key, entry)
+                            delivery_state.pop(key, None)
                             emit("pr_watch_skipped", {"pr": pr, "reason": "already-dispatched"})
                         skipped += 1
+                        _drop_cached_terminal(state, dropped, key, "MERGED")
                         continue
                     if pm is not None and pm.outcome == "disabled":
                         # auto_run opt-in is off: a deliberate no-op, NOT a
@@ -500,12 +775,17 @@ def _run_tick(
                         # no retry, no failure notify. If the operator later
                         # arms auto_run, the past merge is handled manually.
                         entry["parked"] = "auto-run-disabled"
-                        store.set(key, entry)
+                        delivery_state[key] = {
+                            "retries": entry.get("retries", 0),
+                            "parked": "auto-run-disabled",
+                        }
                         emit("pr_watch_skipped", {"pr": pr, "reason": "auto-run-disabled"})
                         skipped += 1
+                        _drop_cached_terminal(state, dropped, key, "MERGED")
                         continue
                     dispatch_ok = pm is not None and pm.outcome in (
-                        "dispatched", "routed-warm",
+                        "dispatched",
+                        "routed-warm",
                     )
                     if dispatch_ok:
                         dispatch_extra = {
@@ -513,7 +793,9 @@ def _run_tick(
                         }
                         log.info(
                             "pr-watch: PR #%d post-merge ritual %s (%s)",
-                            pr, pm.outcome, pm.detail or pm.short_id or "",
+                            pr,
+                            pm.outcome,
+                            pm.detail or pm.short_id or "",
                         )
                 else:
                     result = fire_skill_fn("check", pr, cand.repo_dir)
@@ -526,7 +808,10 @@ def _run_tick(
                     else:
                         entry["last_review_ts"] = obs.latest_review_ts
                     entry["retries"] = 0
-                    store.set(key, entry)
+                    if obs.state in ("MERGED", "CLOSED"):
+                        delivery_state.pop(key, None)
+                    else:
+                        store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
@@ -535,11 +820,20 @@ def _run_tick(
                     except (TypeError, ValueError):
                         retries = 1
                     entry["retries"] = retries
-                    store.set(key, entry)
+                    if obs.state in ("MERGED", "CLOSED"):
+                        delivery_state[key] = {"retries": retries, "parked": None}
+                    else:
+                        store.set(key, entry)
                     emit("pr_watch_dispatch_failed", {"pr": pr, "retries": retries})
                     if retries >= max_retries:
                         entry["parked"] = "retries-exhausted"
-                        store.set(key, entry)
+                        if obs.state in ("MERGED", "CLOSED"):
+                            delivery_state[key] = {
+                                "retries": retries,
+                                "parked": "retries-exhausted",
+                            }
+                        else:
+                            store.set(key, entry)
                         emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
                         try:
                             notify(
@@ -550,15 +844,41 @@ def _run_tick(
                         except Exception as exc:
                             log.warning("pr-watch: notify failed: %s", exc)
 
+            entry["last_seen_state"] = obs.state
+            if obs.state in ("MERGED", "CLOSED"):
+                _drop_cached_terminal(state, dropped, key, obs.state)
+
         finally:
+            # Delivery retries persist per candidate, like store.set's per-write
+            # persist: a mid-tick crash must not reset a terminal PR's retry
+            # count and re-arm unbounded dispatch attempts.
+            delivery_store.persist()
             try:
                 claim.release_pr_lock(pr_lock_key, holder)
             except Exception as exc:
                 log.warning("pr-watch: failed to release PR lock for #%d: %s", pr, exc)
 
-    # Heartbeat: always emitted (even on empty/quiet tick)
-    emit("pr_watch_tick", {"open_prs": len(candidates), "acted": acted})
-    return TickResult(open_prs=len(candidates), acted=acted, skipped=skipped)
+    store.persist()
+    delivery_store.persist()
+    open_prs = sum(
+        1
+        for entry in state.values()
+        if isinstance(entry, dict) and entry.get("last_seen_state") == "OPEN"
+    )
+    receipt = {
+        "open_prs": open_prs,
+        "acted": acted,
+        "swept_count": len(swept),
+        "swept": _compact_keys(swept),
+        "dropped_count": len(dropped),
+        "dropped": _compact_drops(dropped),
+        "normalized_count": len(normalization.normalized),
+        "normalized": normalization.normalized,
+        "failed_count": len(failed),
+        "failed": sorted(failed),
+    }
+    _emit_tick_receipt(emit, receipt)
+    return TickResult(open_prs=open_prs, acted=acted, skipped=skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -586,6 +906,38 @@ def _default_discover(
     from fno.pr_watch._discover import discover_open_prs
 
     return discover_open_prs(entries, now_iso=now_iso, max_age_days=max_age_days)
+
+
+def _default_read_tracked_states(keys: set[str]) -> dict[str, str]:  # pragma: no cover
+    from fno.pr_watch._discover import read_tracked_pr_states
+
+    return read_tracked_pr_states(keys)
+
+
+def _tracked_states_from_reader(keys: set[str], reader: Callable) -> dict[str, str]:
+    """Adapt an injected per-candidate reader into the batch seam for tests."""
+    from fno.graph._reconcile import ReconcileError
+    from fno.pr_watch._discover import PrCandidate
+    from fno.pr_watch._state import parse_watermark_key
+
+    states: dict[str, str] = {}
+    for key in keys:
+        parsed = parse_watermark_key(key)
+        if parsed is None:
+            continue
+        repo, number = parsed
+        candidate = PrCandidate(
+            node_id="",
+            pr_number=number,
+            pr_url=f"https://github.com/{repo}/pull/{number}",
+            repo_dir=None,
+            repo_slug=repo,
+        )
+        try:
+            states[key] = reader(candidate, reviewers=[]).state
+        except ReconcileError:
+            states[key] = "UNKNOWN"
+    return states
 
 
 def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> Any:

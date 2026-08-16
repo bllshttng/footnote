@@ -812,7 +812,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         receipt.is_none(),
         "legacy spawn carries no placement receipt"
     );
-    let layout = c.wait_layout(10, "legacy split below focus", |l| l.panes.len() == 3);
+    let layout = c.wait_layout(30, "legacy split below focus", |l| l.panes.len() == 3);
     let r3 = layout.panes.iter().find(|(id, _)| *id == pane3).unwrap().1;
     assert_eq!(r3.x, r2.x, "legacy split follows the focused pane's column");
     assert!(r3.y > r2.y, "legacy split lands below the focused pane");

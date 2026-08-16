@@ -50,6 +50,15 @@ _HELP_RE = re.compile(r"<help[>\s]")
 # in the rendered age so a mis-tuned window misleads less.
 STALLED_AFTER_S = 2 * 3600
 
+# Attention window: above this, a transcript-backed row reads as neglected and
+# sorts to the top of every agents surface. Deliberately much tighter than
+# STALLED_AFTER_S - that one is the reap-safety window and 7200s is correct for
+# it, but its verdict reads reachable for anything dead inside it, and that gap
+# is exactly where a stale-live worker hides (a fleet of dead workers once sat
+# in it at 20 to 58 minutes idle, every one reporting live). Ordering and
+# display only: no verdict, falsifier, or reap decision keys off this constant.
+STALE_ATTENTION_S = 600
+
 # Tail depth: enough to find the last assistant turn past trailing tool/user
 # rows, bounded so a multi-MB transcript stays cheap (recent_records streams).
 _TAIL_N = 40
@@ -287,13 +296,24 @@ _EVIDENCE = {
 
 
 def _humanize_age(seconds: Optional[int]) -> str:
+    """Fixed-width (4) so a column of these never reflows when a value rolls
+    from ``59m`` to ``1h`` or past a day. ``None`` renders ``?`` padded to the
+    same width - never ``0s``, because an unread probe and a zero-second age
+    are different facts.
+    """
     if seconds is None:
-        return "?"
+        return "   ?"
     if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    return f"{seconds // 3600}h"
+        unit, n = "s", seconds
+    elif seconds < 3600:
+        unit, n = "m", seconds // 60
+    elif seconds < 86400:
+        unit, n = "h", seconds // 3600
+    else:
+        # Capped at 999d (review finding: an uncapped day count breaks the
+        # fixed-width-4 invariant once a row is silent for 1000+ days).
+        unit, n = "d", min(seconds // 86400, 999)
+    return f"{n}{unit}".rjust(4)
 
 
 def _model_clause(observed: Any) -> str:

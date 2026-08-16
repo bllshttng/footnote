@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-import textwrap
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -285,15 +283,21 @@ def test_ac3ui_status_reports_last_tick_and_parked(tmp_home, tmp_launch_agents, 
         json.dumps({
             "owner/repo#42": {
                 "parked": "retries-exhausted",
+                "last_seen_state": "OPEN",
                 "merge_dispatched": False,
                 "last_review_ts": None,
                 "retries": 3,
-            }
+            },
+            "owner/repo#43": {
+                "parked": None,
+                "last_seen_state": "OPEN",
+                "merge_dispatched": False,
+                "last_review_ts": None,
+                "retries": 0,
+            },
         })
     )
 
-    # Stub open-PR discovery to return a count of 2 (avoids real gh)
-    monkeypatch.setattr(m, "_discover_open_pr_count", lambda: 2)
     # Stub launchctl list so we don't run the real binary
     monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
 
@@ -308,6 +312,35 @@ def test_ac3ui_status_reports_last_tick_and_parked(tmp_home, tmp_launch_agents, 
     assert "2026-06-14T01:00:00Z" in out, "last tick time should appear"
     assert "2" in out, "open-PR count should appear"
     assert "owner/repo#42" in out or "42" in out, "parked PR should appear"
+
+
+def test_status_open_count_reads_observed_state_not_graph(tmp_path):
+    """The operator count comes from the cache that the tick just swept."""
+    from fno.pr_watch._install import _observed_open_pr_count
+
+    state_file = tmp_path / "pr-watcher-state.json"
+    state_file.write_text(json.dumps({
+        "owner/one#1": {"last_seen_state": "OPEN"},
+        "owner/two#2": {"last_seen_state": "UNKNOWN"},
+        "owner/three#3": {"last_seen_state": "CLOSED"},
+    }))
+
+    assert _observed_open_pr_count(state_file) == 1
+
+
+def test_parked_prs_includes_pending_delivery_failures(tmp_path):
+    from fno.pr_watch._install import _parked_prs
+
+    state_file = tmp_path / "pr-watcher-state.json"
+    state_file.write_text("{}")
+    delivery_file = tmp_path / "pr-watcher-state-delivery.json"
+    delivery_file.write_text(json.dumps({
+        "owner/repo#7": {"retries": 3, "parked": "retries-exhausted"}
+    }))
+
+    assert _parked_prs(state_file) == {
+        "owner/repo#7 [delivery]": "retries-exhausted"
+    }
 
 
 def test_status_json_emits_liveness_verdict(monkeypatch):

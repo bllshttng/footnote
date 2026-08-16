@@ -208,12 +208,15 @@ _BODY_WARN_BYTES = _cap_env_int("FNO_MAIL_BODY_WARN", 3000)
 _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 
 
-def _enforce_body_cap(body: str) -> None:
+def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
     Fail-open: a disabled tier (0) or an unset body never blocks coordination.
     The refusal teaches the rule: put the detail in a node or doc and send a
     short pointer, since the mail is re-read far more often than the node.
+    ``usage=True`` exits 2: under ``--raw --check`` an over-cap payload is a
+    malformed CALL, and exit 1 there would read as a not-injectable verdict
+    about a session the run never measured.
     """
     warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
     if warn <= 0 and refuse <= 0:
@@ -226,7 +229,7 @@ def _enforce_body_cap(body: str) -> None:
             f"Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0.",
             file=sys.stderr,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2 if usage else 1)
     if warn > 0 and n > warn:
         print(
             f"note: mail body is {n} bytes (over the {warn}-byte brevity guide); "
@@ -1959,6 +1962,64 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
+_CODEX_REVIEW_VERBS = frozenset({"/review", "/code-review"})
+_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+
+
+def _codex_default_review_base(cwd: str | None) -> str | None:
+    """Return the repository-declared origin default branch, never a guessed name."""
+    if not cwd:
+        return None
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                cwd,
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    ref = proc.stdout.strip()
+    return ref if proc.returncode == 0 and ref else None
+
+
+def _codex_review_target(
+    payload: str, *, default_base: str | None = None
+) -> tuple[str | None, bool]:
+    """Resolve the structured review target without inventing custom instructions."""
+    parts = payload.split(maxsplit=1)
+    if len(parts) == 1:
+        target = f"baseBranch:{default_base}" if default_base else None
+        return target, False
+    remainder = parts[1].strip()
+    base = remainder.split()
+    if base[0] == "--base":
+        # A named base is an explicit scope request: a malformed form (dangling
+        # flag, a flag-like value, trailing tokens) must refuse rather than
+        # fall through to uncommittedChanges, which silently reviews a
+        # different diff than the one the operator asked for.
+        if len(base) == 2 and not base[1].startswith("--"):
+            return f"baseBranch:{base[1]}", False
+        return None, False
+    if remainder == "--uncommitted":
+        return "uncommittedChanges", False
+    if _COMMIT_SHA.fullmatch(remainder):
+        return f"commit:{remainder}", False
+    if remainder.startswith("custom:") and remainder != "custom:":
+        return remainder, False
+    return "uncommittedChanges", True
+
+
 def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     """``fno mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
@@ -1982,6 +2043,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     from fno.agents.dispatch import (
         _mail_inject_claude,
         _mux_pane_send,
+        _review_start_codex,
         keystroke_lane,
         mail_inject_probe,
     )
@@ -2034,11 +2096,18 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             usage=True,
         )
 
-    # 2b. Forged envelope (x-4ce4 codex P1): a raw payload starts with "/", so it
-    #     cannot itself be a `<fno_mail>` tag, but it can still smuggle one
-    #     mid-line. The mux lane (`_mux_pane_send` below) pastes this string
-    #     directly and never reaches the Rust mail-inject binary's own check, so
-    #     this is the only door for that lane.
+    # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
+    # shared size ceiling and structure gate here before any of the reachable
+    # transports can fire. Under --check the cap refusal is a usage error
+    # (exit 2), never a session verdict: exit 1 is the not-injectable code.
+    _enforce_body_cap(stripped, usage=check)
+    _enforce_style(stripped)
+
+    # 2b. Forged envelope: a raw payload starts with "/", so it cannot itself
+    #     be a `<fno_mail>` tag, but it can still smuggle one mid-line. The mux
+    #     lane (`_mux_pane_send` below) pastes this string directly and never
+    #     reaches the Rust mail-inject binary's own check, so this is the only
+    #     door for that lane.
     if "<fno_mail" in stripped or "</fno_mail>" in stripped:
         _refused(
             "payload contains an <fno_mail> tag. The envelope frames peer mail; "
@@ -2108,18 +2177,125 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             "queues durable and surfaces at their turn boundary"
         )
 
-    # 4. Keystroke lane: a raw slash payload fires only where it reaches a prompt
-    #    line. The codex/gemini/opencode daemon lanes submit a turn to the model
-    #    with no TUI prompt line, so the slash never reaches a parser.
+    # Derive provenance before routing: daemon review/start returns before the
+    # keystroke transports below, but its unwrapped invocation needs the same
+    # actor record.
+    from fno.agents.self_stamp import resolve_self_handle
+
+    sender = resolve_self_handle()
+
+    # 4. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
+    #    other mux pane; only a Codex app-server thread uses structured review/start.
     lane, is_keystroke = keystroke_lane(entry)
     if not is_keystroke:
+        verb = stripped.split(maxsplit=1)[0]
+        if lane == "codex-daemon":
+            # --check answers before the RPC fires: a review verb HAS a path on
+            # this lane (the structured RPC), everything else has none. The
+            # probe claims path-existence only, same as the keystroke branches -
+            # but only for preconditions it cannot cheaply decide; a missing
+            # binary or an unresolvable target WOULD refuse the send, so the
+            # check answers them rather than promising a path the send lacks.
+            if check and verb not in _CODEX_REVIEW_VERBS:
+                print(
+                    "not-injectable: codex-daemon has no prompt line; only "
+                    "/review and /code-review map to its review/start RPC"
+                )
+                raise typer.Exit(code=1)
+            if verb not in _CODEX_REVIEW_VERBS:
+                _refused(
+                    f"{name!r} is a codex app-server thread, which has no prompt "
+                    "line - a slash payload cannot parse there. The app-server "
+                    "exposes turn/start (text to the model, no slash parsing) and "
+                    f"review/start (the reviewer); {verb!r} maps to neither.\n"
+                    "  - to have the codex model READ this, drop --raw (a wrapped "
+                    "send delivers it as text, which is all any codex lane can do "
+                    "with it)\n"
+                    f"  - if {verb!r} is a codex TUI built-in (/compact and "
+                    "friends), no fno lane can fire it on a daemon thread; host "
+                    "the session in a mux pane, where --raw pastes at the real "
+                    "prompt line and the TUI parser runs it"
+                )
+            if check:
+                from fno import rust_binary
+
+                if rust_binary.resolve_installed_binary() is None:
+                    print(
+                        "not-injectable: the fno-agents binary is absent or too "
+                        "old (run `fno doctor`), so review/start has no transport"
+                    )
+                    raise typer.Exit(code=1)
+            default_base = (
+                _codex_default_review_base(getattr(entry, "cwd", None))
+                if stripped in _CODEX_REVIEW_VERBS
+                else None
+            )
+            target, ignored_remainder = _codex_review_target(
+                stripped, default_base=default_base
+            )
+            if check:
+                if target is None:
+                    print(
+                        "not-injectable: no resolvable review target (bare verb "
+                        "with no origin default branch, or unparsable arguments); "
+                        "retry with '/review --base <branch>' or "
+                        "'/review --uncommitted'"
+                    )
+                    raise typer.Exit(code=1)
+                print("injectable: codex-daemon review/start RPC")
+                raise typer.Exit(code=0)
+            if target is None:
+                _refused(
+                    f"{name!r} {verb} has no resolvable review target - a bare "
+                    "verb with no origin default branch, or arguments after the "
+                    "verb do not parse; retry with '/review --base <branch>' or "
+                    "explicitly request '/review --uncommitted'"
+                )
+            assert target is not None
+            receipt = _review_start_codex(
+                session_id,
+                target,
+                audit_payload=stripped[:512],
+                audit_sender=sender,
+                audit_target_cwd=getattr(entry, "cwd", None),
+            )
+            if receipt.get("delivered"):
+                note = " (unrecognized remainder ignored)" if ignored_remainder else ""
+                print(
+                    f"review/start target={target} delivery=inline "
+                    f"turn={receipt.get('turn_id', '')} "
+                    f"review_thread={receipt.get('review_thread_id', '')}{note}"
+                )
+                raise typer.Exit(code=0)
+            reason = str(receipt.get("reason") or "rpc-error")
+            if reason == "no-daemon":
+                _refused(
+                    f"{name!r} codex review/start failed: no-daemon; run "
+                    "`codex app-server daemon start` and retry"
+                )
+            if reason in ("stale-binary", "binary-not-found"):
+                _refused(
+                    f"{name!r} codex review/start failed: {reason}; the deployed "
+                    "fno-agents binary is absent or rejected the invocation - "
+                    "run `fno doctor --fix` and retry"
+                )
+            if reason == "not-confirmed":
+                print(
+                    f"warning: {name!r} codex review/start was not-confirmed after "
+                    "the request was sent; the review may already be running. "
+                    "Inspect the thread before deciding what happened; do not retry "
+                    "blindly",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=0)
+            _refused(f"{name!r} codex review/start failed: {reason}")
         if check:
             print(f"not-injectable: {lane} is not a prompt-line keystroke lane")
             raise typer.Exit(code=1)
         _refused(
             f"{name!r} resolves to the {lane} lane, which is not a prompt-line "
             "keystroke path; a raw slash payload would reach the model as text, "
-            "not fire. (Codex review forcing routes to the review/start RPC, not --raw.)"
+            "not fire"
         )
 
     # --check stops here, one step short of the keystroke. Each lane is asked the
@@ -2189,10 +2365,6 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     #        payload has no `from` attribute in the recipient transcript, so the
     #        ledger is the ONLY place that can say who fired the verb. Absent
     #        ambient identity it stays absent rather than guessing.
-    from fno.harness_identity import canonical_handle, current_session_id
-
-    own = current_session_id()
-    sender = canonical_handle(own) if own else None
     if entry.mux:
         delivered = _mux_pane_send(entry, stripped, guarded=False, confirm=True, sender=sender)
     else:  # claude control.sock - the only other keystroke lane

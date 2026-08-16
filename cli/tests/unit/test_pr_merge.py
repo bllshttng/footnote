@@ -1300,6 +1300,30 @@ def test_a_missing_gh_during_the_checks_read_keeps_exit_127(
     assert _last_json(capsys, stream="err")["reason"] == "gh CLI not installed"
 
 
+def test_a_missing_gh_during_the_already_armed_probe_keeps_exit_127(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """_already_armed's own gh call owes the same 127 contract its sibling
+    checks/merge calls have (review round 12): it must not propagate a raw
+    ToolMissing past _do_merge."""
+    (tmp_path / ".fno").mkdir()
+
+    class _GhVanishes(_AutoMergeRejectingRun):
+        def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
+            cmd = list(cmd)
+            if cmd[:3] == ["gh", "pr", "view"] and "autoMergeRequest" in cmd:
+                raise ToolMissing("gh")
+            return super().__call__(
+                cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
+            )
+
+    fake = _GhVanishes(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 127
+    assert _last_json(capsys, stream="err")["reason"] == "gh CLI not installed"
+
+
 def test_a_red_refusal_marks_the_node_failed_not_still_queued(
     enabled, monkeypatch, capsys, tmp_path
 ):

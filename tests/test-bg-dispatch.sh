@@ -331,6 +331,8 @@ eval "$(sed -n '/^strip_no_merge() {/,/^}/p' "$DISPATCH")"
   && pass "x-4391 AC1-EDGE: no-merge substring preserved" || fail "AC1-EDGE substring: $(strip_no_merge '/target no-merger-x')"
 [[ "$(strip_no_merge '$fno:target no-merge x-1')" == '$fno:target x-1' ]] \
   && pass "x-4391 AC1-EDGE: codex \$fno:target token stripped" || fail "AC1-EDGE codex"
+[[ "$(strip_no_merge '/fno:target --no-merge x-1')" == '/fno:target x-1' ]] \
+  && pass "x-9d11 AC1-EDGE round 12: opencode /fno:target flag stripped" || fail "AC1-EDGE opencode: $(strip_no_merge '/fno:target --no-merge x-1')"
 [[ "$(strip_no_merge '/think x-1')" == '/think x-1' ]] \
   && pass "x-4391 AC1-EDGE: non-/target command untouched" || fail "AC1-EDGE non-target"
 
