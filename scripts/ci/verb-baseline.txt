@@ -48,6 +48,7 @@ agents spawn !--output-format !--squad
 annotate
 annotate list
 approvals
+autonomy
 backlog
 backlog advance !--continuation
 backlog done
