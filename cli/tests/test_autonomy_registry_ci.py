@@ -9,8 +9,18 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ci" / "check-autonomy-registry.sh"
+
+# Both tests scan the WHOLE cli/src tree while one of them mutates it (the
+# probe file). Under `-n auto` xdist can split them across workers, and the
+# baseline scan then sees the other test's transient probe and fails on
+# interleaving, not on a real spawner (observed on the dirty lane, gw0/gw1).
+# One group name pins them to a single worker, where file order serializes
+# them for free.
+pytestmark = pytest.mark.xdist_group("autonomy-registry")
 
 
 def _run() -> subprocess.CompletedProcess:
