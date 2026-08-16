@@ -332,8 +332,8 @@ def gc_events(
                 delete=False,
             ) as handle:
                 temp_path = Path(handle.name)
-                for raw in kept:
-                    handle.write(raw)
+                for chunk in kept:
+                    handle.write(chunk)
                     renew_leases_if_due()
                 handle.flush()
                 os.fsync(handle.fileno())
