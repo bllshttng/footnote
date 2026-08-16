@@ -1139,7 +1139,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "recipient drains its inbox\n"
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes a blocked/stopped claude session, then re-send\n"
+            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
             f"    fno agents attach {target}   # drive it yourself (claude)\n"
             # The rung that was missing. Every option above tries to reach the
             # recipient; when none of them can, the sender was left holding a
@@ -1152,7 +1152,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "recipient must drain its inbox to read this, and may never do so\n"
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # wakes a blocked/stopped claude session, then re-send\n"
+            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
             f"    fno agents attach {target}   # drive it yourself (claude)\n"
             # The rung that was missing. Every option above tries to reach the
             # recipient; when none of them can, the sender was left holding a

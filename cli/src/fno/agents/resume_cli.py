@@ -182,6 +182,35 @@ def _script_wrapped_attach(short_id: str) -> str:
     return f"script -qc {shlex.quote(attach_cmd)} /dev/null"
 
 
+def _kill_wake_process_tree(proc: "subprocess.Popen[bytes]", short_id: str) -> None:
+    """Best-effort teardown of an abandoned wake attempt's process tree.
+
+    Shared by the timeout and interrupt paths in ``_default_wake_fn``.
+    ``script``'s pty-attached child (the process that actually execs into
+    ``claude attach``) calls ``login_tty()``, which ``setsid()``s it into a
+    BRAND NEW session before exec -- so it is never a member of the ``bash``
+    pgid killed first, and that killpg call does not reach it. Finish the
+    job by matching the unique short_id in its command line instead of by
+    process-group membership; best-effort (no match is the common case when
+    the process already exited on its own after stdin closed). Best-effort
+    in full: a missing ``pkill`` binary must not swallow the caller's
+    pending re-raise, which is what tells it this attempt was abandoned.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except OSError:
+        pass
+    proc.wait()
+    try:
+        subprocess.run(
+            ["pkill", "-f", f"claude attach {short_id}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
 def _default_wake_fn(
     short_id: str,
     *,
@@ -263,29 +292,17 @@ def _default_wake_fn(
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except OSError:
-            pass
-        proc.wait()
-        # `script`'s pty-attached child (the process that actually execs
-        # into `claude attach`) calls login_tty(), which setsid()s it into
-        # a BRAND NEW session before exec -- so it is never a member of the
-        # bash pgid above, and the killpg call just above does not reach
-        # it. Finish the job by matching the unique short_id in its command
-        # line instead of by process-group membership; best-effort (no
-        # match is the common case when the process already exited on its
-        # own after stdin closed). Best-effort in full: a missing `pkill`
-        # binary must not swallow the pending re-raise below, which is what
-        # tells the caller this attempt timed out.
-        try:
-            subprocess.run(
-                ["pkill", "-f", f"claude attach {short_id}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
-            pass
+        _kill_wake_process_tree(proc, short_id)
+        raise
+    except BaseException:
+        # Ctrl-C (SIGINT) never reaches this detached tree --
+        # start_new_session=True put it in its own process group, off the
+        # terminal's foreground group that SIGINT targets -- so without this
+        # it keeps running, and keeps queued to inject the wake message,
+        # after the operator believes they cancelled. Same teardown as a
+        # timeout, then let the real exception (KeyboardInterrupt or
+        # otherwise) propagate.
+        _kill_wake_process_tree(proc, short_id)
         raise
 
 
@@ -301,6 +318,7 @@ def _resume_claude_wake(
     emit_event: Any,
     wake_fn: Any,
     agents_state_fn: Any,
+    claim_fn: Any,
 ) -> ResumeResult:
     """Wake a blocked/stopped claude session and verify it actually moved.
 
@@ -310,6 +328,12 @@ def _resume_claude_wake(
     message, and confirm the live state moved to Working. Every step here
     can exit 0 having done nothing; the verification read is what makes
     that detectable instead of a lie.
+
+    ``claim_fn`` is acquired only once a wake attempt is actually about to
+    run (gated on ``not skipped``, below), not for an already-Working/
+    Idle/Done row's no-op read: two concurrent no-op resumes on such a row
+    must both exit 0, not race each other into a spurious "held by another
+    writer" over a lock that guards a pty write neither of them is making.
     """
     def _state_of() -> str:
         row = agents_state_fn().get(short_id) or {}
@@ -329,12 +353,27 @@ def _resume_claude_wake(
     # would change the verified wake.sh recipe's timing; accepted as a
     # residual few-second race rather than risk that.
     #
-    # Computed once here rather than re-derived at each of its four uses
-    # below (route_env gate, loop guard, exit-16 condition, emit guard): a
-    # future edit to the skip condition that touches only some of the four
-    # call sites would silently reintroduce the exact misreport bug the
-    # surrounding comments already describe as fixed once.
+    # Computed once here rather than re-derived at each of its five uses
+    # below (claim gate, route_env gate, loop guard, exit-16 condition, emit
+    # guard): a future edit to the skip condition that touches only some of
+    # the five call sites would silently reintroduce the exact misreport bug
+    # the surrounding comments already describe as fixed once.
     skipped = before.lower() in _WAKE_SKIP_STATUSES_LOWER
+
+    # Claim before waking, gated on `not skipped` (see docstring): this
+    # function is also a standalone entrypoint (FNO_AGENTS_RUNTIME=python, or
+    # no Rust binary installed at all), reachable without ever going through
+    # Rust's own delegation claim. Guarding only the Rust side would leave
+    # this direct path racing real pty writes with no lock -- the
+    # guard-on-one-of-N-paths trap applied to this PR's own new claim rather
+    # than to the wake implementation it originally caught. Keyed identically
+    # to Rust's delegation claim so the two entrypoints contend for the same
+    # lock on the same row.
+    if not skipped:
+        claim_err = claim_fn(short_id)
+        if claim_err is not None:
+            claim_exit, claim_msg = claim_err
+            return ResumeResult(exit_code=claim_exit, stderr=claim_msg + "\n")
 
     route_env: Optional[dict[str, str]] = None
     # Gated on `not skipped`: route_env only feeds the wake attempts below,
@@ -366,6 +405,8 @@ def _resume_claude_wake(
                 last_err = "wake attempt timed out"
             except OSError as exc:
                 last_err = f"wake attempt failed: {exc}"
+            except Exception as exc:  # noqa: BLE001 - mapped to the bounded exit-16 report below, not a raw traceback
+                last_err = f"wake attempt failed: {exc}"
             # Read state even after a caught exception: `script`/`claude
             # attach` only returns when the attach TUI exits, which need not
             # happen the instant the piped stdin hits EOF, so a message that
@@ -374,6 +415,16 @@ def _resume_claude_wake(
             # score a successful wake as failed.
             after = _state_of()
             if after.lower() == _WAKE_TARGET_STATUS.lower():
+                break
+            if after.lower() in _WAKE_SKIP_STATUSES_LOWER:
+                # The row settled into Idle/Done between attempts (the
+                # operator's own session ended, or an unrelated race) without
+                # ever reaching Working. Firing another wake would inject
+                # keystrokes into a session that no longer needs them -- the
+                # same unsubmitted-text risk _WAKE_SKIP_STATUSES_LOWER exists
+                # to avoid at loop entry, just discovered mid-loop instead.
+                # `skipped` stays False: the exit-16 report below is still
+                # the right outcome to surface, just without a wasted retry.
                 break
 
     # A skipped row (before already Working/Idle) reports success on its
@@ -664,7 +715,9 @@ def resume_logic(
         # rather than exec'ing into an attach that (run non-interactively)
         # would print "Attaching..." and exit having done nothing.
         #
-        # Claim before waking: this function is also a standalone entrypoint
+        # claim_fn is resolved here but acquired inside _resume_claude_wake,
+        # gated on the row actually needing a wake (see that function's
+        # docstring) -- this function is also a standalone entrypoint
         # (FNO_AGENTS_RUNTIME=python, or no Rust binary installed at all),
         # reachable without ever going through Rust's own delegation claim.
         # Guarding only the Rust side would leave this direct path racing
@@ -675,10 +728,6 @@ def resume_logic(
         # on the same row.
         if claim_fn is None:
             claim_fn = _default_acquire_resume_attach_claim
-        claim_err = claim_fn(session_id or "")
-        if claim_err is not None:
-            claim_exit, claim_msg = claim_err
-            return ResumeResult(exit_code=claim_exit, stderr=claim_msg + "\n")
         if emit_event is None:
             from fno.agents import events as events_mod
             emit_event = events_mod.emit
@@ -695,6 +744,7 @@ def resume_logic(
             agents_state_fn=(
                 agents_state_fn if agents_state_fn is not None else _default_agents_state_fn
             ),
+            claim_fn=claim_fn,
         )
 
     # chdir BEFORE emit so a stale cwd surfaces as "agent_resume_failed"

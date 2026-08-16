@@ -167,7 +167,7 @@ The fallbacks, and why they rank below: `fno mail send <name>` reaches a registe
 A live inject writes nothing to the bus; the durable envelope is written only when the inject misses, so it survives a dead recipient as recovery, not delivery.
 **Treat any receipt that is not `delivered (hosted)` as not delivered: re-resolve the handle and send again, do not re-queue.**
 And do not settle for the queue when the peer is merely idle - the handle you mailed is the same id these take, so bring it back and get the answer now:
-`fno agents peek <short-id>` (alive?) · `resume <short-id>` (idle -> live, then re-send) · `attach <short-id>` (drive it yourself, claude).
+`fno agents peek <short-id>` (alive?) · `resume <short-id>` (wakes it, claude, or resumes it, other harnesses, then re-send) · `attach <short-id>` (drive it yourself, claude).
 
 Match the terminal to the message: a send that changes the recipient's next action - a ruling, an instruction, a decision they must act on - must terminate `delivered (hosted)` or `delivered (woken)`; a pure ack or FYI may rest durable, but only when the receipt names a live drain owner (`live-drain` / `wake-daemon` / `inbox-drain`). A `dead-letter` owner means nothing drains it, so a durable rest there is silent loss.
 

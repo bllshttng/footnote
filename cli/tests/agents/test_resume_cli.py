@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import pytest
+
 
 @dataclass
 class _FakeAgentEntry:
@@ -270,8 +272,9 @@ def test_default_acquire_resume_attach_claim_maps_other_errors_to_exit_12(monkey
 
 
 def test_claude_resume_refuses_when_claim_held_by_another_writer() -> None:
-    """Full resume_logic path: a claim_fn conflict must surface as the
-    resume's own exit code/stderr rather than proceeding to wake."""
+    """Full resume_logic path: a claim_fn conflict on a row that actually
+    needs a wake must surface as the resume's own exit code/stderr rather
+    than proceeding to wake."""
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -285,10 +288,35 @@ def test_claude_resume_refuses_when_claim_held_by_another_writer() -> None:
         cwd_checker=lambda _c: True,
         claim_fn=lambda _s: (11, "fno agents resume: session deadbeef is held live by another writer"),
         wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
-        agents_state_fn=lambda: (_ for _ in ()).throw(AssertionError("must not verify")),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
     )
     assert res.exit_code == 11
     assert "held live by another writer" in res.stderr
+
+
+def test_claude_resume_never_consults_claim_fn_for_an_already_working_row() -> None:
+    """A skip-eligible row (already Working) must not even ask claim_fn:
+
+    two concurrent no-op resumes against it must both exit 0, not race each
+    other into a spurious "held by another writer" over a lock that guards
+    a pty write neither of them is making."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: (_ for _ in ()).throw(AssertionError("must not claim")),
+        wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Working -> Working\n"
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +426,70 @@ def test_claude_resume_retries_once_before_giving_up() -> None:
     assert len(wake_calls) == 2, "must retry once before reporting failure"
     assert "Needs input" in res.stderr
     assert "deadbeef" in res.stderr
+
+
+def test_claude_resume_stops_retrying_once_the_row_goes_idle_mid_loop() -> None:
+    """A row that settles into Idle between attempt 1 and attempt 2 (the
+    operator's own session ended, or an unrelated race) must not get a
+    second wake injected into it -- that risks destroying unsubmitted
+    composer text in a session that is no longer blocked at all."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        wake_calls.append(1)
+
+    states = iter(["Needs input", "Idle"])
+
+    def _state():
+        return {"deadbeef": {"live_status": next(states)}}
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=_state,
+    )
+    assert res.exit_code == 16
+    assert len(wake_calls) == 1, "must not fire a second wake once the row went Idle"
+    assert "after='Idle'" in res.stderr
+
+
+def test_claude_resume_wake_attempt_exception_maps_to_exit_16_not_a_traceback() -> None:
+    """An unexpected exception from wake_fn (anything besides the two
+    documented subprocess failure modes) must be caught and folded into the
+    normal exit-16 report, not escape as a raw traceback out of the CLI."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+
+    def _wake(short_id, *, message, route_env, cwd):
+        raise RuntimeError("pty allocation exploded")
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert "pty allocation exploded" in res.stderr
 
 
 def test_claude_resume_emits_no_event_on_a_failed_wake() -> None:
@@ -1044,6 +1136,44 @@ def test_default_wake_fn_leaves_ambient_auth_untouched_with_no_route(
     _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/the/agents/worktree")
 
     assert seen["env"]["ANTHROPIC_API_KEY"] == "sk-operators-own-key"
+
+
+def test_default_wake_fn_kills_the_process_tree_on_keyboard_interrupt(monkeypatch) -> None:
+    """Ctrl-C during proc.wait() must not leave the detached wake subprocess
+    running: start_new_session=True keeps SIGINT from ever reaching it on
+    its own, so the teardown here is the only thing that stops it from
+    quietly injecting the wake message after the operator gave up."""
+    import os as os_mod
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _default_wake_fn
+
+    calls: list[str] = []
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise KeyboardInterrupt()
+            calls.append("wait-no-timeout")
+            return 0
+
+    monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(os_mod, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os_mod, "killpg", lambda pgid, sig: calls.append(f"killpg-{pgid}"))
+    monkeypatch.setattr(
+        subprocess_mod, "run", lambda argv, **kw: calls.append(f"run-{argv}")
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/cwd")
+
+    assert calls == [
+        "killpg-4242",
+        "wait-no-timeout",
+        "run-['pkill', '-f', 'claude attach deadbeef']",
+    ]
 
 
 def test_claude_resume_skips_waking_an_already_done_row() -> None:
