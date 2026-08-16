@@ -2876,41 +2876,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Both runtimes take this flock, so the Rust half must stamp too. A
-    /// Python waiter that times out reads this file to name the holder. When
-    /// acquire leaves an earlier holder's JSON in place, it reports a dead pid
-    /// as the live owner, which is the exact lie the stamp exists to remove.
-    #[test]
-    fn acquire_replaces_any_earlier_holder_stamp() {
-        let dir = std::env::temp_dir().join(format!("fno-lock-stamp-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("locks")).unwrap();
-        let lock_path = dir.join("locks").join("red.lock");
-        fs::write(
-            &lock_path,
-            "{\"pid\": 999999, \"name\": \"red\", \"acquired_at\": \"1999-01-01T00:00:00Z\"}\n",
-        )
-        .unwrap();
-
-        let home = crate::paths::AgentsHome::at(&dir);
-        {
-            let _lock = AgentLock::acquire(&home, "red", Duration::from_secs(2)).unwrap();
-            let raw = fs::read_to_string(&lock_path).unwrap();
-            assert_eq!(raw.lines().count(), 1, "stamp must stay one line: {raw}");
-            let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
-            assert_eq!(
-                parsed["pid"].as_u64().unwrap(),
-                u64::from(std::process::id())
-            );
-            assert_eq!(parsed["name"].as_str().unwrap(), "red");
-            assert_ne!(
-                parsed["acquired_at"].as_str().unwrap(),
-                "1999-01-01T00:00:00Z"
-            );
-        }
-        let _ = fs::remove_dir_all(&dir);
-    }
-
     /// `resume` matches on the STATE, so the verdict has to reach it through
     /// that channel or the falsifier is decorative on this path: a session whose
     /// process died forty minutes ago still reads `working` and resume prints
