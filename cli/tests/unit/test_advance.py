@@ -61,6 +61,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _events(events_path: Path) -> list[dict]:
+    """Decision events only: paired receipts (quota_rotation_declined et al.)
+    share the journal since repo-root resolution landed them where
+    FNO_REPO_ROOT points, and no decision-count assertion means to count them."""
     if not events_path.exists():
         return []
     return [
@@ -68,6 +71,7 @@ def _events(events_path: Path) -> list[dict]:
         for line in events_path.read_text().splitlines()
         if line.strip()
         and not (event := json.loads(line))["type"].startswith("claim_")
+        and event["type"] not in ("quota_rotation_declined", "dispatch_claim_observed")
     ]
 
 
