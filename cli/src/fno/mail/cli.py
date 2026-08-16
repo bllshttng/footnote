@@ -1145,10 +1145,12 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
     naming none, because it sends the reader to diagnose a recipient that was
     never the problem. A None/unreachable reason keeps the honest not-live line.
 
-    A lock timeout gets its own arm for the same reason. The lock is held by
-    ANOTHER SENDER, so it says nothing about the recipient's liveness, and the
-    not-live copy would send the reader to resurrect a session that is working
-    fine.
+    A lock timeout gets its own arm for the same reason. The per-agent flock is
+    shared by every verb that touches the agent (send, ask, spawn, stop, rm), so
+    a timeout says nothing about the recipient's liveness in EITHER direction.
+    The not-live copy would send the reader to resurrect a session that is
+    working fine; naming the holder a peer sender would tell the reader a
+    just-stopped session is fine. The arm names neither and points at `peek`.
 
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     from fno.agents.dispatch import LOCK_TIMEOUT_REASON
@@ -1163,14 +1165,16 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
         )
     elif reason == LOCK_TIMEOUT_REASON:
         msg = (
-            f"mail: live delivery to {target} was not attempted (another send "
-            "held its lock past the wait); queued durably. The holder was "
-            "another SENDER, so this says nothing about whether the recipient "
-            "is live: do not resurrect it on this evidence. It reads the "
-            "message when it next drains its inbox.\n"
-            "  a busy peer may not drain soon, so the two rungs that stay open,\n"
+            f"mail: live delivery to {target} was not attempted (another verb "
+            f"held {target}'s agent lock past the wait); queued durably. That "
+            "holder is any verb on this agent - a send, an ask, a spawn, a "
+            "stop, an rm - so the token proves nothing about the recipient in "
+            "either direction. Do not resurrect it on this evidence, and do "
+            "not read it as healthy either: check it.\n"
+            "  a busy peer may not drain soon, so the rungs that stay open,\n"
             "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
             "  copy still lands at the recipient's next drain:\n"
+            f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
             "    fno mail withdraw <id>      # retract the queued copy FIRST\n"
             f"    fno mail send {target} '<message>'  # then retry live"
         )

@@ -7110,6 +7110,10 @@ def dispatch_send(
                 canonical_name,
                 registry_path,
                 timeout=grace_seconds,
+                # The grace window makes a default send block for 42s, not 30.
+                # Without the callback the extra 12s is silent, so the command
+                # reads as hung right after it announced it was waiting.
+                on_wait=_on_wait,
             ):
                 # Every resolution that feeds a write happens here, under the
                 # lock, through the same call the normal path uses. An owner

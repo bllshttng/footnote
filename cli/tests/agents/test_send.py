@@ -514,13 +514,17 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
     assert "queued (durable) [agent-lock-timeout]" in result.stdout
     stderr = result.stderr or ""
     assert "lock busy" in stderr, "the live lane's cause must still surface"
-    # The lock was held by another SENDER, so it says nothing about the
-    # recipient. The generic durable warning claims "red is not live" and points
-    # at `fno agents resume red`, which resurrects a session that is working
-    # fine - the exact wrong-cause receipt that warning exists to avoid.
+    # The holder is any verb on this agent, so the timeout says nothing about
+    # the recipient in either direction. The generic durable warning claims
+    # "red is not live" and points at `fno agents resume red`, which resurrects
+    # a session that is working fine - the exact wrong-cause receipt that
+    # warning exists to avoid. Naming the holder a peer SENDER is the same
+    # defect mirrored: `fno agents stop red` takes the identical flock, so that
+    # copy would call a just-killed recipient healthy.
     assert "is not live" not in stderr, stderr
     assert "fno agents resume" not in stderr, stderr
-    assert "another send held its lock" in stderr, stderr
+    assert "agent lock past the wait" in stderr, stderr
+    assert "a stop, an rm" in stderr, stderr
 
 
 # ---------------------------------------------------------------------------
