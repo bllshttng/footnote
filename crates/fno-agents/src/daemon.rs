@@ -1268,8 +1268,13 @@ fn gc_sweep_impl(
                     } else {
                         e.short_id.as_str()
                     };
+                    // Count the attempt, not just a successful answer: a timed-out
+                    // or unreadable probe still costs the sweep its bounded
+                    // subprocess budget, and a registry full of unresponsive
+                    // sessions would otherwise pay that cost on every idle row
+                    // with the cap never engaging (codex review, PR #889).
+                    dormant_probes += 1;
                     if let Some(state) = truth_tail_state(handle) {
-                        dormant_probes += 1;
                         dormant_done = state == "done";
                     }
                 }
@@ -1358,6 +1363,20 @@ fn gc_sweep_impl(
         }
     }
 
+    // Cap the whole reap batch at CASCADE_CAP, not just the cascade calls
+    // within it: every row removed from the registry below MUST get its
+    // harness-store cascade attempted THIS sweep, because a row past that
+    // point cannot become a cascade candidate again (its registry record,
+    // the only handle the next sweep would find it by, is gone). A row
+    // beyond the cap simply stays in the registry and is re-evaluated next
+    // tick (codex review, PR #889). Truncated deterministically by name so
+    // dry-run and the real write agree on exactly which rows this covers.
+    if to_reap.len() > CASCADE_CAP {
+        let keep: std::collections::BTreeMap<String, String> =
+            to_reap.iter().take(CASCADE_CAP).map(|(k, v)| (k.clone(), v.clone())).collect();
+        to_reap = keep;
+    }
+
     if to_reap.is_empty() && to_stamp.is_empty() && to_clear.is_empty() {
         return summary;
     }
@@ -1423,24 +1442,6 @@ fn gc_sweep_impl(
             // lock (a stale candidate whose identity changed is not a reap).
             for e in &registry.entries {
                 if reaped_names.contains(&e.name) {
-                    // CASCADE (AC6): two stores, act on both, report both. The
-                    // row is gone from the registry; if the harness's own store
-                    // still holds the session, remove it via the harness's own
-                    // removal surface. A refusal or failure is SURFACED in the
-                    // reap report and event (`cascade_refused`), never
-                    // swallowed, and never rolls back the registry reap - but
-                    // an unknown harness store (probe None) is a skip, not a
-                    // refusal: registry-only rows are the opencode/gemini
-                    // contract, not a failure. Bounded per sweep so a large
-                    // batch cannot turn the write tail into a subprocess farm.
-                    let mut cascade_refused: Option<(String, String)> = None;
-                    if cascaded < CASCADE_CAP {
-                        cascaded += 1;
-                        cascade_refused = cascade(e);
-                    }
-                    if let Some((id, reason)) = &cascade_refused {
-                        summary.cascade_refused.push((id.clone(), reason.clone()));
-                    }
                     let node_id = dispatch_node_id(&e.name);
                     let mut target_session_id = None;
                     let mut termination_event = false;
@@ -1489,6 +1490,32 @@ fn gc_sweep_impl(
                     }
                     if !accounted {
                         continue;
+                    }
+                    // CASCADE (AC6): two stores, act on both, report both.
+                    // Deferred until AFTER dispatch accounting confirms this
+                    // row - cascading first and failing accounting second
+                    // would restore the registry row while its harness
+                    // session (or codex index entry) is already gone,
+                    // leaving a restored-but-unresumable row (codex review,
+                    // PR #889). If the harness's own store still holds the
+                    // session, remove it via the harness's own removal
+                    // surface. A refusal or failure is SURFACED in the reap
+                    // report and event (`cascade_refused`), never swallowed,
+                    // and never rolls back the registry reap - but an
+                    // unknown harness store (probe None) is a skip, not a
+                    // refusal: registry-only rows are the opencode/gemini
+                    // contract, not a failure. Bounded per sweep (the whole
+                    // reap batch is already capped at CASCADE_CAP above, so
+                    // this bound never actually engages - kept as a
+                    // belt-and-suspenders invariant, not the enforcement
+                    // point).
+                    let mut cascade_refused: Option<(String, String)> = None;
+                    if cascaded < CASCADE_CAP {
+                        cascaded += 1;
+                        cascade_refused = cascade(e);
+                    }
+                    if let Some((id, reason)) = &cascade_refused {
+                        summary.cascade_refused.push((id.clone(), reason.clone()));
                     }
                     let _ = emitter.emit_fields(
                         "agent_row_reaped",
@@ -6298,7 +6325,21 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600));
+        // gc_sweep_impl directly, not the gc_sweep wrapper: the wrapper's
+        // HarnessStoreIndex::default() falls back to the REAL $HOME when a
+        // developer machine has one, so "stuck"'s synthetic session id can
+        // resolve against the real ~/.claude/projects and read as gone -
+        // false corroboration this test exists to rule out. Stub `None`
+        // (unresolvable) is the harness-store answer this test is about.
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+        );
 
         assert!(
             summary.reaped.is_empty(),
@@ -6691,7 +6732,19 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         .unwrap();
         let before = state::load_registry(&home.registry_json()).unwrap();
 
-        let summary = gc_sweep_dry_run(&home, &|_| Duration::from_secs(3600));
+        // gc_sweep_impl directly, not the gc_sweep_dry_run wrapper: see the
+        // comment on gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row
+        // for why the wrapper's real-$HOME HarnessStoreIndex is not hermetic.
+        let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            true,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+        );
 
         assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
         assert_eq!(summary.kept_uncorroborated, vec!["stuck".to_string()]);
@@ -6752,10 +6805,24 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             (home, log_path)
         };
 
+        // gc_sweep_impl directly, not the gc_sweep wrapper: see the comment
+        // on gc_sweep_reports_kept_uncorroborated_for_the_stuck_and_invisible_row
+        // for why the wrapper's real-$HOME HarnessStoreIndex is not hermetic
+        // - here it would auto-corroborate via harness_session_gone
+        // regardless of the transcript-mtime freshness this test is about.
+
         // OLD behaviour: one number for every harness.
         let (home_old, _) = seed("gc-silence-old");
         let emitter_old = EventEmitter::new(home_old.events_jsonl(), "daemon");
-        let summary_old = gc_sweep(&home_old, &emitter_old, &|_| Duration::from_secs(3600));
+        let summary_old = gc_sweep_impl(
+            &home_old,
+            &emitter_old,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+        );
         assert_eq!(
             summary_old.reaped,
             vec!["codex-silent".to_string()],
@@ -6765,9 +6832,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // FIXED behaviour: codex gets its own 8h grace/freshness window.
         let (home_new, _) = seed("gc-silence-new");
         let emitter_new = EventEmitter::new(home_new.events_jsonl(), "daemon");
-        let summary_new = gc_sweep(&home_new, &emitter_new, &|harness| {
-            Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 })
-        });
+        let summary_new = gc_sweep_impl(
+            &home_new,
+            &emitter_new,
+            &|harness| Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 }),
+            false,
+            &|_| None,
+            &|_| None,
+            &|_| None,
+        );
         assert!(
             summary_new.reaped.is_empty(),
             "an 8h codex grace must not corroborate a worker that was silent for only 90 minutes"
