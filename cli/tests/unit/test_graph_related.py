@@ -258,16 +258,18 @@ def test_removing_a_node_unlinks_it_from_every_peer(tmp_graph):
     assert _related(tmp_graph, "x-cccc") == []
 
 
-def test_archive_holds_back_a_node_an_open_peer_is_related_to():
-    """A terminal node related to an OPEN node must not be swept.
+def test_archive_releases_an_open_peer_s_related_edge():
+    """A terminal node related to an OPEN node is swept, its edge stripped.
 
-    Archiving one side leaves the open node naming an id the working graph no
-    longer has, with the inverse beyond set_related's reach - the symmetry
-    contract broken by routine daily grooming rather than by any explicit edit.
+    A related edge is soft: it pins finished work in the working set forever
+    when it holds (203 nodes on the machine this was measured on), so the sweep
+    releases it on the open side instead of guarding the target. Read-through
+    keeps the archived id resolvable, and release_soft_edges is what strips
+    the open side at apply time - this partition test pins the drain half.
     """
     from datetime import datetime, timedelta, timezone
 
-    from fno.graph.archive import partition_for_archive
+    from fno.graph.archive import partition_for_archive, release_soft_edges
 
     now = datetime.now(timezone.utc)
     old = (now - timedelta(days=400)).isoformat()
@@ -276,23 +278,28 @@ def test_archive_holds_back_a_node_an_open_peer_is_related_to():
         _node("x-done", status="done", completed_at=old, related=["x-open"]),
         _node("x-lonely", status="done", completed_at=old),
     ]
-    to_archive, _remaining, skipped = partition_for_archive(entries, 30, now)
+    to_archive, remaining, skipped = partition_for_archive(entries, 30, now)
 
     archived_ids = {e["id"] for e in to_archive}
-    assert "x-done" not in archived_ids, "an open peer's related target is held back"
+    assert "x-done" in archived_ids, "an open peer's related target now drains"
     assert "x-lonely" in archived_ids, "an unreferenced terminal node still sweeps"
-    assert "x-done" in {e["id"] for e in skipped}
+    assert "x-done" not in {e["id"] for e in skipped}, "nothing held it back"
+
+    patched, stripped = release_soft_edges(remaining, archived_ids)
+    open_node = next(e for e in patched if e["id"] == "x-open")
+    assert open_node["related"] == [], "the open side no longer names the archived id"
+    assert stripped == 1
 
 
-def test_archive_holds_back_an_open_node_s_origin():
-    """An open node's source_node_id target must survive the sweep.
+def test_archive_releases_an_open_node_s_origin_edge():
+    """An open node's source_node_id target drains too; the origin is nulled.
 
-    This PR made the field readable, so archiving its target turns a live edge
-    into a dangler the reader renders as "(not in graph)".
+    The field stays readable: a nulled origin is a clean "no origin", and the
+    archived target itself stays resolvable through read-through by id.
     """
     from datetime import datetime, timedelta, timezone
 
-    from fno.graph.archive import partition_for_archive
+    from fno.graph.archive import partition_for_archive, release_soft_edges
 
     now = datetime.now(timezone.utc)
     old = (now - timedelta(days=400)).isoformat()
@@ -300,8 +307,12 @@ def test_archive_holds_back_an_open_node_s_origin():
         _node("x-open", status="ready", source_node_id="x-origin"),
         _node("x-origin", status="done", completed_at=old),
     ]
-    to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
-    assert "x-origin" not in {e["id"] for e in to_archive}
+    to_archive, remaining, _skipped = partition_for_archive(entries, 30, now)
+    assert "x-origin" in {e["id"] for e in to_archive}
+    patched, stripped = release_soft_edges(remaining, {e["id"] for e in to_archive})
+    open_node = next(e for e in patched if e["id"] == "x-open")
+    assert open_node["source_node_id"] is None
+    assert stripped == 1
 
 
 def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):

@@ -4663,6 +4663,8 @@ mod tests {
             exited_at: None,
             liveness_surface: true,
             transcript_fresh: Some(false),
+            harness_session_gone: None,
+            dormant_done: false,
             worktree_clean: None,
         };
         assert_eq!(
