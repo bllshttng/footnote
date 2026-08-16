@@ -2734,7 +2734,7 @@ def start(
                 err=True,
             )
 
-    base_label = "in-place" if in_place else "origin/main"
+    base_label = "in-place" if in_place else native_base
 
     # Idempotent re-run from canonical: a manifest already in the worktree means
     # init has run (write-once) - skip it, never double-claim or error.
