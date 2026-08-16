@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import pytest
+
 
 @dataclass
 class _FakeAgentEntry:
@@ -59,6 +61,8 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
         execvp=_no_exec,
     )
@@ -129,6 +133,8 @@ def test_agent_resumed_event_emitted_before_execvp() -> None:
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         emit_event=lambda kind, **_kw: order.append(f"emit:{kind}"),
         execvp=lambda file, args: order.append(f"exec:{file}"),
     )
@@ -152,11 +158,165 @@ def test_missing_cwd_exits_13_with_rm_hint() -> None:
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
     assert "no recorded cwd" in res.stderr
     assert "fno agents rm alpha" in res.stderr
+
+
+def test_claude_resume_refuses_a_stale_cwd_without_waking() -> None:
+    """code-review finding: the claude branch skipped the cwd-reachability
+    check every other harness gets, so a deleted worktree burned a full
+    ~19s wake attempt before surfacing a confusing exit-16 instead of the
+    immediate, actionable exit-13 rm hint."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/gone", short_id="deadbeef",
+    )
+
+    def _must_not_wake(*a, **kw):
+        raise AssertionError("must not wake a row with an unreachable cwd")
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda c: False,
+        wake_fn=_must_not_wake,
+        agents_state_fn=lambda: (_ for _ in ()).throw(AssertionError("must not verify")),
+    )
+    assert res.exit_code == 13
+    assert "no longer reachable" in res.stderr
+    assert "fno agents rm alpha" in res.stderr
+
+
+def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
+    """The Rust binary resolves a claude row's EnterWorktree-moved transcript
+    dir before delegating here (`resolve_resume_cwd`); --cwd carries that
+    resolved value through so this fallback doesn't re-derive the stale
+    pre-EnterWorktree cwd from the registry entry itself."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/stale/registry/cwd", short_id="deadbeef",
+    )
+    seen_cwd: list[str] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        seen_cwd.append(cwd)
+
+    states = iter(["Needs input", "Working"])
+    res = resume_logic(
+        name="alpha",
+        cwd_override="/resolved/worktree/cwd",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda c: True,
+        claim_fn=lambda _s: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+    )
+    assert res.exit_code == 0
+    assert seen_cwd == ["/resolved/worktree/cwd"]
+
+
+def test_default_acquire_resume_attach_claim_refuses_a_second_writer(tmp_path) -> None:
+    """code-review finding: the claim guard on the Rust delegation had no
+    counterpart on this module's own standalone entrypoint
+    (FNO_AGENTS_RUNTIME=python, or no Rust binary installed at all) -- a
+    guard on only one of two reachable paths into the same wake. Exercises
+    the real (non-injected) claim function end to end, keyed identically to
+    Rust's own resume-attach:{short_id} claim."""
+    from fno.claims.core import acquire_claim
+    from fno.agents.resume_cli import _default_acquire_resume_attach_claim
+
+    short_id = "deadbeef"
+    acquire_claim(
+        f"resume-attach:{short_id}", "other-writer", root=tmp_path
+    )
+
+    err = _default_acquire_resume_attach_claim(short_id, root=tmp_path)
+    assert err is not None
+    exit_code, msg = err
+    assert exit_code == 11
+    assert "held live by another writer" in msg
+    assert "other-writer" in msg
+
+    # A different short_id: an unrelated row's wake is never blocked.
+    assert _default_acquire_resume_attach_claim("other-id", root=tmp_path) is None
+
+
+def test_default_acquire_resume_attach_claim_maps_other_errors_to_exit_12(monkeypatch) -> None:
+    """code-review finding: only ClaimHeldByOther was caught, so a
+    validation error or a filesystem failure (disk full, EACCES) from
+    acquire_claim propagated as a raw traceback out of the standalone entry
+    point this claim guard exists to protect. Rust's parity path maps its
+    own AcquireOutcome::Error to exit 12; match it here."""
+    import fno.claims.core as claims_core_mod
+    from fno.agents.resume_cli import _default_acquire_resume_attach_claim
+
+    def _raise(*a, **kw):
+        raise claims_core_mod.ClaimValidationError("key too long")
+
+    monkeypatch.setattr(claims_core_mod, "acquire_claim", _raise)
+
+    err = _default_acquire_resume_attach_claim("deadbeef")
+    assert err is not None
+    exit_code, msg = err
+    assert exit_code == 12
+    assert "could not claim session deadbeef" in msg
+
+
+def test_claude_resume_refuses_when_claim_held_by_another_writer() -> None:
+    """Full resume_logic path: a claim_fn conflict on a row that actually
+    needs a wake must surface as the resume's own exit code/stderr rather
+    than proceeding to wake."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: (11, "fno agents resume: session deadbeef is held live by another writer"),
+        wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 11
+    assert "held live by another writer" in res.stderr
+
+
+def test_claude_resume_never_consults_claim_fn_for_an_already_working_row() -> None:
+    """A skip-eligible row (already Working) must not even ask claim_fn:
+
+    two concurrent no-op resumes against it must both exit 0, not race each
+    other into a spurious "held by another writer" over a lock that guards
+    a pty write neither of them is making."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: (_ for _ in ()).throw(AssertionError("must not claim")),
+        wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Working -> Working\n"
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +337,8 @@ def test_print_command_emits_one_liner() -> None:
         print_command=True,
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 0
@@ -192,11 +354,12 @@ def test_print_command_emits_one_liner() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2-EDGE — claude path uses claude attach
+# claude path wakes headlessly and verifies the state moved
 # ---------------------------------------------------------------------------
 
 
-def test_claude_path_uses_attach_substrate() -> None:
+def test_claude_resume_wakes_and_verifies_working() -> None:
+    """A claude row with a live short_id is woken, not exec'd into attach."""
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -204,14 +367,327 @@ def test_claude_path_uses_attach_substrate() -> None:
         cwd="/cwd",
         short_id="deadbeef",
     )
+    wake_calls: list[dict] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        wake_calls.append({"short_id": short_id, "message": message, "route_env": route_env})
+
+    states = iter(["Needs input", "Working"])
+
+    def _state():
+        current = next(states)
+        return {"deadbeef": {"live_status": current}}
+
+    res = resume_logic(
+        name="alpha",
+        message="continue",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=_state,
+    )
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Needs input -> Working\n"
+    assert len(wake_calls) == 1
+    assert wake_calls[0] == {"short_id": "deadbeef", "message": "continue", "route_env": None}
+
+
+def test_claude_resume_retries_once_before_giving_up() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        wake_calls.append(1)
+
+    # Stays "Needs input" through the pre-check and both post-attempt reads.
+    def _state():
+        return {"deadbeef": {"live_status": "Needs input"}}
+
     res = resume_logic(
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=_state,
+    )
+    assert res.exit_code == 16
+    assert len(wake_calls) == 2, "must retry once before reporting failure"
+    assert "Needs input" in res.stderr
+    assert "deadbeef" in res.stderr
+
+
+def test_claude_resume_stops_retrying_once_the_row_goes_idle_mid_loop() -> None:
+    """A row that settles into Idle between attempt 1 and attempt 2 (the
+    operator's own session ended, or an unrelated race) must not get a
+    second wake injected into it -- that risks destroying unsubmitted
+    composer text in a session that is no longer blocked at all."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        wake_calls.append(1)
+
+    states = iter(["Needs input", "Idle"])
+
+    def _state():
+        return {"deadbeef": {"live_status": next(states)}}
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=_state,
+    )
+    assert res.exit_code == 16
+    assert len(wake_calls) == 1, "must not fire a second wake once the row went Idle"
+    assert "after='Idle'" in res.stderr
+
+
+def test_claude_resume_wake_attempt_exception_maps_to_exit_16_not_a_traceback() -> None:
+    """An unexpected exception from wake_fn (anything besides the two
+    documented subprocess failure modes) must be caught and folded into the
+    normal exit-16 report, not escape as a raw traceback out of the CLI."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+
+    def _wake(short_id, *, message, route_env, cwd):
+        raise RuntimeError("pty allocation exploded")
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert "pty allocation exploded" in res.stderr
+
+
+def test_claude_resume_emits_no_event_on_a_failed_wake() -> None:
+    """Mirrors the codex/exec path's chdir-failure convention: an event named
+    "agent_resumed" must never fire on a wake that did not reach Working, or
+    it misreports the failure as a success to anyone reading the log."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    events_seen: list[dict] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert events_seen == []
+
+
+def test_claude_resume_emits_no_event_on_a_skipped_already_working_row() -> None:
+    """A skipped row (already Working) never entered the wake loop: emitting
+    "agent_resumed" for it would claim a resume happened when nothing was
+    attempted, the same event-naming concern the failed-wake case above
+    guards against."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    events_seen: list[dict] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
     )
     assert res.exit_code == 0
-    assert res.exec_argv == ["claude", "attach", "deadbeef"]
+    assert events_seen == []
+
+
+def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
+    """The wake subprocess must run from the agent's own recorded cwd,
+    matching the non-claude exec path's os.chdir(cwd) and the Rust exec
+    fallback's set_current_dir(cwd) -- claude attach finds the session by
+    short_id, not by directory, but a wrong cwd would still leak into
+    anything the attaching process reads project-locally."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/the/agents/worktree", short_id="deadbeef",
+    )
+    seen_cwd: list[str] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        seen_cwd.append(cwd)
+
+    states = iter(["Needs input", "Working"])
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+    )
+    assert res.exit_code == 0
+    assert seen_cwd == ["/the/agents/worktree"]
+
+
+def test_claude_resume_restores_routed_env() -> None:
+    """A routed row's env must reach the wake attempt."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/route.json"  # type: ignore[attr-defined]
+    seen_env: list[Optional[dict]] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        seen_env.append(route_env)
+
+    def _read_route_settings(path):
+        assert path == "/tmp/route.json"
+        return {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"}
+
+    import fno.agents.model_routing as model_routing_mod
+
+    orig = model_routing_mod.read_route_settings
+    model_routing_mod.read_route_settings = _read_route_settings
+    # Starts "Needs input" so the wake loop actually runs (an already-Working
+    # row is skipped by design and _wake would never be called).
+    states = iter(["Needs input", "Working"])
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+            execvp=_no_exec,
+            emit_event=lambda *a, **kw: None,
+            wake_fn=_wake,
+            agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+        )
+    finally:
+        model_routing_mod.read_route_settings = orig
+
+    assert res.exit_code == 0
+    assert seen_env == [{"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"}]
+
+
+def test_claude_resume_refuses_when_route_cannot_be_restored() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/gone.json"  # type: ignore[attr-defined]
+
+    import fno.agents.model_routing as model_routing_mod
+
+    def _raise(path):
+        raise model_routing_mod.RouteRestoreError(f"{path} is unreadable")
+
+    orig = model_routing_mod.read_route_settings
+    model_routing_mod.read_route_settings = _raise
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+            execvp=_no_exec,
+            wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+            agents_state_fn=lambda: {},
+        )
+    finally:
+        model_routing_mod.read_route_settings = orig
+
+    assert res.exit_code == 2
+    assert "gone.json" in res.stderr
+
+
+def test_claude_resume_skips_a_broken_route_on_an_already_skip_eligible_row() -> None:
+    """code-review finding: route restore ran before the skip check, so an
+    already-Working row with a stale route file got refused with exit 2
+    instead of reporting the no-op success it actually was -- nothing was
+    ever going to be woken, so the route was never going to be used."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/gone.json"  # type: ignore[attr-defined]
+
+    import fno.agents.model_routing as model_routing_mod
+
+    def _raise(path):
+        raise model_routing_mod.RouteRestoreError(f"{path} is unreadable")
+
+    orig = model_routing_mod.read_route_settings
+    model_routing_mod.read_route_settings = _raise
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+            execvp=_no_exec,
+            wake_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not wake")),
+            agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+        )
+    finally:
+        model_routing_mod.read_route_settings = orig
+
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Working -> Working\n"
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +726,8 @@ def test_claude_pane_row_refuses_pointing_at_the_smart_runtime() -> None:
         name="pane-worker",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -273,6 +751,8 @@ def test_missing_session_id_exits_13() -> None:
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -315,6 +795,8 @@ def test_unknown_agent_exits_13() -> None:
         name="ghost",
         registry_loader=lambda: [],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -340,6 +822,8 @@ def test_unsupported_provider_exits_13_not_14() -> None:
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -365,6 +849,8 @@ def test_opencode_argv_attaches_the_tui_by_session() -> None:
         print_command=True,
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 0
@@ -389,6 +875,8 @@ def test_opencode_without_captured_session_id_errors_clearly() -> None:
         name="oc",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     assert res.exit_code == 13
@@ -421,6 +909,8 @@ def test_print_command_uses_shlex_quote_for_special_chars() -> None:
         print_command=True,
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
         execvp=_no_exec,
     )
     # shlex.quote will single-quote any string containing shell-special
@@ -431,10 +921,12 @@ def test_print_command_uses_shlex_quote_for_special_chars() -> None:
 def test_stale_cwd_exits_13_with_rm_hint() -> None:
     """sigma-review H2: missing cwd at chdir-time must NOT emit success.
 
-    Pre-fix: emit_event("agent_resumed", ...) ran BEFORE os.chdir; a stale
-    cwd produced a misleading success record then crashed. Post-fix: chdir
-    runs first, OSError converts to exit 13 with the fno-agents-rm hint,
-    and the event is never emitted on the failure path.
+    The real (default) cwd_checker -- os.path.isdir -- catches this stale
+    path first, before the os.chdir branch below is ever reached; see
+    test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13 for that
+    branch specifically. This test still exercises the real, non-mocked cwd
+    validation end to end, and no agent_resumed event fires on the
+    failure path either way.
     """
     from fno.agents.resume_cli import resume_logic
 
@@ -445,19 +937,389 @@ def test_stale_cwd_exits_13_with_rm_hint() -> None:
     )
     events_seen: list[dict] = []
 
-    # Use real os.chdir/execvp=None so chdir actually runs. Inject a
-    # path_checker that allows the codex binary and an emit_event we
-    # can spy on.
+    # Use the real cwd_checker/execvp=None so the full cwd-validation path
+    # actually runs. Inject a path_checker that allows the codex binary and
+    # an emit_event we can spy on.
     res = resume_logic(
         name="alpha",
         registry_loader=lambda: [entry],
         path_checker=_allow_all_path,
         emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
-        # NOTE: execvp=None means the real os.execvp would be called,
-        # but chdir fails first so we never reach it.
         execvp=None,
     )
     assert res.exit_code == 13
     assert "fno agents rm alpha" in res.stderr
     # Critically: no agent_resumed event was emitted on the failure path.
     assert events_seen == []
+
+
+def test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13() -> None:
+    """code-review finding: the cwd_checker gate added for the claude
+    reachability fix now intercepts every stale-cwd test before os.chdir's
+    own OSError branch runs, leaving that branch covered only by a
+    production TOCTOU race rather than by CI. Force cwd_checker to pass so
+    the real os.chdir call is what fails -- a directory deleted between the
+    isdir check and the chdir call, not merely a directory that never
+    existed."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="codex",
+        cwd="/this/path/almost/certainly/does/not/exist/" + ("x" * 40),
+        harness_session_id="sess-1",
+    )
+    events_seen: list[dict] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        emit_event=lambda kind, **kw: events_seen.append({"kind": kind, **kw}),
+        execvp=None,
+    )
+    assert res.exit_code == 13
+    assert "fno agents rm alpha" in res.stderr
+    assert events_seen == []
+
+
+# ---------------------------------------------------------------------------
+# code-review high --comment --fix findings on the claude wake path
+# ---------------------------------------------------------------------------
+
+
+def test_claude_resume_skips_waking_an_already_working_row() -> None:
+    """An already-Working row must never have keystrokes injected into it."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+    assert res.output == "alpha (deadbeef): Working -> Working\n"
+
+
+def test_claude_resume_skips_waking_an_already_idle_row() -> None:
+    """An Idle row is live and reachable, not blocked: injecting keystrokes
+    risks destroying unsubmitted composer text for no benefit, and must not
+    be scored a failure just because Idle isn't the Working wake target."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Idle"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+    assert res.output == "alpha (deadbeef): Idle -> Idle\n"
+
+
+def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
+    """A wake that lands but whose subprocess outlives the timeout must not
+    be scored a failure: the post-attempt state read must run even when
+    wake_fn raised TimeoutExpired."""
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    states = iter(["Needs input", "Working"])
+
+    def _wake(short_id, *, message, route_env, cwd):
+        raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+    )
+    assert res.exit_code == 0
+    assert res.output == "alpha (deadbeef): Needs input -> Working\n"
+
+
+def test_default_wake_fn_scrubs_ambient_auth_before_overlaying_the_route(
+    monkeypatch,
+) -> None:
+    """The operator's own ANTHROPIC_API_KEY must not survive alongside a
+    routed row's credential in the attaching subprocess's env."""
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _default_wake_fn
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-operators-own-key")
+    seen: dict = {}
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _fake_popen(argv, *, env, **kwargs):
+        seen["env"] = env
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _fake_popen)
+
+    _default_wake_fn(
+        "deadbeef",
+        message="continue",
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/paas/v4"},
+        cwd="/the/agents/worktree",
+    )
+
+    assert seen["env"].get("ANTHROPIC_API_KEY") is None
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/paas/v4"
+
+
+def test_default_wake_fn_leaves_ambient_auth_untouched_with_no_route(
+    monkeypatch,
+) -> None:
+    """code-review finding: a route-less row (the common default-account
+    case) must keep its ambient auth, matching bg_create/headless_create --
+    scrubbing with nothing to restore breaks auth mid-wake for an
+    api-key-authenticated account."""
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _default_wake_fn
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-operators-own-key")
+    seen: dict = {}
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _fake_popen(argv, *, env, **kwargs):
+        seen["env"] = env
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _fake_popen)
+
+    _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/the/agents/worktree")
+
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "sk-operators-own-key"
+
+
+def test_default_wake_fn_kills_the_process_tree_on_keyboard_interrupt(monkeypatch) -> None:
+    """Ctrl-C during proc.wait() must not leave the detached wake subprocess
+    running: start_new_session=True keeps SIGINT from ever reaching it on
+    its own, so the teardown here is the only thing that stops it from
+    quietly injecting the wake message after the operator gave up."""
+    import os as os_mod
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _default_wake_fn
+
+    calls: list[str] = []
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise KeyboardInterrupt()
+            calls.append("wait-no-timeout")
+            return 0
+
+    monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(os_mod, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os_mod, "killpg", lambda pgid, sig: calls.append(f"killpg-{pgid}"))
+    monkeypatch.setattr(
+        subprocess_mod, "run", lambda argv, **kw: calls.append(f"run-{argv}")
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/cwd")
+
+    assert calls == [
+        "killpg-4242",
+        "wait-no-timeout",
+        "run-['pkill', '-f', 'claude attach deadbeef']",
+    ]
+
+
+def test_default_wake_fn_raises_teardown_unconfirmed_when_pkill_cannot_run(
+    monkeypatch,
+) -> None:
+    """killpg never reaches the pty-attached claude attach child (it
+    setsid()s away before exec), so pkill is the ONLY mechanism that can
+    reach it -- not a backstop. If pkill itself can't run at all (missing
+    binary), teardown has zero visibility into whether that child is still
+    alive. That must surface as a distinct signal, not a plain
+    TimeoutExpired the caller might blindly retry into."""
+    import os as os_mod
+    import subprocess as subprocess_mod
+
+    from fno.agents.resume_cli import _WakeTeardownUnconfirmed, _default_wake_fn
+
+    class _FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
+            return 0
+
+    monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(os_mod, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os_mod, "killpg", lambda pgid, sig: None)
+
+    def _raise(*a, **kw):
+        raise FileNotFoundError("pkill: command not found")
+
+    monkeypatch.setattr(subprocess_mod, "run", _raise)
+
+    with pytest.raises(_WakeTeardownUnconfirmed):
+        _default_wake_fn("deadbeef", message="continue", route_env=None, cwd="/cwd")
+
+
+def test_claude_resume_does_not_retry_after_teardown_unconfirmed() -> None:
+    """A second wake_fn call while the first attempt's process tree might
+    still be alive risks two processes injecting into the same pty
+    concurrently -- the retry loop must stop, not retry through it."""
+    from fno.agents.resume_cli import _WakeTeardownUnconfirmed, resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    def _wake(short_id, *, message, route_env, cwd):
+        wake_calls.append(1)
+        raise _WakeTeardownUnconfirmed("teardown unconfirmed")
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 16
+    assert len(wake_calls) == 1, "must not retry after a teardown-unconfirmed signal"
+    assert "teardown unconfirmed" in res.stderr
+
+
+def test_claude_resume_skips_waking_an_already_done_row() -> None:
+    """code-review finding: "Done" is a terminal status (KNOWN_LIVE_STATUSES
+    in harnesses/claude.py), newly visible via `--all` -- it must be
+    skip-eligible like Working/Idle rather than burning two ~60s wake
+    attempts trying to nudge a session that was never going to move."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Done"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+    assert res.output == "alpha (deadbeef): Done -> Done\n"
+
+
+def test_claude_resume_skip_check_is_case_insensitive() -> None:
+    """code-review finding: read.py's own diff fixed a lowercase-status miss
+    with .lower() in this same PR; the wake's skip/target comparisons must
+    apply the same normalization or an un-normalized "idle" gets keystrokes
+    injected into a live session."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    wake_calls: list[int] = []
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: wake_calls.append(1),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "idle"}},
+    )
+    assert res.exit_code == 0
+    assert wake_calls == []
+
+
+def test_script_wrapped_attach_uses_bsd_form_on_darwin(monkeypatch) -> None:
+    from fno.agents.resume_cli import _script_wrapped_attach
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    cmd = _script_wrapped_attach("deadbeef")
+    assert cmd == "script -q /dev/null claude attach deadbeef"
+
+
+def test_script_wrapped_attach_uses_gnu_form_on_linux(monkeypatch) -> None:
+    from fno.agents.resume_cli import _script_wrapped_attach
+
+    monkeypatch.setattr("sys.platform", "linux")
+    cmd = _script_wrapped_attach("deadbeef")
+    assert cmd == "script -qc 'claude attach deadbeef' /dev/null"
+
+
+def test_script_wrapped_attach_uses_bsd_form_on_real_bsd_platform_strings(monkeypatch) -> None:
+    """A real sys.platform on BSD carries a version suffix (freebsd13,
+    openbsd7, ...) and never ends in the literal substring "bsd" -- a
+    `.endswith("bsd")` check silently never matches on real hardware."""
+    from fno.agents.resume_cli import _script_wrapped_attach
+
+    for platform in ("freebsd13", "openbsd7", "netbsd10"):
+        monkeypatch.setattr("sys.platform", platform)
+        cmd = _script_wrapped_attach("deadbeef")
+        assert cmd == "script -q /dev/null claude attach deadbeef", platform

@@ -922,14 +922,17 @@ print(f"{result.msg_id} delivered ({result.delivery})")
     env["FNO_TEST_RELAY_MARKER"] = str(relay_marker)
     env["FNO_TEST_RELAY_RELEASE"] = str(relay_release)
     env["FNO_TEST_RELAY_FINISHED"] = str(relay_finished)
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=8,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=8,
+            check=False,
+        )
+    finally:
+        relay_release.touch()
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(result.stdout.splitlines()) == 1

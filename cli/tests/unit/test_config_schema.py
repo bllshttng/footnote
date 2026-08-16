@@ -39,6 +39,9 @@ def test_glob_star_in_state_dir_rejected(tmp_path: Path, monkeypatch: pytest.Mon
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
+    from fno import config as config_mod
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
     from fno.config import load_settings
 
     with pytest.raises(Exception, match=r"\*|\?|\[|glob"):
@@ -54,6 +57,9 @@ def test_glob_question_in_paths_rejected(tmp_path: Path, monkeypatch: pytest.Mon
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
+    from fno import config as config_mod
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
     from fno.config import load_settings
 
     with pytest.raises(Exception, match=r"\*|\?|\[|glob"):
@@ -67,6 +73,9 @@ def test_glob_bracket_in_plans_dir_rejected(tmp_path: Path, monkeypatch: pytest.
         tmp_path, "schema_version: 1\nconfig:\n  plans_dir: '.fno/[plans]/'\n"
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
+
+    from fno import config as config_mod
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     from fno.config import load_settings
 

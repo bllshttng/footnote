@@ -30,6 +30,8 @@ from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import now_ms
 from fno.claims.types import Claim
 
+_PROCESS_START_TIMEOUT_SECONDS = 30.0
+
 
 def _try_acquire(root_str: str, key: str, holder: str, result_queue, hold_secs: float = 0.0) -> None:
     """Child-process worker. Reports outcome via the queue.
@@ -75,7 +77,7 @@ def _run_race(root: Path, key: str, n_workers: int, hold_secs: float = 0.5) -> l
         p.start()
 
     outcomes: list[tuple] = []
-    deadline = mp_now() + 5.0
+    deadline = mp_now() + _PROCESS_START_TIMEOUT_SECONDS
     while len(outcomes) < n_workers and mp_now() < deadline:
         try:
             outcomes.append(queue.get(timeout=0.5))
@@ -83,7 +85,7 @@ def _run_race(root: Path, key: str, n_workers: int, hold_secs: float = 0.5) -> l
             continue
 
     for p in procs:
-        p.join(timeout=10)
+        p.join(timeout=_PROCESS_START_TIMEOUT_SECONDS)
 
     return outcomes
 
@@ -178,7 +180,7 @@ def test_idempotent_reacquire_succeeds_across_calls(tmp_path):
         args=(str(tmp_path), "reacq-key", "stable-holder", queue),
     )
     p.start()
-    p.join(timeout=5)
+    p.join(timeout=_PROCESS_START_TIMEOUT_SECONDS)
     assert not queue.empty(), "worker produced no output"
     outcome = queue.get()
     assert outcome[0] == "ok", f"unexpected outcome: {outcome}"

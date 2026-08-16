@@ -111,7 +111,7 @@ PAYLOAD=$(cat)
 # filename (codex P1). If NEITHER filename appears, the call cannot target a
 # protected file: approve fast without calling jq. Over-match is safe: the
 # precise parse + normalization below keys on the write TARGET.
-if [[ "$PAYLOAD" != *"graph.json"* && "$PAYLOAD" != *"target-state.md"* ]]; then
+if [[ "$PAYLOAD" != *"graph.json"* && "$PAYLOAD" != *"target-state.md"* && "$PAYLOAD" != *".fno/artifacts/"* ]]; then
     _approve
 fi
 
@@ -177,10 +177,11 @@ case "$TOOL" in
     fi
     # cv-9def52a7: artifact edit during a drive -> ALLOWED, audit-tagged.
     if [[ "$FILE_PATH" == *"/.fno/artifacts/"*.md ]] && drive_authority_active; then
-        if declare -F emit_event >/dev/null 2>&1; then
-            emit_event "hook" "artifact_edited_operator_initiated" \
+        if declare -F emit_event_raw >/dev/null 2>&1; then
+            emit_event_raw "operator_initiated" \
                 "$(jq -nc --arg fp "$FILE_PATH" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                    '{file_path:$fp, last_operator_edit:$ts, reason:"drive_authority_active"}' 2>/dev/null || echo '{}')" \
+                    '{action_type:"artifact_edited_operator_initiated", file_path:$fp, last_operator_edit:$ts, reason:"drive_authority_active"}' 2>/dev/null || echo '{}')" \
+                "hook" \
                 2>/dev/null || true
         fi
         _approve

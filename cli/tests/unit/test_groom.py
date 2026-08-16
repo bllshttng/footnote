@@ -99,6 +99,33 @@ def test_dry_run_neither_claims_nor_spawns(claims_root, spawns):
     assert G.run_groom(cwd="/tmp", today=DAY)["status"] == "dispatched"
 
 
+def test_config_disabled_skips_the_worker_spawn(claims_root, monkeypatch, spawns):
+    """x-aaaf wave 2 (AC4-HP): config.groom.enabled=false stops the spawn."""
+    monkeypatch.setattr(G, "groom_enabled", lambda: False)
+    r = G.run_groom(cwd="/tmp", today=DAY)
+    assert r["status"] == "disabled"
+    assert not spawns
+
+
+def test_config_disabled_still_allows_a_dry_run(claims_root, monkeypatch, spawns):
+    """A dry run is a preview, never a spawn - the gate must not block it."""
+    monkeypatch.setattr(G, "groom_enabled", lambda: False)
+    r = G.run_groom(cwd="/tmp", today=DAY, dry_run=True)
+    assert r["status"] == "dry-run"
+    assert not spawns
+
+
+def test_groom_enabled_defaults_true_matching_prior_ungated_behavior(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    assert G.groom_enabled() is True
+
+
 def test_unlaunchable_spawn_hands_the_day_back(claims_root, monkeypatch, spawns):
     # An OSError means the binary never executed, so no lever was pulled and the
     # day must not be burned behind a marker nothing clears until tomorrow.

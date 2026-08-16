@@ -25,7 +25,6 @@ below the runtime (``fno backlog done``, ``fno done``, the stop-hook seam).
 """
 from __future__ import annotations
 
-import datetime as _dt
 import json
 import sys
 from pathlib import Path
@@ -107,31 +106,25 @@ def emit_operator_initiated(
     The operator-authority matrix (design LD3/LD29) *allows* informational
     actions -- ``fno backlog done``, ``fno gate set``, artifact edits -- while
     an operator holds a drive window, but tags them so the audit trail
-    attributes the action to the operator rather than the LLM. These are
-    internal-observability events: like the stop hook's
-    ``promise_forged_during_drive`` they are intentionally NOT registered in
-    ``events-schema.yaml`` and so bypass ``fno.events.validate``. The
-    ``{timestamp, source, type, data}`` envelope matches the bash
-    ``scripts/lib/events.sh::emit_event`` siblings so an auditor greps one
-    stream for every matrix event in a project.
+    attributes the action to the operator rather than the LLM. The generic
+    ``operator_initiated`` event keeps the caller's action kind in
+    ``data.action_type`` so every matrix action uses the validated canonical
+    envelope and the same coordinated append path as other project events.
 
     Best-effort: callers gate on :func:`is_drive_authority_active` first, and
     any write failure here is swallowed so audit-tagging never breaks the
     primary command.
     """
     target = events_path if events_path is not None else _project_events_path()
-    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    record = {"timestamp": ts, "source": source, "type": action_type, "data": data}
     try:
-        # json.dumps is inside the try too: a non-serializable value in **data
-        # would raise TypeError, which must not break the primary command.
-        line = json.dumps(record, separators=(",", ":")) + "\n"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Single JSONL record is well under PIPE_BUF (4096), so an 'a'-mode
-        # write is atomic and interleaves at line boundaries with concurrent
-        # emitters -- matching scripts/lib/events.sh::emit_event.
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        from fno.events import _build, append_event
+
+        event = _build(
+            "operator_initiated",
+            source,
+            {**data, "action_type": action_type},
+        )
+        append_event(event, events_path=target)
     except Exception as exc:
         print(
             f"drive_authority: warning: emit_operator_initiated({action_type!r}) "

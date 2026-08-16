@@ -1,0 +1,33 @@
+# Known spawn-shaped call sites, held by the CI ratchet (x-aaaf wave 3.3).
+# Each entry is <file>::<enclosing-function> (Python) or <file>:: (shell,
+# file-level: bash has no reliable function-boundary AST, so a shell site is
+# tracked per-file, not per-function - the ceiling this baseline accepts;
+# a Python site is keyed on function, not line, so a reorder inside an
+# existing caller does not trip the gate).
+#
+# A NEW site appearing anywhere the check scans is what trips CI. Every line
+# below is either an autonomy-status spawner name (matches a row in
+# `fno autonomy status`) or an explicit reason the site is NOT autonomous
+# (an operator-invoked command, or plain text/comment with no real call).
+#
+# Forgetting a gate is refused at runtime by config.autonomy.enabled.
+# Forgetting to REGISTER a new spawner is refused here, at CI.
+cli/src/fno/backlog/advance.py::_spawn_worker  # advance / dispatch_lanes / epic converge (config.auto_continue.enabled)
+cli/src/fno/backlog/groom.py::_spawn_groom_worker  # groom (config.groom.enabled)
+cli/src/fno/cli.py::  # NOT a spawn site: LAZY_SUBCOMMANDS declares "agents" as a command group
+cli/src/fno/evals/runner.py::_default_spawn  # evals runner (config.evals.enabled)
+cli/src/fno/observer/cli.py::_default_spawn  # NOT autonomous: explicit `fno observer replay` operator command
+cli/src/fno/pr/_ritual.py::_spawn_judgment  # post-merge ritual (config.post_merge.enabled)
+cli/src/fno/pr_watch/_dispatch.py::fire_skill  # pr_watch headless PR poll (config.pr_watch.enabled)
+cli/src/fno/provenance/spawn_think.py::_spawn_think_worker  # spawn_think (config.think_spawn.enabled)
+cli/src/fno/recovery.py::_redispatch  # recovery sweep (config.recovery.enabled)
+cli/src/fno/recovery.py::_respawn_bg_resume  # recovery sweep (config.recovery.enabled)
+cli/src/fno/restart.py::_revive_orphans  # restart (config.restart.enabled)
+cli/src/fno/retro/keep_going.py::_spawn_target_worker  # keep_going (config.keep_going.enabled)
+cli/src/fno/verify_advise.py::run_verifier  # NOT autonomy: synchronous ship-time verify sub-step of an already-permitted ship, not its own self-start trigger
+hooks/context-nudge.sh::  # NOT a call site: quotes `fno agents spawn` inside an operator-facing nudge message
+scripts/run-target-loop.sh::  # NOT a call site: comment only; the real dispatch is the Rust `fno-agents loop run --driver target` binary, out of this script's scan
+skills/agent/scripts/normalize.sh::  # NOT a call site: comment/variable-name references only
+skills/agent/scripts/spawn.sh::  # explicit operator command wrapper (`/fno:agent spawn`); builds argv from a dynamic $VERB, not a literal spawn call
+skills/target/scripts/dispatch-node.sh::  # advance / dispatch_lanes family (config.auto_continue.enabled) - the shell side of the same autonomous continuation
+skills/target/scripts/handoff.sh::  # target-self-handoff (config.autonomy.enabled master switch, checked before target.handoff.enabled). See docs/architecture/target-self-handoff.md.

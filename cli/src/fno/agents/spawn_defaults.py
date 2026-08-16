@@ -56,13 +56,14 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 
     Returns ``(provider_present, provider_value, model_present, effort_present)``.
     Handles both `--flag value` and `--flag=value`; stops at the `--argv`
-    payload boundary; skips a value flag's value token.
+    payload boundary and at a bare `--` passthrough fence (x-1caa: fenced
+    tokens are the provider's flags, never fno's); skips a value flag's value.
     """
     provider_present = model_present = effort_present = False
     provider_value: Optional[str] = None
     it = iter(args)
     for a in it:
-        if a == "--argv":
+        if a == "--argv" or a == "--":
             break
         key, eq, val = a.partition("=")
         if key in _PROVIDER_FLAGS:
@@ -118,6 +119,17 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
 # `-H` selects the harness and `-P` the vendor, so both are value flags here.
 _EXPLICIT_SUBSTRATE_BOOLS = ("--headless", "-p", "-o", "--once")
 
+#: x-1caa: the pane-only `--` passthrough refusal body, shared by this seam
+#: (explicit-flag substrate, pre-config-injection, covers the Rust-routed lane)
+#: and the Python CLI lane (resolved substrate incl. config defaults). One
+#: string, two triggers - reword it here, not per lane.
+PASSTHROUGH_PANE_ONLY = (
+    "passthrough after -- is pane-only; the "
+    "bg/headless argv builders carry none of the pane's provider "
+    "refusals, so the tokens cannot be forwarded. Use --substrate pane "
+    "(the default) or drop them."
+)
+
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _SHORT_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -161,19 +173,17 @@ def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:
 def _positional_indices(toks: Sequence[str]) -> List[int]:
     """Indices of positional tokens (NAME, MESSAGE), skipping flags + their values.
 
-    Past a bare ``--`` seed fence every token is positional prompt text, even
-    when flag-shaped (click and the Rust client both treat it so).
+    Stops at a bare ``--`` fence: the first fenced token still lands in the
+    MESSAGE (click fills positionals in order), and the rest are the x-1caa
+    provider passthrough - provider tokens, never prompt positionals to refuse.
     """
     idxs: List[int] = []
     i = 0
     n = len(toks)
     while i < n:
         t = toks[i]
-        if t == "--argv":
+        if t == "--argv" or t == "--":
             break
-        if t == "--":
-            idxs.extend(range(i + 1, n))
-            return idxs
         if t.startswith("-"):
             if "=" not in t and t in _SPAWN_VALUE_FLAGS:
                 i += 2  # skip the flag and its value
@@ -183,6 +193,29 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
         idxs.append(i)
         i += 1
     return idxs
+
+
+def _refuse_off_pane_passthrough(toks: Sequence[str], err: IO[str]) -> None:
+    """Refuse `--` passthrough tokens on an explicit bg/headless substrate
+    (x-1caa AC7): those argv builders carry none of the pane's provider
+    refusals, so forwarding there would be a second, unguarded surface.
+
+    Passthrough is fenced tokens in EITHER shape: more than one token after
+    the fence, or any fenced token beside a pre-fence positional message (the
+    legacy flag-shaped-seed idiom is exactly ONE fenced token with NO message
+    before the fence). Runs at the seam on operator argv and again after
+    config injection, so a substrate that arrived by config default - which
+    reroutes to the Rust lane before the Python CLI's own refusal can run -
+    is refused here too.
+    """
+    fence = next((i for i, t in enumerate(toks) if t == "--"), None)
+    if fence is None:
+        return
+    if _has_explicit_substrate(toks) not in ("bg", "headless"):
+        return
+    if len(toks) - fence - 1 > 1 or _positional_indices(toks[:fence]):
+        print(f"fno agents spawn: {PASSTHROUGH_PANE_ONLY}", file=err)
+        raise SystemExit(2)
 
 
 def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
@@ -273,9 +306,14 @@ def normalize_spawn_args(
             del toks[last]
             toks += ["--substrate", tok]
 
-    # Pass 2: -r / --resume id widening + implied bg.
+    # Pass 2: -r / --resume id widening + implied bg. The scan sees only the
+    # pre-fence head (x-1caa): a fenced `--resume`/`-r` is the provider's flag,
+    # and reading it here would append an implied `--substrate bg` under a
+    # passthrough fence - or exit 2 on the provider's short-flag value.
+    _fence = next((i for i, t in enumerate(toks) if t == "--"), None)
+    head_toks = toks if _fence is None else toks[:_fence]
     resume_idxs = [
-        i for i, t in enumerate(toks)
+        i for i, t in enumerate(head_toks)
         if t in ("-r", "--resume")
         or t.startswith("--resume=")
         or (t.startswith("-r") and len(t) > 2)  # -r=ID and the Click -rID attached form
@@ -326,18 +364,37 @@ def normalize_spawn_args(
             toks[value_at] = resolved
         # `--resume` is bg-only: default the substrate when none was pinned.
         # Print the implied choice so the routing decision is never silent
-        # (blueprint Silent-Failure-Hunter / Locked Decision 4).
+        # (blueprint Silent-Failure-Hunter / Locked Decision 4). The flag pair
+        # splices BEFORE any bare `--` fence (x-1caa): appended past it, click
+        # reads it as passthrough positionals and the implied lane is lost.
         if _has_explicit_substrate(toks) is None:
-            toks += ["--substrate", "bg"]
+            cut = _fence if _fence is not None else len(toks)
+            toks = toks[:cut] + ["--substrate", "bg"] + toks[cut:]
             print("fno agents spawn: substrate: bg (implied by --resume)", file=err)
+
+    # x-1caa: a bare `--` fence carries provider passthrough (the first fenced
+    # token is the MESSAGE only in the legacy no-message idiom; click fills
+    # positionals in order). The pane substrate splices those tokens into the
+    # provider argv behind the composed-argv refusals; bg/headless build argv
+    # in Rust with none of those guards, so forwarding there would be a second,
+    # unguarded surface. Refuse here - this seam is the one front door both
+    # runtimes share - rather than dropping the tokens or corrupting the seed.
+    # A single fenced token with NO message before the fence stays the legacy
+    # flag-shaped-seed idiom, untouched.
+    fence = next((i for i, t in enumerate(toks) if t == "--"), None)
+    if fence is not None:
+        _refuse_off_pane_passthrough(toks, err)
 
     # Pass 3: the NAME axis. `spawn` takes ONE positional and it is the MESSAGE;
     # the agent name is a handle the caller rarely picks, so it is minted unless
     # --name says otherwise. Canonicalize to `--name <n> <message>` so both
     # parsers read the same shape. A second positional is refused rather than
     # guessed at: under the old `<name> <message>` grammar it would silently
-    # register an agent named after the prompt.
-    if not any(t == "--name" or t.startswith("--name=") for t in toks):
+    # register an agent named after the prompt. The mint probe scans only the
+    # pre-fence head: a passthrough `--name` is the PROVIDER's flag (claude's
+    # session display name) and must not suppress fno's own name mint (x-1caa).
+    head = toks if fence is None else toks[:fence]
+    if not any(t == "--name" or t.startswith("--name=") for t in head):
         names = existing_names if existing_names is not None else _read_registry_names()
         slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
         toks = ["--name", slug, *toks]
@@ -380,13 +437,22 @@ _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
     """The MESSAGE seed: the ``--message`` value, else the sole positional (the
     name rides ``--name``). A bare ``--`` fence makes the first token after it
-    the seed, even when flag-shaped. Stops at the ``--argv`` payload boundary."""
+    the seed - even when flag-shaped - ONLY in the legacy no-message idiom; a
+    positional message before the fence outranks the fenced tail (x-1caa).
+    Stops at the ``--argv`` payload boundary."""
     i = 0
     while i < len(toks):
         t = toks[i]
         if t == "--argv":
             break
         if t == "--":
+            # x-1caa: a positional MESSAGE before the fence outranks the fenced
+            # tail (click fills positionals in order); the first fenced token
+            # is the seed only in the legacy no-message idiom. Reading the
+            # fenced token here silently dropped the profile layer.
+            head_pos = _positional_indices(toks[:i])
+            if head_pos:
+                return toks[head_pos[0]]
             return toks[i + 1] if i + 1 < len(toks) else None
         if t == "--message":
             return toks[i + 1] if i + 1 < len(toks) else None
@@ -443,12 +509,14 @@ def _profile_key(seed: Optional[str]) -> Optional[str]:
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
-    """Whether the permission control is pinned, up to the ``--argv`` boundary.
+    """Whether the permission control is pinned, up to the ``--argv`` boundary
+    and a bare ``--`` fence (x-1caa: a fenced ``--permission-mode`` is the
+    provider's flag, not fno's, and must not suppress a config default).
     ``--yolo``/``-Y`` count: they are the same knob as ``--permission-mode`` and
     are mutually exclusive with it downstream, so a config value injected
     alongside an explicit ``--yolo`` would exit 2 (explicit intent must win)."""
     for t in toks:
-        if t == "--argv":
+        if t == "--argv" or t == "--":
             break
         if (
             t in ("--permission-mode", "--yolo", "-Y")
@@ -937,4 +1005,9 @@ def inject_spawn_defaults(
         )
     if inject:
         out = [out[0], *inject, *out[1:]]
+        # x-1caa: injection can pin the substrate the operator left open, and
+        # the Rust-routed lane never reaches the Python CLI's own refusal - so
+        # the off-pane passthrough gate re-runs on the final argv, not just the
+        # operator's.
+        _refuse_off_pane_passthrough(out[1:], err)
     return out

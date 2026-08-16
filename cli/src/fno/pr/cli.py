@@ -78,7 +78,9 @@ def verify(
         "One authoritative CI verdict for a PR from statusCheckRollup. Prints a "
         "JSON line {pr, verdict, settled, green, checks}; exit 0 green, 1 red, "
         "2 pending, 3 unknown (no checks), 4 fetch error, 127 gh-missing. "
-        "In-progress checks read as pending, never red."
+        "In-progress checks read as pending, never red. settled is true only "
+        "when every latest run carries a real conclusion, so a cancelled run "
+        "reads red AND unsettled."
     ),
 )
 def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> None:

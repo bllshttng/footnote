@@ -9719,10 +9719,15 @@ def cmd_archive(
     Dry-run by default: prints how many would move and why some are held back.
     ``--apply`` mutates under the graph lock (archive written first, then the
     working graph, so a crash duplicates rather than loses). Never archives a
-    node an OPEN node still references (blocker, parent, or supersede target).
+    node an OPEN node still references through a hard edge (blocker, parent,
+    supersede target). A SOFT edge (the open node's ``related`` peer or
+    ``source_node_id`` origin) does not hold the target: the reference is
+    stripped from the open side at apply time and the node leaves; the
+    read-through fallback keeps its id resolvable.
 
-    Every run's receipt names all four held-back buckets, not just the moved
-    count: a leg that runs daily and reports bare "ok" is indistinguishable
+    Every run's receipt names all four held-back buckets plus the soft-edge
+    strip count, and every run emits a ``graph_archive_swept`` event, dry-run
+    included: a leg that runs daily and reports bare "ok" is indistinguishable
     from one that never ran (x-a023) - the count that matters is often the
     held-back one, not the moved one.
     """
@@ -9736,7 +9741,12 @@ def cmd_archive(
         locked_mutate_graph,
         GraphCorruptError,
     )
-    from fno.graph.archive import partition_for_archive, merge_into_archive, stamp_archived_at
+    from fno.graph.archive import (
+        merge_into_archive,
+        partition_for_archive,
+        release_soft_edges,
+        stamp_archived_at,
+    )
 
     now = datetime.now(timezone.utc)
 
@@ -9759,11 +9769,14 @@ def cmd_archive(
         remaining = [e for e in entries if e.get("id") not in arch_ids]
         return to_archive, remaining, skipped
 
-    def _echo_receipt(moved: int, held: dict[str, int]) -> None:
+    def _echo_receipt(moved: int, held: dict[str, int], stripped: int = 0) -> None:
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
+        typer.echo(f"  soft edges stripped from open nodes: {stripped}")
 
-    def _emit_swept_event(moved: int, held: dict[str, int]) -> None:
+    def _emit_swept_event(
+        moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
+    ) -> None:
         try:
             from fno.events import _build, append_event
             from fno.paths import state_dir
@@ -9777,6 +9790,8 @@ def cmd_archive(
                     "held_related": held["related-peer-not-archived"],
                     "held_too_recent": held["too-recent"],
                     "held_no_timestamp": held["no-parseable-timestamp"],
+                    "soft_edges_stripped": stripped,
+                    "mode": mode,
                     "older_than_days": older_than_days,
                 },
             )
@@ -9792,9 +9807,13 @@ def cmd_archive(
         )
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
         typer.echo("Re-run with --apply to move them.")
+        # Every run emits, dry-run included: a leg that went silent must stay
+        # distinguishable from one that never ran, and the dry-run leg (the
+        # daily groom rehearsal) is the one most likely to break quietly.
+        _emit_swept_event(len(to_archive), _archive_bucket_counts(skipped), mode="dry-run")
         return
 
-    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([])}
+    receipt: dict = {"moved": 0, "held": _archive_bucket_counts([]), "stripped": 0}
 
     def mutator(entries):
         to_archive, remaining, skipped = _split(entries)
@@ -9802,6 +9821,16 @@ def cmd_archive(
         if not to_archive:
             return entries
         receipt["moved"] = len(to_archive)
+
+        # Soft-edge release BEFORE the archive write: strip the soon-archived
+        # ids from staying nodes' related lists / source_node_id, so the working
+        # graph never keeps a soft pointer at an archived id. One write, under
+        # the same lock as everything else here.
+        arch_ids = {
+            e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")
+        }
+        remaining, stripped = release_soft_edges(remaining, arch_ids)
+        receipt["stripped"] = stripped
 
         # Archive-first: append (deduped) and write the archive BEFORE returning
         # `remaining` for the graph write, so a crash leaves a duplicate (healed
@@ -9822,8 +9851,8 @@ def cmd_archive(
         typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
-    _echo_receipt(receipt["moved"], receipt["held"])
-    _emit_swept_event(receipt["moved"], receipt["held"])
+    _echo_receipt(receipt["moved"], receipt["held"], receipt["stripped"])
+    _emit_swept_event(receipt["moved"], receipt["held"], receipt["stripped"])
 
 
 @cli.command(

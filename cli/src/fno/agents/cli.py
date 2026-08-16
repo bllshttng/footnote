@@ -354,6 +354,19 @@ def cmd_watch(
 @agents_app.command("spawn")
 def cmd_spawn(
     message: str = typer.Argument("", help="The prompt to seed the worker with."),
+    passthrough: list[str] | None = typer.Argument(
+        None,
+        help=(
+            "Provider CLI flags after a `--` separator (x-1caa): `spawn \"hi\" "
+            "-- --verbose` forwards --verbose to the harness's own CLI, so a "
+            "flag fno never declared needs no code change. The parser stays "
+            "strict - an unknown fno flag before `--` (e.g. --modle) still "
+            "fails here rather than being silently forwarded. Pane substrate "
+            "only; the tokens ride the composed argv through the same "
+            "refusals (-p/--print, --settings, --session-id) that govern fno's "
+            "own flags."
+        ),
+    ),
     name: str = typer.Option(
         "",
         "--name",
@@ -807,6 +820,15 @@ def cmd_spawn(
             f"--substrate must be one of: pane, bg, headless (got {substrate})",
             file=sys.stderr,
         )
+        raise typer.Exit(code=2)
+    # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
+    # composed-argv refusals live. The seam refuses the explicit-flag spelling
+    # for the Rust-routed lane; this is the same refusal for the Python lane,
+    # including a substrate that arrived by config default after the seam.
+    if passthrough and (substrate != "pane" or once):
+        from fno.agents.spawn_defaults import PASSTHROUGH_PANE_ONLY
+
+        print(PASSTHROUGH_PANE_ONLY, file=sys.stderr)
         raise typer.Exit(code=2)
 
     if monitor is not None and monitor != "happy":
@@ -1291,6 +1313,7 @@ def cmd_spawn(
                     route_env=route_env,
                     monitor=monitor,
                     route_provider=route_provider,
+                    passthrough=passthrough,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
@@ -1346,6 +1369,13 @@ def cmd_spawn(
                 # Server-authored exact-placement receipt (anchor/direction/
                 # fallback/squad/tab); never synthesized from the request.
                 receipt_obj["placement"] = pane_result.placement
+            if pane_result.recovered:
+                # LD5: this pane was adopted after an unanswered
+                # control read, not created by this run. Proves a booted
+                # session, never that the prompt was consumed - the receipt
+                # must say so rather than reading identically to a normal
+                # spawn.
+                receipt_obj["recovered"] = True
             # Locked Decision 5: name the applied mode so an audit of "why did
             # this worker have edit rights" has a durable answer. Only when set,
             # so the unset receipt is unchanged.
@@ -2476,7 +2506,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
 
     This is the Python/Rust boundary: ``family1_truth_probe`` in
     ``crates/fno-agents/src/claude_ask.rs`` reads this, and ``resume`` decides
-    "is live - attaching" from it. The reachability verdict has to be ON this
+    "is live" from it. The reachability verdict has to be ON this
     wire or Rust keeps re-deriving liveness from the raw transcript ``state``
     and never sees the falsifier -- the same trap, one language over.
 

@@ -102,7 +102,9 @@ def _stub_fno(bin_dir: Path) -> None:
     fno.chmod(0o755)
 
 
-def _run_init_script(tmpdir: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess:
+def _run_init_script(
+    tmpdir: Path, extra_env: dict[str, str], *, timeout_s: int = 900
+) -> subprocess.CompletedProcess:
     """Run init-target-state.sh in an isolated tmpdir with the given env overrides.
 
     A PATH-shim `fno` (tmpdir/bin/fno) replaces the ~17 real CLI round-trips the
@@ -141,7 +143,7 @@ def _run_init_script(tmpdir: Path, extra_env: dict[str, str]) -> subprocess.Comp
         # The stub makes each run sub-second in isolation. Keep the backstop well
         # above the parallel full-suite scheduling tail so load cannot look like
         # a functional failure, while still bounding a genuinely hung hook.
-        timeout=90,
+        timeout=timeout_s,
     )
     return proc
 
@@ -252,6 +254,28 @@ def test_no_phase_init_event_emitted(tmp_path):
             "(loop-check reads manifest directly; ab-d0337fbc)"
         )
     # If events.jsonl doesn't exist at all, that's also correct.
+
+
+def test_cancelled_claimless_session_is_archived_on_next_init(tmp_path):
+    """A finalized explicit cancel must not strand the next target init."""
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir()
+    (state_dir / "target-state.md").write_text(
+        "---\nsession_id: old-run\ninput: old-plan\n---\n",
+        encoding="utf-8",
+    )
+    (state_dir / ".target-cancelled").touch()
+    (state_dir / "events.jsonl").write_text(
+        '{"type":"session_finalized","data":{"session_id":"old-run",'
+        '"termination_reason":"Interrupted"}}\n',
+        encoding="utf-8",
+    )
+
+    proc = _run_init_script(tmp_path, {"TARGET_SIZE": "M"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "old-run" not in (state_dir / "target-state.md").read_text()
+    assert list(state_dir.glob("target-state.terminal.*.md"))
 
 
 def test_authority_absent_without_beastmode(tmp_path):

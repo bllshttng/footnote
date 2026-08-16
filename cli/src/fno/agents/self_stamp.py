@@ -46,10 +46,17 @@ def stamp_from(from_name: Optional[str]) -> str:
     # foreign marker is contradicted and floors to "fno" rather than address the
     # return leg to a stranger. A single marker (the dominant case, and any
     # worker after the spawn-time scrub) resolves to its own handle.
-    ident = _owned_ident()
+    return resolve_self_handle() or "fno"
+
+
+def resolve_self_handle(
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Return this process's proven harness handle, or omit it when ambiguous."""
+    ident = _owned_ident(env)
     if ident.session_id and ident.harness:
         return canonical_handle(ident.session_id)
-    return "fno"
+    return None
 
 
 def resolve_self_model(env: Optional[Mapping[str, str]] = None) -> str:

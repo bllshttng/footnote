@@ -743,7 +743,10 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
     # round-trips intact inside the paired envelope.
     assert stored_body.startswith("<fno_mail "), stored_body[:40]
     assert stored_body.rstrip().endswith("</fno_mail>")
+    from fno.mail.envelope import FNO_MAIL_TRAILER
+
     inner = stored_body.split("\n", 1)[1].rsplit("\n", 1)[0]
+    inner = inner.removesuffix(f"\n{FNO_MAIL_TRAILER}")
     assert inner == body, f"Round-trip mismatch: got {len(inner)} chars"
 
 
@@ -1171,7 +1174,11 @@ def test_dispatch_send_queues_to_selected_session_when_live_miss_restamps(
     assert result.delivery == "durable"
     original_threads = read_all_threads(canonical_handle(original_id))
     assert len(original_threads) == 1
-    assert original_threads[0].messages[0].body.endswith("secret for A\n</fno_mail>")
+    from fno.mail.envelope import FNO_MAIL_TRAILER
+
+    assert original_threads[0].messages[0].body.endswith(
+        f"secret for A\n{FNO_MAIL_TRAILER}\n</fno_mail>"
+    )
     assert f'to="{canonical_handle(original_id)}"' in original_threads[0].messages[0].body
     assert read_all_threads(canonical_handle(replacement_id)) == []
     assert read_all_threads("victim") == []

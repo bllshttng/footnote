@@ -138,11 +138,11 @@ After the keep/revert/rework decision, append one `builder_step` to `.fno/events
 
 ```bash
 fno event emit --type builder_step \
-  -d '{"tried":"<the fix attempted>","found":"<what detection/guard showed>","fix":"<the change made>","outcome":"worked|failed|abandoned"}' \
+  -d '{"node_id":"<current node id>","tried":"<the fix attempted>","found":"<what detection/guard showed>","fix":"<the change made>","outcome":"worked|failed|abandoned"}' \
   || echo "warning: builder_step crumb not recorded (continuing)" >&2
 ```
 
-Truncate `tried`/`found`/`fix` to ~500 chars each (a crumb is a pointer, not a transcript). `found`/`fix` are optional; `tried` and `outcome` are required. Degrade, never block: a failed emit prints exactly the one warning above and the loop continues - no retry.
+Truncate `tried`/`found`/`fix` to ~500 chars each (a crumb is a pointer, not a transcript). `found`/`fix` are optional. `node_id`, `tried`, and `outcome` are required. Degrade, never block: a failed emit prints exactly the one warning above and the loop continues - no retry.
 
 #### 4. Summary
 

@@ -275,6 +275,31 @@ pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the current worktree root from any path inside it.
+///
+/// Unlike [`canonical_repo_root`], this preserves linked-worktree isolation.
+/// A non-git path falls back to the caller path so journal construction remains
+/// available in tests and degraded environments.
+pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
+    if cwd.join(".git").exists() {
+        return std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    }
+    let resolved = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| stdout.trim().to_string())
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from);
+    resolved
+        .and_then(|root| std::fs::canonicalize(&root).ok().or(Some(root)))
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +376,33 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(canonical_repo_root(&dir).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worktree_repo_root_resolves_from_subdirectory() {
+        fn git(dir: &Path, args: &[&str]) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let repo = tmp("repo-root");
+        std::fs::create_dir_all(repo.join("nested/source")).unwrap();
+        assert!(git(&repo, &["init", "-q"]));
+
+        let resolved = worktree_repo_root(&repo.join("nested/source"));
+        assert_eq!(resolved, std::fs::canonicalize(&repo).unwrap());
+        std::fs::remove_dir_all(repo).ok();
     }
 
     #[test]

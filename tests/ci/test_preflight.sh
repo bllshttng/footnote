@@ -36,6 +36,9 @@ GLOBAL_EVENTS="$TMP/global-events.jsonl"
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
+# STUB_FNO_SLOW (committed only by the FIFO test) widens the window between a
+# waiter acquiring the lock and finishing its run, so ticket order is observable.
+[[ -f STUB_FNO_SLOW ]] && sleep 4
 if [[ "\$*" == *"paths.worktrees_base"* ]]; then
     echo "$WT_BASE"
     exit 0
@@ -407,12 +410,279 @@ echo "$out" | grep -q "dirty.txt" && ok "lists the dirty file" || fail "did not 
 [[ ! -d "$WT_BASE/repo/preflight" ]] || { [[ -z "$(ls -A "$WT_BASE/repo/preflight" 2>/dev/null)" ]] && ok "no worktree materialized on refusal" || ok "worktree pre-existed (from green run) - refusal touched nothing"; }
 ( cd "$FIX" && rm -f dirty.txt )
 
-echo "== AC2-EDGE: concurrent invocation -> exit 3 with holder =="
+echo "== AC2-EDGE: concurrent invocation (--wait-timeout 0) -> exit 3 with holder =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"  # $$ is alive
-out="$(run_pf 2>&1)"; rc=$?
+out="$(run_pf --wait-timeout 0 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "exit 3 when lock held by a live pid" || fail "expected 3 got $rc"
 echo "$out" | grep -q "lock held" && ok "prints holder info" || fail "no holder info"
+echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hint" || fail "no skip hint"
 rm -rf "$LOCKDIR"
+
+echo "== FIFO queue: waiters are served in arrival order, not by chance =="
+rm -f "$ATT"
+( cd "$FIX" && touch STUB_FNO_SLOW && git add -A && git commit -qm "slow stub sentinel" )
+mkdir -p "$LOCKDIR"
+sleep 600 & fifo_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$fifo_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+run_pf --wait-timeout 90 >/dev/null 2>&1 & w1=$!
+t1=""
+for _i in $(seq 1 100); do
+    t1="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
+    [[ -n "$t1" ]] && break
+    sleep 0.2
+done
+[[ -n "$t1" ]] && ok "first waiter queued a ticket" || fail "first waiter never queued"
+run_pf --wait-timeout 90 >/dev/null 2>&1 & w2=$!
+t2=""
+for _i in $(seq 1 100); do
+    [[ "$(ls "$LOCKDIR.queue.d" 2>/dev/null | wc -l | tr -d ' ')" -ge 2 ]] && break
+    sleep 0.2
+done
+t2="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '2p')"
+[[ -n "$t2" ]] && ok "second waiter queued behind the first" || fail "second waiter never queued"
+rm -rf "$LOCKDIR"   # release: only the front ticket may take it next
+w1_served_first=0
+for _i in $(seq 1 100); do
+    if [[ ! -d "$LOCKDIR.queue.d/$t1" ]]; then w1_served_first=1; break; fi
+    sleep 0.1
+done
+if [[ $w1_served_first -eq 1 && -d "$LOCKDIR.queue.d/$t2" && -d "$LOCKDIR" ]]; then
+    ok "arrival order held: first waiter owns the lock while the second still queues"
+else
+    fail "FIFO violated (w1_served=$w1_served_first t2_queued=$([[ -d "$LOCKDIR.queue.d/$t2" ]] && echo yes || echo no))"
+fi
+wait "$w1"; r1=$?
+wait "$w2"; r2=$?
+[[ $r1 -eq 0 && $r2 -eq 0 ]] && ok "both waiters ran to GREEN after queueing" || fail "waiter outcomes r1=$r1 r2=$r2"
+[[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "queue drained clean" || fail "queue leftovers: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
+kill "$fifo_holder" 2>/dev/null; wait "$fifo_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+( cd "$FIX" && git rm -q STUB_FNO_SLOW && git commit -qm "drop slow stub sentinel" )
+
+echo "== FIFO queue: --wait-timeout expiry exits 3 and cleans up its ticket =="
+mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
+out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "expired wait exits 3" || fail "expected 3 got $rc: $out"
+echo "$out" | grep -q "gave up waiting after 4s" && ok "names the give-up" || fail "no give-up line: $out"
+echo "$out" | grep -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the skip hint" || fail "no skip hint: $out"
+[[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "ticket removed on give-up" || fail "ticket left behind: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== FIFO queue: a newcomer allocates above surviving tickets, never a dequeued hole =="
+mkdir -p "$LOCKDIR" "$LOCKDIR.queue.d/000002"
+printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
+printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR.queue.d/000002/holder"
+run_pf --wait-timeout 6 >/dev/null 2>&1 & mono_w=$!
+new_ticket=""
+for _i in $(seq 1 60); do
+    new_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '2p')"
+    [[ -n "$new_ticket" ]] && break
+    sleep 0.2
+done
+[[ "$new_ticket" == "000003" ]] && ok "newcomer allocated 000003 above the surviving 000002" || fail "allocation wrong: $new_ticket"
+[[ ! -d "$LOCKDIR.queue.d/000001" ]] && ok "the dequeued 000001 hole was not reused" || fail "000001 reused ahead of 000002"
+wait "$mono_w"; rc=$?
+[[ $rc -eq 3 ]] && ok "the newcomer gave up cleanly" || fail "expected 3 got $rc"
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
+rm -f "$ATT"   # the prior section minted an attestation for this SHA; reuse would skip the lock
+# The stamp must sit within the recycle slop of the holder process's real age
+# (a genuinely stalled holder wrote its own stamp): 12s old, STALL_MIN_AGE=10.
+recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$LOCKDIR"
+sleep 600 & stall_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$stall_holder" "$recent" > "$LOCKDIR/holder"
+out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "stole from a stalled holder and ran to GREEN" || fail "stall steal failed rc=$rc: $out"
+echo "$out" | grep -q "stalled holder" && ok "the steal is reported as a recorded exception" || fail "no exception line: $out"
+if ! kill -0 "$stall_holder" 2>/dev/null; then
+    ok "the stalled holder's tree was TERMed on the steal"
+else
+    fail "the stalled holder survived the steal"; kill "$stall_holder" 2>/dev/null
+fi
+wait "$stall_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== stall guard: a live, non-stale holder is never stolen =="
+# Floor 0 makes the stall branch unreachable by arithmetic (delta >= 0 can
+# never be < 0), and the holder is the suite's own pid: it cannot die or be
+# recycled mid-test, so neither dead path can fire either. The old fixture
+# used a freshly forked busy-spin holder with a stamp computed a section
+# earlier: under host load the section's runtime exceeded the 60s recycle
+# slop, the stamp then claimed an age the young process could not have, and
+# the (correct) recycled-pid steal fired - failing the code for the fixture's
+# own lie. Progress-vs-stall semantics are pinned by the unit section below.
+rm -f "$ATT"   # the stall-steal run just minted one for this same SHA
+mkdir -p "$LOCKDIR"
+guard_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$$" "$guard_recent" > "$LOCKDIR/holder"
+holder_stamp="$(cat "$LOCKDIR/holder")"
+out="$(PREFLIGHT_STALL_MIN_AGE=10 PREFLIGHT_STALL_PROBE_SPACING=2 PREFLIGHT_STALL_CPU_FLOOR=0 run_pf --wait-timeout 6 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "a healthy holder is waited on, not stolen" || fail "expected 3 got $rc: $out"
+echo "$out" | grep -q "stalled holder" && fail "stole from a healthy holder" || ok "no false stall verdict"
+[[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the healthy holder kept its lock" || fail "holder stamp changed"
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
+old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+rm -f "$ATT"
+mkdir -p "$LOCKDIR"
+sleep 600 & recycled_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$recycled_holder" "$old" > "$LOCKDIR/holder"
+out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "stole the recycled holder's lock and ran to GREEN" || fail "recycled steal failed rc=$rc: $out"
+# The steal fires at first acquire (before queueing), which prints nothing;
+# what matters is the path taken: dead-style, never the stall/TERM verdict.
+echo "$out" | grep -q "stalled holder" && fail "recycled pid took the stall path" || ok "recycled pid took the dead path, not the stall path"
+kill -0 "$recycled_holder" 2>/dev/null && ok "the innocent recycled process was NOT signaled" || fail "an innocent process was TERMed"
+kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== phantom ticket: a queued ticket stamped by a recycled pid is reaped =="
+rm -f "$ATT"   # else attestation reuse skips the lock and the phantom is never walked
+mkdir -p "$LOCKDIR.queue.d/000001"
+sleep 600 & phantom_pid=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$phantom_pid" "$old" > "$LOCKDIR.queue.d/000001/holder"
+out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "a phantom front ticket did not wedge a free lock" || fail "phantom wedged the queue rc=$rc: $out"
+[[ ! -d "$LOCKDIR.queue.d/000001" ]] && ok "the phantom ticket was reaped" || fail "phantom ticket survived"
+kill "$phantom_pid" 2>/dev/null; wait "$phantom_pid" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== cancel: the preflight-cancel sentinel stops a queued waiter and clears its ticket =="
+# Signals are NOT the asserted path: macOS bash 3.2 does not run INT/TERM
+# traps while waiting on a child (verified against foreground sleep,
+# sleep+wait, and a builtin read), so a SIGINT-asserting test fails on this
+# platform while passing on CI's Linux bash 5. The polled sentinel is the
+# cancellation contract that holds everywhere; the traps remain best-effort.
+rm -f "$ATT"   # else reuse exits 0 before the waiter ever queues
+rm -rf "$FIX/.fno"   # fresh clone: no state dir exists until the queued run ensures it
+mkdir -p "$LOCKDIR"
+sleep 600 & cancel_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$cancel_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+( cd "$FIX" && exec bash scripts/ci/preflight.sh --wait-timeout 60 >/dev/null 2>&1 ) & cancel_w=$!
+kill -0 "$cancel_w" 2>/dev/null || fail "fixture: the waiter failed to fork under load"
+cancel_ticket=""
+cancel_deadline=$(( $(date +%s) + 90 ))
+while [[ "$(date +%s)" -lt "$cancel_deadline" ]]; do
+    cancel_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
+    [[ -n "$cancel_ticket" ]] && break
+    sleep 1
+done
+[[ -n "$cancel_ticket" ]] && ok "the waiter queued a ticket" || fail "waiter never queued (startup starved)"
+[[ -d "$FIX/.fno" ]] && ok "the queued run ensured the sentinel's parent exists" \
+    || fail "fresh checkout: the advertised touch target has no parent"
+touch "$FIX/.fno/preflight-cancel"
+wait "$cancel_w"; rc=$?
+[[ $rc -eq 130 ]] && ok "the sentinel stops a queued waiter with exit 130" || fail "expected 130 got $rc"
+[[ ! -d "$LOCKDIR.queue.d/$cancel_ticket" ]] && ok "the cancelled waiter's ticket was removed" || fail "ticket left behind"
+[[ ! -e "$FIX/.fno/preflight-cancel" ]] && ok "the sentinel is consumed (one-shot)" || fail "sentinel left behind for the next run"
+kill "$cancel_holder" 2>/dev/null; wait "$cancel_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== cancel guard: a STALE sentinel never cancels a later, innocent waiter =="
+# A sentinel nobody consumed (its wait already ended) must not sit waiting to
+# kill the next queued run: past the one-hour grace the next waiter discards
+# it and keeps waiting.
+mkdir -p "$LOCKDIR"
+sleep 600 & stale_holder=$!
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$stale_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+touch -t 202001010000 "$FIX/.fno/preflight-cancel"   # mtime years old
+out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "a stale sentinel did not cancel the waiter" || fail "stale sentinel cancelled rc=$rc: $out"
+echo "$out" | grep -q "cancelled while queued" && fail "reported a cancellation nobody requested" || ok "no false cancel report"
+[[ ! -e "$FIX/.fno/preflight-cancel" ]] && ok "the stale sentinel was discarded by the next waiter" || fail "stale sentinel left behind"
+kill "$stale_holder" 2>/dev/null; wait "$stale_holder" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== cancel (signal lane): INT still works where bash runs traps =="
+# macOS bash 3.2 never delivers trapped INT while the shell waits on a child,
+# so the signal branch is asserted only on platforms where it can fire (CI's
+# Linux bash 5); the sentinel test above carries the contract everywhere.
+if [[ "$(uname)" != "Darwin" ]]; then
+    rm -f "$ATT"
+    mkdir -p "$LOCKDIR"
+    sleep 600 & sig_holder=$!
+    printf 'pid=%s started=%s host=x sha=deadbee\n' "$sig_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
+    ( cd "$FIX" && exec bash scripts/ci/preflight.sh --wait-timeout 60 >/dev/null 2>&1 ) & sig_w=$!
+    sig_ticket=""
+    sig_deadline=$(( $(date +%s) + 90 ))
+    while [[ "$(date +%s)" -lt "$sig_deadline" ]]; do
+        sig_ticket="$(ls "$LOCKDIR.queue.d" 2>/dev/null | sed -n '1p')"
+        [[ -n "$sig_ticket" ]] && break
+        sleep 1
+    done
+    [[ -n "$sig_ticket" ]] || fail "signal lane: waiter never queued"
+    kill -INT "$sig_w" 2>/dev/null
+    wait "$sig_w"; rc=$?
+    [[ $rc -eq 130 ]] && ok "SIGINT exits 130 where traps are delivered" || fail "signal lane expected 130 got $rc"
+    [[ ! -d "$LOCKDIR.queue.d/$sig_ticket" ]] && ok "signal-cancelled ticket removed" || fail "signal lane ticket left behind"
+    kill "$sig_holder" 2>/dev/null; wait "$sig_holder" 2>/dev/null
+    rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+else
+    echo "  ok: signal lane skipped on Darwin (bash 3.2 does not deliver trapped INT while waiting; sentinel lane covers the contract)"
+fi
+
+echo "== cputime parse: octal-looking fields sum in base 10 =="
+eval "$(sed -n '/^cputime_to_s() {/,/^}/p' "$PREFLIGHT_SRC")"
+[[ "$(cputime_to_s "08:09.40")" == "489" ]] && ok "08:09.40 parses as 489s" || fail "octal parse: $(cputime_to_s "08:09.40")"
+[[ "$(cputime_to_s "1-02:03:04")" == "93784" ]] && ok "day-prefixed durations parse" || fail "day parse: $(cputime_to_s "1-02:03:04")"
+unset -f cputime_to_s
+
+echo "== stall predicate: floor and turnover are arithmetic, not host load =="
+# The progress-vs-stall semantics are pinned here, deterministically: a
+# sleeping holder accumulates no CPU on any load, and floor 0 makes the
+# condemnation branch unreachable by arithmetic (delta >= 0 can never be < 0).
+eval "$(sed -n -e '/^cputime_to_s() {/,/^}/p' -e '/^holder_tree_pids() {/,/^}/p' \
+    -e '/^holder_tree_cpu() {/,/^}/p' -e '/^process_age_s() {/,/^}/p' \
+    -e '/^holder_is_stalled() {/,/^}/p' "$PREFLIGHT_SRC")"
+STALL_MIN_AGE=10; STALL_PROBE_SPACING=1; STALL_CPU_FLOOR=0
+unit_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+sleep 600 & unit_a=$!
+line_a="pid=$unit_a started=$unit_recent host=x sha=deadbee"
+holder_is_stalled "$line_a" && fail "condemned before a spaced second sample" \
+    || ok "first sample baselines instead of condemning"
+sleep 1.3
+holder_is_stalled "$line_a" && fail "floor 0 condemned a live holder" \
+    || ok "floor 0 can never condemn (delta >= 0 is not < 0)"
+STALL_CPU_FLOOR=1
+sleep 600 & unit_b=$!
+line_b="pid=$unit_b started=$unit_recent host=x sha=deadbee"
+holder_is_stalled "$line_b" || true   # baseline for the second sleeper
+sleep 1.3
+holder_is_stalled "$line_b" && ok "a zero-CPU holder is condemned after the probe window" \
+    || fail "no-CPU holder not condemned"
+kill "$unit_a" "$unit_b" 2>/dev/null; wait "$unit_a" 2>/dev/null; wait "$unit_b" 2>/dev/null
+# Pin the sampler itself: before its pid-argument fix every sample summed 0
+# (an unbound local under set -u), which floor arithmetic cannot distinguish
+# from a truly idle tree - so assert REAL positive CPU from a busy tree.
+# Four spinners over 15s yield >= 1 integer CPU-second even at load ~400
+# (measured ~1s per spinner per 20s at load 380); fewer or shorter would
+# truncate to zero on a starved box.
+unit_spin_pids=""
+for _s in 1 2 3 4; do ( while :; do :; done ) & unit_spin_pids="$unit_spin_pids $!"; done
+unit_sum_start=0
+for _p in $unit_spin_pids; do unit_sum_start=$(( unit_sum_start + $(holder_tree_cpu "$_p") )); done
+sleep 15
+unit_sum_end=0
+for _p in $unit_spin_pids; do unit_sum_end=$(( unit_sum_end + $(holder_tree_cpu "$_p") )); done
+for _p in $unit_spin_pids; do kill "$_p" 2>/dev/null; wait "$_p" 2>/dev/null; done
+[[ $(( unit_sum_end - unit_sum_start )) -ge 1 ]] \
+    && ok "the tree-CPU sampler measures real progress (delta=$(( unit_sum_end - unit_sum_start ))s)" \
+    || fail "sampler read no progress from a busy tree (delta=$(( unit_sum_end - unit_sum_start ))s)"
+unset -f cputime_to_s holder_tree_pids holder_tree_cpu process_age_s holder_is_stalled
+
+echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
+for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done
+git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
+( cd "$FIX" && git reset -q --hard HEAD~3 )
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 6 ]] && ok "exit 6 on a stale base" || fail "expected 6 got $rc: $out"
+echo "$out" | grep -q "3 commit(s) behind origin/main" && ok "names the behind count" || fail "no behind count: $out"
+echo "$out" | grep -q "rebase" && ok "tells the caller to rebase" || fail "no rebase guidance: $out"
+[[ ! -d "$LOCKDIR" && ! -d "$LOCKDIR.queue.d" ]] && ok "refused before creating any lock or queue artifact" || fail "lock artifacts left behind"
+git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
 
 echo "== canonical concurrency: a second clone cannot append pending for the same SHA =="
 lock_sha="$(git -C "$FIX" rev-parse HEAD)"
@@ -420,7 +690,7 @@ GLOBAL_RECEIPT_LOCKDIR="$TMP/.preflight-receipt-locks/$lock_sha.d"
 mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
 printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$lock_sha" > "$GLOBAL_RECEIPT_LOCKDIR/holder"
 before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
-out="$(run_pf --force 2>&1)"; rc=$?
+out="$(run_pf --force --wait-timeout 0 2>&1)"; rc=$?
 after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
 [[ $rc -eq 3 ]] && ok "same-candidate global lock refuses the second run" || fail "expected 3 got $rc: $out"
 [[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
@@ -461,8 +731,8 @@ for _round in 1 2 3 4 5; do
     rm -rf "$LOCKDIR"
     rm -f "$ATT"   # else the prior green attestation satisfies the gate and no one contends
     mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"
-    run_pf >/dev/null 2>&1 & p1=$!
-    run_pf >/dev/null 2>&1 & p2=$!
+    run_pf --wait-timeout 0 >/dev/null 2>&1 & p1=$!
+    run_pf --wait-timeout 0 >/dev/null 2>&1 & p2=$!
     wait $p1; r1=$?
     wait $p2; r2=$?
     # winners exit 0 (ran) - losers exit 3 (lock held). Never two winners.

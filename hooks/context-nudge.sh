@@ -61,6 +61,8 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$PLUGIN_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=../scripts/lib/events.sh
+source "$PLUGIN_ROOT/scripts/lib/events.sh" 2>/dev/null || true
 
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 
@@ -70,13 +72,16 @@ emit_event() {
     local etype="$1" data="$2" ts line global_events
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
     line="{\"ts\":\"${ts}\",\"type\":\"${etype}\",\"source\":\"hook\",\"data\":${data}}"
+    if ! declare -F _append_bounded_event >/dev/null 2>&1; then
+        echo "context nudge: event helper unavailable; skipping ${etype}" >&2
+        return
+    fi
     # Resolved at CALL time, not definition time: this function fires before the
     # shell stub is sourced (step 5) as well as after, so it reads whatever the
     # stub set and otherwise falls back to the default state dir.
     global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
-    mkdir -p "${REPO_ROOT}/.fno" "$(dirname "$global_events")" 2>/dev/null || true
-    echo "$line" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
-    echo "$line" >> "$global_events" 2>/dev/null || true
+    _append_bounded_event context_nudge "$line" "${REPO_ROOT}/.fno/events.jsonl" || true
+    _append_bounded_event context_nudge "$line" "$global_events" || true
 }
 
 # ── 1. Read stdin: transcript_path + session_id from the Stop payload ─────────

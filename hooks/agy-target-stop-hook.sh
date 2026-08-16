@@ -78,6 +78,11 @@ if [[ -n "$WORKSPACE_ROOT" && -d "$WORKSPACE_ROOT" ]]; then
 else
     ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 fi
+
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}}"
+EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
+# shellcheck source=../scripts/lib/events.sh
+[[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
 LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 DELIVERY_PENDING_PREFIX=$(git -C "$ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
@@ -129,10 +134,15 @@ emit_event() {
         | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
     line="{\"ts\":\"${ts}\",\"type\":\"${kind}\",\"source\":\"hook\",\"data\":{\"session_id\":\"${sid}\",\"harness\":\"agy\"}}"
-    # ${HOME:-} (not ${HOME}): under set -u an unset HOME would abort the script.
-    mkdir -p "$ROOT/.fno" "${HOME:-}/.fno" 2>/dev/null || true
-    printf '%s\n' "$line" >> "$ROOT/.fno/events.jsonl" 2>/dev/null || true
-    printf '%s\n' "$line" >> "${HOME:-}/.fno/events.jsonl" 2>/dev/null || true
+    if ! declare -F _append_bounded_event >/dev/null 2>&1; then
+        echo "agy stop-hook: event helper unavailable; skipping ${kind}" >&2
+        return
+    fi
+    _append_bounded_event agy_stop_hook "$line" "$ROOT/.fno/events.jsonl" || true
+    # Honors an overridden config.state_dir when the shell stub was sourced;
+    # falls back to the default so the helper-missing give-up path still logs.
+    global_events="${GLOBAL_EVENTS_PATH:-${STATE_DIR:-$HOME/.fno}/events.jsonl}"
+    _append_bounded_event agy_stop_hook "$line" "$global_events" || true
 }
 
 # Counter path keyed by conversationId (else the state-file session_id) so two

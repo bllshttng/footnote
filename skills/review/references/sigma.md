@@ -127,6 +127,60 @@ REVIEWED_HEAD=$(git rev-parse HEAD) || exit 1
 Do not resolve this value after the panel runs.
 If the head advances during review, Step 6d retains the completed round without replacing the current alias.
 
+### Step 1b: Resolve Review Scope (MANDATORY - the single changed-files producer)
+
+Every diff-derived "which files changed" read in this pass resolves from this step. Tier detection, change-type detection, dispatch prompts, and plan-drift detection all consume it. Never compute a second changed-files list anywhere else in the pass. A second producer scanning a different base reports narrow but scans wide, or the reverse. That is a silent coverage lie. The static checks stay project-wide by design: typecheck, lint, build, and the anti-pattern scan are not diff-derived. The report names them as unscoped so a reader can tell.
+
+The scope narrows only to the increment since the last reviewed head, read from the durable artifact via the read-only accessor. Full scope is the fail-open default: any doubt about the prior head, the artifact, or the rules produces MORE review, never less.
+
+```bash
+MERGE_BASE=$(git merge-base origin/main HEAD 2>/dev/null || echo origin/main)
+SCOPE_BASE="$MERGE_BASE"
+SCOPE_REASON="first-round"
+
+NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)
+PR_NUMBER=$(gh pr view --json number --jq .number 2>/dev/null || true)
+PRIOR_HEAD=""
+if [ -n "$NODE_ID" ] && [ -n "$PR_NUMBER" ]; then
+  PRIOR_HEAD=$(fno review --sigma-last-head --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" 2>/dev/null || true)
+fi
+
+if [ -n "$PRIOR_HEAD" ]; then
+  if git merge-base --is-ancestor "$PRIOR_HEAD" HEAD 2>/dev/null; then
+    if git diff --name-only "$PRIOR_HEAD..HEAD" | grep -qE '(^|/)(CLAUDE\.md|AGENTS\.md)$|^\.claude/rules/'; then
+      SCOPE_REASON="rules-changed"    # a new rule can condemn cleared code: full scope
+    else
+      SCOPE_BASE="$PRIOR_HEAD"
+      SCOPE_REASON="incremental"
+    fi
+  else
+    SCOPE_REASON="history-rewritten"  # rebase / squash / force-push / GC: full scope
+  fi
+fi
+
+CHANGED_FILES=$(git diff --name-only "$SCOPE_BASE..HEAD")
+FULL_DIFF_FILES=$(git diff --name-only "$MERGE_BASE..HEAD")
+
+# An empty increment (empty commit) must never reach dispatch as a zero-file
+# vacuous pass. Reset to the fail-open full scope instead.
+if [ "$SCOPE_REASON" = "incremental" ] && [ -z "$CHANGED_FILES" ]; then
+  SCOPE_BASE="$MERGE_BASE"
+  SCOPE_REASON="first-round"
+  CHANGED_FILES="$FULL_DIFF_FILES"
+fi
+```
+
+Fallback semantics, each mapping to full scope:
+
+| Condition | `SCOPE_REASON` | Why full |
+|---|---|---|
+| No artifact, no PR, accessor error | `first-round` | Nothing was ever reviewed here |
+| Prior head not an ancestor of HEAD | `history-rewritten` | The old head no longer names reachable state |
+| Increment touches `CLAUDE.md`, `AGENTS.md`, or `.claude/rules/` (at any depth) | `rules-changed` | A new rule can condemn already-cleared code |
+| Increment is empty | resets to `first-round` | A zero-file dispatch passes vacuously |
+
+`PRIOR_HEAD` is a snapshot from an artifact, not proof the commit is still reachable. The `git merge-base --is-ancestor` check is the verification, and it is not optional. A non-zero exit from `fno review --sigma-last-head` is a normal, expected input meaning "review everything". It must never raise into the pass.
+
 ### Step 2: Run Base Agents (MANDATORY - Always Run)
 
 Always run `silent-failure-hunter` and `code-reviewer` regardless of change type.
@@ -152,6 +206,35 @@ When uncertain whether the quote supports the claim, prefer the abstain band (0-
 Filter out issues scoring below **80**. Only report high-confidence issues. (The sub-80 threshold is unchanged; abstain-band findings simply fall below it.)
 
 For CLAUDE.md-related issues: validator must verify the CLAUDE.md actually calls out that specific issue.
+
+### Step 3c: Carry Forward Unresolved Prior Findings (MANDATORY on incremental rounds)
+
+On every `incremental` round, run this step between the panel results and the verdict. Today the full re-review is the resolution mechanism: the fresh full-diff findings re-derive every prior blocker. An unfixed one resurfaces on its own. Narrowing the scope removes that mechanism. Without a replacement, an incremental round over a one-file increment reports zero findings while round 1's blocker is still live. The gate then clears over an unfixed defect. This step is the replacement. Scope narrowing is unsafe to ship without it.
+
+When its cited quote still validates at the current head, a prior blocking finding is unaddressed. That is the checkable definition of unaddressed.
+
+1. Read the prior round's report. `PRIOR_HEAD` satisfies the inspect validator's expected head by construction, so the existing read surface returns the body. Keep the exit status: it decides what an empty result means.
+
+   ```bash
+   if PRIOR_REPORT=$(fno review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
+     --sigma-head "$PRIOR_HEAD" --json 2>/dev/null); then
+     INSPECT=ok
+   else
+     INSPECT=failed
+   fi
+   ```
+
+   With `INSPECT=ok` and no critical or high findings in the body, there is nothing to carry. The round proceeds on its own findings alone.
+
+   With `INSPECT=failed`, the prior report was not readable. The narrowed scope is unproven, so a live blocking finding can sit in the unread report. Never read a failed inspection as an empty prior report. Re-run this round at full scope (`SCOPE_BASE=$MERGE_BASE`) before any verdict. No attestation can be emitted from the incomplete round.
+
+2. For each **critical** or **high** finding in the prior body, spawn the same Haiku cite-or-drop validator as Step 3b. Run it against the CURRENT head. Those two severities are the ones that block.
+   - quote still matches at the cited `file:line` -> the finding is **unresolved**. Carry it verbatim into this round's report and verdict. Tag it `carried from round <id>` under Critical/High Issues.
+   - quote is gone or no longer supports the claim -> it lands in the 0-25 abstain band. It falls below 80 and drops out. The same rubric that decided admission decides resolution. No separate "addressed" flag and no cached verdict exist.
+
+3. A carried finding counts as a blocking finding of THIS round. While any carried finding is unresolved, the verdict cannot be `ready-to-merge`. Step 6c emits no attestation over it.
+
+Every round's report is therefore the union of findings newly derived from the incremental scope and carried findings that still validate at the current head. The cost is one Haiku validation per prior blocking finding, which is far below re-running the panel over the whole diff.
 
 ### Step 4: Run Automated Checks (MANDATORY)
 
@@ -191,6 +274,8 @@ After the report is durable, deduplicate only on the explicit marker for this re
 Load [report-template.md](report-template.md) for the structured output format.
 Render the complete report once to a temporary file as well as to the user-facing response; this exact file is the input to the shared artifact writer in Step 6d.
 
+The report header carries the **Review Scope** line from Step 1b: `$SCOPE_REASON`, plus `$SCOPE_BASE` and the changed-file count on an incremental round. A narrowed round that reads as full coverage is a silent coverage lie.
+
 #### Goal Relevance (if config.toml has goals)
 
 Read `project.goals` from config.toml (`.fno/config.toml` or `~/.fno/config.toml`). For each goal:
@@ -204,7 +289,7 @@ If `.fno/target-state.md` exists and has `input_type: plan`:
 
 1. Read the plan's 00-INDEX.md `## Files Modified` section
 2. Parse expected files and their task attributions
-3. Get actual changes: `git diff --name-only main...HEAD`
+3. Get actual changes: `$FULL_DIFF_FILES` from the Step 1b producer. Never run a second `git diff` against a possibly-stale local `main`
 4. Compare:
    - Files in diff but NOT in plan → **DRIFT** warning
    - Files in plan but NOT in diff → **MISSING** warning
@@ -215,16 +300,16 @@ Exclude common non-plan files: lock files, `.fno/*`, test fixtures, `node_module
 
 ### Step 6c: Emit the reviewers-gate attestation (only on a clean PASS)
 
-If — and only if — the verdict is `ready-to-merge` (no unaddressed blocking finding after Step 3b/Step 4), emit the head-pinned `review_attestation` so a `config.review.reviewers: [sigma]` gate can clear:
+Emit the head-pinned `review_attestation` only on a clean PASS: the verdict is `ready-to-merge` with no unaddressed blocking finding after Steps 3b/3c/4. A `config.review.reviewers: [sigma]` gate then clears:
 
 ```bash
 bash "${SKILL_DIR}/scripts/emit-attestation.sh" sigma
 ```
 
 This is what lets a solo / claude-only harness (no GitHub App bot) express a real, auditable review gate. Rules:
-- **Never emit on a blocking finding.** A failing or blocked panel emits nothing; absence holds the gate (fail closed).
-- **Head-pinned.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma — the old attestation no longer counts (loop-check discards a `head_sha` that is not the current HEAD).
-- **Advisory when not gating.** If no `reviewers` entry names `sigma`, the event is harmless telemetry; loop-check only reads it when the gate is configured.
+- **Never emit on a blocking finding:** a failing or blocked panel emits nothing. Absence holds the gate. That is fail closed. A carried-forward finding that still validates at the current head (Step 3c) is a blocking finding of this round.
+- **Head-pinned, and cumulative in meaning.** The helper stamps the current HEAD. If new commits land after this pass, re-run sigma. The old attestation no longer counts. Loop-check discards a `head_sha` that is not the current HEAD. An attestation asserts coverage **cumulative across rounds up to this head**. Every file in the diff was reviewed in some round at or before this head. Every prior blocking finding was re-validated at this head by Step 3c. It does NOT assert that the full diff was re-reviewed in one pass.
+- **Advisory without a gate:** with no `reviewers` entry naming `sigma`, the event is harmless telemetry. Loop-check reads it only under a configured gate.
 
 ### Step 6d: Persist the report before deciding whether to comment
 
@@ -239,8 +324,11 @@ ROUND_ID="${REVIEWED_HEAD:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fno review --publish-sigma "$REPORT_FILE" \
   --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
   --sigma-head "$REVIEWED_HEAD" --sigma-current-head "$CURRENT_HEAD" \
-  --sigma-round "$ROUND_ID"
+  --sigma-round "$ROUND_ID" \
+  --sigma-scope-base "$SCOPE_BASE" --sigma-scope-reason "$SCOPE_REASON"
 ```
+
+The scope pair is what makes a later round trust this artifact's head as a narrowing base. An artifact without it is treated as no prior head. Omit these two flags and the next round reviews the full diff again. That is fail-open by construction.
 
 Treat a publication error as a failed review handoff and surface it; never claim the report is durable.
 The command prints the primary path, reviewed head, and whether compare-and-publish accepted it.

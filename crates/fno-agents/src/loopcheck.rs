@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -2124,7 +2124,7 @@ fn read_pr_info(
         let checks_out = Command::new(gh_bin)
             .args(["pr", "checks"])
             .args(&sel)
-            .args(["--json", "name,state,bucket"])
+            .args(["--json", "name,state,bucket,startedAt,workflow"])
             .current_dir(cwd)
             .output()
             .map_err(|e| ("pr_checks".to_string(), e.to_string()))?;
@@ -2135,6 +2135,11 @@ fn read_pr_info(
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
             .map_err(|_| ("pr_checks_parse".to_string(), String::new()))?;
+        // One dedup feeds every reader of this payload, so the conclusion, the
+        // failing-name set, and the pending flag can never answer off different
+        // rollups (a superseded run read as the current one is the exact lie
+        // this dedup exists to remove).
+        let checks = latest_per_name(&checks);
 
         let failing = failing_check_names(&checks);
         let has_pending = ci_has_pending_checks(&checks);
@@ -2445,6 +2450,61 @@ fn read_pr_info(
     })
 }
 
+/// Latest run per (check name, workflow), keyed on when the run was
+/// TRIGGERED. The key is the pair, not the name alone: several workflows in
+/// this repo define a job literally named `self-test`, and a name-only key
+/// would fold an unrelated workflow's cancelled or failing `self-test` into
+/// whichever workflow's `self-test` started latest, hiding the real result. A
+/// superseding run always starts later but need not finish later, so
+/// `startedAt` is the only honest recency key; list order is not one. A
+/// missing timestamp sorts oldest and loses to any timestamped sibling. On a
+/// timestamp tie the kept entry is fail-closed: a fail|cancel entry is never
+/// dropped by a same-time non-fail (parity with `_latest_per_name` in
+/// cli/src/fno/pr/_status.py). Entries without a name cannot group and pass
+/// through verbatim.
+fn latest_per_name(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    fn ts_of(v: &Value) -> &str {
+        v.get("startedAt").and_then(|t| t.as_str()).unwrap_or("")
+    }
+    fn workflow_of(v: &Value) -> &str {
+        v.get("workflow").and_then(|w| w.as_str()).unwrap_or("")
+    }
+    fn is_fail(v: &Value) -> bool {
+        matches!(
+            v.get("bucket")
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_lowercase()
+                .as_str(),
+            "fail" | "cancel"
+        )
+    }
+    let mut kept: Vec<Value> = Vec::new();
+    for c in arr {
+        let name = c.get("name").and_then(|n| n.as_str()).map(str::to_string);
+        let slot = name.as_deref().and_then(|nm| {
+            kept.iter().position(|k| {
+                k.get("name").and_then(|n| n.as_str()) == Some(nm)
+                    && workflow_of(k) == workflow_of(c)
+            })
+        });
+        match slot {
+            None => kept.push(c.clone()),
+            Some(i) => {
+                let (tn, te) = (ts_of(c), ts_of(&kept[i]));
+                // Strictly-newer replaces; a tie replaces only fail-closed.
+                if tn > te || (tn == te && !is_fail(&kept[i]) && is_fail(c)) {
+                    kept[i] = c.clone();
+                }
+            }
+        }
+    }
+    Value::Array(kept)
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -2544,12 +2604,16 @@ fn failing_check_names(checks: &Value) -> Vec<String> {
         .collect()
 }
 
-/// True iff any check is still in a non-terminal bucket (`pending`, or an
-/// unrecognized bucket that is not one of pass|fail|cancel|skipping). The
+/// True iff any check is still in a non-terminal bucket (`pending`, `cancel`,
+/// or an unrecognized bucket that is not one of pass|fail|skipping). The
 /// DoneAwaitingMerge terminal must not fire while any check is unresolved: a
 /// still-running check (e.g. the session's own new job) could turn red, so a
 /// partial `Failure` is not yet proof that the ONLY problem is pre-existing
-/// main-red.
+/// main-red. `cancel` is deliberately non-terminal here even though it stays
+/// red in `failing_check_names` and `compute_ci_conclusion`: a cancelled run
+/// produced NO result, so declaring the session done off it would assert a
+/// verdict that never ran. The held terminal waits for a newer run (or the
+/// iteration/budget kill criteria), which is the correct trade.
 fn ci_has_pending_checks(checks: &Value) -> bool {
     let Some(arr) = checks.as_array() else {
         return false;
@@ -2560,7 +2624,7 @@ fn ci_has_pending_checks(checks: &Value) -> bool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_lowercase();
-        !matches!(bucket.as_str(), "pass" | "fail" | "cancel" | "skipping")
+        !matches!(bucket.as_str(), "pass" | "fail" | "skipping")
     })
 }
 
@@ -4647,7 +4711,7 @@ pub(crate) fn now_rfc3339_utc() -> String {
     now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Append a target-stream event to a file (O_APPEND, create if missing).
+/// Append a target-stream event through the shared Branch-A mkdir mutex.
 /// Failure is loud on stderr but never fatal to the decision.
 fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
     let env = LoopEventEnvelope {
@@ -4656,35 +4720,30 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
         source: "hook",
         data,
     };
-    let Ok(mut line) = serde_json::to_string(&env) else {
+    let Ok(event) = serde_json::to_value(&env) else {
         eprintln!("loop-check: failed to serialize event {event_type}");
         return;
     };
-    line.push('\n');
-
-    // Create parent dirs
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(line.as_bytes()) {
+    let mut retried_after_timeout = false;
+    loop {
+        match crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2)) {
+            Ok(()) => return,
+            Err(error)
+                if error.contains("events.jsonl lock timeout")
+                    && crate::claims::event_maintenance_active(path) =>
+            {
+                crate::claims::wait_for_event_maintenance(path);
+            }
+            Err(error) if error.contains("events.jsonl lock timeout") && !retried_after_timeout => {
+                retried_after_timeout = true;
+            }
+            Err(error) => {
                 eprintln!(
-                    "loop-check: failed to write event {event_type} to {}: {e}",
+                    "loop-check: failed to write event {event_type} to {}: {error}",
                     path.display()
                 );
+                return;
             }
-        }
-        Err(e) => {
-            eprintln!(
-                "loop-check: failed to open events file {}: {e}",
-                path.display()
-            );
         }
     }
 }
@@ -5755,13 +5814,21 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
             // Get CI
             let ci = match Command::new(gh_bin)
-                .args(["pr", "checks", "--json", "name,state,bucket"])
+                .args([
+                    "pr",
+                    "checks",
+                    "--json",
+                    "name,state,bucket,startedAt,workflow",
+                ])
                 .current_dir(&cwd)
                 .output()
             {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    compute_ci_conclusion(&cv).unwrap_or(CiConclusion::None)
+                    // Same dedup as the main CI read: the fingerprint's CI arm
+                    // must describe the latest run per name, not a superseded
+                    // one a newer push already replaced.
+                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
                 }
                 _ => CiConclusion::None,
             };
@@ -9034,6 +9101,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn target_stream_emit_waits_for_shared_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("events.jsonl");
+        let global = dir.path().join("global-events.jsonl");
+        let lock = dir.path().join("events.jsonl.lock.d");
+        std::fs::create_dir(&lock).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let thread_barrier = std::sync::Arc::clone(&barrier);
+
+        let handle = std::thread::spawn(move || {
+            thread_barrier.wait();
+            emit_to_both(&project, &global, "mutex_probe", serde_json::json!({}));
+            project
+        });
+        barrier.wait();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!dir.path().join("events.jsonl").exists());
+
+        std::fs::remove_dir_all(lock).unwrap();
+        let project = handle.join().unwrap();
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("mutex_probe"));
+    }
+
+    #[test]
+    fn target_stream_emit_waits_through_expected_maintenance_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("events.jsonl");
+        let lock = dir.path().join("events.jsonl.lock.d");
+        let maintenance = dir.path().join("events.jsonl.gc.d");
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::create_dir(&maintenance).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            append_loop_event(&project, "review_coverage", serde_json::json!({}));
+            project
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(2_300));
+        assert!(
+            !handle.is_finished(),
+            "review coverage was dropped during expected maintenance"
+        );
+
+        std::fs::remove_dir_all(lock).unwrap();
+        std::fs::remove_dir_all(maintenance).unwrap();
+        let project = handle.join().unwrap();
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("review_coverage"));
+    }
+
+    #[test]
+    fn target_stream_emit_retries_when_maintenance_marker_disappears_near_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("events.jsonl");
+        let lock = dir.path().join("events.jsonl.lock.d");
+        let maintenance = dir.path().join("events.jsonl.gc.d");
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::create_dir(&maintenance).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            append_loop_event(&project, "maintenance_handoff_probe", serde_json::json!({}));
+            project
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(1_900));
+        std::fs::remove_dir_all(maintenance).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::remove_dir_all(lock).unwrap();
+
+        let project = handle.join().unwrap();
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("maintenance_handoff_probe"));
+    }
+
     /// The list half of the scan. Production reads the count too, so this
     /// wrapper lives here rather than as an unused function in the binary.
     fn unattested_reviewers(
@@ -11208,6 +11354,75 @@ mod tests {
         assert!(ci_has_pending_checks(&unknown));
         // Malformed input never panics.
         assert!(!ci_has_pending_checks(&serde_json::json!({})));
+    }
+
+    // ── cancel is an absent result, not a terminal one ─────────────────────
+
+    #[test]
+    fn ci_has_pending_counts_latest_cancel_as_unresolved() {
+        // A cancelled latest run produced no result: the DoneAwaitingMerge
+        // terminal must not fire off it, exactly as it must not off a pending
+        // one. Composition mirrors the real path (dedup, then the reader).
+        let cancelled = serde_json::json!([
+            {"name": "ci", "bucket": "cancel", "startedAt": "2026-08-15T00:00:00Z"}
+        ]);
+        assert!(ci_has_pending_checks(&latest_per_name(&cancelled)));
+    }
+
+    #[test]
+    fn latest_per_name_drops_superseded_cancel_for_newer_pass() {
+        // The dedup is what makes the non-terminal cancel safe: a superseded
+        // cancel from an earlier push loses to the newer same-name pass, so
+        // the terminal is held only by a cancel that IS the latest run.
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "cancel", "startedAt": "2026-08-15T00:00:00Z"},
+            {"name": "ci", "bucket": "pass",  "startedAt": "2026-08-15T01:00:00Z"},
+            {"name": "doc", "bucket": "skipping", "startedAt": "2026-08-15T01:00:00Z"},
+        ]);
+        let deduped = latest_per_name(&checks);
+        assert!(!ci_has_pending_checks(&deduped));
+        assert!(failing_check_names(&deduped).is_empty());
+        // Recency keys on TRIGGER time: a slow superseded pass completing
+        // later must not displace a newer fast fail.
+        let swapped = serde_json::json!([
+            {"name": "ci", "bucket": "pass", "startedAt": "2026-08-15T01:00:00Z"},
+            {"name": "ci", "bucket": "cancel", "startedAt": "2026-08-15T00:00:00Z"},
+        ]);
+        let deduped = latest_per_name(&swapped);
+        assert!(!ci_has_pending_checks(&deduped));
+        assert!(failing_check_names(&deduped).is_empty());
+    }
+
+    #[test]
+    fn latest_per_name_tie_keeps_fail_over_same_time_pass() {
+        // Parity with the Python rule: on a missing/equal timestamp a fail is
+        // never dropped by a same-time non-fail, so a superseded pass can
+        // never hide a real fail when the payload carries no ordering.
+        let tie = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "ci", "bucket": "fail"},
+        ]);
+        let deduped = latest_per_name(&tie);
+        assert_eq!(failing_check_names(&deduped), vec!["ci".to_string()]);
+    }
+
+    #[test]
+    fn latest_per_name_keeps_same_name_checks_from_different_workflows() {
+        // codex P1: several workflows in this repo define a job literally
+        // named "self-test". A name-only key folds a cancelled self-test
+        // from one workflow into a passing self-test from another, hiding
+        // the real failure behind an unrelated workflow's pass. The key
+        // must be (name, workflow), so both entries survive the dedup.
+        let checks = serde_json::json!([
+            {"name": "self-test", "bucket": "cancel", "workflow": "control-plane-doc-colocation",
+             "startedAt": "2026-08-15T01:00:00Z"},
+            {"name": "self-test", "bucket": "pass", "workflow": "loc-ratchet",
+             "startedAt": "2026-08-15T00:00:00Z"},
+        ]);
+        let deduped = latest_per_name(&checks);
+        assert_eq!(deduped.as_array().unwrap().len(), 2);
+        assert!(ci_has_pending_checks(&deduped));
+        assert_eq!(failing_check_names(&deduped), vec!["self-test".to_string()]);
     }
 
     #[test]

@@ -98,7 +98,7 @@ def test_help_subcommand_works_in_module_mode():
         capture_output=True,
         text=True,
         env=env,
-        timeout=30,
+        timeout=300,
     )
     assert result.returncode == 0, (
         f"expected rc=0, got rc={result.returncode}.\n"

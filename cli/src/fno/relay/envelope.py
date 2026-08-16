@@ -32,7 +32,12 @@ import re
 from typing import Optional
 
 from fno.bus.log import Envelope
-from fno.mail.envelope import harness_for_provider
+from fno.mail.envelope import (
+    ForgedEnvelopeError,
+    _refuse_unsafe_attr,
+    contains_fno_mail_tag,
+    harness_for_provider,
+)
 
 # Relay-private meta keys on the bus envelope.
 META_HOP = "hop_count"
@@ -58,7 +63,24 @@ def frame(from_session: str, harness: str, model: Optional[str], body: str) -> s
     The body is collapsed to a single line (Enter submits the TUI turn, so an
     embedded newline would submit early -- the constraint that keeps this hop on
     the single-line, no-close variant of the ``<fno_mail>`` envelope).
-    """
+
+    Raises :class:`fno.mail.envelope.ForgedEnvelopeError` if ``body`` contains
+    an ``<fno_mail`` or ``</fno_mail>`` tag, or if an attribute value itself
+    could forge a second tag once interpolated -- ``from_session`` rides bus
+    provenance a peer can influence, not a value this function controls. This
+    is the single producer every delivery vehicle's framed line derives from --
+    the daemon-owned ``worker.submit`` RPC and the claude ``mail-inject``
+    binary each take an already-framed string built here, so neither
+    downstream check alone can cover a peer-controlled body or attribute
+    smuggling a second open tag."""
+    if contains_fno_mail_tag(body):
+        raise ForgedEnvelopeError(
+            "relay body contains an <fno_mail> tag. The single-line envelope "
+            "frames peer mail; a body cannot contain one."
+        )
+    for name, value in (("from", from_session), ("harness", harness), ("model", model)):
+        if value:
+            _refuse_unsafe_attr(name, value)
     one_line = " ".join(body.split())
     model_attr = f' model="{model}"' if model else ""
     return f'<fno_mail from="{from_session}" harness="{harness}"{model_attr}> {one_line}'
@@ -87,18 +109,23 @@ def is_framed(line: str) -> bool:
 
 def frame_envelope(env: Envelope) -> Optional[str]:
     """Frame a relay bus envelope for injection, or ``None`` if it cannot be
-    framed (missing provenance -- no ``from_session`` or no ``provider_from``).
+    framed (missing provenance -- no ``from_session`` or no ``provider_from`` --
+    or a forged body that :func:`frame` refused).
 
     A ``None`` return is the structural signal that the message is unframeable;
-    the daemon refuses to inject it to a cross-provider recipient (AC5-FR)."""
+    the daemon refuses to deliver it through any vehicle rather than inject an
+    unframed or forged body (AC5-FR)."""
     if not env.from_session or not env.provider_from:
         return None
-    return frame(
-        env.from_session,
-        harness_for_provider(env.provider_from),
-        env.from_model,
-        env.body,
-    )
+    try:
+        return frame(
+            env.from_session,
+            harness_for_provider(env.provider_from),
+            env.from_model,
+            env.body,
+        )
+    except ForgedEnvelopeError:
+        return None
 
 
 def hop_count(env: Envelope) -> int:

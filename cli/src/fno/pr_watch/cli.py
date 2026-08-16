@@ -217,6 +217,9 @@ def tick() -> None:
     settings = load_settings()
     cfg = settings.pr_watch
 
+    # x-aaaf wave 3: the master panic switch outranks pr_watch's own gate too.
+    tick_enabled = cfg.enabled and settings.autonomy.enabled
+
     # A dead tick must not kill the legs below. The receipt contract makes
     # _tick raise on a failed emission even though state is already persisted,
     # so a broken events path would otherwise crash-loop recovery and sync
@@ -233,6 +236,7 @@ def tick() -> None:
             now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             max_age_days=cfg.max_age_days,
             max_retries=cfg.retries,
+            enabled=tick_enabled,
         )
     except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
         tick_failed = str(exc)
@@ -241,7 +245,10 @@ def tick() -> None:
         result = None
 
     if result is not None:
-        if result.lock_held:
+        if result.disabled:
+            reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
+            typer.echo(f"pr-watch tick: {reason} is false - skipped")
+        elif result.lock_held:
             typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
         else:
             typer.echo(
@@ -254,8 +261,10 @@ def tick() -> None:
     # socket nudge was removed (a bypass recipient holds it by design), so the
     # sweep no longer resumes idle-but-incomplete sessions. Gated by
     # config.recovery.enabled and wrapped non-fatally so a recovery failure
-    # never breaks the PR-watch tick.
-    if settings.recovery.enabled:
+    # never breaks the PR-watch tick. The master switch (x-aaaf wave 3) outranks
+    # this gate too - a recovery respawn is exactly the "session starts itself"
+    # behavior the panic switch exists to stop.
+    if settings.recovery.enabled and settings.autonomy.enabled:
         try:
             from fno.recovery import run_recovery_sweep
 

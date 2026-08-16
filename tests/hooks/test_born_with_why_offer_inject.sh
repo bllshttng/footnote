@@ -48,6 +48,25 @@ except Exception:
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 git -C "$WORK" init -q || fail "git init failed"
+
+# A brand-new checkout has no .fno directory. The missing-journal fast path must
+# return before cursor-lock retries turn every prompt into a one-second stall.
+FRESH="$WORK/fresh"
+mkdir -p "$FRESH"
+git -C "$FRESH" init -q || fail "fresh git init failed"
+python3 - "$HOOK" "$FRESH" <<'PY' || fail "missing journal did not return promptly"
+import subprocess
+import sys
+
+hook, cwd = sys.argv[1:]
+result = subprocess.run(
+    ["bash", hook], cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, timeout=0.5
+)
+assert result.returncode == 0, result.stderr.decode(errors="replace")
+assert result.stdout == b"", result.stdout
+PY
+pass "missing journal returns before cursor-lock retries"
+
 mkdir -p "$WORK/.fno"
 EVENTS="$WORK/.fno/events.jsonl"
 CURSOR="$WORK/.fno/.think-offer-cursor"
@@ -151,6 +170,43 @@ pass "AC2-HP: fresh offer surfaced with event offer_line, cursor advanced"
 out="$(run_hook)" || fail "hook nonzero on second run"
 [[ -z "$out" ]] || fail "AC2-ERR: offer re-surfaced on second turn: $out"
 pass "AC2-ERR: consumed offer does not re-surface"
+
+# A concurrent worktree holding the project cursor makes this invocation yield
+# without consuming the slice; the holder's successor can surface it once.
+offered_line "2026-06-30T04:30:00Z" "x-lock1111" >> "$EVENTS"
+cursor_before=$(cat "$CURSOR")
+CANONICAL_CURSOR="$WORK/.fno/canonical-think-offer-cursor"
+mv "$CURSOR" "$CANONICAL_CURSOR"
+ln -s "$CANONICAL_CURSOR" "$CURSOR"
+mkdir "${CANONICAL_CURSOR}.lock.d"
+printf '%s' "test:$$:holder" > "${CANONICAL_CURSOR}.lock.d/owner"
+out="$(run_hook)" || fail "cursor lock: hook nonzero while another session held the cursor"
+[[ -z "$out" ]] || fail "cursor lock: contending hook emitted output"
+[[ "$(cat "$CURSOR")" == "$cursor_before" ]] || fail "cursor lock: contending hook consumed the shared slice"
+rm -f "${CANONICAL_CURSOR}.lock.d/owner"
+rmdir "${CANONICAL_CURSOR}.lock.d"
+out="$(run_hook)" || fail "cursor lock: successor hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-lock1111"* ]] || fail "cursor lock: successor did not surface the preserved offer"
+pass "cursor lock resolves the shared target and serializes once-per-project consumption"
+
+# GC publishes an inode-pinned recovery mapping before replacing the journal.
+# If it dies after replacement, the next hook must finish the cursor update
+# before scanning or the old byte offset can skip a pending offer.
+cursor_before=$(wc -c < "$EVENTS" | tr -d ' ')
+offered_line "2026-06-30T04:40:00Z" "x-gcrecover1" >> "$EVENTS"
+printf '%s' "$(wc -c < "$EVENTS" | tr -d ' ')" > "$CANONICAL_CURSOR"
+python3 - "$EVENTS" "${CANONICAL_CURSOR}.gc-pending" "$cursor_before" <<'PY'
+import json, os, sys
+events, pending, cursor = sys.argv[1:]
+stat = os.stat(events)
+open(pending, "w", encoding="ascii").write(json.dumps({"device": stat.st_dev, "inode": stat.st_ino, "cursor": int(cursor)}))
+PY
+out="$(run_hook)" || fail "cursor recovery: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-gcrecover1"* ]] || fail "cursor recovery: pending offer was skipped"
+[[ ! -e "${CANONICAL_CURSOR}.gc-pending" ]] || fail "cursor recovery: pending mapping was not cleared"
+pass "cursor recovery completes an interrupted GC cursor update"
 
 # ── AC2-EDGE: malformed line skipped, later valid offer still surfaces ─
 printf '{this is not json\n' >> "$EVENTS"
@@ -485,7 +541,7 @@ pass "resolve-guard: unreadable graph (rc 3) degrades to surfacing, not suppress
 # jq/python3 are used unconditionally after the one-way cursor advance, so a
 # missing one must leave the slice unconsumed rather than silently eat it.
 MINBIN="$WORK/minbin"; mkdir -p "$MINBIN"
-for t in bash dirname git head jq kill python3 sleep tail tr wc; do
+for t in bash cat date dirname git head hostname jq kill mkdir mv python3 readlink rm rmdir sleep stat tail tr wc; do
     p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$MINBIN/$t"
 done
 # POSITIVE CONTROL first. A stripped PATH missing some unrelated tool would make

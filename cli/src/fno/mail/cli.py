@@ -208,12 +208,15 @@ _BODY_WARN_BYTES = _cap_env_int("FNO_MAIL_BODY_WARN", 3000)
 _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 
 
-def _enforce_body_cap(body: str) -> None:
+def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
     Fail-open: a disabled tier (0) or an unset body never blocks coordination.
     The refusal teaches the rule: put the detail in a node or doc and send a
     short pointer, since the mail is re-read far more often than the node.
+    ``usage=True`` exits 2: under ``--raw --check`` an over-cap payload is a
+    malformed CALL, and exit 1 there would read as a not-injectable verdict
+    about a session the run never measured.
     """
     warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
     if warn <= 0 and refuse <= 0:
@@ -226,13 +229,35 @@ def _enforce_body_cap(body: str) -> None:
             f"Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0.",
             file=sys.stderr,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=2 if usage else 1)
     if warn > 0 and n > warn:
         print(
             f"note: mail body is {n} bytes (over the {warn}-byte brevity guide); "
             f"prefer a short pointer with the detail in a node/doc.",
             file=sys.stderr,
         )
+
+
+def _refuse_forged_envelope(body: str) -> None:
+    """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
+    tag (x-4ce4), with a CLI-friendly error before the body ever reaches
+    ``wrap_fno_mail`` (which enforces the same invariant as the backstop for
+    every producer, not only these CLI entry points).
+
+    The envelope's trailer (``wrap_fno_mail``) is only trustworthy if a peer
+    cannot forge one: a body containing a close tag followed by a fabricated
+    trailer would render as two envelopes to a reader, and the second could say
+    the opposite of the first. Refuse at send time and name the reason, rather
+    than silently stripping or escaping - the body is prose a human reads, and a
+    mangled body is worse than a refused send.
+    """
+    from fno.mail.envelope import ForgedEnvelopeError, refuse_if_forged
+
+    try:
+        refuse_if_forged(body)
+    except ForgedEnvelopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from exc
 
 
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
@@ -655,6 +680,7 @@ def cmd_reply(
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
+    _refuse_forged_envelope(body_text)
     _enforce_body_cap(body_text)
     _enforce_style(body_text, allow_reason=style_exception)
 
@@ -1136,7 +1162,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "recipient drains its inbox\n"
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # idle session -> live, then re-send\n"
+            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
             f"    fno agents attach {target}   # drive it yourself (claude)\n"
             # The rung that was missing. Every option above tries to reach the
             # recipient; when none of them can, the sender was left holding a
@@ -1149,7 +1175,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "recipient must drain its inbox to read this, and may never do so\n"
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
-            f"    fno agents resume {target}   # idle session -> live, then re-send\n"
+            f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"
             f"    fno agents attach {target}   # drive it yourself (claude)\n"
             # The rung that was missing. Every option above tries to reach the
             # recipient; when none of them can, the sender was left holding a
@@ -1936,6 +1962,64 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
+_CODEX_REVIEW_VERBS = frozenset({"/review", "/code-review"})
+_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+
+
+def _codex_default_review_base(cwd: str | None) -> str | None:
+    """Return the repository-declared origin default branch, never a guessed name."""
+    if not cwd:
+        return None
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                cwd,
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    ref = proc.stdout.strip()
+    return ref if proc.returncode == 0 and ref else None
+
+
+def _codex_review_target(
+    payload: str, *, default_base: str | None = None
+) -> tuple[str | None, bool]:
+    """Resolve the structured review target without inventing custom instructions."""
+    parts = payload.split(maxsplit=1)
+    if len(parts) == 1:
+        target = f"baseBranch:{default_base}" if default_base else None
+        return target, False
+    remainder = parts[1].strip()
+    base = remainder.split()
+    if base[0] == "--base":
+        # A named base is an explicit scope request: a malformed form (dangling
+        # flag, a flag-like value, trailing tokens) must refuse rather than
+        # fall through to uncommittedChanges, which silently reviews a
+        # different diff than the one the operator asked for.
+        if len(base) == 2 and not base[1].startswith("--"):
+            return f"baseBranch:{base[1]}", False
+        return None, False
+    if remainder == "--uncommitted":
+        return "uncommittedChanges", False
+    if _COMMIT_SHA.fullmatch(remainder):
+        return f"commit:{remainder}", False
+    if remainder.startswith("custom:") and remainder != "custom:":
+        return remainder, False
+    return "uncommittedChanges", True
+
+
 def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     """``fno mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
@@ -1959,6 +2043,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     from fno.agents.dispatch import (
         _mail_inject_claude,
         _mux_pane_send,
+        _review_start_codex,
         keystroke_lane,
         mail_inject_probe,
     )
@@ -2008,6 +2093,27 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
         _refused(
             "payload must be a single line (a second line rides in as trailing "
             "content on the same submitted turn)",
+            usage=True,
+        )
+
+    # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
+    # shared size ceiling and structure gate here before any of the reachable
+    # transports can fire. Under --check the cap refusal is a usage error
+    # (exit 2), never a session verdict: exit 1 is the not-injectable code.
+    _enforce_body_cap(stripped, usage=check)
+    _enforce_style(stripped)
+
+    # 2b. Forged envelope: a raw payload starts with "/", so it cannot itself
+    #     be a `<fno_mail>` tag, but it can still smuggle one mid-line. The mux
+    #     lane (`_mux_pane_send` below) pastes this string directly and never
+    #     reaches the Rust mail-inject binary's own check, so this is the only
+    #     door for that lane.
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    if contains_fno_mail_tag(stripped):
+        _refused(
+            "payload contains an <fno_mail> tag. The envelope frames peer mail; "
+            "a payload cannot contain one",
             usage=True,
         )
 
@@ -2073,18 +2179,125 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             "queues durable and surfaces at their turn boundary"
         )
 
-    # 4. Keystroke lane: a raw slash payload fires only where it reaches a prompt
-    #    line. The codex/gemini/opencode daemon lanes submit a turn to the model
-    #    with no TUI prompt line, so the slash never reaches a parser.
+    # Derive provenance before routing: daemon review/start returns before the
+    # keystroke transports below, but its unwrapped invocation needs the same
+    # actor record.
+    from fno.agents.self_stamp import resolve_self_handle
+
+    sender = resolve_self_handle()
+
+    # 4. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
+    #    other mux pane; only a Codex app-server thread uses structured review/start.
     lane, is_keystroke = keystroke_lane(entry)
     if not is_keystroke:
+        verb = stripped.split(maxsplit=1)[0]
+        if lane == "codex-daemon":
+            # --check answers before the RPC fires: a review verb HAS a path on
+            # this lane (the structured RPC), everything else has none. The
+            # probe claims path-existence only, same as the keystroke branches -
+            # but only for preconditions it cannot cheaply decide; a missing
+            # binary or an unresolvable target WOULD refuse the send, so the
+            # check answers them rather than promising a path the send lacks.
+            if check and verb not in _CODEX_REVIEW_VERBS:
+                print(
+                    "not-injectable: codex-daemon has no prompt line; only "
+                    "/review and /code-review map to its review/start RPC"
+                )
+                raise typer.Exit(code=1)
+            if verb not in _CODEX_REVIEW_VERBS:
+                _refused(
+                    f"{name!r} is a codex app-server thread, which has no prompt "
+                    "line - a slash payload cannot parse there. The app-server "
+                    "exposes turn/start (text to the model, no slash parsing) and "
+                    f"review/start (the reviewer); {verb!r} maps to neither.\n"
+                    "  - to have the codex model READ this, drop --raw (a wrapped "
+                    "send delivers it as text, which is all any codex lane can do "
+                    "with it)\n"
+                    f"  - if {verb!r} is a codex TUI built-in (/compact and "
+                    "friends), no fno lane can fire it on a daemon thread; host "
+                    "the session in a mux pane, where --raw pastes at the real "
+                    "prompt line and the TUI parser runs it"
+                )
+            if check:
+                from fno import rust_binary
+
+                if rust_binary.resolve_installed_binary() is None:
+                    print(
+                        "not-injectable: the fno-agents binary is absent or too "
+                        "old (run `fno doctor`), so review/start has no transport"
+                    )
+                    raise typer.Exit(code=1)
+            default_base = (
+                _codex_default_review_base(getattr(entry, "cwd", None))
+                if stripped in _CODEX_REVIEW_VERBS
+                else None
+            )
+            target, ignored_remainder = _codex_review_target(
+                stripped, default_base=default_base
+            )
+            if check:
+                if target is None:
+                    print(
+                        "not-injectable: no resolvable review target (bare verb "
+                        "with no origin default branch, or unparsable arguments); "
+                        "retry with '/review --base <branch>' or "
+                        "'/review --uncommitted'"
+                    )
+                    raise typer.Exit(code=1)
+                print("injectable: codex-daemon review/start RPC")
+                raise typer.Exit(code=0)
+            if target is None:
+                _refused(
+                    f"{name!r} {verb} has no resolvable review target - a bare "
+                    "verb with no origin default branch, or arguments after the "
+                    "verb do not parse; retry with '/review --base <branch>' or "
+                    "explicitly request '/review --uncommitted'"
+                )
+            assert target is not None
+            receipt = _review_start_codex(
+                session_id,
+                target,
+                audit_payload=stripped[:512],
+                audit_sender=sender,
+                audit_target_cwd=getattr(entry, "cwd", None),
+            )
+            if receipt.get("delivered"):
+                note = " (unrecognized remainder ignored)" if ignored_remainder else ""
+                print(
+                    f"review/start target={target} delivery=inline "
+                    f"turn={receipt.get('turn_id', '')} "
+                    f"review_thread={receipt.get('review_thread_id', '')}{note}"
+                )
+                raise typer.Exit(code=0)
+            reason = str(receipt.get("reason") or "rpc-error")
+            if reason == "no-daemon":
+                _refused(
+                    f"{name!r} codex review/start failed: no-daemon; run "
+                    "`codex app-server daemon start` and retry"
+                )
+            if reason in ("stale-binary", "binary-not-found"):
+                _refused(
+                    f"{name!r} codex review/start failed: {reason}; the deployed "
+                    "fno-agents binary is absent or rejected the invocation - "
+                    "run `fno doctor --fix` and retry"
+                )
+            if reason == "not-confirmed":
+                print(
+                    f"warning: {name!r} codex review/start was not-confirmed after "
+                    "the request was sent; the review may already be running. "
+                    "Inspect the thread before deciding what happened; do not retry "
+                    "blindly",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=0)
+            _refused(f"{name!r} codex review/start failed: {reason}")
         if check:
             print(f"not-injectable: {lane} is not a prompt-line keystroke lane")
             raise typer.Exit(code=1)
         _refused(
             f"{name!r} resolves to the {lane} lane, which is not a prompt-line "
             "keystroke path; a raw slash payload would reach the model as text, "
-            "not fire. (Codex review forcing routes to the review/start RPC, not --raw.)"
+            "not fire"
         )
 
     # --check stops here, one step short of the keystroke. Each lane is asked the
@@ -2154,10 +2367,6 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     #        payload has no `from` attribute in the recipient transcript, so the
     #        ledger is the ONLY place that can say who fired the verb. Absent
     #        ambient identity it stays absent rather than guessing.
-    from fno.harness_identity import canonical_handle, current_session_id
-
-    own = current_session_id()
-    sender = canonical_handle(own) if own else None
     if entry.mux:
         delivered = _mux_pane_send(entry, stripped, guarded=False, confirm=True, sender=sender)
     else:  # claude control.sock - the only other keystroke lane
@@ -2508,6 +2717,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _refuse_forged_envelope(content)
         _enforce_body_cap(content)
         _enforce_style(content, allow_reason=style_exception)
 
@@ -2676,6 +2886,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _refuse_forged_envelope(content)
         _enforce_body_cap(content)
         _enforce_style(content, allow_reason=style_exception)
         try:
@@ -2737,6 +2948,7 @@ def cmd_send(
             if message is None:
                 print(f"usage: fno mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
+            _refuse_forged_envelope(message)
             _enforce_body_cap(message)
             _enforce_style(message, allow_reason=style_exception)
             _job_lane_send(message, name, from_name=stamp_from(from_name))
@@ -2751,6 +2963,7 @@ def cmd_send(
         )
         raise typer.Exit(code=2)
 
+    _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
     try:
@@ -3240,6 +3453,7 @@ def cmd_drain_self(
         resolve_harness_identity,
         session_identity_key,
     )
+    from fno.mail.envelope import FNO_MAIL_TRAILER
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -3297,11 +3511,34 @@ def cmd_drain_self(
     job_to_print = [m for m in job_msgs if not _already_landed(m)]
     job_skipped = [m for m in job_msgs if _already_landed(m)]
 
+    # A live-injected send already carries FNO_MAIL_TRAILER inside `wrap_fno_mail`'s
+    # `<fno_mail>` envelope, but a durable inbox-kind send (heads-up/question/fyi)
+    # never routes through that wrapper. Stamp the trailer here, the one
+    # chokepoint every drained body passes through regardless of output shape,
+    # so both the text render and `--json` carry the authority boundary
+    # regardless of which lane produced the body.
+    # A live-injected send stores the full paired envelope durably (body
+    # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
+    # needs both shapes: the bare trailer, and the trailer immediately
+    # before a terminal close tag.
+    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+
+    def _render_body(body: str) -> str:
+        # A durable heads-up body is sender-controlled, so a plain `in`
+        # check is satisfiable by embedding the trailer text mid-body and
+        # placing an outward-action instruction after it: the render would
+        # then treat the body as already stamped and skip the real
+        # terminal trailer. Require the stripped body to END with it.
+        text = body.rstrip("\n")
+        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
+            return text
+        return f"{text}\n{FNO_MAIL_TRAILER}"
+
     if json_out:
         out = [
             {
                 "id": m.id, "from": m.from_, "to": m.to,
-                "kind": m.kind, "ts": m.ts, "body": m.body,
+                "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
             }
             for m in to_print
         ]
@@ -3309,7 +3546,7 @@ def cmd_drain_self(
             out.append(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
-                    "kind": m.kind, "ts": m.ts, "body": m.body,
+                    "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
                     "job": job_addr or "",
                 }
             )
@@ -3319,12 +3556,12 @@ def cmd_drain_self(
             print(f"[fno mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(m.body.rstrip("\n"))
+                print(_render_body(m.body))
         if job_to_print:
             print(f"\n[fno mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(m.body.rstrip("\n"))
+                print(_render_body(m.body))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.

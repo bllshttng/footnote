@@ -60,6 +60,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "backlog": ("fno.graph.cli:cli", "Feature graph management"),
+    "autonomy": (
+        "fno.autonomy_cli:autonomy_app",
+        "Inspect every path that can start a session without an operator asking.",
+        {"hidden": True},
+    ),
     "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
@@ -748,6 +753,14 @@ def review(
         "--inspect-sigma",
         help="Inspect the current node-bound sigma artifact without running a panel.",
     ),
+    sigma_last_head: bool = typer.Option(
+        False,
+        "--sigma-last-head",
+        help=(
+            "Print the head the node's current sigma artifact was reviewed at "
+            "and exit. Empty stdout plus a non-zero exit means no prior head."
+        ),
+    ),
     assess_assurance: bool = typer.Option(
         False,
         "--assess-assurance",
@@ -768,6 +781,8 @@ def review(
     sigma_head: Optional[str] = typer.Option(None, "--sigma-head", hidden=True),
     sigma_current_head: Optional[str] = typer.Option(None, "--sigma-current-head", hidden=True),
     sigma_round: Optional[str] = typer.Option(None, "--sigma-round", hidden=True),
+    sigma_scope_base: Optional[str] = typer.Option(None, "--sigma-scope-base", hidden=True),
+    sigma_scope_reason: Optional[str] = typer.Option(None, "--sigma-scope-reason", hidden=True),
     sigma_project: Optional[str] = typer.Option(None, "--sigma-project", hidden=True),
     sigma_reviews_root: Optional[Path] = typer.Option(None, "--sigma-reviews-root", hidden=True),
     json_output: bool = typer.Option(
@@ -833,10 +848,14 @@ def review(
         # an unsatisfied high-assurance policy must not read as a clean pass.
         raise typer.Exit(0 if verdict["satisfied"] else 3)
 
-    if publish_sigma is not None or inspect_sigma:
+    if publish_sigma is not None or inspect_sigma or sigma_last_head:
         from fno.config import load_settings
         from fno.paths import vault_root
-        from fno.review.artifact import inspect_sigma_artifact, publish_sigma_artifact
+        from fno.review.artifact import (
+            inspect_sigma_artifact,
+            publish_sigma_artifact,
+            read_sigma_last_head,
+        )
 
         project = sigma_project or load_settings().project.id
         root = sigma_reviews_root
@@ -848,12 +867,15 @@ def review(
             for name, value in (
                 ("--sigma-node", sigma_node),
                 ("--sigma-pr", sigma_pr),
-                ("--sigma-head", sigma_head),
                 ("config.project.id/--sigma-project", project),
                 ("configured vault/--sigma-reviews-root", root),
             )
             if value is None
         ]
+        if publish_sigma is not None or inspect_sigma:
+            missing.extend(
+                name for name, value in (("--sigma-head", sigma_head),) if value is None
+            )
         if publish_sigma is not None:
             missing.extend(
                 name
@@ -863,9 +885,38 @@ def review(
                 )
                 if value is None
             )
+            if (sigma_scope_base is None) != (sigma_scope_reason is None):
+                missing.append(
+                    "--sigma-scope-base and --sigma-scope-reason (both or neither)"
+                )
         if missing:
             typer.echo(f"error: sigma artifact metadata missing: {', '.join(missing)}", err=True)
             raise typer.Exit(code=2)
+
+        if sigma_last_head and (publish_sigma is not None or inspect_sigma):
+            typer.echo(
+                "error: --sigma-last-head cannot combine with --publish-sigma/--inspect-sigma",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        if sigma_last_head:
+            assert root is not None and project is not None
+            assert sigma_node is not None and sigma_pr is not None
+            last_head = read_sigma_last_head(
+                reviews_root=root,
+                project=project,
+                node=sigma_node,
+                pr_number=sigma_pr,
+            )
+            if last_head.head_sha is None:
+                typer.echo(
+                    f"error: sigma last head unavailable: {last_head.reason}", err=True
+                )
+                raise typer.Exit(code=1)
+            # Bare SHA only: callers consume it as one token of shell input.
+            typer.echo(last_head.head_sha)
+            return
 
         assert root is not None and project is not None
         assert sigma_node is not None and sigma_pr is not None and sigma_head is not None
@@ -880,6 +931,8 @@ def review(
                 reviewed_head=sigma_head,
                 current_head=sigma_current_head,
                 round_id=sigma_round,
+                scope_base=sigma_scope_base,
+                scope_reason=sigma_scope_reason,
             )
             payload = {
                 "published": publish_result.published,

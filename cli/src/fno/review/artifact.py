@@ -14,6 +14,13 @@ import yaml
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
 
+SCOPE_REASONS = (
+    "first-round",
+    "incremental",
+    "rules-changed",
+    "history-rewritten",
+)
+
 
 @dataclass(frozen=True)
 class PublishResult:
@@ -34,6 +41,13 @@ class InspectResult:
     round_id: str | None
 
 
+@dataclass(frozen=True)
+class LastHeadResult:
+    status: str
+    head_sha: str | None
+    reason: str
+
+
 def _component(value: str, label: str) -> str:
     if not value or not _SAFE_COMPONENT.fullmatch(value):
         raise ValueError(f"invalid sigma artifact {label}: {value!r}")
@@ -47,8 +61,10 @@ def _render(
     pr_number: int,
     reviewed_head: str,
     round_id: str,
+    scope_base: str | None = None,
+    scope_reason: str | None = None,
 ) -> str:
-    metadata = {
+    metadata: dict[str, object] = {
         "schema": "sigma-review/v1",
         "node": node,
         "pr_number": pr_number,
@@ -58,6 +74,9 @@ def _render(
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
     }
+    if scope_base is not None and scope_reason is not None:
+        metadata["scope_base"] = scope_base
+        metadata["scope_reason"] = scope_reason
     return (
         "---\n"
         + yaml.safe_dump(metadata, default_flow_style=False, sort_keys=False)
@@ -90,6 +109,8 @@ def publish_sigma_artifact(
     reviewed_head: str,
     current_head: str | None,
     round_id: str,
+    scope_base: str | None = None,
+    scope_reason: str | None = None,
 ) -> PublishResult:
     """Retain a completed round and publish it only when its head is current."""
     project = _component(project, "project")
@@ -98,6 +119,12 @@ def publish_sigma_artifact(
     reviewed_head = _component(reviewed_head, "head")
     if current_head is not None:
         current_head = _component(current_head, "current head")
+    if (scope_base is None) != (scope_reason is None):
+        raise ValueError("sigma artifact scope requires both base and reason")
+    if scope_base is not None:
+        scope_base = _component(scope_base, "scope base")
+    if scope_reason is not None and scope_reason not in SCOPE_REASONS:
+        raise ValueError(f"invalid sigma artifact scope reason: {scope_reason!r}")
     if pr_number < 1:
         raise ValueError("sigma artifact PR number must be positive")
 
@@ -113,6 +140,8 @@ def publish_sigma_artifact(
         pr_number=pr_number,
         reviewed_head=reviewed_head,
         round_id=round_id,
+        scope_base=scope_base,
+        scope_reason=scope_reason,
     )
     node_dir = Path(reviews_root) / project / "reviews" / node
     round_path = node_dir / "rounds" / f"{round_id}.md"
@@ -160,6 +189,70 @@ def _split_artifact(text: str) -> tuple[dict[str, object], str]:
     if not isinstance(metadata, dict):
         raise ValueError("invalid sigma artifact frontmatter")
     return metadata, pieces[2].lstrip()
+
+
+def read_sigma_last_head(
+    *,
+    reviews_root: Path,
+    project: str,
+    node: str,
+    pr_number: int,
+) -> LastHeadResult:
+    """Read the stored head of the current artifact without expecting one.
+
+    The inverse of inspect_sigma_artifact: that validates a caller-supplied
+    head, while this answers "what head is stored?". Any non-found status is
+    a normal input meaning "review everything", never an exception.
+    """
+    try:
+        path = (
+            Path(reviews_root)
+            / _component(project, "project")
+            / "reviews"
+            / _component(node, "node")
+            / "sigma.md"
+        )
+    except ValueError as exc:
+        return LastHeadResult("rejected", None, str(exc))
+    if not path.exists():
+        return LastHeadResult("missing", None, "artifact does not exist")
+    try:
+        metadata, _body = _split_artifact(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return LastHeadResult("rejected", None, str(exc))
+
+    mismatches = [
+        f"{key}={metadata.get(key)!r} (expected {value!r})"
+        for key, value in (
+            ("schema", "sigma-review/v1"),
+            ("node", node),
+            ("pr_number", pr_number),
+        )
+        if metadata.get(key) != value
+    ]
+    if mismatches:
+        return LastHeadResult("rejected", None, "; ".join(mismatches))
+
+    # Only a scope-aware round proves cumulative coverage up to its head: the
+    # internal single-commit panel publishes this artifact too, and an artifact
+    # without scope fields could narrow a later round past files never reviewed.
+    reason = metadata.get("scope_reason")
+    if reason not in SCOPE_REASONS:
+        return LastHeadResult(
+            "unscoped", None, f"artifact carries no valid scope reason: {reason!r}"
+        )
+    base = metadata.get("scope_base")
+    if not isinstance(base, str) or not _SAFE_COMPONENT.fullmatch(base):
+        return LastHeadResult(
+            "rejected", None, f"scope_base is missing or invalid: {base!r}"
+        )
+
+    head = metadata.get("head_sha")
+    # Same grammar the writer enforces: never surface a partial or placeholder
+    # SHA, which a caller would narrow review scope against.
+    if not isinstance(head, str) or not _SAFE_COMPONENT.fullmatch(head):
+        return LastHeadResult("rejected", None, f"head_sha is missing or invalid: {head!r}")
+    return LastHeadResult("found", head, "current artifact")
 
 
 def inspect_sigma_artifact(

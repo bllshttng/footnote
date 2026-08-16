@@ -260,6 +260,46 @@ def test_restart_no_revive_flag_skips_revival(monkeypatch) -> None:
     assert not any("spawn" in c or "reconcile" in c for c in calls)
 
 
+def test_restart_config_disabled_skips_revival_without_the_flag(monkeypatch) -> None:
+    """x-aaaf wave 2 (AC4-HP): config.restart.enabled=false stops revival even
+    with no --no-revive flag passed."""
+    calls: list = []
+    _revive_setup(monkeypatch, calls)
+    monkeypatch.setattr(restart, "_agents_rows", lambda: [{"name": "w", "status": "live"}])
+    monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
+
+    result = runner.invoke(app, ["restart", "--mux"])
+    assert result.exit_code == 0
+    assert not any("spawn" in c or "reconcile" in c for c in calls)
+
+
+def test_restart_explicit_revive_flag_wins_over_config_disabled(monkeypatch) -> None:
+    """An explicit --revive always outranks the config default (mirrors the
+    env>config precedence pattern elsewhere in x-aaaf)."""
+    calls: list = []
+    _revive_setup(monkeypatch, calls)
+    monkeypatch.setattr(
+        restart, "_agents_rows",
+        lambda: [{"name": "w", "status": "live"}],
+    )
+    monkeypatch.setattr(restart, "_revive_enabled", lambda: False)
+
+    result = runner.invoke(app, ["restart", "--mux", "--revive"])
+    assert result.exit_code == 0
+    assert ["/cargo/bin/fno", "agents", "reconcile"] in calls
+
+
+def test_revive_enabled_defaults_true_matching_prior_ungated_behavior(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    assert restart._revive_enabled() is True
+
+
 def test_restart_revive_skips_worker_without_resumable_session(monkeypatch) -> None:
     """A dead worker with no claude session (or a non-claude provider) is
     reported as skipped, never spawned blind."""

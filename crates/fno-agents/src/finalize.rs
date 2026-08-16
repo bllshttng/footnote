@@ -390,30 +390,16 @@ fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
     (started, done, failed)
 }
 
-/// Append a pre-built extended envelope as one events.jsonl line (O_APPEND,
-/// create-if-missing). Non-fatal: a write failure logs and returns, never
-/// wedging finalize. Kept local to finalize (not loopcheck's fixed-envelope
-/// writer) because run_summary carries envelope-level routable fields.
+/// Append a pre-built extended envelope through the shared Branch-A mutex.
+/// Non-fatal: a write failure logs and returns, never wedging finalize.
 fn append_envelope(path: &Path, envelope: &Value) {
-    use std::io::Write;
-    let Ok(mut line) = serde_json::to_string(envelope) else {
-        eprintln!("finalize: failed to serialize run_summary");
-        return;
-    };
-    line.push('\n');
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    match fs::OpenOptions::new().create(true).append(true).open(path) {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(line.as_bytes()) {
-                eprintln!(
-                    "finalize: run_summary write to {} failed: {e}",
-                    path.display()
-                );
-            }
-        }
-        Err(e) => eprintln!("finalize: run_summary open {} failed: {e}", path.display()),
+    if let Err(error) =
+        crate::claims::append_event_line(path, envelope, std::time::Duration::from_secs(2))
+    {
+        eprintln!(
+            "finalize: run_summary write to {} failed: {error}",
+            path.display()
+        );
     }
 }
 

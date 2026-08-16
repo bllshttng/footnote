@@ -54,6 +54,16 @@ if declare -F get_config >/dev/null 2>&1; then
 fi
 case "$enabled" in true|True|TRUE|1|yes|on) ;; *) exit 0 ;; esac
 
+# 1b. Master switch (x-aaaf wave 3 follow-up): config.autonomy.enabled
+# outranks this per-feature gate too, checked first like every other
+# resolver so `fno autonomy status` reporting this row disabled actually
+# means the dispatch below cannot fire.
+autonomy_enabled="true"
+if declare -F get_config >/dev/null 2>&1; then
+  autonomy_enabled=$(get_config "autonomy.enabled" "true" 2>/dev/null || echo "true")
+fi
+case "$autonomy_enabled" in true|True|TRUE|1|yes|on) ;; *) exit 0 ;; esac
+
 # 2. Resolve the backlog node from the plan. Three tiers, first hit wins, so
 #    every plan shape /blueprint produces can auto-launch (bug ab-6f93f87a):
 #      a. `claims: ab-XXXXXXXX`        - quick/full plan claiming an existing node

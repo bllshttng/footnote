@@ -870,6 +870,13 @@ class Ritual:
             # sets it false must not acquire the mutex or run any leg (codex P1).
             self._emit("config", _SKIPPED, "post_merge.enabled is false; ritual disabled")
             return 0
+        from fno.config import autonomy_master_enabled
+
+        if not autonomy_master_enabled(self.canon):
+            # x-aaaf wave 3: the master panic switch outranks post_merge.enabled
+            # too - checked separately so the receipt names WHICH one fired.
+            self._emit("config", _SKIPPED, "autonomy.enabled is false; ritual disabled")
+            return 0
         self._emit("resolve", _OK, "pr={} source={}".format(
             self.ctx.pr, "caller" if self.pr_supplied else "most-recent-merge"))
         if not self.acquire_mutex():

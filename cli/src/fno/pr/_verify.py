@@ -20,6 +20,7 @@ verify --kind reviews (verify-review-replies.sh):
 
 Both keep stdout for the contract output and stderr for diagnostics.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -75,7 +76,7 @@ def _read_field(state_file: str, field: str) -> str:
         with open(state_file, "r", encoding="utf-8") as fh:
             for ln in fh:
                 if ln.startswith(field + ":"):
-                    return _dequote(ln[len(field) + 1:].strip())
+                    return _dequote(ln[len(field) + 1 :].strip())
     except OSError:
         pass
     return ""
@@ -152,15 +153,23 @@ def _append_event_lenient(events_file: str, event: dict, reason: str) -> None:
             f"pr-verify: schema validation failed for transcript_audit_failed "
             f"(reason={reason}); appending anyway\n"
         )
-    lock = _Lock(events_file, 30, steal=True)  # whole-line append
-    if not lock.acquire():
-        sys.stderr.write(f"pr-verify: events.jsonl lock timeout (reason={reason})\n")
-        return
+    requested_path = Path(events_file)
+    while True:
+        path = requested_path.resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_dir = path.with_name(path.name + ".lock.d")
+        token = acquire_dir_mutex(lock_dir, 30, steal=True, poll_s=1)
+        if token is None:
+            sys.stderr.write(f"pr-verify: events.jsonl lock timeout (reason={reason})\n")
+            return
+        if requested_path.resolve() == path:
+            break
+        release_dir_mutex(lock_dir, token)
     try:
-        with open(events_file, "a", encoding="utf-8") as fh:
+        with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, separators=(",", ":")) + "\n")
     finally:
-        lock.release()
+        release_dir_mutex(lock_dir, token)
 
 
 def _record_merge(state_file: str, pr: str, merged_at: str) -> bool:
@@ -310,7 +319,9 @@ def run_verify_merged(
         )
         return 2
     if state == "CLOSED":
-        _emit_audit(repo_root, state_file, pr_number, "pr_closed_without_merge", {"pr_state": "CLOSED"})
+        _emit_audit(
+            repo_root, state_file, pr_number, "pr_closed_without_merge", {"pr_state": "CLOSED"}
+        )
         sys.stdout.write(
             f"pr_closed_without_merge: PR #{pr_number} is CLOSED (not merged) "
             "— investigate before re-promising\n"
@@ -329,7 +340,10 @@ def run_verify_merged(
         return 1
     if review_decision == "CHANGES_REQUESTED":
         _emit_audit(
-            repo_root, state_file, pr_number, "review_changes_requested",
+            repo_root,
+            state_file,
+            pr_number,
+            "review_changes_requested",
             {"review_decision": "CHANGES_REQUESTED"},
         )
         sys.stdout.write(
@@ -357,7 +371,10 @@ def run_verify_merged(
     # All preconditions clean.
     if remediation == "verify_only":
         _emit_audit(
-            repo_root, state_file, pr_number, "remediation_disabled",
+            repo_root,
+            state_file,
+            pr_number,
+            "remediation_disabled",
             {"remediation": "verify_only"},
         )
         sys.stdout.write(
@@ -415,16 +432,13 @@ def _bounded_remediation(
 
     lineage, why = _base_lineage.lineage_verdict(pr_number, cwd)
     if lineage == "stale" and not _base_lineage.bypassed():
-        _emit_audit(
-            repo_root, state_file, pr_number, "merge_refused_stacked_base", {"reason": why}
-        )
+        _emit_audit(repo_root, state_file, pr_number, "merge_refused_stacked_base", {"reason": why})
         sys.stdout.write(f"merge_refused_stacked_base: PR #{pr_number} {why}\n")
         return 1
     if lineage == "stale":
         _base_lineage.emit_bypass_escape(pr_number, cwd, why)
         sys.stderr.write(
-            f"verify-pr-merged: stacked-base guard bypassed "
-            f"({_base_lineage.BYPASS_ENV}); {why}\n"
+            f"verify-pr-merged: stacked-base guard bypassed ({_base_lineage.BYPASS_ENV}); {why}\n"
         )
     elif lineage == "unknown":
         sys.stderr.write(
@@ -519,7 +533,10 @@ def _bounded_remediation(
             if attempt == 0:
                 sleep_fn(30)
         _emit_audit(
-            repo_root, state_file, pr_number, "merge_attempt_did_not_complete",
+            repo_root,
+            state_file,
+            pr_number,
+            "merge_attempt_did_not_complete",
             {"final_state": (pr_json or {}).get("state") or ""},
         )
         sys.stdout.write(
@@ -553,7 +570,10 @@ def _bounded_remediation(
     # read instead of acting on a guess. Mirrors the same guard in _merge.py.
     if pr_json is None:
         _emit_audit(
-            repo_root, state_file, pr_number, "merge_state_unreadable",
+            repo_root,
+            state_file,
+            pr_number,
+            "merge_state_unreadable",
             {"stderr": gh_stderr.splitlines()[0] if gh_stderr.strip() else ""},
         )
         sys.stdout.write(
@@ -567,7 +587,10 @@ def _bounded_remediation(
         for tok in ("freshness", "stale state", "state file", "state-file mtime", "git-protection")
     ):
         _emit_audit(
-            repo_root, state_file, pr_number, "merge_blocked_by_freshness_cap",
+            repo_root,
+            state_file,
+            pr_number,
+            "merge_blocked_by_freshness_cap",
             {"stderr_token": "freshness_cap"},
         )
         sys.stdout.write(
@@ -649,7 +672,9 @@ def run_verify_reviews(pr_number: str, state_file: str, cwd: Optional[str] = Non
 
     repo_root = _repo_root(repo)
 
-    repo_name = run(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd=repo)
+    repo_name = run(
+        ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd=repo
+    )
     repo_slug = repo_name.stdout.strip() if repo_name.ok else ""
     if not repo_slug:
         sys.stderr.write("verify-review-replies: gh repo view failed; degrading open\n")
@@ -659,7 +684,7 @@ def run_verify_reviews(pr_number: str, state_file: str, cwd: Optional[str] = Non
         [
             f"/repos/{repo_slug}/pulls/{pr_number}/reviews",
             "--jq",
-            "[ .[] | select(.state != \"PENDING\") | {login: .user.login, submitted_at: .submitted_at} ]",
+            '[ .[] | select(.state != "PENDING") | {login: .user.login, submitted_at: .submitted_at} ]',
         ],
         repo,
     )
@@ -677,7 +702,9 @@ def run_verify_reviews(pr_number: str, state_file: str, cwd: Optional[str] = Non
         # No non-pending reviewers - nothing to audit.
         return 0
 
-    pr_author_res = run(["gh", "pr", "view", pr_number, "--json", "author", "--jq", ".author.login"], cwd=repo)
+    pr_author_res = run(
+        ["gh", "pr", "view", pr_number, "--json", "author", "--jq", ".author.login"], cwd=repo
+    )
     pr_author = pr_author_res.stdout.strip() if pr_author_res.ok else ""
     if pr_author == "null":  # a null author serialises to the literal string
         pr_author = ""
@@ -685,22 +712,28 @@ def run_verify_reviews(pr_number: str, state_file: str, cwd: Optional[str] = Non
         sys.stderr.write("verify-review-replies: could not fetch PR author; degrading open\n")
         return 0
 
-    issue_comments = _gh_api_json(
-        [
-            f"/repos/{repo_slug}/issues/{pr_number}/comments",
-            "--jq",
-            "[ .[] | {login: .user.login, created_at: .created_at, body: .body} ]",
-        ],
-        repo,
-    ) or []
-    review_comments = _gh_api_json(
-        [
-            f"/repos/{repo_slug}/pulls/{pr_number}/comments",
-            "--jq",
-            "[ .[] | {login: .user.login, created_at: .created_at, body: .body} ]",
-        ],
-        repo,
-    ) or []
+    issue_comments = (
+        _gh_api_json(
+            [
+                f"/repos/{repo_slug}/issues/{pr_number}/comments",
+                "--jq",
+                "[ .[] | {login: .user.login, created_at: .created_at, body: .body} ]",
+            ],
+            repo,
+        )
+        or []
+    )
+    review_comments = (
+        _gh_api_json(
+            [
+                f"/repos/{repo_slug}/pulls/{pr_number}/comments",
+                "--jq",
+                "[ .[] | {login: .user.login, created_at: .created_at, body: .body} ]",
+            ],
+            repo,
+        )
+        or []
+    )
     all_comments = list(issue_comments) + list(review_comments)
 
     missing: List[str] = []

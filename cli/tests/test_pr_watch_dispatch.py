@@ -898,6 +898,58 @@ class TestTickOrchestrator:
         assert deps["events"] == []
         assert deps["fired"] == []
 
+    def test_config_disabled_skips_before_taking_the_lock(self, tmp_path):
+        """x-aaaf wave 2 (AC4-HP): enabled=False no-ops before the lock is
+        even attempted - no events, no discovery, no fire."""
+        from fno.pr_watch._dispatch import tick
+
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        deps = _make_tick_deps(tmp_path, candidates=[candidate])
+
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            enabled=False,
+        )
+
+        assert result.disabled is True
+        assert result.open_prs == 0
+        assert result.acted == 0
+        assert deps["events"] == []
+        assert deps["fired"] == []
+
+    def test_enabled_defaults_true_so_uninjected_callers_are_unaffected(self, tmp_path):
+        """Every existing caller that does not pass `enabled=` must keep
+        dispatching - tick() never reads settings itself (hermetic DI)."""
+        from fno.pr_watch._dispatch import tick
+
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+        assert result.disabled is False
+        tick_events = [e for e in deps["events"] if e["type"] == "pr_watch_tick"]
+        assert len(tick_events) == 1
+
     def test_AC6_HP_lock_held_tick_names_the_holder(self, tmp_path):
         """A wedged predecessor must not read as an empty sweep."""
         from fno.pr_watch._dispatch import tick

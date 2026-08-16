@@ -13,8 +13,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from fno.harness_identity import resolve_harness_identity
-
 # Match one <fno_mail ...> open tag; attribute order is NOT assumed (id and from
 # are pulled independently within the tag).
 _OPEN_TAG_RE = re.compile(r"<fno_mail\b[^>]*>")
@@ -50,7 +48,19 @@ def _read_own_transcript_text() -> Optional[str]:
     ponytail: reads the whole transcript. A received message is near the tail,
     but it can be older; whole-file is the simple correct read. Bound to a tail
     window only if a profiler ever says transcript size hurts.
+
+    Import kept local (not module-level): this module is imported lazily from
+    inside ``cmd_drain_self``, so a module-level ``from fno.harness_identity
+    import resolve_harness_identity`` binds whatever that name pointed to at
+    the moment of THAT first import - permanently, since the module is cached
+    in ``sys.modules`` thereafter. A test that monkeypatches
+    ``harness_identity.resolve_harness_identity`` and happens to trigger this
+    module's first import while the patch is active poisons every later caller
+    in the same process; monkeypatch's teardown only reverts the attribute on
+    ``fno.harness_identity``, not this module's separate name binding.
     """
+    from fno.harness_identity import resolve_harness_identity
+
     ident = resolve_harness_identity()
     if not ident.session_id or not ident.harness:
         return None

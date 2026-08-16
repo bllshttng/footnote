@@ -43,7 +43,12 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _events(events_path: Path) -> list[dict]:
     if not events_path.exists():
         return []
-    return [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
+    return [
+        event
+        for line in events_path.read_text().splitlines()
+        if line.strip()
+        and not (event := json.loads(line))["type"].startswith("claim_")
+    ]
 
 
 def _node(**over) -> dict:
@@ -994,13 +999,18 @@ def test_enabled_honors_project_root(monkeypatch, tmp_path):
             enabled = True
             max_per_run = 7
 
+        class autonomy:
+            enabled = True
+
     monkeypatch.setattr(
         "fno.config.load_settings_for_repo",
         lambda root: seen.append(root) or _S,
     )
     assert st.think_spawn_enabled(project_root=tmp_path, env={}) is True
     assert st._max_per_run(tmp_path) == 7
-    assert seen == [tmp_path, tmp_path]  # repo-specific loader used both times
+    # repo-specific loader used all three times: the x-aaaf wave-3 master
+    # switch check, the think_spawn.enabled read, and _max_per_run.
+    assert seen == [tmp_path, tmp_path, tmp_path]
 
 
 # ---------------------------------------------------------------------------

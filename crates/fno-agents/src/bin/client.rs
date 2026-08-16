@@ -114,9 +114,10 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
     // app-server `review/start` RPC is the codex counterpart of claude's
-    // `--raw /code-review` (codex's turn/start lane is not a keystroke path, so
-    // --raw refuses it). Structured targets + an outcome receipt (a Turn + a
-    // reviewThreadId), strictly better than keystroke faking. Same `matches!`
+    // `--raw /code-review` (the Python raw router sends exact review verbs here;
+    // codex's turn/start lane still cannot parse arbitrary slash payloads).
+    // Structured targets + an outcome receipt (a Turn + a reviewThreadId),
+    // strictly better than keystroke faking. Same `matches!`
     // treatment as `mail-inject`/`codex-loaded-threads` so it stays out of
     // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard - no advertised
     // fno verb is added. The socket round-trip needs the user's daemon.
@@ -1401,11 +1402,18 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             .iter()
             .map(|(id, path)| json!({"id": id, "worktree": path}))
             .collect();
+        let refused: Vec<Value> = summary
+            .cascade_refused
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         return format!(
             "{}\n",
             json!({
                 "reaped": summary.reaped,
                 "reaped_backstop": summary.reaped_backstop,
+                "reaped_dormant": summary.reaped_dormant,
+                "cascade_refused": refused,
                 "kept_dirty": kept,
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "dry_run": dry_run,
@@ -1414,9 +1422,10 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
     }
     let verb = if dry_run { "would reap" } else { "reaped" };
     let mut out = format!(
-        "{verb} {} row(s) ({} by the age backstop)\n",
+        "{verb} {} row(s) ({} by the age backstop, {} dormant done)\n",
         summary.reaped.len(),
-        summary.reaped_backstop.len()
+        summary.reaped_backstop.len(),
+        summary.reaped_dormant.len()
     );
     for id in &summary.reaped {
         out.push_str(&format!("  {verb} {id}\n"));
@@ -1426,12 +1435,22 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             "  {verb} {id} (age backstop: nothing corroborated it)\n"
         ));
     }
+    for id in &summary.reaped_dormant {
+        out.push_str(&format!(
+            "  {verb} {id} (dormant: transcript tail read done; resumable handle in the event)\n"
+        ));
+    }
+    for (id, reason) in &summary.cascade_refused {
+        out.push_str(&format!(
+            "  harness session kept {id} (cascade refused: {reason})\n"
+        ));
+    }
     for (id, path) in &summary.kept_dirty {
         out.push_str(&format!("  kept {id} (dirty worktree: {path})\n"));
     }
     for id in &summary.kept_uncorroborated {
         out.push_str(&format!(
-            "  kept {id} (uncorroborated: no confirmed-dead pid, no positively-stale transcript yet)\n"
+            "  kept {id} (uncorroborated: no confirmed-dead pid, no positively-stale transcript, no gone harness session yet)\n"
         ));
     }
     if dry_run {
@@ -2578,7 +2597,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "drive-authority [--json]",
     "trace [options]",
     "ping",
-    "resume <name> [--print-command]",
+    "resume <name> [--print-command] [--message/-m <text>]",
     "adopt <session-id>",
     "attach <name>",
     "logs <name> [--follow] [options]",
@@ -3031,7 +3050,7 @@ mod tests {
         // nonzero one has nothing to be read against.
         let out = render_reap(&summary(&["a1"], &[]), false, false);
         assert!(
-            out.starts_with("reaped 1 row(s) (0 by the age backstop)"),
+            out.starts_with("reaped 1 row(s) (0 by the age backstop, 0 dormant done)"),
             "missing the zero backstop count: {out}"
         );
     }
@@ -3042,7 +3061,7 @@ mod tests {
         // said "reaped 0 row(s)" while the backstop deleted two rows.
         let out = render_reap(&summary(&[], &["b1", "b2"]), false, false);
         assert!(
-            out.starts_with("reaped 0 row(s) (2 by the age backstop)"),
+            out.starts_with("reaped 0 row(s) (2 by the age backstop, 0 dormant done)"),
             "backstop removals missing from the totals: {out}"
         );
         assert!(out.contains("  reaped b1 (age backstop"), "{out}");
@@ -3088,7 +3107,7 @@ mod tests {
     fn reap_dry_run_says_would_reap_not_reaped() {
         // `--dry-run` must never claim past tense on a row nothing removed.
         let out = render_reap(&summary(&["a1"], &["b1"]), false, true);
-        assert!(out.starts_with("would reap 1 row(s) (1 by the age backstop)"));
+        assert!(out.starts_with("would reap 1 row(s) (1 by the age backstop, 0 dormant done)"));
         assert!(out.contains("  would reap a1"));
         assert!(out.contains("  would reap b1 (age backstop"));
         assert!(

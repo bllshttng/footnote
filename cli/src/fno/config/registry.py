@@ -250,6 +250,8 @@ FIELD_META: dict[str, Meta] = {
     "dispatch.auto_merge": Meta("advanced", "Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false.", default_source="default"),
     "dispatch.on_exhaustion": Meta("advanced", "On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.", default_source="default"),
     "dispatch.cutover_low_after_minutes": Meta("advanced", "Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0.", default_source="default"),
+    # --- config.autonomy.* ---
+    "autonomy.enabled": Meta("never", "The one master switch over every autonomous session-starting spawner. Defaults true; shipping this changes nothing until explicitly disabled."),
     # --- config.auto_continue.* ---
     "auto_continue.enabled": Meta("advanced", "Auto-dispatch the next ready node after a PR merges."),
     # --- config.keep_going.* ---
@@ -357,6 +359,12 @@ FIELD_META: dict[str, Meta] = {
     "pr_watch.retries": Meta("never", "PR-watcher consecutive-failure park threshold."),
     "pr_watch.max_age_days": Meta("never", "PR-watcher: park PRs older than N days."),
     "pr_watch.model": Meta("never", "Claude model used for headless PR-watcher skill fires."),
+    # --- config.groom.* ---
+    "groom.enabled": Meta("never", "Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true."),
+    # --- config.restart.* ---
+    "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true."),
+    # --- config.evals.* ---
+    "evals.enabled": Meta("never", "Enable the headless eval-suite grading-worker spawn. Defaults true."),
     # --- config.recovery.* ---
     "recovery.enabled": Meta("advanced", "Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed."),
     "recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be (seconds) before recovery acts on it."),

@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.mail.envelope import FNO_MAIL_TRAILER
 from fno.paths_testing import use_tmpdir
 
 
@@ -128,7 +129,7 @@ def test_named_agent_heads_up_resolves_to_canonical_drain_handle(
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     assert [item["body"] for item in json.loads(drained.stdout)] == [
-        "Migration is ready"
+        f"Migration is ready\n{FNO_MAIL_TRAILER}"
     ]
 
 
@@ -288,7 +289,7 @@ def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
-    assert [m["body"] for m in payload] == ["ack from K"]
+    assert [m["body"] for m in payload] == [f"ack from K\n{FNO_MAIL_TRAILER}"]
     assert payload[0]["to"] == "019f48e1"
 
     # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
@@ -329,7 +330,10 @@ def test_legacy_addressed_mail_is_not_drained(runner, mailbox, monkeypatch):
     assert res.exit_code == 0, res.output
     bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
     assert "retired form" not in bodies
-    assert set(bodies) == {"canonical", "legacy suffix"}
+    assert set(bodies) == {
+        f"canonical\n{FNO_MAIL_TRAILER}",
+        f"legacy suffix\n{FNO_MAIL_TRAILER}",
+    }
 
 
 def test_send_target_may_be_short_id_shaped(runner, mailbox):

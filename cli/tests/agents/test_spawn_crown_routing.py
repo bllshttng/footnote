@@ -137,3 +137,22 @@ def test_long_only_detectors_detect_and_respect_argv_boundary() -> None:
     assert not _is_dispatch_account_bearing_spawn(
         "crown", ["crown", "w", "--dispatch-account", "ci"]
     )
+
+
+def test_pane_detector_stops_at_the_passthrough_fence() -> None:
+    """x-1caa: a fenced provider token is not fno's flag. Before the fence
+    broke this scan, a passthrough ``-p``/``--once``/``--substrate`` flipped
+    the pane detector to False and rerouted a pane-default spawn onto the
+    Rust binary lane - past the billing guard, the headless-form refusal, and
+    the pane-only passthrough refusal (the guard-on-one-path trap)."""
+    from fno.agents.rust_runtime import _is_pane_substrate_spawn
+
+    assert _is_pane_substrate_spawn("spawn", ["spawn", "hi", "--", "-p"])
+    assert _is_pane_substrate_spawn("spawn", ["spawn", "hi", "--", "--once", "x"])
+    assert _is_pane_substrate_spawn("spawn", ["spawn", "hi", "--", "--substrate", "bg"])
+    # Pre-fence spellings still count, and the --argv payload boundary holds.
+    assert not _is_pane_substrate_spawn("spawn", ["spawn", "hi", "-p"])
+    assert not _is_pane_substrate_spawn(
+        "spawn", ["spawn", "hi", "--substrate", "headless"]
+    )
+    assert _is_pane_substrate_spawn("spawn", ["spawn", "hi", "--argv", "-p"])

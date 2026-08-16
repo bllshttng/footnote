@@ -47,6 +47,31 @@ _SPAWN_TIMEOUT_S = _WORKER_TIMEOUT_S + 120
 _GROOM_KEY_PREFIX = "groom"
 
 
+def groom_enabled() -> bool:
+    """Resolve whether the daily grooming worker spawn is armed (x-aaaf wave 2).
+
+    ``config.groom.enabled`` defaults True (matches the spawner's prior,
+    ungated behavior - it always ran). A malformed value degrades to True
+    (GroomBlock's own fail-safe: this was never opt-in, so a typo must not
+    silently disable it), but a config that fails to LOAD at all degrades to
+    False - the global invariant that an unreadable config resolves every
+    gate to off, never to on (Failure Modes/Errors, x-aaaf design doc).
+
+    Also stops when ``config.autonomy.enabled`` (the wave-3 master panic
+    switch) is off, checked first.
+    """
+    from fno.config import autonomy_master_enabled
+
+    if not autonomy_master_enabled():
+        return False
+    try:
+        from fno.config import load_settings
+
+        return bool(load_settings().groom.enabled)
+    except Exception:  # noqa: BLE001 - fail-safe to disabled on a total read failure
+        return False
+
+
 def groom_day_key(today: Optional[date] = None) -> str:
     """The daily dedup claim key, UTC-bucketed like the repo's other day keys."""
     day = today or datetime.now(timezone.utc).date()
@@ -276,6 +301,7 @@ def run_groom(
     them too), then the judgment worker is dispatched. Returns a receipt whose
     ``status`` is one of ``dispatched`` | ``degraded`` (dispatched, but a
     mechanical leg did not come back clean) | ``already-ran`` | ``dry-run`` |
+    ``disabled`` (x-aaaf wave 2: ``config.groom.enabled`` is false) |
     ``failed``, carrying a ``mechanical`` map of per-leg outcomes. Never raises:
     a grooming pass is hygiene, so a failed dispatch reports and leaves the day
     retryable.
@@ -290,6 +316,9 @@ def run_groom(
 
     key = groom_day_key(today)
     day = key.split(":", 1)[1]
+
+    if not dry_run and not groom_enabled():
+        return {"status": "disabled", "day": day, "key": key, "detail": "config.groom.enabled is false"}
 
     if dry_run:
         return {

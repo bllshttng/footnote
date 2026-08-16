@@ -58,6 +58,21 @@ pub enum GcAction {
     /// It clears the SAME worktree guard `Reap` does. Only the corroboration
     /// requirement is waived here, never the cleanliness one.
     ReapBackstop,
+    /// Remove a LIVE row on a positive done reading: idle past the grace window
+    /// AND the transcript tail classifies `done` (promise emitted). The session
+    /// is idle-and-resumable, not dead, so the reap records a resumable handle
+    /// (harness + session id) in the event rather than treating it as a death.
+    ///
+    /// A separate verdict for the same reason `ReapBackstop` is one: folded into
+    /// `Reap`, live-but-done becomes the ordinary route and a death and a
+    /// finished turn stop being distinguishable in the counts. A credential-dead
+    /// worker whose tail reads anything but `done` is NEITHER alive nor dead -
+    /// only the positive done reading evicts, so every other tail state keeps.
+    ///
+    /// Clears the SAME worktree guard the removal verdicts do: a done worker's
+    /// worktree can hold uncommitted work, and dropping the row drops the only
+    /// pointer to it.
+    ReapDormant,
     /// First tick we observe this row dead: stamp `exited_at` to start the grace
     /// clock. The row stays visible for the whole grace window after this.
     StampExit,
@@ -134,11 +149,40 @@ pub struct GcRow {
     /// keeps the row, because an absence of freshness has two explanations and
     /// only one of them is a dead worker.
     pub transcript_fresh: Option<bool>,
+    /// Does the row's session still exist in its OWN harness's store?
+    /// `Some(true)` the store entry is GONE (positive evidence the session
+    /// ended), `Some(false)` still present, `None` no session id recorded or
+    /// the store could not be read.
+    ///
+    /// Keyed on the row's own harness, never another harness's store: a codex
+    /// worker has no claude transcript by construction, so judging it by
+    /// claude's store would reap every codex row on the machine. The probe
+    /// exists because `claude rm` removes the session from Claude Code while
+    /// the registry row survives - the harness store is the authority the
+    /// registry cannot see on its own.
+    pub harness_session_gone: Option<bool>,
+    /// A LIVE row idle past the grace window whose transcript tail classifies
+    /// `done`. Set by the sweep only after BOTH the idle gate and the
+    /// truth-tail probe answered positively; the one live-row exit from the
+    /// registry, reported as [`GcAction::ReapDormant`].
+    pub dormant_done: bool,
     /// Worktree cleanliness for a worktree-owning row: `Some(true)` clean,
     /// `Some(false)` dirty (uncommitted changes -> keep), `None` the probe could
     /// not determine it (fail closed -> keep). Ignored when `owns_worktree` is
     /// false, because then there is nothing for it to protect.
     pub worktree_clean: Option<bool>,
+}
+
+/// The terminal status set, spelled ONCE: `gc_decide` and the sweep's probe
+/// gates both ask this, because the sweep gates its probes on the same
+/// terminal-or-dead question the policy will rule on, and two local spellings
+/// of one set is how they drifted apart the first time (Orphaned joined the
+/// policy's set while the sweep's copy kept the old three).
+pub fn status_is_terminal(status: AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::Exited | AgentStatus::PermanentDead | AgentStatus::Orphaned
+    )
 }
 
 /// Whether this row has at least one POSITIVE, independent reading that its
@@ -156,7 +200,10 @@ pub struct GcRow {
 /// Ignores `worktree_clean` on purpose: this is the corroboration question
 /// alone, asked before any probe has run.
 pub fn removal_is_corroborated(row: &GcRow) -> bool {
-    row.pid_confirmed_dead || row.transcript_fresh == Some(false) || !row.liveness_surface
+    row.pid_confirmed_dead
+        || row.transcript_fresh == Some(false)
+        || row.harness_session_gone == Some(true)
+        || !row.liveness_surface
 }
 
 /// WHICH gate is holding a [`GcAction::Keep`] row, for diagnostic reporting
@@ -205,13 +252,26 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
     // (AC1-FR) A live worker -- re-checked -- is never touched. The caller clears
     // any stale `exited_at` on such a row separately.
     if row.is_live {
-        return (GcAction::Keep, Some(KeepReason::Live));
+        // The one live-row exit: a POSITIVE done reading (idle past grace,
+        // transcript tail classifies `done`). That worker finished its turn;
+        // the row leaves as `ReapDormant` with a resumable handle recorded by
+        // the caller. Every other live row is untouched on death evidence.
+        if !row.dormant_done {
+            return (GcAction::Keep, Some(KeepReason::Live));
+        }
+        return apply_worktree_guard(row, GcAction::ReapDormant);
     }
     // Reap condition #1: terminal status OR a confirmed-dead pid. A non-terminal
     // row with no confirmed-dead pid (e.g. `Spawning` with no pid recorded yet)
     // is NOT eligible -- never reap something still coming up.
-    let terminal_or_dead = matches!(row.status, AgentStatus::Exited | AgentStatus::PermanentDead)
-        || row.pid_confirmed_dead;
+    //
+    // `Orphaned` is terminal for GC purposes: reconcile parks a row there on an
+    // unreachable probe, which is an external observation of death-adjacency,
+    // so the row earns a stamp and ages through the same grace + corroboration
+    // path as `Exited`. Before this, an Orphaned row with no pid never got an
+    // `exited_at` stamp, never entered the grace path, and the backstop (which
+    // hangs off `exited_at`) never fired: Orphaned rows were immortal.
+    let terminal_or_dead = status_is_terminal(row.status) || row.pid_confirmed_dead;
     if !terminal_or_dead {
         return (GcAction::Keep, Some(KeepReason::NotTerminal));
     }
@@ -232,7 +292,10 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
             // Three qualify. A pid whose start time no longer matches is a
             // process that provably ended. A transcript untouched for the whole
             // window is a session that provably stopped writing. A row with no
-            // liveness surface at all never had a worker to lose.
+            // liveness surface at all never had a worker to lose. A session
+            // entry gone from its OWN harness's store is a session that
+            // provably ended there (`claude rm` removes the harness record while
+            // the registry row survives).
             //
             // None of them available means keep. Reaping a live session destroys
             // work in progress and, worse, the only process able to satisfy its
@@ -256,17 +319,25 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
             } else {
                 return (GcAction::Keep, Some(KeepReason::Uncorroborated));
             };
-            if !row.owns_worktree {
-                // No worktree to protect, so nothing for cleanliness to say.
-                return (earned, None);
-            }
-            match row.worktree_clean {
-                Some(true) => (earned, None),
-                // Dirty worktree kept (AC1-EDGE); probe failure fails closed.
-                Some(false) => (GcAction::Keep, Some(KeepReason::WorktreeDirty)),
-                None => (GcAction::Keep, Some(KeepReason::WorktreeUnprobed)),
-            }
+            apply_worktree_guard(row, earned)
         }
+    }
+}
+
+/// The worktree guard every removal verdict must clear. Spelled once so a
+/// future verdict cannot walk past it: `Reap`, `ReapBackstop`, and `ReapDormant`
+/// each drop a row that may be the only pointer at a worktree, and an unguarded
+/// removal path would orphan uncommitted work the same way for each.
+fn apply_worktree_guard(row: &GcRow, earned: GcAction) -> (GcAction, Option<KeepReason>) {
+    if !row.owns_worktree {
+        // No worktree to protect, so nothing for cleanliness to say.
+        return (earned, None);
+    }
+    match row.worktree_clean {
+        Some(true) => (earned, None),
+        // Dirty worktree kept (AC1-EDGE); probe failure fails closed.
+        Some(false) => (GcAction::Keep, Some(KeepReason::WorktreeDirty)),
+        None => (GcAction::Keep, Some(KeepReason::WorktreeUnprobed)),
     }
 }
 
@@ -309,6 +380,8 @@ mod tests {
             exited_at: Some(NOW - GRACE - 1),
             liveness_surface: true,
             transcript_fresh: Some(false),
+            harness_session_gone: None,
+            dormant_done: false,
             worktree_clean: Some(true),
         }
     }
@@ -448,6 +521,8 @@ mod tests {
             exited_at: Some(NOW - GRACE - 1),
             liveness_surface: true,
             transcript_fresh: None,
+            harness_session_gone: None,
+            dormant_done: false,
             worktree_clean: Some(true),
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
@@ -463,6 +538,182 @@ mod tests {
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    // -- Harness-store corroboration (AC1 / AC3 / AC5) ----------------------
+
+    #[test]
+    fn a_gone_harness_session_corroborates_on_its_own() {
+        // THE `claude rm` CASE: the harness store's entry for the session is
+        // gone while the row still reads Exited with a live pid slot and an
+        // unreadable transcript. The store is the authority the registry cannot
+        // see, and its absence there is positive evidence the session ended.
+        let row = GcRow {
+            pid_confirmed_dead: false,
+            transcript_fresh: None,
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_present_harness_session_never_corroborates() {
+        // Some(false) means the session still exists in its own store: the
+        // strongest KEEP-leaning reading there is. It must not corroborate, and
+        // it must not override any other signal either (an unresolvable probe
+        // answers None, which also never corroborates - AC5).
+        let present = GcRow {
+            pid_confirmed_dead: false,
+            transcript_fresh: None,
+            harness_session_gone: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&present, NOW, GRACE), GcAction::Keep);
+        let unknown = GcRow {
+            harness_session_gone: None,
+            ..present
+        };
+        assert_eq!(gc_action(&unknown, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn a_gone_harness_session_never_shortcuts_the_earlier_guards() {
+        // The store signal is additional, never a replacement: it must not skip
+        // liveness, the grace window, or terminal status.
+        let live = GcRow {
+            is_live: true,
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&live, NOW, GRACE), GcAction::Keep);
+
+        let in_grace = GcRow {
+            exited_at: Some(NOW - GRACE + 10),
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&in_grace, NOW, GRACE), GcAction::Keep);
+
+        let not_terminal = GcRow {
+            status: AgentStatus::Spawning,
+            exited_at: None,
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&not_terminal, NOW, GRACE), GcAction::Keep);
+    }
+
+    // -- Orphaned rows age into eviction (AC4) -------------------------------
+
+    #[test]
+    fn an_orphaned_row_stamps_and_ages_like_an_exited_one() {
+        // The immortal-row mechanism: reconcile parks unreachable rows in
+        // Orphaned; before it joined the terminal set such a row never got an
+        // `exited_at` stamp, so neither the grace path nor the backstop (which
+        // hangs off the stamp) could ever fire.
+        let unstamped = GcRow {
+            status: AgentStatus::Orphaned,
+            pid_confirmed_dead: false,
+            exited_at: None,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&unstamped, NOW, GRACE), GcAction::StampExit);
+
+        let in_grace = GcRow {
+            status: AgentStatus::Orphaned,
+            exited_at: Some(NOW - GRACE + 10),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&in_grace, NOW, GRACE), GcAction::Keep);
+
+        let corroborated = GcRow {
+            status: AgentStatus::Orphaned,
+            pid_confirmed_dead: false,
+            exited_at: Some(NOW - GRACE - 1),
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&corroborated, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn an_orphaned_row_still_needs_corroboration_past_grace() {
+        // Terminal-set membership is the ONLY special case. The same three-gate
+        // path applies: no positive death reading, short of the backstop, kept.
+        let row = GcRow {
+            status: AgentStatus::Orphaned,
+            pid_confirmed_dead: false,
+            transcript_fresh: None,
+            harness_session_gone: None,
+            exited_at: Some(NOW - GRACE - 1),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::Uncorroborated)
+        );
+    }
+
+    // -- Live-but-done rows leave as dormant (AC7) ---------------------------
+
+    #[test]
+    fn a_live_row_with_a_done_tail_is_reaped_as_dormant() {
+        // A bg thread that emitted its promise: idle past grace, tail reads
+        // done. It leaves the view, resumable handle recorded by the sweep.
+        let row = GcRow {
+            is_live: true,
+            dormant_done: true,
+            owns_worktree: false,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::ReapDormant);
+        // NOT folded into Reap: a death and a finished turn must stay
+        // distinguishable in the counts (the same reason ReapBackstop is
+        // separate).
+        assert_ne!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_dormant_reap_clears_the_same_worktree_guard() {
+        // A done worker's worktree can hold uncommitted work; dropping the row
+        // drops the only pointer to it. Dirty keeps, unprobed fails closed.
+        let dirty = GcRow {
+            is_live: true,
+            dormant_done: true,
+            owns_worktree: true,
+            worktree_clean: Some(false),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&dirty, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&dirty, NOW, GRACE),
+            Some(KeepReason::WorktreeDirty)
+        );
+
+        let unprobed = GcRow {
+            worktree_clean: None,
+            ..dirty
+        };
+        assert_eq!(gc_action(&unprobed, NOW, GRACE), GcAction::Keep);
+    }
+
+    #[test]
+    fn a_live_row_without_a_done_tail_is_kept_whatever_the_death_evidence() {
+        // The credential-dead specimen: reads live, transcript idle for an
+        // hour. Neither alive nor dead - only a POSITIVE done reading evicts,
+        // and every other tail state keeps.
+        let row = GcRow {
+            is_live: true,
+            dormant_done: false,
+            pid_confirmed_dead: true,
+            transcript_fresh: Some(false),
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::Live));
     }
 
     #[test]
@@ -698,25 +949,28 @@ mod tests {
         let past = NOW - GRACE - 1;
         for &pid_dead in &[true, false] {
             for &fresh in &[Some(true), Some(false), None] {
-                for &surface in &[true, false] {
-                    let row = GcRow {
-                        pid_confirmed_dead: pid_dead,
-                        transcript_fresh: fresh,
-                        liveness_surface: surface,
-                        exited_at: Some(past),
-                        owns_worktree: false,
-                        worktree_clean: None,
-                        ..reapable()
-                    };
-                    let corroborated = removal_is_corroborated(&row);
-                    // Just past grace, far short of the horizon, so the ONLY
-                    // route to a removal here is corroboration.
-                    let reaped = gc_action(&row, NOW, GRACE) == GcAction::Reap;
-                    assert_eq!(
-                        corroborated, reaped,
-                        "probe and verdict disagree for pid_dead={pid_dead} \
-                         fresh={fresh:?} surface={surface}"
-                    );
+                for &gone in &[Some(true), Some(false), None] {
+                    for &surface in &[true, false] {
+                        let row = GcRow {
+                            pid_confirmed_dead: pid_dead,
+                            transcript_fresh: fresh,
+                            harness_session_gone: gone,
+                            liveness_surface: surface,
+                            exited_at: Some(past),
+                            owns_worktree: false,
+                            worktree_clean: None,
+                            ..reapable()
+                        };
+                        let corroborated = removal_is_corroborated(&row);
+                        // Just past grace, far short of the horizon, so the ONLY
+                        // route to a removal here is corroboration.
+                        let reaped = gc_action(&row, NOW, GRACE) == GcAction::Reap;
+                        assert_eq!(
+                            corroborated, reaped,
+                            "probe and verdict disagree for pid_dead={pid_dead} \
+                             fresh={fresh:?} gone={gone:?} surface={surface}"
+                        );
+                    }
                 }
             }
         }
@@ -760,28 +1014,35 @@ mod tests {
         let past = NOW - GRACE - 1;
         for &pid_dead in &[true, false] {
             for &fresh in &[Some(true), Some(false), None] {
-                for &surface in &[true, false] {
-                    for &live in &[true, false] {
-                        for &wt_clean in &[Some(true), Some(false), None] {
-                            let row = GcRow {
-                                is_live: live,
-                                pid_confirmed_dead: pid_dead,
-                                transcript_fresh: fresh,
-                                liveness_surface: surface,
-                                exited_at: Some(past),
-                                owns_worktree: true,
-                                worktree_clean: wt_clean,
-                                ..reapable()
-                            };
-                            let action = gc_action(&row, NOW, GRACE);
-                            let reason = keep_reason(&row, NOW, GRACE);
-                            assert_eq!(
-                                action == GcAction::Keep,
-                                reason.is_some(),
-                                "action={action:?} reason={reason:?} for \
-                                 live={live} pid_dead={pid_dead} fresh={fresh:?} \
-                                 surface={surface} wt_clean={wt_clean:?}"
-                            );
+                for &gone in &[Some(true), Some(false), None] {
+                    for &surface in &[true, false] {
+                        for &live in &[true, false] {
+                            for &dormant in &[true, false] {
+                                for &wt_clean in &[Some(true), Some(false), None] {
+                                    let row = GcRow {
+                                        is_live: live,
+                                        dormant_done: dormant,
+                                        pid_confirmed_dead: pid_dead,
+                                        transcript_fresh: fresh,
+                                        harness_session_gone: gone,
+                                        liveness_surface: surface,
+                                        exited_at: Some(past),
+                                        owns_worktree: true,
+                                        worktree_clean: wt_clean,
+                                        ..reapable()
+                                    };
+                                    let action = gc_action(&row, NOW, GRACE);
+                                    let reason = keep_reason(&row, NOW, GRACE);
+                                    assert_eq!(
+                                        action == GcAction::Keep,
+                                        reason.is_some(),
+                                        "action={action:?} reason={reason:?} for \
+                                         live={live} dormant={dormant} pid_dead={pid_dead} \
+                                         fresh={fresh:?} gone={gone:?} surface={surface} \
+                                         wt_clean={wt_clean:?}"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
