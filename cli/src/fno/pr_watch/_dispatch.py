@@ -66,6 +66,12 @@ class TickResult:
     # five days, so it gets its own state instead of a zero count.
     lock_held: bool = False
     lock_holder: str = ""
+    # x-aaaf wave 2: config.pr_watch.enabled was declared in the schema but
+    # never actually READ by tick() - the watcher's dispatch could be slowed
+    # (interval_seconds) but never stopped once launchd had it installed.
+    # A disabled tick takes no lock (mirrors an introspection read, never a
+    # gate side-effect) and reports here rather than as open_prs=0.
+    disabled: bool = False
 
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
@@ -391,6 +397,15 @@ def tick(
     max_age_days: int = 14,
     # Retry cap (default matches _MAX_RETRIES; override with config.pr_watch.retries)
     max_retries: Optional[int] = None,
+    # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
+    # consulted here - the launchd activation coupling (x-e106: "enabled means
+    # running") stops a NEWLY-toggled watcher at install time, but a config
+    # edited by hand (bypassing `fno config set`) left an already-installed
+    # launchd job dispatching forever. Plain DI default (True), matching every
+    # other config-sourced param in this signature (max_age_days, max_retries):
+    # tick() never reads settings itself, so it stays hermetic for callers
+    # that inject nothing. The CLI passes the real resolved value explicitly.
+    enabled: bool = True,
 ) -> TickResult:
     """Impure tick orchestrator: discover, decide, dispatch, persist.
 
@@ -398,6 +413,8 @@ def tick(
     claude, gh, launchd, or ~/.fno filesystem.
 
     Step overview (see spec for full contract):
+        0.  If disabled (config.pr_watch.enabled=false) -> return immediately,
+            no lock taken, no events.
         1.  Acquire tick-level lock.  If held -> return immediately (no events).
         2.  Discover open PR candidates from the graph.
         3.  Normalize and re-read the complete tracked cache from GitHub.
@@ -406,6 +423,9 @@ def tick(
         6.  Release tick lock.
     """
     import datetime
+
+    if not enabled:
+        return TickResult(open_prs=0, acted=0, disabled=True)
 
     if now_iso is None:
         now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

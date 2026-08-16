@@ -233,6 +233,7 @@ def tick() -> None:
             now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             max_age_days=cfg.max_age_days,
             max_retries=cfg.retries,
+            enabled=cfg.enabled,
         )
     except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
         tick_failed = str(exc)
@@ -241,7 +242,9 @@ def tick() -> None:
         result = None
 
     if result is not None:
-        if result.lock_held:
+        if result.disabled:
+            typer.echo("pr-watch tick: config.pr_watch.enabled is false - skipped")
+        elif result.lock_held:
             typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
         else:
             typer.echo(

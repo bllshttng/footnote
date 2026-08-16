@@ -297,6 +297,46 @@ def test_AC6_healthy_tick_still_prints_counts(monkeypatch) -> None:
     assert "lock held" not in res.output
 
 
+def test_config_disabled_tick_prints_disabled_not_a_sweep(monkeypatch) -> None:
+    """x-aaaf wave 2: a disabled tick must not read as an empty sweep either."""
+    from fno.pr_watch._dispatch import TickResult
+
+    res = _run_tick_command(monkeypatch, TickResult(open_prs=0, acted=0, disabled=True))
+
+    assert res.exit_code == 0, res.output
+    assert "config.pr_watch.enabled is false" in res.output
+    assert "open_prs=" not in res.output
+
+
+def test_cli_passes_the_resolved_enabled_flag_to_dispatch_tick(monkeypatch) -> None:
+    """The CLI must pass config.pr_watch.enabled through, not silently drop it."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    captured: dict = {}
+
+    def _fake_tick(**kw):
+        captured.update(kw)
+        return TickResult(open_prs=0, acted=0)
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.tick", _fake_tick, raising=True)
+    settings = MagicMock()
+    settings.pr_watch.max_age_days = 30
+    settings.pr_watch.retries = 3
+    settings.pr_watch.enabled = False
+    settings.recovery.enabled = False
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    CliRunner().invoke(app, [])
+
+    assert captured["enabled"] is False
+
+
 def test_AC6_subsystem_failure_is_not_reported_as_a_held_lock(monkeypatch) -> None:
     """A claims failure must not masquerade as routine contention."""
     from fno.pr_watch._dispatch import TickResult
