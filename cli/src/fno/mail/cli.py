@@ -238,6 +238,28 @@ def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
         )
 
 
+def _refuse_forged_envelope(body: str) -> None:
+    """Refuse a body containing an ``<fno_mail`` open tag or ``</fno_mail>`` close
+    tag (x-4ce4), with a CLI-friendly error before the body ever reaches
+    ``wrap_fno_mail`` (which enforces the same invariant as the backstop for
+    every producer, not only these CLI entry points).
+
+    The envelope's trailer (``wrap_fno_mail``) is only trustworthy if a peer
+    cannot forge one: a body containing a close tag followed by a fabricated
+    trailer would render as two envelopes to a reader, and the second could say
+    the opposite of the first. Refuse at send time and name the reason, rather
+    than silently stripping or escaping - the body is prose a human reads, and a
+    mangled body is worse than a refused send.
+    """
+    from fno.mail.envelope import ForgedEnvelopeError, refuse_if_forged
+
+    try:
+        refuse_if_forged(body)
+    except ForgedEnvelopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from exc
+
+
 def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
     """Refuse a body that breaks the six style rules.
 
@@ -658,6 +680,7 @@ def cmd_reply(
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
+    _refuse_forged_envelope(body_text)
     _enforce_body_cap(body_text)
     _enforce_style(body_text, allow_reason=style_exception)
 
@@ -2080,6 +2103,20 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     _enforce_body_cap(stripped, usage=check)
     _enforce_style(stripped)
 
+    # 2b. Forged envelope: a raw payload starts with "/", so it cannot itself
+    #     be a `<fno_mail>` tag, but it can still smuggle one mid-line. The mux
+    #     lane (`_mux_pane_send` below) pastes this string directly and never
+    #     reaches the Rust mail-inject binary's own check, so this is the only
+    #     door for that lane.
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    if contains_fno_mail_tag(stripped):
+        _refused(
+            "payload contains an <fno_mail> tag. The envelope frames peer mail; "
+            "a payload cannot contain one",
+            usage=True,
+        )
+
     # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
     #    resolution (a registry this fno cannot read) is not a miss: it is the
     #    unmeasurable answer, kept apart from "resolved, and there is no path".
@@ -2680,6 +2717,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _refuse_forged_envelope(content)
         _enforce_body_cap(content)
         _enforce_style(content, allow_reason=style_exception)
 
@@ -2848,6 +2886,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _refuse_forged_envelope(content)
         _enforce_body_cap(content)
         _enforce_style(content, allow_reason=style_exception)
         try:
@@ -2909,6 +2948,7 @@ def cmd_send(
             if message is None:
                 print(f"usage: fno mail send {name} <message>", file=sys.stderr)
                 raise typer.Exit(code=2)
+            _refuse_forged_envelope(message)
             _enforce_body_cap(message)
             _enforce_style(message, allow_reason=style_exception)
             _job_lane_send(message, name, from_name=stamp_from(from_name))
@@ -2923,6 +2963,7 @@ def cmd_send(
         )
         raise typer.Exit(code=2)
 
+    _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
     try:
@@ -3412,6 +3453,7 @@ def cmd_drain_self(
         resolve_harness_identity,
         session_identity_key,
     )
+    from fno.mail.envelope import FNO_MAIL_TRAILER
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -3469,11 +3511,34 @@ def cmd_drain_self(
     job_to_print = [m for m in job_msgs if not _already_landed(m)]
     job_skipped = [m for m in job_msgs if _already_landed(m)]
 
+    # A live-injected send already carries FNO_MAIL_TRAILER inside `wrap_fno_mail`'s
+    # `<fno_mail>` envelope, but a durable inbox-kind send (heads-up/question/fyi)
+    # never routes through that wrapper. Stamp the trailer here, the one
+    # chokepoint every drained body passes through regardless of output shape,
+    # so both the text render and `--json` carry the authority boundary
+    # regardless of which lane produced the body.
+    # A live-injected send stores the full paired envelope durably (body
+    # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
+    # needs both shapes: the bare trailer, and the trailer immediately
+    # before a terminal close tag.
+    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+
+    def _render_body(body: str) -> str:
+        # A durable heads-up body is sender-controlled, so a plain `in`
+        # check is satisfiable by embedding the trailer text mid-body and
+        # placing an outward-action instruction after it: the render would
+        # then treat the body as already stamped and skip the real
+        # terminal trailer. Require the stripped body to END with it.
+        text = body.rstrip("\n")
+        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
+            return text
+        return f"{text}\n{FNO_MAIL_TRAILER}"
+
     if json_out:
         out = [
             {
                 "id": m.id, "from": m.from_, "to": m.to,
-                "kind": m.kind, "ts": m.ts, "body": m.body,
+                "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
             }
             for m in to_print
         ]
@@ -3481,7 +3546,7 @@ def cmd_drain_self(
             out.append(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
-                    "kind": m.kind, "ts": m.ts, "body": m.body,
+                    "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
                     "job": job_addr or "",
                 }
             )
@@ -3491,12 +3556,12 @@ def cmd_drain_self(
             print(f"[fno mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(m.body.rstrip("\n"))
+                print(_render_body(m.body))
         if job_to_print:
             print(f"\n[fno mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(m.body.rstrip("\n"))
+                print(_render_body(m.body))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.

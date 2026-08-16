@@ -21,12 +21,27 @@ import fno.events as _events
 # literal delimiter and break out into the recipient's next prompt. Defang the
 # reminder + mail delimiters (case/whitespace-insensitive) before framing. The
 # RECORDED event keeps the original text; only the injected frame is defanged.
-_DELIM = _re.compile(r"<\s*(/?)\s*(system-reminder|fno_mail)\s*>", _re.IGNORECASE)
+_SYSTEM_REMINDER_DELIM = _re.compile(r"<\s*(/?)\s*system-reminder\s*>", _re.IGNORECASE)
+# An open `<fno_mail ...>` tag legitimately carries attributes (a review finding
+# quoting a real envelope example), so this must not require a bare `<fno_mail>`
+# the way the close tag can: `[^>]*` absorbs whatever attributes are present.
+_FNO_MAIL_OPEN_DELIM = _re.compile(r"<\s*fno_mail\b[^>]*>", _re.IGNORECASE)
+# An open tag with no closing '>' anywhere in the text (e.g. operator prose
+# reading "see <fno_mail from=\"x\" for context") does not match the pattern
+# above, but wrap_fno_mail's own forged-tag refusal matches on the bare
+# substring alone and would still reject it. Catch any such leftover fragment
+# after the full-tag pass so no "<fno_mail" substring survives defang().
+_FNO_MAIL_OPEN_FRAGMENT_DELIM = _re.compile(r"<\s*fno_mail\b", _re.IGNORECASE)
+_FNO_MAIL_CLOSE_DELIM = _re.compile(r"<\s*/\s*fno_mail\s*>", _re.IGNORECASE)
 
 
 def defang(text: str) -> str:
     """Neutralize reminder/mail delimiters in operator text before it is framed."""
-    return _DELIM.sub(r"[\1\2]", text)
+    text = _SYSTEM_REMINDER_DELIM.sub(r"[\1system-reminder]", text)
+    text = _FNO_MAIL_OPEN_DELIM.sub("[fno_mail]", text)
+    text = _FNO_MAIL_OPEN_FRAGMENT_DELIM.sub("[fno_mail]", text)
+    text = _FNO_MAIL_CLOSE_DELIM.sub("[/fno_mail]", text)
+    return text
 
 
 def mint_finding_id() -> str:

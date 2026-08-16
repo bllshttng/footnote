@@ -234,6 +234,15 @@ def _seed_transcript_envelope(
     (enc / f"{session_id}.jsonl").write_text(line + "\n", encoding="utf-8")
     monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+    # resolve_harness_identity checks markers in precedence order and
+    # CODEX_THREAD_ID outranks CLAUDE_CODE_SESSION_ID; blank every other
+    # marker so this test's claude identity always wins regardless of what
+    # else is set in the worker's ambient environment.
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        if marker != "CLAUDE_CODE_SESSION_ID":
+            monkeypatch.delenv(marker, raising=False)
 
 
 def test_us3_reply_to_live_injected_id_resolves_sender_from_transcript(
@@ -528,8 +537,11 @@ def test_the_positional_and_body_flag_agree(runner, mailbox, monkeypatch, tmp_pa
     """
     import re
 
+    from fno.mail.envelope import FNO_MAIL_TRAILER
+
     def _payload(body: str) -> str:
-        return re.sub(r"^<fno_mail[^>]*>|</fno_mail>$", "", body.strip()).strip()
+        stripped = re.sub(r"^<fno_mail[^>]*>|</fno_mail>$", "", body.strip()).strip()
+        return stripped.removesuffix(FNO_MAIL_TRAILER).strip()
 
     msg_a, r_a = _seeded_reply(runner, monkeypatch, tmp_path, ["ack"])
     via_positional = _payload([m for m in _bus_msgs() if m.in_reply_to == msg_a][0].body)

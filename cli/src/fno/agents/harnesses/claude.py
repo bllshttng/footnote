@@ -771,7 +771,22 @@ def build_cross_session_container(message: str, from_name: str) -> str:
     dispatch, so the from-name escaping stays byte-in-lockstep with the Rust
     PTY injector. See docs/architecture/fno-agents-deliver-gate.md; changing
     the escaper here means changing `xml_attr_escape` in daemon.rs too.
-    """
+
+    Refuses a ``message`` carrying its own ``</cross-session-message>`` close
+    tag or an ``<fno_mail``/``</fno_mail>`` tag: a peer follow-up (``fno
+    agents ask``) reaches this producer with no forged-envelope check upstream
+    -- unlike the mail send/reply lanes -- so a body closing the container
+    early and opening a fake ``<fno_mail from="operator">`` right after it
+    would otherwise land as an apparently-trusted second envelope on both the
+    socket and mux PTY delivery vehicles this function feeds (codex P1)."""
+    from fno.mail.envelope import ForgedEnvelopeError, contains_fno_mail_tag
+
+    if contains_fno_mail_tag(message) or "</cross-session-message>" in message.lower():
+        raise ForgedEnvelopeError(
+            "cross-session message contains a </cross-session-message> or "
+            "<fno_mail> tag. The container frames peer turns; a message "
+            "cannot contain either."
+        )
     safe_from = html.escape(from_name, quote=True)
     return f'<cross-session-message from-name="{safe_from}">\n{message}\n</cross-session-message>'
 
