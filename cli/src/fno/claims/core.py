@@ -950,9 +950,12 @@ def reap_dead_claims(
     release, refresh, and force-release all exist; nothing prunes a claim
     whose holder died without releasing, so a dead session leaks its
     lockfile forever. This walks every ``.lock`` file in the swept roots,
-    classifies it with :func:`fno.claims.staleness.is_provably_dead` (the
-    single liveness authority - see that function for the three-part
-    proof), and archives the provably-dead ones to ``.expired/``.
+    classifies it with :func:`_classify_for_sweep`, which mirrors
+    :func:`fno.claims.staleness.is_provably_dead`'s three-part proof (the
+    single liveness authority - see that function) but shares one
+    ``classify()`` call across a claim's scan and re-verify instead of
+    calling the bool-only predicate twice, and archives the provably-dead
+    ones to ``.expired/``.
 
     ``roots``, when given, is a list of repo-root arguments passed through
     to :func:`fno.claims.io.claims_dir` exactly as ``--root`` does for

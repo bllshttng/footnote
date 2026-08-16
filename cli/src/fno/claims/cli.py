@@ -679,7 +679,9 @@ def list_cmd(
     if root is not None:
         roots: list[Optional[Path]] = [root]
     else:
-        roots = [global_claims_root(), _node_aware_root(prefix) if prefix else None]
+        # _node_aware_root("") already resolves to None via claims_root_for's
+        # own colon check, so no separate `if prefix` branch is needed here.
+        roots = [global_claims_root(), _node_aware_root(prefix)]
 
     all_rows: list[dict] = []
     # Display-only: which root a row came from, keyed by claim key rather
@@ -687,7 +689,7 @@ def list_cmd(
     # pre-x-aeeb claim_status() shape a scripted caller already parses
     # (x-aeeb review).
     row_roots: dict[str, str] = {}
-    totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "total": 0}
+    totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0, "total": 0}
     deduped_roots = dedup_claims_roots(roots)
     seen_keys: set[str] = set()
     for candidate_root, cdir in deduped_roots:
@@ -749,8 +751,9 @@ def reap_cmd(
 ) -> None:
     """Archive every provably-dead claim: same-machine, dead/reused pid, no live TTL.
 
-    Not an age cutoff - a claim's holder pid is proven dead
-    (:func:`fno.claims.staleness.is_provably_dead`), never guessed from how
+    Not an age cutoff - a claim's holder pid is proven dead by the same
+    three-part proof as :func:`fno.claims.staleness.is_provably_dead`
+    (same-machine, dead/reused pid, no live TTL), never guessed from how
     old the file is. Dry-run by default; `--apply` archives to `.expired/`
     and re-reads the store to confirm each move before counting it
     `reaped` - an exit code alone is not evidence (x-aeeb). Exits 1 when
