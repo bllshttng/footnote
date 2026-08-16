@@ -352,6 +352,18 @@ max_age_days = 14
 # Claude model used for headless PR-watcher skill fires.
 model = "claude-haiku-4-5"
 
+[groom]
+# Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true.
+enabled = true
+
+[restart]
+# Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true.
+enabled = true
+
+[evals]
+# Enable the headless eval-suite grading-worker spawn. Defaults true.
+enabled = true
+
 [recovery]
 # Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed.
 enabled = true

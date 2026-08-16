@@ -33,6 +33,22 @@ import typer
 _REVIVE_SETTLE_SECS = 3.0
 
 
+def _revive_enabled() -> bool:
+    """Resolve whether crash-recovery worker revival is armed (x-aaaf wave 2).
+
+    ``config.restart.enabled`` defaults True (matches the spawner's prior,
+    ungated behavior). A malformed value degrades to True (never opt-in), but
+    a config that fails to load at all degrades to False - the global
+    invariant that an unreadable config resolves every gate to off, never on.
+    """
+    try:
+        from fno.config import load_settings
+
+        return bool(load_settings().restart.enabled)
+    except Exception:  # noqa: BLE001 - fail-safe to disabled on a read failure
+        return False
+
+
 def _mux_sessions() -> Optional[list[dict[str, Any]]]:
     """Live mux sessions via `fno mux ls --json`, or None when the mux front door
     is unavailable / the call fails. Best-effort: never raises."""
@@ -161,12 +177,14 @@ def restart_command(
         "--mux",
         help="Also restart live mux servers (DESTRUCTIVE: ends their shells/panes).",
     ),
-    revive: bool = typer.Option(
-        True,
+    revive: Optional[bool] = typer.Option(
+        None,
         "--revive/--no-revive",
         help="After killing a mux server, respawn the claude workers that died with "
         "it onto their recorded sessions (spawn --resume). Workers that survive "
-        "(bg substrate) or have no recorded session are left alone.",
+        "(bg substrate) or have no recorded session are left alone. Unset resolves "
+        "config.restart.enabled (default True); an explicit flag always wins "
+        "(x-aaaf wave 2).",
     ),
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit a single JSON summary on stdout; text to stderr."
@@ -181,6 +199,7 @@ def restart_command(
     that die with a killed server are respawned onto their recorded sessions
     (--no-revive to skip).
     """
+    revive = revive if revive is not None else _revive_enabled()
     result: dict[str, Any] = {
         "daemon": None,
         "mux_sessions": [],  # LIVE session names (the restart targets)

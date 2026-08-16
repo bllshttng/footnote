@@ -140,6 +140,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
 | `pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
 | `pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
+| `groom.enabled` | bool | `true` | never | Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true. |
+| `restart.enabled` | bool | `true` | never | Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true. |
+| `evals.enabled` | bool | `true` | never | Enable the headless eval-suite grading-worker spawn. Defaults true. |
 | `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed. |
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |
 | `recovery.max_nudges` | int | `3` | never | Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately). |

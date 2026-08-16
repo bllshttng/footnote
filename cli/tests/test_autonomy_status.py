@@ -13,7 +13,6 @@ import typer.main
 from typer.models import TyperInfo
 
 from fno.autonomy_cli import (
-    _UNGATED,
     SpawnerStatus,
     autonomy_app,
     collect_status,
@@ -66,15 +65,13 @@ def test_ac1_hp_every_known_spawner_appears(
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
-    names = {r.name for r in rows}
 
-    # 9 known spawners + 3 currently-ungated ones (AC1-HP + the "ungated
-    # rather than omitted" requirement).
+    # 9 known spawners + groom/restart/evals (x-aaaf wave 2 gated these).
     assert len(rows) == 12
     for r in rows:
         assert r.trigger
         assert r.gate_key
-        assert r.rank in {"env", "config", "default", "ungated"}
+        assert r.rank in {"env", "config", "default"}
 
 
 def test_ac1_hp_env_override_rank_is_visible(
@@ -94,11 +91,11 @@ def test_ac1_hp_env_override_rank_is_visible(
     assert advance_row.rank == "env"
 
 
-def test_ungated_spawners_render_as_ungated_not_omitted(
+def test_previously_ungated_spawners_now_gated_and_default_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A spawner with no gate reads `ungated` rather than being omitted -
-    omission is exactly what hid groom/restart/evals from the operator."""
+    """x-aaaf wave 2: groom/restart/evals now carry a real gate, defaulting
+    True (matches their prior, ungated effective behavior)."""
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
     _write_settings(tmp_path, "schema_version: 1\n")
     from fno import config as config_mod
@@ -106,13 +103,15 @@ def test_ungated_spawners_render_as_ungated_not_omitted(
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
     rows = collect_status(tmp_path)
-    ungated_names = {name for name, _trigger in _UNGATED}
-    found = {r.name for r in rows if r.rank == "ungated"}
-    assert found == ungated_names
-    for r in rows:
-        if r.rank == "ungated":
-            assert r.armed is None
-            assert r.gate_key == "(none)"
+    by_name = {r.name: r for r in rows}
+    for name, gate_key in (
+        ("groom (_spawn_groom_worker)", "config.groom.enabled"),
+        ("restart (_revive_orphans)", "config.restart.enabled"),
+        ("evals runner", "config.evals.enabled"),
+    ):
+        assert by_name[name].armed is True
+        assert by_name[name].gate_key == gate_key
+        assert by_name[name].rank == "config"
 
 
 def test_format_table_includes_every_row(tmp_path: Path) -> None:

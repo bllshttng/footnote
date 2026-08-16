@@ -357,6 +357,12 @@ FIELD_META: dict[str, Meta] = {
     "pr_watch.retries": Meta("never", "PR-watcher consecutive-failure park threshold."),
     "pr_watch.max_age_days": Meta("never", "PR-watcher: park PRs older than N days."),
     "pr_watch.model": Meta("never", "Claude model used for headless PR-watcher skill fires."),
+    # --- config.groom.* ---
+    "groom.enabled": Meta("never", "Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true."),
+    # --- config.restart.* ---
+    "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true."),
+    # --- config.evals.* ---
+    "evals.enabled": Meta("never", "Enable the headless eval-suite grading-worker spawn. Defaults true."),
     # --- config.recovery.* ---
     "recovery.enabled": Meta("advanced", "Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed."),
     "recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be (seconds) before recovery acts on it."),

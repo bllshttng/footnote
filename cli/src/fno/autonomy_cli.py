@@ -156,14 +156,44 @@ def _blueprint_auto_launch_status(project_root: Optional[Path]) -> SpawnerStatus
         )
 
 
-# Wave 2 (x-aaaf task 2.1/2.2) gates these; until then they spawn with no
-# enable key at all and MUST render as `ungated` rather than being omitted -
-# omission is exactly what hid them from the operator in the incident.
-_UNGATED: tuple[tuple[str, str], ...] = (
-    ("groom (_spawn_groom_worker)", "fno backlog groom"),
-    ("restart (_revive_orphans)", "orphan sweep"),
-    ("evals runner", "fno evals run"),
-)
+def _groom_status(project_root: Optional[Path]) -> SpawnerStatus:
+    try:
+        armed = bool(_settings_for(project_root).groom.enabled)
+        return SpawnerStatus(
+            "groom (_spawn_groom_worker)", "fno backlog groom",
+            "config.groom.enabled", armed, "config",
+        )
+    except Exception:  # noqa: BLE001
+        return SpawnerStatus(
+            "groom (_spawn_groom_worker)", "fno backlog groom",
+            "config.groom.enabled", False, "default",
+        )
+
+
+def _restart_status(project_root: Optional[Path]) -> SpawnerStatus:
+    try:
+        armed = bool(_settings_for(project_root).restart.enabled)
+        return SpawnerStatus(
+            "restart (_revive_orphans)", "orphan sweep (fno restart --mux)",
+            "config.restart.enabled", armed, "config",
+        )
+    except Exception:  # noqa: BLE001
+        return SpawnerStatus(
+            "restart (_revive_orphans)", "orphan sweep (fno restart --mux)",
+            "config.restart.enabled", False, "default",
+        )
+
+
+def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
+    try:
+        armed = bool(_settings_for(project_root).evals.enabled)
+        return SpawnerStatus(
+            "evals runner", "fno evals run", "config.evals.enabled", armed, "config",
+        )
+    except Exception:  # noqa: BLE001
+        return SpawnerStatus(
+            "evals runner", "fno evals run", "config.evals.enabled", False, "default",
+        )
 
 
 def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
@@ -178,11 +208,12 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _pr_watch_status(project_root),
         _keep_going_status(project_root),
         _blueprint_auto_launch_status(project_root),
+        # x-aaaf wave 2: previously ungated, now gated - see GroomBlock /
+        # RestartBlock / EvalsBlock in fno.config.
+        _groom_status(project_root),
+        _restart_status(project_root),
+        _evals_status(project_root),
     ]
-    rows.extend(
-        SpawnerStatus(name, trigger, "(none)", None, "ungated")
-        for name, trigger in _UNGATED
-    )
     return rows
 
 

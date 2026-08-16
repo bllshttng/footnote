@@ -13,7 +13,8 @@ import pytest
 from fno.evals import history as _history
 from fno.evals.bank import GradeCheck, TaskSpec
 from fno.evals.grading import grade
-from fno.evals.runner import SpawnResult, run_task
+import fno.evals.runner as _runner
+from fno.evals.runner import SpawnResult, evals_enabled, run_task
 
 
 # --------------------------------------------------------------------------- #
@@ -136,6 +137,51 @@ def test_run_worker_task_invokes_spawn(tmp_path: Path) -> None:
     results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn)
     assert calls == ["do the thing"]
     assert results[0].passed
+
+
+def test_config_disabled_skips_the_default_spawn(tmp_path: Path, monkeypatch) -> None:
+    """x-aaaf wave 2 (AC4-HP): config.evals.enabled=false stops the REAL
+    default spawn (no `spawn=` injected) - it must never reach _default_spawn."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "evals_enabled", lambda: False)
+
+    def _boom(*a, **kw):
+        raise AssertionError("_default_spawn must not run when the gate is off")
+
+    monkeypatch.setattr(_runner, "_default_spawn", _boom)
+
+    task = _task(prompt="x", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp)
+    assert not results[0].passed
+    assert "config.evals.enabled is false" in results[0].reason
+
+
+def test_config_disabled_never_blocks_an_injected_spawn(tmp_path: Path, monkeypatch) -> None:
+    """The gate only bites the real default spawn; a caller-injected spawn_fn
+    (tests, or an explicit invocation) is unaffected."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "evals_enabled", lambda: False)
+
+    def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
+        return SpawnResult(True)
+
+    task = _task(prompt="x", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn)
+    assert results[0].passed
+
+
+def test_evals_enabled_defaults_true_matching_prior_ungated_behavior(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "nonexistent.yaml"))
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    assert evals_enabled() is True
 
 
 # AC3-ERR: spawn failure is a graded fail, remaining repeats still run.

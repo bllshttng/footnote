@@ -2080,6 +2080,91 @@ class PrWatchBlock(BaseModel):
     model: str = Field(default="claude-haiku-4-5", min_length=1)
 
 
+class GroomBlock(BaseModel):
+    """Daily backlog-grooming pass settings (nested under 'config.groom').
+
+    x-aaaf wave 2: `fno backlog groom` (`_spawn_groom_worker`,
+    backlog/groom.py:204) previously spawned with no enable key at all, so it
+    could not be turned off. Default ``True`` matches the spawner's CURRENT
+    effective behavior (it always ran) - shipping this gate changes nothing
+    for an existing user until they explicitly disable it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe: a non-boolean value degrades to True (this gate's
+        CURRENT effective default), mirroring PostMergeBlock.enabled rather
+        than the false-enabled-is-dangerous opt-in blocks above - groom was
+        never opt-in, so a malformed typo must not silently turn it off."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return True
+
+
+class RestartBlock(BaseModel):
+    """`fno restart` worker-revival settings (nested under 'config.restart').
+
+    x-aaaf wave 2: `_revive_orphans` (restart.py:90) - respawning claude
+    workers orphaned by a killed mux server - previously had only a per-run
+    `--revive/--no-revive` CLI flag and no durable config gate, so it could
+    not be turned off once and forgotten. Default ``True`` matches the
+    spawner's CURRENT effective behavior: a legitimately unconditional
+    trigger (crash recovery) still gets a gate, it just defaults on.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe to True (mirrors GroomBlock: never opt-in, so a typo
+        must not silently disable crash-recovery revival)."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return True
+
+
+class EvalsBlock(BaseModel):
+    """Eval-suite worker settings (nested under 'config.evals').
+
+    x-aaaf wave 2: `evals/runner.py`'s `run_task` spawns a headless grading
+    worker with no enable key at all. Default ``True`` matches its CURRENT
+    effective behavior (it always ran when invoked) - shipping this gate
+    changes nothing until an operator explicitly disables it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: object) -> bool:
+        """Fail-safe to True (mirrors GroomBlock)."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):
+            return v == 1
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on"}
+        return True
+
+
 class RecoveryBlock(BaseModel):
     """Bg-session recovery sweep settings (nested under 'config.recovery').
 
@@ -3097,6 +3182,9 @@ class ConfigBlock(BaseModel):
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
+    groom: GroomBlock = Field(default_factory=GroomBlock)
+    restart: RestartBlock = Field(default_factory=RestartBlock)
+    evals: EvalsBlock = Field(default_factory=EvalsBlock)
     recovery: RecoveryBlock = Field(default_factory=RecoveryBlock)
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
