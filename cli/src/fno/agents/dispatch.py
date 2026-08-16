@@ -1391,10 +1391,13 @@ def _claude_create_path(
     # mkdir + open + replace under the state dir, and doing it at row-write time
     # would put that I/O after the launch, where an OSError escapes uncaught and
     # strands a live supervisor with no registry row. Content-addressed, so this
-    # is the same path bg_create resolves for itself moments later.
+    # is the same path bg_create resolves for itself moments later - including
+    # the account overlay, else a composed spawn's row names a different file
+    # than the worker launched with and a restore silently drops the account's
+    # pinned env.
     from fno.agents.model_routing import route_settings_path_for
 
-    route_settings_path = route_settings_path_for(route_env)
+    route_settings_path = route_settings_path_for(route_env, account_env)
 
     # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
     # bg_create snapshots dict(os.environ) to build the NEW worker's own

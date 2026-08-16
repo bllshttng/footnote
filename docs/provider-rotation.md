@@ -261,7 +261,7 @@ The external loop honors the same knob, via `pick --if-armed`.
 Two spawns are never picked for, whatever the knob says:
 
 - one that passed an explicit `--account` - it wins and is never second-guessed
-- one that passed `--route` or `--role` - `fno agents spawn` already refuses `--account` alongside either, because the route's `ANTHROPIC_*` overrides the account's `CLAUDE_CONFIG_DIR` and silently mis-bills. Auto-picking would reassemble exactly that combination behind the refusal.
+- one that passed `--route` or `--role` - a routed worker sends its model traffic to the route's vendor. It consumes no Anthropic account quota, so there is no account headroom to pick for. An explicit `--account` still composes with a route: profile from the account, endpoint+auth+model from the vendor. That is operator intent, never a picker decision.
 
 ### `fno config accounts doctor`
 

@@ -1032,9 +1032,12 @@ def _mesh_env_wrapper(
     # overlay as pairs below expresses that order without re-deriving it.
     resolved_route = route_env
     if resolved_route is None and role:
-        from fno.agents.model_routing import resolve_route
+        from fno.agents.model_routing import resolve_spawn_route
 
-        resolved_route = resolve_route(role)
+        # Through the guarded door, not bare resolve_route: this internal lane
+        # is the one place a seam could hand-roll an unguarded resolution, and
+        # the completeness refusals must fire on it like every other path.
+        resolved_route = resolve_spawn_route(role, None)
     if account_env or resolved_route:
         from fno.agents.account_env import SCRUB_AUTH_VARS, compose_worker_credentials
 
@@ -1745,6 +1748,20 @@ def dispatch_spawn_pane(
         picked = _pick_account_env(role=role, route_env=route_env)
         account_env = dict(picked) if picked is not None else None
 
+    # The monitor contract is judged BEFORE the generic route guard: an
+    # explicit --monitor happy refusal names the zai-shaped gap it found, and
+    # letting resolve_spawn_route's completeness refusal fire first would
+    # replace that diagnosis with a generic one. resolve_monitor's inputs are
+    # all settled here (account picked, flags parsed); the unmonitored path
+    # refuses nothing and stays byte-identical.
+    resolved_monitor = resolve_monitor(
+        monitor,
+        harness=provider,
+        route_provider=route_provider,
+        route_env=route_env,
+        account_env=account_env,
+        model=model,
+    )
     launch_role = role
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
@@ -1824,16 +1841,7 @@ def dispatch_spawn_pane(
     # pinned uuid is therefore discarded, claude mints its own, and the receipt
     # names a session that never exists - which is what makes a happy pane
     # unpeekable and its registry row id-less whether it is healthy or a corpse.
-    # Every resolve_monitor input is available here, so the hoist leaves the
-    # unmonitored route byte-identical.
-    resolved_monitor = resolve_monitor(
-        monitor,
-        harness=provider,
-        route_provider=route_provider,
-        route_env=route_env,
-        account_env=account_env,
-        model=model,
-    )
+    # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     argv = build_pane_argv(
@@ -2341,7 +2349,10 @@ def dispatch_spawn_pane(
 
         try:
             if provider == "claude":
-                route_settings_path = route_settings_path_for(route_env)
+                # account_env included so the row names the same composed file
+                # the wrapper rendered; a route-only stamp would make a later
+                # restore silently drop the account's pinned env.
+                route_settings_path = route_settings_path_for(route_env, account_env)
             _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
             if crown_declined and _declined_scope:

@@ -214,6 +214,14 @@ def compose_worker_credentials(
         composed.update(account_env)
     if route_env:
         composed.update(route_env)
+        # A self-authed route owns the credential slot outright: any account
+        # credential the route does not name is dropped, else an api-key
+        # account's vendor key rides the child env against the route's
+        # endpoint - a foreign secret that may even win the auth precedence.
+        if route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY"):
+            for _var in SECRET_ROUTE_VARS:
+                if _var not in route_env:
+                    composed.pop(_var, None)
     return composed, _credential_decision(
         composed, account_id=account_id, route_env=route_env
     )

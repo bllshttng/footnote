@@ -679,7 +679,7 @@ def test_headless_create_routed_spawn_passes_settings_flag(
 # ---------------------------------------------------------------------------
 
 
-def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
+def test_account_only_settings_unsets_vendor_and_keeps_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import json
@@ -687,12 +687,12 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
 
     monkeypatch.setenv("HOME", str(tmp_path))
     from fno.agents.account_env import SCRUB_AUTH_VARS
-    from fno.agents.model_routing import materialize_account_scrub_settings
+    from fno.agents.model_routing import route_settings_path_for
 
     # A config_dir account: the overlay only carries CLAUDE_CONFIG_DIR, which
     # must NOT land in the settings file. Every vendor auth/model var is written
     # empty, which claude reads as unset (so the account's own login wins).
-    path = materialize_account_scrub_settings({"CLAUDE_CONFIG_DIR": "/x/.claude"})
+    path = route_settings_path_for(None, {"CLAUDE_CONFIG_DIR": "/x/.claude"})
     blob = json.load(open(path))["env"]
     assert "CLAUDE_CONFIG_DIR" not in blob
     for var in SCRUB_AUTH_VARS:
@@ -710,7 +710,7 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
         "ANTHROPIC_CUSTOM_HEADERS": "X-Org: foo",
         "HTTPS_PROXY": "http://proxy:8080",
     }
-    path2 = materialize_account_scrub_settings(overlay)
+    path2 = route_settings_path_for(None, overlay)
     blob2 = json.load(open(path2))["env"]
     assert blob2["ANTHROPIC_BASE_URL"] == "https://api.example/anthropic"
     assert blob2["ANTHROPIC_AUTH_TOKEN"] == "acct-token"
@@ -722,7 +722,7 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
         if var not in overlay:
             assert blob2[var] == ""
     assert oct(os.stat(path2).st_mode & 0o777) == "0o600"  # carries a token
-    assert materialize_account_scrub_settings(dict(overlay)) == path2  # content-addressed
+    assert route_settings_path_for(None, dict(overlay)) == path2  # content-addressed
 
 
 def test_bg_create_account_spawn_passes_settings_flag(

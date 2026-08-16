@@ -1143,17 +1143,20 @@ def cmd_spawn(
     # x-8552: the receipt's credential facts, read off the composed overlays
     # (never off the flags - a caller who typed `--account makers -P zai` reads
     # auth/bills and learns immediately that makers contributed a profile and
-    # nothing else). Computed only when BOTH axes are present, so an
-    # account-only or route-only receipt stays byte-identical to main (AC3).
+    # nothing else). Gated on the resolved overlays, not the flag spellings, so
+    # a routed --role or a --dispatch-account merge gets the same facts as an
+    # explicit --route; an account-only or route-only receipt stays
+    # byte-identical to main (AC3) because the other overlay is absent.
     credential = None
-    if account is not None and route_provider is not None:
+    if account_env is not None and route_env is not None:
         from fno.agents.account_env import compose_worker_credentials
 
+        account_label = account if account is not None else dispatch_account
         _, credential = compose_worker_credentials(
-            account_env, route_env, {}, account_id=account
+            account_env, route_env, {}, account_id=account_label
         )
         print(
-            f"account: {account} (profile only; auth {credential.auth}, "
+            f"account: {account_label} (profile only; auth {credential.auth}, "
             f"bills {credential.bills})",
             file=sys.stderr,
         )

@@ -194,32 +194,49 @@ def resolve_spawn_route(
         if route_env
         else resolve_route(role, notice=notice, business_lookup=business_lookup)
     )
-    if route and route.get("ANTHROPIC_BASE_URL"):
+    if route:
         route_intent = intent or (
             f"routed role {role!r}" if role is not None else "pre-resolved route"
         )
-        if not (
-            route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
+        if route.get("ANTHROPIC_BASE_URL"):
+            if not (
+                route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
+            ):
+                raise RouteCompositionError(
+                    f"refusing {route_intent}: it sets endpoint "
+                    f"{route['ANTHROPIC_BASE_URL']!r} without its own credential, which "
+                    "would pair that endpoint with the account's OAuth login; endpoint, "
+                    "auth, and model must be selected as one provider route; "
+                    "no worker launched."
+                )
+            missing_models = [
+                k for k in MODEL_ENV_KEYS if not (route.get(k) or "").strip()
+            ]
+            if missing_models:
+                raise RouteCompositionError(
+                    f"refusing {route_intent}: it sets endpoint "
+                    f"{route['ANTHROPIC_BASE_URL']!r} without "
+                    f"{', '.join(missing_models)}; the composition scrubs every "
+                    "inherited model var before layering the route, so the worker "
+                    "would ask that endpoint for Claude's default model and fail on "
+                    "its first turn; endpoint, auth, and model must be selected as "
+                    "one provider route; no worker launched."
+                )
+        elif any(
+            (route.get(k) or "").strip()
+            for k in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", *MODEL_ENV_KEYS)
         ):
+            # The inverse half of the same invariant: a credential or model
+            # tier with no endpoint composes against Claude's default endpoint
+            # (the composition scrubs the inherited ANTHROPIC_BASE_URL), so a
+            # vendor token or vendor model id is sent to api.anthropic.com.
             raise RouteCompositionError(
-                f"refusing {route_intent}: it sets endpoint "
-                f"{route['ANTHROPIC_BASE_URL']!r} without its own credential, which "
-                "would pair that endpoint with the account's OAuth login; endpoint, "
+                f"refusing {route_intent}: it sets a credential or model tier "
+                "without an endpoint; the composition scrubs the inherited "
+                "ANTHROPIC_BASE_URL, so the worker would send that credential "
+                "and those model ids to Claude's default endpoint; endpoint, "
                 "auth, and model must be selected as one provider route; "
                 "no worker launched."
-            )
-        missing_models = [
-            k for k in MODEL_ENV_KEYS if not (route.get(k) or "").strip()
-        ]
-        if missing_models:
-            raise RouteCompositionError(
-                f"refusing {route_intent}: it sets endpoint "
-                f"{route['ANTHROPIC_BASE_URL']!r} without "
-                f"{', '.join(missing_models)}; the composition scrubs every "
-                "inherited model var before layering the route, so the worker "
-                "would ask that endpoint for Claude's default model and fail on "
-                "its first turn; endpoint, auth, and model must be selected as "
-                "one provider route; no worker launched."
             )
     return route
 
@@ -739,24 +756,6 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     return str(path)
 
 
-def materialize_account_scrub_settings(account_env: Mapping[str, str]) -> str:
-    """Write an ``--account`` spawn's auth/model scrub as a claude ``--settings``
-    JSON and return its path.
-
-    Retained as the account-only spelling of :func:`route_settings_path_for`;
-    the composed case lives there. Every ``SCRUB_AUTH_VARS`` entry is written as
-    an empty string (claude reads an empty settings env value as UNSET,
-    measured 2026-07-27), the account's overlay minus ``CLAUDE_CONFIG_DIR`` is
-    re-applied on top, and the shared content-addressed writer dedupes
-    identical overlays to one file.
-    """
-    from fno.agents.account_env import SCRUB_AUTH_VARS
-
-    scrub = {var: "" for var in SCRUB_AUTH_VARS}
-    overlay = {k: v for k, v in account_env.items() if k != "CLAUDE_CONFIG_DIR"}
-    return materialize_route_settings({**scrub, **overlay})
-
-
 class RouteRestoreError(RuntimeError):
     """A recorded route could not be read back, so a relaunch must refuse."""
 
@@ -791,7 +790,19 @@ def route_settings_path_for(
     overlay = {
         k: v for k, v in (account_env or {}).items() if k != "CLAUDE_CONFIG_DIR"
     }
-    return materialize_route_settings({**overlay, **(route_env or {})})
+    merged = {**overlay, **(route_env or {})}
+    if route_env and (
+        route_env.get("ANTHROPIC_AUTH_TOKEN") or route_env.get("ANTHROPIC_API_KEY")
+    ):
+        # The route owns the credential slot: an account credential the route
+        # does not name stays on the scrub floor (""), never baked into the
+        # file against the route's endpoint. Mirrors compose_worker_credentials.
+        from fno.agents.account_env import SECRET_ROUTE_VARS
+
+        for k in SECRET_ROUTE_VARS:
+            if k not in route_env:
+                merged.pop(k, None)
+    return materialize_route_settings(merged)
 
 
 def read_route_settings(path: str) -> dict[str, str]:
