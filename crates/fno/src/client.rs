@@ -288,8 +288,9 @@ pub(crate) fn connect_or_spawn(path: &Path) -> Result<std::os::unix::net::UnixSt
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             return Err(format!(
                 "server at {} is not accepting connections (connect timed out); it is \
-                 wedged. kill-server needs an accepted connection and cannot recover it - \
-                 kill the server process directly (its log is at {}), then retry.",
+                 wedged. Run `fno mux kill-server` for this session: it escalates to \
+                 SIGTERM/SIGKILL and unlinks the socket (the server's log is at {}), \
+                 then retry.",
                 path.display(),
                 log_path(path).display()
             ));
@@ -8107,7 +8108,7 @@ fn draw_lines_overlay<S: AsRef<str>>(
     };
     let body: Vec<chrome::BodyLine> = lines[start..start + take]
         .iter()
-        .map(|l| chrome::BodyLine::from_str(l.as_ref()))
+        .map(|l| chrome::BodyLine::plain(l.as_ref()))
         .collect();
     let framed = chrome::frame(&body, chrome, body_w, scroll);
     let box_h = framed.lines.len().min(content_rows);

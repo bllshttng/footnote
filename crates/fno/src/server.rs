@@ -1056,16 +1056,36 @@ enum Flow {
     Shutdown,
 }
 
-/// Unlink the socket AND its wire-version sidecar (x-1a85) on every exit path
-/// out of `run` (a SIGKILL leaves them behind by design; the stale-socket path
-/// in `bind_or_probe` covers that, and a lingering `.ver` is inert - `ls` only
-/// reads it for a LIVE server, and a dead one probes `Stale`).
+/// Unlink the socket AND both its sidecars (x-1a85 `.ver`, x-48a5 `.pid`) on
+/// every exit path out of `run` (a SIGKILL leaves them behind by design; the
+/// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
+/// is inert - `ls` only reads it for a LIVE server, and a dead one probes
+/// `Stale`).
 struct SocketGuard(PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-        let _ = std::fs::remove_file(crate::proto::version_sidecar_path(&self.0));
+        let _ = crate::proto::remove_session_files(&self.0);
+    }
+}
+
+/// RAII count of in-flight connections, read by the FNO_E2E idle reaper. A
+/// control one-shot (`pane run`, kill-server, a probe) is NOT an attached
+/// client, so without this the reaper can fire mid-verb on a young server
+/// whose test grace is shorter than a loaded machine's verb latency, killing
+/// the server out from under a live peer.
+struct ConnAlive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ConnAlive {
+    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::Release);
+        ConnAlive(count.clone())
+    }
+}
+
+impl Drop for ConnAlive {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1113,6 +1133,13 @@ pub fn run(socket: PathBuf) -> i32 {
         crate::proto::PROTO_VERSION.to_string(),
     ) {
         eprintln!("fno mux: warn: could not write version sidecar: {e}");
+    }
+
+    // Stamp the server's own pid beside the socket (x-48a5) so kill-server
+    // can signal a wedged holder without an accepted connection. Format lives
+    // in proto's write/read pair; best-effort like `.ver` above.
+    if let Err(e) = crate::proto::write_pid_sidecar(&socket) {
+        eprintln!("fno mux: warn: could not write pid sidecar: {e}");
     }
 
     let runtime = match tokio::runtime::Runtime::new() {
@@ -1677,9 +1704,7 @@ fn node_id_shaped(s: &str) -> bool {
 /// live holder's claim from being stolen by a permissions error; ESRCH is the
 /// definitive "gone").
 fn pid_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) performs no signal delivery, only validation.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    !crate::proto::pid_confirmed_dead(pid as libc::pid_t)
 }
 
 /// Resolve the `fno` binary: `$FNO_BIN`, else the running executable itself (the
@@ -8574,9 +8599,7 @@ impl Core {
                 // (AC4-FR: nothing outlives the session), then shut down -
                 // the SocketGuard unlinks on the way out.
                 self.bye_all("killed");
-                for entry in self.panes.values() {
-                    entry.pty.kill();
-                }
+                self.kill_all_panes();
                 Flow::Shutdown
             }
             CoreMsg::Gone(id) => {
@@ -8993,6 +9016,19 @@ impl Core {
             let _ = c.reliable_tx.try_send(ServerMsg::Bye {
                 reason: reason.to_string(),
             });
+        }
+    }
+
+    /// Kill every pane child. Called from serve's shutdown choke point (every
+    /// exit path funnels there) and from `CoreMsg::Kill`'s handler; the two
+    /// layers keep their own call because `handle()` must stay correct for
+    /// callers outside serve. PtyShell has no Drop that kills its child, so an
+    /// exit path that skips this leaves pane children to whatever SIGHUP the
+    /// closing pty master happens to deliver; a worker that ignores SIGHUP
+    /// keeps running.
+    fn kill_all_panes(&self) {
+        for entry in self.panes.values() {
+            entry.pty.kill();
         }
     }
 }
@@ -9528,6 +9564,8 @@ async fn serve(
 
     // Accept loop: handshake each connection off the core loop's back.
     let accept_core_tx = core_tx.clone();
+    let conns_alive = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accept_conns = conns_alive.clone();
     tokio::spawn(async move {
         let mut next_id: u64 = 1;
         loop {
@@ -9541,12 +9579,16 @@ async fn serve(
                         "conn {id} accepted (peer pid {:?})",
                         stream.peer_cred().ok().and_then(|c| c.pid())
                     ));
-                    tokio::spawn(handle_client(
-                        stream,
-                        accept_core_tx.clone(),
-                        resolver.clone(),
-                        id,
-                    ));
+                    let conn_core_tx = accept_core_tx.clone();
+                    let conn_resolver = resolver.clone();
+                    // Count from the accept itself, not the task's first poll:
+                    // a scheduler-starved newborn task would otherwise leave
+                    // the reaper a mid-verb window with conns_alive == 0.
+                    let alive = ConnAlive::new(&accept_conns);
+                    tokio::spawn(async move {
+                        let _alive = alive;
+                        handle_client(stream, conn_core_tx, conn_resolver, id).await;
+                    });
                 }
                 Err(e) => {
                     eprintln!("fno mux: accept failed: {e}");
@@ -9753,11 +9795,10 @@ async fn serve(
             // SocketGuard unlinks); NEVER std::process::exit, which would
             // orphan the pane shells and leak the socket file.
             _ = tokio::time::sleep_until(idle_deadline), if idle_exit_e2e => {
-                if *idle_count_rx.borrow() == 0 {
+                if *idle_count_rx.borrow() == 0
+                    && conns_alive.load(std::sync::atomic::Ordering::Acquire) == 0
+                {
                     eprintln!("fno mux: idle-exit (FNO_E2E): no client for grace window");
-                    for entry in core.panes.values() {
-                        entry.pty.kill();
-                    }
                     break Flow::Shutdown;
                 }
                 idle_deadline = tokio::time::Instant::now() + idle_grace;
@@ -9773,6 +9814,13 @@ async fn serve(
         core.publish_client_count();
     };
     if flow == Flow::Shutdown {
+        // Pane teardown lives at this choke point, not in each arm: every
+        // shutdown path funnels through here (CoreMsg::Kill, the idle reaper,
+        // SIGTERM/SIGINT, last-pane-closed), an arm that forgets the call
+        // leaves pane children to SIGHUP luck (x-48a5: the signal arms once
+        // did), and PtyShell::kill is idempotent, so a path whose panes are
+        // already gone pays nothing.
+        core.kill_all_panes();
         // (x-caef) The server is going down: write any dirty topology capture
         // now - this is the "ending fno" moment whose loss is the operator's
         // whole symptom. SIGTERM and the idle exit land here; a -9 cannot be

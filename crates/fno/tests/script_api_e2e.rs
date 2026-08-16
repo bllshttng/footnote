@@ -541,3 +541,120 @@ fn mux_where_cli_rejects_harness_only_ambiguous_prefix() {
     assert_eq!(out.status.code(), Some(16));
     assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous prefix"));
 }
+
+#[test]
+fn server_publishes_and_removes_its_pid_sidecar() {
+    // x-48a5: the server writes its pid beside its socket at bind so
+    // kill-server can signal a wedged holder without an accepted connection,
+    // and every exit path removes it with the socket. A real headless server,
+    // watched across its whole life.
+    let scratch = Scratch::new("pid_sidecar");
+    let server = common::spawn_server(&scratch.main_sock(), &[]);
+
+    let pid_path = scratch.0.join("main.pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Content is "<pid>:<start_time>" (x-48a5) or bare "<pid>" on a platform
+    // pid_start_time cannot supply one for; only the pid field matters here.
+    let pid: i32 = loop {
+        if let Some(p) = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|t| common::sidecar_pid_field(&t))
+        {
+            break p;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pid sidecar never appeared at {}",
+            pid_path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        unsafe { libc::kill(pid, 0) } == 0,
+        "sidecar pid {pid} must be live right after bind"
+    );
+
+    let out = scratch
+        .command()
+        .args(["mux", "kill-server", "--json"])
+        .output()
+        .expect("kill-server runs");
+    assert!(
+        out.status.success(),
+        "kill-server stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["killed"], true, "healthy server dies gracefully");
+    // Under load the graceful window can expire and the SIGTERM rung finishes
+    // the same clean shutdown; both are clean deaths of a healthy server.
+    assert!(
+        v["path"] == "graceful" || v["path"] == "sigterm",
+        "path names a clean-death rung: {}",
+        v["path"]
+    );
+
+    for name in ["main.sock", "main.ver", "main.pid"] {
+        let p = scratch.0.join(name);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!p.exists(), "{name} left behind after shutdown");
+    }
+    drop(server);
+}
+
+#[test]
+fn sigterm_shutdown_kills_pane_children() {
+    // x-48a5: the SIGTERM arm must tear panes down the way CoreMsg::Kill
+    // does. The pane holds a child that ignores SIGHUP, so the closing pty
+    // master cannot be what kills it - only the server's explicit teardown
+    // can. Pre-fix, the child outlives the server.
+    let scratch = Scratch::new("sigterm_panes");
+    let dir = scratch.0.to_str().unwrap();
+    let run = pane(
+        &scratch,
+        &[
+            "run",
+            "--cwd",
+            dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap '' HUP; exec sleep 300",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    // The pane's child pid, straight from the listing.
+    let ls = stdout(&pane(&scratch, &["ls", "--json"]));
+    let panes: Vec<serde_json::Value> = serde_json::from_str(&ls).unwrap();
+    let child_pid = panes[0]["child_pid"]
+        .as_u64()
+        .expect("pane reports child_pid") as i32;
+    assert!(
+        unsafe { libc::kill(child_pid, 0) } == 0,
+        "pane child {child_pid} live before SIGTERM"
+    );
+
+    let server_pid: i32 = common::sidecar_pid_field(
+        &std::fs::read_to_string(scratch.0.join("main.pid")).expect("server pid sidecar"),
+    )
+    .expect("pid field");
+    unsafe { libc::kill(server_pid, libc::SIGTERM) };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while unsafe { libc::kill(child_pid, 0) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        unsafe { libc::kill(child_pid, 0) } != 0,
+        "pane child {child_pid} outlived the server's SIGTERM"
+    );
+    drop(scratch);
+}

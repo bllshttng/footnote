@@ -300,8 +300,8 @@ def restart_command(
             log = w.get("log") or "(server log path unknown)"
             say(
                 f"fno restart: mux session '{name}' is WEDGED (holds its socket but is not "
-                f"accepting connections); the server is stuck. Kill the server process directly "
-                f"(its log: {log}).",
+                f"accepting connections). `fno mux kill-server {name}` recovers it "
+                f"(escalates to SIGTERM/SIGKILL; its log: {log}).",
                 err=True,
             )
             failures.append(f"mux: {name} wedged")
@@ -334,15 +334,18 @@ def restart_command(
             else:
                 for name in to_restart:
                     reason = "stale wire version" if name in stale_live else "requested"
+                    # The belt must exceed kill-server's worst case (connect +
+                    # drain + unlink waits, then the SIGTERM/SIGKILL ladder);
+                    # raising the ladder means raising this too.
                     try:
                         kc = subprocess.run(
                             [fno, "mux", "kill-server", name],
                             capture_output=True,
                             text=True,
-                            timeout=10,
+                            timeout=20,
                         ).returncode
                     except subprocess.TimeoutExpired:
-                        say(f"fno restart: gave up on mux session '{name}' after 10s.", err=True)
+                        say(f"fno restart: gave up on mux session '{name}' after 20s.", err=True)
                         failures.append(f"mux: kill {name} timed out")
                         continue
                     except (OSError, subprocess.SubprocessError):

@@ -2446,6 +2446,158 @@ pub fn version_sidecar_path(socket: &Path) -> PathBuf {
     socket.with_extension("ver")
 }
 
+/// The pid sidecar for a session socket (`<name>.sock` -> `<name>.pid`),
+/// written by the server at bind with its own pid (x-48a5) so `kill-server`
+/// can signal a wedged holder without an accepted connection - the
+/// connected-peer route cannot serve a connect that never completes. Skipped
+/// by [`session_names`]'s `.sock` filter, the same reason `.ver` is. Content is
+/// `"<pid>:<start_time>"` (see [`pid_start_time`]) when the platform can supply
+/// a start time, else bare `"<pid>"`.
+pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
+    socket.with_extension("pid")
+}
+
+/// Process start time in this OS's own units: a per-host, per-boot quantity
+/// meaningful only compared for equality against a value captured for the
+/// SAME pid, never converted to wall-clock time. Lets a pid sidecar prove it
+/// still names the process that wrote it rather than one that reused the pid
+/// after that process exited (x-48a5): a stale sidecar can survive a rebind
+/// whose rewrite failed (best-effort, like the `.ver` sidecar), so the pid
+/// alone is not proof of identity.
+#[cfg(target_os = "linux")]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+pub fn pid_start_time(pid: u32) -> Option<u64> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::pid_t,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn pid_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Write the pid sidecar beside a freshly bound socket: the server's own pid
+/// with its start time when this platform can supply one, else a bare pid
+/// (the two shapes `parse_pid_sidecar` reads). The write/read pair lives here
+/// so writer and parser cannot drift on the format.
+pub fn write_pid_sidecar(socket: &Path) -> std::io::Result<()> {
+    let own_pid = std::process::id();
+    let contents = match pid_start_time(own_pid) {
+        Some(start) => format!("{own_pid}:{start}"),
+        None => own_pid.to_string(),
+    };
+    std::fs::write(pid_sidecar_path(socket), contents)
+}
+
+/// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (x-48a5, the
+/// identity-checked format) or bare `"<pid>"` (a platform `pid_start_time`
+/// cannot supply one for). Tolerant of trailing whitespace/newline. A `:` is
+/// present only when the writer meant to supply a start time, so a present
+/// but unparseable one (a write torn mid-`fs::write`) fails the whole parse
+/// rather than silently degrading to the unverified bare-pid shape - a torn
+/// write must read as corrupt, not as a platform that never verifies.
+pub fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some((p, t)) => Some((p.parse().ok()?, Some(t.parse().ok()?))),
+        None => Some((s.parse().ok()?, None)),
+    }
+}
+
+/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
+/// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
+/// nothing. A bare-init container never reaps an adopted orphan, so waiting
+/// out a grace window for ESRCH there never converges (x-48a5); a zombie
+/// must read as gone the moment it is observed.
+#[cfg(target_os = "linux")]
+pub fn pid_is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+pub fn pid_is_zombie(pid: i32) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::pid_t,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    written == size && info.pbi_status == libc::SZOMB
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn pid_is_zombie(_pid: i32) -> bool {
+    false
+}
+
+/// True only when `kill(pid, 0)` proves `pid` is dead: ESRCH is the sole
+/// unambiguous signal. Any other outcome - alive, or an error like EPERM
+/// that cannot distinguish "alive but not ours to signal" from "gone" -
+/// reads as not-provably-dead. The single implementation for a read that
+/// three call sites (kill-server's pre-check, its poll loop, and the
+/// server's own respawn-vs-alive check) each duplicated inline before
+/// x-48a5, which is exactly the shape that lets one of them drift.
+pub fn pid_confirmed_dead(pid: i32) -> bool {
+    let result = unsafe { libc::kill(pid, 0) };
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Every file a session leaves beside its name: the socket, the wire-version
+/// sidecar, and the pid sidecar. The one list both removal and the operator's
+/// manual recovery command are built from, so a new sidecar cannot join one
+/// and miss the other.
+pub fn session_files(socket: &Path) -> [PathBuf; 3] {
+    [
+        socket.to_path_buf(),
+        version_sidecar_path(socket),
+        pid_sidecar_path(socket),
+    ]
+}
+
+/// Remove every file a session leaves beside its name. Shared by the server's
+/// SocketGuard, kill-server's recovery ladder, and bind_or_probe's stale
+/// takeover so the three cannot drift apart about what a dead session
+/// leaves behind. A file that is already gone is fine (the guard may have
+/// run first); the first other failure is returned so a caller mid-recovery
+/// can report it.
+pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
+    for path in session_files(socket) {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub const DEFAULT_SESSION: &str = "main";
 
 /// Outcome of [`bind_or_probe`].
@@ -2477,12 +2629,10 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
             if probe_alive(path) {
                 return Ok(BindOutcome::AlreadyRunning);
             }
-            // Stale socket from a dead server: take the name over.
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            // Stale socket from a dead server: take the name over. Session
+            // files, not just the socket, so a dead holder's .pid cannot
+            // outlive the rebind and name an unrelated pid.
+            remove_session_files(path)?;
             match UnixListener::bind(path) {
                 Ok(l) => Ok(BindOutcome::Bound(l)),
                 Err(e) if socket_in_use(&e) => {
