@@ -818,6 +818,24 @@ struct View {
     /// (x-feec) Generation token, bumped on every open/close so a fold result
     /// landing after the overlay closed or re-opened is discarded (AC6-FR).
     needs_gen: u64,
+    /// (x-b2bf) The yard overlay, when open. The cursor indexes the
+    /// roster-derived crowd; the spotlight renders that citizen's sprite,
+    /// and `opened_at` drives frame cycling (a flavour channel - it carries
+    /// no reading, so a timer is legal where it would not be for the eye).
+    yard: Option<YardSel>,
+    /// Pending escape bytes in yard-overlay mode (same split-arrow safety as
+    /// [`View::ans_esc`]).
+    yard_esc: Vec<u8>,
+    /// (x-b2bf) The identity fold's last result while the overlay is open
+    /// (`None` = not yet fetched this open). Species/rarity/crown/
+    /// first-sighting only - no status field, ever: the eye is derived from
+    /// the row's own badge/need values so the sprite cannot disagree.
+    yard_fold: Option<Vec<crate::yard_overlay::YardItem>>,
+    yard_fold_at: Option<Instant>,
+    yard_degraded: bool,
+    yard_want: bool,
+    yard_inflight: bool,
+    yard_gen: u64,
     /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
@@ -2092,6 +2110,14 @@ impl View {
             needs_want: false,
             needs_inflight: false,
             needs_gen: 0,
+            yard: None,
+            yard_esc: Vec::new(),
+            yard_fold: None,
+            yard_fold_at: None,
+            yard_degraded: false,
+            yard_want: false,
+            yard_inflight: false,
+            yard_gen: 0,
             digest: None,
             notice: None,
             search: None,
@@ -2344,6 +2370,49 @@ impl View {
         if self.needs_degraded {
             NeedsFooter::Degraded
         } else if self.needs_fold.is_none() {
+            NeedsFooter::Folding
+        } else {
+            NeedsFooter::AsOf
+        }
+    }
+
+    /// (x-b2bf) The yard crowd: every roster agent as `(name, eye, crown)`,
+    /// the eye derived from that row's own badge/need reading at render time
+    /// and the crown read off the same wire field the sideline orders by.
+    /// This is the whole multi-citizen surface - one glyph each, no sprite,
+    /// so any density including Slim can hold it.
+    fn yard_crowd(&self) -> Vec<(&str, crate::sprites::Eye, u32)> {
+        let queue = self.needs_queue();
+        self.layout
+            .agents
+            .iter()
+            .map(|a| {
+                let need = queue.iter().find(|r| r.name == a.name).map(|r| r.kind);
+                (
+                    a.name.as_str(),
+                    yard_eye(a, need),
+                    a.crown_level.unwrap_or(0),
+                )
+            })
+            .collect()
+    }
+
+    /// (x-b2bf) The identity payload for a citizen, joined by name the same
+    /// way the needs fold joins: first match on a display name. A
+    /// display-name collision degrades to whichever citizen the fold listed
+    /// first - noted, not fixed here.
+    fn yard_identity(&self, name: &str) -> Option<&crate::yard_overlay::YardItem> {
+        self.yard_fold
+            .as_ref()
+            .and_then(|f| f.iter().find(|c| c.name == name))
+    }
+
+    /// (x-b2bf) The yard overlay's footer state, same three shapes as the
+    /// needs fold's.
+    fn yard_footer(&self) -> NeedsFooter {
+        if self.yard_degraded {
+            NeedsFooter::Degraded
+        } else if self.yard_fold.is_none() {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
@@ -5391,6 +5460,34 @@ impl View {
                 // fold while still being the row Enter acts on.
                 Some(sel + 1),
             );
+        } else if let Some(yv) = &self.yard {
+            // (x-b2bf) The yard: the fleet as a Neko Atsume collection. The
+            // crowd is one eye glyph per roster citizen (each glyph computed
+            // from that row's own badge/need values); the spotlight is ONE
+            // 12-column sprite for the selected citizen, its eye from the
+            // same reading, its species/rarity/crown/first-sighting from the
+            // identity fold. A failed fold degrades to readings-only, never
+            // blocks, never guesses a species.
+            let crowd = self.yard_crowd();
+            let sel = yv.sel.min(crowd.len().saturating_sub(1));
+            let identity = crowd
+                .get(sel)
+                .and_then(|(name, _, _)| self.yard_identity(name));
+            let frame =
+                (yv.opened_at.elapsed().as_millis() / YARD_FRAME_MS) % crate::sprites::FRAME_COUNT as u128;
+            let lines = yard_overlay_lines(&crowd, sel, identity, frame as usize, self.yard_footer());
+            let chrome = chrome::Chrome::new("the yard", Anchor::Center).footer("n/N pick · q close");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                None,
+            );
         } else if let Some(picker) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
@@ -8046,6 +8143,120 @@ fn needs_overlay_lines(
     lines
 }
 
+/// (x-b2bf) The yard overlay's open state: the crowd cursor plus the open
+/// timestamp that drives frame cycling.
+struct YardSel {
+    sel: usize,
+    opened_at: Instant,
+}
+
+/// The yard overlay body width: the 12-column sprite plus a label margin,
+/// padded to a block rectangle like the needs overlay.
+const YARD_OVERLAY_W: usize = 48;
+/// Frame period for the flavour leg: frames advance on a timer, never on a
+/// state change (a pose carries no reading, which is exactly why cycling it
+/// is legal where cycling the eye would not be).
+const YARD_FRAME_MS: u128 = 800;
+
+/// The sprite's eye for a roster row (x-b2bf) - the binding that keeps a
+/// sprite honest. Computed at render time from the same values the row
+/// itself renders (badge, joined need kind, the open-PR fact); there is no
+/// stored eye field anywhere. A gift outranks every mood: the PR is open
+/// and waiting on the operator. `DoneUnseen` without a PR reads as
+/// attention for the same reason it sits in the needs-me queue - the worker
+/// finished and nobody has looked. No badge and no need is NO READING:
+/// [`crate::sprites::Eye::Reserved`], rendered dim, never as content.
+fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
+    use crate::sprites::Eye;
+    if a.pr.is_some() {
+        return Eye::Gift;
+    }
+    match need {
+        Some(
+            NeedKind::Decision
+            | NeedKind::MailQuestion
+            | NeedKind::BlockedAnswerable
+            | NeedKind::BlockedFocusOnly
+            | NeedKind::DoneUnseen,
+        ) => Eye::Attention,
+        Some(NeedKind::ReviewWedged | NeedKind::BudgetStop) => Eye::Faded,
+        None if !a.exited && a.badge == Some(AgentBadge::Working) => Eye::Working,
+        None => Eye::Reserved,
+    }
+}
+
+/// Build the yard overlay lines (x-b2bf): the CROWD as one glyph per citizen
+/// (the cheap layer - many cats, one cell each, the only multi-citizen
+/// render) and the SPOTLIGHT as exactly one 12-column sprite for the
+/// selected citizen. One sprite at a time is the capacity ruling: a
+/// simultaneous field of full sprites fits no panel width the sideline
+/// publishes (`PANEL_W` 28 fits one sprite plus a label, two plus nothing).
+/// Without an identity payload the spotlight shows its pending notice and
+/// NO sprite - a species with no reading is a guessed cat, and the yard does
+/// not guess. The hat reads the ROW's `crown_level` (the same wire value the
+/// sideline orders by), never a payload copy.
+fn yard_overlay_lines(
+    crowd: &[(&str, crate::sprites::Eye, u32)],
+    sel: usize,
+    identity: Option<&crate::yard_overlay::YardItem>,
+    frame: usize,
+    footer: NeedsFooter,
+) -> Vec<String> {
+    let mut lines = vec![pad_to(
+        " the yard · n/N pick · q close",
+        YARD_OVERLAY_W,
+    )];
+    if crowd.is_empty() {
+        // The true failure state of a dispatch system: nothing was sent out.
+        lines.push(pad_to("   the yard is empty - nothing was dispatched", YARD_OVERLAY_W));
+    } else {
+        // Crowd row: one eye glyph per citizen, wrapped to the body width.
+        let glyphs: String = crowd.iter().map(|(_, e, _)| e.glyph()).collect();
+        for chunk in glyphs.chars().collect::<Vec<_>>().chunks(YARD_OVERLAY_W - 3) {
+            lines.push(pad_to(&format!("   {}", chunk.iter().collect::<String>()), YARD_OVERLAY_W));
+        }
+        lines.push(pad_to("", YARD_OVERLAY_W));
+        let sel = sel.min(crowd.len() - 1);
+        let (name, eye, crown) = crowd[sel];
+        match identity {
+            Some(id) => {
+                let mut caption = format!(" ▸ {name} · {}", crate::sprites::species_name(id.species));
+                if !id.rarity.is_empty() {
+                    caption.push_str(&format!(" · {}", id.rarity));
+                }
+                if crown >= 1 {
+                    caption.push_str(&format!(" · crown {crown}"));
+                }
+                if id.first_sighting {
+                    caption.push_str(" · NEW");
+                }
+                lines.push(pad_to(&caption, YARD_OVERLAY_W));
+                if crown >= 1 {
+                    lines.push(pad_to(&format!("  {}", crate::sprites::HAT_CROWN), YARD_OVERLAY_W));
+                }
+                for row in crate::sprites::render_frame(id.species, frame, eye) {
+                    lines.push(pad_to(&format!("  {row}"), YARD_OVERLAY_W));
+                }
+            }
+            None => {
+                lines.push(pad_to(
+                    &format!(" ▸ {name} · identity fold pending"),
+                    YARD_OVERLAY_W,
+                ));
+            }
+        }
+    }
+    let footer_line = match footer {
+        NeedsFooter::Folding => "   folding identities...".to_string(),
+        NeedsFooter::Degraded => {
+            "   identity fold unavailable - readings only".to_string()
+        }
+        NeedsFooter::AsOf => format!("   {} citizens", crowd.len()),
+    };
+    lines.push(pad_to(&footer_line, YARD_OVERLAY_W));
+    lines
+}
+
 /// The navigator overlay content width (x-653d): labels truncate to it and pad
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
 const NAV_OVERLAY_W: usize = 54;
@@ -8850,6 +9061,11 @@ async fn attach_and_run(
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::needs_overlay::FoldItem>>)>(
         );
 
+    // x-b2bf: the yard identity fold leg, same shape as the needs fold -
+    // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
+    let (yard_tx, mut yard_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
+
     // x-84d7: the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
     // never blocks the modal and a result landing after a close/refresh is
@@ -8921,6 +9137,16 @@ async fn attach_and_run(
                 .to_string();
             tokio::spawn(async move {
                 let result = crate::needs_overlay::fold_now(&since).await;
+                let _ = tx.send((gen, result));
+            });
+        }
+        if view.yard_want && !view.yard_inflight {
+            view.yard_want = false;
+            view.yard_inflight = true;
+            let tx = yard_tx.clone();
+            let gen = view.yard_gen;
+            tokio::spawn(async move {
+                let result = crate::yard_overlay::fold_now().await;
                 let _ = tx.send((gen, result));
             });
         }
@@ -9223,6 +9449,28 @@ async fn attach_and_run(
                 view.set_notice(notice);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
+                }
+            }
+            Some((gen, result)) = yard_rx.recv() => {
+                // x-b2bf: the identity fold landed; same merge discipline as
+                // the needs fold - gen-guarded, degraded-loud on None, never
+                // blocking, never cached from a failure.
+                view.yard_inflight = false;
+                if gen == view.yard_gen && view.yard.is_some() {
+                    match result {
+                        Some(items) => {
+                            view.yard_fold = Some(items);
+                            view.yard_degraded = false;
+                            view.yard_fold_at = Some(Instant::now());
+                        }
+                        None => {
+                            view.yard_fold = Some(Vec::new());
+                            view.yard_degraded = true;
+                        }
+                    }
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
                 }
             }
             Some((gen, result)) = needs_rx.recv() => {
@@ -9945,6 +10193,9 @@ async fn handle_stdin(
     if view.answers.is_some() {
         return answer_keys(view, &passthrough, sock_w).await;
     }
+    if view.yard.is_some() {
+        return yard_keys(view, &passthrough, sock_w).await;
+    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -10073,6 +10324,27 @@ async fn dispatch_event(
                 view.needs_fold = None;
                 view.needs_degraded = false;
                 view.needs_want = true;
+            }
+        }
+        Event::OpenYard => {
+            // x-b2bf: open the yard. Always opens - an empty roster renders
+            // "the yard is empty - nothing was dispatched", the true failure
+            // state, rather than staying hidden. The identity fold merges in
+            // when it lands; the overlay never blocks on it.
+            view.yard = Some(YardSel {
+                sel: 0,
+                opened_at: Instant::now(),
+            });
+            view.yard_gen = view.yard_gen.wrapping_add(1);
+            let fresh = view
+                .yard_fold_at
+                .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
+            if fresh {
+                view.yard_degraded = false;
+            } else {
+                view.yard_fold = None;
+                view.yard_degraded = false;
+                view.yard_want = true;
             }
         }
         Event::TogglePanel => {
@@ -13385,6 +13657,44 @@ async fn answer_keys(
             0x1b | b'q' => {
                 view.answers = None;
                 view.needs_gen = view.needs_gen.wrapping_add(1);
+            }
+            _ => {}
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// (x-b2bf) Yard-overlay key routing: `n`/`N` (and j/k, folded arrows) move
+/// the spotlight over the crowd, `q`/Esc close. Any other key is consumed -
+/// an open modal owns the keyboard and never leaks a byte into a pane (the
+/// answer-overlay invariant).
+async fn yard_keys(
+    view: &mut View,
+    bytes: &[u8],
+    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.yard_esc);
+    let keys = fold_selector_keys(&mut esc, bytes);
+    view.yard_esc = esc;
+    let len = view.layout.agents.len();
+    for &k in &keys {
+        let Some(yv) = view.yard.as_mut() else {
+            break; // closed mid-chunk
+        };
+        if len == 0 {
+            // The empty yard: any key dismisses it, like the needs overlay's
+            // "nothing needs you".
+            view.yard = None;
+            view.yard_gen = view.yard_gen.wrapping_add(1);
+            break;
+        }
+        yv.sel = yv.sel.min(len - 1);
+        match k {
+            b'n' | b'j' => yv.sel = (yv.sel + 1) % len,
+            b'N' | b'k' => yv.sel = (yv.sel + len - 1) % len,
+            0x1b | b'q' => {
+                view.yard = None;
+                view.yard_gen = view.yard_gen.wrapping_add(1);
             }
             _ => {}
         }
@@ -25429,6 +25739,137 @@ mod tests {
             .any(|l| l.contains("events fold unavailable")));
         let capped = needs_overlay_lines(&one, 0, 7, NeedsFooter::AsOf);
         assert!(capped.iter().any(|l| l.contains("7 more hidden")));
+    }
+
+    // ---- x-b2bf: the yard ----
+
+    #[test]
+    fn yard_eye_binds_the_rows_own_reading() {
+        use crate::sprites::Eye;
+        // Gift: an open PR outranks every mood.
+        let mut g = blocked_row("g", 1, None);
+        g.badge = Some(AgentBadge::Working);
+        g.pr = Some(883);
+        assert_eq!(yard_eye(&g, None), Eye::Gift);
+        // Working, nothing owed: the default body eye.
+        let mut w = blocked_row("w", 2, None);
+        w.badge = Some(AgentBadge::Working);
+        assert_eq!(yard_eye(&w, None), Eye::Working);
+        // Attention: every human-owing need kind.
+        for kind in [
+            NeedKind::Decision,
+            NeedKind::MailQuestion,
+            NeedKind::BlockedAnswerable,
+            NeedKind::BlockedFocusOnly,
+            NeedKind::DoneUnseen,
+        ] {
+            assert_eq!(yard_eye(&w, Some(kind)), Eye::Attention, "{kind:?}");
+        }
+        // Faded: wedged review, budget stop.
+        assert_eq!(yard_eye(&w, Some(NeedKind::ReviewWedged)), Eye::Faded);
+        assert_eq!(yard_eye(&w, Some(NeedKind::BudgetStop)), Eye::Faded);
+        // No badge, no need: NO reading - reserved, never content.
+        let mut dark = blocked_row("dark", 3, None);
+        dark.badge = None;
+        assert_eq!(yard_eye(&dark, None), Eye::Reserved);
+        let mut gone = blocked_row("gone", 4, None);
+        gone.exited = true;
+        assert_eq!(yard_eye(&gone, None), Eye::Reserved);
+    }
+
+    #[test]
+    fn yard_crowd_reads_rows_and_joins_needs() {
+        let mut working = blocked_row("working", 2, None);
+        working.badge = Some(AgentBadge::Working);
+        let mut blocked_focus = blocked_row("stuck", 3, None);
+        blocked_focus.badge = Some(AgentBadge::Blocked);
+        let v = view_with_agents(vec![working, blocked_focus]);
+        let crowd = v.yard_crowd();
+        assert_eq!(crowd[0].0, "working");
+        assert_eq!(crowd[0].1, crate::sprites::Eye::Working);
+        // A blocked row joins the needs queue -> attention eye.
+        assert_eq!(crowd[1].1, crate::sprites::Eye::Attention);
+        assert_eq!(crowd[1].2, 0); // crown defaults to 0, no hat
+    }
+
+    fn yard_item(name: &str, species: usize, rarity: &str, crown: u32, first: bool) -> crate::yard_overlay::YardItem {
+        crate::yard_overlay::YardItem {
+            id: format!("{name}-id"),
+            name: name.into(),
+            harness: Some("claude".into()),
+            species,
+            rarity: rarity.into(),
+            crown_level: crown,
+            first_sighting: first,
+        }
+    }
+
+    #[test]
+    fn yard_overlay_renders_one_spotlight_sprite() {
+        let crowd = vec![
+            ("a", crate::sprites::Eye::Working, 0u32),
+            ("b", crate::sprites::Eye::Attention, 0),
+        ];
+        let id = yard_item("b", 3, "common", 0, false);
+        let lines = yard_overlay_lines(&crowd, 1, Some(&id), 0, NeedsFooter::AsOf);
+        // Crowd row: exactly the two eye glyphs.
+        assert!(lines.iter().any(|l| {
+            l.trim_start() == "\u{b7}@" || l.trim_start().starts_with("\u{b7}@")
+        }));
+        // Caption carries identity outcome fields, never a rank or boundary.
+        let caption = lines.iter().find(|l| l.contains('▸')).expect("caption");
+        assert!(caption.contains("b") && caption.contains("cat") && caption.contains("common"));
+        assert!(!caption.contains("60") && !caption.contains("boundary"));
+        // The sprite: each of the cat's rendered rows WITH CONTENT appears
+        // exactly once (padding trails, so match on the prefix; the sprite's
+        // own blank top row is indistinguishable from padding by design),
+        // and NO hat row (crown 0) - one sprite, no second block.
+        for row in crate::sprites::render_frame(3, 0, crate::sprites::Eye::Attention) {
+            if row.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                lines.iter().filter(|l| l.starts_with(&format!("  {row}"))).count() == 1,
+                "sprite row {row:?} once"
+            );
+        }
+        assert!(!lines.iter().any(|l| l.contains("\\^^^/")));
+        assert!(lines.iter().any(|l| l.contains("2 citizens")));
+    }
+
+    #[test]
+    fn yard_overlay_crown_hat_only_when_grounded() {
+        let crowd = vec![("king", crate::sprites::Eye::Working, 2u32)];
+        let id = yard_item("king", 0, "rare", 0, true);
+        let lines = yard_overlay_lines(&crowd, 0, Some(&id), 0, NeedsFooter::AsOf);
+        assert!(lines.iter().any(|l| l.contains("\\^^^/")), "crown hat row");
+        let caption = lines.iter().find(|l| l.contains('▸')).unwrap();
+        assert!(caption.contains("crown 2"));
+        assert!(caption.contains("NEW"));
+    }
+
+    #[test]
+    fn yard_overlay_without_identity_never_guesses_a_species() {
+        let crowd = vec![("x", crate::sprites::Eye::Working, 0u32)];
+        let lines = yard_overlay_lines(&crowd, 0, None, 0, NeedsFooter::Folding);
+        assert!(lines.iter().any(|l| l.contains("identity fold pending")));
+        // No sprite rows: nothing 12-wide renders.
+        assert!(!lines
+            .iter()
+            .any(|l| l.trim_start().chars().count() == crate::sprites::SPRITE_W));
+        assert!(lines.iter().any(|l| l.contains("folding identities")));
+        let degraded = yard_overlay_lines(&crowd, 0, None, 0, NeedsFooter::Degraded);
+        assert!(degraded
+            .iter()
+            .any(|l| l.contains("identity fold unavailable")));
+    }
+
+    #[test]
+    fn yard_overlay_empty_yard_is_the_failure_state() {
+        let lines = yard_overlay_lines(&[], 0, None, 0, NeedsFooter::AsOf);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("the yard is empty - nothing was dispatched")));
     }
 
     #[test]
