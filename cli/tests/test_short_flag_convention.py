@@ -189,7 +189,15 @@ def _scan() -> list[Decl]:
         rel = path.relative_to(SRC_ROOT.parent.parent)
         if "test" in path.name:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # A file can vanish between the glob and the read: under `-n auto`,
+        # test_autonomy_registry_ci.py writes then unlinks its fake-spawner
+        # probe in src/fno/, and test_ambient_identity_scrub.py copies itself
+        # in and unlinks. See the same guard in test_exit_codes.py.
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        tree = ast.parse(text, filename=str(path))
         parents: dict[ast.AST, ast.AST] = {}
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
