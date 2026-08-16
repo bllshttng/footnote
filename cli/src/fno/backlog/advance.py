@@ -100,9 +100,12 @@ def _auto_continue_resolve(
         return env.strip().lower() in _TRUTHY, "env"
 
     try:
-        from fno.config import load_settings
+        from fno.config import load_settings, load_settings_for_repo
 
-        return bool(load_settings().auto_continue.enabled), "config"
+        settings = (
+            load_settings_for_repo(Path(project_root)) if project_root else load_settings()
+        )
+        return bool(settings.auto_continue.enabled), "config"
     except Exception as exc:  # noqa: BLE001 - fail-safe to disabled (AC2-ERR)
         # Diagnosable without changing the safety posture: false-disabled is
         # strictly safer than false-enabled for a background dispatcher, but a

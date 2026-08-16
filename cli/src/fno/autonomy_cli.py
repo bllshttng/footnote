@@ -49,12 +49,24 @@ def _settings_for(project_root: Optional[Path]):
 
 
 def _master_switch_status(project_root: Optional[Path]) -> SpawnerStatus:
-    from fno.config import autonomy_master_enabled
+    """Rank reflects whether the settings read succeeded, not the resolved
+    value - the same convention every other row uses (armed=False from a
+    successful read is still rank "config"; only a read failure is
+    "default"). Mapping the boolean straight to a rank would label an
+    explicit ``autonomy.enabled=false`` as "default", which reads as
+    unconfigured precisely when an operator used the panic switch."""
+    from fno.config import load_settings, load_settings_for_repo
 
-    armed = autonomy_master_enabled(project_root)
+    try:
+        settings = load_settings_for_repo(Path(project_root)) if project_root else load_settings()
+        armed = bool(settings.autonomy.enabled)
+        rank = "config"
+    except Exception:  # noqa: BLE001 - fail-safe to disabled on a read failure
+        armed = False
+        rank = "default"
     return SpawnerStatus(
         "autonomy (master switch)", "every row below", "config.autonomy.enabled", armed,
-        "config" if armed else "default",
+        rank,
     )
 
 

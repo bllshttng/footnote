@@ -30,4 +30,4 @@ scripts/run-target-loop.sh::  # NOT a call site: comment only; the real dispatch
 skills/agent/scripts/normalize.sh::  # NOT a call site: comment/variable-name references only
 skills/agent/scripts/spawn.sh::  # explicit operator command wrapper (`/fno:agent spawn`); builds argv from a dynamic $VERB, not a literal spawn call
 skills/target/scripts/dispatch-node.sh::  # advance / dispatch_lanes family (config.auto_continue.enabled) - the shell side of the same autonomous continuation
-skills/target/scripts/handoff.sh::  # KNOWN GAP, not fixed here: target-self-handoff spawns its successor unprompted but is not wired to config.autonomy.enabled. See docs/architecture/target-self-handoff.md.
+skills/target/scripts/handoff.sh::  # target-self-handoff (config.autonomy.enabled master switch, checked before target.handoff.enabled). See docs/architecture/target-self-handoff.md.
