@@ -8495,7 +8495,7 @@ def cmd_reconcile(
             if not json_out:
                 typer.echo(f"warning: sync catch-up skipped: {_cu_exc}", err=True)
 
-    # Claim GC (x-aeeb). This call site reaches every path that fires
+    # Claim GC. This call site reaches every path that fires
     # reconcile - the SessionStart hook, the megawalk stop hook, and a
     # manual invocation, all through scripts/lib/reconcile-throttle.sh - so
     # a reaper hook on any one caller instead would be a guard on one of N

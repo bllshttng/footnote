@@ -151,7 +151,7 @@ def emit_claim_force_overridden(
 
 
 def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
-    """GC archived one provably-dead claim (x-aeeb). Per-file record."""
+    """GC archived one provably-dead claim. Per-file record."""
     data = _common(claim)
     data["root"] = root
     data["age_ms"] = int(age_ms)
@@ -159,9 +159,9 @@ def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
 
 
 def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
-    """One `fno claim reap` run completed (x-aeeb). Fires on every run,
-    apply or dry-run, including a run that reaped nothing - a silent sweep
-    and a dead sweep must not look the same.
+    """One `fno claim reap` run completed. Fires on every run, apply or
+    dry-run, including a run that reaped nothing - a silent sweep and a
+    dead sweep must not look the same.
     """
     data = {
         "scanned": int(summary["scanned"]),
@@ -172,6 +172,7 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         "kept_offhost": int(summary["kept_offhost"]),
         "corrupted": int(summary["corrupted"]),
         "vanished": int(summary["vanished"]),
+        "contended": int(summary["contended"]),
         "reap_failed": len(summary["reap_failed"]),
         "apply": bool(summary["apply"]),
         "roots": [str(r) for r in summary["roots"]],

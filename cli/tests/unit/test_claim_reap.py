@@ -1,4 +1,4 @@
-"""Unit tests for x-aeeb: claim GC (reap) and the list reader's honesty.
+"""Unit tests for claim GC (reap) and the list reader's honesty.
 
 Two things had no test before this: nothing pruned a claim whose holder died
 without releasing (so a leaked lockfile stayed forever), and `fno claim list`
@@ -6,7 +6,7 @@ rendered a store that was 99 percent stale as an empty store. Every test here
 proves a real defect would have been caught - especially the load-bearing
 case (test_AC1_HP_kill_without_release_is_reaped), which spawns a real
 subprocess and kills it. A test that only exercises a clean release proves
-nothing about the leak this node measured.
+nothing about the leak that was measured.
 """
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ class TestClassifyForSweepMatchesIsProvablyDead:
     """_classify_for_sweep (core.py) inlines is_provably_dead's own
     composition (same-machine and classify() is STALE) instead of calling
     it, so a sweep can share one classify() call across the outer scan and
-    the mutex re-verify (x-aeeb review). A parity test pins the two
+    the mutex re-verify. A parity test pins the two
     together: if a future change to either composition diverges, this
     fails instead of reap silently disagreeing with its documented single
     liveness authority.

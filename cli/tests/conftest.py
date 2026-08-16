@@ -104,7 +104,7 @@ def _hermetic_promise_carveout_gate(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _hermetic_claim_reap(monkeypatch):
-    """Neutralise cmd_reconcile's claim-GC leg during tests (x-aeeb).
+    """Neutralise cmd_reconcile's claim-GC leg during tests.
 
     ``reap_dead_claims()``'s default roots resolve through
     ``resolve_canonical_repo_root()`` (cwd-based ``git worktree list``

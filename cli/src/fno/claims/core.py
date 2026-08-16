@@ -790,13 +790,13 @@ def _list_claims_impl(
     Returns ``(rows, counts)``: ``rows`` is filtered per ``include_stale``
     exactly as before; ``counts`` is every state seen while walking,
     regardless of what ``include_stale`` kept, so a caller can report what
-    it withheld (x-aeeb AC7).
+    it withheld.
     """
     cdir = claims_dir(root)
     # "free" covers a claim released between iterdir() and claim_status()
     # below (ClaimGoneAway / a vanished path) - without a bucket for it, that
     # entry silently drops out of `total` too, instead of being an accounted
-    # non-event (x-aeeb review).
+    # non-event.
     counts = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0}
     if not cdir.is_dir():
         return [], {**counts, "total": 0}
@@ -858,7 +858,7 @@ def list_claims_with_counts(
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Like :func:`list_claims`, but also returns the filtered-state counts.
 
-    x-aeeb AC7: a store that is 99 percent stale must not render as an
+    A store that is 99 percent stale must not render as an
     empty store. ``counts`` carries ``live``/``suspect``/``stale``/
     ``corrupted``/``total`` for every lockfile the walk saw, independent of
     what ``include_stale`` kept in ``rows`` - this is what lets a caller
@@ -947,7 +947,7 @@ def reap_dead_claims(
 ) -> dict[str, Any]:
     """Archive every provably-dead claim across one or more claims roots.
 
-    x-aeeb: the only mutation missing from the claim lifecycle. Acquire,
+    The only mutation missing from the claim lifecycle. Acquire,
     release, refresh, and force-release all exist; nothing prunes a claim
     whose holder died without releasing, so a dead session leaks its
     lockfile forever. This walks every ``.lock`` file in the swept roots,
@@ -980,10 +980,10 @@ def reap_dead_claims(
 
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
     ``kept_live``, ``kept_suspect``, ``kept_offhost``, ``corrupted``,
-    ``vanished``, ``reap_failed`` (list of ``(path, reason)``), ``apply``,
-    ``roots``. A ``claim_reap_swept`` event fires on every call, apply or
-    dry-run, including a zero-reap run - a leg that never ran must not
-    look the same as one that ran and found nothing.
+    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path, reason)``),
+    ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every call,
+    apply or dry-run, including a zero-reap run - a leg that never ran must
+    not look the same as one that ran and found nothing.
     """
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
 
@@ -996,6 +996,12 @@ def reap_dead_claims(
     kept_offhost = 0
     corrupted = 0
     vanished = 0
+    # A provably-dead claim whose recovery mutex is held by a genuine live
+    # recovery (acquire_dir_mutex returned None on real contention, not a
+    # stealable corpse) - the file is still on disk and still dead, just
+    # left for the next sweep, so it must not be counted as vanished (which
+    # means "gone from the store").
+    contended = 0
     reap_failed: list[tuple[str, str]] = []
 
     for cdir in use_dirs:
@@ -1026,7 +1032,7 @@ def reap_dead_claims(
             # is_same_machine + classify() computed once per claim and reused
             # by both this outer scan and the mutex re-verify below, instead
             # of paid twice or three times per claim - the sweep runs on
-            # every SessionStart/megawalk stop hook (x-aeeb review).
+            # every SessionStart/megawalk stop hook.
             provably_dead, bucket = _classify_for_sweep(claim, ts)
 
             if provably_dead:
@@ -1042,13 +1048,15 @@ def reap_dead_claims(
                 # else give up immediately rather than wait - reap runs on a
                 # cadence and blocking here would stall the whole sweep; a
                 # live owner (no steal) means a real recovery is in flight,
-                # left for the next sweep (x-aeeb review: shares
-                # fno.mutex.acquire_dir_mutex instead of hand-rolling the
-                # same mkdir/steal/retry dance a third time).
+                # left for the next sweep.
                 recovery_lock = entry.with_name(entry.name + ".recovery.d")
                 recovery_token = acquire_dir_mutex(recovery_lock, 0)
                 if recovery_token is None:
-                    vanished += 1
+                    # A live, in-age holder - genuine contention, not a
+                    # corpse (mutex.py's own contract). The file is still on
+                    # disk and still provably dead; "vanished" would wrongly
+                    # tell the operator it is gone from the store.
+                    contended += 1
                     continue
 
                 try:
@@ -1117,6 +1125,7 @@ def reap_dead_claims(
         "kept_offhost": kept_offhost,
         "corrupted": corrupted,
         "vanished": vanished,
+        "contended": contended,
         "reap_failed": reap_failed,
         "apply": apply,
         "roots": [str(d) for d in use_dirs],

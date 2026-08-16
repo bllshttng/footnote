@@ -126,7 +126,7 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
 def is_provably_dead(claim: Claim, now: Optional[int] = None) -> bool:
     """Return True iff a claim's holder can be PROVEN dead from this host.
 
-    Three conditions, all required, x-aeeb:
+    Three conditions, all required:
 
       1. Same machine, by machine_id (never by hostname - see module header).
          An off-machine or unverifiable claim cannot be proven dead here.

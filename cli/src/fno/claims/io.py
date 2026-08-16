@@ -153,7 +153,7 @@ def dedup_claims_roots(roots: list[Path | None]) -> list[tuple[Path | None, Path
     one scan, not two; dedup is by ``Path.resolve()`` on the resolved claims
     dir, never on the raw root arg (``None`` and an equivalent explicit
     ``Path`` must collapse too). Single source of truth for the both-roots
-    dedup used by ``fno claim list``/``reap`` (x-aeeb review: this logic
+    dedup used by ``fno claim list``/``reap`` (this logic previously
     existed three times with no shared helper).
     """
     seen: set[Path] = set()

@@ -669,8 +669,8 @@ def list_cmd(
     Both claims roots (global ~/.fno/claims and the cwd-local root) are
     always read and merged in one run, --prefix or not - a bare `fno
     claim list` used to resolve only whichever single root an empty
-    prefix happened to fall to, silently missing the other store (x-aeeb
-    specimen 1: 574 lockfiles in a root a bare `list` could never reach).
+    prefix happened to fall to, silently missing the other store (measured:
+    574 lockfiles in a root a bare `list` could never reach).
     A colon-less or unrecognized --prefix cannot tell which root its keys
     live in (:func:`fno.claims.io.claims_root_for` returns None for
     exactly that case), so narrowing to a single guessed root would
@@ -686,8 +686,7 @@ def list_cmd(
     all_rows: list[dict] = []
     # Display-only: which root a row came from, keyed by claim key rather
     # than mutated onto the row dict itself, so JSON output stays the bare
-    # pre-x-aeeb claim_status() shape a scripted caller already parses
-    # (x-aeeb review).
+    # claim_status() shape a scripted caller already parses.
     row_roots: dict[str, str] = {}
     totals = {"live": 0, "suspect": 0, "stale": 0, "corrupted": 0, "free": 0, "total": 0}
     deduped_roots = dedup_claims_roots(roots)
@@ -699,8 +698,7 @@ def list_cmd(
         for r in rows:
             # A key present in more than one root (only possible via a bug
             # elsewhere writing to the wrong root) is one logical claim for
-            # display purposes - first root wins, matching the old
-            # cross-root dedup this rewrite had dropped (x-aeeb review).
+            # display purposes - first root wins.
             if r["key"] in seen_keys:
                 continue
             seen_keys.add(r["key"])
@@ -713,7 +711,7 @@ def list_cmd(
     n_roots = len(deduped_roots)
 
     if json_output:
-        # Bare list, matching the pre-x-aeeb shape: a scripted caller already
+        # Bare list, matching the original shape: a scripted caller already
         # does `for r in json.loads(...)`. The filtered-count fix below is a
         # human-output problem only - JSON already answers unambiguously
         # (an empty list here really does mean zero rows in this mode).
@@ -756,7 +754,7 @@ def reap_cmd(
     (same-machine, dead/reused pid, no live TTL), never guessed from how
     old the file is. Dry-run by default; `--apply` archives to `.expired/`
     and re-reads the store to confirm each move before counting it
-    `reaped` - an exit code alone is not evidence (x-aeeb). Exits 1 when
+    `reaped` - an exit code alone is not evidence. Exits 1 when
     any reapable file's move could not be confirmed on that re-read.
     """
     summary = reap_dead_claims(roots=list(root) if root else None, apply=apply)

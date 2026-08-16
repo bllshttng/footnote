@@ -1108,7 +1108,7 @@ event_types:
     consumers: [operator]
 
   - name: claim_reaped
-    description: "GC archived one provably-dead claim to .expired/ (x-aeeb). Emitted only after a re-read confirms the source path is gone and the archive path exists."
+    description: "GC archived one provably-dead claim to .expired/. Emitted only after a re-read confirms the source path is gone and the archive path exists."
     sources: [fno-loop]
     data:
       required: [key, holder, pid, host, acquired_at, root, age_ms]
@@ -1135,10 +1135,10 @@ event_types:
     consumers: [operator]
 
   - name: claim_reap_swept
-    description: "One `fno claim reap` run completed, apply or dry-run alike, including a run that reaped nothing (x-aeeb). A silent sweep and a dead sweep must not look the same."
+    description: "One `fno claim reap` run completed, apply or dry-run alike, including a run that reaped nothing. A silent sweep and a dead sweep must not look the same."
     sources: [fno-loop]
     data:
-      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, reap_failed, apply, roots]
+      required: [scanned, reaped, would_reap, kept_live, kept_suspect, kept_offhost, corrupted, vanished, contended, reap_failed, apply, roots]
       properties:
         scanned:
           type: integer
@@ -1157,6 +1157,9 @@ event_types:
           type: integer
         vanished:
           type: integer
+        contended:
+          type: integer
+          description: "Provably-dead but its recovery mutex was held by a genuine live recovery this round - still on disk, left for the next sweep."
         reap_failed:
           type: integer
           description: "Count of files that classified reapable but the post-archive re-read did not confirm the move."
