@@ -2506,7 +2506,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
 
     This is the Python/Rust boundary: ``family1_truth_probe`` in
     ``crates/fno-agents/src/claude_ask.rs`` reads this, and ``resume`` decides
-    "is live - attaching" from it. The reachability verdict has to be ON this
+    "is live" from it. The reachability verdict has to be ON this
     wire or Rust keeps re-deriving liveness from the raw transcript ``state``
     and never sees the falsifier -- the same trap, one language over.
 

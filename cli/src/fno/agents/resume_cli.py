@@ -156,7 +156,18 @@ def _default_agents_state_fn() -> dict[str, dict]:
     """
     from fno.agents.harnesses.claude import claude_agents_json
 
-    live_map, _warnings = claude_agents_json()
+    live_map, warnings = claude_agents_json()
+    if warnings:
+        # Best-effort diagnostic only: claude_agents_json() reports its own
+        # failures (missing PATH, subprocess timeout, unparseable JSON) via
+        # this list, not an exception. Dropping it silently, as every other
+        # caller of this function avoids doing (read.py, cli.py), meant a
+        # wake read "unknown" before and after because the shellout itself
+        # was broken, burned two full wake attempts against a session it
+        # could never observe, and reported a bare "did not reach Working"
+        # with no hint the real cause was upstream.
+        for warning in warnings:
+            print(f"fno agents resume: {warning}", file=sys.stderr)
     return live_map
 
 
