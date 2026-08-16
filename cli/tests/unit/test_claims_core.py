@@ -440,3 +440,45 @@ class TestForceRelease:
         archive = claims_dir(tmp_path) / ".expired"
         assert archive.exists()
         assert any(archive.iterdir())
+
+    def test_force_release_takes_and_releases_recovery_mutex(self, tmp_path):
+        """force_release_claim must take the SAME per-key recovery mutex
+        acquire_claim/refresh_claim/reap_dead_claims take, closing the
+        resurrection race where a concurrent idempotent re-acquire reads the
+        still-present claim under its own lock and writes it back right after
+        this call's archive_claim moves the file away."""
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)
+
+        calls: list[str] = []
+        real_acquire = claims_core.acquire_dir_mutex
+        real_release = claims_core.release_dir_mutex
+
+        def _acquire_spy(*args, **kwargs):
+            calls.append("acquire")
+            return real_acquire(*args, **kwargs)
+
+        def _release_spy(*args, **kwargs):
+            calls.append("release")
+            return real_release(*args, **kwargs)
+
+        with patch.object(claims_core, "acquire_dir_mutex", _acquire_spy), \
+             patch.object(claims_core, "release_dir_mutex", _release_spy):
+            force_release_claim("k", reason="operator override", root=tmp_path)
+
+        assert calls == ["acquire", "release"]
+        assert not claim_path("k", root=tmp_path).exists()
+
+    def test_force_release_still_succeeds_when_mutex_acquire_times_out(self, tmp_path):
+        """A contended recovery mutex must not turn force-release's
+        'always succeeds' administrative-override contract into a raise -
+        it proceeds without the lock on timeout instead."""
+        import fno.claims.core as claims_core
+
+        acquire_claim("k", HOLDER_A, root=tmp_path)
+
+        with patch.object(claims_core, "acquire_dir_mutex", return_value=None):
+            force_release_claim("k", reason="operator override", root=tmp_path)
+
+        assert not claim_path("k", root=tmp_path).exists()

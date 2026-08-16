@@ -983,25 +983,52 @@ def force_release_claim(
         raise ClaimValidationError("reason must be non-empty for force-release")
 
     path = claim_path(key, root=root)
-    if not path.exists():
-        emit_claim_force_overridden(
-            key=key, reason=reason, previous_holder=None, previous_pid=None,
-        )
-        return
 
-    previous: Optional[Claim] = None
+    # Take the same per-key recovery mutex acquire_claim/refresh_claim/
+    # reap_dead_claims all take. Without it, a concurrent idempotent
+    # re-acquire or refresh can read the still-present claim under ITS OWN
+    # lock and then write a fresh copy back via _atomic_replace's
+    # unconditional rename right after this call's archive_claim moves the
+    # file away - silently resurrecting the very claim this override just
+    # removed (the same class of race the other verbs close, just left open
+    # here). A contended mutex is a bounded wait like every other verb, never
+    # a refusal: on timeout, force-release proceeds without it rather than
+    # raising, preserving its "always succeeds" administrative-override
+    # contract - the exposure narrows from "always racy" to "racy only past
+    # a 5s timeout under sustained contention" instead of closing to zero.
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    acquired_lock = False
+    recovery_token = ""
     try:
-        previous = read_claim_file(path)
-    except (ClaimCorrupted, ClaimGoneAway):
-        previous = None
+        token = acquire_dir_mutex(
+            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        )
+        if token is not None:
+            recovery_token = token
+            acquired_lock = True
 
-    archive_claim(path, ts_ms=now_ms())
-    emit_claim_force_overridden(
-        key=key,
-        reason=reason,
-        previous_holder=previous.holder if previous is not None else None,
-        previous_pid=previous.pid if previous is not None else None,
-    )
+        if not path.exists():
+            emit_claim_force_overridden(
+                key=key, reason=reason, previous_holder=None, previous_pid=None,
+            )
+            return
+
+        previous: Optional[Claim] = None
+        try:
+            previous = read_claim_file(path)
+        except (ClaimCorrupted, ClaimGoneAway):
+            previous = None
+
+        archive_claim(path, ts_ms=now_ms())
+        emit_claim_force_overridden(
+            key=key,
+            reason=reason,
+            previous_holder=previous.holder if previous is not None else None,
+            previous_pid=previous.pid if previous is not None else None,
+        )
+    finally:
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
 
 
 def _default_reap_roots() -> list[Path]:
