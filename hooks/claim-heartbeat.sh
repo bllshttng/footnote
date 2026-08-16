@@ -16,9 +16,13 @@
 #   - at most once per THROTTLE window (a stamp-file mtime gate makes almost
 #     every tool call a cheap stat+exit; only an aging claim shells `fno`).
 #
-# NEVER blocks the tool call: silent no-op on not-holder / throttled / no
+# Never fails the tool call: silent no-op on not-holder / throttled / no
 # manifest; a refresh error logs to stderr and still exits 0. Touches the claim
 # lockfile only (via `fno claim refresh`) - never the immutable manifest.
+# `refresh_claim` takes the same per-key recovery mutex as `reap`/`acquire`
+# (closes a resurrection race - see core.py), so on rare contention with a
+# concurrent reap sweep or acquire on the SAME key this call can wait up to
+# ~5s before returning; the stamp-file throttle above keeps that window rare.
 
 set -uo pipefail
 

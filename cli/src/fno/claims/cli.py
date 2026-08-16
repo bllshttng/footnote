@@ -655,6 +655,57 @@ def status(
         typer.echo(json.dumps(info, indent=2))
 
 
+def _merge_claims_across_roots(
+    deduped_roots: list[tuple[Optional[Path], Path]],
+    *,
+    prefix: str,
+    include_stale: bool,
+) -> tuple[list[dict], dict[str, str], dict[str, int]]:
+    """Merge per-root claim listings into one first-root-wins view.
+
+    Returns ``(all_rows, row_roots, totals)``. A key present in more than one
+    root (a bug elsewhere writing to the wrong root, or a deliberate
+    FNO_CLAIMS_ROOT migration leaving stale claims under the old root - see
+    the version-skew note on CLAIMS_ROOT_ENV in io.py) is one logical claim -
+    first root wins, for every purpose, not just the purpose that root
+    happened to satisfy. A single ``seen_keys`` dedup set, built from
+    ``states_by_key`` (a superset of the row-worthy keys), is what makes that
+    hold: two separate dedup sets - one gated on row-worthy states, one on
+    totals-worthy states - would let a key be claimed by root A for its row
+    but by root B for its totals bucket, showing e.g. a live row while also
+    counting it stale.
+    """
+    all_rows: list[dict] = []
+    # Display-only: which root a row came from, keyed by claim key rather
+    # than mutated onto the row dict itself, so JSON output stays the bare
+    # claim_status() shape a scripted caller already parses.
+    row_roots: dict[str, str] = {}
+    # Only stale/corrupted/free ever feed the empty-store message below;
+    # live/suspect/total would just be dead weight summed on every list call.
+    totals = {"stale": 0, "corrupted": 0, "free": 0}
+    seen_keys: set[str] = set()
+    for candidate_root, cdir in deduped_roots:
+        rows, _counts, states_by_key = list_claims_with_counts(
+            prefix=prefix or None, include_stale=include_stale, root=candidate_root,
+        )
+        row_by_key = {r["key"]: r for r in rows}
+        # states_by_key is a superset of row_by_key's keys (every state seen
+        # while walking, not just the ones include_stale kept), so iterating
+        # it alone dedups both outputs against the same first-root-wins set.
+        for key, state in states_by_key.items():
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if key in row_by_key:
+                all_rows.append(row_by_key[key])
+                row_roots[key] = str(cdir)
+            if state in totals:
+                totals[state] += 1
+
+    all_rows.sort(key=lambda r: r["key"])
+    return all_rows, row_roots, totals
+
+
 @cli.command(name="list")
 def list_cmd(
     prefix: str = typer.Option("", "--prefix", help="Filter keys starting with this prefix"),
@@ -683,40 +734,10 @@ def list_cmd(
         # own colon check, so no separate `if prefix` branch is needed here.
         roots = [global_claims_root(), _node_aware_root(prefix)]
 
-    all_rows: list[dict] = []
-    # Display-only: which root a row came from, keyed by claim key rather
-    # than mutated onto the row dict itself, so JSON output stays the bare
-    # claim_status() shape a scripted caller already parses.
-    row_roots: dict[str, str] = {}
-    # Only stale/corrupted/free ever feed the empty-store message below;
-    # live/suspect/total would just be dead weight summed on every list call.
-    totals = {"stale": 0, "corrupted": 0, "free": 0}
     deduped_roots = dedup_claims_roots(roots)
-    seen_keys: set[str] = set()
-    seen_total_keys: set[str] = set()
-    for candidate_root, cdir in deduped_roots:
-        rows, _counts, states_by_key = list_claims_with_counts(
-            prefix=prefix or None, include_stale=include_stale, root=candidate_root,
-        )
-        for r in rows:
-            # A key present in more than one root (only possible via a bug
-            # elsewhere writing to the wrong root) is one logical claim for
-            # display purposes - first root wins.
-            if r["key"] in seen_keys:
-                continue
-            seen_keys.add(r["key"])
-            all_rows.append(r)
-            row_roots[r["key"]] = str(cdir)
-        # Dedup by key, not a blind counts sum: a key present in more than
-        # one root would otherwise be double-counted in totals even though
-        # all_rows above only shows it once (same first-root-wins rule).
-        for key, state in states_by_key.items():
-            if state not in totals or key in seen_total_keys:
-                continue
-            seen_total_keys.add(key)
-            totals[state] += 1
-
-    all_rows.sort(key=lambda r: r["key"])
+    all_rows, row_roots, totals = _merge_claims_across_roots(
+        deduped_roots, prefix=prefix, include_stale=include_stale
+    )
     n_roots = len(deduped_roots)
 
     if json_output:

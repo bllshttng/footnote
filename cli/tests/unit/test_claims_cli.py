@@ -5,10 +5,13 @@ import json
 import os
 from pathlib import Path
 
+import psutil
 import pytest
 from typer.testing import CliRunner
 
-from fno.claims.cli import cli, _parse_ttl
+from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
+from fno.claims.core import acquire_claim
+from fno.claims.io import dedup_claims_roots
 
 
 runner = CliRunner()
@@ -257,6 +260,43 @@ def test_list_prefix_node_scans_global_root_once(cwd_tmp):
     assert result.exit_code == 0
     keys = [r["key"] for r in json.loads(result.output)]
     assert keys == ["node:ab-1"]
+
+
+def _dead_pid() -> int:
+    dead = 999_999
+    while psutil.pid_exists(dead):
+        dead += 1
+    return dead
+
+
+def test_merge_across_roots_first_root_wins_row_and_totals_together(tmp_path):
+    """A key present in two roots with divergent states (e.g. a stale
+    leftover from an older fno that predates FNO_CLAIMS_ROOT-based global
+    routing, sitting alongside a live claim the current fno wrote to the
+    global root - see the version-skew note on CLAIMS_ROOT_ENV in io.py)
+    must be claimed by the SAME root for both the displayed row and the
+    totals bucket. A prior implementation deduped all_rows and totals with
+    two different predicates, so a key could show as a live row (from the
+    first root) while also being counted stale (from the second root) - an
+    internal inconsistency invisible today only because the totals hint text
+    happens to be gated on all_rows being empty."""
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    acquire_claim("k", "holder-a", pid=os.getpid(), root=root_a)
+    acquire_claim("k", "holder-b", pid=_dead_pid(), root=root_b)
+
+    deduped = dedup_claims_roots([root_a, root_b])
+    all_rows, row_roots, totals = _merge_claims_across_roots(
+        deduped, prefix="", include_stale=False
+    )
+
+    assert [r["key"] for r in all_rows] == ["k"]
+    assert all_rows[0]["state"] == "live"
+    assert row_roots["k"] == str(root_a / ".fno" / "claims")
+    assert totals == {"stale": 0, "corrupted": 0, "free": 0}, (
+        "root_a won the key for the row (live); root_b's stale sighting of "
+        "the SAME key must not also land in totals"
+    )
 
 
 def test_force_release_succeeds(cwd_tmp):

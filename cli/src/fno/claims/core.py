@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import socket
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,7 +52,7 @@ from .io import (
 )
 from .staleness import classify, classify_for_sweep, now_ms
 from ..harness_identity import resolve_harness_identity
-from ..mutex import _stamp_owner, acquire_dir_mutex, release_dir_mutex, steal_if_stale
+from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -279,14 +278,13 @@ def acquire_claim(
         acquired_lock = False
         recovery_token = ""
         try:
-            try:
-                recovery_lock.mkdir(parents=True)
-                recovery_token = _stamp_owner(recovery_lock)
-                acquired_lock = True
-            except FileExistsError:
-                if not steal_if_stale(recovery_lock):
-                    _wait_for_recovery_release(recovery_lock)
+            token = acquire_dir_mutex(
+                recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+            )
+            if token is None:
                 return _retry()
+            recovery_token = token
+            acquired_lock = True
 
             # Re-verify under the mutex: a concurrent stale-reclaim or reap
             # archive could have completed between our initial unlocked read
@@ -319,20 +317,19 @@ def acquire_claim(
         acquired_lock = False
         recovery_token = ""
         try:
-            try:
-                recovery_lock.mkdir(parents=True)
-                recovery_token = _stamp_owner(recovery_lock)
-                acquired_lock = True
-            except FileExistsError:
-                # Another worker is doing recovery -- or died holding the mutex.
-                # Steal a corpse (age-based, rename-atomic) so a killed
-                # recoverer cannot brick this key forever; otherwise wait
-                # briefly. Either way recurse from the top: the recovering
-                # worker will either succeed (we then see live-other) or fail
-                # (we get another shot).
-                if not steal_if_stale(recovery_lock):
-                    _wait_for_recovery_release(recovery_lock)
+            # Another worker may be doing recovery -- or died holding the
+            # mutex. acquire_dir_mutex steals a corpse (age-based,
+            # rename-atomic) so a killed recoverer cannot brick this key
+            # forever, else polls briefly. Either outcome on timeout means
+            # recurse from the top: the recovering worker will either
+            # succeed (we then see live-other) or fail (we get another shot).
+            token = acquire_dir_mutex(
+                recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+            )
+            if token is None:
                 return _retry()
+            recovery_token = token
+            acquired_lock = True
 
             # Inside the recovery mutex: verify the existing claim is still
             # what we read (a fast-moving releaser could have unlinked it).
@@ -470,26 +467,21 @@ def compare_and_rebind(
     acquired_lock = False
     recovery_token = ""
     try:
-        try:
-            recovery_lock.mkdir(parents=True)
-            recovery_token = _stamp_owner(recovery_lock)
-            acquired_lock = True
-        except FileExistsError:
-            # A peer is mid-recovery, or a recoverer died holding the mutex.
-            # Steal a corpse so a killed peer cannot brick the rebind; else wait.
-            if steal_if_stale(recovery_lock):
-                try:
-                    recovery_lock.mkdir(parents=True)
-                    recovery_token = _stamp_owner(recovery_lock)
-                    acquired_lock = True
-                except FileExistsError:
-                    pass
-            if not acquired_lock:
-                _wait_for_recovery_release(recovery_lock)
-                raise RebindRefused(
-                    "claim recovery mutex busy; retry the resume bind",
-                    state=None,
-                )
+        # A peer may be mid-recovery, or a recoverer died holding the mutex.
+        # acquire_dir_mutex steals a corpse so a killed peer cannot brick the
+        # rebind, else polls briefly; a compare_and_rebind is a one-shot verb
+        # (unlike acquire_claim/refresh_claim it does not recurse), so a
+        # timeout here refuses rather than retrying from the top.
+        token = acquire_dir_mutex(
+            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        )
+        if token is None:
+            raise RebindRefused(
+                "claim recovery mutex busy; retry the resume bind",
+                state=None,
+            )
+        recovery_token = token
+        acquired_lock = True
 
         # Inside the mutex: re-read + classify before any mutation.
         try:
@@ -573,29 +565,6 @@ def compare_and_rebind(
 
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
-
-
-def _wait_for_recovery_release(recovery_lock: Path) -> None:
-    """Poll briefly for a recovery lock to be released by another worker.
-
-    The lock is just a directory; once the holder finishes, it rmdir()s and
-    we can recurse. Only reached for a mutex young enough to be honestly held
-    - a corpse is stolen by ``steal_if_stale`` before this is called.
-    """
-    # lexists, not exists: a dangling symlink at the mutex path is EEXIST to
-    # mkdir but absent to a following stat, so exists() would report the lock
-    # free and send the caller straight back into acquire_claim, recursing
-    # without pause until RecursionError.
-    deadline = time.monotonic() + _RECOVERY_LOCK_MAX_WAIT_S
-    while os.path.lexists(recovery_lock) and time.monotonic() < deadline:
-        time.sleep(_RECOVERY_LOCK_POLL_INTERVAL_S)
-    # Deadline expired with the lock still held, and it is too young to be a
-    # corpse. Do NOT rmdir - the holder may still be inside the critical
-    # section (a slow archive + create on a heavily-loaded filesystem), and
-    # removing it in place would let two workers run archive+create at once.
-    # The waiter recurses into acquire_claim regardless; the next attempt
-    # re-evaluates the claim and either sees the recovered state or tries its
-    # own recovery, stealing the mutex once it ages past the threshold.
 
 
 def _existing_is_live(existing: Claim) -> bool:
@@ -736,14 +705,13 @@ def refresh_claim(
     acquired_lock = False
     recovery_token = ""
     try:
-        try:
-            recovery_lock.mkdir(parents=True)
-            recovery_token = _stamp_owner(recovery_lock)
-            acquired_lock = True
-        except FileExistsError:
-            if not steal_if_stale(recovery_lock):
-                _wait_for_recovery_release(recovery_lock)
+        token = acquire_dir_mutex(
+            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        )
+        if token is None:
             return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root)
+        recovery_token = token
+        acquired_lock = True
 
         existing = read_claim_file(path)
         if existing.holder != holder:
