@@ -733,6 +733,11 @@ impl FakeClient {
                 Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
                     return Wire::Idle
                 }
+                // A blocking read can be interrupted by a signal (observed under
+                // CI load, likely a SIGCHLD from a concurrent process reap) with
+                // no bytes lost - retry the same read rather than treat it as a
+                // real failure.
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => panic!("fake client read failed: {e}"),
             }
         }
