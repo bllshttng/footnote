@@ -919,8 +919,8 @@ fn connect_unix_timeout(path: &str, timeout: Duration) -> std::io::Result<UnixSt
 /// propagated as a send failure (AF_UNIX: the only reliable "bytes didn't
 /// land" signal).
 pub fn send_to_session(sock_path: &str, content: &str, from_name: &str) -> Result<(), AskError> {
-    let payload =
-        build_envelope(content, from_name).map_err(|message| AskError::ForgedEnvelope { message })?;
+    let payload = build_envelope(content, from_name)
+        .map_err(|message| AskError::ForgedEnvelope { message })?;
     let mut stream =
         connect_unix_timeout(sock_path, SEND_SOCKET_TIMEOUT).map_err(|e| AskError::Socket {
             message: e.to_string(),
