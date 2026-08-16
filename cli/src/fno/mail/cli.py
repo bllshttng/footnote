@@ -3451,6 +3451,7 @@ def cmd_drain_self(
         resolve_harness_identity,
         session_identity_key,
     )
+    from fno.mail.envelope import FNO_MAIL_TRAILER
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -3526,16 +3527,27 @@ def cmd_drain_self(
             )
         print(json.dumps(out, ensure_ascii=False))
     else:
+        # A live-injected send already carries FNO_MAIL_TRAILER inside `wrap_fno_mail`'s
+        # `<fno_mail>` envelope, but a durable inbox-kind send (heads-up/question/fyi)
+        # never routes through that wrapper. Stamp the trailer here, the one
+        # chokepoint every drained body passes through, so this render always
+        # carries the authority boundary regardless of which lane produced the body.
+        def _render_body(body: str) -> str:
+            text = body.rstrip("\n")
+            if FNO_MAIL_TRAILER in text:
+                return text
+            return f"{text}\n{FNO_MAIL_TRAILER}"
+
         if to_print:
             print(f"[fno mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(m.body.rstrip("\n"))
+                print(_render_body(m.body))
         if job_to_print:
             print(f"\n[fno mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(m.body.rstrip("\n"))
+                print(_render_body(m.body))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.
