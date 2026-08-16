@@ -1372,8 +1372,11 @@ fn gc_sweep_impl(
     // tick (codex review, PR #889). Truncated deterministically by name so
     // dry-run and the real write agree on exactly which rows this covers.
     if to_reap.len() > CASCADE_CAP {
-        let keep: std::collections::BTreeMap<String, String> =
-            to_reap.iter().take(CASCADE_CAP).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let keep: std::collections::BTreeMap<String, String> = to_reap
+            .iter()
+            .take(CASCADE_CAP)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         to_reap = keep;
     }
 
