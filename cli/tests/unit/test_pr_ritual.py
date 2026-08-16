@@ -25,7 +25,8 @@ class FakeRunner:
                  deferred=None, reconcile_closed=None, claim_rc=0,
                  spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED",
                  reconcile_held=None, reconcile_candidates=None,
-                 reconcile_contained=None):
+                 reconcile_contained=None, reconcile_errors=(),
+                 reconcile_sync_outcome=None):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
@@ -33,6 +34,8 @@ class FakeRunner:
         self._held = reconcile_held or []
         self._candidates = reconcile_candidates
         self._contained = reconcile_contained or ()
+        self._errors = reconcile_errors
+        self._sync_outcome = reconcile_sync_outcome
         self._claim_rc = claim_rc
         self._spawn_rc = spawn_rc
         self._rows = agent_rows or []
@@ -64,6 +67,10 @@ class FakeRunner:
             payload["promise_unmet"] = [{"node_id": n} for n in self._held]
             if self._contained:
                 payload["contained_closed"] = list(self._contained)
+            if self._errors:
+                payload["contained_errors"] = list(self._errors)
+            if self._sync_outcome:
+                payload["sync_catchup"] = {"outcome": self._sync_outcome}
             return Result(0, json.dumps(payload), "")
         if sub == "backlog" and "find" in argv:
             import json
@@ -293,6 +300,33 @@ def test_reconcile_healed_only_is_not_no_drift(tmp_path, capsys):
     r = _bare(
         tmp_path,
         FakeRunner(reconcile_candidates=[], reconcile_contained=["x-h1", "x-h2"]),
+    )
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=ok detail=healed-only" in out
+    assert "no-drift" not in out
+
+
+def test_reconcile_contained_errors_and_failed_sync_are_not_no_drift(tmp_path, capsys):
+    """Cascade-close failures and a failed canonical sync leave reconcile
+    exiting 0 with empty close sets; the receipt must not then claim
+    no-drift, or the failure is observable nowhere but an unread JSON body."""
+    for kwargs in (
+        {"reconcile_errors": ["x-e1"]},
+        {"reconcile_sync_outcome": "failed"},
+    ):
+        r = _bare(tmp_path, FakeRunner(reconcile_candidates=[], **kwargs))
+        r.leg_stamp()
+        out = capsys.readouterr().out
+        assert "step=reconcile status=ok detail=no-drift" not in out
+        assert "contained-errors=1 sync=None" in out or "sync=failed" in out
+
+
+def test_reconcile_synced_catchup_reads_healed_only(tmp_path, capsys):
+    """A canonical catch-up sync mutated repo state; that is not no-drift."""
+    r = _bare(
+        tmp_path,
+        FakeRunner(reconcile_candidates=[], reconcile_sync_outcome="synced"),
     )
     r.leg_stamp()
     out = capsys.readouterr().out

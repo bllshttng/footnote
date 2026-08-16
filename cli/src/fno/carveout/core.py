@@ -157,26 +157,23 @@ def _owning_node_id(repo_root: Path) -> Optional[str]:
     manifest exists, and a handoff re-points the claim while a stale manifest
     would still name the former node - so the claim is consulted FIRST and a
     mismatch stamps nothing. The manifest match (find_held_node) stays as the
-    fallback for a session whose claim died mid-run while it still holds the
-    worktree manifest. Never guesses: zero or 2+ matching claims fall through.
+    fallback for a CLAUDE session whose claim died mid-run while it still
+    holds the worktree manifest; it proves identity via the manifest's
+    claude_session_id, so a codex/gemini worker whose claim expired stamps
+    nothing rather than guessing. Never guesses: zero or 2+ matching claims
+    fall through.
     """
     import os
 
-    candidates = set()
-    # The same ids init-target-state.sh / _successor_claim_holder anchor the
-    # node:<id> claim holder on. CODEX_THREAD_ID (not CODEX_SESSION_ID) is the
-    # durable codex identity the claim names; opencode has its own marker.
-    for var in (
-        "TARGET_SESSION_ID",
-        "CLAUDE_CODE_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "CODEX_SESSION_ID",
-        "GEMINI_SESSION_ID",
-        "OPENCODE_SESSION_ID",
-    ):
-        val = os.environ.get(var)
-        if val and val.strip():
-            candidates.add(val.strip())
+    # Marker names live in ONE place: harness_identity owns the table (its
+    # docstring asks callers not to duplicate it). TARGET_SESSION_ID is the one
+    # extra id init anchors the claim holder on that the table does not carry.
+    from fno.harness_identity import current_session_ids
+
+    candidates = set(current_session_ids())
+    _extra = os.environ.get("TARGET_SESSION_ID")
+    if _extra and _extra.strip():
+        candidates.add(_extra.strip())
     if candidates:
         wanted = {f"target-session:{c}" for c in candidates}
         try:

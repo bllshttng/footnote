@@ -114,14 +114,9 @@ def test_a_stale_claim_falls_back_to_the_manifest(tmp_path, monkeypatch):
 def _no_ambient_session(monkeypatch, tmp_path):
     """Hermetic: no harness session envs, and the claims lookup pointed at an
     empty tmp root so the machine's real ~/.fno/claims is never read."""
-    for var in (
-        "TARGET_SESSION_ID",
-        "CLAUDE_CODE_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "CODEX_SESSION_ID",
-        "GEMINI_SESSION_ID",
-        "OPENCODE_SESSION_ID",
-    ):
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+
+    for var in (*AMBIENT_IDENTITY_ENV, "TARGET_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-empty"))
 
