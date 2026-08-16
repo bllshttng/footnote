@@ -94,7 +94,7 @@ Substitute the worker's own verb from "The verb, per harness" above. Claude's or
 
 Three details in that template are load-bearing, so do not smooth them out:
 
-- **The verb sits alone on its own indented line.** Nothing before it on the line, nothing after.
+- **The verb sits alone on its own indented line.** Only its own flags may follow it: claude's `<level> --comment [--fix]`, codex's nothing - prose after a codex `/review` changes the review target.
 - **"INVOKE IT FOR REAL. Type the verb."** A bare verb as the entire message body has been observed failing where this framing fired. That is one observation each way, so it is a lead rather than a mechanism - but it costs nothing to keep and the shape with it has never failed.
 - **Name the substitutes.** `fno:code-reviewer`, `/fno:review`, a Bash approximation - these exactly, not "do not substitute another reviewer". The refusal text forbids these by name, a worker DID quietly take one of them and report success, and a generic prohibition leaves the worker deciding what counts as a substitute.
 
