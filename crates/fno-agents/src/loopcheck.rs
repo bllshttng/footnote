@@ -11315,10 +11315,7 @@ mod tests {
             {"name": "ci", "bucket": "fail"},
         ]);
         let deduped = latest_per_name(&tie);
-        assert_eq!(
-            failing_check_names(&deduped),
-            vec!["ci".to_string()]
-        );
+        assert_eq!(failing_check_names(&deduped), vec!["ci".to_string()]);
     }
 
     #[test]
