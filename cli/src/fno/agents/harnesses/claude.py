@@ -1165,6 +1165,15 @@ _FOLLOW_POLL_INTERVAL = 0.5
 # through unchanged so consumers that already adapted aren't blocked on us.
 KNOWN_LIVE_STATUSES = frozenset({"Working", "Needs input", "Idle", "Done"})
 
+# The "not blocked" subset of KNOWN_LIVE_STATUSES -- every status except
+# "Needs input", lowercased for case-insensitive callers. Single source for
+# resume_cli.py's wake-skip check and read.py's live_status fill-in gate,
+# which used to each hand-enumerate this same subset and had already drifted
+# out of sync with each other by the time review caught it.
+NOT_BLOCKED_STATUSES_LOWER = frozenset(
+    s.lower() for s in KNOWN_LIVE_STATUSES if s != "Needs input"
+)
+
 # The INPUT vocabulary: every spelling observed from a real binary, mapped onto
 # the output set. Widening the output set instead (accepting "blocked" as its
 # own value) is what let raw lowercase leak to every consumer, so `Needs input`

@@ -116,10 +116,10 @@ def list_agents(
     # this layer trusts the contract and does not add a broad catch
     # that would also swallow programmer errors (AttributeError /
     # TypeError / ImportError).
+    from fno.agents.harnesses import claude as claude_mod
+
     live_map: dict[str, dict] = {}
     if any(e.harness == "claude" for e in filtered):
-        from fno.agents.harnesses import claude as claude_mod
-
         live_map, augment_warnings = claude_mod.claude_agents_json()
         warnings.extend(augment_warnings)
 
@@ -169,12 +169,14 @@ def list_agents(
         # ``--all``: a stopped/completed row now arrives in live_map instead
         # of being absent, and without this, its raw supervisor status would
         # silently win over the richer PR/CI-aware truth-status fallback.
-        # ``resume_cli.py``'s ``_WAKE_SKIP_STATUSES_LOWER`` independently
-        # enumerates the neighboring subset of claude.py's
-        # ``KNOWN_LIVE_STATUSES`` ("working"/"idle"/"done", the complement of
-        # "needs input") for its own not-blocked check - keep both in sync
-        # by hand if that status vocabulary ever changes.
-        if live_status is None or str(live_status).lower() in ("idle", "done"):
+        # Derived from claude.py's NOT_BLOCKED_STATUSES_LOWER (also used by
+        # resume_cli.py's wake-skip check) minus "working", since this fill
+        # only wants the ambiguous Idle/missing gap, not the target status
+        # itself -- both used to hand-enumerate independently and had
+        # already drifted out of sync with each other by the time review
+        # caught it.
+        not_blocked_minus_working = claude_mod.NOT_BLOCKED_STATUSES_LOWER - {"working"}
+        if live_status is None or str(live_status).lower() in not_blocked_minus_working:
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(

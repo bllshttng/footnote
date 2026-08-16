@@ -55,6 +55,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -129,6 +130,7 @@ def _build_resume_argv(
 _DEFAULT_WAKE_MESSAGE = "continue"
 _WAKE_ATTEMPTS = 2
 _WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
+_WAKE_RETRY_BACKOFF_SEC = 2.0
 _WAKE_TARGET_STATUS = "Working"
 # A row already in one of these needs no wake: Working is the target itself,
 # Idle is a live, reachable session that may hold unsubmitted composer
@@ -136,14 +138,12 @@ _WAKE_TARGET_STATUS = "Working"
 # benefit, since the row isn't blocked or stopped in the first place - and
 # Done is a terminal row that was never going to reach Working no matter how
 # many attempts run (visible here for the first time now that
-# `claude_agents_json` passes `--all`). Defined lower-case directly (not
-# derived from a Title-Case set) since `_state_of()` compares
-# case-insensitively: a live_map producer that skips claude.py's own
-# Title-Case normalization has slipped an un-normalized status through
-# before (see the matching check in read.py's live_status fill-in, ~line
-# 168 - both independently enumerate a subset of claude.py's
-# `KNOWN_LIVE_STATUSES` and must be kept in sync by hand).
-_WAKE_SKIP_STATUSES_LOWER = frozenset({"working", "idle", "done"})
+# `claude_agents_json` passes `--all`). Shared with read.py's live_status
+# fill-in gate via claude.py's NOT_BLOCKED_STATUSES_LOWER (imported lazily,
+# inside _resume_claude_wake, matching this module's existing convention of
+# deferring fno.agents submodule imports to call time) -- both used to
+# hand-enumerate this same subset independently and had already drifted out
+# of sync with each other by the time review caught it.
 
 
 def _default_agents_state_fn() -> dict[str, dict]:
@@ -346,6 +346,8 @@ def _resume_claude_wake(
     must both exit 0, not race each other into a spurious "held by another
     writer" over a lock that guards a pty write neither of them is making.
     """
+    from fno.agents.harnesses.claude import NOT_BLOCKED_STATUSES_LOWER
+
     def _state_of() -> str:
         row = agents_state_fn().get(short_id) or {}
         return str(row.get("live_status") or "unknown")
@@ -369,7 +371,7 @@ def _resume_claude_wake(
     # guard): a future edit to the skip condition that touches only some of
     # the five call sites would silently reintroduce the exact misreport bug
     # the surrounding comments already describe as fixed once.
-    skipped = before.lower() in _WAKE_SKIP_STATUSES_LOWER
+    skipped = before.lower() in NOT_BLOCKED_STATUSES_LOWER
 
     # Claim before waking, gated on `not skipped` (see docstring): this
     # function is also a standalone entrypoint (FNO_AGENTS_RUNTIME=python, or
@@ -427,16 +429,23 @@ def _resume_claude_wake(
             after = _state_of()
             if after.lower() == _WAKE_TARGET_STATUS.lower():
                 break
-            if after.lower() in _WAKE_SKIP_STATUSES_LOWER:
+            if after.lower() in NOT_BLOCKED_STATUSES_LOWER:
                 # The row settled into Idle/Done between attempts (the
                 # operator's own session ended, or an unrelated race) without
                 # ever reaching Working. Firing another wake would inject
                 # keystrokes into a session that no longer needs them -- the
-                # same unsubmitted-text risk _WAKE_SKIP_STATUSES_LOWER exists
+                # same unsubmitted-text risk NOT_BLOCKED_STATUSES_LOWER exists
                 # to avoid at loop entry, just discovered mid-loop instead.
                 # `skipped` stays False: the exit-16 report below is still
                 # the right outcome to surface, just without a wasted retry.
                 break
+            if _attempt < _WAKE_ATTEMPTS - 1:
+                # A short backoff before retrying, not part of the verified
+                # ~19s send sequence itself (that stays untouched): a wake
+                # that failed once due to something transient (a slow
+                # supervisor tick, a momentarily busy pty) benefits from not
+                # immediately re-hammering the same session.
+                time.sleep(_WAKE_RETRY_BACKOFF_SEC)
 
     # A skipped row (before already Working/Idle) reports success on its
     # `before` state even when that state isn't the wake target: nothing was
