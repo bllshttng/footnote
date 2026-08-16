@@ -527,12 +527,15 @@ sleep 600 & recycled_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$recycled_holder" "$old" > "$LOCKDIR/holder"
 out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "stole the recycled holder's lock and ran to GREEN" || fail "recycled steal failed rc=$rc: $out"
-echo "$out" | grep -q "dead holder" && ok "the recycled pid took the dead path, not the stall path" || fail "no dead-holder line: $out"
+# The steal fires at first acquire (before queueing), which prints nothing;
+# what matters is the path taken: dead-style, never the stall/TERM verdict.
+echo "$out" | grep -q "stalled holder" && fail "recycled pid took the stall path" || ok "recycled pid took the dead path, not the stall path"
 kill -0 "$recycled_holder" 2>/dev/null && ok "the innocent recycled process was NOT signaled" || fail "an innocent process was TERMed"
 kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== phantom ticket: a queued ticket stamped by a recycled pid is reaped =="
+rm -f "$ATT"   # else attestation reuse skips the lock and the phantom is never walked
 mkdir -p "$LOCKDIR.queue.d/000001"
 sleep 600 & phantom_pid=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$phantom_pid" "$old" > "$LOCKDIR.queue.d/000001/holder"
@@ -543,6 +546,7 @@ kill "$phantom_pid" 2>/dev/null; wait "$phantom_pid" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== cancel: SIGINT to a queued waiter exits 130 and removes its ticket =="
+rm -f "$ATT"   # else reuse exits 0 before the waiter ever queues
 mkdir -p "$LOCKDIR"
 sleep 600 & cancel_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$cancel_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
