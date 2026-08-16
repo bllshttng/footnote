@@ -931,13 +931,47 @@ fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
 
 /// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (x-48a5, the
 /// identity-checked format) or bare `"<pid>"` (a platform `pid_start_time`
-/// cannot supply one for). Tolerant of trailing whitespace/newline.
+/// cannot supply one for). Tolerant of trailing whitespace/newline. A `:` is
+/// present only when the writer meant to supply a start time, so a present
+/// but unparseable one (a write torn mid-`fs::write`) fails the whole parse
+/// rather than silently degrading to the unverified bare-pid shape - a torn
+/// write must read as corrupt, not as a platform that never verifies.
 fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
     let s = s.trim();
     match s.split_once(':') {
-        Some((p, t)) => Some((p.parse().ok()?, t.parse().ok())),
+        Some((p, t)) => Some((p.parse().ok()?, Some(t.parse().ok()?))),
         None => Some((s.parse().ok()?, None)),
     }
+}
+
+/// True only when the sidecar recorded a start time AND the live process at
+/// `pid` demonstrably has a DIFFERENT one: the one state that proves `pid`
+/// has been reused by an unrelated process since the sidecar was written.
+/// `pid_start_time` returning `None` (the pid is already dead, or this
+/// platform cannot read start times for a pid it did not spawn) is NOT a
+/// mismatch - it is exactly the ambiguous case the caller's own
+/// `pid_confirmed_dead` / `holder_gone` checks exist to resolve, so this
+/// must never substitute a guess for their answer.
+fn identity_mismatch(pid: i32, recorded_start: Option<u64>) -> bool {
+    match recorded_start {
+        None => false,
+        Some(recorded) => {
+            matches!(proto::pid_start_time(pid as u32), Some(live) if live != recorded)
+        }
+    }
+}
+
+/// Unlink the session's files after a signal ends its holder, or turn a
+/// failure to do so into the outcome. The three rungs below (StaleSocket via
+/// ESRCH, Sigterm, Sigkill) all reach this exact cleanup, so it is one
+/// function rather than three copies that could drift on their wording.
+fn cleanup_after_death(sock: &Path, cause: &str) -> Result<(), KillOutcome> {
+    proto::remove_session_files(sock).map_err(|e| {
+        plain_unrecoverable(format!(
+            "the holder {cause} but its session files remain at {}: {e}",
+            sock.display()
+        ))
+    })
 }
 
 /// The escalation ladder, entered only from states that prove a live process
@@ -949,9 +983,10 @@ fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
 /// Pid reuse is closed by identity, not just sanity checks: a SIGKILLed
 /// server leaves its `.pid` sidecar behind (no guard runs), and a rebind's
 /// rewrite of it is best-effort like `.ver`, so a stale sidecar can survive
-/// with a pid that has since been reused. The sidecar's start time (below)
-/// proves the live process at that pid is the one that wrote it before any
-/// signal is sent.
+/// with a pid that has since been reused. The sidecar's start time proves
+/// the live process at that pid is the one that wrote it, checked again
+/// immediately before EVERY signal - not only once at entry - because the
+/// holder can die and its pid be recycled during either grace window.
 fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     let pid_sidecar = proto::pid_sidecar_path(sock);
     let parsed = std::fs::read_to_string(&pid_sidecar)
@@ -973,40 +1008,43 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
             );
         }
     };
-    if let Some(recorded) = recorded_start {
-        // Identity check: only a sidecar the current bind actually wrote
-        // carries a start time that matches the live process at this pid.
-        // Anything else - the pid gone, or reused by an unrelated process -
-        // refuses rather than guesses.
-        if proto::pid_start_time(pid as u32) != Some(recorded) {
-            return refusal(
-                context,
-                &format!(
-                    "the pid sidecar at {} names process {pid}, but its recorded start time \
-                     no longer matches a live process there; the pid was likely reused, so \
-                     it will not be signalled.",
-                    pid_sidecar.display()
-                ),
-                sock,
-            );
-        }
+    let reused_refusal = || {
+        refusal(
+            context,
+            &format!(
+                "the pid sidecar at {} names process {pid}, but its recorded start time no \
+                 longer matches a live process there; the pid was likely reused, so it will \
+                 not be signalled.",
+                pid_sidecar.display()
+            ),
+            sock,
+        )
+    };
+    if identity_mismatch(pid, recorded_start) {
+        return reused_refusal();
     }
     if unsafe { libc::kill(pid, 0) } != 0 {
+        // ESRCH is the same definitive "gone" that proto::pid_confirmed_dead
+        // checks; read inline here (rather than a second probe through that
+        // helper) only because this branch also needs the raw errno for the
+        // EPERM refusal message below.
         let e = std::io::Error::last_os_error();
         return if e.raw_os_error() == Some(libc::ESRCH) {
             // The holder is already gone: its files are stale, and nothing
             // needs signalling. The SocketGuard never ran, so clean up here.
-            if let Err(e) = proto::remove_session_files(sock) {
-                return plain_unrecoverable(format!(
-                    "the holder is dead but its session files remain at {}: {e}",
-                    sock.display()
-                ));
-            }
-            KillOutcome {
-                path: KillPath::StaleSocket,
-                note: format!("removed stale socket for session {session:?} (server was dead)"),
+            match cleanup_after_death(sock, "is dead") {
+                Ok(()) => KillOutcome {
+                    path: KillPath::StaleSocket,
+                    note: format!(
+                        "removed stale socket for session {session:?} (server was dead)"
+                    ),
+                },
+                Err(outcome) => outcome,
             }
         } else {
+            // Alive but not signalable by us (EPERM: recycled to a process
+            // we lack permission on). Neither this nor pid_confirmed_dead
+            // can tell "alive" from "can't tell", so refuse rather than guess.
             refusal(
                 context,
                 &format!("process {pid} holds the socket but cannot be signalled: {e}"),
@@ -1016,35 +1054,35 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
     }
     unsafe { libc::kill(pid, libc::SIGTERM) };
     if holder_gone(pid, sock, SIGTERM_GRACE) {
-        if let Err(e) = proto::remove_session_files(sock) {
-            return plain_unrecoverable(format!(
-                "the holder died but its session files remain at {}: {e}",
-                sock.display()
-            ));
-        }
-        return KillOutcome {
-            path: KillPath::Sigterm,
-            note: format!(
-                "killed session {session:?} (SIGTERM after the control channel timed out)"
-            ),
+        return match cleanup_after_death(sock, "died") {
+            Ok(()) => KillOutcome {
+                path: KillPath::Sigterm,
+                note: format!(
+                    "killed session {session:?} (SIGTERM after the control channel timed out)"
+                ),
+            },
+            Err(outcome) => outcome,
         };
+    }
+    // Re-verify identity before SIGKILL: the SIGTERM_GRACE window just spent
+    // is exactly long enough for the holder to have died on its own and the
+    // OS to have handed its pid to an unrelated process.
+    if identity_mismatch(pid, recorded_start) {
+        return reused_refusal();
     }
     unsafe { libc::kill(pid, libc::SIGKILL) };
     if holder_gone(pid, sock, SIGKILL_GRACE) {
-        if let Err(e) = proto::remove_session_files(sock) {
-            return plain_unrecoverable(format!(
-                "the holder died but its session files remain at {}: {e}",
-                sock.display()
-            ));
-        }
-        return KillOutcome {
-            path: KillPath::Sigkill,
-            // Honest report, not a silent success: a SIGKILLed server never
-            // runs teardown, so its pane children were not reaped.
-            note: format!(
-                "killed session {session:?} (SIGKILL after SIGTERM was ignored); pane \
-                 children were not reaped and may still be running"
-            ),
+        return match cleanup_after_death(sock, "died") {
+            Ok(()) => KillOutcome {
+                path: KillPath::Sigkill,
+                // Honest report, not a silent success: a SIGKILLed server
+                // never runs teardown, so its pane children were not reaped.
+                note: format!(
+                    "killed session {session:?} (SIGKILL after SIGTERM was ignored); pane \
+                     children were not reaped and may still be running"
+                ),
+            },
+            Err(outcome) => outcome,
         };
     }
     refusal(
@@ -1065,12 +1103,7 @@ fn escalate(session: &str, sock: &Path, context: &str) -> KillOutcome {
 fn holder_gone(pid: i32, sock: &Path, grace: Duration) -> bool {
     let deadline = Instant::now() + grace;
     loop {
-        // ESRCH is the only kill(pid, 0) error that proves death: EPERM (pid
-        // recycled to a privileged process) must read as not-gone, the same
-        // read escalate()'s pre-check and server::pid_alive use.
-        if unsafe { libc::kill(pid, 0) } != 0
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        {
+        if proto::pid_confirmed_dead(pid) {
             return true;
         }
         if proto::pid_is_zombie(pid) {

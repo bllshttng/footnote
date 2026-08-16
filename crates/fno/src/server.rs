@@ -1711,9 +1711,7 @@ fn node_id_shaped(s: &str) -> bool {
 /// live holder's claim from being stolen by a permissions error; ESRCH is the
 /// definitive "gone").
 fn pid_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) performs no signal delivery, only validation.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    !crate::proto::pid_confirmed_dead(pid as libc::pid_t)
 }
 
 /// Resolve the `fno` binary: `$FNO_BIN`, else the running executable itself (the

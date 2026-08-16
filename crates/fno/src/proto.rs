@@ -2529,6 +2529,18 @@ pub fn pid_is_zombie(_pid: i32) -> bool {
     false
 }
 
+/// True only when `kill(pid, 0)` proves `pid` is dead: ESRCH is the sole
+/// unambiguous signal. Any other outcome - alive, or an error like EPERM
+/// that cannot distinguish "alive but not ours to signal" from "gone" -
+/// reads as not-provably-dead. The single implementation for a read that
+/// three call sites (kill-server's pre-check, its poll loop, and the
+/// server's own respawn-vs-alive check) each duplicated inline before
+/// x-48a5, which is exactly the shape that lets one of them drift.
+pub fn pid_confirmed_dead(pid: i32) -> bool {
+    let result = unsafe { libc::kill(pid, 0) };
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 /// Remove every file a session leaves beside its name: the socket, the
 /// wire-version sidecar, and the pid sidecar. Shared by the server's
 /// SocketGuard, kill-server's recovery ladder, and bind_or_probe's stale
