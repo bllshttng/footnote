@@ -70,7 +70,7 @@ Opt-in, default off (Locked Decision 3). `auto_continue_enabled()` resolves, hig
 
 A malformed `config.auto_continue` block (a non-boolean `enabled`, or a scalar where the block should be a mapping) degrades to disabled rather than raising out of the settings load (AC2-ERR), and any settings-read failure in the resolver is swallowed to `False`.
 
-**The campaign-arm marker file is gone (2026-08, x-aaaf wave 1).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer no longer exists (`skills/megawalk` is deleted), so the marker had no writer and no expiry while silently outranking the live config key - the motivating incident for `fno autonomy status`. The env var above is retained as the highest-precedence explicit override; a persistent campaign arm has no replacement mechanism today.
+**The campaign-arm marker file is gone (2026-08, x-aaaf wave 1).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer, `skills/megawalk`, is deleted. The marker had no writer and no expiry, and it silently outranked the live config key - the motivating incident for `fno autonomy status`. The env var above stays the highest-precedence explicit override. A persistent campaign arm has no replacement mechanism today.
 
 ## Triggers
 
