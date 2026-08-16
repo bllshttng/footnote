@@ -809,12 +809,12 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         error:     string (only when state == corrupted)
     """
     path = claim_path(key, root=root)
-    if not path.exists():
-        return {"key": key, "state": ClaimState.FREE.value}
-
     try:
         claim = read_claim_file(path)
     except ClaimGoneAway:
+        # Covers both "never existed" and "vanished before this read" - a
+        # separate path.exists() pre-check would be a redundant stat, since
+        # read_claim_file already turns a missing file into this same case.
         return {"key": key, "state": ClaimState.FREE.value}
     except ClaimCorrupted as exc:
         return {

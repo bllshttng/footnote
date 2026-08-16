@@ -7952,6 +7952,11 @@ def cmd_reconcile(
     and drop a retro sentinel so a later session captures follow-ups. It never
     auto-creates inbox lines or backlog nodes, never auto-resumes work, and
     never clobbers a node that is already done.
+
+    Side effect: also runs claim GC (``reap_dead_claims``), archiving dead
+    lockfiles under the claims store's ``.expired/``. ``--dry-run`` propagates
+    to it (no archiving). This fires on every throttled auto-reconcile,
+    including the SessionStart hook - not just a manual invocation.
     """
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node

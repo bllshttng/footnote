@@ -550,6 +550,14 @@ def _dispatch_one(
         )
     except ClaimHeldByOther:
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
+    except RuntimeError:
+        # acquire_claim's own contention-retry-exhaustion guard: same "someone
+        # else has this key right now, retry later" semantic as ClaimHeldByOther
+        # above (contended, not broken), so it gets the same verdict rather than
+        # an uncaught traceback breaking this command's one-JSON-verdict contract
+        # (the mux's `leader+g` shells this expecting a single exec, never a
+        # Python stack trace on stderr).
+        return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
 
     # 3. Atomic lane cap (config.parallel.max_lanes). A full cap -> lanes-full:
     #    no lane, no spawn (AC-edge). max_lanes 0 would forbid every manual grab,

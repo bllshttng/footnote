@@ -703,7 +703,12 @@ def _merge_claims_across_roots(
         for key, state in states_by_key.items():
             priority = _STATE_PRIORITY.get(state, len(_STATE_PRIORITY))
             current = best_state.get(key)
-            if current is not None and priority >= _STATE_PRIORITY.get(current, 0):
+            # Both sides default to worst-priority (never best): an unrecognized
+            # `current` must stay displaceable by any recognized state, not
+            # freeze the winner the way defaulting to 0 (best) would.
+            if current is not None and priority >= _STATE_PRIORITY.get(
+                current, len(_STATE_PRIORITY)
+            ):
                 continue
             best_state[key] = state
             best_root[key] = str(cdir)

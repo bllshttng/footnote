@@ -621,7 +621,7 @@ def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkey
     canned = {
         "scanned": 9, "reaped": 3, "would_reap": 0, "kept_live": 2,
         "kept_suspect": 1, "kept_offhost": 0, "corrupted": 0, "vanished": 0,
-        "reap_failed": [], "apply": True, "roots": ["/canned/root"],
+        "contended": 0, "reap_failed": [], "apply": True, "roots": ["/canned/root"],
     }
     monkeypatch.setattr(claims_core, "reap_dead_claims", lambda **kw: dict(canned))
 
