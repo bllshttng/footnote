@@ -1132,19 +1132,35 @@ def _mesh_env_wrapper(
         from fno.agents.harnesses.claude import claude_stop_hook_block_cap
 
         pairs.append(f"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP={claude_stop_hook_block_cap()}")
-    # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
-    # account's own login. SCRUB inherited auth vars (env -u) so an ambient
-    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't override the account's
-    # login and bill the wrong account. Applied BEFORE the route so a route (when
-    # both are present, x-5ed4) wins endpoint+auth+model atomically (x-2af5):
-    # env(1) assignments are left-to-right last-wins, so the route pairs below
-    # override the account's, while CLAUDE_CONFIG_DIR survives.
-    if account_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
+    # Per-spawn account overlay (x-d012) and any route compose through ONE
+    # function (x-8552), same as bg/headless: scrub inherited auth vars
+    # (env -u), layer the account (profile + its own login), layer the route
+    # last so it wins endpoint+auth+model as one unit (x-2af5). env(1)
+    # assignments are left-to-right last-wins, so rendering the composed
+    # overlay as pairs below expresses that order without re-deriving it.
+    resolved_route = route_env
+    if resolved_route is None and role:
+        from fno.agents.model_routing import resolve_spawn_route
 
-        for _k in SCRUB_AUTH_VARS:
-            unset += ["-u", _k]
-        pairs += [f"{k}={v}" for k, v in account_env.items()]
+        # Through the guarded door, not bare resolve_route: this internal lane
+        # is the one place a seam could hand-roll an unguarded resolution, and
+        # the completeness refusals must fire on it like every other path.
+        resolved_route = resolve_spawn_route(role, None)
+    if account_env or resolved_route:
+        from fno.agents.account_env import SCRUB_AUTH_VARS, compose_worker_credentials
+
+        composed, _decision = compose_worker_credentials(
+            account_env, resolved_route, {}
+        )
+        # The scrub floor is claude-shaped (SCRUB_AUTH_VARS are all
+        # ANTHROPIC_*/CLAUDE_* vars): an OpenAI-protocol route on another
+        # harness must not strip unrelated inherited Claude auth. `env -u` on
+        # an unset var is a harmless no-op; `unset +=` (not `=`) so the
+        # identity/provenance unsets above are preserved.
+        if provider == "claude":
+            for _k in SCRUB_AUTH_VARS:
+                unset += ["-u", _k]
+        pairs += [f"{k}={v}" for k, v in composed.items()]
     # Set-or-clear the whole triple, never merge. A pane spawned from a
     # node-bound worker inherits that worker's env, so adding only what this
     # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE
@@ -1156,26 +1172,6 @@ def _mesh_env_wrapper(
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
-    if role or route_env:
-        route = route_env
-        if route is None:
-            from fno.agents.model_routing import resolve_route
-
-            route = resolve_route(role)
-        if route:
-            # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
-            # a lingering API key or subscription OAuth token would otherwise
-            # override it and send the routed pane back to Anthropic. `env -u`
-            # on an unset var is a harmless no-op. `unset +=` (not `=`) so the
-            # account/provenance unsets above are preserved.
-            if provider == "claude":
-                unset += [
-                    "-u",
-                    "ANTHROPIC_API_KEY",
-                    "-u",
-                    "CLAUDE_CODE_OAUTH_TOKEN",
-                ]
-            pairs += [f"{k}={v}" for k, v in route.items()]
     return ["env", *unset, *pairs, *argv]
 
 
@@ -1974,6 +1970,20 @@ def dispatch_spawn_pane(
         picked = _pick_account_env(role=role, route_env=route_env)
         account_env = dict(picked) if picked is not None else None
 
+    # The monitor contract is judged BEFORE the generic route guard: an
+    # explicit --monitor happy refusal names the zai-shaped gap it found, and
+    # letting resolve_spawn_route's completeness refusal fire first would
+    # replace that diagnosis with a generic one. resolve_monitor's inputs are
+    # all settled here (account picked, flags parsed); the unmonitored path
+    # refuses nothing and stays byte-identical.
+    resolved_monitor = resolve_monitor(
+        monitor,
+        harness=provider,
+        route_provider=route_provider,
+        route_env=route_env,
+        account_env=account_env,
+        model=model,
+    )
     launch_role = role
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
@@ -1982,7 +1992,7 @@ def dispatch_spawn_pane(
         )
 
         try:
-            route_env = resolve_spawn_route(role, route_env, account_overlay=bool(account_env))
+            route_env = resolve_spawn_route(role, route_env)
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         launch_role = None
@@ -2053,16 +2063,7 @@ def dispatch_spawn_pane(
     # pinned uuid is therefore discarded, claude mints its own, and the receipt
     # names a session that never exists - which is what makes a happy pane
     # unpeekable and its registry row id-less whether it is healthy or a corpse.
-    # Every resolve_monitor input is available here, so the hoist leaves the
-    # unmonitored route byte-identical.
-    resolved_monitor = resolve_monitor(
-        monitor,
-        harness=provider,
-        route_provider=route_provider,
-        route_env=route_env,
-        account_env=account_env,
-        model=model,
-    )
+    # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     argv = build_pane_argv(
@@ -2640,8 +2641,16 @@ def dispatch_spawn_pane(
             return rows
 
         try:
-            if provider == "claude":
-                route_settings_path = route_settings_path_for(route_env)
+            # Route-bearing rows only: the path is the restore contract, and an
+            # account-only file (scrub floor + non-profile env) restores as "no
+            # route" or as an incomplete unit the composition guard refuses,
+            # which turned every --account worker's revive into an exit-2
+            # refusal. account_env is included whenever a route IS present so
+            # the row names the same composed file the wrapper rendered; a
+            # route-only stamp would make a later restore silently drop the
+            # account's pinned env.
+            if provider == "claude" and route_env:
+                route_settings_path = route_settings_path_for(route_env, account_env)
             _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
             if crown_declined and _declined_scope:

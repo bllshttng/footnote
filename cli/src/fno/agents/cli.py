@@ -1104,7 +1104,6 @@ def cmd_spawn(
                 route_env,
                 intent=intent,
                 notice=lambda note: print(note, file=sys.stderr),
-                account_overlay=account is not None,
             )
         except RouteCompositionError as exc:
             print(str(exc), file=sys.stderr)
@@ -1112,8 +1111,8 @@ def cmd_spawn(
 
     # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
     # gate, like --route: a refusal spawns nothing, takes no gate slot, and
-    # leaves the node dispatchable. Contradictions (non-claude provider, --route,
-    # --role) were already refused above, before route resolution.
+    # leaves the node dispatchable. Only a non-claude harness was refused above;
+    # --account composes with --route/--role (x-5ed4).
     account_env: dict[str, str] | None = None
     if account is not None:
         from fno.agents.account_env import resolve_account_overlay_or_exit
@@ -1162,6 +1161,27 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2) from exc
+
+    # x-8552: the receipt's credential facts, read off the composed overlays
+    # (never off the flags - a caller who typed `--account makers -P zai` reads
+    # auth/bills and learns immediately that makers contributed a profile and
+    # nothing else). Gated on the resolved overlays, not the flag spellings, so
+    # a routed --role or a --dispatch-account merge gets the same facts as an
+    # explicit --route; an account-only or route-only receipt stays
+    # byte-identical to main (AC3) because the other overlay is absent.
+    credential = None
+    if account_env is not None and route_env is not None:
+        from fno.agents.account_env import compose_worker_credentials
+
+        account_label = account if account is not None else dispatch_account
+        _, credential = compose_worker_credentials(
+            account_env, route_env, {}, account_id=account_label
+        )
+        print(
+            f"account: {account_label} (profile only; auth {credential.auth}, "
+            f"bills {credential.bills})",
+            file=sys.stderr,
+        )
 
     # Resolve node provenance once for every substrate. A node-bearing spawn is
     # itself a dispatcher route, so it must cross the same family-2 decision and
@@ -1385,6 +1405,11 @@ def cmd_spawn(
             # time, not at billing time. Only when set (receipt byte-stable else).
             if account is not None:
                 receipt_obj["account"] = account
+            # x-8552: for the composed spawn, which credential fno made live and
+            # who is billed - derived from the composed env, never the flags.
+            if credential is not None:
+                receipt_obj["auth"] = credential.auth
+                receipt_obj["bills"] = credential.bills
             if _moved_cwd is not None:
                 receipt_obj["cwd"] = _moved_cwd
             receipt = json.dumps(receipt_obj)
@@ -1490,6 +1515,15 @@ def cmd_spawn(
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
         account_field = f', "account": {json.dumps(account)}' if account else ""
+        # x-8552: the composed spawn's live credential and payer, from the
+        # composed env (see the pane branch); composed-only so an account-only
+        # bg receipt stays byte-identical (AC3).
+        cred_field = (
+            f', "auth": {json.dumps(credential.auth)}, '
+            f'"bills": {json.dumps(credential.bills)}'
+            if credential is not None
+            else ""
+        )
         effective_message = getattr(result, "effective_message", None)
         message_field = (
             f', "effective_message": {json.dumps(effective_message)}'
@@ -1510,7 +1544,7 @@ def cmd_spawn(
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
             f'"harness": "{result.provider}"{provider_field}{model_field}, "status": "live"'
-            f"{perm_field}{cwd_field}{account_field}{message_field}}}"
+            f"{perm_field}{cwd_field}{account_field}{cred_field}{message_field}}}"
         )
         sys.stdout.write(receipt + "\n")
         sys.stdout.flush()

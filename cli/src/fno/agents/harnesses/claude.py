@@ -344,7 +344,7 @@ def headless_create(
     if route_env:
         from fno.agents.model_routing import resolve_spawn_route
 
-        route_env = resolve_spawn_route(None, route_env, account_overlay=bool(account_env))
+        route_env = resolve_spawn_route(None, route_env)
     argv = ["claude", "-p"]
     # x-6de8: apply an explicit --route via --settings, same as bg_create. A
     # direct `claude -p` subprocess would inherit route env too, but --settings
@@ -379,9 +379,10 @@ def headless_create(
     # claude prefers an env credential over the settings file, so a routed
     # headless spawn from a logged-in shell would authenticate with the primary
     # Claude account instead of the selected provider (routing failure / wrong
-    # billing). Scrub inherited auth vars whenever we route or pin an account, and
-    # apply the route env too (belt-and-suspenders with --settings, matching
-    # bg_create). Without either overlay, inherit the parent env untouched.
+    # billing). compose_worker_credentials scrubs the inherited auth vars
+    # whenever we route or pin an account and applies the same scrub/account/
+    # route precedence as every other seam (x-8552), belt-and-suspenders with
+    # --settings. Without either overlay, inherit the parent env untouched.
     spawn_env: Optional[dict[str, str]] = None
     # Identity is scrubbed whenever the parent carries a marker: a one-shot
     # `claude -p` otherwise inherits CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID
@@ -397,20 +398,11 @@ def headless_create(
         spawn_env = dict(os.environ)
         scrub_ambient_identity(spawn_env)
         if account_env or route_env:
-            from fno.agents.account_env import SCRUB_AUTH_VARS
+            from fno.agents.account_env import compose_worker_credentials
 
-            for _k in SCRUB_AUTH_VARS:
-                spawn_env.pop(_k, None)
-            # Account first (profile + its login), route last: when both are
-            # present the route must win endpoint+auth+model as one unit
-            # (x-2af5 atomicity), or the account overlay splits it (overlay
-            # endpoint+auth, route model -> a foreign model asked of the
-            # Anthropic API). CLAUDE_CONFIG_DIR from the account survives,
-            # since the route carries no such key.
-            if account_env:
-                spawn_env.update(account_env)
-            if route_env:
-                spawn_env.update(route_env)
+            spawn_env, _ = compose_worker_credentials(
+                account_env, route_env, spawn_env
+            )
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -501,7 +493,6 @@ def bg_create(
             role,
             route_env,
             notice=lambda note: print(note, file=sys.stderr),
-            account_overlay=bool(account_env),
         )
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
@@ -555,33 +546,18 @@ def bg_create(
     # session process the same way FNO_AGENT_SELF above does.
     spawn_env["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = claude_stop_hook_block_cap()
 
-    # Role-based model routing (x-d2fe). An auxiliary role with a configured
-    # provider key merges ANTHROPIC_BASE_URL/AUTH_TOKEN + the model env vars so
-    # the worker runs on the secondary provider (z.ai GLM, ...); no role /
-    # production role / missing key returns None and changes nothing
-    # (fail-safe). Clear any parent Anthropic credential (a stale API key OR a
-    # subscription OAuth token) so the routed auth token is the one that wins;
-    # otherwise a lingering credential sends the routed worker back to Anthropic.
-    # The role or explicit route was resolved once above. Reusing that captured
-    # value keeps mutable manifest discovery from changing within one launch.
+    # Role-based model routing (x-d2fe) and the per-spawn account overlay
+    # (x-d012) compose through ONE function (x-8552): scrub inherited auth vars,
+    # layer the account (profile + its own login), layer the route last so it
+    # wins endpoint+auth+model as one unit (x-2af5 atomicity) while
+    # CLAUDE_CONFIG_DIR survives. The role or explicit route was resolved once
+    # above; reusing that captured value keeps mutable manifest discovery from
+    # changing within one launch.
     route: Optional[dict[str, str]] = dict(route_env) if route_env else None
-    # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
-    # account's own login. SCRUB inherited auth vars first, else an ambient
-    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN would override the account's
-    # login and bill the wrong account. Applied BEFORE the route so a route (when
-    # both are present, x-5ed4) wins endpoint+auth+model atomically (x-2af5): the
-    # route's keys override the account's here, while CLAUDE_CONFIG_DIR survives.
-    if account_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
+    if account_env or route:
+        from fno.agents.account_env import compose_worker_credentials
 
-        for _k in SCRUB_AUTH_VARS:
-            spawn_env.pop(_k, None)
-        spawn_env.update(account_env)
-
-    if route:
-        spawn_env.pop("ANTHROPIC_API_KEY", None)
-        spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-        spawn_env.update(route)
+        spawn_env, _ = compose_worker_credentials(account_env, route, spawn_env)
 
     start = time.monotonic()
     try:

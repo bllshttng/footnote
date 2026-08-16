@@ -542,6 +542,13 @@ def test_headless_create_routed_scrubs_ambient_creds(tmp_path: Path, monkeypatch
         route_env={
             "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
             "ANTHROPIC_AUTH_TOKEN": "zk-routed",
+            # Every tier: headless_create crosses resolve_spawn_route, which
+            # refuses a foreign endpoint without the full model set.
+            "ANTHROPIC_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.2",
         },
     )
     env = captured["env"]
@@ -695,7 +702,12 @@ def test_headless_receipt_reports_routed_model_without_argv_pin(
         route_env={
             "ANTHROPIC_BASE_URL": "https://z",
             "ANTHROPIC_AUTH_TOKEN": "t",
+            # Every tier: the guard refuses an endpoint without the full set.
             "ANTHROPIC_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.2",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.2",
         },
     )
 

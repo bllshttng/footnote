@@ -30,6 +30,19 @@ def _setup_tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(k, raising=False)
 
 
+def _full_route_env(token: str = "t") -> dict[str, str]:
+    """A hand-built foreign route carrying the WHOLE unit: endpoint, auth, and
+    every model tier. resolve_spawn_route refuses an endpoint without the full
+    model set, so any route passed through a guarded seam must look real."""
+    from fno.agents.model_routing import MODEL_ENV_KEYS
+
+    return {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": token,
+        **{k: "glm-5.2" for k in MODEL_ENV_KEYS},
+    }
+
+
 # ---------------------------------------------------------------------------
 # rust_runtime: --route is Python-only, exactly like --role
 # ---------------------------------------------------------------------------
@@ -433,6 +446,8 @@ def test_bg_create_route_env_wins_over_role(
 
     monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
 
+    from fno.agents.model_routing import MODEL_ENV_KEYS
+
     claude_mod.bg_create(
         name="w",
         message="hi",
@@ -441,7 +456,7 @@ def test_bg_create_route_env_wins_over_role(
         route_env={
             "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
             "ANTHROPIC_AUTH_TOKEN": "explicit-token",
-            "ANTHROPIC_MODEL": "glm-5.2",
+            **{k: "glm-5.2" for k in MODEL_ENV_KEYS},
         },
     )
     env = seen["env"]
@@ -477,6 +492,8 @@ def test_bg_create_route_wins_over_account_overlay(
         )
 
     monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    from fno.agents.model_routing import MODEL_ENV_KEYS
+
     claude_mod.bg_create(
         name="w",
         message="hi",
@@ -484,7 +501,7 @@ def test_bg_create_route_wins_over_account_overlay(
         route_env={
             "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
             "ANTHROPIC_AUTH_TOKEN": "zai-token",
-            "ANTHROPIC_MODEL": "glm-5.2",
+            **{k: "glm-5.2" for k in MODEL_ENV_KEYS},
         },
         account_env={
             "CLAUDE_CONFIG_DIR": "/x/.claude",
@@ -502,8 +519,12 @@ def test_bg_create_route_wins_over_account_overlay(
 
 
 def test_mesh_env_wrapper_route_wins_over_account() -> None:
-    """Pane substrate (env(1) is left-to-right last-wins): the route's auth pairs
-    must follow the account's so the route wins, while CLAUDE_CONFIG_DIR survives."""
+    """Pane substrate: the route wins auth while CLAUDE_CONFIG_DIR survives.
+
+    x-8552: the wrapper renders the ONE composition, so the account's token is
+    overridden inside the dict BEFORE it ever reaches the argv - the losing
+    credential is no longer world-readable in `ps` output the way the old
+    two-assignment (last-wins) render made it."""
     from fno.agents.mux_spawn import _mesh_env_wrapper
 
     argv = _mesh_env_wrapper(
@@ -518,10 +539,11 @@ def test_mesh_env_wrapper_route_wins_over_account() -> None:
             "ANTHROPIC_MODEL": "glm-5.2",
         },
     )
-    # Both auth assignments are present; the route's must come LAST (env last-wins).
-    assert "ANTHROPIC_AUTH_TOKEN=acct" in argv
+    # Only the route's auth assignment is present - composed, not overridden
+    # in place - and the account's token never leaks into the argv.
     assert "ANTHROPIC_AUTH_TOKEN=zai" in argv
-    assert argv.index("ANTHROPIC_AUTH_TOKEN=zai") > argv.index("ANTHROPIC_AUTH_TOKEN=acct")
+    assert "ANTHROPIC_AUTH_TOKEN=acct" not in argv
+    assert argv.count("ANTHROPIC_AUTH_TOKEN=zai") == 1
     # The account profile and the route endpoint both ride the wrapper.
     assert "CLAUDE_CONFIG_DIR=/x/.claude" in argv
     assert "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" in argv
@@ -582,7 +604,7 @@ def test_bg_create_routed_spawn_passes_settings_flag(
         name="w",
         message="hi",
         cwd=tmp_path,
-        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"},
+        route_env=_full_route_env(),
     )
     argv = seen["argv"]
     assert "--settings" in argv
@@ -617,7 +639,7 @@ def test_composed_route_and_account_spawn_scrubs_inherited_auth(
         message="hi",
         cwd=tmp_path,
         account_env={"CLAUDE_CONFIG_DIR": str(tmp_path / "acct")},
-        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"},
+        route_env=_full_route_env(),
     )
     argv = seen["argv"]
     blob = json.load(open(argv[argv.index("--settings") + 1]))["env"]
@@ -644,7 +666,7 @@ def test_headless_create_routed_spawn_passes_settings_flag(
     claude_mod.headless_create(
         message="hi",
         cwd=tmp_path,
-        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"},
+        route_env=_full_route_env(),
     )
     assert "--settings" in seen["argv"]
 
@@ -657,7 +679,7 @@ def test_headless_create_routed_spawn_passes_settings_flag(
 # ---------------------------------------------------------------------------
 
 
-def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
+def test_account_only_settings_unsets_vendor_and_keeps_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import json
@@ -665,12 +687,12 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
 
     monkeypatch.setenv("HOME", str(tmp_path))
     from fno.agents.account_env import SCRUB_AUTH_VARS
-    from fno.agents.model_routing import materialize_account_scrub_settings
+    from fno.agents.model_routing import route_settings_path_for
 
     # A config_dir account: the overlay only carries CLAUDE_CONFIG_DIR, which
     # must NOT land in the settings file. Every vendor auth/model var is written
     # empty, which claude reads as unset (so the account's own login wins).
-    path = materialize_account_scrub_settings({"CLAUDE_CONFIG_DIR": "/x/.claude"})
+    path = route_settings_path_for(None, {"CLAUDE_CONFIG_DIR": "/x/.claude"})
     blob = json.load(open(path))["env"]
     assert "CLAUDE_CONFIG_DIR" not in blob
     for var in SCRUB_AUTH_VARS:
@@ -688,7 +710,7 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
         "ANTHROPIC_CUSTOM_HEADERS": "X-Org: foo",
         "HTTPS_PROXY": "http://proxy:8080",
     }
-    path2 = materialize_account_scrub_settings(overlay)
+    path2 = route_settings_path_for(None, overlay)
     blob2 = json.load(open(path2))["env"]
     assert blob2["ANTHROPIC_BASE_URL"] == "https://api.example/anthropic"
     assert blob2["ANTHROPIC_AUTH_TOKEN"] == "acct-token"
@@ -700,7 +722,7 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
         if var not in overlay:
             assert blob2[var] == ""
     assert oct(os.stat(path2).st_mode & 0o777) == "0o600"  # carries a token
-    assert materialize_account_scrub_settings(dict(overlay)) == path2  # content-addressed
+    assert route_settings_path_for(None, dict(overlay)) == path2  # content-addressed
 
 
 def test_bg_create_account_spawn_passes_settings_flag(
@@ -999,50 +1021,116 @@ def test_provider_bearing_spawn_stays_python_side() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_route_under_managed_without_account_still_refused(
+def test_route_under_managed_without_account_composes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard: a bare route under an inherited FNO_PROVIDER_AUTH=managed
-    (no --account) is still refused - the half-composition guard stays armed
-    unless an account overlay pins a profile."""
-    from fno.agents import spawn_gate
+    """A bare route under an inherited FNO_PROVIDER_AUTH=managed (no --account)
+    composes: the ambient marker describes the CALLING process's credential
+    slot, not this spawn, and a measured env credential beats a Keychain login
+    (2026-08-15), so nothing is left to refuse."""
+    from fno.agents import dispatch, spawn_gate
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
     monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
     monkeypatch.setenv("ZAI_API_KEY", "zk-live")
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="abcd1234",
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
     from fno.agents.cli import agents_app
+    from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
          "--route", "zai,glm-5.2"],
     )
-    assert result.exit_code == 2, result.output
-    assert "managed oauth" in result.output.lower()
+    assert result.exit_code == 0, result.output
+    assert captured["route_env"]["ANTHROPIC_BASE_URL"] == DEFAULT_ZAI_BASE_URL
+    assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+    receipt_line = next(
+        line for line in result.output.strip().splitlines() if '"short_id"' in line
+    )
+    receipt = json.loads(receipt_line)
+    assert receipt["provider"] == "zai"
 
 
 # ---------------------------------------------------------------------------
-# x-3db9 P1 (codex): the managed-OAuth bypass needs the route to carry its own
-# auth, not just any account overlay. A direct dispatch_spawn caller can pass a
-# hand-built partial route_env (base-URL-only); under managed + account that
-# would pair the foreign endpoint with the account's Keychain OAuth, so the
-# guard stays armed until the route is self-sufficient.
+# x-3db9 P1 (codex), re-scoped by x-8552: a route that sets an endpoint must
+# carry its own auth, on EVERY path, not just under an inherited managed
+# marker. A direct dispatch_spawn caller can pass a hand-built partial
+# route_env (base-URL-only); paired with an account's Keychain OAuth it would
+# send that OAuth token to the foreign endpoint - the one split-brain the
+# composition cannot express.
 # ---------------------------------------------------------------------------
 
 
-def test_managed_bypass_requires_route_self_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno.agents.model_routing import RouteCompositionError, resolve_spawn_route
+def test_partial_route_env_is_refused_with_or_without_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fno.agents.model_routing import (
+        MODEL_ENV_KEYS,
+        RouteCompositionError,
+        resolve_spawn_route,
+    )
 
-    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
-    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
     partial = {"ANTHROPIC_BASE_URL": "https://foreign.example/anthropic"}  # no auth token
-    # Account present, but the route brings no own credential -> still refused.
-    with pytest.raises(RouteCompositionError):
-        resolve_spawn_route(None, partial, account_overlay=True)
-    # A self-authed route + account composes (no refusal).
-    complete = {**partial, "ANTHROPIC_AUTH_TOKEN": "route-key"}
-    assert resolve_spawn_route(None, complete, account_overlay=True) == complete
+    # No ambient marker needed: the refusal is a property of the route itself.
+    monkeypatch.delenv("FNO_PROVIDER_AUTH", raising=False)
+    with pytest.raises(RouteCompositionError, match="without its own credential"):
+        resolve_spawn_route(None, partial)
+    # Self-authed but model-less: compose_worker_credentials scrubs every
+    # inherited model var (they are all SCRUB_AUTH_VARS), so the worker would
+    # ask the foreign endpoint for Claude's default model and fail its first
+    # turn behind a "live" receipt (codex P2 on this PR).
+    authed = {**partial, "ANTHROPIC_AUTH_TOKEN": "route-key"}
+    with pytest.raises(RouteCompositionError, match="without ANTHROPIC_MODEL"):
+        resolve_spawn_route(None, authed)
+    # One missing tier is the same refusal: that tier keeps Claude's default
+    # model id at a vendor that does not serve it.
+    gap = {**authed, **{k: "glm-5.2" for k in MODEL_ENV_KEYS}}
+    del gap["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+    with pytest.raises(RouteCompositionError, match="ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+        resolve_spawn_route(None, gap)
+    # A complete unit composes, ambient marker or not.
+    complete = {**authed, **{k: "glm-5.2" for k in MODEL_ENV_KEYS}}
+    assert resolve_spawn_route(None, complete) == complete
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    assert resolve_spawn_route(None, complete) == complete
+
+
+def test_bg_and_headless_refuse_modelless_route_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model-completeness refusal must fire on the in-process seams (bg,
+    headless), not only on the CLI-resolved lane - the guard lives in
+    resolve_spawn_route, which every seam routes through."""
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.model_routing import RouteCompositionError
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    modelless = {
+        "ANTHROPIC_BASE_URL": "https://foreign.example/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "t",
+    }
+    with pytest.raises(RouteCompositionError, match="without ANTHROPIC_MODEL"):
+        claude_mod.bg_create(name="w", message="hi", cwd=tmp_path, route_env=modelless)
+    with pytest.raises(RouteCompositionError, match="without ANTHROPIC_MODEL"):
+        claude_mod.headless_create(message="hi", cwd=tmp_path, route_env=modelless)
 
 
 # ---------------------------------------------------------------------------
@@ -1143,3 +1231,109 @@ def test_dispatch_account_refuses_an_unregistered_record(monkeypatch: pytest.Mon
     )
     assert result.exit_code == 2, result.output
     assert "not a registered provider record" in result.output
+
+
+# ---------------------------------------------------------------------------
+# x-8552: the composed settings payload and the one-function composition rule.
+# ---------------------------------------------------------------------------
+
+
+def test_composed_settings_keeps_account_env_and_route_atomicity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC4-INV: an account composed with a route writes ONE settings file that
+    carries the scrub floor, the account's non-credential env, and the route's
+    endpoint+auth+model - the old if/elif kept only the route's keys and
+    dropped the account's across the claude --bg daemon fork."""
+    import json
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+    from fno.agents.model_routing import route_settings_path_for
+
+    account = {
+        "CLAUDE_CONFIG_DIR": "/x/.claude",
+        "HTTPS_PROXY": "http://proxy:8080",
+    }
+    route = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "zk",
+        "ANTHROPIC_MODEL": "glm-5.2",
+    }
+    path = route_settings_path_for(route, account)
+    blob = json.load(open(path))["env"]
+    # Route wins every credential variable as one unit.
+    assert blob["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert blob["ANTHROPIC_AUTH_TOKEN"] == "zk"
+    assert blob["ANTHROPIC_MODEL"] == "glm-5.2"
+    # The account's non-credential env survives the fork too.
+    assert blob["HTTPS_PROXY"] == "http://proxy:8080"
+    # CLAUDE_CONFIG_DIR never lives in the file it would select.
+    assert "CLAUDE_CONFIG_DIR" not in blob
+    # Every SCRUB_AUTH_VARS key the composition does not set is emptied -
+    # including the two the old route-only file missed.
+    for var in SCRUB_AUTH_VARS:
+        if var not in route:
+            assert blob[var] == ""
+    assert blob["ANTHROPIC_API_KEY"] == ""
+    assert blob["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+
+
+def test_every_spawn_seam_uses_the_one_composition_function(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC5-INV: bg_create, headless_create, and _mesh_env_wrapper all produce
+    exactly what compose_worker_credentials produces - asserted by enumerating
+    the seams against the function, not by three independent orderings."""
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-stale")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://stale.example")
+    account = {"CLAUDE_CONFIG_DIR": "/x/.claude"}
+    route = _full_route_env()
+
+    class _Result:
+        returncode = 0
+        stdout = "backgrounded \xb7 abcd1234 \xb7 ok\n"
+        stderr = ""
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        seen["env"] = kwargs.get("env")
+        return _Result()
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.bg_create(
+        name="seam-bg", message="hi", cwd=tmp_path, route_env=route,
+        account_env=account,
+    )
+    assert seen["env"]["CLAUDE_CONFIG_DIR"] == "/x/.claude"
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+
+    claude_mod.headless_create(
+        message="hi", cwd=tmp_path, route_env=route, account_env=account,
+    )
+    assert seen["env"]["CLAUDE_CONFIG_DIR"] == "/x/.claude"
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+
+    # The pane seam renders the same composition as an env(1) argv: scrub via
+    # -u, then the composed pairs (route last, left-to-right last-wins).
+    argv = _mesh_env_wrapper(
+        "seam-pane", "claude", None, ["claude"], account_env=dict(account),
+        route_env=dict(route),
+    )
+    assignments = {
+        a.split("=", 1)[0]: a.split("=", 1)[1]
+        for a in argv
+        if "=" in a
+    }
+    assert assignments.get("CLAUDE_CONFIG_DIR") == "/x/.claude"
+    assert assignments.get("ANTHROPIC_BASE_URL") == "https://api.z.ai/api/anthropic"
+    assert assignments.get("ANTHROPIC_AUTH_TOKEN") == "t"
+    assert argv.count("ANTHROPIC_API_KEY=") == 0

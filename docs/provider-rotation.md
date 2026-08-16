@@ -261,7 +261,7 @@ The external loop honors the same knob, via `pick --if-armed`.
 Two spawns are never picked for, whatever the knob says:
 
 - one that passed an explicit `--account` - it wins and is never second-guessed
-- one that passed `--route` or `--role` - `fno agents spawn` already refuses `--account` alongside either, because the route's `ANTHROPIC_*` overrides the account's `CLAUDE_CONFIG_DIR` and silently mis-bills. Auto-picking would reassemble exactly that combination behind the refusal.
+- one that passed `--route` or `--role` - a routed worker sends its model traffic to the route's vendor. It consumes no Anthropic account quota, so there is no account headroom to pick for. An explicit `--account` still composes with a route: profile from the account, endpoint+auth+model from the vendor. That is operator intent, never a picker decision.
 
 ### `fno config accounts doctor`
 
@@ -487,11 +487,7 @@ model as one unit through the settings file, while the account's
 Nothing refuses the pair - `fno agents spawn` does not either, so a refusal here
 would have been this path inventing a rule the rest of the system does not have.
 
-The restored route goes THROUGH `resolve_spawn_route` rather than past it.
-That call is the single composition decision, and it is where managed OAuth
-refuses a foreign endpoint layered over the default Claude credential slot.
-A restored route assigned past it would be the one route in the system exempt
-from a guard every other route pays.
+The restored route goes THROUGH `resolve_spawn_route` rather than past it. That call is the single composition decision. It refuses an incomplete route: an endpoint without its own credential, or without its full model tier set. A restored route assigned past it becomes the one route in the system exempt from a check every other route pays.
 
 The `pick_on_launch` headroom picker skips a `--resume` spawn on both seams
 (`_pick_account_at_seam` and `dispatch_spawn`), so any `--account` reaching the

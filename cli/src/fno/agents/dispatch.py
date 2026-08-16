@@ -1391,10 +1391,17 @@ def _claude_create_path(
     # mkdir + open + replace under the state dir, and doing it at row-write time
     # would put that I/O after the launch, where an OSError escapes uncaught and
     # strands a live supervisor with no registry row. Content-addressed, so this
-    # is the same path bg_create resolves for itself moments later.
+    # is the same path bg_create resolves for itself moments later - including
+    # the account overlay, else a composed spawn's row names a different file
+    # than the worker launched with and a restore silently drops the account's
+    # pinned env. Route-bearing rows only: an account-only file restores as "no
+    # route" (or an incomplete unit the composition guard refuses), so stamping
+    # it broke every --account worker's revive.
     from fno.agents.model_routing import route_settings_path_for
 
-    route_settings_path = route_settings_path_for(route_env)
+    route_settings_path = (
+        route_settings_path_for(route_env, account_env) if route_env else None
+    )
 
     # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
     # bg_create snapshots dict(os.environ) to build the NEW worker's own
@@ -2069,11 +2076,12 @@ def _pick_account_env(
     does today. The receipt is always printed, because a launch silently landing
     on a different account than the operator expects is a billing surprise.
 
-    A ROUTED spawn is never picked for. `fno agents spawn` refuses `--account`
-    together with `--route` / `--role` because the route's ANTHROPIC_* overrides
-    the account's CLAUDE_CONFIG_DIR and silently mis-bills; auto-picking would
-    combine the two axes the CLI just refused, and would print an account
-    receipt for a worker the route intends to bill elsewhere.
+    A ROUTED spawn is never picked for. Picking is a quota decision, and a
+    routed worker sends its model traffic to the route's vendor, consuming no
+    Anthropic account quota - there is nothing to pick for. An explicit
+    ``--account`` still composes with a route (profile from the account,
+    endpoint+auth+model from the vendor), but that is operator intent, never a
+    picker decision.
     """
     picked = pick_account_id(role=role, route_env=route_env)
     if picked is None:
@@ -2101,9 +2109,8 @@ def pick_account_id(
 
     Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
-    does today. A routed spawn is never picked for - `fno agents spawn` refuses
-    `--account` together with `--route` / `--role` because the route's ANTHROPIC_*
-    overrides the account's CLAUDE_CONFIG_DIR and silently mis-bills.
+    does today. A routed spawn is never picked for: it bills the route's
+    vendor, not an Anthropic account, so there is no quota to manage.
     """
     if route_env or role is not None:
         return None
@@ -2274,7 +2281,6 @@ def dispatch_spawn(
                 role,
                 route_env,
                 notice=lambda note: print(note, file=sys.stderr),
-                account_overlay=bool(account_env),
             )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
@@ -2459,11 +2465,11 @@ def dispatch_spawn(
                     # an account reaching this point is one the operator typed.
                     #
                     # Through resolve_spawn_route, not assigned past it: that is
-                    # THE composition decision, and it is where managed OAuth
-                    # refuses a foreign endpoint layered over the default Claude
-                    # credential slot. A restored route that skipped it would be
-                    # the one route in the system exempt from the check - a guard
-                    # every other route pays and this one does not.
+                    # THE composition decision, where an incomplete route (an
+                    # endpoint without its own credential) is refused. A restored
+                    # route that skipped it would be the one route in the system
+                    # exempt from the check - a guard every other route pays and
+                    # this one does not.
                     from fno.agents.model_routing import resolve_spawn_route
 
                     try:
@@ -2472,7 +2478,6 @@ def dispatch_spawn(
                             restored_route,
                             intent=f"route recorded for {source_row.name!r}",
                             notice=lambda note: print(note, file=sys.stderr),
-                            account_overlay=bool(account_env),
                         )
                     except RouteCompositionError as exc:
                         raise DispatchAskError(str(exc), exit_code=2) from exc
