@@ -81,7 +81,7 @@ Send this shape. It is not a style preference: every observed firing used it, an
 ```
 fno mail send <worker-handle> "REVIEW GRANTED for <branch-or-PR>. Invoke this in your session, as a command, against your diff:
 
-    /code-review <level> --comment [--fix]
+    /<review-verb>
 
 INVOKE IT FOR REAL. Type the verb. Do not substitute fno:code-reviewer, /fno:review, or a Bash approximation.
 
@@ -89,6 +89,8 @@ If it refuses, retry; if it still refuses, report the LITERAL refusal string and
 
 Verify each finding against source before accepting it. The reviewer is advisory, not authoritative - push back with a file:line argument where you disagree."
 ```
+
+Substitute the worker's own verb from "The verb, per harness" above, arguments and all: claude's order is `/code-review <level> --comment [--fix]`, codex's is bare `/review` - anything after it changes the review target.
 
 Three details in that template are load-bearing, so do not smooth them out:
 
