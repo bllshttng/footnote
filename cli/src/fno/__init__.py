@@ -60,8 +60,14 @@ def _module_is_now_on_disk(name: str) -> bool:
     ``importlib.metadata``, ``email`` and ``zipfile``.  Measured on a bare
     interpreter: 17.9ms and 84 modules for that first call, 0.003ms for every
     call after it.  The exact figure moves with what the process has already
-    imported, so treat it as "tens of milliseconds, once".  It is paid only on
-    an import that has ALREADY failed, so no successful path ever sees it.
+    imported, so treat it as "tens of milliseconds, once".
+
+    It is TRIGGERED only by an import that has already failed, but it is not
+    free for the imports that follow: ``invalidate_caches()`` is process-global
+    and drops ``sys.path_importer_cache`` for every ``sys.path`` entry, so the
+    next import of anything re-lists its directory.  That is the honest cost,
+    and it is still the right trade -- the alternative is answering the retry
+    question from a cache that a reinstall just made a lie.
     """
     import importlib.util
 

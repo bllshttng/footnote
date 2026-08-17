@@ -746,8 +746,6 @@ def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch)
     assert "_mid_reinstall" not in flat, combined
 
 
-
-
 # ---------------------------------------------------------------------------
 # AC8-HOOK: the same verify-then-retry, for the imports the lazy group cannot see
 # ---------------------------------------------------------------------------
@@ -795,12 +793,16 @@ def test_import_hook_retries_a_module_that_is_on_disk_now(monkeypatch):
     among them.
     """
     import fno
+    import fno._lazy_group
 
     seen: list[str] = []
     finder = _installed_finder()
-    # The gate is the SHARED helper, the same one `_load_real` consults. Patching
-    # it here is what pins that: an inlined second copy of the on-disk check
-    # would sail past this and the two paths could drift apart unnoticed.
+    # The gate is the SHARED helper, the same one `_load_real` consults. Asserted
+    # by identity rather than left to the patch below: `_lazy_group` binds the
+    # function by VALUE at import time, so monkeypatching `fno` reaches the
+    # finder only. An inlined second copy of the on-disk check in `_load_real`
+    # would sail past the patch, and this line is what refuses it.
+    assert fno._lazy_group._module_is_now_on_disk is fno._module_is_now_on_disk
     checked: list[str] = []
     monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: checked.append(name) or True)
     _spy_path_finder(monkeypatch, seen)

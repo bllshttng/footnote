@@ -157,6 +157,15 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // pays for a second process. A genuinely broken probe crashes twice and
     // keeps its warning, which is the point: this tolerates a transient
     // failure, it does not hide a persistent one.
+    //
+    // Worth naming, because the Python half of this fix is built the other way:
+    // that one FALSIFIES (is the module on disk right now?) before retrying,
+    // while this one INFERS from the failure shape alone. There is no cheap
+    // equivalent question to ask here -- "why did it exit 1" has no answer from
+    // out here -- so a permanent fault matching the shape retries every sweep
+    // rather than settling. The cost is bounded and visible: one extra
+    // fast-failing spawn per affected row, and the second attempt always keeps
+    // its WARN, so a stuck probe is loud rather than silent.
     family1_truth_probe_retrying(
         || family1_truth_command(handle),
         Duration::from_secs(5),
