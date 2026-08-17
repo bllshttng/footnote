@@ -473,6 +473,28 @@ def test_hook_var_list_matches_model_env_keys():
     )
 
 
+def test_rust_mirror_var_list_matches_model_env_keys():
+    # The compiled client carries its own mirror (it cannot import Python)
+    # and is reachable without the Python seam: a direct `fno-agents spawn`
+    # and the loop runtime both spawn through it. Pin the mirror's var list
+    # to MODEL_ENV_KEYS so a new tier cannot land in one list and not the
+    # other.
+    import re
+    from pathlib import Path
+
+    mirror = (
+        Path(__file__).resolve().parents[3]
+        / "crates/fno-agents/src/model_env_scrub.rs"
+    )
+    block = re.search(r"MODEL_ENV_KEYS[^=]*=\s*\[(.*?)\]", mirror.read_text(), re.S)
+    assert block is not None, "model_env_scrub.rs has no MODEL_ENV_KEYS list"
+    rust_vars = set(re.findall(r'"(ANTHROPIC_[A-Z_]+)"', block.group(1)))
+    assert rust_vars == set(MODEL_ENV_KEYS), (
+        f"rust/model var drift: rust-only={sorted(rust_vars - set(MODEL_ENV_KEYS))} "
+        f"model-only={sorted(set(MODEL_ENV_KEYS) - rust_vars)}"
+    )
+
+
 def test_seam_scrub_covers_the_rust_exec_lane(monkeypatch, capsys):
     # A bg/headless spawn execs the Rust client with os.environ, and that
     # binary hands the child the env verbatim - a scrub only inside the Python

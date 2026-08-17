@@ -1432,6 +1432,11 @@ pub fn bg_create(
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.current_dir(cwd);
+    // Inherited-model scrub before any overlay env below, so a route or
+    // account that re-supplies a var still wins (env after env_remove is
+    // last-wins). The Python front door already scrubbed os.environ; this
+    // arm is also reached without it (direct client, loop runtime).
+    crate::model_env_scrub::scrub_onto(&mut cmd);
     cmd.env("FNO_AGENT_SELF", name);
     cmd.env("FNO_AGENT_HARNESS", "claude");
     for (k, v) in extra_env {
@@ -2383,6 +2388,8 @@ pub fn dispatch_claude_headless(
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.current_dir(cwd);
+    // Same scrub + ordering rationale as bg_create above.
+    crate::model_env_scrub::scrub_onto(&mut cmd);
     cmd.env("FNO_AGENT_SELF", name);
     cmd.env("FNO_AGENT_HARNESS", "claude");
     cmd.env("FNO_AGENT_FROM", from_name);
