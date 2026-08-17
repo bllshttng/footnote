@@ -21,6 +21,7 @@ from fno.agents.watchdog import (
     REAP,
     REROUTE,
     Row,
+    STALE,
     TailFacts,
     Verdict,
     WAKE,
@@ -36,9 +37,9 @@ NOW_1850 = datetime(2026, 8, 16, 18, 50, 0, tzinfo=timezone.utc).timestamp()
 RATE_LIMIT_TAIL = "API Error: 429 rate limit, window resets at 02:48:21 SGT"
 
 
-def _facts(text: str, age_min: float = 5) -> TailFacts:
+def _facts(text: str, age_min: float = 5, role: str = "assistant") -> TailFacts:
     epoch = NOW_1840 - age_min * 60
-    return TailFacts([(epoch, text)], epoch, text)
+    return TailFacts([(epoch, text)], epoch, text, role, text)
 
 
 def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840):
@@ -75,11 +76,14 @@ def test_healthy_injectable_row_is_leave():
 
 def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
     row = Row("cccc3333-0000", "r1", "blocked", None, "/tmp/r1")
-    [before] = _run([row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL)})
+    # 125m silent: past classify_tail's 2h window, so the tail POSITIVELY
+    # asserts the session owes its next move (stalled) - the wake gate's
+    # resumability marker, not a missing-429 absence.
+    [before] = _run([row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)})
     assert before.verdict == REROUTE
     assert "18:48:21Z" in before.basis and "8m out" in before.basis
     [after] = _run(
-        [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL)}, now_s=NOW_1850
+        [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)}, now_s=NOW_1850
     )
     assert after.verdict == WAKE
     assert "window passed" in after.basis
@@ -133,8 +137,43 @@ def test_node_done_reaps_and_own_claim_does_not():
 
 def test_stopped_row_is_wakeable():
     rows = [Row("dddd4444-0000", "k1", "stopped", None, "/tmp/k1")]
-    [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=30)})
+    [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=130)})
     assert v.verdict == WAKE
+
+
+def test_wake_age_ceiling_buckets_old_rows_as_stale_not_wake():
+    # The king's measured case: a session stopped 87852 minutes (61 days) is
+    # not recovery - dead node, stale branch, stale context. Past the 1d
+    # ceiling the row is a needs-human bucket and never reaches an action
+    # lane, not even under --apply=all.
+    rows = [Row("dddd4444-0000", "k1", "stopped", None, "/tmp/k1")]
+    [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=87852)})
+    assert v.verdict == STALE
+    assert "past the 1d wake ceiling" in v.basis
+    assert v.action == "report"
+    outcome, _ = apply_verdict(v, lanes="all")
+    assert outcome == "reported"
+
+
+def test_no_parseable_evidence_never_wakes():
+    # A tail with no parseable timestamp is the "basis no-evidence" row the
+    # king caught marked wake: absence of evidence must never reach an action.
+    facts = TailFacts([(None, "stopped mid turn")], None, "stopped mid turn",
+                      "assistant", "stopped mid turn")
+    rows = [Row("eeee6666-0000", "n1", "stopped", None, "/tmp/n1")]
+    [v] = _run(rows, {"eeee6666-0000": facts})
+    assert v.verdict == LEAVE
+    assert "no parseable transcript evidence" in v.basis
+
+
+def test_fresh_tail_does_not_owe_a_move():
+    # Positive marker, not absence: a tail still inside classify_tail's 2h
+    # window reads working, and working rows never wake - the watchdog does
+    # not race a session that may still be moving.
+    rows = [Row("ffff7777-0000", "f1", "stopped", None, "/tmp/f1")]
+    [v] = _run(rows, {"ffff7777-0000": _facts("stopped mid turn", age_min=30)})
+    assert v.verdict == LEAVE
+    assert "does not owe a move" in v.basis
 
 
 def test_stopped_row_under_live_429_window_waits_not_wakes():

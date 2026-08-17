@@ -16,9 +16,14 @@ Order is precedence. The top row wins.
 |---------|-----------|-----------------|
 | `ghost` | state is `working` or `blocked` and no transcript resolves for the row's recorded id | `no transcript for <id>` |
 | `reap` | the node is done, or the `node:<id>` claim is held live by a different session | `node <id> done` / `claim held by <other>` |
+| `stale` | a wake-state row whose last transcript event is older than the 1d ceiling | `<state> <n>d old, past the 1d wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
-| `wake` | state `blocked` or `stopped`, a transcript exists, and no live 429 window | `<state> <n>m, last 429 window passed` |
+| `wake` | state `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `reachable, last turn <n>m ago` |
+
+`stale` is the needs-human bucket, and it is checked before the 429 window math on purpose: the reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage and would poison reroute. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
+
+Every wake condition is positive evidence. A parseable last event, an age under the ceiling, and a tail the shipped classifier (`session_truth.classify_tail`) reads as `stalled` - silent while still owing its next move. "No 429 in tail" is an absence and never a wake reason, and a tail with no parseable evidence reads leave, never an action lane.
 
 Reset stamps ride the provider error text in Singapore time, UTC+8. `02:48:21 SGT` is `18:48:21Z`. Two sessions launched at 18:45 and 18:46 took a 429 three minutes before their window opened. When a stamp fails to parse, the window is unknown and the row classifies `leave`, never `wake`. Bouncing a session off a closed window was proved twice by hand and costs a real turn each time.
 
@@ -54,6 +59,10 @@ A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake 
 
 A verdict the king has to remember to fetch goes unread. When `config.recovery.watchdog_mail_to` names a handle (or `--mail <handle>` is passed), the sweep mails a one-screen digest of the non-leave verdicts with their basis strings. The digest is gated on change. The signature of the non-leave set rides in the sweep file, and an unchanged signature sends nothing. A row stuck for a day reads once, not on every tick. A `project:<slug>` recipient addresses the project mailbox instead of one agent.
 
+## Two row sources, one truth
+
+The sweep enumerates from `claude agents --json --all` and joins registry identity where it exists, so it counts MORE rows than `fno agents list`. On 2026-08-17 the sweep saw 38 rows where the roster returned 23, and most named wake rows were absent from the roster. That gap is expected, not a bug: claude's supervisor view holds every claude bg session on the machine, including hand-started `claude --bg` threads, restored rows, and sessions other tools launched, while the registry holds only fno-spawned workers and can go stale in both directions (it called a working session exited and a removed one live on 2026-08-15). The watchdog reads the superset on purpose - a non-fno session burning a gigabyte is still a fleet fact - and treats both stores as hints over the transcript.
+
 ## What this does not replace
 
-`fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window, reap on settled deliverables, and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either.
+`fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window, reap on settled deliverables, and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either. A future port into the Rust daemon's `gc_sweep_impl` is filed as x-f93a and blocked by x-cd31 (the daemon lazy-start leak), because a second cadence would triple the verdicts and the mail.

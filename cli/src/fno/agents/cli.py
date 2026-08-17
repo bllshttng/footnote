@@ -2670,7 +2670,7 @@ def cmd_watchdog(
     from fno.agents import watchdog as wd
 
     if only is not None and only not in (
-        wd.GHOST, wd.REAP, wd.REROUTE, wd.WAKE, wd.LEAVE,
+        wd.GHOST, wd.REAP, wd.REROUTE, wd.WAKE, wd.STALE, wd.LEAVE,
     ):
         print(f"fno agents watchdog: unknown verdict {only!r}", file=sys.stderr)
         raise typer.Exit(code=2)

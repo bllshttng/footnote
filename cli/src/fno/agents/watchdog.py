@@ -35,17 +35,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+# The shipped tail classifier is the POSITIVE resumability marker: its
+# ``stalled`` verdict asserts the session went silent while still owing its
+# next move, which is a fact about the tail rather than an absence in it.
+from fno.agents.session_truth import classify_tail
+
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
 Row = namedtuple("Row", "row_id name state node cwd")
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
-#: flattened join of those texts. No transcript resolving -> None (ghost),
-#: which is a different fact from a resolved-but-quiet transcript.
-TailFacts = namedtuple("TailFacts", "records last_event_epoch tail_text")
+#: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
+#: record so the wake gate can run the shipped tail classifier (a POSITIVE
+#: resumability marker - the absence of a 429 is not one). No transcript
+#: resolving -> None (ghost), which is a different fact from a
+#: resolved-but-quiet transcript.
+TailFacts = namedtuple(
+    "TailFacts", "records last_event_epoch tail_text last_role last_text",
+    defaults=(None, ""),
+)
 
 GHOST = "ghost"
 REAP = "reap"
 REROUTE = "reroute"
 WAKE = "wake"
+STALE = "stale"
 LEAVE = "leave"
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
@@ -56,6 +68,14 @@ LEAVE = "leave"
 #: ghost as a healthy leave.
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 _WAKE_STATES = frozenset({"blocked", "stopped"})
+
+#: Hard age ceiling on the wake lane (king ruling 2026-08-17): a session
+#: stopped for two months has a dead node, a stale branch, and a context that
+#: describes a repository that has moved - waking it is not recovery. Past the
+#: ceiling the row reads ``stale`` (a needs-human bucket) and NEVER reaches an
+#: action lane: the 429 reset stamp carries no date, so on an old tail its
+#: time-of-day reading is garbage, which also poisons reroute.
+WAKE_MAX_AGE_S = 24 * 3600
 
 # The 429 marker and its reset stamp. Reset stamps ride the provider error
 # text in Singapore local time (UTC+8): "02:48:21 SGT" is 18:48:21Z. Two
@@ -204,6 +224,21 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, REAP,
                            f"claim held by {holder_sid}", "stop+rm")
 
+    # stale: the hard age ceiling, BEFORE the 429 window math - the reset
+    # stamp carries no date, so on a tail older than the ceiling its
+    # time-of-day reading is garbage and would poison reroute below.
+    facts_age_s: Optional[float] = None
+    if facts is not None and facts.last_event_epoch is not None:
+        facts_age_s = max(0.0, now_s - facts.last_event_epoch)
+    if row.state in _WAKE_STATES and facts_age_s is not None:
+        if facts_age_s > WAKE_MAX_AGE_S:
+            return Verdict(
+                row.row_id, row.name, row.state, STALE,
+                f"{row.state} {int(facts_age_s // 86400)}d old, past the 1d "
+                f"wake ceiling, needs a human",
+                "report",
+            )
+
     window, reset_epoch, stamp = ("none", None, "")
     if facts is not None:
         window, reset_epoch, stamp = rate_limit_window(facts.tail_text, now_s)
@@ -221,12 +256,16 @@ def _verdict_one(
         )
 
     # wake: blocked or stopped, a transcript exists, and no live 429 window.
-    # An unknown window (stamp missing or unparseable) is NOT wakeable, and
-    # neither is a live one: reroute above only catches blocked rows, so a
-    # stopped row under a closed window lands here and must wait, not wake
-    # into the bounce that costs a real turn.
+    # Every condition is POSITIVE evidence (king ruling 2026-08-17): an age
+    # under the ceiling, a parseable last event, and a tail that asserts the
+    # session went silent while still owing its next move (classify_tail
+    # ``stalled``). "No 429 in tail" is an absence and never a wake reason; a
+    # row with no parseable evidence must never reach an action lane.
     if row.state in _WAKE_STATES and facts is not None:
-        age = _age_clause(now_s, facts.last_event_epoch)
+        if facts.last_event_epoch is None:
+            return Verdict(row.row_id, row.name, row.state, LEAVE,
+                           "no parseable transcript evidence, not wakeable",
+                           "none")
         if window == "unknown":
             return Verdict(row.row_id, row.name, row.state, LEAVE,
                            f"429 present, reset window unknown "
@@ -236,10 +275,16 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, LEAVE,
                            f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
                            f"window not open", "none")
+        truth = classify_tail(facts.last_role, facts.last_text, facts_age_s)
+        if truth != "stalled":
+            return Verdict(row.row_id, row.name, row.state, LEAVE,
+                           f"tail reads {truth}, session does not owe a move",
+                           "none")
         clause = ("last 429 window passed" if window == "passed"
-                  else "no 429 in tail")
+                  else "silent, no 429 in tail")
         return Verdict(row.row_id, row.name, row.state, WAKE,
-                       f"{row.state} {age}, {clause}", "resume")
+                       f"{row.state} {_mins(now_s, facts.last_event_epoch)}m "
+                       f"silent, {clause}", "resume")
 
     # leave: everything else, including every healthy injectable row - the
     # watchdog never competes with the normal inject path.
@@ -293,6 +338,8 @@ def tail_facts(session_id: str, cwd: str) -> Optional[TailFacts]:
     if size > _TAIL_BYTES and lines:
         lines = lines[1:]  # a mid-file seek lands inside a line; drop it
     records: list[tuple[Optional[float], str]] = []
+    last_role: Optional[str] = None
+    last_text = ""
     for line in lines:
         try:
             e = json.loads(line)
@@ -307,10 +354,20 @@ def tail_facts(session_id: str, cwd: str) -> Optional[TailFacts]:
                 ).timestamp()
             except ValueError:
                 epoch = None
-        records.append((epoch, _record_text(e)))
+        text = _record_text(e)
+        records.append((epoch, text))
+        msg = e.get("message")
+        role = msg.get("role") if isinstance(msg, dict) else None
+        if role:
+            # The LAST role-bearing record decides the tail classifier's
+            # input; a trailing user turn clears stale assistant signals.
+            last_role = str(role)
+            last_text = text
     records = records[-_TAIL_RECORDS:]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
-    return TailFacts(records, last_epoch, " ".join(t for _, t in records))
+    return TailFacts(
+        records, last_epoch, " ".join(t for _, t in records), last_role, last_text
+    )
 
 
 def _record_text(e: dict) -> str:
