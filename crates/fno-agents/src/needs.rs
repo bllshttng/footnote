@@ -44,6 +44,12 @@ const DECISION_STALE_FLOOR_SECS: u64 = 7 * 24 * 60 * 60;
 /// a stable string (`review_wedged` | `budget_stop`) the client maps to its own
 /// severity enum; the fold does not rank (the client owns the full 6-kind
 /// order, of which this leg populates two).
+///
+/// A kind the client does not map is dropped from the operator view by its
+/// `_ => continue` arm, which is how `mail_delivery_miss` stays out of the
+/// panel while still flowing into the journal for a wake consumer to read.
+/// Emitting a new kind here is therefore a quiet change on the operator
+/// surface, never a loud one: to SHOW a new kind, map it there too.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct NeedItem {
     pub kind: String,
@@ -224,7 +230,8 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         }
         // mail_escalation is folded before the session gate: it carries no
         // session_id (it is mail between agents), so the gate below would drop
-        // it. One NeedItem (kind mail_question) per recipient, latest wins.
+        // it. One NeedItem per recipient, latest wins; its kind comes from that
+        // latest row's reason.
         if kind == Some("mail_escalation") {
             let Some(recipient) = str_field(&v, "recipient") else {
                 continue;
@@ -232,6 +239,18 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             let reason = str_field(&v, "reason").unwrap_or("");
             let sender = str_field(&v, "sender").unwrap_or("");
             let summary = str_field(&v, "summary").unwrap_or("");
+            // A reachable-miss is an agent-to-agent DELIVERY failure: the
+            // recipient was reachable, the live inject missed, the durable copy
+            // is queued. It needs a retry or a wake, not an operator decision,
+            // so it gets its own kind and the client's `_ => continue` arm keeps
+            // it out of the needs panel by construction rather than by a filter
+            // someone can forget to apply. attended-miss stays a question:
+            // there the operator IS the attended recipient.
+            let kind = if reason == "reachable-miss" {
+                "mail_delivery_miss"
+            } else {
+                "mail_question"
+            };
             let epoch = to_epoch_lenient(ts).unwrap_or(0);
             seq += 1;
             // Same (epoch, seq) ordering as the session accumulator: a cross-source
@@ -246,7 +265,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                         epoch,
                         seq,
                         NeedItem {
-                            kind: "mail_question".to_string(),
+                            kind: kind.to_string(),
                             // No target session; the recipient handle is the row's
                             // stable identity (id_key) and the roster join key.
                             session_id: recipient.to_string(),
@@ -554,9 +573,16 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
         // Same reasoning for operator_question (no node claim behind a
         // question either) and for the aggregate carveout_stale/stale_claims
         // rows (no single node owns a pile of carve-outs or claims).
+        // mail_delivery_miss rides the same rule: the client drops it from the
+        // operator view, but it stays in the JSON for a wake consumer, and a
+        // node-keyed stamp would label it dead when nothing was ever claimed.
         if matches!(
             item.kind.as_str(),
-            "mail_question" | "operator_question" | "carveout_stale" | "stale_claims"
+            "mail_question"
+                | "mail_delivery_miss"
+                | "operator_question"
+                | "carveout_stale"
+                | "stale_claims"
         ) {
             item.live = true;
             continue;
@@ -977,6 +1003,56 @@ mod tests {
             items[0].evidence.contains("new"),
             "latest (epoch, seq) wins"
         );
+    }
+
+    #[test]
+    fn reachable_miss_folds_to_its_own_kind() {
+        // Measured 2026-08-17: three of twelve operator rows were the king's own
+        // outbound mail that missed a reachable recipient, sorted beside a real
+        // question. A miss needs a retry or a wake, not a human.
+        let events = mail_escalation(
+            "2026-07-03T02:00:00Z",
+            "reachable-miss",
+            "web",
+            "019f48e1",
+            "ping",
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "mail_delivery_miss");
+    }
+
+    #[test]
+    fn question_and_reachable_miss_do_not_share_a_kind() {
+        // The question row is the positive control: a fold that stopped emitting
+        // anything at all would satisfy a bare "the miss is not a question"
+        // assertion and read as proof of a split that is not there.
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation("2026-07-03T02:00:00Z", "question", "etl", "web", "which auth?"),
+            mail_escalation("2026-07-03T03:00:00Z", "reachable-miss", "sender", "9a06", "ping"),
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 2, "one row per recipient, both present");
+        let mut kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
+        kinds.sort();
+        assert_eq!(kinds, vec!["mail_delivery_miss", "mail_question"]);
+    }
+
+    #[test]
+    fn attended_miss_stays_a_question() {
+        // The operator IS the attended recipient, so an attended-miss is still a
+        // human's problem. Only the machine-to-machine miss moves.
+        let events = mail_escalation(
+            "2026-07-03T02:00:00Z",
+            "attended-miss",
+            "ops",
+            "claude-9a06",
+            "need you",
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "mail_question");
     }
 
     #[test]
