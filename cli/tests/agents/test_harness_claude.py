@@ -440,9 +440,50 @@ def test_headless_create_applies_account_env(tmp_path: Path, monkeypatch) -> Non
     assert env is not None and env["CLAUDE_CONFIG_DIR"] == "/x/.claude-alt"
 
 
+def test_headless_create_strips_incoherent_inherited_model_env(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A daemon-carried foreign model var with no base URL is stripped from the
+    child env with one stderr line naming it; the child falls back to the
+    account's own default instead of dying on turn one."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        captured["stderr_at_call"] = capsys.readouterr().err
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+
+    env = captured["env"]
+    assert env is not None, "incoherent env must force an explicit child env"
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in env
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" in captured["stderr_at_call"]
+
+
 def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) -> None:
     """No --account -> no explicit env (byte-identical to today: inherits parent)."""
     from fno.agents.harnesses import claude as claude_mod
+
+    # The "inherits verbatim" property holds for a COHERENT parent env: a
+    # daemon-carried foreign model var with no base URL now builds an explicit
+    # scrubbed env instead. Pin the model vars absent so this test is stable
+    # under a routed or poisoned invoking shell.
+    for var in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    for alias in ("OPUS", "SONNET", "HAIKU", "FABLE"):
+        monkeypatch.delenv(f"ANTHROPIC_DEFAULT_{alias}_MODEL", raising=False)
 
     captured: dict[str, object] = {}
 
@@ -651,8 +692,15 @@ def test_headless_receipt_resolves_remapped_model(
     # Clear ambient overrides so the alias-remap path is exercised
     # deterministically (this test process may itself run routed, with
     # ANTHROPIC_MODEL set as a global override that would otherwise win).
+    # The base URL makes the remap a REAL route: a foreign model var with no
+    # base URL is the incoherent inherited shape, which the seam strips so the
+    # child falls back to Anthropic's own tier (and the receipt then reports
+    # the alias - truthfully, because that is what serves).
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.2")
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic"
+    )
     captured: dict[str, object] = {}
 
     def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]

@@ -57,7 +57,7 @@ Two non-negotiable invariants:
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional, Sequence
 
 from fno.env_file import read_var_from_env_file
 
@@ -367,6 +367,122 @@ def check_spawn_tier_remap(
     if role and resolve_route(role, settings=settings, env=env):
         return
     raise TierRemapConflict(remap_conflict_message(*found))
+
+
+# The inherited-env carrier (x-4709): a long-lived background daemon stamps the
+# environment of the shell that started it into every session it spawns. When
+# that shell held a foreign vendor's model exports with no base URL, every
+# child asks Anthropic's endpoint for a model it does not serve and the whole
+# tier ERRORS rather than degrading - far from the cause, because no config
+# edit reaches a running daemon. The four spawn seams strip the vars below; a
+# real route (base URL + token + model as one unit) is never stripped because
+# the coherence question never fires under a foreign base URL.
+
+
+def base_url_is_anthropic(env: Optional[Mapping[str, str]] = None) -> bool:
+    """True when ANTHROPIC_BASE_URL is unset or names an anthropic.com host.
+
+    Under either, a foreign vendor's model id is sent to Anthropic's endpoint,
+    which has no model by that name, so the call errors rather than degrading.
+    Exact host or subdomain match; a bare ``*anthropic.com`` glob would also
+    match ``notanthropic.com`` (the same rule hooks/attest-model.sh applies).
+    """
+    if env is None:
+        env = os.environ
+    base = (env.get("ANTHROPIC_BASE_URL") or "").strip().lower()
+    if not base:
+        return True
+    host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    return host == "anthropic.com" or host.endswith(".anthropic.com")
+
+
+def incoherent_model_env(env: Optional[Mapping[str, str]] = None) -> tuple[tuple[str, str], ...]:
+    """Every ``(var, value)`` in :data:`MODEL_ENV_KEYS` naming a non-Anthropic
+    model while the endpoint is Anthropic's. Empty when coherent.
+
+    Returns Bedrock and Vertex runs empty: ``CLAUDE_CODE_USE_BEDROCK`` /
+    ``CLAUDE_CODE_USE_VERTEX`` serve Anthropic models under ids that do not
+    start with ``claude-`` (``us.anthropic.claude-...``) and leave
+    ``ANTHROPIC_BASE_URL`` unset, so the coherence question this asks does not
+    apply there. A foreign base URL also returns empty: the endpoint serves
+    those model ids, so a route is never stripped. Do not widen
+    :func:`tier_remap_conflict` instead - that answers "does this spawn's named
+    alias mean something else here" and its answer must stay a refusal; this
+    answers "does any inherited var name something this endpoint cannot serve"
+    and its answer is a repair. :func:`is_anthropic_model` is the shared half.
+    """
+    if env is None:
+        env = os.environ
+    for lane_flag in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+        if (env.get(lane_flag) or "").strip().lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return ()
+    if not base_url_is_anthropic(env):
+        return ()
+    return tuple(
+        (key, value)
+        for key in MODEL_ENV_KEYS
+        if (value := (env.get(key) or "").strip())
+        and not is_anthropic_model(value)
+    )
+
+
+def scrub_incoherent_model_env(
+    environ: Optional[dict[str, str]] = None,
+) -> tuple[str, ...]:
+    """Remove every incoherent model var from ``environ`` (default
+    ``os.environ``); return the names actually removed.
+
+    The dict substrate (bg / headless / wake). Pairs with
+    :func:`incoherent_model_env_unset_args` for the pane's argv substrate; both
+    read :func:`incoherent_model_env`, so the two shapes cannot drift on what
+    counts. A strip, never a refusal: a refusal at 3am kills an autonomous loop
+    over a condition the child cannot fix from inside itself, while a strip
+    restores correct behavior because a spawn with no model var uses the
+    account's own default.
+    """
+    target = os.environ if environ is None else environ
+    found = incoherent_model_env(target)
+    for key, _value in found:
+        target.pop(key, None)
+    return tuple(key for key, _value in found)
+
+
+def incoherent_model_env_unset_args(env: Optional[Mapping[str, str]] = None) -> list[str]:
+    """``env -u`` flag pairs that strip every incoherent model var, for a child
+    launched through an ``env`` argv (the pane substrate).
+
+    Same source as :func:`scrub_incoherent_model_env`, so the dict and argv
+    substrates cannot drift on which names count. ``env -u`` on an unset var is
+    a harmless no-op, so the argv is stable when the env is clean.
+    """
+    flags: list[str] = []
+    for key, _value in incoherent_model_env(env):
+        flags += ["-u", key]
+    return flags
+
+
+def incoherent_model_env_notice(dropped: Sequence[str]) -> str:
+    """The one stderr line, shared by every seam: names the dropped vars, the
+    cause, and both remedies (the settings.json pin and the daemon restart)."""
+    return (
+        "fno: dropped "
+        + ", ".join(dropped)
+        + " from this child's env: they name a non-Anthropic model while "
+        "ANTHROPIC_BASE_URL is unset or names an anthropic.com host, so the "
+        "child would ask Anthropic for a model it does not serve and every "
+        "call on that tier would error. The child falls back to its account's "
+        "own default. This env was inherited, usually from a long-lived "
+        "`claude` background daemon started from a shell that held those "
+        "exports; no config edit clears a running daemon. Pin the tier "
+        "defaults in ~/.claude/settings.json `env` (that wins over an "
+        "inherited value) or restart the daemon."
+    )
 
 
 # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB. Set by an operator (or a hardened shell) to

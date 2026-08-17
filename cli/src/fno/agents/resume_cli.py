@@ -300,6 +300,19 @@ def _default_wake_fn(
     signal this function itself does not have.
     """
     env = dict(os.environ)
+    # An incoherent inherited model env is the exact repro this seam exists
+    # for: a woken incarnation inherited the parent's foreign model name with
+    # no base URL and died on turn one behind a "woken" receipt. Strip
+    # unconditionally, BEFORE the route overlay, so a real route still
+    # re-supplies its own model vars and wins.
+    from fno.agents.model_routing import (
+        incoherent_model_env_notice,
+        scrub_incoherent_model_env,
+    )
+
+    dropped = scrub_incoherent_model_env(env)
+    if dropped:
+        print(incoherent_model_env_notice(dropped), file=sys.stderr)
     # Scrub only when there is something to restore, matching
     # bg_create/headless_create (harnesses/claude.py): a route-less row (the
     # common default-account case) keeps its ambient auth untouched rather

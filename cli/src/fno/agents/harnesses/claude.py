@@ -392,11 +392,29 @@ def headless_create(
     # is lossless; identity-only, never routing/auth. Constructing the env only
     # when an overlay or a marker is present preserves the no-overlay "inherit
     # parent byte-identical" path and its test.
+    from fno.agents.model_routing import (
+        incoherent_model_env,
+        incoherent_model_env_notice,
+        scrub_incoherent_model_env,
+    )
     from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
 
-    if account_env or route_env or any(m in os.environ for m in AMBIENT_IDENTITY_ENV):
+    # incoherent_model_env() joins the build condition: without it the
+    # no-overlay path leaves spawn_env None and the child inherits a poisoned
+    # model env verbatim. A coherent, overlay-free, marker-free call still
+    # passes None and inherits byte-identically (there is a test on that).
+    if (
+        account_env
+        or route_env
+        or any(m in os.environ for m in AMBIENT_IDENTITY_ENV)
+        or incoherent_model_env()
+    ):
         spawn_env = dict(os.environ)
         scrub_ambient_identity(spawn_env)
+        # Strip before the overlay below so a real route still wins.
+        dropped = scrub_incoherent_model_env(spawn_env)
+        if dropped:
+            print(incoherent_model_env_notice(dropped), file=sys.stderr)
         if account_env or route_env:
             from fno.agents.account_env import compose_worker_credentials
 
@@ -539,6 +557,18 @@ def bg_create(
     from fno.harness_identity import scrub_ambient_identity
 
     scrub_ambient_identity(spawn_env)
+    # An inherited model env naming a foreign vendor's model with no base URL
+    # (the daemon-carrier shape) errors the whole tier at spawn. Strip first,
+    # compose the account/route overlay after, so a real route still re-supplies
+    # its own model vars and wins.
+    from fno.agents.model_routing import (
+        incoherent_model_env_notice,
+        scrub_incoherent_model_env,
+    )
+
+    dropped = scrub_incoherent_model_env(spawn_env)
+    if dropped:
+        print(incoherent_model_env_notice(dropped), file=sys.stderr)
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not

@@ -19,9 +19,14 @@ from fno.agents.model_routing import (
     MODEL_ENV_KEYS,
     TIER_ALIASES,
     TierRemapConflict,
+    base_url_is_anthropic,
     check_spawn_tier_remap,
     emit_env_scrub_warning,
     env_scrub_warning,
+    incoherent_model_env,
+    incoherent_model_env_notice,
+    incoherent_model_env_unset_args,
+    scrub_incoherent_model_env,
 )
 from fno.agents.rust_runtime import (
     _refuse_inherited_tier_remap,
@@ -366,6 +371,106 @@ def test_emit_env_scrub_warning_prints_and_never_refuses(capsys):
     # A non-claude provider is silent, and neither case raises (never a refusal).
     emit_env_scrub_warning("codex", permission_pinned=True, env={ENV_SCRUB_VAR: "1"})
     assert capsys.readouterr().err == ""
+
+
+# ---- x-4709: strip an incoherent inherited model env at every spawn seam ----
+
+#: The operator's measured daemon-carried env: GLM names, no base URL.
+POISON_ENV = {
+    "ANTHROPIC_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+}
+
+
+def test_incoherent_model_env_returns_every_poisoned_var():
+    # Every offender, not the first: the measured carrier poisoned more than
+    # one var, and a repair that drops half of them ships the same bug on the
+    # tiers it missed.
+    assert dict(incoherent_model_env(POISON_ENV)) == POISON_ENV
+
+
+def test_a_real_route_is_never_stripped():
+    # A foreign base URL serves those model ids, so a composed route must reach
+    # the child unchanged (AC3). The route case never even enters the strip.
+    routed = {**POISON_ENV, "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"}
+    assert incoherent_model_env(routed) == ()
+    assert base_url_is_anthropic(routed) is False
+
+
+def test_a_pinned_anthropic_tier_is_coherent():
+    # Pinning a tier to a specific Anthropic model is a supported customization
+    # (the is_anthropic_model contract), not a conflict (AC5).
+    assert incoherent_model_env({"ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-1"}) == ()
+
+
+def test_bedrock_and_vertex_lanes_are_coherent():
+    # Those lanes serve Anthropic models under ids that do not start with
+    # "claude-" and leave the base URL unset, so the question does not apply
+    # (AC4). A pre-existing false positive on the single-var detector.
+    bedrock_env = {
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "ANTHROPIC_MODEL": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    }
+    assert incoherent_model_env(bedrock_env) == ()
+    assert incoherent_model_env({**bedrock_env, "CLAUDE_CODE_USE_VERTEX": "1"}) == ()
+    # An explicit off-word is not a lane opt-in.
+    off = {"CLAUDE_CODE_USE_BEDROCK": "0", **POISON_ENV}
+    assert dict(incoherent_model_env(off)) == POISON_ENV
+
+
+def test_a_lookalike_host_is_a_foreign_endpoint():
+    # notanthropic.com must not match the anthropic.com host rule (the
+    # substring trap): the endpoint serves the model, so nothing is dropped.
+    lookalike = {**POISON_ENV, "ANTHROPIC_BASE_URL": "https://notanthropic.com/api"}
+    assert incoherent_model_env(lookalike) == ()
+    assert base_url_is_anthropic(lookalike) is False
+
+
+def test_dict_scrub_and_argv_args_drop_the_same_names():
+    # Seam parity asserted on the resulting NAME SETS, not on both calling one
+    # helper: asserting shared plumbing pins the call, not the destination.
+    env = {**POISON_ENV, "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]"}
+    scrubbed = dict(env)
+    dropped_by_dict = scrub_incoherent_model_env(scrubbed)
+    argv = incoherent_model_env_unset_args(env)
+    dropped_by_argv = {name for i, name in enumerate(argv) if i % 2 == 1}
+    assert set(dropped_by_dict) == dropped_by_argv == {
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    }
+    assert all(flag == "-u" for i, flag in enumerate(argv) if i % 2 == 0)
+    assert not [k for k in dropped_by_dict if k in scrubbed]
+    # A coherent env scrubs nothing and builds a stable empty argv.
+    assert scrub_incoherent_model_env(dict(ZAI_ENV)) == ()
+    assert incoherent_model_env_unset_args(ZAI_ENV) == []
+
+
+def test_the_notice_names_each_dropped_var():
+    msg = incoherent_model_env_notice(["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+    for name in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+        assert name in msg
+    # Both remedies, so the line is actionable without a doc open.
+    assert "settings.json" in msg
+    assert "restart the daemon" in msg
+
+
+def test_hook_var_list_matches_model_env_keys():
+    # The var list lives in two languages (the hook cannot import Python
+    # without paying a subprocess at every SessionStart), so pin the hook's
+    # list to MODEL_ENV_KEYS: a future tier added to TIER_ALIASES without
+    # updating the hook fails here naming the missing var (AC7).
+    import re
+    from pathlib import Path
+
+    hook = Path(__file__).resolve().parents[3] / "hooks" / "attest-model.sh"
+    block = re.search(r"MODEL_ENV_VARS=\((.*?)\)", hook.read_text(), re.S)
+    assert block is not None, "hooks/attest-model.sh has no MODEL_ENV_VARS list"
+    hook_vars = set(re.findall(r"\b(ANTHROPIC_[A-Z_]+)\b", block.group(1)))
+    assert hook_vars == set(MODEL_ENV_KEYS), (
+        f"hook/model var drift: hook-only={sorted(hook_vars - set(MODEL_ENV_KEYS))} "
+        f"model-only={sorted(set(MODEL_ENV_KEYS) - hook_vars)}"
+    )
 
 
 if __name__ == "__main__":
