@@ -104,10 +104,17 @@ else
     "$TMP" > "$TMP/fno-stub"
   chmod +x "$TMP/fno-stub"
 
+  # A branch-checked scratch repo to emit from. The emitter refuses a detached
+  # HEAD (an empty branch field would mint a pre-branch-field event), and a CI
+  # checkout IS detached - $REPO_ROOT is not a place this emitter can run from.
+  EMITREPO="$TMP/emitrepo"
+  git init -q -b scratch/emit "$EMITREPO"
+  git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+
   emitter_stored_model() { # args: MODEL BASE -> echoes the stored model value
     local _m="$1" _b="$2"
     rm -f "$TMP/last-emit.txt"
-    (cd "$REPO_ROOT" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+    (cd "$EMITREPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
       ANTHROPIC_MODEL="$_m" ANTHROPIC_BASE_URL="$_b" FNO="$TMP/fno-stub" \
       bash "$EMITTER" code-review pass) >/dev/null 2>&1 || { echo "<error>"; return; }
     [[ -f "$TMP/last-emit.txt" ]] || { echo "<no-emit>"; return; }
@@ -170,7 +177,7 @@ else
     || fail "refused claim should store 'unobserved', stored '$got'"
 
   # And the receipt must not re-collapse what the payload separates.
-  receipt="$(cd "$REPO_ROOT" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  receipt="$(cd "$EMITREPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
     FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
   case "$receipt" in
     *"model=unobserved"*) fail "receipt calls an ABSENT claim 'unobserved': $receipt" ;;
