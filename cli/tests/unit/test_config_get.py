@@ -286,3 +286,24 @@ def test_get_reports_file_holding_legacy_spelling(
     assert f"source: {(tmp_path / 'proj' / '.fno' / 'config.toml')}" in r.stderr
     # The global's canonical 'none' was overridden by the project's legacy true.
     assert "overrides" in r.stderr
+
+
+def test_get_block_key_does_not_claim_one_decider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A block get merges leaves from several files; naming one decider for the
+    whole block would recreate the confusion this command exists to end."""
+    _pin_two_layers(
+        tmp_path,
+        monkeypatch,
+        project="[auto_merge]\nenabled = true\n",
+        global_="[auto_merge]\nmerge_strategy = \"squash\"\n",
+    )
+    from fno.cli import app
+
+    r = CliRunner().invoke(app, ["config", "get", "auto_merge"])
+    assert r.exit_code == 0
+    assert "mixed" in r.stderr
+    assert "overrides" not in r.stderr
+    # And the pointer suggests a leaf query.
+    assert "auto_merge.enabled" in r.stderr

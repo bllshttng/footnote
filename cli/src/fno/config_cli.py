@@ -527,8 +527,9 @@ def _report_deprecated_auto_merge() -> None:
     individually - the merged model cannot tell them apart, which is exactly
     the home-vs-project confusion the node exists to end.
     """
-    from fno.config import _candidate_paths, _load_raw
+    from fno.config import _candidate_paths, _global_settings_path, _load_raw
 
+    global_dir = _global_settings_path().parent
     for candidate in _candidate_paths():
         if not candidate.is_file():
             continue
@@ -545,6 +546,11 @@ def _report_deprecated_auto_merge() -> None:
             legacy = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
         if not (isinstance(legacy, dict) and "auto_merge" in legacy):
             continue
+        # Migration commands must target THE SAME FILE this warning names:
+        # `fno config set/unset` defaults to the global scope, so a project
+        # file needs --local or the operator edits the wrong file. The removal
+        # must also drop the legacy key, or the warning recurs forever.
+        scope_flag = "" if candidate.parent == global_dir else " --local"
         canonical = scope.get("auto_merge") if isinstance(scope, dict) else None
         if isinstance(canonical, dict) and "grant" in canonical:
             # Canonical wins in this file (`_alias_am_grant` refuses to fold), so
@@ -555,14 +561,16 @@ def _report_deprecated_auto_merge() -> None:
             typer.echo(
                 f"warn: {candidate} still sets the deprecated `dispatch.auto_merge`, "
                 "but a canonical `auto_merge.grant` in the same file masks it "
-                "(the file reads as the canonical value). Remove the legacy line."
+                "(the file reads as the canonical value). Remove the legacy line.\n"
+                f"      Migrate: fno config unset dispatch.auto_merge{scope_flag}"
             )
             continue
         reads_as = "dispatch" if legacy.get("auto_merge") is True else "none"
         typer.echo(
             f"warn: {candidate} sets the deprecated `dispatch.auto_merge`.\n"
             f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
-            f"      Migrate: fno config set auto_merge.grant {reads_as}"
+            f"      Migrate: fno config set auto_merge.grant {reads_as}{scope_flag} && "
+            f"fno config unset dispatch.auto_merge{scope_flag}"
         )
 
 
@@ -689,9 +697,18 @@ def get_cmd(
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    source = resolve_source(key)
-    if source is not None:
-        decider, overridden = source
+    # Provenance is per LEAF: a block get merges leaves from several files, so
+    # no single file "decided" it (project auto_merge.enabled + global
+    # auto_merge.merge_strategy both live in the one resolved block). Attributing
+    # the block to one file would re-create the home-vs-project confusion this
+    # command exists to end, just with the block as the lie.
+    is_leaf = not isinstance(node, (BaseModel, dict))
+    if is_leaf:
+        source = resolve_source(key)
+        if source is not None:
+            decider, overridden = source
+        else:
+            decider, overridden = None, []
     else:
         decider, overridden = None, []
 
@@ -714,9 +731,12 @@ def get_cmd(
         )
         return
 
-    source_line = f"source: {decider}" if decider else "source: default (no config file sets this key)"
-    if overridden:
-        source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
+    if is_leaf:
+        source_line = f"source: {decider}" if decider else "source: default (no config file sets this key)"
+        if overridden:
+            source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
+    else:
+        source_line = "source: mixed - a block merges leaves from several files; query a leaf (e.g. auto_merge.enabled) for its decider"
 
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())

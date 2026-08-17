@@ -74,3 +74,46 @@ def test_wrapped_shape_also_reported(monkeypatch, tmp_path):
     text = "\n".join(out)
     assert str(glob) in text
     assert '"dispatch"' in text
+
+
+def test_migration_removes_legacy_key_not_just_sets_canonical(monkeypatch, tmp_path):
+    """The command must drop dispatch.auto_merge too, or the warning recurs
+    forever; and it must carry the right scope flag for the file it names."""
+    _pin_global(monkeypatch, tmp_path, "[dispatch]\nauto_merge = true\n")
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    _report_deprecated_auto_merge()
+    text = "\n".join(out)
+    assert "fno config unset dispatch.auto_merge" in text
+
+
+def test_project_file_migration_carries_local_flag(monkeypatch, tmp_path):
+    """A project-local legacy key needs --local: `fno config set` defaults to
+    the global file, so a bare command would edit the wrong file."""
+    monkeypatch.delenv("FNO_CONFIG", raising=False)
+    monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+    proj = tmp_path / "proj" / ".fno"
+    proj.mkdir(parents=True)
+    (proj / "config.toml").write_text("[dispatch]\nauto_merge = true\n", encoding="utf-8")
+    glob = tmp_path / "elsewhere-config.toml"
+    glob.write_text("schema_version = 1\n", encoding="utf-8")
+
+    import fno.paths as paths_mod
+    from fno import config as config_mod
+
+    monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
+    monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    _report_deprecated_auto_merge()
+    text = "\n".join(out)
+    assert str(proj / "config.toml") in text
+    assert "--local" in text
+    assert "fno config unset dispatch.auto_merge --local" in text
