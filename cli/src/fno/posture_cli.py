@@ -52,13 +52,13 @@ POSTURE_KEYS: dict[str, dict[str, str]] = {
     # attended: a human is adjudicating. No autonomous merge, no autonomous drain.
     "attended": {
         "auto_merge.enabled": "false",
-        "dispatch.auto_merge": "false",
+        "auto_merge.grant": "none",
         "active_backlog.enabled": "false",
     },
     # autonomous: the fleet runs unattended. Merge authority armed, drain on.
     "autonomous": {
         "auto_merge.enabled": "true",
-        "dispatch.auto_merge": "true",
+        "auto_merge.grant": "dispatch",
         "active_backlog.enabled": "true",
     },
 }

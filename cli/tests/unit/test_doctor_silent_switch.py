@@ -22,13 +22,12 @@ def _fake_settings(
     active_backlog: bool = False,
     think_spawn: bool = False,
     auto_merge: bool = False,
-    dispatch_am: bool = False,
+    grant: str = "none",
 ) -> types.SimpleNamespace:
     return types.SimpleNamespace(
         active_backlog=types.SimpleNamespace(enabled=active_backlog),
         think_spawn=types.SimpleNamespace(enabled=think_spawn),
-        auto_merge=types.SimpleNamespace(enabled=auto_merge),
-        dispatch=types.SimpleNamespace(auto_merge=dispatch_am),
+        auto_merge=types.SimpleNamespace(enabled=auto_merge, grant=grant),
     )
 
 
@@ -90,22 +89,71 @@ def test_think_spawn_off_named_as_inaction(monkeypatch: pytest.MonkeyPatch) -> N
 def test_auto_merge_armed_named_as_irreversible(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_silent(
         monkeypatch,
-        settings=_fake_settings(auto_merge=True, dispatch_am=True),
+        settings=_fake_settings(auto_merge=True, grant="dispatch"),
         armed={"config": 2, "env-target-auto-merge": 1},
     )
     report = doctor._silent_switch_report()
     irreversible = [f for f in report["findings"] if f["direction"] == "irreversible"]
     switches = {f["switch"] for f in irreversible}
     assert "auto_merge.enabled" in switches
-    assert "dispatch.auto_merge" in switches
+    assert "auto_merge.grant" in switches
     assert "auto_merge_approved (worktree manifests)" in switches
     by_sw = {f["switch"]: f for f in irreversible}
     assert by_sw["auto_merge_approved (worktree manifests)"]["count"] == 3
     assert "2 config" in by_sw["auto_merge_approved (worktree manifests)"]["count_label"]
     assert "1 env-target-auto-merge" in by_sw["auto_merge_approved (worktree manifests)"]["count_label"]
-    # Every irreversible finding carries a disarm command.
+    # Every irreversible finding carries a disarm command (x-4be1: the grant
+    # disarms to the 'none' literal, not a bool).
     for f in irreversible:
-        assert "false" in f["command"]
+        assert f["command"].startswith("fno config set")
+
+
+def test_armed_unknown_manifests_name_stale_plugin_cache_as_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """x-4be1: an `unknown` source count is answerable. When the deployed
+    claude plugin cache is PROVEN stale, the armed-manifest finding carries the
+    cause and names `fno update`; any other cache verdict stays a bare count
+    (never guess an origin)."""
+    _patch_silent(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=True, grant="dispatch"),
+        armed={"unknown": 3},
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_plugin_cache_report",
+        lambda: {
+            "status": "stale",
+            "sha": "a8f3c5537ed55",
+            "installed_at": "2026-08-13T04:48:50.501Z",
+        },
+    )
+    report = doctor._silent_switch_report()
+    by_sw = {f["switch"]: f for f in report["findings"]}
+    finding = by_sw["auto_merge_approved (worktree manifests)"]
+    assert finding["cause"] == (
+        "deployed plugin cache is stale (a8f3c5537ed5, 2026-08-13); the "
+        "auto_merge_source writer landed later. Fix: fno update"
+    )
+
+
+def test_armed_unknown_manifests_no_cause_when_cache_not_proven_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh or unknown cache verdict must not fabricate a cause: a genuinely
+    pre-provenance manifest stays a bare `unknown` count."""
+    _patch_silent(
+        monkeypatch,
+        settings=_fake_settings(auto_merge=True, grant="dispatch"),
+        armed={"unknown": 3},
+    )
+    monkeypatch.setattr(
+        doctor, "_plugin_cache_report", lambda: {"status": "unknown", "sha": None}
+    )
+    report = doctor._silent_switch_report()
+    by_sw = {f["switch"]: f for f in report["findings"]}
+    assert "cause" not in by_sw["auto_merge_approved (worktree manifests)"]
 
 
 def test_armed_manifests_not_irreversible_when_kill_switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +165,7 @@ def test_armed_manifests_not_irreversible_when_kill_switch_off(monkeypatch: pyte
     """
     _patch_silent(
         monkeypatch,
-        settings=_fake_settings(active_backlog=True, think_spawn=True, auto_merge=False, dispatch_am=False),
+        settings=_fake_settings(active_backlog=True, think_spawn=True, auto_merge=False),
         armed=4,
     )
     report = doctor._silent_switch_report()
@@ -131,7 +179,7 @@ def test_armed_manifests_not_irreversible_when_kill_switch_off(monkeypatch: pyte
 def test_both_directions_when_drain_off_and_merge_armed(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_silent(
         monkeypatch,
-        settings=_fake_settings(active_backlog=False, auto_merge=True, dispatch_am=True),
+        settings=_fake_settings(active_backlog=False, auto_merge=True, grant="dispatch"),
         missions=2,
         armed=1,
     )
@@ -166,7 +214,7 @@ def test_doctor_names_drain_off_with_missions(monkeypatch: pytest.MonkeyPatch) -
     _stub_quiet_machine(monkeypatch)
     _patch_silent(
         monkeypatch,
-        settings=_fake_settings(active_backlog=False, think_spawn=False, auto_merge=True, dispatch_am=True),
+        settings=_fake_settings(active_backlog=False, think_spawn=False, auto_merge=True, grant="dispatch"),
         missions=5,
         armed=31,
     )
@@ -178,7 +226,7 @@ def test_doctor_names_drain_off_with_missions(monkeypatch: pytest.MonkeyPatch) -
     assert "think_spawn.enabled is OFF" in out
     # Both directions in one report.
     assert "auto_merge.enabled is ARMED" in out
-    assert "dispatch.auto_merge is ARMED" in out
+    assert "auto_merge.grant is ARMED" in out
     assert "31 manifest(s)" in out
     # Advisory: does not change the exit code.
     assert "up to date" in out or "status unknown" in out
