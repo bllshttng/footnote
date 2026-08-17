@@ -48,18 +48,6 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
             ProducerReach::Reachable,
         ),
         (
-            "fno pr coverage-check <n> (and the git-protection hook through it)",
-            "no-recompute read: the recompute shells the Rust producer at minutes \
-             while a PreToolUse hook has a 60s budget, and a killed hook emits no \
-             verdict at all",
-            ProducerReach::SafeDirection(
-                "one-directional by design: on a missing or stale row this DENIES \
-                 where `fno pr merge` may yet allow after recomputing. An empty \
-                 read is an answer and refuses. Recovery from a wrong deny is one \
-                 command; from a wrong allow it is a revert",
-            ),
-        ),
-        (
             "finalize auto-merge arm (coverage_satisfied_in_latest_event)",
             "reached only from a terminal-allow, which implies run_done already \
              ran this fire; a failed arm leaves a green reviewed PR for a human, \
