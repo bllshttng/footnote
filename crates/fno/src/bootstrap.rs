@@ -89,7 +89,19 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // of a different package) is re-verified before exec, so the "never run a
     // foreign fno" invariant still holds after the first bootstrap.
     if let Some((real, recorded_mtime)) = read_sentinel() {
-        if is_executable(&real) {
+        // `is_executable` answers false for a purely TRANSIENT reason too: an
+        // install in flight deletes and recreates this exact file, and it is
+        // absent for ~490ms. Concluding "uninstalled" from a single look is what
+        // turned one unlucky moment into the storm this whole change exists to
+        // stop, because the `else` arm DROPS THE SENTINEL. A dropped sentinel
+        // removes the fast path for the NEXT call too, so every subsequent
+        // process re-provisions, each with its own `--force`, re-breaking the
+        // tree for the others.
+        //
+        // So re-check on the same budget the verify uses. The cost lands only on
+        // a genuinely uninstalled wheel, where 3s precedes a multi-second
+        // reinstall and is not the expensive part.
+        if executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
             if file_mtime(&real) == Some(recorded_mtime) {
                 return Err(exec_real(&real, args)); // unchanged: already verified
             }
@@ -382,6 +394,29 @@ fn stderr_is_enotempty(stderr: &str) -> bool {
 /// Change one budget and change all of them.
 const VERIFY_ATTEMPTS: u32 = 15;
 const VERIFY_POLL: Duration = Duration::from_millis(200);
+
+/// True when `path` is executable now, or becomes executable within the budget.
+///
+/// The sentinel twin of [`install_verified_within`], and it exists for the same
+/// reason: the console script is deleted and recreated across an install, so a
+/// single look answers "gone" for a file that is about to be back. Reading that
+/// as an uninstall drops the sentinel, which costs every LATER process its fast
+/// path and starts the reinstall storm.
+///
+/// Falsifiable, not hopeful: a wheel that really was uninstalled stays absent
+/// through every pass and answers false, exactly as the single look did.
+fn executable_within(path: &Path, attempts: u32, poll: Duration) -> bool {
+    if is_executable(path) {
+        return true;
+    }
+    for _ in 0..attempts {
+        thread::sleep(poll);
+        if is_executable(path) {
+            return true;
+        }
+    }
+    false
+}
 
 /// [`install_verified`], retried on a disk RE-CHECK until it passes or the
 /// budget runs out.
@@ -1415,6 +1450,47 @@ mod tests {
         fs::write(&uv, script).unwrap();
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
         uv
+    }
+
+    #[test]
+    fn sentinel_survives_a_binary_that_is_only_transiently_absent() {
+        // The trigger for the storm, not just the refusal. A single look during
+        // the ~490ms window answers "gone", the caller drops the sentinel, and
+        // every LATER process loses its fast path and re-provisions with its own
+        // --force. Keeping the sentinel across a transient absence is what stops
+        // one unlucky moment from becoming a fleet-wide reinstall.
+        let root = env::temp_dir().join(format!("fno-sentwait-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let real = root.join("fno-py");
+
+        // Falsification: a single look fails right now, so a pass below is the
+        // wait doing work rather than the file having been there all along.
+        assert!(!is_executable(&real), "precondition: the binary is absent");
+
+        let late = real.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            fs::write(&late, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&late, fs::Permissions::from_mode(0o755)).unwrap();
+        });
+        assert!(
+            executable_within(&real, 15, Duration::from_millis(50)),
+            "a binary that comes back must keep its sentinel"
+        );
+        writer.join().unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_genuinely_uninstalled_wheel_still_answers_absent() {
+        // The other half, and the reason this is a re-check rather than a hope:
+        // a wheel that really is gone stays gone through every pass, so the
+        // sentinel is still dropped and the reprovision still happens.
+        let root = env::temp_dir().join(format!("fno-sentgone-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let missing = root.join("fno-py");
+        assert!(!executable_within(&missing, 3, Duration::from_millis(10)));
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
