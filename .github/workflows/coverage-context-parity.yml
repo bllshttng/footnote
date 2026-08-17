@@ -1,0 +1,40 @@
+name: coverage-context-parity
+
+# The parity guard for the merge-coverage strings: the `fno/review-coverage`
+# context and the `coverage-override` label are spelled independently by the
+# ruleset data, the Python and Rust publishers, the refresher workflow, and
+# the post-merge audit. A rename in any one surface keeps that surface's own
+# suite green while the required context waits forever. This minimal workflow
+# runs only scripts/ci/check-coverage-context-parity.sh, and only when one of
+# the surfaces (or the check itself) changes.
+on:
+  push:
+    branches: [main]
+    paths: &parity_paths
+      - cli/src/fno/pr/_reviews.py
+      - crates/fno-agents/src/loopcheck.rs
+      - scripts/ci/merge-ruleset.json
+      - scripts/ci/check-merge-coverage-audit.sh
+      - .github/workflows/review-coverage-gate.yml
+      - scripts/ci/check-coverage-context-parity.sh
+      - .github/workflows/coverage-context-parity.yml
+  pull_request:
+    paths: *parity_paths
+
+concurrency:
+  group: coverage-context-parity-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Coverage context and label parity
+        run: bash scripts/ci/check-coverage-context-parity.sh
