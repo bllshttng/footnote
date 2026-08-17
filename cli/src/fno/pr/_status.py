@@ -235,7 +235,9 @@ def _ready_blockers(
     blockers: list[str] = []
     if not green:
         blockers.append(f"ci_{verdict}")
-    if unresolved is None:
+    if unresolved is None or not isinstance(unresolved, int):
+        # None is the read's own "unknown"; a non-int is a contract violation.
+        # Both fail closed as unknown rather than TypeError or a silent pass.
         blockers.append("optional_reviews_unknown")
     elif unresolved > 0:
         blockers.append("optional_reviews_unresolved")
