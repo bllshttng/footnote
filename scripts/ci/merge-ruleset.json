@@ -1,0 +1,31 @@
+{
+  "name": "merge-coverage",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_status_checks": {
+          "do_not_enforce_on_create": false,
+          "contexts": ["fno/review-coverage", "stacked-base-guard"],
+          "strict": false
+        }
+      }
+    },
+    {
+      "type": "non_fast_forward"
+    }
+  ],
+  "bypass_actors": []
+}
