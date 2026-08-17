@@ -921,8 +921,10 @@ def discovery_address_matches(
     ``unknown`` is unproven, not absent, and an asleep session remains
     resumable. Address uniqueness therefore unions every enumerated identity;
     liveness decides the transport only after one recipient is selected.
+    The sweep takes the resolver-only lane: matching reads identity fields
+    alone, so per-session truth classification here is discarded cost.
     """
-    sessions = discover_live_sessions(registry_path=registry_path)
+    sessions = discover_live_sessions(registry_path=registry_path, classify_truth=False)
     return _exact_address_matches(token, sessions)
 
 
