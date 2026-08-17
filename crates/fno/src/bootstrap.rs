@@ -143,8 +143,25 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // metadata" from a probe that would pass a moment later. The `?` makes that
     // a hard exit rather than a fall-through, so a single-shot probe here is a
     // user-visible refusal, not a retry.
+    //
+    // The `is_executable` gate in front of it needs the same wait, or the guard
+    // below is decorative: during a `--force` the script is absent for ~490ms,
+    // a single look skips this whole arm, and control falls straight into
+    // another `--force` - the storm. But NOT unconditionally. This arm also
+    // runs on a box that never installed fno, and during the whole
+    // failure-stamp cooldown below, where a blind 3s is a per-call tax on
+    // exactly the paths the stamp exists to keep cheap. The bin DIRECTORY is
+    // the discriminator: it survives the rewrite that deletes the script inside
+    // it (docs/architecture/cli-lazy-imports.md), and it is absent on a box
+    // with no tool venv at all.
     if let Some(real) = resolve_via_uv_tool_dir() {
-        if is_executable(&real) {
+        let mid_rewrite_possible = real.parent().is_some_and(|bin| bin.is_dir());
+        let ready = if mid_rewrite_possible {
+            executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)
+        } else {
+            is_executable(&real)
+        };
+        if ready {
             verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)?;
             return Err(record_and_exec(&real, args));
         }
@@ -179,8 +196,14 @@ fn run(args: &[OsString]) -> BootResult<()> {
     );
     install_wheel(&uv, &source)?;
 
+    // Waited for the same reason the verify below is, and this gate runs FIRST:
+    // `install_verified_within` proved the script executable moments ago, so a
+    // miss here is another process's `--force` deleting it between the two
+    // looks. The else arm stamps, which refuses every call for
+    // FAILURE_COOLDOWN_SECS, so a single look is the most expensive miss in the
+    // function. No first-run tax: we just installed, so the venv is there.
     let real = match resolve_via_uv_tool_dir() {
-        Some(p) if is_executable(&p) => p,
+        Some(p) if executable_within(&p, VERIFY_ATTEMPTS, VERIFY_POLL) => p,
         candidate => {
             // Name the path we built, why we rejected it, and what we installed
             // from. Without those three facts the failure is unfalsifiable from
