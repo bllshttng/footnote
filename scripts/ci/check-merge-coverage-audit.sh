@@ -52,9 +52,18 @@ short() { printf '%s' "$1" | cut -c1-8; }
 # The latest state and description of the coverage context on one sha.
 # Empty state means absent - which the caller treats as a failure, so an API
 # hiccup can never read as a pass (fail closed, like everything else here).
+#
+# The COMBINED endpoint, never the status list. The list is newest-first with
+# one-second `updated_at` granularity, and jq's sort_by is stable, so
+# `sort_by(.updated_at) | last` returns the OLDEST member of a same-second
+# tie. A refresher posting failure and a publisher posting success within the
+# same second would read as failure and red main for a covered merge, with
+# the branch already gone and nothing able to repair it. The combined
+# endpoint returns exactly one entry per context, the latest, so there is no
+# tie to break.
 coverage_field() { # <sha> <jq-tail: .state or .description>
-  gh api "repos/:owner/:repo/commits/$1/statuses" \
-    --jq "[.[] | select(.context == \"$CTX\")] | sort_by(.updated_at) | last | $2 // empty" \
+  gh api "repos/:owner/:repo/commits/$1/status" \
+    --jq "[.statuses[] | select(.context == \"$CTX\")] | first | $2 // empty" \
     2>/dev/null || true
 }
 
