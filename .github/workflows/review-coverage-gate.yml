@@ -1,0 +1,109 @@
+name: review-coverage-gate
+
+# The CI-side refresher for the `fno/review-coverage` commit status (the
+# context the repo ruleset requires on merges to main).
+#
+# The green marker can only come from a machine that actually ran the review:
+# the enforced predicate is a head-pinned LOCAL attestation in events.jsonl,
+# which this workflow cannot see. So this job INVALIDATES, never certifies -
+# it never posts success on its own judgment, with one deliberate exception:
+# the `coverage-override` label, the 3am release valve, where the label event
+# itself is the human decision and the actor is recorded in the description.
+#
+# What fires when:
+#   synchronize - the head is new, so no local attestation can exist for it
+#     yet. Post failure "head moved; re-run the review verb at HEAD" so a
+#     previously-green status can never survive onto a commit nobody reviewed.
+#   labeled/unlabeled with `coverage-override` - the override arm: label
+#     present posts success naming the actor; withdrawn posts failure. Any
+#     other label is a no-op: re-posting failure would clobber a green marker
+#     a worker legitimately published on that same sha.
+#   opened/reopened/ready_for_review - no status change. The context starts
+#     absent, which a required-check reads as pending: exactly right for a
+#     PR no review verb has run on yet.
+#   workflow_dispatch - manual re-stamp; same invalidate-only stance.
+#
+# FORK PRs ARE SKIPPED, AND THAT IS ACCEPTED. A `pull_request` event from a
+# fork gets a read-only GITHUB_TOKEN whatever `permissions:` says, so a fork
+# PR can never post the context and can never be merged while the ruleset is
+# applied. This repo takes no external PRs; the `coverage-override` label is
+# the release valve if that ever changes and a fork contribution must land.
+# (Same trade as stacked-base-guard.yml, recorded here so the next person
+# does not discover it during an incident.)
+#
+# The local publishers - the stop-hook emitter, the standalone
+# `fno-agents review-coverage` verb, and `fno pr merge` - are what post
+# success. This workflow is the half they cannot do: reacting to pushes made
+# from somewhere other than the reviewing machine.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_dispatch:
+
+concurrency:
+  group: review-coverage-gate-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  statuses: write
+  pull-requests: read
+
+jobs:
+  refresh:
+    # Fork guard, same as stacked-base-guard: a read-only token cannot POST,
+    # and a skipped run is the honest outcome - not a red one it can never
+    # make green.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Invalidate or re-evaluate the coverage status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name || '' }}
+          ACTOR: ${{ github.actor }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -uo pipefail
+          ctx=fno/review-coverage
+          # A failed POST fails the step on purpose: a release valve that
+          # silently fails to open reads as open.
+          post() {
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+              -f state="$1" -f context="$ctx" -f description="$2" >/dev/null
+          }
+          case "$EVENT:$ACTION" in
+            pull_request:labeled)
+              if [ "$LABEL" = "coverage-override" ]; then
+                post success "coverage-override label applied by ${ACTOR}"
+                echo "override: posted success naming ${ACTOR}"
+              else
+                echo "label '${LABEL}' is not the override; no status change"
+              fi
+              ;;
+            pull_request:unlabeled)
+              if [ "$LABEL" = "coverage-override" ]; then
+                post failure "coverage-override withdrawn by ${ACTOR}; run the review verb at HEAD"
+                echo "override withdrawn: posted failure"
+              else
+                echo "label '${LABEL}' is not the override; no status change"
+              fi
+              ;;
+            pull_request:synchronize)
+              post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
+              echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+              ;;
+            workflow_dispatch:)
+              post failure "manual invalidate at ${HEAD_SHA:0:8}; run the review verb at HEAD"
+              echo "dispatch: invalidated at ${HEAD_SHA:0:8}"
+              ;;
+            *)
+              echo "$EVENT:$ACTION: no status change (invalidate-only)"
+              ;;
+          esac
