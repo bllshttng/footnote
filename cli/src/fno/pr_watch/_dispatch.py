@@ -81,6 +81,9 @@ class TickResult:
     quota_skip: bool = False
     quota_remaining: Optional[int] = None
     quota_reset: Optional[str] = None
+    # The preflight RAN but the budget was unreadable: the tick proceeded on
+    # an absent instrument rather than reading the absence as a low budget.
+    quota_unknown: bool = False
 
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
@@ -422,6 +425,10 @@ def tick(
     max_age_days: int = 14,
     # Retry cap (default matches _MAX_RETRIES; override with config.pr_watch.retries)
     max_retries: Optional[int] = None,
+    # GraphQL budget preflight (x-c12c): the dispatch pass spends gh pr view,
+    # which bills the shared per-user GraphQL pool by point cost.
+    graphql_remaining_fn: Optional[Callable] = None,
+    graphql_min_remaining: int = 200,
     # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
     # consulted here - the launchd activation coupling (x-e106: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
@@ -486,6 +493,9 @@ def tick(
     else:
         _read_tracked_states = _default_read_tracked_states
     _max_retries = max_retries if max_retries is not None else _MAX_RETRIES
+    _graphql_remaining = (
+        graphql_remaining_fn if graphql_remaining_fn is not None else _default_graphql_remaining
+    )
 
     holder = f"pr-watch:{os.getpid()}"
 
@@ -526,6 +536,8 @@ def tick(
             now_iso=now_iso,
             max_age_days=max_age_days,
             max_retries=_max_retries,
+            graphql_remaining_fn=_graphql_remaining,
+            graphql_min_remaining=graphql_min_remaining,
             holder=holder,
         )
     finally:
@@ -552,6 +564,8 @@ def _run_tick(
     now_iso,
     max_age_days,
     max_retries,
+    graphql_remaining_fn,
+    graphql_min_remaining,
     holder,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
@@ -654,6 +668,25 @@ def _run_tick(
 
     acted = 0
     skipped = 0
+
+    # GraphQL budget preflight. The dispatch pass below spends gh pr view,
+    # which bills the shared per-user GraphQL pool by point cost; with the
+    # bucket drained, those queries stall for their full timeout each. The
+    # rate_limit read costs nothing against any bucket. None (unreadable
+    # instrument) PROCEEDS: an absence is not evidence of a low budget.
+    # A skip persists nothing and emits no pr_watch_tick (AC9): this tick did
+    # not complete a sweep, so it must not mint liveness.
+    quota_remaining, quota_reset = graphql_remaining_fn()
+    quota_unknown = quota_remaining is None
+    if not quota_unknown and quota_remaining < graphql_min_remaining:
+        return TickResult(
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            quota_skip=True,
+            quota_remaining=quota_remaining,
+            quota_reset=quota_reset,
+        )
 
     set_tick_phase("dispatch")
     for cand in candidates:
@@ -928,10 +961,16 @@ def _run_tick(
         "normalized": normalization.normalized,
         "failed_count": len(failed),
         "failed": sorted(failed),
+        "sweep_failures": sweep_failures,
+        "listing_api": "rest",
     }
     _emit_tick_receipt(emit, receipt)
     return TickResult(
-        open_prs=open_prs, acted=acted, skipped=skipped, sweep_failures=sweep_failures
+        open_prs=open_prs,
+        acted=acted,
+        skipped=skipped,
+        sweep_failures=sweep_failures,
+        quota_unknown=quota_unknown,
     )
 
 
@@ -962,10 +1001,16 @@ def _default_discover(
     return discover_open_prs(entries, now_iso=now_iso, max_age_days=max_age_days)
 
 
-def _default_read_tracked_states(keys: set[str]) -> dict[str, str]:  # pragma: no cover
+def _default_read_tracked_states(keys: set[str]):  # pragma: no cover
     from fno.pr_watch._discover import read_tracked_pr_states
 
     return read_tracked_pr_states(keys)
+
+
+def _default_graphql_remaining() -> tuple[Optional[int], Optional[str]]:  # pragma: no cover
+    from fno.pr._rest import graphql_remaining
+
+    return graphql_remaining()
 
 
 def _tracked_states_from_reader(keys: set[str], reader: Callable) -> tuple[dict[str, str], int]:

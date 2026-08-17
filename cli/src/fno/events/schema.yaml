@@ -3185,6 +3185,9 @@ event_types:
         quota_reset:
           type: string
           description: "ISO timestamp of the GraphQL budget reset (quota_skip only)."
+        quota_unknown:
+          type: boolean
+          description: "The budget preflight ran but the instrument was unreadable; the tick proceeded rather than reading the absence as a low budget."
         pid:
           type: integer
           description: "OS pid of the tick process."

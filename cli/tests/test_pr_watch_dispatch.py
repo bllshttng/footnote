@@ -2273,3 +2273,134 @@ class TestTickRecordsAndDeadline:
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends[0]["outcome"] == "degraded"
         assert ends[0]["sweep_failures"] == 2
+
+
+# ---------------------------------------------------------------------------
+# GraphQL budget preflight (x-c12c wave 2)
+# ---------------------------------------------------------------------------
+
+
+class TestQuotaPreflight:
+    """AC5-HP/AC6-EDGE: read the shared GraphQL budget before spending it."""
+
+    def _tick_with_quota(self, tmp_path, quota, candidates=None):
+        from fno.pr_watch._dispatch import tick
+
+        deps = _make_tick_deps(
+            tmp_path,
+            candidates=candidates
+            or [_make_candidate(pr_number=1, repo_dir=tmp_path)],
+        )
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: quota,
+            graphql_min_remaining=200,
+        )
+        return result, deps
+
+    def test_low_budget_skips_dispatch_and_mints_no_tick(self, tmp_path):
+        """AC5-HP/AC9-EDGE: below the floor, no per-PR read fires, no
+        pr_watch_tick is emitted, and the skip carries count + reset."""
+        result, deps = self._tick_with_quota(tmp_path, (42, "2026-08-17T07:00:00Z"))
+
+        assert result.quota_skip is True
+        assert result.quota_remaining == 42
+        assert result.quota_reset == "2026-08-17T07:00:00Z"
+        assert deps["fired"] == [], "no headless fire may run on a skipped pass"
+        ticks = [e for e in deps["events"] if e["type"] == "pr_watch_tick"]
+        assert ticks == [], "a quota skip must not mint liveness"
+
+    def test_unreadable_budget_proceeds(self, tmp_path):
+        """AC6-EDGE: (None, None) is unknown, not zero - the tick runs."""
+        result, deps = self._tick_with_quota(tmp_path, (None, None))
+
+        assert result.quota_skip is False
+        assert result.quota_unknown is True
+        assert result.open_prs == 1
+        assert any(e["type"] == "pr_watch_tick" for e in deps["events"])
+
+    def test_healthy_budget_proceeds_normally(self, tmp_path):
+        result, deps = self._tick_with_quota(tmp_path, (4800, "2026-08-17T07:00:00Z"))
+        assert result.quota_skip is False
+        assert result.quota_unknown is False
+
+    def test_receipt_carries_sweep_failures_and_listing_api(self, tmp_path):
+        """The receipt names which code path produced it and how many repos
+        failed, so the event log alone answers without version inference."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 1),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+        )
+
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["listing_api"] == "rest"
+        assert receipt["sweep_failures"] == 1
+
+    def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
+        """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
+        outcome degraded, keys UNKNOWN - and a completed sweep still mints
+        pr_watch_tick carrying the failure count (AC9's no-tick list is
+        disabled/lock-held/quota-skip/timeout/error, not degraded)."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "UNKNOWN" for key in keys}, 1),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+        )
+        assert result.sweep_failures == 1
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["sweep_failures"] == 1

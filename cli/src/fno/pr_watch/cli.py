@@ -317,6 +317,7 @@ def tick() -> None:
                 now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 max_age_days=cfg.max_age_days,
                 max_retries=cfg.retries,
+                graphql_min_remaining=cfg.graphql_min_remaining,
                 enabled=tick_enabled,
             )
         except TickDeadlineExceeded:
@@ -434,6 +435,8 @@ def tick() -> None:
             if getattr(result, "quota_skip", False):
                 end_data["quota_remaining"] = result.quota_remaining
                 end_data["quota_reset"] = result.quota_reset
+            if getattr(result, "quota_unknown", False):
+                end_data["quota_unknown"] = True
         # The end record always fires - including on timeout and error - so the
         # attempt/end pair brackets every invocation; only outcome=ok/degraded
         # corresponds to a pr_watch_tick (the liveness watermark) having fired.
