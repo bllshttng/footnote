@@ -234,9 +234,13 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // once `install_verified` started refusing it, it stopped.
     //
     // Only this shape. A uv that itself failed (network, auth, disk) must not be
-    // cached: the operator fixes it and the next call must try again.
+    // cached: the operator fixes it and the next call must try again. That
+    // carve-out includes `install_verified`'s own uv-side refusal: an unreadable
+    // `uv tool dir` means the predicate could not ANSWER, not that the install is
+    // bad, and `decide_cached_failure` fails OPEN on every unreadable shape for
+    // the same reason - a negative cache must never wedge the bootstrap shut.
     if let Err(e) = install_wheel(&uv, &source) {
-        if e.msg.starts_with(UNVERIFIED_INSTALL_PREFIX) {
+        if e.msg.starts_with(UNVERIFIED_INSTALL_PREFIX) && !e.msg.contains(UV_DIR_UNREADABLE) {
             write_failure_stamp(&source, &e.msg);
         }
         return Err(e);
@@ -463,6 +467,13 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
 /// and is never cached, so the operator's fix takes effect on the next call.
 const UNVERIFIED_INSTALL_PREFIX: &str = "uv reported success but the install does not verify";
 
+/// The one `install_verified` refusal that means "the predicate could not ANSWER",
+/// not "the install is bad": `uv tool dir` was unreadable, so no tree was ever
+/// looked at. `run()` matches on it to keep that shape out of the failure stamp,
+/// so the text is a constant shared with the site that emits it rather than a
+/// literal repeated at both: the two must not drift.
+const UV_DIR_UNREADABLE: &str = "uv tool dir unreadable";
+
 /// How many times `install_wheel` may run uv before giving up. Three: one
 /// real attempt plus two retries, enough to absorb the measured intermittent
 /// race without turning a genuinely broken environment into a slow one.
@@ -607,7 +618,7 @@ fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(
 /// Pure and single-shot on purpose: [`install_verified_within`] owns the
 /// waiting, so this stays a predicate a test can drive against a fixed tree.
 fn install_verified(uv: &Path) -> Result<(), String> {
-    let tool_dir = uv_tool_dir(uv).ok_or("uv tool dir unreadable")?;
+    let tool_dir = uv_tool_dir(uv).ok_or(UV_DIR_UNREADABLE)?;
     let venv = tool_dir.join(TOOL_NAME);
     let entry = venv.join("bin").join("fno-py");
     if !entry.exists() {
