@@ -73,10 +73,13 @@ class Sidecar(BaseModel):
     # Lifecycle provenance (append-only phase records).
     sessions: list[dict] = Field(default_factory=list)
     # Agent provenance.
+    source_session_id: Optional[str] = None
     source_harness: Optional[str] = None
     source_cwd: Optional[str] = None
     source_node_id: Optional[str] = None
     source_plan_path: Optional[str] = None
+    # The cross-project inbox message that birthed this item (birth-dedup key).
+    source_inbox_msg: Optional[str] = None
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None

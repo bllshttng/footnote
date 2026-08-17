@@ -181,6 +181,27 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+def _display_entries(reader: str) -> list[dict]:
+    """Entries for read-only display/search surfaces (view, find, roadmap,
+    relatedness, provenance walks, the status summary).
+
+    These renders visualize the LOCAL store's full records - status, tags,
+    details, slug - which the five-field read contract does not carry, so they
+    read through the guarded metadata reader: byte-identical on the default
+    backend, an honest named refusal under an external selection (an external
+    tracker has its own UI; a stale local render is the leak the seam closes).
+    Mutation paths keep ``read_graph`` and get the shared external refusal
+    from task 4.2 instead.
+    """
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        return read_entries(reader)
+    except ExternalMetadataUnavailable as exc:
+        typer.echo(f"fno backlog: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+
 def _safe_stderr_warn(msg: str) -> None:
     """Write ``msg`` to stderr, swallowing a closed/broken stream.
 
@@ -254,10 +275,9 @@ def cmd_relatedness_build(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the built map as JSON."),
 ) -> None:
     """Build the relatedness sidecar from graph signals (read-only on the graph)."""
-    from fno.graph.store import read_graph
     from fno.graph import relatedness as _r
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("relatedness.build")
     if project is not None:
         entries = [e for e in entries if e.get("project") == project]
     mapping = _r.build_map(entries, k=top_k)
@@ -477,7 +497,6 @@ def cmd_epic_status(
     """One table over an epic's children: status, worker, PR, and an inline
     dispatch receipt (or breaker streak) so an idle/deferred child is never a
     silent blank. Refuses a non-container node by name."""
-    from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
     from fno.handoff.output import merge_json_flag, json_mode
 
@@ -485,7 +504,7 @@ def cmd_epic_status(
     # parent callbacks merge theirs into ctx.obj; merge this leaf's too.
     merge_json_flag(ctx, json_output)
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("epic.status")
     match = resolve_node(epic, entries)
     if match.kind != "exact" or not match.id:
         typer.echo(f"epic status: no node matches '{epic}'", err=True)
@@ -4516,6 +4535,57 @@ def cmd_board(
 
 # -- get --
 
+def _read_time_status_external(state: str, pr_number: Optional[int]) -> str:
+    """Read-time rung for the external get render - the same derivation the
+    live snapshot applies (never stored; x-cc90 keeps readiness derived)."""
+    if state == "closed":
+        return "done"
+    return "in_review" if pr_number else "ready"
+
+
+def _render_external_get(id: str, field: Optional[str]) -> None:
+    """`backlog get` under an external backend: exact-id tracker read plus the
+    sidecar, joined FOR DISPLAY ONLY (a render, not a stored convenience
+    record). Byte-compatibility binds the graph mode above, not this branch."""
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.types import NodeNotFound
+
+    try:
+        node = get_tracker().read(id)
+    except NodeNotFound:
+        typer.echo(
+            f"fno backlog get: no node matches '{id}' "
+            "(an external backend resolves exact ids; slug/bare-hex are "
+            "footnote-minted)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    sc = sidecar_store.load(id)
+    state = str(node.state.value)
+    joined: dict = {
+        "id": node.id,
+        "title": node.title,
+        "state": state,
+        "status": _read_time_status_external(state, sc.pr_number),
+        "parent": node.parent,
+        "blocked_by": list(node.blocked_by),
+    }
+    joined.update(sc.model_dump(exclude_unset=True, exclude={"id"}))
+    joined["_resolved_cwd"] = sc.cwd
+
+    if field:
+        value = joined.get(field)
+        if value is None:
+            typer.echo("null")
+        elif isinstance(value, (list, dict)):
+            typer.echo(json.dumps(value))
+        else:
+            typer.echo(value)
+        return
+    typer.echo(json.dumps(joined, indent=2))
+
+
 @cli.command("get")
 def cmd_get(
     id: str = typer.Argument(
@@ -4532,10 +4602,19 @@ def cmd_get(
     ),
 ) -> None:
     from fno.graph.fuzzy import resolve_node
+    from fno.tracker import active_backend_name
 
     # Pre-rename spelling; shell consumers outside this repo still pass it.
     if field == "_status":
         field = "status"
+
+    # Backend-neutral read: an external tracker resolves the OPAQUE id exactly
+    # (never through the local <prefix>-<hex> grammar) and displays the five
+    # tracker fields plus the sidecar. Slug/bare-hex tiers are footnote-minted
+    # metadata and refuse with the backend named rather than reporting absent.
+    if active_backend_name() != "graph":
+        _render_external_get(id, field)
+        return
 
     # Strict read: exit 1 stays "read cleanly, node absent"; an unreadable graph
     # gets GRAPH_UNREADABLE_EXIT so a caller cannot mistake it for an absent node.
@@ -4794,6 +4873,108 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
     return lines, summary
 
 
+def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
+    """`backlog provenance` under an external backend: exact-id tracker read
+    plus the sidecar provenance edges (the AC2 provenance path). Footnote-minted
+    extras the sidecar does not carry (``related``) render empty rather than
+    from stale local rows."""
+    import dataclasses
+
+    from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.types import NodeNotFound
+
+    try:
+        node = get_tracker().read(id)
+    except NodeNotFound:
+        typer.echo(f"No node matching '{id}' (external backend; exact ids)", err=True)
+        raise typer.Exit(code=1)
+    sc = sidecar_store.load(id)
+
+    def _title_of(nid: Optional[str]) -> Optional[str]:
+        if not nid:
+            return None
+        try:
+            return get_tracker().read(nid).title
+        except Exception:  # noqa: BLE001 - advisory title; absent is honest
+            return None
+
+    birth_result = (
+        resolve_transcript(sc.source_harness, sc.source_session_id,
+                           sc.source_cwd or sc.cwd,
+                           projects_root=_DEFAULT_PROJECTS_ROOT)
+        if sc.source_session_id else None
+    )
+    spawn_result = (
+        resolve_transcript(sc.spawned_by_harness, sc.spawned_by_session,
+                           sc.spawned_by_cwd,
+                           projects_root=_DEFAULT_PROJECTS_ROOT)
+        if sc.spawned_by_session else None
+    )
+
+    # Spawned walk over the sidecar origin index (source_node_id edges),
+    # titles joined from the tracker.
+    walk_rows: list = []
+    if spawned:
+        by_source: dict = {}
+        for nid, other in sidecar_store.load_all().items():
+            if other.source_node_id:
+                by_source.setdefault(other.source_node_id, []).append(nid)
+        seen = {node.id}
+        frontier = [node.id]
+        depth = 0
+        while frontier and depth < _SPAWNED_MAX_DEPTH:
+            depth += 1
+            nxt = []
+            for parent_id in frontier:
+                for child_id in sorted(by_source.get(parent_id, [])):
+                    if child_id in seen:
+                        continue
+                    seen.add(child_id)
+                    walk_rows.append((depth, child_id))
+                    nxt.append(child_id)
+            frontier = nxt
+
+    def _edge(label: str, result) -> dict:
+        if result is None:
+            return {"edge": label, "session_id": None, "resolved": False}
+        d = dataclasses.asdict(result)
+        d["edge"] = label
+        return d
+
+    if json_out:
+        output = {
+            "node_id": node.id,
+            "title": node.title,
+            "edges": [_edge("node_birth", birth_result), _edge("spawn", spawn_result)],
+            "sessions": sc.sessions,
+            "lifecycle": None,  # roster derives from sc.sessions; kept for shape parity
+            "source_node_id": sc.source_node_id,
+            "source_node_title": _title_of(sc.source_node_id),
+            "source_plan_path": sc.source_plan_path,
+            "related": [],  # footnote-minted; unavailable under an external backend
+        }
+        if spawned:
+            output["spawned"] = {
+                "nodes": [
+                    {"depth": d, "id": nid, "title": _title_of(nid)}
+                    for d, nid in walk_rows
+                ],
+                "cycle_detected": False,
+                "truncated_at_depth": None,
+            }
+        typer.echo(json.dumps(output, indent=2))
+        return
+    typer.echo(f"provenance for {node.id}: {node.title or ''}")
+    typer.echo(f"  node_birth: {sc.source_session_id or '(none)'}")
+    typer.echo(f"  spawn: {sc.spawned_by_session or '(none)'}")
+    typer.echo(f"  sessions: {len(sc.sessions)} row(s)")
+    if spawned:
+        for d, nid in walk_rows:
+            typer.echo(f"  spawned d{d}: {nid} ({_title_of(nid) or ''})")
+
+
 @cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
@@ -4821,6 +5002,11 @@ def cmd_provenance(
     """
     from fno.graph.fuzzy import resolve_node
     from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        _render_external_provenance(id, spawned, json_out)
+        return
 
     # Strict read for the same reason cmd_get uses it: a wedged graph must not
     # read as "No node matching", which asserts the node is absent.
@@ -5211,6 +5397,9 @@ def cmd_session_add(
                 return
             added = status == "added"
         else:
+            # session add is a mutation verb: local-store resolution, guarded
+            # against external backends by the shared refusal (task 4.2), not
+            # the display-reader seam.
             match = resolve_node(node, read_graph(_graph_path()))
             if match.kind != "exact":
                 typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
@@ -5287,10 +5476,8 @@ def cmd_view() -> None:
 
     from fno.graph._constants import GRAPH_HTML
     from fno.graph.render_html import render_graph_html
-    from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
-    render_graph_html(entries, GRAPH_HTML)
+    render_graph_html(_display_entries("view"), GRAPH_HTML)
     typer.echo(str(GRAPH_HTML))
 
     if os.environ.get("FNO_NO_OPEN") == "1":
@@ -5380,8 +5567,7 @@ def cmd_roadmap(
         )
         raise typer.Exit(code=1)
 
-    entries = read_graph(_graph_path())
-    md = render_public_roadmap_md(entries, resolved_project)
+    md = render_public_roadmap_md(_display_entries("roadmap"), resolved_project)
 
     if out:
         Path(os.path.expanduser(out)).write_text(md)
@@ -5499,7 +5685,7 @@ def cmd_status(
         typer.echo(json.dumps(_build_live_snapshot(), indent=2))
         return
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("status.summary")
 
     if not entries:
         typer.echo("No graph entries found. Run /megawalk vision.md to generate a roadmap.")
@@ -10571,9 +10757,8 @@ def cmd_find(
     """
     from fno.graph.fuzzy import resolve_id, resolve_node, search_entries
     from fno.graph.slug import format_handle
-    from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("find")
     q = (query or "").strip()
 
     def _resolve_against(pool: list[dict]) -> list[dict]:

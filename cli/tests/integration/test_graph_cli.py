@@ -50,6 +50,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
     # Also patch the store module's imported names
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    # Seam readers (sidecar projection, guarded metadata/display reads)
+    # resolve through paths.graph_json at call time; pin the resolver too.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
 
 
@@ -596,7 +599,9 @@ class _SnapshotFakeTracker:
             return self._TrackerCandidate(
                 id=id, title="Closed blocker", state=self._TrackerState.closed
             )
-        raise KeyError(id)
+        from fno.tracker.types import NodeNotFound
+
+        raise NodeNotFound(id)
 
     def list_open(self):
         T, S = self._TrackerCandidate, self._TrackerState
@@ -2473,3 +2478,113 @@ def test_reconcile_rollup_preserves_an_existing_cost(tmp_graph, tmp_path, monkey
     assert node["cost_usd"] == 9.99  # prior stamp preserved, not 11.99
     assert node["cost_sessions"] == [{"session_id": "pre", "cost_usd": 9.99}]
     assert node["points"] == 3  # non-cost rollup still applied
+
+
+class _GetFakeTracker(_SnapshotFakeTracker):
+    """Extends the snapshot fake: read() answers the open sentinels too."""
+
+    def read(self, id):
+        if id == "EXT-1":
+            T, S = self._TrackerCandidate, self._TrackerState
+            return T(id=id, title="Free work", state=S.open, blocked_by=["EXT-done"])
+        return super().read(id)
+
+
+def test_get_external_reads_tracker_and_sidecar_sentinels(
+    tmp_graph, tmp_path, monkeypatch
+):
+    """AC2-HP (display path): `backlog get` under an external backend resolves
+    the OPAQUE id exactly (no prefix-hex grammar), renders the five tracker
+    fields plus sidecar sentinels, derives status at read time, and never
+    returns the contradictory graph values."""
+    tmp_graph.write_text(
+        json.dumps({"entries": [{
+            "id": "EXT-1", "title": "graph-title-sentinel",
+            "cwd": "/graph-cwd-sentinel", "pr_number": 999,
+        }]}),
+        encoding="utf-8",
+    )
+    sidecars = tmp_path / "sidecars"
+    sidecars.mkdir()
+    (sidecars / "EXT-1.json").write_text(
+        json.dumps({"id": "EXT-1", "cwd": "/external-cwd", "pr_number": 7}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _GetFakeTracker())
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_graph)
+    import fno.tracker.sidecar as sidecar_store
+
+    monkeypatch.setattr(sidecar_store, "sidecar_path",
+                        lambda i: sidecars / f"{i}.json")
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    r = _invoke("backlog", "get", "EXT-1")
+    assert r.exit_code == 0, r.output
+    doc = json.loads(r.output)
+    assert doc["title"] == "Free work"  # tracker sentinel, not graph-title-sentinel
+    assert doc["cwd"] == "/external-cwd"
+    assert doc["pr_number"] == 7
+    assert doc["state"] == "open"
+    assert doc["status"] == "in_review"  # read-time derivation from pr evidence
+    assert doc["_resolved_cwd"] == "/external-cwd"
+    # Field mode reads through the same halves.
+    r = _invoke("backlog", "get", "EXT-1", "--field", "cwd")
+    assert r.exit_code == 0 and r.output.strip() == "/external-cwd"
+    # A local-grammar spelling never resolves externally (dash-free so typer
+    # does not read it as a flag).
+    r = _invoke("backlog", "get", "1")
+    assert r.exit_code == 1
+
+
+def test_provenance_external_reads_sidecar_edges(
+    tmp_graph, tmp_path, monkeypatch
+):
+    """AC2-HP (provenance path): `backlog provenance` under an external backend
+    reads birth/spawn edges from the sidecar, joins the origin title from the
+    tracker, and never reports the graph file's rows."""
+    tmp_graph.write_text(
+        json.dumps({"entries": [{
+            "id": "EXT-1", "source_session_id": "graph-sess",
+            "sessions": [{"phase": "graph-only"}],
+        }]}),
+        encoding="utf-8",
+    )
+    sidecars = tmp_path / "sidecars"
+    sidecars.mkdir()
+    (sidecars / "EXT-1.json").write_text(
+        json.dumps({"id": "EXT-1", "source_session_id": "ext-sess",
+                    "source_harness": "claude",
+                    "sessions": [{"phase": "do", "session_id": "ext-sess"}],
+                    "source_node_id": "EXT-done"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _GetFakeTracker())
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_graph)
+    import fno.tracker.sidecar as sidecar_store
+
+    monkeypatch.setattr(sidecar_store, "sidecar_path",
+                        lambda i: sidecars / f"{i}.json")
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    r = _invoke("backlog", "provenance", "EXT-1", "--json")
+    assert r.exit_code == 0, r.output
+    doc = json.loads(r.output)
+    assert doc["node_id"] == "EXT-1"
+    assert doc["title"] == "Free work"
+    assert doc["sessions"] == [{"phase": "do", "session_id": "ext-sess"}]
+    assert doc["source_node_id"] == "EXT-done"
+    assert doc["source_node_title"] == "Closed blocker"
+
+
+def test_local_store_displays_refuse_cleanly_under_external(tmp_path, monkeypatch):
+    """Display renders of the LOCAL store's full records (view, find) refuse
+    with the backend named under an external selection - never a stale render."""
+    absent = tmp_path / "absent.json"
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
+    monkeypatch.setattr("fno.paths.graph_json", lambda: absent)
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    for verb_args in (("view",), ("find", "anything")):
+        r = _invoke("backlog", *verb_args)
+        assert r.exit_code == 2, (verb_args, r.output)
+        assert "external" in r.output
