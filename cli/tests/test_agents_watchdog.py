@@ -155,6 +155,45 @@ def test_wake_age_ceiling_buckets_old_rows_as_stale_not_wake():
     assert outcome == "reported"
 
 
+def test_deliverable_reaps_regardless_of_age():
+    # King ruling 2026-08-17: the deliverable read outranks the age ceiling.
+    # A row whose node is done with its PR merged reaps at any age; age
+    # decides what to do with an UNKNOWN row, never a finished one.
+    rows = [Row("e65d5fff-0000", "t-xd214-mail-raw-onto-rpc", "blocked",
+                "x-d214", "/canonical")]
+    [v] = _run(
+        rows,
+        {"e65d5fff-0000": _facts("blocked mid turn", age_min=87852)},
+        nodes={"x-d214": {"status": "done", "pr_url": "https://github.com/pull/891"}},
+    )
+    assert v.verdict == REAP
+    assert "node x-d214 done" in v.basis
+
+
+def test_no_deliverable_ages_into_stale():
+    # x-35cc reads status idea: no deliverable, so the ceiling is the test.
+    rows = [Row("ab12cd34-0000", "t-x35cc", "stopped", "x-35cc", "/tmp")]
+    [v] = _run(rows, {"ab12cd34-0000": _facts("stopped mid turn", age_min=61 * 1440)},
+               nodes={"x-35cc": {"status": "idea"}})
+    assert v.verdict == STALE
+
+
+def test_ledger_join_finds_nodes_for_manifest_less_rows(monkeypatch, tmp_path):
+    # A worker that ran in the canonical checkout has no manifest of its own;
+    # the execution ledger's machine-written (sessions -> node) row is its
+    # recorded identity. The ``t-`` shorthand name stays untrusted: the node's
+    # dash is stripped in it, so the slug boundary is unknowable.
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [
+        {"title": "x-d214", "sessions": ["e65d5fff-8ba4-46d4-b2df-f19b2eb832f1"]},
+    ]}))
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
+    nodes = watchdog._ledger_nodes()
+    assert nodes["e65d5fff-8ba4-46d4-b2df-f19b2eb832f1"] == "x-d214"
+
+
 def test_no_parseable_evidence_never_wakes():
     # A tail with no parseable timestamp is the "basis no-evidence" row the
     # king caught marked wake: absence of evidence must never reach an action.

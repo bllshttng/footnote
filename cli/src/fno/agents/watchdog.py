@@ -389,10 +389,42 @@ def _record_text(e: dict) -> str:
     return " ".join(" ".join(parts).split())
 
 
+def _ledger_nodes() -> dict[str, str]:
+    """``{claude session id -> node id}`` from the execution ledger.
+
+    A worker that ran in the CANONICAL checkout has no worktree manifest of
+    its own (king ruling 2026-08-17: its deliverable must still reap), and
+    the operator fleet's ``t-`` shorthand names are ambiguous (the node's
+    dash is stripped, so the slug boundary is unknowable - the name-join trap
+    in its exact measured form). The ledger is machine-written recorded
+    identity: each execution entry names its node and the claude sessions
+    that ran it. A miss degrades to no node, which condemns nothing."""
+    from fno import paths
+
+    try:
+        entries = json.loads(
+            paths.ledger_json().read_text(encoding="utf-8")
+        ).get("entries", [])
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return {}
+    out: dict[str, str] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        node = str(e.get("title") or "")
+        if not node:
+            continue
+        for sid in e.get("sessions") or []:
+            if sid:
+                out[str(sid)] = node
+    return out
+
+
 def fleet_rows() -> tuple[list[Row], list[str]]:
     """Enumerate the fleet from ``claude agents --json --all`` joined to the
-    registry for recorded identity. Node identity comes from the worktree
-    MANIFEST (runtime-recorded), never from a name regex."""
+    registry for recorded identity. Node identity is the worktree MANIFEST
+    first (runtime-recorded), then the execution LEDGER for rows with no
+    manifest of their own - both machine-written. Never a name regex."""
     from fno.agents.harnesses.claude import claude_agents_rows
     from fno.agents.registry import load_registry
     from fno.recovery import _node_id_from_worktree
@@ -411,17 +443,23 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
                 by_sid[str(sid)] = entry
     except Exception:  # noqa: BLE001 - registry read miss degrades to claude rows
         by_sid = {}
+    ledger_nodes: dict[str, str] = {}
     out: list[Row] = []
     for r in raw:
         sid = str(r.get("sessionId") or r.get("id") or "")
         if not sid:
             continue
         entry = by_sid.get(sid)
+        name = str(getattr(entry, "name", None) or r.get("name") or sid)
         cwd = str(r.get("cwd") or getattr(entry, "cwd", "") or "")
         node = _node_id_from_worktree(cwd) if cwd else None
+        if node is None:
+            if not ledger_nodes:
+                ledger_nodes = _ledger_nodes()
+            node = ledger_nodes.get(sid)
         out.append(Row(
             row_id=sid,
-            name=str(getattr(entry, "name", None) or r.get("name") or sid),
+            name=name,
             state=str(r.get("state") or ""),
             node=node,
             cwd=cwd,
