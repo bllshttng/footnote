@@ -171,13 +171,13 @@ The built-in `zai` provider already routes the background (haiku) tier to the ch
 
 ## Inherited env and the daemon carrier
 
-A long-lived background daemon (`claude --bg` supervision) holds a copy of the environment of the shell that started it and re-stamps it into every session it spawns. If that shell held a foreign vendor's model exports with no base URL, every child asks Anthropic's endpoint for a model it does not serve, and the whole tier ERRORS rather than degrading. No config edit reaches a running daemon; only a restart or a settings pin does.
+A long-lived background daemon holds a copy of the env of its first shell. It re-stamps that copy into every session it spawns. A shell with foreign model exports and no base URL poisons every child. Each child asks Anthropic for a model it does not serve. The whole tier errors rather than degrading. No config edit reaches a running daemon. Only a restart or a settings pin does.
 
-`~/.claude/settings.json` `env` wins over an inherited value. That is the durable pin, and it is the only fix that works without terminating live sessions. The current Anthropic ids to pin: `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`, `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5`.
+`~/.claude/settings.json` `env` wins over an inherited value. That is the durable pin. It is the only fix that spares live sessions. The current Anthropic ids to pin: `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`, `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5`.
 
-**The naming trap.** There is no Haiku 4.7. The current lineup is Haiku 4.5, with Sonnet, Opus and Fable at 5. The zai provider's `haiku_model` IS `glm-4.7`, and that number does not transfer to an Anthropic id. Guessing `claude-haiku-4-7` fails exactly the way the GLM names do.
+**The naming trap.** There is no Haiku 4.7. The current lineup is Haiku 4.5, with Sonnet, Opus and Fable at 5. The zai provider's `haiku_model` IS `glm-4.7`. That number does not transfer to an Anthropic id. Guessing `claude-haiku-4-7` fails exactly the way the GLM names do.
 
-The code side of the same defense: `incoherent_model_env` (`cli/src/fno/agents/model_routing.py`) names every model var that carries a non-Anthropic id while the endpoint is Anthropic's, and the four spawn seams that copy the parent env (`bg_create`, `headless_create`, `_default_wake_fn`, `_mesh_env_wrapper`) strip those vars before composing any route overlay, printing one stderr line per strip. A real route is never stripped: a foreign base URL serves those model ids, so the predicate returns empty. A pre-warmed spare session started by the daemon itself is beyond a spawn-time scrub (the process already exists); the settings pin is what covers that case. The SessionStart detector (`hooks/attest-model.sh`) warns over the same five vars, bails out on Bedrock/Vertex lanes, and a parity test pins its var list to `MODEL_ENV_KEYS` so a new tier cannot land in one list and not the other.
+The code side of the same defense: `incoherent_model_env` (`cli/src/fno/agents/model_routing.py`) names every offending model var. An offending var carries a non-Anthropic id while the endpoint is Anthropic's. The substrate seams that copy the parent env strip those vars before any route overlay. Those seams are `bg_create`, `headless_create`, `_default_wake_fn`, and `_mesh_env_wrapper`. Each strip prints one stderr line. The Rust exec seam scrubs `os.environ` before the compiled client takes a bg/headless spawn. That binary hands the child the environment verbatim. A real route is never stripped. A foreign base URL serves those model ids, so the predicate returns empty. When the daemon itself pre-warms a spare session, a spawn-time scrub cannot reach it: the process already exists. The settings pin covers that case. The SessionStart detector (`hooks/attest-model.sh`) warns over the same five vars. It bails out on Bedrock/Vertex lanes. A parity test pins its var list to `MODEL_ENV_KEYS`. A new tier cannot land in one list and not the other.
 
 ## Scope and deferrals
 
@@ -185,9 +185,7 @@ Wires native per-spawn routing for the claude lane (Anthropic-protocol providers
 
 ## Sigma panel routes
 
-`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer.
-Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles.
-At the measured 50–60K tokens per preamble, routing all six agents costs roughly 300–360K tokens before review work; use whole-session routing when the full panel should share one model.
+`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer. Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles. At the measured 50–60K tokens per preamble, routing all six agents costs roughly 300–360K tokens before review work; use whole-session routing when the full panel should share one model.
 
 ```yaml
 config:
