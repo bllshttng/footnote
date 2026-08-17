@@ -61,20 +61,22 @@ case "$RECEIPT" in
   *) fail "receipt lacks branch=feature/x-e601: $RECEIPT" ;;
 esac
 
-# 2. Detached HEAD: the literal "HEAD" names no branch, so the field is empty
-#    in the payload and the receipt says detached. An empty field is the
-#    pre-branch-field shape, which consumers admit on exact head equality
-#    only - recording the string "HEAD" would invent a branch nobody can match.
+# 2. Detached HEAD: the literal "HEAD" names no branch, and an empty branch
+#    field is byte-identical to the pre-branch-field backlog - a live emit
+#    would mint a fresh legacy member that no later carry can scope. So the
+#    emitter refuses: nonzero exit, no event, and the reason names the shape.
 git -C "$REPO" checkout -q --detach
 rm -f "$TMP/last-emit.txt"
 RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
   FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
-got="$(stored '.branch')"
-[[ "$got" == "" ]] && pass "detached HEAD stores an empty branch" \
-  || fail "detached HEAD branch: want empty, got '$got'"
+RECEIPT_RC=$?
+[[ $RECEIPT_RC -ne 0 ]] && pass "detached HEAD refuses to emit" \
+  || fail "detached HEAD emitted anyway (exit $RECEIPT_RC)"
+[[ ! -f "$TMP/last-emit.txt" ]] && pass "detached HEAD writes no event" \
+  || fail "detached HEAD wrote an event: $(stored '.branch')"
 case "$RECEIPT" in
-  *"branch=detached"*) pass "receipt says detached rather than naming HEAD" ;;
-  *) fail "receipt lacks branch=detached: $RECEIPT" ;;
+  *"detached HEAD names no PR branch"*) pass "refusal names the shape" ;;
+  *) fail "refusal lacks the reason: $RECEIPT" ;;
 esac
 
 # 3. The pre-existing contract is intact: head_sha pins the repo HEAD and the
@@ -91,6 +93,22 @@ got="$(stored '.reviewer')"
 got="$(stored '.verdict')"
 [[ "$got" == "pass" ]] && pass "payload verdict round-trips" \
   || fail "payload verdict: want pass, got '$got'"
+
+# 4. A reviewer worktree branch (git refuses two worktrees on one branch)
+#    tracking the PR branch upstream: the payload records the UPSTREAM short
+#    name - what GitHub reports as headRefName - not the local worktree name.
+#    The local name would never equal the PR's branch, so the post-rebase
+#    carry would die on the branch arm over a pass that belongs here.
+git -C "$REPO" remote add origin "$TMP/origin.git"
+git -C "$REPO" update-ref refs/remotes/origin/feature/x-e601 "$HEAD_SHA"
+git -C "$REPO" checkout -q -b wt/r-1
+git -C "$REPO" branch --set-upstream-to=origin/feature/x-e601 wt/r-1 >/dev/null 2>&1
+rm -f "$TMP/last-emit.txt"
+emit
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "worktree branch records its upstream PR branch" \
+  || fail "worktree branch: want feature/x-e601 (upstream), got '$got'"
 
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"
