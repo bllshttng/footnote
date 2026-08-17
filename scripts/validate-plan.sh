@@ -657,6 +657,112 @@ if [[ -f "$PLAN_DIR" ]]; then
 fi
 
 # -------------------------------------------------------------------
+# Check 6b-bis: Consolidation block (step 2d gate, plan x-3bd3)
+# -------------------------------------------------------------------
+# A blueprint MUST record exactly one consolidation outcome in frontmatter:
+# absorb | append | proceed_alone, with a non-empty reason for every id
+# listed. This is a positive marker, not an absence check - the gate passes
+# only on a string the real outcome produces. It cannot live in skill prose
+# alone: a direct `fno` call or a non-claude worker skips the skill layer and
+# would ship green. Missing block, empty block, or out-of-enum outcome is an
+# ERROR, never a warn.
+check_consolidation_file() {
+    local file="$1"
+    local label="$2"
+    local block=""
+    # Same two-stage extraction as check_kill_criteria_file: top-level
+    # frontmatter first, then the consolidation: block up to the next
+    # top-level key.
+    block=$(awk '
+        /^---/ { c++; if (c==2) exit; next }
+        c==1 { print }
+    ' "$file" | awk '
+        /^consolidation:/ { in_block=1; next }
+        in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
+        in_block { print }
+    ')
+
+    if [[ -z "$block" ]]; then
+        error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone); silence is not an outcome"
+        return 1
+    fi
+
+    local outcome
+    outcome=$(printf '%s\n' "$block" | awk '
+        /^[[:space:]]*outcome:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*outcome:[[:space:]]*/, "", line)
+            gsub(/^["'"'"']|["'"'"']$/, "", line)
+            print line
+            exit
+        }')
+    if [[ -z "$outcome" ]]; then
+        error "$label: consolidation block present but has no outcome: line (expected absorb | append | proceed_alone)"
+    elif [[ "$outcome" != "absorb" && "$outcome" != "append" && "$outcome" != "proceed_alone" ]]; then
+        error "$label: consolidation outcome \`${outcome}\` is not in the enum (absorb | append | proceed_alone)"
+    fi
+
+    # Walk the id lists: absorbed / appended_to / proceed_alone_against. Each
+    # `- id:` entry must carry a non-empty reason a later reader can check.
+    local entries
+    entries=$(printf '%s\n' "$block" | awk '
+        function flush() { if (sec != "" && cur != "") printf "%s\037%s\037%s\n", sec, cur, rsn }
+        /^[[:space:]]*(absorbed|appended_to|proceed_alone_against):/ {
+            flush(); cur=""; rsn=""
+            sec=$0
+            sub(/^[[:space:]]*/, "", sec)
+            sub(/:.*/, "", sec)
+            next
+        }
+        sec != "" && /^[[:space:]]*-[[:space:]]+id:/ {
+            flush()
+            cur=$0
+            sub(/^[[:space:]]*-[[:space:]]+id:[[:space:]]*/, "", cur)
+            gsub(/^["'"'"']|["'"'"']$/, "", cur)
+            rsn=""
+            next
+        }
+        sec != "" && cur != "" && /^[[:space:]]*reason:/ {
+            rsn=$0
+            sub(/^[[:space:]]*reason:[[:space:]]*/, "", rsn)
+            gsub(/^["'"'"']|["'"'"']$/, "", rsn)
+            next
+        }
+        END { flush() }
+    ')
+
+    local absorb_count=0 append_count=0
+    while IFS=$'\037' read -r sec entry_id entry_reason; do
+        [[ -n "$sec" ]] || continue
+        if [[ -z "$entry_id" ]]; then
+            error "$label: consolidation section \`${sec}\` has an entry with no id"
+            continue
+        fi
+        if [[ -z "$entry_reason" ]]; then
+            error "$label: consolidation entry \`${entry_id}\` (${sec}) has an empty reason - the recorded decision must be checkable by a later reader"
+        fi
+        [[ "$sec" == "absorbed" ]] && absorb_count=$((absorb_count + 1))
+        [[ "$sec" == "appended_to" ]] && append_count=$((append_count + 1))
+    done <<< "$entries"
+
+    # An outcome that records no decision is an empty block wearing a label.
+    if [[ "$outcome" == "absorb" && "$absorb_count" -eq 0 ]]; then
+        error "$label: consolidation outcome is absorb but the absorbed: list is empty"
+    fi
+    if [[ "$outcome" == "append" && "$append_count" -eq 0 ]]; then
+        error "$label: consolidation outcome is append but the appended_to: list is empty"
+    fi
+
+    if [[ $ERRORS -eq 0 ]]; then
+        ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate)"
+    fi
+}
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_consolidation_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+fi
+
+# -------------------------------------------------------------------
 # Check 6c: Wave section headers (parity with Execution Strategy YAML)
 # -------------------------------------------------------------------
 echo ""
