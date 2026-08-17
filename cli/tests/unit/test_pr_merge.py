@@ -138,6 +138,11 @@ def enabled(monkeypatch, tmp_path):
         lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    # No 3am valve by default. The gate reads the override label on every
+    # verdict, and an unstubbed read is a real `gh pr view` per merge case.
+    monkeypatch.setattr(
+        "fno.pr._reviews._override_label_actor", lambda pr, repo, r: (False, None)
+    )
     # The merge's server receipt is best-effort; hermetic tests stub the
     # publisher so no real gh spawn rides along with every merge case.
     monkeypatch.setattr(

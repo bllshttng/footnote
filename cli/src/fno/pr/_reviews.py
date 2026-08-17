@@ -626,44 +626,45 @@ def publish_coverage_status(
             return False, "no PR head to publish a status on"
 
         runner: Runner = run
-        # Override first (AC5): a labelled PR publishes success naming the
-        # label and its actor, legible in the PR timeline and the audit.
-        overridden, actor = _override_label_actor(pr_number, gh_dir, runner)
-        if overridden:
-            state, description = (
-                "success",
-                f"{COVERAGE_OVERRIDE_LABEL} label applied by "
-                f"{actor or 'unknown actor'}",
+        verdict, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+            pr_number, gh_dir, recompute=False
+        )
+        if verdict == _coverage_gate.COVERED and note.startswith(
+            _coverage_gate.OVERRIDE_NOTE_PREFIX
+        ):
+            # Override first (AC5): a labelled PR publishes success naming the
+            # label and its actor, legible in the PR timeline and the audit.
+            # The gate read the label - the publisher does not read it a second
+            # time, so the status it stamps and the verdict the merge enforces
+            # cannot disagree about the valve.
+            head = covered_head or head
+            state = "success"
+            description = note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :]
+        elif verdict == _coverage_gate.COVERED and covered_head:
+            # POST on the head the row pins, not one the caller guessed
+            # at: the verdict describes that sha and no other.
+            head = covered_head
+            count = _best_effort_reviewed_count(pr_number, gh_dir)
+            state = "success"
+            description = (
+                f"covered: {count} reviewed at {head[:8]}"
+                if count
+                else f"covered at {head[:8]}"
             )
+        elif verdict == _coverage_gate.COVERED:
+            # No review lane configured: the merge gate does not apply.
+            # Say so on the status instead of reading as a pass on
+            # nothing.
+            state = "success"
+            description = "no review lane configured; merge ungated"
         else:
-            verdict, refusal, covered_head, note = _coverage_gate.coverage_verdict(
-                pr_number, gh_dir, recompute=False
+            state = "failure"
+            line = (
+                _coverage_gate.refusal_line(refusal, note)
+                if verdict == _coverage_gate.REFUSED
+                else (note or "coverage verdict unavailable")
             )
-            if verdict == _coverage_gate.COVERED and covered_head:
-                # POST on the head the row pins, not one the caller guessed
-                # at: the verdict describes that sha and no other.
-                head = covered_head
-                count = _best_effort_reviewed_count(pr_number, gh_dir)
-                state = "success"
-                description = (
-                    f"covered: {count} reviewed at {head[:8]}"
-                    if count
-                    else f"covered at {head[:8]}"
-                )
-            elif verdict == _coverage_gate.COVERED:
-                # No review lane configured: the merge gate does not apply.
-                # Say so on the status instead of reading as a pass on
-                # nothing.
-                state = "success"
-                description = "no review lane configured; merge ungated"
-            else:
-                state = "failure"
-                line = (
-                    _coverage_gate.refusal_line(refusal, note)
-                    if verdict == _coverage_gate.REFUSED
-                    else (note or "coverage verdict unavailable")
-                )
-                description = _truncate_description(line)
+            description = _truncate_description(line)
 
         res = runner(
             [

@@ -30,6 +30,10 @@ never that the instrument looked and found nothing. An empty read is an
 answer - nothing has attested this head - and it REFUSES. Only a failed head
 fetch or a raised events read reaches ``UNANSWERED``, and both carry a note
 naming the probe that died.
+
+The one deliberate bypass is the ``coverage-override`` label: it answers
+COVERED with a note carrying ``OVERRIDE_NOTE_PREFIX``, so a caller can always
+tell a merge that was reviewed from a merge that was waived.
 """
 from __future__ import annotations
 
@@ -42,6 +46,42 @@ from fno.pr import _merge
 COVERED = 0
 REFUSED = 3
 UNANSWERED = 4
+
+# The 3am release valve, read in the ONE predicate so it opens on every
+# surface the docs point at. `docs/best-practices.md` and
+# `docs/troubleshooting.md` both tell the operator to route merges through
+# `fno pr merge` and name the `coverage-override` label as the only way past
+# an uncovered head. Read it anywhere but here and that is false: the gate
+# refuses at step 2a, the publisher's override branch is never reached, and
+# the only path through is the raw `gh` the same docs forbid.
+#
+# The prefix is the caller's discriminator. An overridden COVERED is a merge
+# that landed on the valve, never a merge that was reviewed, and a receipt
+# that cannot tell the two apart is a receipt that lies.
+OVERRIDE_NOTE_PREFIX = "override: "
+
+
+def _override_note(pr_number: int, repo: str) -> str:
+    """The override note when the PR carries the label, else ``""``.
+
+    ``_reviews`` owns the label reader (one reader, name-matched, never a grep
+    over the raw label JSON). Every failure inside it degrades to "no label":
+    an unreadable label state must not open the valve, because the recovery
+    from a wrong refusal is one command and the recovery from a wrong merge is
+    a revert.
+    """
+    try:
+        from fno.pr import _reviews
+
+        held, actor = _reviews._override_label_actor(pr_number, repo, _reviews.run)
+        if not held:
+            return ""
+        return (
+            f"{OVERRIDE_NOTE_PREFIX}{_reviews.COVERAGE_OVERRIDE_LABEL} "
+            f"label applied by {actor or 'unknown actor'}"
+        )
+    except Exception:  # noqa: BLE001 - an unreadable label is not an override
+        return ""
 
 
 def coverage_verdict(
@@ -69,6 +109,15 @@ def coverage_verdict(
     head: Optional[str] = _merge._pr_head_oid(pr_number, repo)
     if head is None:
         return UNANSWERED, "", "", "pr head fetch failed"
+
+    # The valve, checked before the events read so an overridden PR skips the
+    # recompute entirely, and before the attestation branch so the refusal it
+    # would have built never runs. It returns the live head as the pin, so
+    # `--match-head-commit` still refuses a push that races the merge: an
+    # override waives the review, never the TOCTOU.
+    override = _override_note(pr_number, repo)
+    if override:
+        return COVERED, "", head, override
 
     code_review_required = _merge._code_review_attestation_required(repo, pr_number)
     if recompute:

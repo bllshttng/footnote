@@ -1213,6 +1213,16 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
         return 2
 
+    if note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX):
+        # A waived merge says so on its own receipt. A covered merge and an
+        # overridden one both exit 0, and a receipt that cannot tell them apart
+        # is how a 3am override disappears from the record.
+        print(
+            "coverage waived: "
+            + note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :],
+            file=sys.stderr,
+        )
+
     # covered_head (from the gate) pins the merge so a racing push after the
     # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The
     # staleness check inside the gate already refused a current mismatch; this

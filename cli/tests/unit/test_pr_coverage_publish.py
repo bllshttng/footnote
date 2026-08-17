@@ -140,18 +140,34 @@ def test_an_unanswered_probe_posts_the_note_as_failure(hermetic):
     assert fields["description"] == "pr head fetch failed"
 
 
-def test_the_override_label_wins_before_the_verdict(hermetic, monkeypatch):
+def test_the_override_arrives_through_the_verdict_not_a_second_label_read(
+    hermetic, monkeypatch
+):
+    """The gate owns the label read; the publisher stamps what it was told.
+
+    A publisher that read the label itself would be a second reader of one
+    fact, free to disagree with the gate whose verdict it certifies.
+    """
     runner, verdict_box = hermetic
-    monkeypatch.setattr(
-        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
+
+    def boom(*_a, **_k):  # the publisher must not read the label at all
+        raise AssertionError("publisher read the override label a second time")
+
+    monkeypatch.setattr(_reviews, "_override_label_actor", boom)
+    verdict_box["return"] = (
+        _coverage_gate.COVERED,
+        "",
+        ROW_HEAD,
+        _coverage_gate.OVERRIDE_NOTE_PREFIX
+        + "coverage-override label applied by jane",
     )
-    verdict_box["return"] = (_coverage_gate.REFUSED, "0 reviewed", "", "")
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
     fields = _fields(_posts(runner)[0])
     assert fields["state"] == "success"
-    assert "coverage-override" in fields["description"]
-    assert "jane" in fields["description"]
+    # The audit matches this description by its `coverage-override*` prefix,
+    # so the note's own discriminator must not survive into the status.
+    assert fields["description"] == "coverage-override label applied by jane"
 
 
 def test_no_resolvable_head_never_posts(hermetic, monkeypatch):
