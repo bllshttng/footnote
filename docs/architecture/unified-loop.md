@@ -246,7 +246,11 @@ The reachable merge paths it governs:
 | `fno pr merge` (direct CLI) | reads `review_coverage`; zero/unknown/stale refuses (only when `auto_merge.enabled`) |
 | reconcile (telemetry) | a zero-coverage out-of-band merge emits `gate_escape{zero-coverage}` even with no bots configured |
 | `fno pr status` | reports the `review_coverage` field (advisory) |
-| `gh pr merge` (raw GitHub) | not footnote-gated; the human is the authority on a non-auto-merge repo |
+| `gh pr merge`, the web button, raw REST, the auto-merge queue | the server refuses an uncovered head once the merge ruleset is applied; the verdict is published as the `fno/review-coverage` status from the same source |
+
+The verdict is also published where GitHub can see it: the stop hook, the standalone `fno-agents review-coverage` verb, and a covered `fno pr merge` POST it as the `fno/review-coverage` commit status on the PR head, computed from the same predicate the merge gate enforces.
+`review-coverage-gate.yml` refreshes the status on the events only GitHub sees: a push invalidates the head, and the `coverage-override` label arms or withdraws the release valve, naming its actor.
+`apply-merge-ruleset.sh` makes `fno/review-coverage` and `stacked-base-guard` required on the default branch with an empty bypass list, so every client path is refused by GitHub itself rather than by advice; `merge-coverage-audit.yml` fails the next push to main if the live ruleset drifts from the committed data or a merge lands without the covered marker.
 
 One source also has to mean one *location*.
 
@@ -287,16 +291,17 @@ Coverage of the eight reachable merge paths, stated honestly rather than implied
 | a PR update, via `.github/workflows/stacked-base-guard.yml` | checked for same-repo PRs; blocks only once marked a required status check. Fork PRs are skipped: their `GITHUB_TOKEN` cannot post the status |
 | GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |
 | an agent-run bare `gh pr merge`, via `hooks/git-protection.py` | checked, denies before the two-factor path so the merge-gate override cannot buy past it |
-| the GitHub web / mobile merge button | NOT covered until the context is marked required; reachable from no code here |
-| a human's `gh pr merge` in a plain terminal, or an unwired harness | NOT covered until the context is marked required |
+| the GitHub web / mobile merge button | checked once the ruleset is applied: both contexts are required, so the button refuses an uncovered head |
+| a human's `gh pr merge` in a plain terminal, or an unwired harness | checked once the ruleset is applied: the required `fno/review-coverage` context refuses an uncovered head |
 
 The hook was nearly left unwired, on the argument that a guard over one of the ways a human runs a command invites the belief that the command is guarded.
 That reasoning assumed a single harness and a mostly-human population; it is wired on both `hooks/hooks.json` and `hooks/codex-hooks.json`, and most merges here are agents running gh through a tool call.
 It also already gated `gh pr merge` with its own two-factor check, so omitting lineage would have made that gate the incomplete one.
 The residual hole is a human typing gh in a terminal, which only the required status context closes.
 
-Marking the `stacked-base-guard` context required is a repository-settings action; no code in this repo can take it, and this repo commits no branch-protection or ruleset config.
-Until someone does, the workflow reports and does not block.
+The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`, which makes both `stacked-base-guard` and `fno/review-coverage` required on the default branch with an empty bypass list.
+Applying it is a deliberate operator step (`--apply`, run once after a PR has proven a green status on its own head); until it is applied, the workflows report and do not block.
+`merge-coverage-audit.yml` re-checks the live ruleset on every push to main, so deleting or weakening it in the GitHub UI fails the next push rather than passing silently.
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.
 The `guard` job therefore skips fork PRs outright rather than running and failing on the POST, which would have hung a permanently red check on every external contribution.
 Marking it required while fork PRs are accepted blocks every one of them permanently, waiting on a context no run can produce, so the setting is safe only on a repo that takes no fork PRs; covering forks needs a privileged second workflow, which is a security decision this PR does not make.
