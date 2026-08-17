@@ -2921,7 +2921,10 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "@codex review",
         reply_handle: "@chatgpt-codex-connector",
         usage_markers: &["usage limits for code reviews", "codex usage limits"],
-        clean_pass_markers: &["didn't find any major issues", "didn\u{2019}t find any major issues"],
+        clean_pass_markers: &[
+            "didn't find any major issues",
+            "didn\u{2019}t find any major issues",
+        ],
         nudgeable: true,
     },
     BotProfile {
@@ -4178,8 +4181,7 @@ pub fn classify_coverage(
                     // must land on the pessimistic verdict.
                     if refused {
                         (CoverageVerdict::Refused, String::new(), None)
-                    } else if let Some((sha, fresh)) =
-                        clean_pass_review(comments, login, freshness)
+                    } else if let Some((sha, fresh)) = clean_pass_review(comments, login, freshness)
                     {
                         (
                             if fresh.counts() {
