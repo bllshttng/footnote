@@ -1141,7 +1141,8 @@ def _uv_retry_sh(cmd: list[str]) -> str:
     Any other failure exits immediately with uv's own code, uv's stderr
     re-printed verbatim. Bounded at ``_UV_INSTALL_ATTEMPTS``. Success is
     accepted only via a positive marker - the ``fno-py`` console script plus
-    shipped bytecode under the tool venv - never the exit code alone.
+    shipped bytecode under the tool venv - never the exit code alone, and only
+    after the same bounded re-check ``_await_binary`` spends on the same file.
 
     This lives as a shell string (not a Python loop) because the Unix install
     path execs it: uv must be free to replace the venv this interpreter may
@@ -1158,14 +1159,27 @@ def _uv_retry_sh(cmd: list[str]) -> str:
         '[ -n "$__td" ] && [ -x "$__td/fno/bin/fno-py" ] && '
         '[ -n "$(find "$__td/fno/lib" -name "*.pyc" -print -quit 2>/dev/null)" ]'
     )
+    # The same wait `_await_binary` spends, on the verify that runs BEFORE it.
+    # uv exits before its own artifacts settle (the console script is absent for
+    # ~490ms across an install), so a single-shot verify here refuses a good
+    # install, and its `exit 1` short-circuits the whole chain: no marker write,
+    # no agent refresh, `_await_binary` never reached. RE-CHECKED rather than
+    # slept blind, so a genuinely broken install still fails with the same words.
+    # POSIX sh only. 15 * 0.2s = 3s, the budget every provisioning path spends.
+    verify_fns = (
+        '__fno_verify() { ' + verify + '; }; '
+        '__fno_verify_within() { __vn=0; while :; do __fno_verify && return 0; '
+        '__vn=$((__vn+1)); [ "$__vn" -gt 15 ] && return 1; sleep 0.2; done; }; '
+    )
     return (
+        f'{verify_fns}'
         f'__n=0; __e=$(mktemp) || exit 1; '
         f'while :; do __n=$((__n+1)); '
         f'if {c} 2>"$__e"; then rm -f "$__e"; '
         # break, not exit 0: callers chain `&& marker-write && refresh` after
         # this snippet, and an exit here would skip both on every success.
-        f'if {verify}; then break; '
-        f'else echo "fno: uv exited 0 but the install does not verify '
+        f'if __fno_verify_within; then break; '
+        f'else echo "fno: uv exited 0 but the install does not verify after waiting 3s '
         f'(no fno-py script or no shipped bytecode under the tool venv)" >&2; exit 1; fi; '
         f'else __rc=$?; cat "$__e" >&2; '
         # __sig is the signature verdict for THIS attempt. It gates the race

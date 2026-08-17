@@ -89,7 +89,19 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // of a different package) is re-verified before exec, so the "never run a
     // foreign fno" invariant still holds after the first bootstrap.
     if let Some((real, recorded_mtime)) = read_sentinel() {
-        if is_executable(&real) {
+        // `is_executable` answers false for a purely TRANSIENT reason too: an
+        // install in flight deletes and recreates this exact file, and it is
+        // absent for ~490ms. Concluding "uninstalled" from a single look is what
+        // turned one unlucky moment into the storm this whole change exists to
+        // stop, because the `else` arm DROPS THE SENTINEL. A dropped sentinel
+        // removes the fast path for the NEXT call too, so every subsequent
+        // process re-provisions, each with its own `--force`, re-breaking the
+        // tree for the others.
+        //
+        // So re-check on the same budget the verify uses. The cost lands only on
+        // a genuinely uninstalled wheel, where 3s precedes a multi-second
+        // reinstall and is not the expensive part.
+        if executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
             if file_mtime(&real) == Some(recorded_mtime) {
                 return Err(exec_real(&real, args)); // unchanged: already verified
             }
@@ -323,7 +335,7 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         let _ = std::io::stderr().write_all(&out.stderr);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if out.status.success() {
-            return match install_verified(uv) {
+            return match install_verified_within(uv, VERIFY_ATTEMPTS, VERIFY_POLL) {
                 Ok(()) => Ok(()),
                 Err(m) => Err(BootErr::new(
                     1,
@@ -370,9 +382,83 @@ fn stderr_is_enotempty(stderr: &str) -> bool {
     stderr.contains("Directory not empty") && stderr.contains("os error 66")
 }
 
+/// Ceiling and poll interval for [`install_verified_within`].
+///
+/// 15 * 200ms = 3s, deliberately the SAME budget every other provisioning path
+/// spends on the same file: `_uv_retry_sh` and `_await_binary` in
+/// `cli/src/fno/update.py`, `uv_install_verifies_within` in
+/// `.claude-plugin/postinstall.sh`, and the same function in
+/// `scripts/install/fno.sh`. Rust, emitted POSIX sh, and bash cannot share an
+/// implementation across those boundaries, so they share the numbers, and
+/// `tests/ci/test_uv_install_verify_wait.sh` reads all of them and fails on drift.
+/// Change one budget and change all of them.
+const VERIFY_ATTEMPTS: u32 = 15;
+const VERIFY_POLL: Duration = Duration::from_millis(200);
+
+/// True when `path` is executable now, or becomes executable within the budget.
+///
+/// The sentinel twin of [`install_verified_within`], and it exists for the same
+/// reason: the console script is deleted and recreated across an install, so a
+/// single look answers "gone" for a file that is about to be back. Reading that
+/// as an uninstall drops the sentinel, which costs every LATER process its fast
+/// path and starts the reinstall storm.
+///
+/// Falsifiable, not hopeful: a wheel that really was uninstalled stays absent
+/// through every pass and answers false, exactly as the single look did.
+fn executable_within(path: &Path, attempts: u32, poll: Duration) -> bool {
+    if is_executable(path) {
+        return true;
+    }
+    for _ in 0..attempts {
+        thread::sleep(poll);
+        if is_executable(path) {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`install_verified`], retried on a disk RE-CHECK until it passes or the
+/// budget runs out.
+///
+/// Why this exists: uv exits before its own artifacts settle. The console
+/// script `<tools>/fno/bin/fno-py` is deleted and recreated across an install,
+/// and `docs/architecture/cli-lazy-imports.md` measured it absent for ~490ms,
+/// with the gap closing only ~40ms before uv exited on an idle machine. A
+/// verify firing the instant uv returns therefore races the install it is
+/// verifying and reports the script missing while it is about to appear. That
+/// is the whole bug: `fno` refused every verb, ran a full reinstall each time,
+/// and told the operator the install did not verify.
+///
+/// `update.py` was given a bounded wait for exactly this race. This is that
+/// remedy reaching the second provisioning path, which never got one.
+///
+/// This is NOT the sleep-retry the doc rejects. That rejection is about waiting
+/// on an ABSENT module in the hope it appears; the doc draws the line itself,
+/// at whether the disk is re-checked. This re-runs the full predicate every
+/// pass and returns the moment it passes, so a genuinely broken install still
+/// fails, with the same message it always did plus what we waited.
+fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(), String> {
+    let mut last = install_verified(uv);
+    for _ in 0..attempts {
+        if last.is_ok() {
+            return last;
+        }
+        thread::sleep(poll);
+        last = install_verified(uv);
+    }
+    last.map_err(|m| {
+        let waited = poll.as_millis() * u128::from(attempts);
+        format!("{m} (still absent after waiting {waited}ms for uv's own artifact)")
+    })
+}
+
 /// Confirm the install with markers only a real provisioned venv produces:
 /// the `fno-py` console script AND shipped bytecode under its lib tree. A
 /// zero exit from uv proves nothing about what landed.
+///
+/// Pure and single-shot on purpose: [`install_verified_within`] owns the
+/// waiting, so this stays a predicate a test can drive against a fixed tree.
 fn install_verified(uv: &Path) -> Result<(), String> {
     let tool_dir = uv_tool_dir(uv).ok_or("uv tool dir unreadable")?;
     let venv = tool_dir.join(TOOL_NAME);
@@ -1349,6 +1435,136 @@ mod tests {
         assert!(e.msg.contains("does not verify"), "{}", e.msg);
         assert!(e.msg.contains("no compiled bytecode"), "{}", e.msg);
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A fake `uv` that only answers `tool dir`, pointing at `tool_dir`.
+    fn uv_reporting_tool_dir(root: &Path, tool_dir: &Path) -> PathBuf {
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') echo '{}'; exit 0;;\n\
+             esac; exit 64\n",
+            tool_dir.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+        uv
+    }
+
+    #[test]
+    fn sentinel_survives_a_binary_that_is_only_transiently_absent() {
+        // The trigger for the storm, not just the refusal. A single look during
+        // the ~490ms window answers "gone", the caller drops the sentinel, and
+        // every LATER process loses its fast path and re-provisions with its own
+        // --force. Keeping the sentinel across a transient absence is what stops
+        // one unlucky moment from becoming a fleet-wide reinstall.
+        let root = env::temp_dir().join(format!("fno-sentwait-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let real = root.join("fno-py");
+
+        // Falsification: a single look fails right now, so a pass below is the
+        // wait doing work rather than the file having been there all along.
+        assert!(!is_executable(&real), "precondition: the binary is absent");
+
+        let late = real.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            fs::write(&late, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&late, fs::Permissions::from_mode(0o755)).unwrap();
+        });
+        assert!(
+            executable_within(&real, 15, Duration::from_millis(50)),
+            "a binary that comes back must keep its sentinel"
+        );
+        writer.join().unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_genuinely_uninstalled_wheel_still_answers_absent() {
+        // The other half, and the reason this is a re-check rather than a hope:
+        // a wheel that really is gone stays gone through every pass, so the
+        // sentinel is still dropped and the reprovision still happens.
+        let root = env::temp_dir().join(format!("fno-sentgone-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let missing = root.join("fno-py");
+        assert!(!executable_within(&missing, 3, Duration::from_millis(10)));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_waits_for_a_console_script_that_lands_after_uv_exits() {
+        // The bug this closes: uv exits before its own artifacts settle. The
+        // console script is absent for ~490ms across an install, so a verify
+        // firing the instant uv returns raced the install it was verifying and
+        // refused every fno verb.
+        let root = env::temp_dir().join(format!("fno-uvwait1-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        let venv = tool_dir.join("fno");
+        fs::create_dir_all(venv.join("bin")).unwrap();
+        fs::create_dir_all(venv.join("lib")).unwrap();
+        // Bytecode marker is already there; only the console script is late.
+        fs::write(venv.join("lib/x.pyc"), "").unwrap();
+        let uv = uv_reporting_tool_dir(&root, &tool_dir);
+
+        // Falsification first: without the wait this case FAILS. If this
+        // assertion ever stops holding, the test below proves nothing.
+        assert!(
+            install_verified(&uv).is_err(),
+            "single-shot verify must fail while the script is still absent"
+        );
+
+        let entry = venv.join("bin/fno-py");
+        let late = entry.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            fs::write(&late, "#!/bin/sh\n").unwrap();
+        });
+
+        let got = install_verified_within(&uv, 15, Duration::from_millis(50));
+        writer.join().unwrap();
+        assert!(
+            got.is_ok(),
+            "verify must wait for uv's own artifact: {got:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_gives_up_bounded_and_says_what_it_waited_for() {
+        // The wait is bounded and falsifiable: a genuinely broken install still
+        // fails, with the same marker message plus what we waited. Nothing is
+        // masked, which is what separates this from the sleep-retry the
+        // lazy-imports doc rejects.
+        let root = env::temp_dir().join(format!("fno-uvwait2-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
+        let uv = uv_reporting_tool_dir(&root, &tool_dir);
+
+        let e = install_verified_within(&uv, 3, Duration::from_millis(10)).unwrap_err();
+        assert!(e.contains("no console script at"), "{e}");
+        assert!(e.contains("still absent after waiting 30ms"), "{e}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_budget_is_the_shared_three_second_ceiling() {
+        // This half only: nothing here can read the shell twins, so it pins the
+        // Rust numbers and nothing more. The cross-language pin - the one that
+        // fails when update.py, postinstall.sh, or scripts/install/fno.sh drift
+        // off these numbers - is tests/ci/test_uv_install_verify_wait.sh, which
+        // reads all four files. Claiming otherwise here would be a guard on one
+        // of N paths, which is the bug this whole change exists to close.
+        assert_eq!(VERIFY_ATTEMPTS, 15);
+        assert_eq!(VERIFY_POLL, Duration::from_millis(200));
+        assert_eq!(
+            VERIFY_POLL * VERIFY_ATTEMPTS,
+            Duration::from_secs(3),
+            "ceiling must stay the 3s update.py spends on the same file"
+        );
     }
 
     #[test]

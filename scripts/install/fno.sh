@@ -147,6 +147,31 @@ uv_install_verifies() {
 	[ -n "$(find "$_td/fno/lib" -name '*.pyc' -print -quit 2>/dev/null)" ]
 }
 
+# `uv_install_verifies`, RE-CHECKED until it passes or the budget runs out.
+#
+# uv exits before its own artifacts settle: the console script is deleted and
+# recreated across an install and is absent for ~490ms, a gap that closed only
+# ~40ms before uv exited in an idle measurement (see
+# docs/architecture/cli-lazy-imports.md). A verify firing the instant uv returns
+# therefore races the install it is verifying and kills a good install.
+#
+# One of FOUR provisioning paths carrying this wait. The others are
+# `_await_binary` in cli/src/fno/update.py, `install_verified_within` in
+# crates/fno/src/bootstrap.rs, and `uv_install_verifies_within` in
+# .claude-plugin/postinstall.sh. All four spend the same 15 * 0.2s = 3s and all
+# four RE-CHECK rather than sleeping blind, so a genuinely broken install still
+# fails with the same message. tests/ci/test_uv_install_verify_wait.sh asserts the
+# four budgets match; change one and change all four.
+uv_install_verifies_within() {
+	_n=0
+	while :; do
+		uv_install_verifies && return 0
+		_n=$((_n + 1))
+		[ "$_n" -gt 15 ] && return 1
+		sleep 0.2
+	done
+}
+
 # `uv tool install --force --compile-bytecode` with ONE retried failure: the
 # ENOTEMPTY signature, uv's removal walk racing a concurrent importer's
 # bytecode rewrite (docs/architecture/cli-lazy-imports.md). Any other failure
@@ -159,7 +184,7 @@ uv_tool_install_retry() {
 		_attempts=$((_attempts + 1))
 		if "$FNO_UV" tool install --force --compile-bytecode "$1" 2>"$_err"; then
 			rm -f "$_err"
-			uv_install_verifies || die "uv exited 0 but the install does not verify: no fno-py script or no shipped bytecode under the tool venv. Inspect it with \`$FNO_UV tool dir\`."
+			uv_install_verifies_within || die "uv exited 0 but the install does not verify after waiting 3s: no fno-py script or no shipped bytecode under the tool venv. Inspect it with \`$FNO_UV tool dir\`."
 			return 0
 		fi
 		cat "$_err" >&2

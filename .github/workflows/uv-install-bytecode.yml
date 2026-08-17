@@ -30,3 +30,12 @@ jobs:
         run: |
           bash scripts/ci/check-uv-install-compiles-bytecode.sh --self-test
           bash scripts/ci/check-uv-install-compiles-bytecode.sh
+
+      # Same surface, same reason there is no paths filter above: this reads all
+      # four `uv tool install` verify sites and fails when one drifts off the
+      # shared 15 * 0.2s re-check or reverts to a single-shot call. Wired by
+      # explicit name because nothing here globs tests/, so an unwired file is
+      # inert - which is a guard on zero of N paths, the very shape this test
+      # exists to refuse.
+      - name: uv install verify-wait pin (all four provisioning paths)
+        run: bash tests/ci/test_uv_install_verify_wait.sh
