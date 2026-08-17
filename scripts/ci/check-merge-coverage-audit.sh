@@ -95,6 +95,13 @@ fi
 fail=0
 merges=0
 skipped=0
+# Captured and status-checked BEFORE the loop: a `git log` failure inside a
+# process substitution feeds the loop nothing, and "audited 0 merges" would
+# read as a pass. An audit that could not read history has audited nothing.
+commits="$(git log --first-parent --format=%H "${since}..HEAD")" || {
+  echo "FAIL: could not read history ${since}..HEAD" >&2
+  exit 1
+}
 while read -r commit; do
   if head="$(git rev-parse --verify -q "$commit^2" 2>/dev/null)" && [ -n "$head" ]; then
     merges=$((merges + 1))
@@ -103,7 +110,7 @@ while read -r commit; do
     skipped=$((skipped + 1))
     echo "skip: $(short "$commit") is a first-parent-only commit (direct push, predates the merge ruleset)"
   fi
-done < <(git log --first-parent --format=%H "${since}..HEAD")
+done <<<"$commits"
 
 echo "audited ${merges} merge(s) from $(short "$since") to $(short HEAD); ${skipped} first-parent-only commit(s) skipped by name"
 if [ "$fail" = 1 ]; then

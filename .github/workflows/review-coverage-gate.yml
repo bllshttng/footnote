@@ -70,7 +70,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           ctx=fno/review-coverage
           # A failed POST fails the step on purpose: a release valve that
           # silently fails to open reads as open.
