@@ -3949,6 +3949,21 @@ def _layer_worktree_local_override(
     return _deep_merge(raw, override) if override else raw
 
 
+# Legacy-path deprecation warnings fire ONCE per process, not once per
+# _alias_legacy_keys call: the shared _aliased_layers collector is deliberately
+# uncached, so one `fno config get` (load_settings + resolve_source) walks and
+# aliases the chain twice - a per-call warning would double every legacy-key
+# notice on stderr for callers that keep it.
+_DEPRECATED_WARNED: set[str] = set()
+
+
+def _warn_legacy_once(path: str, message: str) -> None:
+    if path in _DEPRECATED_WARNED:
+        return
+    _DEPRECATED_WARNED.add(path)
+    _LOG.warning(message)
+
+
 def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     """Bridge legacy key locations onto their canonical modeled paths (US3).
 
@@ -3987,15 +4002,17 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         resolved_reviewers = review.get("external_reviewers")
     elif legacy_list is not None:
         resolved_reviewers = legacy_list
-        _LOG.warning(
+        _warn_legacy_once(
+            "config.external_reviewers",
             "settings.yaml: 'config.external_reviewers' is deprecated; "
-            "use 'config.review.external_reviewers' instead."
+            "use 'config.review.external_reviewers' instead.",
         )
     elif legacy_scalar is not None:
         resolved_reviewers = legacy_scalar
-        _LOG.warning(
+        _warn_legacy_once(
+            "config.external_reviewer",
             "settings.yaml: 'config.external_reviewer' (scalar) is deprecated; "
-            "use the list 'config.review.external_reviewers' instead."
+            "use the list 'config.review.external_reviewers' instead.",
         )
 
     if resolved_reviewers is not None and not canonical_present:
@@ -4020,9 +4037,10 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         if lifted:
             config["project"] = cfg_project
             raw["config"] = config
-            _LOG.warning(
+            _warn_legacy_once(
+                "top-level project",
                 "settings.yaml: the top-level 'project' block is deprecated; "
-                "use 'config.project' instead."
+                "use 'config.project' instead.",
             )
 
     # --- top-level work -> config.work ------------------------------------
@@ -4032,9 +4050,10 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     if had_config and isinstance(top_work, dict) and not isinstance(config.get("work"), dict):
         config["work"] = top_work
         raw["config"] = config
-        _LOG.warning(
+        _warn_legacy_once(
+            "top-level work",
             "settings.yaml: the top-level 'work' block is deprecated; "
-            "use 'config.work' instead."
+            "use 'config.work' instead.",
         )
 
     # --- dispatch.auto_merge -> auto_merge.grant (x-4be1) -------------------
@@ -4088,11 +4107,11 @@ def _aliased_layers(
     The single collector shared by :func:`load_settings` and
     :func:`resolve_source`, so the chain, its order, and the per-layer
     ``_alias_legacy_keys`` pass exist once and cannot drift apart. Deliberately
-    NOT cached: the alias pass emits no warning (stderr-noise poison, x-4be1),
-    so the only thing a cache would buy is one redundant file walk per
-    consumer - and caching by path would serve a stale parse to a test (or
-    tool) that rewrites a config file mid-process, exactly the freshness
-    load_settings' own cache_clear contract promises."""
+    NOT cached: the alias pass's legacy-arm warnings are once-per-process
+    (``_warn_legacy_once``), so the only thing a cache would buy is one
+    redundant file walk per consumer - and caching by path would serve a stale
+    parse to a test (or tool) that rewrites a config file mid-process, exactly
+    the freshness load_settings' own cache_clear contract promises."""
     layers: list[tuple[Path, dict[str, object]]] = []
     for candidate in candidates:
         if candidate.is_file():
