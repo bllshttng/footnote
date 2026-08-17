@@ -407,12 +407,15 @@ def read_tracked_pr_states(
             returned.add(number)
 
         # Distinguishing CLOSED from MERGED needs the PR itself; the open
-        # list proved only that it is not open.
+        # list proved only that it is not open. Every per-key failure counts
+        # toward the failure total: a sweep whose keys stay unresolved must
+        # never read as outcome ok (the AC4 swallowed-failure shape).
         for number in sorted(requested - returned):
             try:
                 res = runner(["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=timeout_s)
             except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
                 log.warning("pr-watch: per-key read failed for %s#%d: %s", repo, number, exc)
+                sweep_failures += 1
                 continue
             if not res.ok:
                 log.warning(
@@ -421,11 +424,13 @@ def read_tracked_pr_states(
                     number,
                     (getattr(res, "stderr", "") or "").strip()[:200],
                 )
+                sweep_failures += 1
                 continue
             try:
                 one = json.loads(res.stdout)
             except json.JSONDecodeError:
                 log.warning("pr-watch: per-key read for %s#%d was not JSON", repo, number)
+                sweep_failures += 1
                 continue
             states[make_watermark_key(repo_slug=repo, pr_number=number)] = _map_pr_state(one)
 

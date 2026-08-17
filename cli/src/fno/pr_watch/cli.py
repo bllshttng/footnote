@@ -356,7 +356,7 @@ def tick() -> None:
                 )
             elif result.sweep_failures:
                 typer.echo(
-                    f"pr-watch tick: degraded: {result.sweep_failures} repo sweep failure(s)"
+                    f"pr-watch tick: degraded: {result.sweep_failures} sweep failure(s)"
                 )
             else:
                 typer.echo(

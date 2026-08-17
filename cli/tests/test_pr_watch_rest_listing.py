@@ -320,3 +320,17 @@ class TestRestReaderHardening:
         states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
         assert states == {"owner/repo#1": "UNKNOWN"}
         assert failures == 1
+
+    def test_failed_per_key_reads_count_toward_the_failure_total(self):
+        """A listing that succeeds while every per-key read fails must not
+        read as a clean sweep: outcome ok with unresolved keys is the
+        swallowed-failure shape AC4 exists to end."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+        runner = _sweep_runner(calls, open_pages={"owner/repo": []}, per_key={})
+
+        states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
+
+        assert states == {"owner/repo#1": "UNKNOWN"}
+        assert failures == 1
