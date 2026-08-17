@@ -17,9 +17,15 @@
 #      caught trigger 1 alone as dead on arrival for that path), so its
 #      result surfaces only in the subagent's final text.
 #
-# Both paths converge on the SAME clean-pass signal: an empty findings
-# array, matching ReportFindings' own contract ("empty array if nothing
-# survived verification").
+# Trigger 2 identifies the fork from the harness's own record of what it
+# ran (the sidecar beside `agent_transcript_path`), NOT from the shape of
+# what it printed. Keying on printed shape is what left this branch
+# decorative through six PRs: see the measurement in the branch itself.
+#
+# The clean-pass signal is an empty findings set, matching ReportFindings'
+# own contract ("empty array if nothing survived verification"). The two
+# review protocols spell it differently - an empty fenced JSON array, or a
+# bare "(none)" line - and both are accepted, by name, nothing else.
 #
 # Fail direction: any parse problem, an event this script does not
 # recognize, or a NON-empty findings array emits nothing, so the reviewers
@@ -48,30 +54,73 @@ case "$event" in
     message="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
     [[ -n "$message" ]] || exit 0
 
-    # Two INDEPENDENT signals identify this as a code-review completion,
-    # either is sufficient - a second self-review of this exact PR found the
-    # first commit trusted only the description field, and a harness whose
-    # SubagentStop payload names the field differently (undocumented; only
-    # `agent_type` is confirmed by Claude Code's docs, and that field is a
-    # generic fork type like "general-purpose", not skill-specific) would
-    # silently never match.
+    # THREE independent signals identify this as a code-review completion, any
+    # one sufficient. Signals 1 and 3 are string matches on things the tool
+    # does not mandate; signal 2 is the one that always holds, and it is why
+    # this branch stopped being decorative (x-bcb5).
     #
-    # 1. The subagent's task description names the invocation. Try every
-    #    field name this repo's own hooks have observed a subagent's task
-    #    carried under (target-subagent-guard.sh's same fallback chain).
-    description="$(printf '%s' "$input" | jq -r '.agent_name // .description // .subagent_description // empty' 2>/dev/null || true)"
+    # Measured live on 2026-08-17, one `Skill(skill="code-review")` fork:
+    # SubagentStop DOES fire (target-subagent-guard.sh logged its
+    # `subagent_done` row as a positive control), but it fires with
+    # `agent_type` = "general-purpose" and with NO agent_name / description /
+    # subagent_description at all - the guard, which reads that same fallback
+    # chain, recorded `agent:"unknown"`. The final text was the literal
+    # "(none)". So signal 1 could not match, signal 3 could not match, and the
+    # fence parser had nothing to parse. Six PRs shipped green and unmergeable
+    # on that hole, each rescued by a hand-run emit-attestation.sh.
+    #
+    # 1. A name field names the invocation. `agent_type` is the DOCUMENTED
+    #    one; the other three are names this repo's hooks have observed a
+    #    subagent's task carried under. Each is tested on its own rather than
+    #    first-non-null, because agent_type is always populated and a `//`
+    #    chain starting with it would shadow every later field.
     described=0
-    [[ "$description" =~ ^/?code-review([[:space:]]|$) ]] && described=1
+    while IFS= read -r cand; do
+      [[ "$cand" =~ ^/?code-review([[:space:]]|$) ]] && described=1
+    done < <(printf '%s' "$input" \
+      | jq -r '[.agent_type?, .agent_name?, .description?, .subagent_description?]
+               | map(select(type == "string")) | .[]' 2>/dev/null || true)
 
-    # 2. The message's own shape: "## Review findings" is the code-review
-    #    skill's own output heading, observed verbatim across two live
-    #    self-reviews of this PR (x-e97b) - distinctive enough that an
-    #    unrelated subagent producing it by coincidence is not a real risk,
-    #    and it needs no field-name guess at all.
+    # 2. The harness's own record of WHAT THIS FORK RAN, which it writes
+    #    beside the subagent transcript whatever the skill's output contract
+    #    says. This is the positive marker the real outcome always produces:
+    #    `agent-<id>.forked-skill.marker.json` holds
+    #    {"forkedSkill":true,"skillName":"code-review"}, and the sibling
+    #    `.meta.json` holds the "/code-review low" description the payload
+    #    itself omits. Nothing the review prints can dodge it, and no
+    #    unrelated subagent can forge it.
+    #
+    #    Fail direction is unchanged: a missing or renamed sidecar leaves this
+    #    signal at 0 and the gate holds, rather than attesting on a guess.
+    forked=0
+    agent_transcript="$(printf '%s' "$input" | jq -r '.agent_transcript_path // empty' 2>/dev/null || true)"
+    [[ "$agent_transcript" == "~/"* ]] && agent_transcript="$HOME/${agent_transcript#\~/}"
+    if [[ -n "$agent_transcript" ]]; then
+      sidecar_base="${agent_transcript%.jsonl}"
+      for sidecar in "$sidecar_base.forked-skill.marker.json" \
+        "$sidecar_base.forked-skill.json" "$sidecar_base.meta.json"; do
+        [[ -f "$sidecar" ]] || continue
+        while IFS= read -r cand; do
+          [[ "$cand" =~ ^/?code-review([[:space:]]|$) ]] && forked=1
+        done < <(jq -r '[.skillName?, .attributionName?, .name?, .description?]
+                        | map(select(type == "string")) | .[]' "$sidecar" 2>/dev/null || true)
+      done
+    fi
+
+    # 3. The message's own shape: "## Review findings" is a heading two live
+    #    self-reviews produced (x-e97b). ReportFindings mandates no header, so
+    #    this was never sound on its own; it is kept because it costs nothing
+    #    and still covers a harness that populates neither of the above.
     shaped=0
     printf '%s' "$message" | grep -q '^## Review findings' && shaped=1
 
-    [[ "$described" == "1" || "$shaped" == "1" ]] || exit 0
+    [[ "$described" == "1" || "$forked" == "1" || "$shaped" == "1" ]] || exit 0
+
+    # The clean-pass verdict, positively enumerated over every shape observed
+    # live. An empty fenced JSON array is the high-level protocol's marker; a
+    # bare "(none)" line is the low-level protocol's. Both mean the same
+    # thing, and a parser that reads only the first calls the second
+    # unparseable - which is a silence indistinguishable from "no review ran".
     findings="$(printf '%s' "$message" | python3 -c '
 import json, re, sys
 text = sys.stdin.read()
@@ -86,7 +135,14 @@ except Exception:
     sys.exit(0)
 print("[]" if data == [] else "nonempty")
 ' 2>/dev/null || echo "absent")"
-    [[ "$findings" == "[]" ]] && is_clean=1
+    if [[ "$findings" == "[]" ]]; then
+      is_clean=1
+    elif [[ "$findings" == "absent" ]] \
+      && printf '%s\n' "$message" | grep -qE '^[[:space:]]*\(none\)[[:space:]]*$'; then
+      # Only when NO array was parsed. A run that reported real findings and
+      # also happens to contain a "(none)" line stays non-clean.
+      is_clean=1
+    fi
     ;;
   *)
     exit 0
