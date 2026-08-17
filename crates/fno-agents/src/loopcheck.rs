@@ -1359,9 +1359,17 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
 /// move: a same-branch attestation can still carry (x-62a1), while a foreign
 /// branch at a different head stays out of scope - the cherry-pick shape.
 ///
-/// `attested_branch` is empty for every event predating the field (and for a
-/// detached-HEAD emit). Those fall back to exact head equality only: a legacy
-/// attestation on a moved head is not scopeable and must not count.
+/// Named, not closed: a shared sha proves COMMIT identity, not PR identity.
+/// The event carries no base ref or PR number, so a pass attested for one PR
+/// clears another PR at the same commit with a different base (a
+/// duplicate-PR pair). All PRs here share main as base, so the shape is
+/// exotic; closing it needs `base` in the attestation payload (schema +
+/// producer + this resolver), filed on the follow-up node.
+///
+/// `attested_branch` is empty for every event predating the field (a
+/// detached HEAD now refuses to emit at all). Those fall back to exact head
+/// equality only: a legacy attestation on a moved head is not scopeable and
+/// must not count.
 fn attestation_in_scope(
     attested_branch: &str,
     attested_head: &str,
@@ -3463,10 +3471,11 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// bot and proceeding. Add a marker only for a string the bot posts when it
 /// truly will not review; a phrase a real review could quote is not one.
 pub(crate) fn body_is_usage_limit(body: &str) -> bool {
+    let lower = body.to_lowercase();
     BOT_PROFILES
         .iter()
         .flat_map(|p| p.usage_markers.iter())
-        .any(|m| body.contains(m))
+        .any(|m| lower.contains(m))
 }
 
 /// The clean-pass markers for a CONFIGURED login (may differ from the comment
@@ -3492,21 +3501,28 @@ fn reviewed_commit_from_body(body: &str) -> &str {
     const MARKER: &str = "Reviewed commit:";
     // The marker match lowercases the body, so the lowercased spelling parses
     // here too; any other casing stays unpinned, which is the fail-closed no.
+    // A reply QUOTING an earlier marker ("Reviewed commit: (see previous)")
+    // before its own pin must not shadow the real one, so every occurrence
+    // is tried until one yields a hex token.
     let marker_lc = MARKER.to_lowercase();
-    let Some(idx) = body.find(MARKER).or_else(|| body.find(marker_lc.as_str())) else {
-        return "";
-    };
-    let token = body[idx + MARKER.len()..]
-        .trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or("");
-    let hex: &str = token.trim_end_matches(|c: char| !c.is_ascii_hexdigit());
-    if hex.len() >= 7 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        hex
-    } else {
-        ""
+    let mut from = 0;
+    while let Some(idx) = body[from..]
+        .find(MARKER)
+        .map(|i| from + i)
+        .or_else(|| body[from..].find(marker_lc.as_str()).map(|i| from + i))
+    {
+        let token = body[idx + MARKER.len()..]
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let hex: &str = token.trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+        if hex.len() >= 7 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return hex;
+        }
+        from = idx + MARKER.len();
     }
+    ""
 }
 
 /// A clean-pass issue comment by `login` that pins the commit it read, as
@@ -3535,7 +3551,10 @@ fn clean_pass_review(
             .pointer("/author/login")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if !logins_correspond(author, login) {
+        // One-way: the AUTHOR's login must contain the configured name. The
+        // symmetric test lets a human whose login is a substring of the bot's
+        // ("codex" vs "chatgpt-codex-connector") post the pass comment.
+        if !login_matches_bot(author, login) {
             continue;
         }
         let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
@@ -3558,9 +3577,13 @@ fn clean_pass_review(
             .get("createdAt")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // On EQUAL rank the later comment wins: keeping first-seen pins the
+        // verdict to the earliest pass of that rank and lets a quota bounce
+        // BETWEEN two equal-rank passes outdate the newer one (PR 917 round
+        // two: the newest pass postdates the bounce and must be the evidence).
         if best
             .as_ref()
-            .map(|(_, b, _)| freshness_rank(fresh) > freshness_rank(*b))
+            .map(|(_, b, _)| freshness_rank(fresh) >= freshness_rank(*b))
             .unwrap_or(true)
         {
             best = Some((sha.to_string(), fresh, ts));
@@ -3569,16 +3592,33 @@ fn clean_pass_review(
     best
 }
 
-/// A clean-pass marker only counts at a sentence boundary. `Didn't find any
-/// major issues. Bravo.` passes; `Didn't find any major issues, but 2 minor
-/// ones need attention` does not - the bot posts that exact clause while
-/// REPORTING findings, so a bare substring match would clear the gate on a
-/// PR that has them (the PR 917 dual-review finding, operator-verified
-/// against the marker list).
+/// A clean-pass marker only counts when the SENTENCE it ends is the pass
+/// sentence and what follows is the measured shape: end of body, the `Bravo`
+/// flourish, or the `Reviewed commit:` pin (often on its own line). The bot
+/// posts the same clause while REPORTING findings - `Didn't find any major
+/// issues, but 2 minor ones...` and the period form `...issues. 2 minor
+/// ones need attention.` - and a punctuation peek alone cannot tell a pass
+/// from a findings note sharing the clause; the FOLLOW-UP sentence can.
+/// Characterized from the measured specimens (PR #947): a new bot's shape
+/// gets its own profile entry, never a loosened predicate.
 fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
+    // The measured follow-ups to a genuine pass sentence.
+    fn shaped(t: &str) -> bool {
+        t.is_empty() || t.starts_with("bravo") || t.starts_with("reviewed commit:")
+    }
     lower.match_indices(marker).any(|(i, _)| {
         let rest = lower[i + marker.len()..].trim_start();
-        rest.is_empty() || rest.starts_with('.') || rest.starts_with('!') || rest.starts_with('?')
+        if shaped(rest) {
+            return true;
+        }
+        for term in ['.', '!', '?'] {
+            if let Some(next) = rest.strip_prefix(term) {
+                if shaped(next.trim_start()) {
+                    return true;
+                }
+            }
+        }
+        false
     })
 }
 
@@ -3611,14 +3651,18 @@ fn bot_verdict(
     freshness: &dyn Fn(&str) -> Freshness,
 ) -> (CoverageVerdict, String, Option<Freshness>) {
     // That login's freshest review object, selected by `freshness_rank`
-    // exactly as classify_coverage's known-author scan selects.
+    // exactly as classify_coverage's known-author scan selects. The author
+    // match is ONE-WAY (login_matches_bot: the author's login contains the
+    // configured name), restoring the presence gate's old pre-filter: the
+    // symmetric test let a drive-by human whose login is a substring of the
+    // bot's ("codex" vs "chatgpt-codex-connector") satisfy the gate.
     let mut review: Option<(String, Freshness)> = None;
     for r in reviews {
         let author = r
             .pointer("/author/login")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if !logins_correspond(author, login) {
+        if !login_matches_bot(author, login) {
             continue;
         }
         if r.get("state")
@@ -3654,14 +3698,18 @@ fn bot_verdict(
                     .pointer("/author/login")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if !logins_correspond(author, login) {
+                if !login_matches_bot(author, login) {
                     return false;
                 }
                 if !body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or("")) {
                     return false;
                 }
+                // ts_after, never a raw compare: offset-suffixed and Z-suffixed
+                // RFC3339 forms mis-order lexicographically, and an UNPARSEABLE
+                // side (an absent clean_ts) reads false - the pass stands,
+                // which is what the rule-2 doc above promises.
                 let ts = c.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
-                ts > clean_ts.as_deref().unwrap_or("")
+                ts_after(ts, clean_ts.as_deref().unwrap_or(""))
             });
             if !later_refusal {
                 return (CoverageVerdict::Reviewed, sha.clone(), Some(*fresh));
@@ -3673,7 +3721,7 @@ fn bot_verdict(
             .pointer("/author/login")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        logins_correspond(author, login)
+        login_matches_bot(author, login)
             && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
     });
     if refused {
@@ -13912,6 +13960,109 @@ mod tests {
             info.missing_bots,
             vec!["chatgpt-codex-connector".to_string()]
         );
+    }
+
+    // ── round two: the fix round's own review findings ───────────────────────
+
+    #[test]
+    fn human_login_substring_of_bot_cannot_satisfy_the_gate() {
+        // A drive-by human "codex" posting a review object used to clear the
+        // required bot "chatgpt-codex-connector" through the symmetric
+        // correspond test; the gate has always been one-way.
+        let reviews = vec![serde_json::json!({
+            "author": {"login": "codex"},
+            "state": "COMMENTED",
+            "commit": {"oid": "abc12345"}
+        })];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &reviews, &[], &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Absent);
+        let json = serde_json::json!({"reviews": reviews, "comments": []});
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    #[test]
+    fn period_reworded_findings_note_is_not_a_clean_pass() {
+        // "...issues. 2 minor ones need attention." shares the clause with a
+        // genuine pass; only the FOLLOW-UP sentence separates them.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues. 2 minor ones need attention. Reviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        assert!(clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none());
+    }
+
+    #[test]
+    fn line_broken_clean_pass_with_pin_is_evidence() {
+        // The pin is often its own line; a newline before it is a boundary a
+        // genuine pass must not be dropped over.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues\nReviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("abc12345"));
+    }
+
+    #[test]
+    fn equal_rank_later_pass_replaces_the_earlier_one() {
+        // Pass A (01:00), quota bounce (02:00), pass B (03:00), both passes
+        // equal rank: the NEWEST pass is the evidence, and the bounce between
+        // them must not outdate it. Keeping first-seen manufactured Refused.
+        let pass = |at: &str, sha: &str| {
+            serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": format!("Codex Review: Didn't find any major issues. Bravo. Reviewed commit: {sha}"),
+                "createdAt": at
+            })
+        };
+        let comments = vec![
+            pass("2026-08-17T01:00:00Z", "abc12345"),
+            usage_comment("2026-08-17T02:00:00Z"),
+            pass("2026-08-17T03:00:00Z", "abc12345"),
+        ];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
+    }
+
+    #[test]
+    fn usage_marker_matches_mixed_case() {
+        // The helper's contract is case-insensitive; the pass-vs-bounce
+        // ordering must see a mixed-case bounce as a bounce.
+        let comments = vec![
+            clean_pass_comment("abc12345"),
+            serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "Codex Usage Limits for code reviews reached",
+                "createdAt": "2026-08-17T03:00:00Z"
+            }),
+        ];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Refused);
+    }
+
+    #[test]
+    fn quoted_marker_does_not_shadow_the_real_pin() {
+        // A reply quoting an unparsable earlier marker keeps the real pin in
+        // the same body visible to the scan.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues. Bravo.\n> Reviewed commit: (see previous)\nReviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("abc12345"));
     }
 
     // ── x-b167 nudge state ────────────────────────────────────────────────────
