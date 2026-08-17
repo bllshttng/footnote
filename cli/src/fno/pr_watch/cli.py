@@ -65,8 +65,8 @@ def _emit_event(
     instead of silently passing so the failure is observable.
 
     When no explicit ``events_path`` is given, defaults to
-    ``state_dir()/events.jsonl`` -- the same global path that
-    ``_last_tick_ts`` (status command) reads from and that the watermark
+    ``state_dir()/events.jsonl`` -- the same global path that the status
+    command's watermark scan reads from and that the watermark
     store anchors to.  This makes the daemon cwd-independent: launchd
     starts the daemon in ``/`` with no WorkingDirectory, so any cwd-relative
     path (e.g. ``Path(".fno/events.jsonl")``) would be silently lost.

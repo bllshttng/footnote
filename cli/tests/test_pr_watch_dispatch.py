@@ -1897,9 +1897,9 @@ class TestInstallParkedPrsGuards:
         assert "owner/repo#2" not in result
         assert "owner/repo#3" not in result
 
-    def test_last_tick_ts_non_dict_event_line_skipped(self, tmp_path):
+    def test_watermark_scan_non_dict_event_line_skipped(self, tmp_path):
         """AC-gemini-medium _install:367: non-dict JSON line in events.jsonl -> skipped, no crash."""
-        from fno.pr_watch._install import _last_tick_ts
+        from fno.pr_watch._install import _tick_watermarks
 
         events_path = tmp_path / "events.jsonl"
         valid_line = json.dumps({"type": "pr_watch_tick", "ts": "2026-06-14T03:00:00Z"})
@@ -1911,7 +1911,7 @@ class TestInstallParkedPrsGuards:
             '"a string"',
         ]))
 
-        result = _last_tick_ts(events_path)
+        result = _tick_watermarks(events_path)["last_tick"]
         assert result == "2026-06-14T03:00:00Z"
 
 

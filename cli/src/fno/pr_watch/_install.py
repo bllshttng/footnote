@@ -688,16 +688,6 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
     return marks
 
 
-def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
-    """Return the ts of the most recent pr_watch_tick event, or None.
-
-    Thin wrapper over ``_tick_watermarks``: the liveness verdict and the
-    tests keep this name while the single-pass scan lives next to its
-    sibling watermarks.
-    """
-    return _tick_watermarks(events_path)["last_tick"]
-
-
 def _parked_prs(state_path: Optional[Path]) -> dict:
     """Return observed-cache and pending-delivery parked outcomes."""
     if state_path is None:

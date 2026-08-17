@@ -185,10 +185,11 @@ class TestEmitEventAnchoredPath:
         ev = json.loads(lines[0])
         assert ev["type"] == "pr_watch_tick"
 
-    def test_emit_event_same_path_as_last_tick_ts(self, tmp_path, monkeypatch):
-        """_emit_event default path must be the SAME path _last_tick_ts reads from.
+    def test_emit_event_same_path_as_the_liveness_watermark(self, tmp_path, monkeypatch):
+        """_emit_event default path must be the SAME path the liveness
+        watermark reads from.
 
-        status's _last_tick_ts defaults to state_dir()/events.jsonl.
+        status's watermark scan defaults to state_dir()/events.jsonl.
         The daemon's _emit_event must write to the same location.
         """
         fake_home = tmp_path / "home"
@@ -208,11 +209,11 @@ class TestEmitEventAnchoredPath:
              "dropped_count": 0, "dropped": {}},
         )
 
-        # Now verify _last_tick_ts (with no explicit path) finds that event
-        from fno.pr_watch._install import _last_tick_ts
-        ts = _last_tick_ts(None)  # None = use the default state_dir() path
+        # Now verify the watermark scan (with no explicit path) finds that event
+        from fno.pr_watch._install import _tick_watermarks
+        ts = _tick_watermarks(None)["last_tick"]  # None = default state_dir() path
         assert ts is not None, (
-            "_last_tick_ts could not find the event written by _emit_event; "
+            "the watermark scan could not find the event written by _emit_event; "
             "they must resolve to the same path"
         )
 
