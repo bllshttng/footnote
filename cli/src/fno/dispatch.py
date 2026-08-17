@@ -356,11 +356,11 @@ def _cutover_command(harness: Optional[str], node_id: str) -> str:
     caller's signal to stage nothing - a half-resolved destination must not
     spawn.
 
-    This verb's normal path always spawns the no-merge `/target` command, so the cutover
-    renders the SAME posture on the destination. Going through the full resolver
-    would read `config.dispatch.auto_merge` and could hand a rerouted worker the
-    merge authority the non-cutover launch never gets: quota exhaustion must not
-    change who may merge."""
+    This verb always spawns the no-merge `/target` command, on the normal path
+    and on the cutover path alike, so `config.auto_merge.grant` is deliberately
+    not consulted here. Going through the full resolver would read it and could
+    hand a rerouted worker merge authority that the non-cutover launch never
+    gets: quota exhaustion must not change who may merge."""
     try:
         from fno.agents.harness_map import dispatch_command
 
