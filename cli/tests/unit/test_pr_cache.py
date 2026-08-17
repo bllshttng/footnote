@@ -71,6 +71,29 @@ def test_ttl_hit_makes_zero_network_calls(cache_env, monkeypatch, capsys):
     assert out["cached"] is True
 
 
+def test_ttl_hit_replays_the_degraded_coverage_note(cache_env, monkeypatch, capsys):
+    """A cached degraded row carries its stderr note onto the serve, not only
+    onto the one live read that produced it: the coalescing this module exists
+    to do must not swallow the human-readable degradation reason."""
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "unknown",
+            "reviewed_count": None,
+            "recompute": "recompute degraded to unknown: GraphQL quota exhausted",
+        },
+    )
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    assert _cache.cached_status("42") == 0
+    assert calls["n"] == 1, "the TTL hit serves the row without a network call"
+    cap = capsys.readouterr()
+    assert "degraded to unknown" in cap.err, cap.err
+
+
 def test_ttl_expiry_rereads(cache_env, monkeypatch, capsys):
     fetch, calls = _fetch_spy([_GREEN])
     monkeypatch.setattr(_status, "_fetch", fetch)

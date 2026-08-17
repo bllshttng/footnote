@@ -8137,7 +8137,37 @@ harness_session_id scanned from <cwd>/.fno/target-state.md, else none
 unmeasured 0).
 
 Exits: 0 emitted a row; 3 no PR for the selector; 4 gh read failed
-(emitted row is unknown); 2 bad arguments.";
+(emitted row is unknown); 2 bad arguments.
+
+On exit 4 stdout additionally carries graphql_remaining /
+graphql_exhausted (plus a reason string when exhausted), so a degraded
+read is distinguishable from a genuinely unreviewed one. The persisted
+row keeps the bare unknown schema.";
+
+/// Decorate an exit-4 payload with the stdout-only quota diagnostic. Both
+/// exit-4 arms of `decide_review_coverage` carry the same keys so a reader
+/// never needs to know which arm produced the row; the persisted event row
+/// is schema-gated and must NOT grow them.
+fn insert_quota_diagnostic(out: &mut Value, quota: &Option<GraphqlQuota>) {
+    // Index assignment, the file's idiom: a non-object payload panics loudly
+    // instead of silently dropping the diagnostic.
+    out["graphql_remaining"] = serde_json::json!(quota.as_ref().map(|q| q.remaining));
+    out["graphql_exhausted"] = serde_json::json!(quota.as_ref().map(|q| q.remaining == 0));
+    if let Some(q) = quota.as_ref().filter(|q| q.remaining == 0) {
+        out["reason"] = serde_json::json!(graphql_exhausted_reason(q));
+    }
+}
+
+/// The exit-4 reason for a secondary (burst) limit refusal. Shared by BOTH
+/// exit-4 arms so the stdout contract does not fork on whether `--pr` was
+/// passed: the refusal names itself in the failed read's stderr, the quota
+/// probe is skipped (one more spawn against a refusing gh is the doomed
+/// kind), and `graphql_*` read null because no probe ran.
+fn secondary_limit_reason() -> &'static str {
+    "GitHub secondary rate limit refused this gh read (a burst limit, distinct \
+     from the hourly quota; advertised remaining stays healthy). Stop retrying \
+     for a few minutes."
+}
 
 fn decide_review_coverage(args: &[String]) -> (i32, String) {
     let args = if args.first().map(|s| s.as_str()) == Some("review-coverage") {
@@ -8309,23 +8339,53 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
-                return (4, data.to_string());
+                // The persisted row above is schema-gated (the pr_num == 0
+                // comment below applies here too); the quota diagnosis rides
+                // stdout only. Without it, exit 4's unknown row is
+                // indistinguishable from a genuine "nobody reviewed this" -
+                // the reader was told to re-review a PR whose only problem
+                // was an exhausted quota window.
+                //
+                // A secondary-limit refusal names itself in the failed read's
+                // own stderr (advertised remaining stays healthy - the case
+                // is_secondary_limit_stderr documents), so classify from
+                // `tail` and skip the probe: one more spawn against a
+                // refusing gh is the doomed kind. Quota exhaustion, the other
+                // cause, still probes for the reset time its reason names.
+                let secondary = is_secondary_limit_stderr(&tail);
+                let quota = if secondary {
+                    None
+                } else {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                };
+                let mut out = data;
+                insert_quota_diagnostic(&mut out, &quota);
+                if secondary {
+                    out["reason"] = serde_json::json!(secondary_limit_reason());
+                }
+                return (4, out.to_string());
             }
             // The emitted unknown row above is schema-gated, so the exhaustion
             // diagnosis rides this stdout-only branch (and the stop hook's own
-            // block reason); it must not fork the event contract.
-            let quota = probe_graphql_quota(&gh_bin, &cwd);
-            (
-                4,
-                serde_json::json!({
-                    "error": format!("gh read failed: {read}"),
-                    "detail": tail,
-                    "emitted": false,
-                    "graphql_remaining": quota.as_ref().map(|q| q.remaining),
-                    "graphql_exhausted": quota.as_ref().map(|q| q.remaining == 0),
-                })
-                .to_string(),
-            )
+            // block reason); it must not fork the event contract. The same
+            // secondary-limit classification as the --pr arm: a refusal with no
+            // PR number must not spawn the probe the other arm already skips.
+            let secondary = is_secondary_limit_stderr(&tail);
+            let quota = if secondary {
+                None
+            } else {
+                probe_graphql_quota(&gh_bin, &cwd)
+            };
+            let mut out = serde_json::json!({
+                "error": format!("gh read failed: {read}"),
+                "detail": tail,
+                "emitted": false,
+            });
+            insert_quota_diagnostic(&mut out, &quota);
+            if secondary {
+                out["reason"] = serde_json::json!(secondary_limit_reason());
+            }
+            (4, out.to_string())
         }
     }
 }
@@ -11090,6 +11150,275 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 1\n");
         assert!(probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).is_none());
+    }
+
+    /// One stub gh for the pr_num > 0 failure-arm tests: `pr view` fails with a
+    /// rate-limit stderr (NOT the "no pull requests found" no-PR wording, which
+    /// would take the Ok(PrState::None) branch), `api rate_limit` answers the
+    /// given graphql bucket.
+    fn write_failing_pr_view_gh(dir: &Path, graphql_remaining: i64, reset_in_secs: i64) -> String {
+        let reset = Utc::now().timestamp() + reset_in_secs;
+        write_exec(
+            dir,
+            "gh",
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = pr ] && [ \"$2\" = view ] && \
+                 echo 'GraphQL: API rate limit exceeded for user ID 1.' >&2 && exit 1\n\
+                 [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":{remaining},\"reset\":{reset}}}}}}}' && exit 0\n\
+                 exit 1\n",
+                remaining = graphql_remaining,
+                reset = reset,
+            ),
+        )
+        .to_str()
+        .unwrap()
+        .to_string()
+    }
+
+    /// Run the verb until the quota probe answers decisively (a bool
+    /// graphql_exhausted): a fork/exec blip on a loaded runner lands as
+    /// probe_graphql_quota -> None (null), which is correct behavior - the
+    /// assertions need a decisive read, not the first one.
+    fn run_exit4_until_decisive(args: &[String]) -> Value {
+        for _ in 0..5 {
+            let (code, out) = run_review_coverage_capture(args);
+            assert_eq!(code, 4);
+            let parsed: Value = serde_json::from_str(&out).expect("stdout is one JSON object");
+            if parsed
+                .get("graphql_exhausted")
+                .and_then(|x| x.as_bool())
+                .is_some()
+            {
+                return parsed;
+            }
+        }
+        panic!(
+            "exit-4 stdout never carried a decisive graphql_exhausted across 5 \
+             runs: either the gh stub kept failing to spawn or the stdout \
+             contract changed - both are real failures"
+        );
+    }
+
+    #[test]
+    fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
+        // x-b56a: exit 4 with a known PR persists a schema-gated unknown row,
+        // and its stdout must say WHY the read degraded. A bare unknown is
+        // indistinguishable from "nobody reviewed this" and sent operators to
+        // re-review PRs whose only problem was an exhausted quota window.
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60);
+        let events = tmp.path().join("ev.jsonl");
+        let global = tmp.path().join("gev.jsonl");
+        let args: Vec<String> = [
+            "review-coverage",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2",
+            "--events",
+            events.to_str().unwrap(),
+            "--global-events",
+            global.to_str().unwrap(),
+            "--settings",
+            tmp.path().join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            &gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let v = run_exit4_until_decisive(&args);
+        assert_eq!(v["coverage"], "unknown");
+        assert_eq!(v["graphql_exhausted"], true, "got: {v}");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("GraphQL quota exhausted"),
+            "reason must name the cause, got: {reason}"
+        );
+        // The PERSISTED row keeps the bare schema: stdout-only diagnostics, no
+        // event-contract fork. Pin the destination, not the tag - the row must
+        // lack the diagnostic keys, and carry the unknown verdict as emitted.
+        let log = std::fs::read_to_string(&events).expect("the verb emitted a row");
+        let row: Value =
+            serde_json::from_str(log.lines().next().expect("one row")).expect("row is JSON");
+        assert_eq!(row["type"], "review_coverage");
+        assert_eq!(row["data"]["coverage"], "unknown");
+        assert_eq!(row["data"]["verdicts"], serde_json::json!([]));
+        assert!(row["data"].get("graphql_exhausted").is_none());
+        assert!(row["data"].get("graphql_remaining").is_none());
+        assert!(row["data"].get("reason").is_none());
+    }
+
+    #[test]
+    fn review_coverage_pr_failure_healthy_quota_reports_not_exhausted() {
+        // The diagnostic must not cry wolf: a gh failure with graphql budget
+        // left is an outage, not exhaustion, and stdout saying exhausted=false
+        // is what lets a reader stop guessing between the two.
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0);
+        let args: Vec<String> = [
+            "review-coverage",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            "deadbeef",
+            "--events",
+            tmp.path().join("ev.jsonl").to_str().unwrap(),
+            "--global-events",
+            tmp.path().join("gev.jsonl").to_str().unwrap(),
+            "--settings",
+            tmp.path().join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            &gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let v = run_exit4_until_decisive(&args);
+        assert_eq!(v["graphql_exhausted"], false, "got: {v}");
+        assert_eq!(v["graphql_remaining"], 4890);
+        assert!(v.get("reason").is_none(), "no reason without exhaustion");
+    }
+
+    #[test]
+    fn review_coverage_pr_failure_secondary_limit_names_cause_and_skips_probe() {
+        // The other exit-4 cause: a secondary (burst) limit refusal fires with
+        // advertised quota healthy, so the quota probe cannot see it. The
+        // cause names itself in the failed read's stderr; stdout must carry
+        // it, and the probe must not even fire (its spawn is one more call
+        // against the limiter that just refused). The stub's rate_limit arm
+        // answers HEALTHY and drops a marker file - if the probe fired, the
+        // marker exists and graphql_remaining reads a number.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("probe-fired");
+        let gh = write_exec(
+            tmp.path(),
+            "gh",
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = pr ] && [ \"$2\" = view ] && \
+                 echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
+                 [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo probe > {marker} && exit 0\n\
+                 exit 1\n",
+                marker = marker.display()
+            ),
+        );
+        let events = tmp.path().join("ev.jsonl");
+        // Retry until the pr-view spawn lands (its fork is the one flake this
+        // suite retries for): a spawn failure degrades tail to an exec error,
+        // the secondary match misses, and the probe fires.
+        let mut v: Option<Value> = None;
+        for _ in 0..5 {
+            let (code, out) = run_review_coverage_capture(&[
+                "review-coverage".to_string(),
+                "--cwd".to_string(),
+                tmp.path().display().to_string(),
+                "--pr".to_string(),
+                "865".to_string(),
+                "--head".to_string(),
+                "deadbeef".to_string(),
+                "--events".to_string(),
+                events.display().to_string(),
+                "--global-events".to_string(),
+                tmp.path().join("gev.jsonl").display().to_string(),
+                "--settings".to_string(),
+                tmp.path().join("absent.toml").display().to_string(),
+                "--gh-bin".to_string(),
+                gh.display().to_string(),
+            ]);
+            assert_eq!(code, 4);
+            if let Ok(parsed) = serde_json::from_str::<Value>(&out) {
+                if parsed.get("reason").is_some() {
+                    v = Some(parsed);
+                    break;
+                }
+            }
+        }
+        let v = v.expect("5 runs never produced a reasoned stdout");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("secondary rate limit"),
+            "reason must name the secondary limit, got: {reason}"
+        );
+        assert!(
+            v["graphql_exhausted"].is_null(),
+            "probe skipped on secondary: exhausted reads null, got: {v}"
+        );
+        assert!(
+            !marker.exists(),
+            "probe_graphql_quota spawned against a refusing gh"
+        );
+        assert_eq!(v["coverage"], "unknown");
+    }
+
+    #[test]
+    fn review_coverage_no_pr_secondary_limit_also_skips_probe() {
+        // The pr_num == 0 arm (no --pr passed) shares the secondary
+        // classification: without it a refusal with no PR number would spawn
+        // the probe the --pr arm skips - one more call against the limiter
+        // that just refused - and emit no reason for the same failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("probe-fired");
+        let gh = write_exec(
+            tmp.path(),
+            "gh",
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = pr ] && [ \"$2\" = view ] && \
+                 echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
+                 [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo probe > {marker} && exit 0\n\
+                 exit 1\n",
+                marker = marker.display()
+            ),
+        );
+        let events = tmp.path().join("ev.jsonl");
+        let mut reasoned: Option<Value> = None;
+        for _ in 0..5 {
+            let (code, out) = run_review_coverage_capture(&[
+                "review-coverage".to_string(),
+                "--cwd".to_string(),
+                tmp.path().display().to_string(),
+                "--head".to_string(),
+                "deadbeef".to_string(),
+                "--events".to_string(),
+                events.display().to_string(),
+                "--global-events".to_string(),
+                tmp.path().join("gev.jsonl").display().to_string(),
+                "--settings".to_string(),
+                tmp.path().join("absent.toml").display().to_string(),
+                "--gh-bin".to_string(),
+                gh.display().to_string(),
+            ]);
+            assert_eq!(code, 4);
+            if let Ok(parsed) = serde_json::from_str::<Value>(&out) {
+                if parsed.get("reason").is_some() {
+                    reasoned = Some(parsed);
+                    break;
+                }
+            }
+        }
+        let v = reasoned.expect("5 runs never produced a reasoned stdout");
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("secondary rate limit"),
+            "reason must name the secondary limit, got: {v}"
+        );
+        assert!(
+            !marker.exists(),
+            "probe_graphql_quota spawned against a refusing gh on the no-PR arm"
+        );
     }
 
     #[test]
