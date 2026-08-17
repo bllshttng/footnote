@@ -2369,6 +2369,46 @@ class TestQuotaPreflight:
         assert receipt["listing_api"] == "rest"
         assert receipt["sweep_failures"] == 1
 
+    def test_deadline_raised_inside_the_sweep_aborts_the_tick(self, tmp_path):
+        """AC7 at the swallow site. TickDeadlineExceeded raised inside the
+        guarded sweep must abort the whole tick. If a broad except seam can
+        swallow it as a 'sweep failed' warning, the tick continues past the
+        one-shot alarm with nothing bounding the rest - exactly the stall
+        class the deadline exists to stop."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+        from fno.pr_watch.cli import TickDeadlineExceeded
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+
+        def _stall(keys):
+            raise TickDeadlineExceeded()
+
+        with pytest.raises(TickDeadlineExceeded):
+            tick(
+                graph_path=tmp_path / "graph.json",
+                store_path=store_path,
+                discover_fn=deps["discover"],
+                read_pr_state_fn=deps["read_pr_state"],
+                read_tracked_states_fn=_stall,
+                fire_skill_fn=deps["fire_skill"],
+                emit=deps["emit"],
+                reviewers_for=deps["reviewers_for"],
+                claim=deps["claim"],
+                notify=deps["notify"],
+                post_merge_readiness_fn=deps["post_merge_readiness"],
+                now_iso="2026-06-14T12:00:00Z",
+                graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+            )
+
     def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
         """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
         outcome degraded, keys UNKNOWN - and a completed sweep still mints

@@ -211,8 +211,15 @@ _TICK_TIMEOUT_EXIT = 75
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
 
-class TickDeadlineExceeded(Exception):
-    """The tick's wall-clock deadline fired; the phase marker names where."""
+class TickDeadlineExceeded(BaseException):
+    """The tick's wall-clock deadline fired; the phase marker names where.
+
+    BaseException on purpose: every broad `except Exception` seam in the tick
+    path (the sweep, recovery, catch-up) exists to degrade one leg without
+    stopping the others, and the deadline is the one signal that must stop
+    everything. The alarm is one-shot, so a seam that swallowed it would leave
+    the rest of the tick unbounded - the exact stall class this deadline ends.
+    """
 
 
 def _on_deadline(signum, frame) -> None:  # noqa: ARG001 - signal handler signature
