@@ -1,6 +1,6 @@
 # Quick Plan Template
 
-Single flat markdown file for bugs, focused features, and single-session work. One `.md` == one PR == one node; no folder, no `00-INDEX.md`, no phase files. Frontmatter is **mandatory** on every plan (quick or not): `status`, `kind`, `consolidation`, `kill_criteria` always ride in it - the markdown-heading form of kill_criteria is invisible to the stamp/validate parser and is not used.
+Single flat markdown file for bugs, focused features, and single-session work. One `.md` == one PR == one node, with no folder, no `00-INDEX.md`, and no phase files. Frontmatter is **mandatory** on every plan, quick or not. `status`, `kind`, `consolidation`, and `kill_criteria` always ride in it. The markdown-heading form of kill_criteria is invisible to the stamp/validate parser and is not used.
 
 ---
 
