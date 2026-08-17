@@ -503,6 +503,16 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         from fno.paths import graph_json
         from fno.graph.store import locked_mutate_graph
 
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            # merge_status is footnote-owned node metadata AND a derived flag
+            # (readiness derives from live PR state, never a stored field).
+            # Under external selection the graph is not the store and every
+            # reader of the field refuses, so the write would only land in a
+            # dead local file.
+            return
+
         path = graph_json()
         if not path.exists():
             return

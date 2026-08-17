@@ -265,3 +265,68 @@ def test_reconcile_merged_pr_node_closes_via_seam_under_external(
     assert node.get("pr_number") != 777
     sc = json.loads((sc_dir / "ab-recon001.json").read_text())
     assert sc["pr_number"] == 777
+
+
+def test_on_confirmed_merge_leaves_graph_untouched_under_external(
+    tmp_path, monkeypatch
+):
+    """merge_status is footnote-owned derived metadata; under external
+    selection the whole confirmed-merge graph side-effect set must skip the
+    local store (the close itself routes through the seam)."""
+    from fno.tracker.types import NodeNotFound, TrackerCandidate, TrackerState
+
+    url = f"{_FOOT}/888"
+    g = _make_graph(tmp_path, [{"id": "ab-conf002", "title": "t",
+                                "pr_number": 888, "pr_url": url}])
+    _patch(monkeypatch, g)
+    import fno.pr._merge as M
+
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    monkeypatch.setattr(M, "run", _stub_run([]))
+
+    class _T:
+        name = "fake-external"
+
+        def read(self, id):
+            if id != "ab-conf002":
+                raise NodeNotFound(id)
+            return TrackerCandidate(
+                id=id, title="t", state=TrackerState.open,
+                parent=None, blocked_by=[],
+            )
+
+        def list_open(self):
+            return []
+
+        def close(self, id):
+            pass
+
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _T())
+    sc_dir = tmp_path / "sidecars"
+    sc_dir.mkdir()
+    (sc_dir / "ab-conf002.json").write_text(json.dumps(
+        {"id": "ab-conf002", "pr_number": 888, "pr_url": url}))
+    import fno.tracker.sidecar as sidecar_store
+
+    monkeypatch.setattr(sidecar_store, "sidecar_path",
+                        lambda i: sc_dir / f"{i}.json")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    import fno.graph._constants as gc
+
+    monkeypatch.setattr(gc, "LEDGER_JSON", tmp_path / "absent-ledger.json")
+
+    from fno.graph._reconcile import PrMergeState
+
+    monkeypatch.setattr(
+        "fno.graph.cli._done_gh_query",
+        lambda pr, **kw: PrMergeState(
+            number=888, state="MERGED", url=url,
+            merged_at="2026-08-17T00:00:00Z",
+        ),
+    )
+
+    before = g.read_bytes()
+    M._on_confirmed_merge(888, str(tmp_path))
+    assert g.read_bytes() == before  # no graph write anywhere in the flow
