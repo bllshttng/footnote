@@ -7440,103 +7440,26 @@ def _done_gh_query(pr_number, **kwargs):
     return query_pr_merge_state(pr_number, **kwargs)
 
 
-@cli.command(
-    "done",
-    epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses this "
-    "(hidden; run its own --help). Related: `fno backlog reconcile` closes nodes "
-    "whose PR merged outside the gate (hidden).",
-)
-def cmd_done(
-    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    skip_stamp: bool = typer.Option(
-        False,
-        "--skip-stamp",
-        help="Skip plan stamp even if plan_path is set",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-F",
-        help="Bypass gh cross-check. Requires --reason.",
-    ),
-    reason: Optional[str] = typer.Option(
-        None,
-        "--reason",
-        "-R",
-        help="Required when --force is used. Explains why the cross-check is bypassed.",
-    ),
-) -> None:
-    """Mark a node complete.
-
-    Sets ``completed_at`` to an ISO timestamp; ``recompute_statuses`` derives
-    ``status: done`` from that field and unblocks any dependents.
-
-    Before mutation, a gh cross-check verifies that at least one referenced PR
-    is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
-    closing evidence - the node is awaiting merge and closes on the actual
-    merge via reconcile / merge-triggered advance. CI state is irrelevant to
-    the close decision.
-
-    Exit codes:
-        0  success (node closed)
-        1  validation error (bad id, node not found)
-        2  usage error (--force without --reason)
-        3  gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence
-           (retryable when the PR merges; walker treats this as Parked)
-        4  gh outage: subprocess failure / timeout / parse error; retryable
-        5  awaiting merge: PR OPEN, not merged; node stays in_review
-           (success-shaped; close lands via reconcile/advance at merge)
-        6  promise unmet: plan promised work that has not all shipped
-           (multi-wave with no assertion, a failed close_probe, or fewer
-           merged ships than expected_url_count). Use --force --reason to
-           record a deliberate half-ship.
+def _done_gate_pipeline(
+    task_id: str,
+    node: dict,
+    refs: list,
+    *,
+    force: bool,
+    reason: Optional[str],
+) -> Optional[str]:
+    """The shared rich-completion gates (task 4.1): gh merge evidence,
+    the forced-close journal, and the promise gate, with today's exit-code
+    contract (3 refused / 4 outage / 5 awaiting merge / 6 promise unmet).
+    Both completion front doors (``backlog done`` on either backend,
+    ``fno done``) run this BEFORE any close so neither can bypass the
+    gates. Returns the evidencing PR url (None when no evidence).
     """
-    from fno.graph._constants import has_node_id_prefix
-    from fno.graph.store import locked_mutate_graph, read_graph
-    from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
-        node_pr_refs,
-        repo_slug_from_url,
-        resolve_merge_evidence,
-        resolve_promise_evidence,
+        repo_slug_from_url, resolve_merge_evidence, resolve_promise_evidence,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Usage guard: --force requires --reason
-    if force and not reason:
-        typer.echo(
-            "Error: --force requires --reason TEXT (explain why the cross-check is bypassed)",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    # -- Step 1: Idempotency + node-lookup read (outside the lock) --
-    # We must discover idempotency and PR refs before acquiring the lock, so
-    # that gh I/O (which can be slow) never blocks other graph mutations.
-    entries = read_graph(_graph_path())
-    node = _find_node(entries, task_id)
-    if not node:
-        typer.echo(f"Error: feature {task_id} not found", err=True)
-        raise typer.Exit(code=1)
-
-    # Idempotency first: already done -> short-circuit with NO gh read (AC4-EDGE)
-    if node.get("completed_at"):
-        typer.echo(f"{task_id} is already done", err=True)
-        return
-
-    # -- Step 2: gh cross-check (outside the lock) --
-    refs = node_pr_refs(node)
-
-    # The PR url that evidences the close, captured so the plan stamp records
-    # the actual ship (ab-bd9f476c). None when there is no PR ref / no evidence.
     evidence_pr_url: Optional[str] = None
-
     if refs and not force:
         # There are PR references; require evidence before closing.
         first_pr_number, _ = refs[0]
@@ -7640,6 +7563,237 @@ def cmd_done(
             raise typer.Exit(code=promise.exit_code)
         if promise.warning:
             typer.echo(f"warning: {promise.warning}", err=True)
+    return evidence_pr_url
+
+
+def _cascade_close_external_parents(tracker, child_id: str) -> list[str]:
+    """Close ancestor containers whose children are now ALL closed - the
+    external twin of ``_cascade_close_parents``: sibling state from ONE
+    list_open, the chain from tracker reads, each close best-effort."""
+    closed: list[str] = []
+    try:
+        open_children: dict[str, list[str]] = {}
+        for cand in tracker.list_open():
+            if cand.parent:
+                open_children.setdefault(cand.parent, []).append(cand.id)
+        cur = tracker.read(child_id).parent
+        seen: set[str] = set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            if open_children.get(cur):
+                break  # still has open children
+            try:
+                parent_node = tracker.read(cur)
+            except Exception:  # noqa: BLE001 - unknown ancestor ends the walk
+                break
+            if str(parent_node.state.value) == "closed":
+                cur = parent_node.parent
+                continue
+            try:
+                tracker.close(cur)
+                closed.append(cur)
+            except Exception as exc:  # noqa: BLE001 - cascade is best-effort
+                typer.echo(f"warning: cascade close failed for {cur}: {exc}", err=True)
+                break
+            cur = parent_node.parent
+    except Exception as exc:  # noqa: BLE001 - cascade never fails the close
+        typer.echo(f"warning: cascade evaluation failed: {exc}", err=True)
+    return closed
+
+
+def _done_via_seam(
+    task_id: str, *, skip_stamp: bool, force: bool, reason: Optional[str]
+) -> None:
+    """Rich completion under an external backend (task 4.1, AC7/AC8).
+
+    The same shared gate pipeline runs first; footnote-owned rollups persist
+    to the sidecar BEFORE the irreversible close; then
+    ``get_tracker().close(task_id)`` runs exactly once and success prints only
+    after it returns. A failed external close is loud and retryable - the
+    item stays open. Plan stamping and the ancestor cascade ride the same
+    seam (tracker parent edges, sidecar plan_path)."""
+    from fno.graph._reconcile import node_pr_refs
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.types import NodeNotFound
+
+    tracker = get_tracker()
+    try:
+        tnode = tracker.read(task_id)
+    except NodeNotFound:
+        typer.echo(f"Error: feature {task_id} not found", err=True)
+        raise typer.Exit(code=1)
+    if str(tnode.state.value) == "closed":
+        typer.echo(f"{task_id} is already done", err=True)
+        return
+
+    sc = sidecar_store.load(task_id)
+    row = {
+        "id": task_id, "title": tnode.title, "cwd": sc.cwd,
+        "plan_path": sc.plan_path, "pr_number": sc.pr_number,
+        "pr_url": sc.pr_url, "additional_prs": sc.additional_prs,
+        "sessions": sc.sessions,
+    }
+    refs = node_pr_refs(row)
+    evidence_pr_url = _done_gate_pipeline(
+        task_id, row, refs, force=force, reason=reason
+    )
+
+    # Footnote-owned rollups BEFORE the close (one physical owner: the sidecar).
+    try:
+        from fno.done.cli import _rollup_from_ledger
+
+        rollup = _rollup_from_ledger(row)
+    except Exception:  # noqa: BLE001 - rollup is fill-only, never blocks
+        rollup = {}
+    if rollup.get("cost_usd") is not None and sc.cost_usd is None:
+        sc.cost_usd = rollup["cost_usd"]
+    if rollup.get("cost_sessions") and not sc.cost_sessions:
+        sc.cost_sessions = list(rollup["cost_sessions"])
+    if evidence_pr_url and sc.pr_url is None:
+        sc.pr_url = evidence_pr_url
+    sidecar_store.save(sc)
+
+    # The one close. Failure keeps the item open and retryable (AC8-ERR).
+    try:
+        tracker.close(task_id)
+    except Exception as exc:  # noqa: BLE001 - name backend + id, fail loud
+        typer.echo(
+            f"Error: external close failed for {task_id} on backend "
+            f"{tracker.name!r}: {exc}\n"
+            "The item stays open; retry once the backend is available.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    _cascade_close_external_parents(tracker, task_id)
+    typer.echo(f"Marked {task_id} done")
+
+    if sc.plan_path and not skip_stamp:
+        _stamp_and_graduate_plan(sc.plan_path, url=evidence_pr_url, session_id=None)
+
+    # Retro-at-done lifecycle trigger (x-122a): same non-fatal posture as the
+    # graph path; the seam row carries what the resolver needs.
+    try:
+        from fno.provenance.spawn_think import on_node_retro
+
+        on_node_retro(row)
+    except Exception:  # noqa: BLE001 - additive; never wedge the close
+        pass
+
+
+@cli.command(
+    "done",
+    epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses this "
+    "(hidden; run its own --help). Related: `fno backlog reconcile` closes nodes "
+    "whose PR merged outside the gate (hidden).",
+)
+def cmd_done(
+    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+    skip_stamp: bool = typer.Option(
+        False,
+        "--skip-stamp",
+        help="Skip plan stamp even if plan_path is set",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help="Bypass gh cross-check. Requires --reason.",
+    ),
+    reason: Optional[str] = typer.Option(
+        None,
+        "--reason",
+        "-R",
+        help="Required when --force is used. Explains why the cross-check is bypassed.",
+    ),
+) -> None:
+    """Mark a node complete.
+
+    Sets ``completed_at`` to an ISO timestamp; ``recompute_statuses`` derives
+    ``status: done`` from that field and unblocks any dependents.
+
+    Before mutation, a gh cross-check verifies that at least one referenced PR
+    is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
+    closing evidence - the node is awaiting merge and closes on the actual
+    merge via reconcile / merge-triggered advance. CI state is irrelevant to
+    the close decision.
+
+    Exit codes:
+        0  success (node closed)
+        1  validation error (bad id, node not found)
+        2  usage error (--force without --reason)
+        3  gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence
+           (retryable when the PR merges; walker treats this as Parked)
+        4  gh outage: subprocess failure / timeout / parse error; retryable
+        5  awaiting merge: PR OPEN, not merged; node stays in_review
+           (success-shaped; close lands via reconcile/advance at merge)
+        6  promise unmet: plan promised work that has not all shipped
+           (multi-wave with no assertion, a failed close_probe, or fewer
+           merged ships than expected_url_count). Use --force --reason to
+           record a deliberate half-ship.
+    """
+    from fno.graph._constants import has_node_id_prefix
+    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph._intake import _find_node
+    from fno.graph._reconcile import (
+        node_pr_refs,
+        repo_slug_from_url,
+        resolve_merge_evidence,
+        resolve_promise_evidence,
+    )
+
+    # External backend (task 4.1): the shared gates then exactly one
+    # tracker.close. The local <prefix>-<hex> grammar guard does not apply to
+    # an opaque external id - resolution is the tracker's exact read.
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        _done_via_seam(task_id, skip_stamp=skip_stamp, force=force, reason=reason)
+        return
+
+    if not has_node_id_prefix(task_id):
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Usage guard: --force requires --reason
+    if force and not reason:
+        typer.echo(
+            "Error: --force requires --reason TEXT (explain why the cross-check is bypassed)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # -- Step 1: Idempotency + node-lookup read (outside the lock) --
+    # We must discover idempotency and PR refs before acquiring the lock, so
+    # that gh I/O (which can be slow) never blocks other graph mutations.
+    entries = read_graph(_graph_path())
+    node = _find_node(entries, task_id)
+    if not node:
+        typer.echo(f"Error: feature {task_id} not found", err=True)
+        raise typer.Exit(code=1)
+
+    # Idempotency first: already done -> short-circuit with NO gh read (AC4-EDGE)
+    if node.get("completed_at"):
+        typer.echo(f"{task_id} is already done", err=True)
+        return
+
+    # -- Step 2: gh cross-check (outside the lock) --
+    refs = node_pr_refs(node)
+
+    # The PR url that evidences the close, captured so the plan stamp records
+    # the actual ship (ab-bd9f476c). None when there is no PR ref / no evidence.
+    evidence_pr_url: Optional[str] = None
+
+    # Shared rich-completion gates (task 4.1): both front doors and both
+    # backends run the identical evidence/promise pipeline before any close.
+    evidence_pr_url = _done_gate_pipeline(
+        task_id, node, refs, force=force, reason=reason
+    )
+
 
     # -- Step 4: Mutation under the lock --
     plan_path_out: list = [None]

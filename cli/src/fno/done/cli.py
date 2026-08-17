@@ -477,6 +477,26 @@ def done_command(
         return
 
     # -- normal flow: resolve + flip status + rollup --
+    # External backend (task 4.1): this front door routes through the SAME
+    # shared terminal as `backlog done` - identical gates, sidecar rollups
+    # before the close, exactly one tracker.close - instead of the local
+    # graph resolution below. Requires an explicit node id: the branch-based
+    # auto-detect resolves through footnote-minted slug metadata.
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        from fno.graph.cli import _done_via_seam
+
+        if not query:
+            typer.echo(
+                "fno done: an external tracker backend needs an explicit node "
+                "id (branch auto-detect is footnote-metadata-based)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _done_via_seam(query, skip_stamp=False, force=False, reason=None)
+        return
+
     entries = read_graph(graph_path)
     branch = _current_branch()
     match = resolve_id(query, entries, git_branch=branch)
