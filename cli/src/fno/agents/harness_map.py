@@ -52,7 +52,7 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # spelling lives in ONE place (command_surface), not five literal strings.
 #
 # The `--no-merge` flag is the merge POSTURE, resolved from
-# config.dispatch.auto_merge rather than baked in. It was the free-text
+# config.auto_merge.grant rather than baked in. It was the free-text
 # `no-merge` token until x-8e59 (config-deaf) and x-9d11 (free text stopped
 # being a control input): the flag is the deterministic carrier that survives
 # `fno target start` resolving its argument to a bare node id, and unlike the
@@ -267,7 +267,7 @@ def dispatch_command(harness: str, allow_merge: bool = False) -> str:
     normalization of ``/target --no-merge {id}``, or of ``/target {id}`` when
     ``allow_merge``. ``config.dispatch.command`` and a node ``dispatch_verb``
     override this in :func:`resolve_dispatch`, which is also where
-    ``config.dispatch.auto_merge`` is read into ``allow_merge``.
+    ``config.auto_merge.grant`` is read into ``allow_merge``.
 
     The default is no-merge, and every error path must land on it: granting
     merge authority is the irreversible direction, so an unreadable config
@@ -345,7 +345,7 @@ def resolve_dispatch(
       harness    : explicit > config.dispatch.harness > ``claude``
       substrate  : explicit > config.dispatch.substrate > per-harness default
       command    : explicit > node ``verb`` > config.dispatch.command > builtin
-      merge      : builtin rung only; ``config.dispatch.auto_merge`` picks
+      merge      : builtin rung only; ``config.auto_merge.grant`` picks
                    ``/target {id}`` over the default ``/target --no-merge {id}``
 
     ``verb`` is a node's ``dispatch_verb`` (US3): validated against the allowlist
@@ -475,8 +475,8 @@ def resolve_dispatch(
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
         # refused. config.dispatch.command overrides.
         #
-        # The merge posture comes from config.dispatch.auto_merge (x-8e59). It
-        # applies to the builtin only: an explicit `command` or a node
+        # The merge posture comes from config.auto_merge.grant (x-8e59/x-4be1).
+        # It applies to the builtin only: an explicit `command` or a node
         # `dispatch_verb` already spells out what to run, and silently editing
         # a caller's own template would be the surprising read.
         _cmd = cfg.get("command")
@@ -566,15 +566,15 @@ def resolve_dispatch(
 
 
 def _load_dispatch_cfg(settings: object) -> dict:
-    """Read ``config.dispatch`` (harness/substrate/command/auto_merge) as a plain
-    dict. A missing/unreadable config yields ``{}`` so a resolve never bricks on
-    config.
+    """Read ``config.dispatch`` (harness/substrate/command) plus the
+    ``config.auto_merge.grant`` actor key as a plain dict. A missing/unreadable
+    config yields ``{}`` so a resolve never bricks on config.
 
     Every field is read through ``getattr`` with a default, per field. Attribute
     access on a partial settings object (a caller's stub, an older config model)
     used to raise and drop the WHOLE dict on the floor, so one missing key
     silently disabled every other one - the failure mode that let
-    ``dispatch.auto_merge`` be set and ignored. A field that is absent is now
+    ``auto_merge.grant`` be set and ignored. A field that is absent is now
     just absent."""
     if settings is None:
         try:
@@ -584,8 +584,14 @@ def _load_dispatch_cfg(settings: object) -> dict:
         except Exception:  # noqa: BLE001 - a bad config must not brick resolution
             return {}
     d = getattr(settings, "dispatch", None)
+    # The grant lives in config.auto_merge, NOT under dispatch (x-4be1), so it
+    # is read before the dispatch-block gate: a settings object carrying an
+    # auto_merge block but no dispatch overlay still resolves its grant, and a
+    # stub without either degrades to no-grant.
+    am_block = getattr(settings, "auto_merge", None)
+    grant = getattr(am_block, "grant", None) == "dispatch"
     if d is None:
-        return {}
+        return {"auto_merge": grant}
 
     def _text(name: str) -> str:
         return (getattr(d, name, None) or "").strip()
@@ -596,10 +602,9 @@ def _load_dispatch_cfg(settings: object) -> dict:
             "substrate": _text("substrate"),
             "command": _text("command"),
             "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),
-            # Strict identity, not truthiness: a non-boolean here (a stray
-            # "false" string, which is truthy) must never read as a merge grant.
-            # Anything that is not exactly True is no.
-            "auto_merge": getattr(d, "auto_merge", None) is True,
+            # Strict literal compare, not truthiness: only the "dispatch"
+            # grant grants (a stray truthy value or a stub block never does).
+            "auto_merge": grant,
         }
     except Exception:  # noqa: BLE001
         return {}

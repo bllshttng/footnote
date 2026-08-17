@@ -298,7 +298,7 @@ fi
 
 # 5. Dispatch via the target dispatch primitive. Whether the worker may merge
 #    is not decided here: since x-4391 dispatch-node.sh resolves it per node
-#    from that node's own config.dispatch.auto_merge (default false), so an
+#    from that node's own config.auto_merge.grant (default none), so an
 #    autolaunched worker merges exactly when its project's config says it may.
 #    Surface the outcome; on failure the node stays ready and the plan is
 #    intact (AC6-FR).

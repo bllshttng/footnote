@@ -1911,3 +1911,112 @@ def test_doctor_codex_app_server_report_respects_codex_home(tmp_path, monkeypatc
     report = doctor._codex_app_server_report()
     assert report["present"] is False
     assert report["socket_path"].endswith("app-server-control/app-server-control.sock")
+
+
+# ---------------------------------------------------------------------------
+# Deployed claude plugin cache freshness (x-4be1): the hooks Claude sessions
+# actually run come from ~/.claude/plugins/cache, not the wheel. Same
+# fresh|stale|unknown vocabulary; stale only on proven evidence.
+# ---------------------------------------------------------------------------
+
+
+def _plugin_repo_with_two_commits(tmp_path: Path) -> tuple[Path, str, str]:
+    """A real git repo with two commits; returns (repo, old_sha, head_sha)."""
+    import subprocess
+
+    repo = tmp_path / "src"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for cmd in (
+        ["config", "user.email", "t@t"],
+        ["config", "user.name", "t"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
+    (repo / "f").write_text("1")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "one"], check=True)
+    old = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (repo / "f").write_text("2")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "two"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return repo, old, head
+
+
+def _write_plugin_registry(tmp_path: Path, sha: str) -> Path:
+    registry = tmp_path / "installed_plugins.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "fno@footnote": [
+                        {
+                            "scope": "user",
+                            "gitCommitSha": sha,
+                            "installedAt": "2026-08-13T04:48:50.501Z",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return registry
+
+
+def test_plugin_cache_pinned_at_head_is_fresh(tmp_path, monkeypatch):
+    repo, _old, head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, head)
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    assert doctor._plugin_cache_report()["status"] == "fresh"
+
+
+def test_plugin_cache_pinned_at_ancestor_is_stale(tmp_path, monkeypatch):
+    repo, old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, old)
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    report = doctor._plugin_cache_report()
+    assert report["status"] == "stale"
+    assert report["sha"] == old
+    assert report["installed_at"] == "2026-08-13T04:48:50.501Z"
+
+
+def test_plugin_cache_foreign_sha_is_unknown_not_stale(tmp_path, monkeypatch):
+    """A sha this clone has never seen is unknown, never asserted stale."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor,
+        "_plugin_registry_path",
+        lambda: _write_plugin_registry(tmp_path, "0" * 40),
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    assert doctor._plugin_cache_report()["status"] == "unknown"
+
+
+def test_plugin_cache_missing_registry_is_unknown(tmp_path, monkeypatch):
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: tmp_path / "nope.json"
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    assert doctor._plugin_cache_report()["status"] == "unknown"
+
+
+def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
+    _repo, _old, head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, head)
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
+    assert doctor._plugin_cache_report()["status"] == "unknown"

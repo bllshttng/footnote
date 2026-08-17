@@ -753,12 +753,12 @@ def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, caps
 
 
 def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):
-    """AC4-EDGE / x-4391: config.dispatch.auto_merge=true routes the /target verb
-    path so the command drops the no-merge token (never re-baked into a verb).
-    Guards PR #412 through the resolver."""
+    """AC4-EDGE / x-4391: config.auto_merge.grant="dispatch" routes the /target
+    verb path so the command drops the no-merge token (never re-baked into a
+    verb). Guards PR #412 through the resolver."""
     from fno.config import SettingsModel
 
-    merged = SettingsModel(dispatch={"auto_merge": True})
+    merged = SettingsModel(auto_merge={"grant": "dispatch"})
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: merged)
     captured = {}
 
@@ -1483,7 +1483,7 @@ def test_spawn_worker_error_contract_unchanged(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# x-4391: config.dispatch.auto_merge drives the merge posture token
+# x-4391/x-4be1: config.auto_merge.grant drives the merge posture token
 # ---------------------------------------------------------------------------
 
 
@@ -1492,12 +1492,14 @@ def _settings_ns(auto_merge=False, perm=""):
 
     return types.SimpleNamespace(
         agents=types.SimpleNamespace(spawn_permission_mode=perm),
-        dispatch=types.SimpleNamespace(auto_merge=auto_merge),
+        auto_merge=types.SimpleNamespace(
+            grant="dispatch" if auto_merge else "none"
+        ),
     )
 
 
 def test_spawn_worker_auto_merge_true_omits_no_merge(monkeypatch):
-    """AC2-HP: config.dispatch.auto_merge=true -> /target <id> (no no-merge)."""
+    """AC2-HP: config.auto_merge.grant="dispatch" -> /target <id> (no no-merge)."""
     import fno.config as _config
 
     captured = _capture_spawn_argv(monkeypatch)

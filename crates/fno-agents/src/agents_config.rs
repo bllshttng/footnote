@@ -285,14 +285,38 @@ pub fn worker_qos_enabled(cwd: &Path) -> bool {
     )
 }
 
-/// Resolve `dispatch.auto_merge`: the per-project merge posture for autonomous
-/// dispatch (x-4391). Degrades to `false` (no-merge) on any missing/malformed
-/// value, so a config error never grants merge rights (Locked Decision 6). Only
-/// a real TOML boolean grants merge — `as_bool()` returns None for a string like
-/// `"yes"`, mirroring the Python `DispatchBlock` coercer.
-pub fn dispatch_auto_merge(cwd: &Path) -> bool {
+/// Resolve `auto_merge.grant`: the actor-scope merge grant for autonomous
+/// dispatch (x-4391, one table since x-4be1). `true` = a dispatched worker may
+/// merge (`grant = "dispatch"` or the legacy `dispatch.auto_merge = true`,
+/// readable for one release); `false` = no-merge. Canonical first WITHIN each
+/// candidate file, so a project that has migrated is never masked by its own
+/// legacy key. Degrades to `false` on any missing/malformed value, so a config
+/// error never grants merge rights (Locked Decision 6). Only the real literal
+/// grants: `"dispatch"` trimmed-exact for the string, a real TOML boolean for
+/// the legacy spelling (`as_bool()` rejects `"yes"`), mirroring the Python
+/// `AutoMergeBlock` coercer and its `_alias_legacy_keys` arm. Parity with that
+/// arm extends to fall-through: a legacy key that is PRESENT but not a bool is
+/// a no-grant DECISION in this file (the Python per-layer fold writes
+/// `grant = "none"`), never a fall-through that lets a lower-precedence file
+/// resurrect the grant.
+pub fn auto_merge_grant(cwd: &Path) -> bool {
     resolve(cwd, |t| {
-        t.get("dispatch")?.as_table()?.get("auto_merge")?.as_bool()
+        let grant = t
+            .get("auto_merge")
+            .and_then(|v| v.as_table())
+            .and_then(|tbl| tbl.get("grant"));
+        if let Some(g) = grant {
+            // A PRESENT canonical key decides even when malformed (degrade to
+            // no-grant): the same file's legacy spelling must not resurrect a
+            // value the coercer just refused - that would make a typo grant.
+            return Some(g.as_str().map(|s| s.trim() == "dispatch").unwrap_or(false));
+        }
+        // No canonical grant in this file; it may still carry the legacy
+        // spelling. An ABSENT key falls through to the next candidate file
+        // (same as every other resolve() extractor); a present-but-non-bool
+        // value is a no-grant decision, mirroring the Python fold.
+        let legacy = t.get("dispatch")?.as_table()?.get("auto_merge")?;
+        Some(legacy.as_bool().unwrap_or(false))
     })
     .unwrap_or(false)
 }
@@ -318,7 +342,7 @@ pub fn review_optional_apps(cwd: &Path) -> Vec<String> {
 /// from the model's. Both degrade to the value `finalize` hardcoded before it
 /// read config at all, so a malformed file is never worse than the old behavior.
 ///
-/// One known parity edge, shared with `dispatch_auto_merge`: a NON-STRING value
+/// One known parity edge, shared with `auto_merge_grant`: a NON-STRING value
 /// (`merge_strategy = 3`) yields `None` from the extractor and so falls through
 /// to the next config candidate, where Python's merge-then-coerce loader would
 /// let the malformed project value mask the global one. A misspelled string (the
@@ -722,36 +746,87 @@ mod tests {
         );
     }
 
-    // --- x-4391: dispatch.auto_merge reader ---------------------------------
+    // --- x-4391/x-4be1: auto_merge.grant reader -----------------------------
 
     #[test]
-    fn dispatch_auto_merge_absent_is_false() {
+    fn auto_merge_grant_absent_is_false() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let cwd = write_project_settings("am-absent", "schema_version = 1\n");
         // Pin FNO_CONFIG (the SOLE-source short-circuit) to the project file:
         // without it the candidate chain falls through to the developer's real
-        // global config, whose dispatch.auto_merge masks the default under test.
+        // global config, whose grant masks the default under test.
         std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
-        let got = dispatch_auto_merge(&cwd);
+        let got = auto_merge_grant(&cwd);
         clear_config_env();
         assert!(!got);
     }
 
     #[test]
-    fn dispatch_auto_merge_true_grants() {
+    fn auto_merge_grant_legacy_true_grants() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
-        let cwd = write_project_settings("am-true", "[dispatch]\nauto_merge = true\n");
-        assert!(dispatch_auto_merge(&cwd));
+        let cwd = write_project_settings("am-legacy-true", "[dispatch]\nauto_merge = true\n");
+        assert!(auto_merge_grant(&cwd));
     }
 
     #[test]
-    fn dispatch_auto_merge_false_no_merge() {
+    fn auto_merge_grant_legacy_false_no_merge() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
-        let cwd = write_project_settings("am-false", "[dispatch]\nauto_merge = false\n");
-        assert!(!dispatch_auto_merge(&cwd));
+        let cwd = write_project_settings("am-legacy-false", "[dispatch]\nauto_merge = false\n");
+        assert!(!auto_merge_grant(&cwd));
+    }
+
+    #[test]
+    fn auto_merge_grant_canonical_dispatch_grants() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("am-grant", "[auto_merge]\ngrant = \"dispatch\"\n");
+        assert!(auto_merge_grant(&cwd));
+    }
+
+    #[test]
+    fn auto_merge_grant_canonical_none_beats_legacy_true_same_file() {
+        // x-4be1: within one file the canonical spelling wins; a migrated
+        // project is never masked by its own leftover legacy key.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "am-canonical-wins",
+            "[auto_merge]\ngrant = \"none\"\n[dispatch]\nauto_merge = true\n",
+        );
+        // Pin FNO_CONFIG so the None from the canonical arm cannot fall
+        // through to the developer's real global config either.
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_grant(&cwd);
+        clear_config_env();
+        assert!(!got);
+    }
+
+    #[test]
+    fn auto_merge_grant_malformed_legacy_in_project_masks_global() {
+        // Parity with the Python per-layer fold (x-4be1): a present-but-non-bool
+        // legacy value is a no-grant DECISION in the project file. It must not
+        // fall through and let the global's canonical grant resurrect merge -
+        // the Python fold writes grant="none" into the project layer, which
+        // masks the global on merge.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("am-malformed-legacy", "[dispatch]\nauto_merge = \"yes\"\n");
+        let gdir =
+            std::env::temp_dir().join(format!("fno-agents-global-am-{}", std::process::id()));
+        std::fs::create_dir_all(&gdir).unwrap();
+        std::fs::write(
+            gdir.join("config.toml"),
+            "[auto_merge]\ngrant = \"dispatch\"\n",
+        )
+        .unwrap();
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", gdir.join("settings.json"));
+        let got = auto_merge_grant(&cwd);
+        clear_config_env();
+        assert!(!got);
     }
 
     // --- review.optional_apps reader ---------------------------------------
@@ -937,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_auto_merge_non_bool_degrades_to_false() {
+    fn auto_merge_grant_non_bool_degrades_to_false() {
         // Only a real TOML boolean grants merge (Locked Decision 6): a string
         // "yes" yields None from as_bool() -> false, mirroring the Python coercer.
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -946,7 +1021,24 @@ mod tests {
         // Pinned for the same reason as the absent case: a non-bool yields None,
         // which would otherwise fall through to the real global config.
         std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
-        let got = dispatch_auto_merge(&cwd);
+        let got = auto_merge_grant(&cwd);
+        clear_config_env();
+        assert!(!got);
+    }
+
+    #[test]
+    fn auto_merge_grant_malformed_canonical_key_decides_no_grant() {
+        // A present-but-malformed canonical `grant` is a DECISION (no-grant),
+        // never a fall-through to the same file's legacy spelling: a typo must
+        // not resurrect the merge right the coercer just refused.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "am-bad-grant",
+            "[auto_merge]\ngrant = 3\n[dispatch]\nauto_merge = true\n",
+        );
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_grant(&cwd);
         clear_config_env();
         assert!(!got);
     }

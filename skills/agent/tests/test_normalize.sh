@@ -25,7 +25,7 @@ run() { bash "$NORM" --input "$1" "${@:2}"; }
 
 # run_nofno shadows `fno` with an exit-1 stub so assertions about BUILTIN
 # defaults (no-merge posture, static fallback tables) hold regardless of the
-# host's installed fno and its config (e.g. dispatch.auto_merge=true would
+# host's installed fno and its config (e.g. auto_merge.grant="dispatch" would
 # otherwise flip allow_merge via the x-4391 rung-2 read).
 _de43_stub="$(mktemp -d)"
 # Guard the mktemp: an empty _de43_stub would write the stub to /fno.
@@ -717,7 +717,7 @@ rm -f "$_proj_res"
 
 # --- the node-id shape is config-agnostic, not hardcoded to ab- ---------------
 # run_nofno pins the no-merge posture to the builtin default so the message
-# assertions do not inherit the host repo's dispatch.auto_merge.
+# assertions do not inherit the host repo's auto_merge.grant.
 out="$(run_nofno 'x-2aad bg')"
 check_eq 'configured-prefix node classifies'      "$(field "$out" node)" 'x-2aad'
 check_eq 'configured-prefix build mode'           "$(field "$out" payload_mode)" 'build'

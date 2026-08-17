@@ -511,7 +511,67 @@ def doctor_cmd(
         _report_gates()
     except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
         pass
+    try:
+        _report_deprecated_auto_merge()
+    except Exception:  # noqa: BLE001 - advisory, same wrap as the two above
+        pass
     raise typer.Exit(rc)
+
+
+def _report_deprecated_auto_merge() -> None:
+    """Name every config file still setting the deprecated ``dispatch.auto_merge``.
+
+    The migration arm of x-4be1: the alias keeps old files working for one
+    release, and this line tells the operator WHICH file to move. Reads the
+    raw candidate chain (not the merged model) so each file is named
+    individually - the merged model cannot tell them apart, which is exactly
+    the home-vs-project confusion the node exists to end.
+    """
+    from fno.config import _candidate_paths, _global_settings_path, _load_raw
+
+    global_dir = _global_settings_path().parent
+    for candidate in _candidate_paths():
+        if not candidate.is_file():
+            continue
+        parsed, ok = _load_raw(candidate)
+        if not ok:
+            continue
+        # Either shape: flat config.toml (top-level dispatch) or a pre-migration
+        # settings.yaml (config-wrapped dispatch); the canonical grant lives in
+        # the same scope so the masked check uses the file's real shape.
+        scope = parsed if isinstance(parsed.get("dispatch"), dict) else parsed.get("config")
+        legacy = parsed.get("dispatch")
+        if not isinstance(legacy, dict):
+            wrapped = parsed.get("config")
+            legacy = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
+        if not (isinstance(legacy, dict) and "auto_merge" in legacy):
+            continue
+        # Migration commands must target THE SAME FILE this warning names:
+        # `fno config set/unset` defaults to the global scope, so a project
+        # file needs --local or the operator edits the wrong file. The removal
+        # must also drop the legacy key, or the warning recurs forever.
+        scope_flag = "" if candidate.parent == global_dir else " --local"
+        canonical = scope.get("auto_merge") if isinstance(scope, dict) else None
+        if isinstance(canonical, dict) and "grant" in canonical:
+            # Canonical wins in this file (`_alias_am_grant` refuses to fold), so
+            # the legacy line is INERT. Never print its fold value as a migration
+            # target: telling the operator to `config set auto_merge.grant
+            # dispatch` on a file whose canonical grant is "none" would arm
+            # unattended merge on a project they just disarmed.
+            typer.echo(
+                f"warn: {candidate} still sets the deprecated `dispatch.auto_merge`, "
+                "but a canonical `auto_merge.grant` in the same file masks it "
+                "(the file reads as the canonical value). Remove the legacy line.\n"
+                f"      Migrate: fno config unset dispatch.auto_merge{scope_flag}"
+            )
+            continue
+        reads_as = "dispatch" if legacy.get("auto_merge") is True else "none"
+        typer.echo(
+            f"warn: {candidate} sets the deprecated `dispatch.auto_merge`.\n"
+            f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
+            f"      Migrate: fno config set auto_merge.grant {reads_as}{scope_flag} && "
+            f"fno config unset dispatch.auto_merge{scope_flag}"
+        )
 
 
 @app.command("active-backlog")
@@ -580,6 +640,12 @@ def get_cmd(
         ...,
         help="Dotted config key, e.g. config.blueprint.max_prs_per_epic",
     ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        "-J",
+        help="Emit {key, value, source, overrides} as one JSON object on stdout.",
+    ),
 ) -> None:
     """Print a single resolved config value. Read-only.
 
@@ -592,11 +658,19 @@ def get_cmd(
     retried as ``config.review.required_bots`` so a caller need not remember
     the redundant prefix (x-8b64 E: the review gate defaults to
     ``config.review.required_bots`` but the shorthand used to error).
+
+    Which FILE decided the value prints on STDERR (x-4be1): the silent
+    home-vs-project override is the defect this fixes, so the resolved value
+    alone on stdout would keep the confusion. stdout stays value-only because
+    callers pipe it (normalize.sh compares the whole stream); the source line,
+    including an ``overrides`` clause exactly when a lower-precedence file
+    also sets the key, is stderr-only. ``--json`` carries both streams' facts
+    as one object.
     """
     import json
     import sys
 
-    from fno.config import load_settings
+    from fno.config import load_settings, resolve_source
     from pydantic import BaseModel
 
     root = load_settings()
@@ -623,12 +697,54 @@ def get_cmd(
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    # Provenance is per LEAF: a block get merges leaves from several files, so
+    # no single file "decided" it (project auto_merge.enabled + global
+    # auto_merge.merge_strategy both live in the one resolved block). Attributing
+    # the block to one file would re-create the home-vs-project confusion this
+    # command exists to end, just with the block as the lie.
+    is_leaf = not isinstance(node, (BaseModel, dict))
+    if is_leaf:
+        source = resolve_source(key)
+        if source is not None:
+            decider, overridden = source
+        else:
+            decider, overridden = None, []
+    else:
+        decider, overridden = None, []
+
+    if json_out:
+        # model_dump(mode="json") is the JSON-ready form in one step; scalars
+        # and containers pass through unchanged.
+        value: object = (
+            node.model_dump(mode="json") if isinstance(node, BaseModel) else node
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "key": key,
+                    "value": value,
+                    "source": str(decider) if decider else None,
+                    "overrides": [str(p) for p in overridden],
+                },
+                default=str,
+            )
+        )
+        return
+
+    if is_leaf:
+        source_line = f"source: {decider}" if decider else "source: default (no config file sets this key)"
+        if overridden:
+            source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
+    else:
+        source_line = "source: mixed - a block merges leaves from several files; query a leaf (e.g. auto_merge.enabled) for its decider"
+
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
     elif isinstance(node, (dict, list)):
         typer.echo(json.dumps(node, default=str))
     else:
         typer.echo("" if node is None else str(node))
+    typer.echo(source_line, file=sys.stderr)
 
 
 @app.command("set")

@@ -171,7 +171,7 @@ def test_config_get_resolves_parking_lot_path(
         "    parking_lot_path: internal/etl/backlog/parking-lot.md\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "internal/etl/backlog/parking-lot.md"
+    assert result.stdout.strip() == "internal/etl/backlog/parking-lot.md"
 
 
 def test_config_get_unset_parking_lot_path_is_empty(
@@ -186,7 +186,7 @@ def test_config_get_unset_parking_lot_path_is_empty(
         tmp_path, monkeypatch, "config.post_merge.parking_lot_path", "schema_version: 1\n"
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == ""
+    assert result.stdout.strip() == ""
 
 
 def test_config_get_enabled_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,7 +200,7 @@ def test_config_get_enabled_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "    enabled: false\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "False"
+    assert result.stdout.strip() == "False"
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ def test_config_get_self_reap_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "schema_version: 1\nconfig:\n  post_merge:\n    self_reap: true\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "True"
+    assert result.stdout.strip() == "True"
 
 
 # ---------------------------------------------------------------------------

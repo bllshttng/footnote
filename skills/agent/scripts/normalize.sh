@@ -16,7 +16,7 @@
 #   normalize.sh --input "<raw payload>" [--name <n>] [--harness <h>] [--allow-merge|--no-merge]
 #
 # --allow-merge / --no-merge: per-run merge posture (x-4391). Neither => posture
-#   from config.dispatch.auto_merge (default false = no-merge; fno absent => false).
+#   from config.auto_merge.grant (default none = no-merge; fno absent => none).
 #
 # Emits key=value lines on stdout (one per line; values are NOT shell-quoted -
 # read them line by line, never `eval`):
@@ -57,7 +57,7 @@ MODEL=""           # exact model name forwarded to `fno agents spawn --model`
 EFFORT=""          # reasoning effort forwarded to `fno agents spawn --effort`.
                    # Dashless: `effort <value>`; the CLI validates per provider.
 EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
-# x-4391 tri-state: "" = unset (resolve from config.dispatch.auto_merge after
+# x-4391 tri-state: "" = unset (resolve from config.auto_merge.grant after
 # arg parse); 1 = allow (--allow-merge / dashless `merge`); 0 = no-merge
 # (--no-merge). Resolved to 0/1 before any read, so `allow_merge=` never emits "".
 ALLOW_MERGE=""
@@ -496,19 +496,20 @@ if [[ -n "$PROJECT" ]]; then
   esac
 fi
 
-# x-4391: resolve merge posture when no explicit flag/word set it. Rung 2 =
-# config.dispatch.auto_merge; rung 3 = builtin no-merge. Read from the TARGET
+# x-4391/x-4be1: resolve merge posture when no explicit flag/word set it. Rung 2 =
+# config.auto_merge.grant; rung 3 = builtin no-merge. Read from the TARGET
 # project's cwd when a -C/--project cross-project spawn resolved one (RESOLVED_CWD),
 # so a caller repo's opt-in never leaks to a project that opted out, and vice
-# versa (codex P2). `fno config get` prints a Python bool (`True`/`False`) and has
-# no cwd flag, so cd in a subshell then lowercase before the exact-`true` compare.
-# fno absent, a stale binary rejecting the key, or any error degrades to no-merge
-# (matches this file's provider-fallback degrade; never grant merge on a failed read).
+# versa (codex P2). `fno config get` prints the value alone on stdout (the
+# source-file line it adds is stderr-only) and has no cwd flag, so cd in a
+# subshell before the exact-`dispatch` compare. fno absent, a stale binary
+# rejecting the key, or any error degrades to no-merge (matches this file's
+# provider-fallback degrade; never grant merge on a failed read).
 if [[ -z "$ALLOW_MERGE" ]]; then
   ALLOW_MERGE=0
   if command -v fno >/dev/null 2>&1; then
-    _am="$( ( [[ -n "$RESOLVED_CWD" ]] && cd "$RESOLVED_CWD" 2>/dev/null; fno config get dispatch.auto_merge 2>/dev/null ) | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
-    [[ "$_am" == "true" ]] && ALLOW_MERGE=1
+    _am="$( ( [[ -n "$RESOLVED_CWD" ]] && cd "$RESOLVED_CWD" 2>/dev/null; fno config get auto_merge.grant 2>/dev/null ) | tr -d '[:space:]' || true)"
+    [[ "$_am" == "dispatch" ]] && ALLOW_MERGE=1
   fi
 fi
 

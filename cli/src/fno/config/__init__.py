@@ -1502,11 +1502,13 @@ class DispatchBlock(BaseModel):
     # US3 verb allowlist: a node-supplied dispatch verb must match one of these
     # or the resolver refuses (no worker). Empty = the built-in default set.
     allowed_verbs: list[str] = Field(default_factory=lambda: ["/target", "/think"])
-    # x-4391: per-project merge posture for AUTONOMOUS dispatch. Default False =
-    # today's `no-merge` floor (a fresh install is byte-identical). Each dispatch
-    # path (dispatch-node.sh / normalize.sh / advance.py / the Rust loop) defaults
-    # its posture from this key; an explicit --allow-merge/--no-merge flag wins.
-    # Layer-separate from config.auto_merge.* (the worker-side review gate).
+    # DEPRECATED (x-4391/x-4be1): the per-project merge posture for AUTONOMOUS
+    # dispatch, formerly read by every dispatch path. Reads as
+    # `auto_merge.grant` ("dispatch" when true): the alias folds it per layer,
+    # and each path (dispatch-node.sh / normalize.sh / advance.py / the Rust
+    # reader) now reads the grant key. Kept one release so nothing breaks on
+    # upgrade; no consumer reads this field. An explicit
+    # --allow-merge/--no-merge flag always wins.
     auto_merge: bool = False
     # x-0676: on provider exhaustion, defer (today's floor) or fail over to the
     # next healthy provider in the active combo. Default "defer" = byte-identical
@@ -2057,11 +2059,30 @@ class AutoMergeBlock(BaseModel):
     the same fallback). A malformed block degrades to defaults (auto-merge OFF)
     rather than failing the whole settings load - false-enabled is the dangerous
     direction for a merge opt-in.
+
+    Scope-ordered to read like the AND chain ``fno pr merge`` enforces
+    (``pr/_merge.py`` step 1/1b): ``enabled`` is PROJECT scope (the master
+    switch, checked first); ``grant`` is ACTOR scope (who may merge once
+    ``enabled`` passes); the policy keys below only matter once both do.
+
+    RUN scope is deliberately not a key here. ``fno target init`` folds
+    ``enabled`` plus ``grant`` plus ``--allow-merge`` / ``--no-merge`` plus the
+    ``/target bg`` injected default into ``auto_merge_approved`` in
+    ``.fno/target-state.md``, with ``auto_merge_source`` naming the decider.
+    That fold is one-directional: a run can withhold merge authority, never
+    grant it (``cli/src/fno/pr/_merge.py`` step 1b). The review rung of the
+    same chain is ``config.review.required_bots`` / ``config.review.reviewers``,
+    enforced at the coverage guard in ``_merge.py``.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
+    # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
+    # `dispatch.auto_merge`, which spelled the same decision in another table.
+    #   none     - humans only, via `fno pr merge`
+    #   dispatch - autonomously dispatched /target workers may merge too
+    grant: str = "none"
     merge_strategy: str = "merge"
     delete_branch_on_merge: bool = True
     require_checks_pass: bool = True
@@ -2072,6 +2093,19 @@ class AutoMergeBlock(BaseModel):
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
         return _coerce_affirmative(v, default=False)
+
+    @field_validator("grant", mode="before")
+    @classmethod
+    def _coerce_grant(cls, v: object) -> str:
+        """Only the two literals are honored; anything else degrades to "none".
+        Same stance as `DispatchBlock._coerce_auto_merge`: a config error can
+        never grant merge rights, only withhold them. A str is trimmed first so
+        a padded literal still grants - the Rust reader compares
+        ``s.trim() == "dispatch"`` and the two runtimes must not disagree on
+        who may merge."""
+        if isinstance(v, str):
+            v = v.strip()
+        return v if v in ("none", "dispatch") else "none"
 
     @field_validator("delete_branch_on_merge", "require_checks_pass", mode="before")
     @classmethod
@@ -3915,6 +3949,21 @@ def _layer_worktree_local_override(
     return _deep_merge(raw, override) if override else raw
 
 
+# Legacy-path deprecation warnings fire ONCE per process, not once per
+# _alias_legacy_keys call: the shared _aliased_layers collector is deliberately
+# uncached, so one `fno config get` (load_settings + resolve_source) walks and
+# aliases the chain twice - a per-call warning would double every legacy-key
+# notice on stderr for callers that keep it.
+_DEPRECATED_WARNED: set[str] = set()
+
+
+def _warn_legacy_once(path: str, message: str) -> None:
+    if path in _DEPRECATED_WARNED:
+        return
+    _DEPRECATED_WARNED.add(path)
+    _LOG.warning(message)
+
+
 def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     """Bridge legacy key locations onto their canonical modeled paths (US3).
 
@@ -3953,15 +4002,17 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         resolved_reviewers = review.get("external_reviewers")
     elif legacy_list is not None:
         resolved_reviewers = legacy_list
-        _LOG.warning(
+        _warn_legacy_once(
+            "config.external_reviewers",
             "settings.yaml: 'config.external_reviewers' is deprecated; "
-            "use 'config.review.external_reviewers' instead."
+            "use 'config.review.external_reviewers' instead.",
         )
     elif legacy_scalar is not None:
         resolved_reviewers = legacy_scalar
-        _LOG.warning(
+        _warn_legacy_once(
+            "config.external_reviewer",
             "settings.yaml: 'config.external_reviewer' (scalar) is deprecated; "
-            "use the list 'config.review.external_reviewers' instead."
+            "use the list 'config.review.external_reviewers' instead.",
         )
 
     if resolved_reviewers is not None and not canonical_present:
@@ -3986,9 +4037,10 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
         if lifted:
             config["project"] = cfg_project
             raw["config"] = config
-            _LOG.warning(
+            _warn_legacy_once(
+                "top-level project",
                 "settings.yaml: the top-level 'project' block is deprecated; "
-                "use 'config.project' instead."
+                "use 'config.project' instead.",
             )
 
     # --- top-level work -> config.work ------------------------------------
@@ -3998,12 +4050,75 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     if had_config and isinstance(top_work, dict) and not isinstance(config.get("work"), dict):
         config["work"] = top_work
         raw["config"] = config
-        _LOG.warning(
+        _warn_legacy_once(
+            "top-level work",
             "settings.yaml: the top-level 'work' block is deprecated; "
-            "use 'config.work' instead."
+            "use 'config.work' instead.",
         )
 
+    # --- dispatch.auto_merge -> auto_merge.grant (x-4be1) -------------------
+    # Same concept, one table: the actor-scope grant moves into the [auto_merge]
+    # block. Runs PER LAYER (the caller merges after), so precedence between a
+    # legacy and a canonical spelling across files is file-ordered, not
+    # last-merged. Canonical wins silently. Deliberately NO warning here, unlike
+    # the arms above: this key sits in real config files on real machines, and
+    # the warning fires from every settings load - including subprocesses whose
+    # single-line stdout other tools parse (dispatch-node.sh's agent-name
+    # bridge rejects any stderr noise). The operator-facing deprecation surface
+    # is `fno config doctor`, which names the file and the migration command.
+    # Both shapes carry the tables: flat config.toml at top level, a
+    # settings.yaml-era file wrapped under `config:` (flattened after this pass).
+    if _alias_am_grant(raw) or (had_config and _alias_am_grant(config)):
+        if had_config:
+            raw["config"] = config
+
     return raw
+
+
+def _alias_am_grant(scope: dict[str, object]) -> bool:
+    """Fold a scope's legacy ``dispatch.auto_merge`` into ``auto_merge.grant``.
+
+    True when the fold fired (the caller deliberately draws NO warning - the
+    operator-facing surface is `fno config doctor`). A canonical ``grant``
+    already present wins and returns False - never masked by the file's own
+    legacy key. Only a real TOML ``True`` grants; a malformed legacy value
+    folds to ``"none"`` (degrade toward safety, same stance as
+    ``DispatchBlock._coerce_auto_merge``).
+    """
+    dispatch = scope.get("dispatch")
+    if not isinstance(dispatch, dict):
+        return False
+    am = scope.get("auto_merge")
+    am = am if isinstance(am, dict) else {}
+    legacy_am = dispatch.get("auto_merge")
+    if legacy_am is None or "grant" in am:
+        return False
+    am["grant"] = "dispatch" if legacy_am is True else "none"
+    scope["auto_merge"] = am
+    return True
+
+
+def _aliased_layers(
+    candidates: tuple[Path, ...],
+) -> tuple[tuple[Path, dict[str, object]], ...]:
+    """One walk over the candidate chain: ``(path, alias-applied parsed)`` per
+    existing parseable file, highest precedence first.
+
+    The single collector shared by :func:`load_settings` and
+    :func:`resolve_source`, so the chain, its order, and the per-layer
+    ``_alias_legacy_keys`` pass exist once and cannot drift apart. Deliberately
+    NOT cached: the alias pass's legacy-arm warnings are once-per-process
+    (``_warn_legacy_once``), so the only thing a cache would buy is one
+    redundant file walk per consumer - and caching by path would serve a stale
+    parse to a test (or tool) that rewrites a config file mid-process, exactly
+    the freshness load_settings' own cache_clear contract promises."""
+    layers: list[tuple[Path, dict[str, object]]] = []
+    for candidate in candidates:
+        if candidate.is_file():
+            parsed, ok = _load_raw(candidate)
+            if ok:
+                layers.append((candidate.resolve(), _alias_legacy_keys(parsed)))
+    return tuple(layers)
 
 
 @lru_cache(maxsize=1)
@@ -4028,27 +4143,27 @@ def load_settings() -> SettingsModel:
     # (project-local highest, global lowest). Files that fail to parse are
     # skipped (a WARNING is already emitted by _load_raw) so a corrupt
     # higher-priority file still falls through to a valid lower-priority one.
-    layers: list[tuple[Path, dict[str, object]]] = []
-    for candidate in _candidate_paths():
-        if candidate.is_file():
-            parsed, ok = _load_raw(candidate)
-            if ok:
-                layers.append((candidate.resolve(), parsed))
+    # The walk (parse + per-layer legacy alias) is the ONE shared collector:
+    # resolve_source replays the same layers, so the chain, its order, and the
+    # alias pass (whose deprecation warnings fire once per process per chain,
+    # not once per consumer) live in exactly one place.
+    candidates = _candidate_paths()
+    layers = list(_aliased_layers(tuple(candidates)))
 
     # Deep-merge lowest priority first so the highest-priority file wins per
     # key. config.obsidian.vault can come from global while
     # config.post_merge.parking_lot_path comes from the project file.
-    # Alias legacy keys PER LAYER, before merging, so a higher-priority file's
-    # legacy value still wins over a lower-priority file's canonical value (and
-    # vice-versa). Aliasing only the merged result would let a low-priority
-    # canonical key mask a high-priority legacy key.
+    # Legacy keys were aliased PER LAYER inside _aliased_layers, before this
+    # merge, so a higher-priority file's legacy value still wins over a
+    # lower-priority file's canonical value (and vice-versa). Aliasing only the
+    # merged result would let a low-priority canonical key mask a high-priority
+    # legacy key.
     raw: dict[str, object] = {}
     for _path, parsed in reversed(layers):
-        raw = _deep_merge(raw, _alias_legacy_keys(parsed))
+        raw = _deep_merge(raw, parsed)
 
     # Per-worktree local override (x-cbce). A real, non-symlinked local file is
     # layered only for the allowlisted collision keys.
-    candidates = _candidate_paths()
     if candidates:
         raw = _layer_worktree_local_override(raw, candidates[0].parent)
 
@@ -4129,6 +4244,86 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
     raw = _layer_worktree_local_override(raw, Path(repo_root) / ".fno")
     return SettingsModel.model_validate(raw)
+
+
+def resolve_source(key: str) -> Optional[tuple[Path, list[Path]]]:
+    """Which config file decided ``key``: ``(decider, overridden)`` or None.
+
+    Consumes the SAME aliased layers :func:`load_settings` merges (via
+    :func:`_aliased_layers`), in the same order, and attributes the key by
+    REPLAYING the loader's merge: the decider is the file whose merge changed
+    the key's value under the loader's own semantics - deep-merge
+    highest-wins-per-key plus the post-merge ``_unwrap_config_dict`` flatten,
+    where a ``config:``-wrapped block beats flat top-level keys. Presence per
+    layer alone would mis-attribute exactly there: a flat project key that the
+    wrapped global's block overrides at unwrap would name the project as
+    decider while the model serves the global's value.
+
+    The worktree-local ``config.local.toml`` enters as the highest layer
+    through the same allowlist filter the loader applies, so a dropped
+    non-allowlisted key can never masquerade as a source. A value that arrived
+    through the legacy spelling reports the file that actually holds it (the
+    alias ran per layer inside the shared collector).
+
+    None = no file sets the key (the value is a built-in default).
+    """
+    layers = list(_aliased_layers(tuple(_candidate_paths())))
+    candidates = _candidate_paths()
+    if candidates:
+        local_path = candidates[0].parent / "config.local.toml"
+        if local_path.is_file() and not local_path.is_symlink():
+            local_parsed, lok = _load_raw(local_path)
+            if lok:
+                override = _worktree_local_override(local_parsed)
+                if override:
+                    layers.insert(0, (local_path.resolve(), override))
+
+    _MISSING = object()
+
+    def _get(dotted: str, data: object) -> object:
+        node: object = data
+        for part in dotted.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return _MISSING
+            node = node[part]
+        return node
+
+    def _value(data: object) -> object:
+        for v in variants:
+            got = _get(v, data)
+            if got is not _MISSING:
+                return got
+        return _MISSING
+
+    # The same prefix tolerance get_cmd applies to lookups: a bare
+    # `review.required_bots` and a legacy `config.`-prefixed spelling are one key.
+    variants = [key, key[len("config.") :]] if key.startswith("config.") else [key, f"config.{key}"]
+
+    # Replay lowest precedence first, loader order. A worktree's .fno/config.toml
+    # is often a symlink to the canonical checkout's; candidate.resolve()
+    # collapses both chain tiers onto one path, and the same file must not
+    # replay twice and "override" itself.
+    seen: set[Path] = set()
+    setters: list[Path] = []
+    decider: Optional[Path] = None
+    merged: dict[str, object] = {}
+    prev: object = _MISSING
+    for path, parsed in reversed(layers):
+        if path in seen:
+            continue
+        seen.add(path)
+        if _value(_unwrap_config_dict(parsed)) is not _MISSING:
+            setters.append(path)
+        merged = _deep_merge(merged, parsed)
+        now = _value(_unwrap_config_dict(merged))
+        if now is not _MISSING and now != prev:
+            decider = path
+        if now is not _MISSING:
+            prev = now
+    if not setters:
+        return None
+    assert decider is not None  # the first setter introduces the value: a change
+    return (decider, [p for p in setters if p != decider])
 
 
 def agents_headless_yolo(provider: str) -> bool:

@@ -429,6 +429,89 @@ def _rust_report() -> dict[str, Optional[str]]:
     }
 
 
+def _plugin_registry_path() -> Path:
+    """The claude plugin install registry (module-level so tests can stub it)."""
+    return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+
+
+def _plugin_cache_report() -> dict[str, Optional[str]]:
+    """Freshness of the deployed CLAUDE plugin cache the hooks run from.
+
+    ``fno doctor`` already owns source-vs-installed staleness for the wheel and
+    the cargo bins, but not for ``~/.claude/plugins/cache/footnote``: the copy
+    ``hooks/helpers/init-target-state.sh`` (resolved via CLAUDE_PLUGIN_ROOT)
+    actually executes in every Claude session. A cache pinned to a pre-feature
+    sha ships hooks that predate provenance writers while every Python-side
+    check reads green - the exact gap that left armed manifests reporting
+    ``auto_merge_source: unknown`` after x-9d11.
+
+    Uses the module's staleness vocabulary: ``fresh`` when the pinned sha IS
+    the source HEAD, ``stale`` when the sha is a proven ancestor of HEAD (and
+    not HEAD), ``unknown`` when the installed-plugins file is missing, the sha
+    is unknown to this clone, or git is unavailable. Never asserts staleness on
+    absent evidence (same rule as the exit-code contract at module top).
+    """
+    report: dict[str, Optional[str]] = {
+        "status": "unknown",
+        "sha": None,
+        "installed_at": None,
+        "detail": None,
+    }
+    try:
+        registry = _plugin_registry_path()
+        data = json.loads(registry.read_text(encoding="utf-8"))
+        plugins = data.get("plugins") if isinstance(data, dict) else None
+        entries = (
+            plugins.get("fno@footnote") if isinstance(plugins, dict) else None
+        ) or []
+        entry = entries[0] if isinstance(entries, list) and entries else {}
+    except (OSError, ValueError, IndexError, AttributeError, TypeError, KeyError):
+        # A hand-edited, corrupted, or future-version registry is exactly the
+        # broken install this advisory leg exists to describe: any malformed
+        # shape degrades to unknown, never a traceback through doctor_command's
+        # unwrapped call sites.
+        report["detail"] = "no installed_plugins.json entry for fno@footnote"
+        return report
+    sha = entry.get("gitCommitSha")
+    if not sha:
+        report["detail"] = "installed_plugins.json carries no gitCommitSha"
+        return report
+    report["sha"] = sha
+    report["installed_at"] = entry.get("installedAt")
+
+    src = _resolve_source(None)
+    if src is None:
+        report["detail"] = "no source checkout to compare against"
+        return report
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(src), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if head.returncode != 0:
+            report["detail"] = "git rev-parse failed in the source checkout"
+            return report
+        if head.stdout.strip() == sha:
+            report["status"] = "fresh"
+            return report
+        ancestor = subprocess.run(
+            ["git", "-C", str(src), "merge-base", "--is-ancestor", sha, "HEAD"],
+            capture_output=True,
+            timeout=15,
+        )
+        if ancestor.returncode == 0:
+            report["status"] = "stale"
+        else:
+            # Not HEAD and not an ancestor: a foreign sha. Unknown, never
+            # stale-on-absent-evidence.
+            report["detail"] = "pinned sha is not known as an ancestor of HEAD"
+    except (OSError, subprocess.SubprocessError):
+        report["detail"] = "git unavailable"
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Cost cross-check (--cost-check, opt-in - ab-c0f92987)
 # ---------------------------------------------------------------------------
@@ -944,13 +1027,13 @@ def _read_posture_stamp() -> Optional[dict[str, Any]]:
         return None
 
 
-def _silent_switch_report() -> dict[str, Any]:
+def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Both directions of the silent-switch rule.
 
     Direction "inaction": a default-off switch silently producing nothing while
     work waits (drain off + missions queued; think_spawn off). Direction
     "irreversible": a default-on/armed switch that can merge a green PR with no
-    operator (auto_merge.enabled, dispatch.auto_merge, armed manifests). Each
+    operator (auto_merge.enabled, auto_merge.grant, armed manifests). Each
     finding names the switch, a count where one exists, and the exact command.
     """
     try:
@@ -967,7 +1050,10 @@ def _silent_switch_report() -> dict[str, Any]:
     ab = _leaf(getattr(s, "active_backlog", None), "enabled")
     ts = _leaf(getattr(s, "think_spawn", None), "enabled")
     am = _leaf(getattr(s, "auto_merge", None), "enabled")
-    dam = _leaf(getattr(s, "dispatch", None), "auto_merge")
+    # Actor scope (x-4be1): the grant key replaces the dispatch.auto_merge
+    # bool. Read through getattr so a stub settings object in tests degrades
+    # to None (not armed) rather than raising.
+    grant = getattr(getattr(s, "auto_merge", None), "grant", None)
 
     findings: list[dict[str, Any]] = []
     missions = _mission_active_count()
@@ -999,12 +1085,12 @@ def _silent_switch_report() -> dict[str, Any]:
                 "command": "fno config set auto_merge.enabled false",
             }
         )
-    if dam is True:
+    if grant == "dispatch":
         findings.append(
             {
                 "direction": "irreversible",
-                "switch": "dispatch.auto_merge",
-                "command": "fno config set dispatch.auto_merge false",
+                "switch": "auto_merge.grant",
+                "command": "fno config set auto_merge.grant none",
             }
         )
     # A manifest's per-run approval is inert while the kill-switch
@@ -1023,15 +1109,30 @@ def _silent_switch_report() -> dict[str, Any]:
         breakdown = ", ".join(
             f"{n} {src}" for src, n in sorted(armed.items(), key=lambda kv: -kv[1])
         )
-        findings.append(
-            {
-                "direction": "irreversible",
-                "switch": "auto_merge_approved (worktree manifests)",
-                "count": total,
-                "count_label": f"manifest(s): {breakdown}",
-                "command": "fno config set auto_merge.enabled false",
-            }
-        )
+        finding = {
+            "direction": "irreversible",
+            "switch": "auto_merge_approved (worktree manifests)",
+            "count": total,
+            "count_label": f"manifest(s): {breakdown}",
+            "command": "fno config set auto_merge.enabled false",
+        }
+        # An ``unknown`` count is answerable, not fated (x-4be1): a proven-stale
+        # deployed plugin cache is a LIKELY cause (a cache pinned before the
+        # provenance writer cannot stamp manifests), and ``fno update`` is the
+        # fix for that cause. Only speak when the plugin-cache signal PROVES
+        # stale, and say "likely" - ancestor-ness alone does not prove the
+        # pinned sha predates the writer, and a pre-provenance manifest with a
+        # fresh cache stays a bare unknown (never guess an origin).
+        if armed.get("unknown"):
+            cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
+            if cache.get("status") == "stale":
+                sha = str(cache.get("sha") or "")[:12]
+                when = str(cache.get("installed_at") or "")[:10] or "?"
+                finding["cause"] = (
+                    f"deployed plugin cache is stale ({sha}, {when}); likely "
+                    "predates the auto_merge_source writer. Fix: fno update"
+                )
+        findings.append(finding)
     return {"findings": findings, "posture": _read_posture_stamp()}
 
 
@@ -1588,6 +1689,21 @@ def _emit_human(
                 f"fno doctor: {sw} is ARMED{clause}; a green PR can merge "
                 f"unattended. Run `{cmd}` to disarm."
             )
+        if f.get("cause"):
+            out(f"  cause: {f['cause']}")
+
+    # Deployed claude plugin cache (x-4be1): the hooks actually executed by
+    # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
+    pc = result.get("plugin_cache") or {}
+    if pc.get("status") == "stale":
+        sha = str(pc.get("sha") or "")[:12]
+        when = str(pc.get("installed_at") or "")[:10] or "?"
+        out(
+            f"fno doctor: deployed claude plugin cache STALE (pinned {sha}, "
+            f"{when}; hooks run pre-HEAD bytes). Run `fno update`."
+        )
+    elif pc.get("status") == "fresh":
+        out("fno doctor: deployed claude plugin cache: fresh (pinned at source HEAD).")
 
     if surf.get("codex_hooks_dual"):
         out(
@@ -2674,8 +2790,16 @@ def doctor_command(
 
     # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.
-    # Never changes status/exit.
-    result["silent_switches"] = _silent_switch_report()
+    # Never changes status/exit. The plugin-cache report is computed ONCE and
+    # shared with the silent-switch pass (its unknown-manifest cause reads it):
+    # two invocations would run the registry read and the git probes twice and
+    # could disagree about the same cache within one report.
+    plugin_cache = _plugin_cache_report()
+    result["silent_switches"] = _silent_switch_report(plugin_cache=plugin_cache)
+
+    # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
+    # sessions actually run. Never changes status/exit.
+    result["plugin_cache"] = plugin_cache
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

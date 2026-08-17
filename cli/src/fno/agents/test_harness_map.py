@@ -414,12 +414,18 @@ def test_normalize_reads_the_same_merge_posture_key_as_harness_map():
     # have silently diverged - the same "guard that never touches the path it
     # claims to cover" shape as the bug this node fixed (codex P2 on PR #640).
     #
-    # Build the settings stub FROM the shell's key. If Python is repointed, this
-    # stub no longer grants and the assertion fails; if the shell is repointed,
-    # the registry check above fails. Neither side can move alone.
+    # Build the settings stub FROM the shell's key AND the shell's grant
+    # literal (the comparison the shell runs against `fno config get` output).
+    # If Python is repointed, this stub no longer grants and the assertion
+    # fails; if the shell is repointed, the registry check above fails. Neither
+    # side can move alone.
     section, _, field = key.partition(".")
     assert section and field, f"expected a dotted config key, got {key!r}"
-    stub = types.SimpleNamespace(**{section: types.SimpleNamespace(**{field: True})})
+    m = re.search(r'\$_am" == "(\w+)"', text)
+    assert m, "normalize.sh no longer compares config get output to a grant literal"
+    stub = types.SimpleNamespace(
+        **{section: types.SimpleNamespace(**{field: m.group(1)})}
+    )
     out = resolve_dispatch(harness="claude", node_id="x-1", settings=stub)
     assert out["command"] == "/target x-1", (
         f"normalize.sh reads {key!r}, but setting that field does not grant merge "

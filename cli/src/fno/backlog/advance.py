@@ -4,7 +4,7 @@ Node ab-3cd195b6. When a backlog node's PR merges, a merge-detector
 (``fno backlog reconcile`` or the /pr merged skill) calls this verb after the
 node-close write commits. If auto-continue is armed for the project and no live
 walk owns it, advance dispatches a fresh background ``/target`` worker (with the
-merge posture from ``config.dispatch.auto_merge``, default ``no-merge``) for the
+merge posture from ``config.auto_merge.grant``, default ``none``) for the
 next now-unblocked node, so a merge-gated epic walks itself group-by-
 group across merges with no manual re-invocation.
 
@@ -12,13 +12,13 @@ Locked Decisions this module embodies:
   1. Decoupled from the loop driver - driven by the merge event, so megawalk /
      /target / /megatron all inherit auto-continue (no driver-specific code).
   4. Fire-and-forget dispatch: ``fno agents spawn`` -> ``/target [--no-merge] <id>``
-     (the ``--no-merge`` flag is gated on ``config.dispatch.auto_merge``; x-4391).
+     (the ``--no-merge`` flag is gated on ``config.auto_merge.grant``; x-4391/x-4be1).
   5. Concurrency via ``fno claim``: honor ``walker:<root>`` (no double-dispatch
      during a live walk); reserve ``dispatch:<id>`` (O_EXCL dedup + bridge token
      that outlives this short-lived process until the worker owns ``node:<id>``,
      LD#11 / AC1-CLAIM - mirrors handoff.sh + dispatch-node.sh).
   6. advance never merges the PR itself - it dispatches a worker whose merge
-     posture comes from ``config.dispatch.auto_merge`` (default ``no-merge``);
+     posture comes from ``config.auto_merge.grant`` (default ``none``);
      an actual merge, when enabled, is still gated by the worker's own
      ``config.auto_merge.*`` review layer (x-4391, revisits epic LD#4).
   7. Non-fatal: a failed spawn never wedges the host op (reconcile/post-merge).
@@ -1047,7 +1047,7 @@ def _spawn_worker(
     brief on ``TARGET_BRIEF`` env); with no verb the builtin ``/target`` is used.
 
     Merge posture (x-4391) stays a launcher decision, never baked into a node verb:
-    the default builtin bakes ``no-merge``; ``config.dispatch.auto_merge`` routes the
+    the default builtin bakes ``no-merge``; ``config.auto_merge.grant`` routes the
     ``/target`` verb path (which omits ``no-merge``); reconcile stays an explicit
     ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
     ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
@@ -1067,12 +1067,13 @@ def _spawn_worker(
     # from `harness` (the record's cli, which drives the resolver's substrate).
     prov = (provider or "").strip() or "claude"
 
-    # x-4391: merge posture from config.dispatch.auto_merge, read with the node_cwd
-    # precedence so a cross-project dispatch reads the DEPENDENT node's config
-    # (AC2-EDGE), never the merged repo's. advance takes no per-run flag, so config
-    # is the sole non-builtin rung; any read failure -> no-merge (Locked Decision
-    # 6). The same settings object feeds the resolver (config.dispatch.*) and the
-    # permission-mode read below, so all three config reads are node-consistent.
+    # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
+    # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
+    # config (AC2-EDGE), never the merged repo's. advance takes no per-run flag,
+    # so config is the sole non-builtin rung; any read failure -> no-merge
+    # (Locked Decision 6). The same settings object feeds the resolver
+    # (config.dispatch.*) and the permission-mode read below, so all three
+    # config reads are node-consistent.
     allow_merge = False
     settings_obj = None
     try:
@@ -1083,17 +1084,21 @@ def _spawn_worker(
         )
     except Exception:  # noqa: BLE001 - unreadable config -> defaults below
         settings_obj = None
-    # Read auto_merge in its OWN guard so a missing/odd .dispatch never disables the
-    # independent permission-mode read that also consumes settings_obj.
+    # Read the grant in its OWN guard so a missing/odd block never disables the
+    # independent permission-mode read that also consumes settings_obj. Only the
+    # literal "dispatch" grants (a typo or a stub settings object never does).
     if settings_obj is not None:
         try:
-            allow_merge = bool(settings_obj.dispatch.auto_merge)
+            allow_merge = (
+                getattr(getattr(settings_obj, "auto_merge", None), "grant", None)
+                == "dispatch"
+            )
         except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
             allow_merge = False
 
     # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
     # verb path (never a merge); reconcile stays explicit and spells its own posture.
-    # With neither, the builtin rung reads config.dispatch.auto_merge itself (x-8e59),
+    # With neither, the builtin rung reads config.auto_merge.grant itself (x-8e59),
     # so this caller no longer routes a merge grant through the verb path to work
     # around a builtin that ignored the key. A DispatchResolveError propagates to the
     # caller's non-fatal spawn-failure path.

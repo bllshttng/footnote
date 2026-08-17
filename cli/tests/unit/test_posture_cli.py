@@ -40,7 +40,7 @@ def test_apply_attended_writes_off_keys(project_scope: Path) -> None:
     assert res.exit_code == 0, res.output
     s = load_settings_for_repo(project_scope)
     assert s.auto_merge.enabled is False
-    assert s.dispatch.auto_merge is False
+    assert s.auto_merge.grant == "none"
     assert s.active_backlog.enabled is False
 
 
@@ -49,7 +49,7 @@ def test_apply_autonomous_writes_on_keys(project_scope: Path) -> None:
     assert res.exit_code == 0, res.output
     s = load_settings_for_repo(project_scope)
     assert s.auto_merge.enabled is True
-    assert s.dispatch.auto_merge is True
+    assert s.auto_merge.grant == "dispatch"
     assert s.active_backlog.enabled is True
 
 

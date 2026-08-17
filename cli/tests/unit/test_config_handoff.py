@@ -172,7 +172,7 @@ def test_config_get_used_pct_trigger_default(
         tmp_path, monkeypatch, "config.target.handoff.used_pct_trigger", "schema_version: 1\n"
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "50"
+    assert result.stdout.strip() == "50"
 
 
 def test_config_get_generation_cap_default(
@@ -183,7 +183,7 @@ def test_config_get_generation_cap_default(
         tmp_path, monkeypatch, "config.target.handoff.generation_cap", "schema_version: 1\n"
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "4"
+    assert result.stdout.strip() == "4"
 
 
 def test_config_get_enabled_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +192,7 @@ def test_config_get_enabled_default(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         tmp_path, monkeypatch, "config.target.handoff.enabled", "schema_version: 1\n"
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "True"
+    assert result.stdout.strip() == "True"
 
 
 def test_config_get_enabled_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +204,7 @@ def test_config_get_enabled_override(tmp_path: Path, monkeypatch: pytest.MonkeyP
         "schema_version: 1\nconfig:\n  target:\n    handoff:\n      enabled: false\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "False"
+    assert result.stdout.strip() == "False"
 
 
 def test_config_get_used_pct_trigger_override(
@@ -218,4 +218,4 @@ def test_config_get_used_pct_trigger_override(
         "schema_version: 1\nconfig:\n  target:\n    handoff:\n      used_pct_trigger: 80\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "80"
+    assert result.stdout.strip() == "80"
