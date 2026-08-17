@@ -98,7 +98,39 @@ def test_unparseable_reset_stamp_is_leave_never_wake():
     rows = [Row("dddd4444-0000", "k1", "blocked", None, "/tmp/k1")]
     [v] = _run(rows, {"dddd4444-0000": _facts("429 quota exceeded, try later")})
     assert v.verdict == LEAVE
-    assert "unknown" in v.basis
+
+
+def test_newest_429_stamp_decides_the_window():
+    """Records join newest-last, so a first-match stamp search reads the
+    OLDEST 429's reset. Two 429s in the tail with the old window passed and
+    the newest still closed must read live, or the wake lane spends a turn
+    inside the open window."""
+    old = "429 rate limit, window resets at 02:10:00 SGT"
+    new = RATE_LIMIT_TAIL
+    tail = f"{old} {new}"
+    window, epoch, _stamp = rate_limit_window(tail, NOW_1840)
+    assert window == "live"
+    assert epoch == datetime(2026, 8, 16, 18, 48, 21, tzinfo=timezone.utc).timestamp()
+    # Once the NEWEST window has passed too, the row is wakeable again.
+    assert rate_limit_window(tail, NOW_1850)[0] == "passed"
+    # A newest 429 with no stamp of its own is unknown, never the old stamp.
+    assert rate_limit_window("429 resets 02:10:00 SGT 429 quota exceeded", NOW_1840)[0] == "unknown"
+
+
+def test_old_passed_plus_new_live_429_is_reroute_not_wake():
+    row = Row("eeee5555-0000", "r2", "blocked", None, "/tmp/r2")
+    old = "429 rate limit, window resets at 02:10:00 SGT"
+    facts = TailFacts(
+        [(NOW_1840 - 130 * 60, old), (NOW_1840 - 125 * 60, RATE_LIMIT_TAIL)],
+        NOW_1840 - 125 * 60,
+        f"{old} {RATE_LIMIT_TAIL}",
+        "assistant",
+        RATE_LIMIT_TAIL,
+        "text",
+    )
+    [v] = _run([row], {"eeee5555-0000": facts})
+    assert v.verdict == REROUTE
+    assert "18:48:21Z" in v.basis
 
 
 def test_identity_joins_on_claim_holder_not_name():
@@ -325,6 +357,32 @@ def test_wake_applies_when_message_lands(monkeypatch):
     assert outcome == "applied"
 
 
+def test_lifecycle_subprocesses_run_in_the_rows_worktree(monkeypatch):
+    """A registry-less row from another project must resolve in its own
+    project: the delegated resume carries the row's cwd, never the sweep
+    caller's ambient one."""
+    seen = {}
+    reads = {"n": 0}
+
+    def fake_tail(sid, cwd):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return _facts("stopped mid turn")
+        return _facts("continue", age_min=0)
+
+    def runner(argv, **kw):
+        seen["cwd"] = kw.get("cwd")
+        return _Proc(0)
+
+    monkeypatch.setattr(watchdog, "tail_facts", fake_tail)
+    v = Verdict("dddd4444-0000", "k1", "stopped", WAKE, "stopped 30m", "resume")
+    outcome, detail = apply_verdict(
+        v, lanes="wake", cwd="/tmp/other-project", runner=runner
+    )
+    assert outcome == "applied", detail
+    assert seen["cwd"] == "/tmp/other-project"
+
+
 def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
     """A torn/summary record with no timestamp of its own is presence, not a
     landing: it must not confirm a wake whose message never arrived."""
@@ -395,14 +453,18 @@ def test_reap_applies_on_clean_worktree(tmp_path):
     git("push", "-q", "-u", "origin", "main")
 
     stopped = []
+    cwds = []
     def runner(argv, **kw):
         stopped.append(argv)
+        cwds.append(kw.get("cwd"))
         return _Proc(0)
     v = Verdict("eeee1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
     outcome, _ = apply_verdict(v, lanes="all", cwd=str(repo), runner=runner)
     assert outcome == "applied"
     assert any("stop" in " ".join(a) for a in stopped)
     assert any("rm" in " ".join(a) for a in stopped)
+    # Both lifecycle calls resolve in the row's worktree, not the caller's.
+    assert cwds == [str(repo), str(repo)]
     # rm is never forced: claude rm's own refusal on a dirty worktree is a
     # safety feature the lane leans on.
     assert not any("--force" in " ".join(a) for a in stopped)
@@ -426,7 +488,10 @@ def test_reroute_delegates_to_the_full_failover(monkeypatch):
         v, lanes="all", cwd="/tmp/r1", failover_fn=fake_failover
     )
     assert outcome == "applied", detail
-    assert seen == {"cwd": "/tmp/r1", "name": "r1", "swap": True}
+    # The lifecycle address is the SESSION ID, not the display name: a
+    # registry-less row's name is claude's friendly label with no registry
+    # row behind it, so a stop by name cannot use the session-store fallback.
+    assert seen == {"cwd": "/tmp/r1", "name": "cccc3333-0000", "swap": True}
 
 
 def test_reroute_refuses_when_no_alternate_is_armed(monkeypatch):
@@ -595,6 +660,44 @@ def test_staleness_reads_loud_and_never_clean(monkeypatch, tmp_path):
     os.utime(path, (NOW_1840 - dead_age, NOW_1840 - dead_age))
     s = watchdog.sweep_staleness(now_s=NOW_1840)
     assert s["stale"] is True and s["age_s"] == dead_age
+
+
+def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
+    """`pr-watch status --json` and the doctor read liveness_report_live, and
+    that dict is the ONLY surface they see: a sweep starved while the pr_watch
+    tick stayed healthy must read loud there, not only in the human status
+    lines. The threshold is two CONFIGURED intervals, not the fixed default."""
+    import os
+    import time as _time
+    from types import SimpleNamespace
+    from fno.pr_watch import _install
+
+    sweep = tmp_path / "watchdog-sweep.json"
+    sweep.write_text(json.dumps({"source": "tick", "at": "x", "counts": {}}))
+    # 3x a 600s interval: stale under any plausible clock skew.
+    os.utime(sweep, (_time.time() - 1800,) * 2)
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: sweep)
+    monkeypatch.setattr(_install, "_LAUNCH_AGENTS_DIR", tmp_path)
+    monkeypatch.setattr(_install, "_launchctl_is_loaded", lambda: False)
+    settings = SimpleNamespace(
+        pr_watch=SimpleNamespace(enabled=True, interval_seconds=600),
+        recovery=SimpleNamespace(watchdog="report"),
+    )
+    monkeypatch.setattr("fno.config.load_settings", lambda: settings)
+
+    report = _install.liveness_report_live()
+    assert report["watchdog"]["stale"] is True
+    assert report["watchdog"]["source"] == "tick"
+
+    # Lane off: no freshness verdict manufactured for a lane nobody armed.
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(
+            pr_watch=settings.pr_watch,
+            recovery=SimpleNamespace(watchdog="off"),
+        ),
+    )
+    assert "watchdog" not in _install.liveness_report_live()
 
 
 def test_failed_send_keeps_the_gate_open(monkeypatch, tmp_path):

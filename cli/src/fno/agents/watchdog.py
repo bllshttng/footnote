@@ -147,9 +147,15 @@ def rate_limit_window(
     stamp sits in the future / past. ``unknown``: a 429 whose stamp cannot be
     found or parsed - fail safe, the caller must not wake on it.
     """
-    if not _RATE_MARK_RE.search(tail_text):
+    marks = list(_RATE_MARK_RE.finditer(tail_text))
+    if not marks:
         return "none", None, ""
-    m = _RESET_STAMP_RE.search(tail_text)
+    # Only the NEWEST rate-limit record decides: records join newest-last, so
+    # a first-match search reads the OLDEST 429's stamp and calls a still-open
+    # window passed, spending a wake turn inside it. The stamp must sit at or
+    # after the last rate mark; a newest record with no parseable stamp of its
+    # own is unknown (fail safe), never the previous record's stamp.
+    m = _RESET_STAMP_RE.search(tail_text, marks[-1].start())
     if m is None:
         return "unknown", None, ""
     stamp = m.group(0)
@@ -291,7 +297,7 @@ def _verdict_one(
     # reroute: blocked on a 429 whose window has NOT opened. Waking bounces
     # (proved twice by hand); the session must be stopped before the window
     # opens or it wakes into a duplicate.
-    if row.state == "blocked" and window == "live":
+    if row.state == "blocked" and window == "live" and reset_epoch is not None:
         reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
         return Verdict(
             row.row_id, row.name, row.state, REROUTE,
@@ -315,7 +321,7 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, LEAVE,
                            f"429 present, reset window unknown "
                            f"({stamp or 'no stamp'})", "none")
-        if window == "live":
+        if window == "live" and reset_epoch is not None:
             reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
             return Verdict(row.row_id, row.name, row.state, LEAVE,
                            f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
@@ -512,9 +518,9 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
         sid = str(r.get("sessionId") or r.get("id") or "")
         if not sid:
             continue
-        entry = by_sid.get(sid)
-        name = str(getattr(entry, "name", None) or r.get("name") or sid)
-        cwd = str(r.get("cwd") or getattr(entry, "cwd", "") or "")
+        match: Any = by_sid.get(sid)
+        name = str(getattr(match, "name", None) or r.get("name") or sid)
+        cwd = str(r.get("cwd") or getattr(match, "cwd", "") or "")
         node = _node_id_from_worktree(cwd) if cwd else None
         if node is None:
             if ledger_nodes is None:
@@ -823,7 +829,7 @@ def worktree_refusal(cwd: str) -> Optional[str]:
             ["git", "-C", cwd, "status", "--porcelain"],
             capture_output=True, text=True, timeout=30, check=False,
         )
-        n_dirty = len([l for l in (dirty.stdout or "").splitlines() if l.strip()])
+        n_dirty = len([ln for ln in (dirty.stdout or "").splitlines() if ln.strip()])
         if n_dirty:
             return f"{n_dirty} uncommitted change(s) in {cwd}"
         unpushed = subprocess.run(
@@ -882,7 +888,10 @@ def apply_verdict(
     Mechanisms delegate: resume (which verifies the state move and holds its
     own single-writer claim), recovery._redispatch for reroute, stop + rm for
     reap - rm is never forced, ``claude rm``'s own refusal on a dirty worktree
-    is a safety feature this lane leans on rather than bypasses."""
+    is a safety feature this lane leans on rather than bypasses. Every
+    delegated lifecycle command runs with ``cwd`` set to the row's worktree:
+    a registry-less row from another project must resolve in its own project,
+    not in whatever project launched the sweep."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return "reported", f"{v.verdict} outside {lanes} lane"
     try:
@@ -903,6 +912,7 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
     proc = runner(
         [*_fno(), "agents", "resume", v.row_id, "--message", WAKE_MESSAGE],
         capture_output=True, text=True, timeout=180, check=False,
+        cwd=cwd or None,
     )
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
@@ -937,9 +947,13 @@ def _apply_reroute(
     if err is None or not getattr(err, "triggers_swap", False):
         return "refused", f"reroute refused: tail is not swap-class ({v.basis})"
     fn = failover_fn or _default_failover
+    # The lifecycle address is the SESSION ID, not the display name: a
+    # registry-less row's ``name`` is claude's friendly label with no registry
+    # row behind it, so ``fno agents stop <name>`` cannot fall back to the
+    # session store and the reroute ends rotated-no-worker.
     candidate = Candidate(
         short_id=v.row_id[:8], sock_path="", jobs_dir=None,
-        cwd=cwd, name=v.name,
+        cwd=cwd, name=v.row_id,
     )
     outcome = fn(candidate, err)
     if outcome in ("swapped", "notified"):
@@ -958,12 +972,14 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
     stopped = runner(
         [*_fno(), "agents", "stop", v.row_id],
         capture_output=True, text=True, timeout=60, check=False,
+        cwd=cwd or None,
     )
     if stopped.returncode != 0:
         return "refused", f"stop exit {stopped.returncode}: {(stopped.stderr or '').strip()[:200]}"
     removed = runner(
         [*_fno(), "agents", "rm", v.row_id],
         capture_output=True, text=True, timeout=60, check=False,
+        cwd=cwd or None,
     )
     if removed.returncode != 0:
         return (

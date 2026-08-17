@@ -603,18 +603,22 @@ def status(
     # Fleet watchdog freshness (x-55c3): a watchdog on a dead cadence never
     # fires, and its silence is indistinguishable from a healthy fleet. When
     # the lane is armed and the last sweep is older than two intervals, say so
-    # LOUD - absence is never evidence, so status never reads clean here.
+    # LOUD - absence is never evidence, so status never reads clean here. The
+    # threshold is two CONFIGURED tick intervals: a cadence slower than the
+    # 600s default would read stale while its next tick is merely not due.
     try:
         from fno.agents.watchdog import sweep_staleness
         from fno.config import load_settings
 
-        if getattr(load_settings().recovery, "watchdog", "off") != "off":
-            s = sweep_staleness()
+        settings = load_settings()
+        if getattr(settings.recovery, "watchdog", "off") != "off":
+            interval = settings.pr_watch.interval_seconds
+            s = sweep_staleness(stale_after_s=2 * interval)
             age = "?" if s["age_s"] is None else f"{int(s['age_s']) // 60}m"
             if s["stale"]:
                 typer.echo(
                     f"FLEET WATCHDOG STALE: last sweep {age} old "
-                    f"(interval 600s, source {s['source'] or 'none'}). "
+                    f"(interval {interval}s, source {s['source'] or 'none'}). "
                     "A dead cadence reads as a healthy fleet. "
                     "Sweep manually: fno agents watchdog",
                     err=True,
@@ -791,12 +795,13 @@ def liveness_report_live() -> dict:
     """Gather ground truth (config, launchd, tick, plist mtime) and judge liveness."""
     from fno.config import load_settings
 
-    cfg = load_settings().pr_watch
+    settings = load_settings()
+    cfg = settings.pr_watch
     plist_path = _LAUNCH_AGENTS_DIR / _PLIST_FILENAME
     plist_exists = plist_path.exists()
     plist_mtime = plist_path.stat().st_mtime if plist_exists else None
 
-    return liveness_report(
+    report = liveness_report(
         enabled=cfg.enabled,
         interval_seconds=cfg.interval_seconds,
         loaded=_launchctl_is_loaded(),
@@ -805,3 +810,17 @@ def liveness_report_live() -> dict:
         plist_mtime=plist_mtime,
         now=time.time(),
     )
+    # Fleet watchdog freshness rides the SAME report the --json path emits:
+    # the SessionStart hook and the doctor read this dict, and a sweep starved
+    # while the pr_watch tick stayed healthy must read loud there too, not
+    # only in the human-readable status lines.
+    try:
+        from fno.agents.watchdog import sweep_staleness
+
+        if getattr(settings.recovery, "watchdog", "off") != "off":
+            report["watchdog"] = sweep_staleness(
+                stale_after_s=2 * cfg.interval_seconds
+            )
+    except Exception:  # noqa: BLE001 - liveness never crashes on the watchdog read
+        pass
+    return report
