@@ -3458,12 +3458,14 @@ pub(crate) fn body_is_usage_limit(body: &str) -> bool {
 }
 
 /// The clean-pass markers for a CONFIGURED login (may differ from the comment
-/// author by case or a `[bot]` suffix). Empty for a login with no measured
-/// clean-pass shape, which the caller treats as "no clean-pass evidence".
+/// author by case or a `[bot]` suffix, and may be the config's short name -
+/// hence the SYMMETRIC correspond test, not the one-way matches). Empty for a
+/// login with no measured clean-pass shape, which the caller treats as "no
+/// clean-pass evidence".
 fn clean_pass_markers_for(login: &str) -> &'static [&'static str] {
     BOT_PROFILES
         .iter()
-        .find(|p| login_matches_bot(login, p.login))
+        .find(|p| logins_correspond(login, p.login))
         .map(|p| p.clean_pass_markers)
         .unwrap_or(&[])
 }

@@ -5616,6 +5616,32 @@ fn no_clean_pass_marker_is_guessed_for_an_unmeasured_bot() {
     assert_eq!(g.verdict, CoverageVerdict::Absent);
 }
 
+/// A config's SHORT name ("codex") resolves the full-login profile, so the
+/// clean-pass read does not silently vanish for the one spelling configs
+/// actually use. The author login still carries the full form.
+#[test]
+fn clean_pass_markers_resolve_through_a_config_short_name() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        &format!(
+            "Codex Review: Didn't find any major issues. Reviewed commit: {}",
+            COV_HEAD
+        ),
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["codex".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
 /// The hedge: a human GitHub APPROVAL is recorded (human_approval: true) but
 /// excluded from the count. Lean: exclude; one predicate flip includes it.
 #[test]
