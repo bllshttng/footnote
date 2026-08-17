@@ -127,6 +127,12 @@ def events_path(root: Path) -> Path:
     rather than hand-building the path: that keeps the ``.resolve()`` (so a
     symlinked root yields one path string, not two) and keeps this reader on
     the same placement rule as every other writer.
+
+    Deliberately NOT ``paths.project_events_json``, which honors the
+    ``FNO_EVENTS_PATH`` pin: that pin stands in for a root nobody resolved, and
+    this caller resolves one. Letting it win here would collapse every root the
+    reader folds onto one file, and under test it would replace each test's own
+    journal with the one sandbox journal the whole pytest process shares.
     """
     from fno.paths import project_log
 

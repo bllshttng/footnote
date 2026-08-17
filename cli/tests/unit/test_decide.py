@@ -68,8 +68,15 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A hermetic canonical root for the events journal (FNO_REPO_ROOT hook)."""
+    """A hermetic canonical root for the events journal (FNO_REPO_ROOT hook).
+
+    The journal is pinned as well as the root: the hermetic sandbox sets
+    ``FNO_EVENTS_PATH`` to keep an unpathed ``append_event`` out of the real
+    checkout, and that pin outranks repo-root resolution, so a test that reads
+    ``<root>/.fno/events.jsonl`` back by hand has to name the same file.
+    """
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
     import fno.paths as paths_mod
 
     paths_mod.resolve_repo_root.cache_clear()

@@ -514,6 +514,38 @@ def decisions_jsonl() -> Path:
     return ledger_json().parent / "decisions.jsonl"
 
 
+def project_events_json() -> Path:
+    """The per-checkout event journal, or the scratch journal a harness pins.
+
+    ``FNO_EVENTS_PATH`` exists because repo-root resolution cannot be
+    sandboxed. ``fno.hermetic.neutralise`` deliberately leaves ``FNO_REPO_ROOT``
+    unset (it says why), so :func:`resolve_repo_root` falls through to ``git
+    rev-parse`` and returns the developer's real checkout. An unpathed
+    ``append_event`` under test then lands a production-shaped row in the real
+    journal, and from there in the operator needs panel, which is how six test
+    fixtures came to sit beside two genuine operator questions.
+
+    The containment belongs here rather than at either reader. A fold that
+    recognises fixture-shaped rows carries an exception list, and the next
+    fixture that does not match the list refills the queue in silence.
+
+    The pin stands in for a root nobody resolved, so it is deliberately NOT
+    consulted by callers that already hold a root of their own: those pass an
+    explicit ``events_path=`` to :func:`fno.events.append_event`, or go through
+    :func:`project_log`. One sandbox journal serves a whole pytest process, so
+    honoring the pin for a caller that named a root would replace that caller's
+    own file with a bucket every test in the process shares.
+
+    Returned unresolved: ``append_event`` re-resolves under its own mutex to
+    catch a journal being swapped for a canonical-journal symlink mid-write,
+    and handing it an already-resolved path would silently retire that check.
+    """
+    override = os.environ.get("FNO_EVENTS_PATH")
+    if override:
+        return Path(override)
+    return resolve_repo_root() / ".fno" / "events.jsonl"
+
+
 def repo_identity_from_remote_url(url: str) -> Optional[str]:
     """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
 

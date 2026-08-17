@@ -347,6 +347,14 @@ def neutralise(
     out["FNO_THINK_SPAWN"] = "0"  # never spawn a real /think worker
     out["FNO_SPAWN_GATE"] = "0"  # never queue behind the host's live workers
     out["FNO_E2E"] = "1"  # arm idle-exit so an orphaned mux server reaps itself
+    # The operator needs panel folds the checkout journal, and repo-root
+    # resolution cannot be sandboxed (see the FNO_REPO_ROOT note above), so an
+    # unpathed append_event under test lands a production-shaped row on a live
+    # operator surface. Six such fixture rows were measured in the panel on
+    # 2026-08-17. Pin the journal itself instead of teaching either reader to
+    # recognise test data: one var, and it reaches the pytest, shell, and cargo
+    # trees because all three come through this function.
+    out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
 
     out.update(caches)
     out.update(_git_pins(sandbox))
