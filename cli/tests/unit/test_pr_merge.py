@@ -1646,12 +1646,13 @@ def test_refusal_reason_never_claims_zero_when_the_count_is_positive():
     assert "0 reviewed" not in _merge._coverage_refused_reason(cov, "newhead")
 
 
-def test_moved_head_names_a_legacy_attestation_as_unscoped():
-    """x-e601: a pre-branch-field attestation was admitted on exact head
-    equality, so it dies the moment the head moves. The generic head-pinned
-    message then reads as "nobody reviewed" over a review that genuinely
-    happened on an older commit of this branch; name the unscoped shape so the
-    reader can tell the two apart."""
+def test_moved_head_keeps_the_generic_message_for_legacy_attestations_too():
+    """x-e601: a pre-branch-field pass dies with the head move it cannot be
+    scoped past, and the producer emits no verdict for it (an unbranchable
+    line is skipped, never guessed onto this PR's row). The refusal therefore
+    keeps ONE staleness message for every cohort: a targeted legacy branch
+    here could fire only on a degraded recompute returning a pre-move row,
+    and implied the producer names a shape it no longer emits."""
     cov = {
         "coverage": "covered",
         "reviewed_count": 0,
@@ -1667,14 +1668,14 @@ def test_moved_head_names_a_legacy_attestation_as_unscoped():
         ],
     }
     reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
-    assert "unscoped attestation (pre-branch-field) at oldhead0" in reason
-    assert "re-run the review verb at HEAD" in reason
+    assert "unscoped attestation" not in reason
+    assert "head-pinned by design" in reason
+    assert "re-run the review verb" in reason
 
 
 def test_moved_head_keeps_the_generic_message_for_branch_scoped_passes():
-    """The unscoped branch is for legacy attestations only: a branch-scoped
-    pass under a moved head is the ordinary staleness case and keeps the
-    ordinary message."""
+    """A branch-scoped pass under a moved head is the ordinary staleness case
+    and keeps the ordinary message; no cohort gets a special-case branch."""
     cov = {
         "coverage": "covered",
         "reviewed_count": 0,
