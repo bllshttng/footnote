@@ -11732,3 +11732,127 @@ def _exec_liveness(state: str) -> str:
     """Map a claim_status state to the ExecNode liveness enum."""
     return {"live": "live", "suspect": "unknown", "stale": "unknown",
             "corrupted": "unknown", "free": ""}.get(state, "")
+
+
+# -- task 4.2: the external-backend verb classification -----------------------
+#
+# Every registered backlog verb is classified exactly ONCE, here, against the
+# LIVE registry (never a frozen count): tracker-owned verbs wrap their
+# registered callback with the shared external refusal BEFORE any graph
+# read/write, and footnote-owned verbs carry the read-side marker the
+# consumer census pins (scripts/diagnostics/tracker-consumers.py --verbs).
+# A verb missing from both lists fails the import, and a listed verb the
+# registry no longer carries fails it too (no tombstones, no renames smuggled
+# past the classification). Misclassifying a read as tracker-owned only
+# refuses it externally; misclassifying a mutation as footnote-owned is the
+# dangerous direction, so unsure verbs sit tracker-owned.
+
+_TRACKER_OWNED_VERBS = frozenset({
+    # node lifecycle + creation
+    "add", "idea", "new", "intake", "decompose", "update", "note", "remove",
+    "reopen", "supersede", "unsupersede",
+    # board/rank/queue state
+    "rank", "reprioritize", "defer", "undefer", "queue", "unqueue", "pick",
+    "unclaim",
+    # storage + sweep machinery
+    "archive", "unarchive", "archive-dedupe-ids", "rehash", "maintain",
+    "groom",
+    # orchestration that stamps nodes
+    "advance", "reconcile", "reconcile-findings", "lanes", "lane-fill",
+    "dispatch-lanes",
+    # footnote-owned DATA with a graph-resident write path (refused until the
+    # write moves to the sidecar seam)
+    "cost", "session add",
+    # sub-app mutations
+    "triage apply", "capture promote",
+    "batch join", "batch prepare", "batch ship", "batch ship-closeable",
+})
+
+_FOOTNOTE_OWNED_VERBS = frozenset({
+    # seam reads / renders
+    "get", "status", "view", "find", "next", "ready", "queued", "provenance",
+    "roadmap", "bases", "album", "project-root",
+    # completion works on any backend by design (task 4.1)
+    "done",
+    # footnote-owned sidecar files, no graph write
+    "relatedness build", "relatedness get", "epic status",
+    # capture-pile file machinery (no graph writes; promote is tracker-owned)
+    "capture add", "capture archive", "capture capture-pass", "capture dismiss",
+    "capture empty-pass", "capture list", "capture scan", "capture tidy",
+    # triage read/propose surfaces (apply is tracker-owned)
+    "triage consistency", "triage context", "triage health", "triage projects",
+    "triage propose", "triage rank", "triage trend", "triage validate",
+    # batch read surfaces
+    "batch open", "batch status", "batch metrics",
+    # graph-store integrity check (read-only)
+    "collisions check",
+})
+
+
+def _refuse_tracker_owned_on_external_backend(label: str) -> None:
+    """The shared external-backend refusal for a tracker-owned backlog verb.
+
+    One guard at every reachable tracker-owned entry point (the wrapper below
+    installs it on the registered callback), firing before any graph read or
+    write. The message names the verb and the backend."""
+    from fno.tracker import active_backend_name
+
+    backend = active_backend_name()
+    if backend != "graph":
+        typer.echo(
+            f"fno backlog {label}: this verb owns graph state; under the "
+            f"{backend} tracker backend it is refused. Track the item in the "
+            f"tracker by its id.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
+def _classify_backlog_verbs() -> None:
+    import functools
+
+    apps = [
+        (None, cli),
+        ("triage", _triage_cli),
+        ("capture", _capture_cli),
+        ("batch", _batch_cli),
+        ("relatedness", _relatedness_cli),
+        ("epic", _epic_cli),
+        ("session", session_app),
+        ("collisions", collisions_app),
+    ]
+    seen: set[str] = set()
+    for group, app in apps:
+        for info in app.registered_commands:
+            name = info.name or ""
+            label = f"{group} {name}" if group else name
+            seen.add(label)
+            callback = info.callback
+            if callback is None:
+                raise RuntimeError(f"backlog verb {label!r} has no callback")
+            if label in _TRACKER_OWNED_VERBS:
+
+                @functools.wraps(callback)
+                def _guarded(*args, _orig=callback, _label=label, **kwargs):
+                    _refuse_tracker_owned_on_external_backend(_label)
+                    return _orig(*args, **kwargs)
+
+                _guarded._fno_tracker_owned = True
+                info.callback = _guarded
+            elif label in _FOOTNOTE_OWNED_VERBS:
+                callback._fno_footnote_owned = True
+            else:
+                raise RuntimeError(
+                    f"unclassified backlog verb {label!r}: classify it in "
+                    "_TRACKER_OWNED_VERBS or _FOOTNOTE_OWNED_VERBS "
+                    "(graph/cli.py) so the external-backend census holds"
+                )
+    unknown = (_TRACKER_OWNED_VERBS | _FOOTNOTE_OWNED_VERBS) - seen
+    if unknown:
+        raise RuntimeError(
+            f"classified verbs missing from the live registry (renamed or "
+            f"removed?): {sorted(unknown)}"
+        )
+
+
+_classify_backlog_verbs()
