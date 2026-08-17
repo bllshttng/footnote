@@ -451,6 +451,31 @@ def _build_rationale(
     return base + "; both plans can ship if the second one rebases on the first."
 
 
+def _claims_default(plan_path: Path) -> str | None:
+    """Default the self-exclusion from the plan's own ``claims:`` frontmatter.
+
+    A plan intaked against a node collides with that node's plan at HIGH, the
+    exact severity meant to stop an operator, so a caller that forgets
+    ``self_id`` manufactures a reflexive finding. The plan file is already in
+    hand here, so the default lives in this one place and every caller
+    (graph/cli.py, backlog/advance.py, graph/triage.py) inherits it. One
+    declared id is used; zero or several leave the behavior unchanged, and an
+    explicit ``self_id`` still wins because this only runs when it is None.
+    """
+    from fno.graph._intake import _read_plan_frontmatter
+
+    target = plan_path / "00-INDEX.md" if plan_path.is_dir() else plan_path
+    fm = _read_plan_frontmatter(str(target))
+    claims = fm.get("claims")
+    if isinstance(claims, str):
+        claims = [claims]
+    if isinstance(claims, list):
+        ids = [c.strip() for c in claims if isinstance(c, str) and c.strip() not in ("", "null")]
+        if len(ids) == 1:
+            return ids[0]
+    return None
+
+
 def find_collisions(
     candidate_plan_path: Path,
     graph: Iterable[dict],
@@ -472,6 +497,9 @@ def find_collisions(
     """
     if thresholds is None:
         thresholds = _load_thresholds()
+
+    if self_id is None:
+        self_id = _claims_default(candidate_plan_path)
 
     out: list[Collision] = []
     candidate_files = parse_files_to_modify(candidate_plan_path)
