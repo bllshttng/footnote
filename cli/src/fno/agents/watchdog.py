@@ -546,6 +546,18 @@ def _graph_index() -> dict[str, dict]:
     }
 
 
+#: A sweep over ZERO rows is an unreadable instrument, never an empty fleet
+#: (king report 2026-08-17, node x-4c87: after a binary update the roster read
+#: 0 registered rows against an intact 19-row registry file). A zero-row sweep
+#: would write ``counts={}`` and a fresh sweep-file mtime, which reads as a
+#: healthy quiet fleet - an empty fleet and a broken instrument must never
+#: produce the same output. The same absence-as-evidence rule as the wake lane.
+ROSTER_REFUSAL = (
+    "roster unreadable: 0 rows (an empty fleet and a broken instrument "
+    "read the same; refusing so staleness reads loud)"
+)
+
+
 def run_sweep(
     *,
     now_s: Optional[float] = None,
@@ -558,9 +570,24 @@ def run_sweep(
     ``(payload, rows)`` - the payload is the ``--json`` shape
     (``{"generated_at", "verdicts", "counts", "warnings"}``) and the rows ride
     along index-aligned with the verdicts so an apply lane can reach each
-    row's cwd. Read-only - actions live in :func:`apply_verdict`."""
+    row's cwd. Read-only - actions live in :func:`apply_verdict`.
+
+    A zero-row enumeration sets ``payload["refused"]`` and classifies
+    nothing: callers must not write the sweep file or advance the mail gate
+    on it, so the missing write turns into loud staleness instead of clean
+    evidence."""
     now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
     rows, warnings = (rows_provider or fleet_rows)()
+    if not rows:
+        return {
+            "generated_at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "verdicts": [],
+            "counts": {},
+            "warnings": [*warnings, ROSTER_REFUSAL],
+            "refused": ROSTER_REFUSAL,
+        }, rows
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
     if transcript_fn is None:
         def transcript_fn(sid: str) -> Optional[TailFacts]:
@@ -716,6 +743,10 @@ def mail_digest(
     recipient addresses the project mailbox instead of one agent."""
     if not to:
         return False, "no recipient configured"
+    if payload.get("refused"):
+        # Never "all rows leave, nothing to say": zero rows read is not zero
+        # rows found, and the digest must not claim either.
+        return False, payload["refused"]
     non_leave = [v for v in payload["verdicts"] if v["verdict"] != LEAVE]
     if not non_leave:
         return True, "all rows leave, nothing to say"
@@ -747,6 +778,10 @@ def mail_gate(
     of swallowing the verdict behind a signature it never sent."""
     if not to:
         return True, "no recipient", _last_signature()
+    if payload.get("refused"):
+        # A refused sweep keeps the PREVIOUS stamp: the gate stays armed
+        # against the last digest actually mailed.
+        return False, payload["refused"], _last_signature()
     ok, receipt = mail_digest(payload, to, runner=runner)
     stamp = verdict_signature(payload) if ok else _last_signature()
     return ok, receipt, stamp

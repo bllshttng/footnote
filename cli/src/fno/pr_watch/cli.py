@@ -295,23 +295,31 @@ def tick() -> None:
 
             now = _time.time()
             payload, rows = _wd.run_sweep(now_s=now)
-            # Mail before the sweep file write: the change gate compares
-            # against the PREVIOUS sweep's signature (push, not pull), and
-            # only a delivered digest advances it (mail_gate) so a transient
-            # send failure retries on the next tick instead of vanishing.
-            mail_to = str(getattr(
-                settings.recovery, "watchdog_mail_to", ""
-            ) or "")
-            signature = ""
-            try:
-                _ok, receipt, signature = _wd.mail_gate(payload, mail_to)
-                if not _ok:
-                    log.warning("pr-watch: watchdog mail failed: %s", receipt)
-            except Exception:  # noqa: BLE001 - mail never breaks the tick
-                log.warning("pr-watch: watchdog mail failed", exc_info=True)
-            _wd.write_sweep_file(
-                "tick", payload["counts"], now, signature
-            )
+            if payload.get("refused"):
+                # x-4c87: zero rows read is an instrument failure, not an
+                # empty fleet. No sweep file, no mail, no gate advance - the
+                # missing write turns into loud staleness within two ticks.
+                log.warning(
+                    "pr-watch: watchdog sweep refused: %s", payload["refused"]
+                )
+            else:
+                # Mail before the sweep file write: the change gate compares
+                # against the PREVIOUS sweep's signature (push, not pull), and
+                # only a delivered digest advances it (mail_gate) so a transient
+                # send failure retries on the next tick instead of vanishing.
+                mail_to = str(getattr(
+                    settings.recovery, "watchdog_mail_to", ""
+                ) or "")
+                signature = ""
+                try:
+                    _ok, receipt, signature = _wd.mail_gate(payload, mail_to)
+                    if not _ok:
+                        log.warning("pr-watch: watchdog mail failed: %s", receipt)
+                except Exception:  # noqa: BLE001 - mail never breaks the tick
+                    log.warning("pr-watch: watchdog mail failed", exc_info=True)
+                _wd.write_sweep_file(
+                    "tick", payload["counts"], now, signature
+                )
             acted = 0
             for d, row in zip(payload["verdicts"], rows):
                 verdict = _wd.Verdict(**d)

@@ -14,6 +14,8 @@ import json
 import subprocess
 from datetime import datetime, timezone
 
+import typer
+
 from fno.agents import watchdog
 from fno.agents.watchdog import (
     GHOST,
@@ -621,3 +623,77 @@ def test_failed_send_keeps_the_gate_open(monkeypatch, tmp_path):
     # No recipient configured: nothing to warn about, gate unchanged.
     ok3, _, stamp3 = watchdog.mail_gate(_payload_two_rows(), "")
     assert ok3 and stamp3 == "old-sig"
+
+
+# ---------------------------------------------------------------------------
+# x-4c87: a zero-row roster is an unreadable instrument, never an empty fleet
+# ---------------------------------------------------------------------------
+
+def _refused_payload():
+    payload, rows = watchdog.run_sweep(
+        now_s=NOW_1840,
+        rows_provider=lambda: ([], ["claude agents --json failed: exit 1"]),
+    )
+    assert rows == []
+    return payload
+
+
+def test_zero_row_roster_refuses_instead_of_sweeping_clean():
+    """King report 2026-08-17: after a binary update the roster read 0 rows
+    against an intact registry. A sweep over that writes counts={} and a
+    fresh mtime, indistinguishable from a healthy quiet fleet. Zero rows must
+    refuse: the payload says why and classifies nothing."""
+    payload = _refused_payload()
+    assert payload["refused"] and "0 rows" in payload["refused"]
+    assert payload["verdicts"] == [] and payload["counts"] == {}
+    # The instrument's own warning rides along, not swallowed.
+    assert any("failed" in w for w in payload["warnings"])
+
+
+def test_refused_sweep_writes_no_file_and_advances_no_gate(monkeypatch, tmp_path):
+    import json as _json
+
+    sweep = tmp_path / "watchdog-sweep.json"
+    sweep.write_text(_json.dumps(
+        {"source": "tick", "at": "x", "counts": {"wake": 1}, "signature": "prev"}
+    ))
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: sweep)
+    payload = _refused_payload()
+
+    fired = []
+
+    def runner(argv, **kw):
+        fired.append(argv)
+        return _Proc(0)
+
+    ok, receipt = watchdog.mail_digest(payload, "king", runner=runner)
+    assert not ok and payload["refused"] in receipt
+    ok2, receipt2, stamp = watchdog.mail_gate(payload, "king", runner=runner)
+    assert not ok2 and stamp == "prev"
+    assert fired == []  # nothing sent: zero rows read is not zero rows found
+
+    # The stored sweep file is untouched - mtime and signature both survive,
+    # so staleness (not a clean write) is what the next status read shows.
+    stored = _json.loads(sweep.read_text())
+    assert stored["signature"] == "prev" and stored["counts"] == {"wake": 1}
+
+
+def test_cli_refused_sweep_exits_loud_without_writing(monkeypatch, tmp_path):
+    from fno.agents import cli as agents_cli
+
+    refused = _refused_payload()  # built BEFORE the patch it would recurse into
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (refused, []))
+    wrote = []
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: wrote.append(a))
+    monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("mail must not run on a refused sweep")
+    ))
+
+    try:
+        agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
+                                only=None, mail_to=None)
+    except typer.Exit as e:
+        assert e.exit_code == 3
+    else:
+        raise AssertionError("a refused sweep must exit non-zero")
+    assert wrote == []

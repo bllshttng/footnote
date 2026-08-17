@@ -2677,6 +2677,12 @@ def cmd_watchdog(
 
     now = _time.time()
     payload, rows = wd.run_sweep(now_s=now)
+    if payload.get("refused"):
+        # x-4c87: a zero-row roster is an unreadable instrument, not an empty
+        # fleet. Write no sweep file and advance no gate, so staleness reads
+        # loud instead of certifying a healthy quiet fleet that was never read.
+        print(f"fno agents watchdog: {payload['refused']}", file=sys.stderr)
+        raise typer.Exit(code=3)
     pairs = [
         (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
     ]
