@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # attest-model.sh - SessionStart guard (a) Layer 1: model/provider env coherence.
 #
-# Catches the x-db50 bug class: ANTHROPIC_MODEL names a non-Anthropic model
-# (e.g. a glm-* routing target) but ANTHROPIC_BASE_URL is empty or an
-# anthropic.com host, so the request silently falls back to the primary
-# Anthropic model. Detectable at SessionStart with zero API calls.
+# Catches the x-db50 bug class across ALL FIVE model vars: any of
+# ANTHROPIC_MODEL or the four ANTHROPIC_DEFAULT_<TIER>_MODEL vars names a
+# non-Anthropic model (e.g. a glm-* routing target) while ANTHROPIC_BASE_URL
+# is empty or an anthropic.com host, so every call on that tier errors rather
+# than degrading. A tier default alone (the haiku var with ANTHROPIC_MODEL
+# unset) is the exact shape that breaks the small tier, so reading
+# ANTHROPIC_MODEL only never saw it. Bedrock and Vertex bail out first: they
+# serve Anthropic models under ids that do not start with "claude-" and leave
+# the base URL unset, so the coherence question does not apply there.
 #
 # Advisory only: prints a plain-text warning to stdout (SessionStart stdout is
-# injected as additionalContext) and always exits 0. An un-routed session
-# (no ANTHROPIC_MODEL) is coherent by definition and prints nothing. It also
-# records the resolved intended identity to a per-session sidecar that the
-# PostToolUse drift check (Layer 2, spend-drift-monitor.js) reads.
+# injected as additionalContext) and always exits 0. An env with no foreign
+# model var is coherent by definition and prints nothing. It also records the
+# resolved intended identity to a per-session sidecar that the PostToolUse
+# drift check (Layer 2, spend-drift-monitor.js) reads; the sidecar keeps
+# recording ANTHROPIC_MODEL only, because a tier default is not the running
+# model and Layer 2 compares against the running model.
 set -uo pipefail
 
 # session_id from stdin (SessionStart payload). Skip the read when stdin is a
@@ -50,28 +57,63 @@ if [[ -n "$SESSION_ID" ]]; then
     "$MODEL" "$BASE_HOST" "$PROVIDER" "$TS" > "$SIDE" 2>/dev/null || true
 fi
 
-# Coherence is only meaningful when a model is explicitly routed.
-[[ -z "$MODEL" ]] && exit 0
+# Bedrock / Vertex: Anthropic models under ids that do not start with "claude-"
+# (us.anthropic.claude-...) and no ANTHROPIC_BASE_URL, so the coherence checks
+# below would warn on a correct setup. Bail before them.
+_env_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    ""|0|false|no|off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+if _env_truthy "${CLAUDE_CODE_USE_BEDROCK:-}" || _env_truthy "${CLAUDE_CODE_USE_VERTEX:-}"; then
+  exit 0
+fi
 
-# Anthropic models start with "claude"; anything else is a routed foreign model.
-case "$MODEL" in
-  claude*) exit 0 ;;   # coherent: Anthropic model, any base
-esac
+# The five model vars, one list with the Python MODEL_ENV_KEYS
+# (cli/src/fno/agents/model_routing.py); a Python test pins the two lists
+# equal, so a new tier cannot land in one and not the other.
+MODEL_ENV_VARS=(
+  ANTHROPIC_MODEL
+  ANTHROPIC_DEFAULT_OPUS_MODEL
+  ANTHROPIC_DEFAULT_SONNET_MODEL
+  ANTHROPIC_DEFAULT_HAIKU_MODEL
+  ANTHROPIC_DEFAULT_FABLE_MODEL
+)
 
-# Non-Anthropic model. If the base URL is empty or an anthropic.com host, the
-# request silently falls back to the primary Anthropic model (the x-db50 bug).
-# Match the host exactly or as a subdomain - a bare *anthropic.com glob would
-# also match e.g. notanthropic.com.
-if [[ -z "$BASE_HOST" || "$BASE_HOST" == "anthropic.com" || "$BASE_HOST" == *.anthropic.com ]]; then
-  echo "⚠️  MODEL ROUTING DRIFT: ANTHROPIC_MODEL='${MODEL}' names a non-Anthropic model but ANTHROPIC_BASE_URL is ${BASE_HOST:-unset} (Anthropic). Requests will silently fall back to the primary Anthropic model. Fix the routing env or unset ANTHROPIC_MODEL before relying on this session."
+# Collect every var naming a foreign model. Anthropic ids start with "claude-"
+# and the bare tier aliases resolve to Anthropic models, so both are coherent.
+OFFENDERS=""
+for VAR in "${MODEL_ENV_VARS[@]}"; do
+  VAL="${!VAR:-}"
+  [[ -z "$VAL" ]] && continue
+  case "$VAL" in
+    claude-*|opus|sonnet|haiku|fable) continue ;;
+  esac
+  OFFENDERS+="${OFFENDERS:+, }${VAR}='${VAL}'"
+done
+
+# A foreign model only drifts when the endpoint is Anthropic's: empty base or
+# an anthropic.com host. Match the host exactly or as a subdomain - a bare
+# *anthropic.com glob would also match e.g. notanthropic.com. A foreign base
+# serves those model ids, so a real route never warns.
+if [[ -n "$OFFENDERS" ]] && { [[ -z "$BASE_HOST" ]] || [[ "$BASE_HOST" == "anthropic.com" ]] || [[ "$BASE_HOST" == *.anthropic.com ]]; }; then
+  echo "⚠️  MODEL ROUTING DRIFT: ${OFFENDERS} name a non-Anthropic model but ANTHROPIC_BASE_URL is ${BASE_HOST:-unset} (Anthropic), so every call on those tiers errors rather than degrading. This env was inherited, usually from a long-lived claude background daemon started from a shell that held those exports; no config edit clears a running daemon. Pin the tier defaults in ~/.claude/settings.json env (that wins over an inherited value) or restart the daemon (that terminates every session under it)."
   exit 0
 fi
 
 # Routed to a real non-Anthropic base. Flag an Anthropic OAuth token where the
 # routed provider expects its own API key (the x-db50 OAuth-scrub failure).
-case "$TOKEN" in
-  sk-ant-oat*)
-    echo "⚠️  MODEL ROUTING WARNING: routed to '${MODEL}' at ${BASE_HOST} but ANTHROPIC_AUTH_TOKEN looks like an Anthropic OAuth token (sk-ant-oat…). A routed lane usually needs that provider's API key; verify the token was swapped for this lane."
-    ;;
-esac
+if [[ -n "$MODEL" ]]; then
+  case "$MODEL" in
+    claude-*) ;;
+    *)
+      case "$TOKEN" in
+        sk-ant-oat*)
+          echo "⚠️  MODEL ROUTING WARNING: routed to '${MODEL}' at ${BASE_HOST} but ANTHROPIC_AUTH_TOKEN looks like an Anthropic OAuth token (sk-ant-oat…). A routed lane usually needs that provider's API key; verify the token was swapped for this lane."
+          ;;
+      esac
+      ;;
+  esac
+fi
 exit 0

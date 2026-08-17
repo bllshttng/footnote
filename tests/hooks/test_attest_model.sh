@@ -29,13 +29,22 @@ SID="test-session-abc"
 STDIN_JSON="$(printf '{"session_id":"%s"}' "$SID")"
 
 # Run the hook with a scrubbed routing env, capturing stdout + exit code.
-run_hook() {
-  # args: MODEL BASE TOKEN
-  env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u FNO_HOME \
+# run_hook_env takes extra VAR=VAL assignments (tier vars, Bedrock/Vertex
+# flags) after MODEL BASE TOKEN; run_hook is the bare three-arg form.
+run_hook_env() {
+  # Scrub ALL FIVE model vars plus the Bedrock/Vertex flags so the ambient
+  # session (a routed shell, or a daemon-carried poisoned env) cannot leak
+  # into the verdict: each case sets exactly what it asserts on and nothing
+  # else.
+  env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN \
+    -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL \
+    -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_DEFAULT_FABLE_MODEL \
+    -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u FNO_HOME \
     ANTHROPIC_MODEL="$1" ANTHROPIC_BASE_URL="$2" ANTHROPIC_AUTH_TOKEN="$3" \
-    HOME="$HOME" \
+    HOME="$HOME" "${@:4}" \
     bash "$HOOK" <<<"$STDIN_JSON"
 }
+run_hook() { run_hook_env "$1" "$2" "$3"; }
 
 # 1. Coherent: un-routed Anthropic session -> no warning, exit 0.
 OUT="$(run_hook "" "" "" 2>/dev/null)"; RC=$?
@@ -56,6 +65,37 @@ echo "$OUT" | grep -q "ROUTING DRIFT" && pass "foreign model + empty base -> DRI
 OUT="$(run_hook "glm-4.6" "https://api.anthropic.com" "" 2>/dev/null)"
 echo "$OUT" | grep -q "ROUTING DRIFT" && pass "foreign model + anthropic host -> DRIFT warning" \
   || fail "expected DRIFT warning for anthropic host, got: $OUT"
+
+# 3c. Tier-var-only poisoning: ANTHROPIC_MODEL unset, the haiku tier default
+#     names a foreign model with no base URL. This is the shape that kills the
+#     small tier (WebSearch / WebFetch summarization) while the interactive
+#     selection looks fine. Assert the var NAME, not a generic warning marker:
+#     a grep for "DRIFT" alone would pass on a warning about the wrong var.
+OUT="$(run_hook_env "" "" "" ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-4.5-air" 2>/dev/null)"
+echo "$OUT" | grep -q "ANTHROPIC_DEFAULT_HAIKU_MODEL" \
+  && pass "haiku-only poisoning names the tier var" \
+  || fail "haiku-only poisoning went unseen: $OUT"
+
+# 3d. Two poisoned vars report in ONE line naming both.
+OUT="$(run_hook_env "glm-5.2[1m]" "" "" ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-4.5-air" 2>/dev/null)"
+LINES="$(printf '%s\n' "$OUT" | grep -c "MODEL ROUTING DRIFT")"
+if [[ "$LINES" -eq 1 ]] \
+  && printf '%s' "$OUT" | grep -q "ANTHROPIC_MODEL" \
+  && printf '%s' "$OUT" | grep -q "ANTHROPIC_DEFAULT_HAIKU_MODEL"; then
+  pass "two poisoned vars -> one line naming both"
+else
+  fail "expected one line naming both vars, got ($LINES lines): $OUT"
+fi
+
+# 3e. Bedrock: Anthropic models under us.anthropic.* ids with no base URL are
+#     coherent (same for Vertex); the hook must print nothing. This was a
+#     false positive in the single-var detector.
+OUT="$(run_hook_env "us.anthropic.claude-sonnet-4-20250514-v1:0" "" "" \
+  CLAUDE_CODE_USE_BEDROCK=1 2>/dev/null)"
+[[ -z "$OUT" ]] && pass "Bedrock lane prints nothing" || fail "Bedrock warned: $OUT"
+OUT="$(run_hook_env "us.anthropic.claude-sonnet-4-20250514-v1:0" "" "" \
+  CLAUDE_CODE_USE_VERTEX=1 2>/dev/null)"
+[[ -z "$OUT" ]] && pass "Vertex lane prints nothing" || fail "Vertex warned: $OUT"
 
 # 4. Properly routed: foreign model + foreign base -> no drift warning.
 OUT="$(run_hook "glm-4.6" "https://open.bigmodel.cn/api/anthropic" "sk-real-apikey" 2>/dev/null)"
