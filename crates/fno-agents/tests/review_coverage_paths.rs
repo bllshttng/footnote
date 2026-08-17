@@ -316,10 +316,13 @@ fn new_reader_sites_must_join_the_table() {
     );
 
     // And the gates route through the recompute: both files name the shared
-    // helper, which is the only path to the verb.
+    // helper, which is the only path to the verb. The status row passes
+    // `recompute=review_lane` (not a bare True): the producer spawn is gated
+    // on the same no-lane boundary merge reads, while the read itself still
+    // goes through this helper.
     for (file, needle) in [
         ("_merge.py", "review_coverage_for_gate"),
-        ("_status.py", "recompute=True"),
+        ("_status.py", "recompute=review_lane"),
     ] {
         let text = fs::read_to_string(pr_dir.join(file)).unwrap();
         assert!(
