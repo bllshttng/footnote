@@ -227,13 +227,20 @@ def _on_deadline(signum, frame) -> None:  # noqa: ARG001 - signal handler signat
 
 
 def _resolve_tick_deadline(cfg) -> int:
-    """Env seam first, then config, then 0.8x the interval (min 60s)."""
+    """Env seam first, then config, then 0.8x the interval (min 60s).
+
+    The derived value is clamped BELOW interval_seconds: launchd never runs a
+    StartInterval job concurrently, so a deadline at or above the interval
+    (possible for intervals under 75s, where the 60s floor binds) would let an
+    overrun suppress the successor tick - the failure mode this ceiling is for.
+    """
     env = (os.environ.get(_ENV_TICK_TIMEOUT) or "").strip()
     if env.isdigit() and int(env) > 0:
         return int(env)
     if cfg.tick_timeout_seconds:
         return int(cfg.tick_timeout_seconds)
-    return max(60, int(cfg.interval_seconds * 0.8))
+    derived = max(60, int(cfg.interval_seconds * 0.8))
+    return min(derived, max(1, int(cfg.interval_seconds) - 5))
 
 
 def _tick_outcome(result, tick_failed: Optional[str], timed_out: bool) -> str:

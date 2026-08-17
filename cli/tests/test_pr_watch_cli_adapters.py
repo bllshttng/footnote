@@ -475,3 +475,21 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     # A controlled failure exit, not the RuntimeError escaping the command:
     # reaching SystemExit proves the composed legs ran to the end.
     assert isinstance(res.exception, SystemExit), repr(res.exception)
+
+
+def test_derived_deadline_stays_below_the_interval(monkeypatch):
+    """The 60s floor must not push the derived deadline to or above
+    StartInterval on small intervals: launchd does not run a StartInterval
+    job concurrently, so an at-or-above deadline suppresses the successor."""
+    from types import SimpleNamespace
+
+    from fno.pr_watch.cli import _resolve_tick_deadline
+
+    monkeypatch.delenv("FNO_PR_WATCH_TICK_TIMEOUT", raising=False)
+
+    def cfg(interval):
+        return SimpleNamespace(tick_timeout_seconds=None, interval_seconds=interval)
+
+    assert _resolve_tick_deadline(cfg(600)) == 480
+    assert _resolve_tick_deadline(cfg(60)) == 55
+    assert _resolve_tick_deadline(cfg(30)) == 25
