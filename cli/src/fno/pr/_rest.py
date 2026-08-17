@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from fno.pr._proc import run
@@ -167,3 +168,76 @@ def fetch_pr_rest(
         {"state": _map_pr_state(pr_data), "statusCheckRollup": rollup, "headRefOid": sha},
         "",
     )
+
+
+def list_prs_rest(
+    slug: str,
+    *,
+    state: str = "open",
+    runner: Callable = run,
+    cwd: Optional[str] = None,
+    per_page: int = 100,
+    max_pages: int = 20,
+) -> "tuple[Optional[list[dict]], str]":
+    """List a repo's PRs on REST: `(rows, reason)`.
+
+    Measured with the GraphQL bucket at 0/5000, this endpoint answered the
+    open-PR question completely and left core untouched, which is why the
+    pr-watch bulk sweep routes here instead of `gh pr list` (GraphQL bills
+    by point cost; one oversized sweep drained the shared per-user budget).
+    Paginates on `page=` until a short page or the `max_pages` ceiling; rows
+    are reduced to ``{"number", "state"}`` with ``_map_pr_state``, so the
+    caller sees the OPEN/CLOSED/MERGED shape the GraphQL path produced.
+    `(None, reason)` on any failure, matching `fetch_pr_rest`'s loud contract.
+    """
+    rows: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        res = runner(
+            ["gh", "api", f"repos/{slug}/pulls?state={state}&per_page={per_page}&page={page}"],
+            cwd=cwd,
+        )
+        if not res.ok:
+            return None, _rest_reason(res)
+        try:
+            payload = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            return None, f"gh api pulls list page {page} returned output that is not JSON"
+        if not isinstance(payload, list):
+            return None, f"gh api pulls list page {page} was not a JSON array"
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            number = row.get("number")
+            if not isinstance(number, int):
+                continue
+            rows.append({"number": number, "state": _map_pr_state(row)})
+        if len(payload) < per_page:
+            break
+    return rows, ""
+
+
+def graphql_remaining(
+    runner: Callable = run, cwd: Optional[str] = None
+) -> "tuple[Optional[int], Optional[str]]":
+    """Read the shared GraphQL budget: `(remaining, reset_iso)`.
+
+    `gh api rate_limit` does not itself count against any bucket. Both values
+    are None on any failure, and a caller MUST read None as unknown, never as
+    zero: skipping work because the instrument is unreadable is an absence
+    read as evidence.
+    """
+    res = runner(["gh", "api", "rate_limit"], cwd=cwd)
+    if not res.ok:
+        return None, None
+    try:
+        graphql = json.loads(res.stdout)["resources"]["graphql"]
+        remaining = graphql["remaining"]
+        reset_epoch = graphql["reset"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None, None
+    if not isinstance(remaining, int) or not isinstance(reset_epoch, (int, float)):
+        return None, None
+    reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    return remaining, reset_iso
