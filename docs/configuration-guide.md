@@ -149,6 +149,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |
 | `recovery.max_nudges` | int | `3` | never | Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately). |
 | `recovery.watchdog` | typing.Literal['off', 'report', 'wake'] | `off` | advanced | External fleet watchdog lane on the same tick (x-55c3): off (default) | report (classify + emit one event per non-leave verdict) | wake (also apply the wake lane: resume plus a content-verified message). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply=all`. |
+| `recovery.watchdog_mail_to` | str | `` | advanced | Mail handle the watchdog digest is pushed to when the non-leave verdict set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody. |
 | `health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |
 | `health_monitor.thresholds.idea_pile_depth` | int | `25` | never | Breach threshold: idea pile depth. |
 | `health_monitor.thresholds.stale_ready_days` | int | `30` | never | Breach threshold: stale-ready age (days). |

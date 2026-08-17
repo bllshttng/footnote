@@ -439,9 +439,13 @@ def sweep_path() -> Path:
     return paths.state_dir() / "watchdog-sweep.json"
 
 
-def write_sweep_file(source: str, counts: dict, now_s: float) -> None:
+def write_sweep_file(
+    source: str, counts: dict, now_s: float, signature: str = ""
+) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
-    best-effort (an unwritable state root must never break a tick)."""
+    best-effort (an unwritable state root must never break a tick). The
+    ``signature`` of the non-leave verdict set rides along so the mail lane
+    can skip a digest that says exactly what the last one said."""
     try:
         path = sweep_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -452,11 +456,74 @@ def write_sweep_file(source: str, counts: dict, now_s: float) -> None:
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
                 "counts": counts,
+                "signature": signature,
             }),
             encoding="utf-8",
         )
     except OSError:
         pass
+
+
+def _last_signature() -> str:
+    try:
+        return str(json.loads(sweep_path().read_text(encoding="utf-8")).get("signature") or "")
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+
+
+def verdict_signature(payload: dict) -> str:
+    """Stable identity of the non-leave verdict set (row_id:verdict, sorted).
+    Two sweeps that agree on the fleet produce one signature, so the mail lane
+    speaks only on change - a row stuck for a day reads once, not 72 times."""
+    parts = sorted(
+        f"{v['row_id']}:{v['verdict']}"
+        for v in payload["verdicts"]
+        if v["verdict"] != LEAVE
+    )
+    return ";".join(parts)
+
+
+def digest_text(payload: dict, limit: int = 8) -> str:
+    """One-screen digest of a sweep, house-style (one physical line per
+    paragraph). The basis rides along so the king can falsify each call."""
+    total = len(payload["verdicts"])
+    counts = " ".join(f"{k}={v}" for k, v in sorted(payload["counts"].items()))
+    lines = [f"fleet watchdog swept {total} rows. {counts}"]
+    non_leave = [x for x in payload["verdicts"] if x["verdict"] != LEAVE]
+    for v in non_leave[:limit]:
+        lines.append(f"{v['verdict']} {v['name']}: {v['basis']}")
+    more = len(non_leave) - limit
+    if more > 0:
+        lines.append(f"{more} more row(s) not shown.")
+    return "\n".join(lines)
+
+
+def mail_digest(
+    payload: dict, to: str, *, runner: Callable = subprocess.run
+) -> tuple[bool, str]:
+    """Push the verdict to a mail handle (push, not pull: a verdict the king
+    has to remember to fetch goes unread). Skipped without comment when the
+    non-leave set is unchanged since the last sweep. A ``project:<slug>``
+    recipient addresses the project mailbox instead of one agent."""
+    if not to:
+        return False, "no recipient configured"
+    non_leave = [v for v in payload["verdicts"] if v["verdict"] != LEAVE]
+    if not non_leave:
+        return True, "all rows leave, nothing to say"
+    if verdict_signature(payload) == _last_signature():
+        return True, "unchanged since the last sweep, not mailed"
+    argv = [*_fno(), "mail", "send"]
+    if to.startswith("project:"):
+        argv += ["--to-project", to[len("project:"):]]
+    else:
+        argv.append(to)
+    argv.append(digest_text(payload))
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"mail send failed: {exc}"
+    ok = proc.returncode == 0
+    return ok, (proc.stdout or proc.stderr or "").strip()
 
 
 # ---------------------------------------------------------------------------

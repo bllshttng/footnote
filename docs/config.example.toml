@@ -379,6 +379,8 @@ idle_threshold_seconds = 900
 max_nudges = 3
 # External fleet watchdog lane on the same tick (x-55c3): off (default) | report (classify + emit one event per non-leave verdict) | wake (also apply the wake lane: resume plus a content-verified message). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply=all`.
 watchdog = "off"
+# Mail handle the watchdog digest is pushed to when the non-leave verdict set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody.
+watchdog_mail_to = ""
 
 [health_monitor]
 # Enable backlog health monitoring.

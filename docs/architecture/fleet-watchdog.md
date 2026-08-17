@@ -50,6 +50,10 @@ A bus-only row (`delivery_policy == "bus-only"`, x-e21e) stays bus-only. It is s
 
 `config.recovery.watchdog` rides the pr_watch tick: `off` (default), `report` (one `watchdog_verdict` event per non-leave row), `wake` (also apply the wake lane). No tick value reaps or reroutes. A destructive action stays behind an operator running `--apply=all` by hand. Every sweep, tick or manual, writes `~/.fno/watchdog-sweep.json` as freshness evidence. Its row lives in `docs/state-root-inventory.md`.
 
+## Push, not pull
+
+A verdict the king has to remember to fetch goes unread. When `config.recovery.watchdog_mail_to` names a handle (or `--mail <handle>` is passed), the sweep mails a one-screen digest of the non-leave verdicts with their basis strings. The digest is gated on change. The signature of the non-leave set rides in the sweep file, and an unchanged signature sends nothing. A row stuck for a day reads once, not on every tick. A `project:<slug>` recipient addresses the project mailbox instead of one agent.
+
 ## What this does not replace
 
 `fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window, reap on settled deliverables, and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either.

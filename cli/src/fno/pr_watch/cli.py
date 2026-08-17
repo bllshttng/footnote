@@ -282,7 +282,12 @@ def tick() -> None:
     # non-leave row; "wake" additionally applies the wake lane. No tick value
     # reaps or reroutes - those stop a session and stay behind a manual
     # `fno agents watchdog --apply=all`.
-    if settings.recovery.watchdog in ("report", "wake") and settings.autonomy.enabled:
+    # getattr with the modeled default: a settings stub or a partially-loaded
+    # config must never crash the tick - "off" is the no-op that fails safe.
+    if (
+        getattr(settings.recovery, "watchdog", "off") in ("report", "wake")
+        and settings.autonomy.enabled
+    ):
         try:
             import time as _time
 
@@ -290,7 +295,19 @@ def tick() -> None:
 
             now = _time.time()
             payload, rows = _wd.run_sweep(now_s=now)
-            _wd.write_sweep_file("tick", payload["counts"], now)
+            # Mail before the sweep file write: the change gate compares
+            # against the PREVIOUS sweep's signature (push, not pull).
+            mail_to = str(getattr(
+                settings.recovery, "watchdog_mail_to", ""
+            ) or "")
+            if mail_to:
+                try:
+                    _wd.mail_digest(payload, mail_to)
+                except Exception:  # noqa: BLE001 - mail never breaks the tick
+                    pass
+            _wd.write_sweep_file(
+                "tick", payload["counts"], now, _wd.verdict_signature(payload)
+            )
             acted = 0
             for d, row in zip(payload["verdicts"], rows):
                 verdict = _wd.Verdict(**d)

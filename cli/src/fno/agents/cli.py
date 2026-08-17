@@ -2641,6 +2641,15 @@ def cmd_watchdog(
     only: Optional[str] = typer.Option(
         None, "--only", help="Filter to one verdict: wake|reroute|reap|ghost|leave."
     ),
+    mail_to: Optional[str] = typer.Option(
+        None,
+        "--mail",
+        help=(
+            "Mail the digest to this handle (an agent name, short id, or "
+            "project:<slug>). Defaults to config.recovery.watchdog_mail_to. "
+            "Skipped when the non-leave verdict set is unchanged."
+        ),
+    ),
 ) -> None:
     """Sweep the fleet from transcript truth and decide, per row: wake,
     reroute, reap, or leave.
@@ -2673,7 +2682,30 @@ def cmd_watchdog(
     ]
     if only is not None:
         pairs = [p for p in pairs if p[0].verdict == only]
-    wd.write_sweep_file("manual", payload["counts"], now)
+
+    # Push, not pull: a verdict the king has to remember to fetch goes
+    # unread. Mail before writing the sweep file, so the change gate compares
+    # against the PREVIOUS sweep's signature.
+    recipient = mail_to
+    if recipient is None:
+        try:
+            from fno.config import load_settings
+
+            recipient = str(getattr(
+                load_settings().recovery, "watchdog_mail_to", "") or ""
+            )
+        except Exception:  # noqa: BLE001 - config read miss means no mail
+            recipient = ""
+    if recipient:
+        try:
+            ok, receipt = wd.mail_digest(payload, recipient)
+            if not ok:
+                print(f"watchdog mail: {receipt}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
+            print(f"watchdog mail failed: {exc}", file=sys.stderr)
+    wd.write_sweep_file(
+        "manual", payload["counts"], now, wd.verdict_signature(payload)
+    )
 
     if apply is None:
         for v, _row in pairs:

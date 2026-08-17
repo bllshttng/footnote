@@ -2262,6 +2262,11 @@ class RecoveryBlock(BaseModel):
         content-verified message). No tick value ever reaps or reroutes:
         those stop a session and stay behind an operator running
         ``fno agents watchdog --apply=all`` by hand.
+    watchdog_mail_to:
+        Mail handle the watchdog digest is pushed to (agent name, short id,
+        or ``project:<slug>``). Empty (default) mails nobody. A digest is
+        sent only when the non-leave verdict set changed since the previous
+        sweep, so a row stuck for a day reads once, not every tick.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2270,6 +2275,7 @@ class RecoveryBlock(BaseModel):
     idle_threshold_seconds: int = Field(default=900, gt=0)
     max_nudges: int = Field(default=3, ge=1)
     watchdog: Literal["off", "report", "wake"] = "off"
+    watchdog_mail_to: str = ""
 
 
 class HealthThresholdsBlock(BaseModel):

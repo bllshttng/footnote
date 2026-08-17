@@ -252,6 +252,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # pane's open rollout fd); no Rust port, so it must never auto-route to
     # the daemon.
     "codex-session-for-pid",
+    # x-55c3: the external fleet watchdog. Pure Python (transcript tail reads +
+    # registry/graph joins; apply lanes shell out to fno verbs); no Rust client
+    # port, so it must never auto-route to the daemon.
+    "watchdog",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs

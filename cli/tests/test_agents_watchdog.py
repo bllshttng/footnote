@@ -315,3 +315,74 @@ def test_sweep_payload_shape():
     assert payload["counts"] == {LEAVE: 1}
     # Rows ride along index-aligned so apply lanes can reach each cwd.
     assert out_rows == rows
+
+
+# ---------------------------------------------------------------------------
+# The mail lane (push, not pull) and its change gate
+# ---------------------------------------------------------------------------
+
+def _payload_two_rows():
+    return {
+        "verdicts": [
+            {"row_id": "aaaa1111-0000", "name": "w1", "state": "working",
+             "verdict": LEAVE, "basis": "reachable", "action": "none"},
+            {"row_id": "dddd4444-0000", "name": "k1", "state": "blocked",
+             "verdict": WAKE, "basis": "blocked 30m", "action": "resume"},
+        ],
+        "counts": {LEAVE: 1, WAKE: 1},
+    }
+
+
+def test_digest_is_house_style_and_names_the_basis():
+    text = watchdog.digest_text(_payload_two_rows())
+    assert "wake k1: blocked 30m" in text
+    # The mail lane is style-gated at send time; a semicolon or the modal
+    # 'could' makes the whole send exit non-zero without delivering.
+    assert ";" not in text
+    assert "could" not in text.lower()
+
+
+def test_mail_digest_sends_on_change_and_skips_when_unchanged(monkeypatch, tmp_path):
+    import json as _json
+
+    (tmp_path / "watchdog-sweep.json").write_text(_json.dumps(
+        {"source": "tick", "at": "x", "counts": {}, "signature": "old-sig"}
+    ))
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
+    sent = []
+
+    def runner(argv, **kw):
+        sent.append(argv)
+        return _Proc(0, stdout="msg-1 delivered (hosted)\n")
+
+    payload = _payload_two_rows()
+    ok, receipt = watchdog.mail_digest(payload, "king", runner=runner)
+    assert ok and "delivered" in receipt
+    assert sent and "mail" in " ".join(sent[0]) and "king" in sent[0]
+
+    # Same signature as the stored sweep: no second send, no spam.
+    watchdog.write_sweep_file(
+        "tick", payload["counts"], NOW_1840, watchdog.verdict_signature(payload)
+    )
+    sent.clear()
+    ok2, detail2 = watchdog.mail_digest(payload, "king", runner=runner)
+    assert ok2 and "unchanged" in detail2
+    assert sent == []
+
+
+def test_mail_digest_project_recipient(monkeypatch, tmp_path):
+    import json as _json
+
+    (tmp_path / "watchdog-sweep.json").write_text(_json.dumps(
+        {"source": "tick", "at": "x", "counts": {}, "signature": ""}
+    ))
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
+    seen = {}
+
+    def runner(argv, **kw):
+        seen["argv"] = argv
+        return _Proc(0, stdout="msg-2 queued (durable)\n")
+
+    ok, _ = watchdog.mail_digest(_payload_two_rows(), "project:fno", runner=runner)
+    assert ok
+    assert "--to-project" in seen["argv"] and "fno" in seen["argv"]
