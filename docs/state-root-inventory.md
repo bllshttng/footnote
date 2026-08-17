@@ -109,9 +109,9 @@ Leave them. The finding is the cwd fallback, not the directories it produced. `.
 
 ## The project journal and `FNO_EVENTS_PATH`
 
-The per-checkout journal `<repo>/.fno/events.jsonl` resolves through `paths.project_events_json()`, and `FNO_EVENTS_PATH` overrides it. The override exists because repo-root resolution cannot be sandboxed: `fno.hermetic.neutralise` deliberately leaves `FNO_REPO_ROOT` unset, so an unpathed `append_event` under test writes a real row into the developer's checkout, and both operator readers fold that file. On 2026-08-17 six test fixtures were sitting in the needs panel beside two genuine operator questions.
+The per-checkout journal `<repo>/.fno/events.jsonl` resolves through `paths.project_events_json()`. `FNO_EVENTS_PATH` overrides it. The override exists because repo-root resolution cannot be sandboxed. `fno.hermetic.neutralise` deliberately leaves `FNO_REPO_ROOT` unset. So an unpathed `append_event` under test writes a real row into the developer's checkout, and both operator readers fold that file. On 2026-08-17 six test fixtures sat in the needs panel beside two genuine operator questions.
 
-`neutralise` pins the override at one line, and it reaches the pytest, shell, and cargo trees because all three come through that function. Reach for it, not for a marker the fold recognises: a fold that must know about test data carries an exception list, and the next fixture that does not match the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and then reads the journal back by hand must name the same file in `FNO_EVENTS_PATH`, because the pin outranks the root.
+`neutralise` pins the override at one line. It reaches the pytest, shell, and cargo trees, because all three come through that function. Reach for the pin, not for a marker the fold recognises. A fold that must know about test data carries an exception list, and the next fixture that misses the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and reads the journal back must name the same file in `FNO_EVENTS_PATH`. The pin outranks the root.
 
 ## Adding a new root writer
 
