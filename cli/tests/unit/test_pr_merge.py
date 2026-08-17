@@ -72,6 +72,16 @@ class FakeRun:
             if cmd[1:3] == ["pr", "view"]:
                 if any("statusCheckRollup" in a for a in cmd):
                     return Result(0, json.dumps(self.checks) + "\n", "")
+                if cmd[-1] == "headRefOid":
+                    # The coverage gate's head fetch: a merge first pins the
+                    # head coverage would describe. Served from the same
+                    # default the rollup read carries, so a test faking a
+                    # moved head overrides `checks` and both reads agree.
+                    return Result(
+                        0,
+                        json.dumps({"headRefOid": self.checks.get("headRefOid", "deadbeefcafe")}) + "\n",
+                        "",
+                    )
                 if "mergedAt" in cmd:
                     if self.view_fails:
                         return Result(1, "", "gh: could not reach api.github.com")
@@ -1407,6 +1417,7 @@ def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"}, ""),
     )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
 
@@ -1448,6 +1459,7 @@ def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
             ],
         }, ""),
     )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "89bc0b91")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "blocked"
@@ -1491,6 +1503,7 @@ def test_carried_local_attestation_still_satisfies_the_code_review_gate(
             ],
         }, ""),
     )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
 
@@ -1556,6 +1569,7 @@ def test_code_review_gate_accepts_its_head_pinned_local_attestation(
             ],
         }, ""),
     )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
