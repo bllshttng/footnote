@@ -679,7 +679,6 @@ crates/fno-agents/src/daemon.rs:10154: provider="codex" (provider-named binding 
 crates/fno-agents/src/daemon.rs:10158: provider="codex" (provider-named binding holds a harness literal)
 crates/fno-agents/src/daemon.rs:2837: provider="claude" (provider-named binding holds a harness literal)
 crates/fno-agents/src/daemon.rs:3561: provider="claude" (provider-named binding holds a harness literal)
-crates/fno-agents/src/daemon.rs:3573: provider="claude" (provider-named binding holds a harness literal)
 crates/fno-agents/src/daemon.rs:3586: provider="claude" (provider-named binding holds a harness literal)
 crates/fno-agents/src/daemon.rs:3621: provider="claude" (provider-named binding holds a harness literal)
 crates/fno-agents/src/daemon.rs:3637: provider="claude" (provider-named binding holds a harness literal)

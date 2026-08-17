@@ -597,7 +597,7 @@ struct HarnessStoreIndex {
 impl HarnessStoreIndex {
     /// Test seam: fixed roots, so the per-harness keying is unit-testable
     /// against temp trees instead of the developer's real `~/.claude`/`~/.codex`.
-    /// (Dead in non-test builds; the lib test suite is the caller.)
+    #[cfg(test)]
     fn with_roots(claude_root: std::path::PathBuf, codex_root: std::path::PathBuf) -> Self {
         HarnessStoreIndex {
             claude_root: Some(claude_root),
@@ -3703,7 +3703,6 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
                             &json!({
                                 "name": from,
                                 "from_name": to,
-                                "provider": "claude",
                                 "transport": "switchboard-mirror",
                                 "reason": e,
                             }),

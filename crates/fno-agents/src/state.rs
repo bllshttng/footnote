@@ -1053,9 +1053,13 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
                 .unwrap_or(0);
             if on_disk <= REGISTRY_SCHEMA_VERSION as u64 {
                 if raw_rows > 0 {
-                    return Err(StateError::InvariantViolation(registry_row_divergence_msg(
-                        path, raw_rows, 0,
-                    )));
+                    // Keep the count-bearing refusal (AC3) but carry the typed
+                    // error too: a decode failure that lost no rows (a bad
+                    // top-level type) still names its field instead of
+                    // masquerading as a pure count divergence (PR 924 review).
+                    let mut msg = registry_row_divergence_msg(path, raw_rows, 0);
+                    msg.push_str(&format!("; typed error: {typed_err}"));
+                    return Err(StateError::InvariantViolation(msg));
                 }
                 return Err(typed_err.into());
             }
