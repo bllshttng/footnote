@@ -297,6 +297,17 @@ def _exit4_degraded_reason(stdout: Optional[str]) -> str:
     return reason
 
 
+def _exit4_reason_or_unstated(stdout: Optional[str]) -> str:
+    """Exit 4's degradation reason, or the unstated-cause fallback.
+
+    Exit 4 itself is the degradation signal: an outage with a healthy quota
+    states no reason, but the read still failed, and an empty ``why`` would
+    stamp a bare "recomputed" beside an unknown row - reading as "genuinely
+    unreviewed" when the read in fact failed.
+    """
+    return _exit4_degraded_reason(stdout) or "gh read failed (exit 4)"
+
+
 def _fire_review_coverage_verb(
     pr_number: int, cwd: Optional[str], head: Optional[str]
 ) -> tuple[bool, str]:
@@ -343,7 +354,7 @@ def _fire_review_coverage_verb(
         why = ((proc.stderr or "").strip() or (proc.stdout or "").strip()).splitlines()
         return False, f"recompute failed (exit {proc.returncode}: {why[-1] if why else ''})"
     if proc.returncode == 4:
-        return True, _exit4_degraded_reason(proc.stdout)
+        return True, _exit4_reason_or_unstated(proc.stdout)
     return True, ""
 
 
@@ -372,9 +383,10 @@ def review_coverage_for_gate(
     Returns ``(data_or_None, note)``; ``note`` is ``""`` when no recompute ran,
     else ``"recomputed"``, ``"recompute produced no row"``,
     ``"recompute unavailable: <why>"``, or - when the recompute ran but its gh
-    read failed on an exhausted GraphQL quota and the re-read row is still
-    ``unknown`` - ``"recompute degraded to unknown: <why>"``, so a gate can say
-    "retry after the quota reset" instead of a bare "nobody reviewed this".
+    read failed (exhausted quota, secondary limit, or an unstated cause) and
+    the re-read row is still ``unknown`` - ``"recompute degraded to unknown:
+    <why>"``, so a gate can say "retry after the quota reset" instead of a
+    bare "nobody reviewed this".
     """
     data = latest_review_coverage(pr_number, cwd)
     note = ""

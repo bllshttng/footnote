@@ -186,6 +186,20 @@ def test_exit4_reason_stays_empty_without_exhaustion():
     assert _reviews._exit4_degraded_reason(no_reason) == "graphql quota exhausted"
 
 
+def test_exit4_outage_falls_back_to_the_exit_code_note():
+    """Exit 4 with no stated reason (an outage with a healthy quota, or a
+    probe that could not answer) must still yield a non-empty `why`: exit 4
+    itself is the degradation signal, and an empty `why` would stamp a bare
+    "recomputed" beside an unknown row - reading as "genuinely unreviewed"
+    when the read in fact failed."""
+    outage = '{"coverage":"unknown","graphql_remaining":4890,"graphql_exhausted":false}'
+    for stdout in (outage, "not json", "", None):
+        why = _reviews._exit4_reason_or_unstated(stdout)
+        assert why == "gh read failed (exit 4)", (stdout, why)
+    stated = '{"graphql_exhausted":true,"reason":"GraphQL quota exhausted."}'
+    assert _reviews._exit4_reason_or_unstated(stated) == "GraphQL quota exhausted."
+
+
 def test_exit4_reason_surfaces_a_stated_secondary_limit():
     """A secondary-rate-limit refusal fires with advertised quota healthy, so
     it cannot ride graphql_exhausted - the verb states it as a plain reason
