@@ -169,6 +169,16 @@ The built-in `zai` provider already routes the background (haiku) tier to the ch
 
 **`/effort` mapping.** GLM collapses `low`/`medium`/`high` to a single high setting; only `xhigh`/`max` reach its maximum reasoning. Pin a routed build lane to `high` or above (`--effort high`); a lower effort buys nothing on GLM.
 
+## Inherited env and the daemon carrier
+
+A long-lived background daemon (`claude --bg` supervision) holds a copy of the environment of the shell that started it and re-stamps it into every session it spawns. If that shell held a foreign vendor's model exports with no base URL, every child asks Anthropic's endpoint for a model it does not serve, and the whole tier ERRORS rather than degrading. No config edit reaches a running daemon; only a restart or a settings pin does.
+
+`~/.claude/settings.json` `env` wins over an inherited value. That is the durable pin, and it is the only fix that works without terminating live sessions. The current Anthropic ids to pin: `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`, `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5`.
+
+**The naming trap.** There is no Haiku 4.7. The current lineup is Haiku 4.5, with Sonnet, Opus and Fable at 5. The zai provider's `haiku_model` IS `glm-4.7`, and that number does not transfer to an Anthropic id. Guessing `claude-haiku-4-7` fails exactly the way the GLM names do.
+
+The code side of the same defense: `incoherent_model_env` (`cli/src/fno/agents/model_routing.py`) names every model var that carries a non-Anthropic id while the endpoint is Anthropic's, and the four spawn seams that copy the parent env (`bg_create`, `headless_create`, `_default_wake_fn`, `_mesh_env_wrapper`) strip those vars before composing any route overlay, printing one stderr line per strip. A real route is never stripped: a foreign base URL serves those model ids, so the predicate returns empty. A pre-warmed spare session started by the daemon itself is beyond a spawn-time scrub (the process already exists); the settings pin is what covers that case. The SessionStart detector (`hooks/attest-model.sh`) warns over the same five vars, bails out on Bedrock/Vertex lanes, and a parity test pins its var list to `MODEL_ENV_KEYS` so a new tier cannot land in one list and not the other.
+
 ## Scope and deferrals
 
 Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `extra_env` is the escape hatch for differentiated tiers (e.g. a cheaper `ANTHROPIC_DEFAULT_HAIKU_MODEL`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints; claude-code-router (CCR) for routing an *in-session* subagent to a non-Anthropic provider; a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
