@@ -134,9 +134,15 @@ jobs:
               # operator's fix commit after a 3am override keeps the valve
               # they are still holding, so the label is re-read before the
               # head is invalidated.
-              if gh pr view "${{ github.event.pull_request.number }}" \
+              # Read the label by NAME, the same jq the Python and Rust
+              # siblings use. A grep over the raw JSON blob also sees each
+              # label's description and colour, so an unrelated label
+              # described "coverage-override" would re-stamp success on a
+              # head nobody reviewed.
+              held="$(gh pr view "${{ github.event.pull_request.number }}" \
                     -R "${GITHUB_REPOSITORY}" --json labels \
-                   | grep -q '"coverage-override"'; then
+                    --jq '[.labels[].name] | index("coverage-override") != null')"
+              if [ "$held" = "true" ]; then
                 post success "coverage-override label still applied (head moved to ${HEAD_SHA:0:8})"
                 echo "synchronize: override still held; re-stamped success at ${HEAD_SHA:0:8}"
               else
