@@ -1250,14 +1250,120 @@ def _valid_status(value: Any) -> bool:
     return value is not None
 
 
+def claude_agents_rows(
+    timeout: float = _AGENTS_JSON_TIMEOUT_DEFAULT,
+) -> tuple[list[dict], list[str]]:
+    """Shell out to ``claude agents --json --all`` and return the RAW agent rows.
+
+    The one enumeration every fleet consumer reads: ``--all`` is load-bearing
+    (without it stopped/completed rows are invisible - 57 of 133 on a real
+    fleet - and every sweep reading the narrower view reports success over
+    half the fleet). The operator's own interactive rows are skipped by design
+    (``kind == "interactive"``); everything else passes through RAW, so a
+    consumer that needs claude's own ``state``/``sessionId``/``cwd`` fields
+    gets them unmangled while :func:`claude_agents_json` normalizes the subset
+    it wants. Best-effort: every failure mode returns ``([], warnings)``.
+    """
+    # `claude agents --json` alone omits stopped/completed rows; `--all` is
+    # the fix; there is no narrower flag that keeps only live rows visible,
+    # and no caller here wants that narrower view anyway.
+    argv = ["claude", "agents", "--json", "--all"]
+
+    try:
+        result = _subprocess_run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return [], [
+            f"claude agents --json timed out after {timeout}s; "
+            "live_status unavailable, falling back to registry-only view"
+        ]
+    except FileNotFoundError:
+        return [], [
+            "claude agents --json: claude binary not found on PATH; "
+            "live_status unavailable, falling back to registry-only view"
+        ]
+    except OSError as exc:
+        return [], [
+            f"claude agents --json raised OSError: {exc}; "
+            "live_status unavailable, falling back to registry-only view"
+        ]
+
+    if result.returncode != 0:
+        head = (result.stderr or result.stdout or "").strip()[:200]
+        return [], [
+            f"claude agents --json exited non-zero ({result.returncode}); "
+            f"stderr: {head!r}; falling back to registry-only view"
+        ]
+
+    try:
+        parsed = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return [], [
+            f"claude agents --json parse failure: {exc}; falling back to registry-only view"
+        ]
+
+    # Claude's `agents --json` output shape isn't formally pinned: some
+    # versions return ``{"agents": [...]}``, others return the bare
+    # ``[...]`` array (per the CLI docs). Treat both as valid; the
+    # legacy ``{"agents": ...}`` wrapper is unwrapped and a bare list
+    # is used directly. Anything else degrades to the warned-fallback
+    # path instead of crashing with ``AttributeError`` on ``.get()``.
+    rows: Any
+    if isinstance(parsed, list):
+        rows = parsed
+    elif isinstance(parsed, dict):
+        rows = parsed.get("agents")
+        if not isinstance(rows, list):
+            return [], [
+                "claude agents --json response missing 'agents' array; "
+                "falling back to registry-only view"
+            ]
+    else:
+        return [], [
+            f"claude agents --json response has unexpected shape "
+            f"({type(parsed).__name__}); falling back to registry-only view"
+        ]
+
+    # The operator's own interactive sessions ride in the same array and
+    # carry no id BY DESIGN. They are not agents and never were, so they are
+    # skipped silently: warning about each one turns a healthy invocation
+    # into a wall of "no usable short id", which is how an operator learns
+    # to ignore the warnings below. `kind` is the discriminator rather than
+    # "did the row have an id", because a drift that renamed BOTH the id and
+    # status keys still says `background` and must still be caught.
+    #
+    # `kind` is itself a drift surface, and this match is exact: a rename to
+    # `session_type` or a recase to `Interactive` makes the skip fail OPEN,
+    # and every interactive row falls back through to the "no usable short
+    # id" path. That degrades to the wall of warnings this skip removed -
+    # loud, not silent, which is the direction a diagnostic should fail.
+    out: list[dict] = []
+    warnings: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            warnings.append(f"claude agents --json row {index} is not an object; skipped")
+            continue
+        if row.get("kind") == "interactive":
+            continue
+        out.append(row)
+    return out, warnings
+
+
 def claude_agents_json(
     timeout: float = _AGENTS_JSON_TIMEOUT_DEFAULT,
 ) -> tuple[dict[str, dict], list[str]]:
-    """Shell out to ``claude agents --json`` and return a short-id → fields map.
+    """Shell out to ``claude agents --json --all`` and return a short-id map.
 
-    Best-effort. Returns ``({}, warnings)`` on every failure mode so the
-    caller can fall back to registry-only data (AC1-FR). Failure modes
-    that map to a non-empty warning list:
+    Raw enumeration is :func:`claude_agents_rows` (``--all`` included, so
+    stopped/completed rows survive into this map too); this wrapper normalizes
+    each row onto the ``live_status`` axis. Best-effort. Returns
+    ``({}, warnings)`` on every failure mode so the caller can fall back to
+    registry-only data (AC1-FR). Failure modes that map to a non-empty
+    warning list:
 
     - ``FileNotFoundError`` — ``claude`` binary missing from PATH.
     - ``subprocess.TimeoutExpired`` — exceeded the per-call timeout.
@@ -1288,95 +1394,10 @@ def claude_agents_json(
     which spelling the binary used; an unmapped value passes through with a
     drift warning.
     """
-    # `claude agents --json` alone omits stopped/completed rows (57 of
-    # 133 seen live on a real fleet); every reconcile/orphan sweep reading this
-    # map was blind to exactly the rows it needed to inspect. `--all` is the
-    # fix; there is no narrower flag that keeps only live rows visible, and no
-    # caller here wants that narrower view anyway.
-    argv = ["claude", "agents", "--json", "--all"]
-
-    try:
-        result = _subprocess_run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return {}, [
-            f"claude agents --json timed out after {timeout}s; "
-            "live_status unavailable, falling back to registry-only view"
-        ]
-    except FileNotFoundError:
-        return {}, [
-            "claude agents --json: claude binary not found on PATH; "
-            "live_status unavailable, falling back to registry-only view"
-        ]
-    except OSError as exc:
-        return {}, [
-            f"claude agents --json raised OSError: {exc}; "
-            "live_status unavailable, falling back to registry-only view"
-        ]
-
-    if result.returncode != 0:
-        head = (result.stderr or result.stdout or "").strip()[:200]
-        return {}, [
-            f"claude agents --json exited non-zero ({result.returncode}); "
-            f"stderr: {head!r}; falling back to registry-only view"
-        ]
-
-    try:
-        parsed = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        return {}, [
-            f"claude agents --json parse failure: {exc}; falling back to registry-only view"
-        ]
-
-    # Claude's `agents --json` output shape isn't formally pinned: some
-    # versions return ``{"agents": [...]}``, others return the bare
-    # ``[...]`` array (per the CLI docs). Treat both as valid; the
-    # legacy ``{"agents": ...}`` wrapper is unwrapped and a bare list
-    # is used directly. Anything else degrades to the warned-fallback
-    # path instead of crashing with ``AttributeError`` on ``.get()``.
-    rows: Any
-    if isinstance(parsed, list):
-        rows = parsed
-    elif isinstance(parsed, dict):
-        rows = parsed.get("agents")
-        if not isinstance(rows, list):
-            return {}, [
-                "claude agents --json response missing 'agents' array; "
-                "falling back to registry-only view"
-            ]
-    else:
-        return {}, [
-            f"claude agents --json response has unexpected shape "
-            f"({type(parsed).__name__}); falling back to registry-only view"
-        ]
-
+    rows, warnings = claude_agents_rows(timeout=timeout)
     out_map: dict[str, dict] = {}
-    warnings: list[str] = []
-    agent_rows = 0
+    agent_rows = len(rows)
     for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            warnings.append(f"claude agents --json row {index} is not an object; skipped")
-            continue
-        # The operator's own interactive sessions ride in the same array and
-        # carry no id BY DESIGN. They are not agents and never were, so they are
-        # skipped silently: warning about each one turns a healthy invocation
-        # into a wall of "no usable short id", which is how an operator learns
-        # to ignore the warnings below. `kind` is the discriminator rather than
-        # "did the row have an id", because a drift that renamed BOTH the id and
-        # status keys still says `background` and must still be caught.
-        #
-        # `kind` is itself a drift surface, and this match is exact: a rename to
-        # `session_type` or a recase to `Interactive` makes the skip fail OPEN,
-        # and every interactive row falls back through to the "no usable short
-        # id" path. That degrades to the wall of warnings this skip removed -
-        # loud, not silent, which is the direction a diagnostic should fail.
-        if row.get("kind") == "interactive":
-            continue
-        agent_rows += 1
         short_id, id_warning = _alias_value(row, _SHORT_ID_KEYS, _valid_short_id)
         if short_id is None:
             warnings.append(
