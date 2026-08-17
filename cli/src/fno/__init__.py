@@ -52,7 +52,16 @@ def _module_is_now_on_disk(name: str) -> bool:
     the check work there).  It is kept for the cases that granularity does not
     cover -- a coarse-mtime filesystem where the rewrite lands inside one mtime
     tick -- and because it is the documented thing to do when files change
-    underneath a running process.  It costs microseconds, on an error path only.
+    underneath a running process.
+
+    It is NOT free, and the cost is worth naming: ``PathFinder.invalidate_caches``
+    ends in ``from importlib.metadata import MetadataPathFinder``, so the FIRST
+    call in a process that has not already loaded that module pulls in
+    ``importlib.metadata``, ``email`` and ``zipfile``.  Measured on a bare
+    interpreter: 17.9ms and 84 modules for that first call, 0.003ms for every
+    call after it.  The exact figure moves with what the process has already
+    imported, so treat it as "tens of milliseconds, once".  It is paid only on
+    an import that has ALREADY failed, so no successful path ever sees it.
     """
     import importlib.util
 
