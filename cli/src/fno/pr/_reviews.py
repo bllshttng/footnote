@@ -278,19 +278,23 @@ def _exit4_degraded_reason(stdout: Optional[str]) -> str:
     """The exit-4 degradation reason from the verb's stdout, or ``""``.
 
     The verb's stdout is one JSON object whose last line is it even under
-    stray warnings. Unparseable or non-exhausted stdout keeps the empty
-    string - the unknown row the verb emitted is still the caller's answer;
-    only a stated ``graphql_exhausted`` upgrades the empty string to a
-    reason a gate can interpolate.
+    stray warnings. Exit 4 means the read failed, so any ``reason`` the verb
+    states is a real degradation cause - quota exhaustion (with its reset
+    time) or a secondary-rate-limit refusal. Unparseable stdout, or a failure
+    with no stated cause, keeps the empty string: the unknown row the verb
+    emitted is still the caller's answer.
     """
     lines = [ln for ln in (stdout or "").splitlines() if ln.strip()]
     try:
         payload = json.loads(lines[-1]) if lines else None
     except ValueError:
         return ""
-    if isinstance(payload, dict) and payload.get("graphql_exhausted"):
-        return str(payload.get("reason") or "graphql quota exhausted")
-    return ""
+    if not isinstance(payload, dict):
+        return ""
+    reason = str(payload.get("reason") or "").strip()
+    if payload.get("graphql_exhausted"):
+        return reason or "graphql quota exhausted"
+    return reason
 
 
 def _fire_review_coverage_verb(
@@ -301,10 +305,10 @@ def _fire_review_coverage_verb(
     ``ran`` is True for any exit the verb defines (0/3/4) - including the
     unknown-coverage exit 4, which still emitted a row the caller re-reads.
     ``why`` names the failure when ``ran`` is False, for the refusal text; on
-    exit 4 it carries the verb's degradation reason when stdout says the read
-    failed on an exhausted GraphQL quota (``graphql_exhausted``), so a caller
-    can tell "retriable after the reset" from "go get a review". ``why`` is
-    advisory text callers interpolate, never a boolean.
+    exit 4 it carries the verb's degradation reason when stdout states one
+    (an exhausted GraphQL quota with its reset time, or a secondary-rate-limit
+    refusal), so a caller can tell "retriable after the reset" from "go get a
+    review". ``why`` is advisory text callers interpolate, never a boolean.
     Binary resolution reuses :func:`fno.rust_binary.resolve_binary` (the one
     resolver; never a second lookup here).
     """

@@ -184,3 +184,17 @@ def test_exit4_reason_stays_empty_without_exhaustion():
         assert _reviews._exit4_degraded_reason(stdout) == "", stdout
     no_reason = '{"coverage":"unknown","graphql_exhausted":true}'
     assert _reviews._exit4_degraded_reason(no_reason) == "graphql quota exhausted"
+
+
+def test_exit4_reason_surfaces_a_stated_secondary_limit():
+    """A secondary-rate-limit refusal fires with advertised quota healthy, so
+    it cannot ride graphql_exhausted - the verb states it as a plain reason
+    and the parser must surface it (exit 4 is degraded by definition)."""
+    secondary = (
+        '{"coverage":"unknown","graphql_remaining":null,"graphql_exhausted":null,'
+        '"reason":"GitHub secondary rate limit refused this gh read '
+        '(a burst limit, distinct from the hourly quota; advertised remaining '
+        'stays healthy). Stop retrying for a few minutes."}'
+    )
+    why = _reviews._exit4_degraded_reason(secondary)
+    assert "secondary rate limit" in why, why

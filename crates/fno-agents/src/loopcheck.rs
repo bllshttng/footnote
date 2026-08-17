@@ -11270,6 +11270,79 @@ mod tests {
     }
 
     #[test]
+    fn review_coverage_pr_failure_secondary_limit_names_cause_and_skips_probe() {
+        // The other exit-4 cause: a secondary (burst) limit refusal fires with
+        // advertised quota healthy, so the quota probe cannot see it. The
+        // cause names itself in the failed read's stderr; stdout must carry
+        // it, and the probe must not even fire (its spawn is one more call
+        // against the limiter that just refused). The stub's rate_limit arm
+        // answers HEALTHY and drops a marker file - if the probe fired, the
+        // marker exists and graphql_remaining reads a number.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("probe-fired");
+        let gh = write_exec(
+            tmp.path(),
+            "gh",
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = pr ] && [ \"$2\" = view ] && \
+                 echo 'You have exceeded a secondary rate limit and have been temporarily blocked.' >&2 && exit 1\n\
+                 [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":4890,\"reset\":1750000000}}}}}}' && \
+                 echo probe > {marker} && exit 0\n\
+                 exit 1\n",
+                marker = marker.display()
+            ),
+        );
+        let events = tmp.path().join("ev.jsonl");
+        // Retry until the pr-view spawn lands (its fork is the one flake this
+        // suite retries for): a spawn failure degrades tail to an exec error,
+        // the secondary match misses, and the probe fires.
+        let mut v: Option<Value> = None;
+        for _ in 0..5 {
+            let (code, out) = run_review_coverage_capture(&[
+                "review-coverage".to_string(),
+                "--cwd".to_string(),
+                tmp.path().display().to_string(),
+                "--pr".to_string(),
+                "865".to_string(),
+                "--head".to_string(),
+                "deadbeef".to_string(),
+                "--events".to_string(),
+                events.display().to_string(),
+                "--global-events".to_string(),
+                tmp.path().join("gev.jsonl").display().to_string(),
+                "--settings".to_string(),
+                tmp.path().join("absent.toml").display().to_string(),
+                "--gh-bin".to_string(),
+                gh.display().to_string(),
+            ]);
+            assert_eq!(code, 4);
+            if let Ok(parsed) = serde_json::from_str::<Value>(&out) {
+                if parsed.get("reason").is_some() {
+                    v = Some(parsed);
+                    break;
+                }
+            }
+        }
+        let v = v.expect("5 runs never produced a reasoned stdout");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("secondary rate limit"),
+            "reason must name the secondary limit, got: {reason}"
+        );
+        assert!(
+            v["graphql_exhausted"].is_null(),
+            "probe skipped on secondary: exhausted reads null, got: {v}"
+        );
+        assert!(
+            !marker.exists(),
+            "probe_graphql_quota spawned against a refusing gh"
+        );
+        assert_eq!(v["coverage"], "unknown");
+    }
+
+    #[test]
     fn is_secondary_limit_stderr_matches_ghs_real_wording_case_insensitively() {
         assert!(is_secondary_limit_stderr(
             "You have exceeded a secondary rate limit. Please wait a few minutes."
