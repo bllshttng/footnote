@@ -530,7 +530,17 @@ fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> BootResult<
         thread::sleep(poll);
         last = verify_ours(path);
     }
-    last
+    // Say what was waited for, the way [`install_verified_within`] does. This is
+    // the message the post-install arm writes into the failure stamp and replays
+    // for the whole cooldown, so "it was re-asked for 3s" is the difference
+    // between a falsifiable report and one the operator reads as a single
+    // unlucky look. A stable refusal returns above on any non-zero budget, so
+    // the suffix only ever describes a budget that was actually spent.
+    last.map_err(|mut e| {
+        let waited = poll.as_millis() * u128::from(attempts);
+        e.msg = format!("{} (still failing after re-asking for {waited}ms)", e.msg);
+        e
+    })
 }
 
 /// [`install_verified`], retried on a disk RE-CHECK until it passes or the
@@ -933,12 +943,23 @@ fn verify_ours(real: &Path) -> BootResult<()> {
     // run a foreign fno" for the whole cooldown over an install that was
     // milliseconds from verifying.
     //
+    // ALL THREE fields, not just name and version: a wheel METADATA emits `Name`
+    // and `Version` before `Author-email`, so the widest torn window is the one
+    // that answers those two and leaves the author blank - and that is the field
+    // decide_identity refuses on once the name matches. Asking only for a name
+    // and a version would call the likeliest torn read final and stamp it.
+    //
+    // A stranger whose METADATA carries no author at all is indistinguishable
+    // from that torn read, so it pays the full budget on every call. That is the
+    // safe direction and the cheap one: a bounded 3s that still refuses, against
+    // a 600s cooldown that refuses a good install.
+    //
     // "None" is checked beside emptiness because that is what an absent header
     // renders as the moment anyone writes `md['Name']` instead of `md.get(...)`,
     // and the guard has to hold whichever way the probe above is spelled. No real
     // package answers to it: the worst a false positive costs is one re-ask.
     let present = |v: &str| !v.is_empty() && v != "None";
-    let answered = present(name) && present(version);
+    let answered = present(name) && present(version) && present(author);
     decide_identity(name, author).map_err(|why| {
         let e = BootErr::new(
             1,
@@ -1735,8 +1756,20 @@ mod tests {
         // Both spellings of "the header was not there": the empty line the probe
         // emits today, and the literal "None" a bare `md['Name']` would emit if
         // anyone rewrote it that way.
+        //
+        // The `no-author` case is the LIKELIEST torn read, not a corner: a wheel
+        // METADATA emits `Name` and `Version` before `Author-email`, so the
+        // window where the first two have landed and the author has not is wider
+        // than the one where nothing has. decide_identity refuses it as
+        // `author=`, and reading name+version alone as "answered in full" would
+        // call that stable and stamp a foreign-package refusal for the whole
+        // cooldown over an install milliseconds from verifying.
         let root = env::temp_dir().join(format!("fno-torn-{}", std::process::id()));
-        for (case, payload) in [("empty", "\\n\\n\\n"), ("none", "None\\n\\nNone\\n")] {
+        for (case, payload) in [
+            ("empty", "\\n\\n\\n"),
+            ("none", "None\\n\\nNone\\n"),
+            ("no-author", "fno\\n\\n0.4.2\\n"),
+        ] {
             let bin = root.join(case);
             fs::create_dir_all(&bin).unwrap();
             let calls = bin.join("calls");
