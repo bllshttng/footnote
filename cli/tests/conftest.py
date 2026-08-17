@@ -8,6 +8,33 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def _no_global_tick_events(monkeypatch):
+    """Capture pr-watch tick emissions instead of hitting the live events log.
+
+    Tests that drive the real tick command would otherwise append fabricated
+    pr_watch_tick_attempt/end records to ~/.fno/events.jsonl. Opt in per file:
+
+        pytestmark = pytest.mark.usefixtures("_no_global_tick_events")
+
+    An explicit events_path still delegates to the real writer, so direct
+    _emit_event tests keep their tmp files.
+    """
+    from fno.pr_watch import cli as prcli
+
+    real = prcli._emit_event
+    events: list[tuple[str, dict]] = []
+
+    def _capture(event_type, data, *, events_path=None):
+        if events_path is not None:
+            return real(event_type, data, events_path=events_path)
+        events.append((event_type, dict(data)))
+        return True
+
+    monkeypatch.setattr(prcli, "_emit_event", _capture)
+    return events
+
+
 _SERIAL_TEST_SUFFIXES = frozenset(
     {
         (

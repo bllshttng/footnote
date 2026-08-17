@@ -15,6 +15,8 @@ import pytest
 
 from fno.pr import _sync_canonical as sc
 
+pytestmark = pytest.mark.usefixtures("_no_global_tick_events")
+
 
 def _pm(**over):
     base = dict(
@@ -383,7 +385,14 @@ def test_catchup_survives_a_wedged_events_bus(tmp_path, monkeypatch):  # AC5-FR
 
 def _tick_settings(**over):
     s = _pm(**over)
-    s.pr_watch = SimpleNamespace(max_age_days=7, retries=3, enabled=True)
+    s.pr_watch = SimpleNamespace(
+        max_age_days=7,
+        retries=3,
+        enabled=True,
+        tick_timeout_seconds=None,
+        interval_seconds=600,
+        graphql_min_remaining=200,
+    )
     s.recovery = SimpleNamespace(enabled=False)
     s.autonomy = SimpleNamespace(enabled=True)
     return s
@@ -403,7 +412,16 @@ def _run_tick(monkeypatch, catchup_result):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
     calls: list[str] = []
@@ -411,6 +429,50 @@ def _run_tick(monkeypatch, catchup_result):
     monkeypatch.setattr(sc_mod, "run_sync_catchup", lambda **_kw: catchup_result)
     result = CliRunner().invoke(pw.cli, ["tick"])
     return result, calls
+
+
+def test_quota_skip_defers_the_catchup_leg(monkeypatch):
+    """The catch-up leg spends the same shared GraphQL pool the skip just
+    refused to drain (gh pr list --state merged, gh pr view per root), so a
+    quota skip defers it to the next healthy tick instead of stalling it
+    out against the drained budget it was protecting."""
+    from typer.testing import CliRunner
+
+    from fno.pr import _sync_canonical as sc_mod
+    from fno.pr_watch import cli as pw
+
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(pw, "load_settings_for_repo", lambda _root: _tick_settings())
+    monkeypatch.setattr(pw, "_catchup_roots", lambda: [Path("/tmp/proj-alpha")])
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: SimpleNamespace(
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=2,
+            quota_skip=True,
+            quota_remaining=12,
+            quota_reset="2026-08-17T15:00:00Z",
+        ),
+    )
+    ran: list[str] = []
+    monkeypatch.setattr(
+        sc_mod,
+        "run_sync_catchup",
+        lambda **_kw: ran.append("ran")
+        or SimpleNamespace(outcome="synced", detail="", stale=False),
+    )
+    res = CliRunner().invoke(pw.cli, ["tick"])
+
+    assert res.exit_code == 0
+    assert ran == []
+    # The skip line must carry the outage count too: an operator tailing
+    # stdout during a budget drought sees the degraded sweep, not a clean one.
+    assert "degraded: 2 sweep failure(s)" in res.output
 
 
 def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
@@ -466,7 +528,16 @@ def test_tick_sweeps_each_project_independently(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
 
@@ -498,7 +569,16 @@ def test_tick_continues_after_one_project_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
 
@@ -563,7 +643,16 @@ def test_tick_survives_a_catchup_exception(monkeypatch):  # US2 non-fatal
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
     monkeypatch.setattr(

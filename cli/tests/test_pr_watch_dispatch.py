@@ -100,6 +100,19 @@ def _claude_nonzero_response(rc: int = 1) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=rc, stdout="", stderr="error")
 
 
+def _rest_ok(stdout: str):
+    """fno.pr._proc.run result shape for a successful REST read."""
+    from fno.pr._proc import Result
+
+    return Result(returncode=0, stdout=stdout, stderr="")
+
+
+def _rest_fail(stderr: str):
+    from fno.pr._proc import Result
+
+    return Result(returncode=1, stdout="", stderr=stderr)
+
+
 # ---------------------------------------------------------------------------
 # State module tests
 # ---------------------------------------------------------------------------
@@ -236,7 +249,11 @@ class TestWatermarkStore:
 
 
 class TestTrackedStateBatch:
-    """The production sweep reads each repository once and fails closed."""
+    """The production sweep reads each repository once and fails closed.
+
+    x-c12c: the sweep runs on REST (``gh api repos/<slug>/pulls``) with the
+    ``fno.pr._proc.run`` runner contract; untracked-but-open PRs still
+    surface, and a repo failure counts into the sweep_failures return."""
 
     def test_reads_all_requested_states_one_call_per_repo(self):
         from fno.pr_watch._discover import read_tracked_pr_states
@@ -244,17 +261,28 @@ class TestTrackedStateBatch:
         calls = []
 
         def runner(cmd, **_kwargs):
-            calls.append(cmd)
-            repo = cmd[cmd.index("--repo") + 1]
-            rows = (
-                [{"number": 1, "state": "OPEN"}, {"number": 2, "state": "MERGED"},
-                 {"number": 99, "state": "OPEN"}]
-                if repo == "owner/one"
-                else [{"number": 3, "state": "CLOSED"}]
-            )
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(rows), "")
+            calls.append(list(cmd))
+            # owner/one: tracked #2 closed+merged (absent from the open list,
+            # resolved by its per-key read) plus untracked open #99; owner/two:
+            # tracked #3 closed.
+            open_rows = {
+                "owner/one": [{"number": 1, "state": "open", "merged": False},
+                              {"number": 99, "state": "open", "merged": False}],
+                "owner/two": [],
+            }
+            per_key = {
+                "owner/one#2": {"number": 2, "state": "closed", "merged": True},
+                "owner/two#3": {"number": 3, "state": "closed", "merged": False},
+            }
+            path = cmd[2]
+            if path.startswith("repos/") and path.endswith("/pulls?state=open&per_page=100&page=1"):
+                repo = path[len("repos/"): path.index("/pulls?")]
+                return _rest_ok(json.dumps(open_rows[repo]))
+            number = path.rsplit("/", 1)[-1]
+            repo = path[len("repos/"): -len(f"/pulls/{number}")]
+            return _rest_ok(json.dumps(per_key[f"{repo}#{number}"]))
 
-        states = read_tracked_pr_states(
+        states, sweep_failures = read_tracked_pr_states(
             {"owner/one#1", "owner/one#2", "owner/two#3"}, runner=runner
         )
 
@@ -264,19 +292,23 @@ class TestTrackedStateBatch:
             "owner/one#99": "OPEN",
             "owner/two#3": "CLOSED",
         }
-        assert len(calls) == 2
+        assert sweep_failures == 0
+        # One open-listing per repo plus one per-key read for each tracked
+        # key the open list did not answer.
+        assert len(calls) == 4
 
     def test_repo_read_failure_returns_unknown_for_each_requested_key(self):
         from fno.pr_watch._discover import read_tracked_pr_states
 
         def runner(cmd, **_kwargs):
-            return subprocess.CompletedProcess(cmd, 1, "", "network down")
+            return _rest_fail("network down")
 
-        states = read_tracked_pr_states(
+        states, sweep_failures = read_tracked_pr_states(
             {"owner/repo#1", "owner/repo#2"}, runner=runner
         )
 
         assert states == {"owner/repo#1": "UNKNOWN", "owner/repo#2": "UNKNOWN"}
+        assert sweep_failures == 1
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +614,7 @@ class TestTickOrchestrator:
             store_path=store_path,
             discover_fn=deps["discover"],
             read_pr_state_fn=deps["read_pr_state"],
-            read_tracked_states_fn=lambda keys: {key: "CLOSED" for key in keys},
+            read_tracked_states_fn=lambda keys: ({key: "CLOSED" for key in keys}, 0),
             fire_skill_fn=deps["fire_skill"],
             emit=deps["emit"],
             reviewers_for=deps["reviewers_for"],
@@ -771,7 +803,7 @@ class TestTickOrchestrator:
             store_path=store_path,
             discover_fn=deps["discover"],
             read_pr_state_fn=deps["read_pr_state"],
-            read_tracked_states_fn=lambda keys: {key: "OPEN" for key in keys},
+            read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 0),
             fire_skill_fn=deps["fire_skill"],
             emit=deps["emit"],
             reviewers_for=deps["reviewers_for"],
@@ -1865,9 +1897,9 @@ class TestInstallParkedPrsGuards:
         assert "owner/repo#2" not in result
         assert "owner/repo#3" not in result
 
-    def test_last_tick_ts_non_dict_event_line_skipped(self, tmp_path):
+    def test_watermark_scan_non_dict_event_line_skipped(self, tmp_path):
         """AC-gemini-medium _install:367: non-dict JSON line in events.jsonl -> skipped, no crash."""
-        from fno.pr_watch._install import _last_tick_ts
+        from fno.pr_watch._install import _tick_watermarks
 
         events_path = tmp_path / "events.jsonl"
         valid_line = json.dumps({"type": "pr_watch_tick", "ts": "2026-06-14T03:00:00Z"})
@@ -1879,7 +1911,7 @@ class TestInstallParkedPrsGuards:
             '"a string"',
         ]))
 
-        result = _last_tick_ts(events_path)
+        result = _tick_watermarks(events_path)["last_tick"]
         assert result == "2026-06-14T03:00:00Z"
 
 
@@ -2127,3 +2159,324 @@ class TestWarmMergeRouting:
         assert parked[0]["data"]["reason"] == "retries-exhausted"
         receipts = [e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick"]
         assert [receipt["dropped_count"] for receipt in receipts] == [1, 0, 0, 0]
+
+
+# ---------------------------------------------------------------------------
+# Tick entry/exit records + wall-clock deadline (x-c12c wave 1)
+# ---------------------------------------------------------------------------
+
+
+class TestTickRecordsAndDeadline:
+    """AC7-HP/AC8-HP/AC9-EDGE: the CLI verb records entry and exit, and a tick
+    that outlives its deadline writes a timeout record and exits 75 instead of
+    suppressing its launchd successors."""
+
+    def _invoke_tick(self, monkeypatch, dispatch_tick):
+        import typer
+        from typer.testing import CliRunner
+        from unittest.mock import MagicMock
+
+        from fno.pr_watch import cli as prcli
+
+        monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
+
+        settings = MagicMock()
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.recovery.enabled = False
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+        events: list[tuple[str, dict]] = []
+
+        def _capture(event_type, data, *, events_path=None):
+            events.append((event_type, dict(data)))
+            return True
+
+        monkeypatch.setattr(prcli, "_emit_event", _capture, raising=True)
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        res = CliRunner().invoke(app, [])
+        return res, events
+
+    def test_attempt_record_precedes_settings_load(self, monkeypatch):
+        """AC8-HP: a hang or crash during config load still leaves an attempt."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.pr_watch import cli as prcli
+
+        def _boom():
+            raise RuntimeError("settings exploded during import")
+
+        monkeypatch.setattr(prcli, "load_settings", _boom, raising=True)
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            prcli, "_emit_event",
+            lambda t, d, **_kw: events.append((t, dict(d))) or True,
+            raising=True,
+        )
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        res = CliRunner().invoke(app, [])
+
+        assert events[0][0] == "pr_watch_tick_attempt"
+        assert events[0][1]["pid"] > 0
+        # The end record still fires with outcome error and the settings phase.
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert len(ends) == 1
+        assert ends[0]["outcome"] == "error"
+        assert ends[0]["phase"] == "settings"
+        assert res.exit_code != 0
+
+    def test_deadline_timeout_writes_end_record_and_exits_75(self, monkeypatch):
+        """AC7-HP: a tick stalled past its deadline ends with outcome timeout."""
+        import time as _time
+
+        def _stall(**_kw):
+            _time.sleep(1.5)
+            raise AssertionError("deadline did not interrupt the stalled tick")
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
+        res, events = self._invoke_tick(monkeypatch, _stall)
+
+        assert res.exit_code == 75, f"expected exit 75, got {res.exit_code}: {res.output!r}"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert len(ends) == 1
+        assert ends[0]["outcome"] == "timeout"
+        assert ends[0]["phase"] == "sweep"
+        assert ends[0]["duration_s"] >= 1.0
+
+    def test_healthy_tick_brackets_with_ok_end_record(self, monkeypatch):
+        """AC9-EDGE backdrop: a normal tick emits attempt, tick, and end ok."""
+        from fno.pr_watch._dispatch import TickResult
+
+        res, events = self._invoke_tick(
+            monkeypatch, lambda **_kw: TickResult(open_prs=0, acted=0)
+        )
+        assert res.exit_code == 0, res.output
+        assert events[0][0] == "pr_watch_tick_attempt"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert len(ends) == 1
+        assert ends[0]["outcome"] == "ok"
+
+    def test_sweep_failure_end_record_reads_degraded(self, monkeypatch):
+        """AC4-EDGE at the CLI boundary: the end record distinguishes degraded."""
+        from fno.pr_watch._dispatch import TickResult
+
+        res, events = self._invoke_tick(
+            monkeypatch,
+            lambda **_kw: TickResult(open_prs=0, acted=0, sweep_failures=2),
+        )
+        assert res.exit_code == 0, res.output
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[0]["outcome"] == "degraded"
+        assert ends[0]["sweep_failures"] == 2
+
+
+# ---------------------------------------------------------------------------
+# GraphQL budget preflight (x-c12c wave 2)
+# ---------------------------------------------------------------------------
+
+
+class TestQuotaPreflight:
+    """AC5-HP/AC6-EDGE: read the shared GraphQL budget before spending it."""
+
+    def _tick_with_quota(self, tmp_path, quota, candidates=None):
+        from fno.pr_watch._dispatch import tick
+
+        deps = _make_tick_deps(
+            tmp_path,
+            candidates=candidates
+            or [_make_candidate(pr_number=1, repo_dir=tmp_path)],
+        )
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: quota,
+            graphql_min_remaining=200,
+        )
+        return result, deps
+
+    def test_low_budget_skips_dispatch_and_mints_no_tick(self, tmp_path):
+        """AC5-HP/AC9-EDGE: below the floor, no per-PR read fires, no
+        pr_watch_tick is emitted, and the skip carries count + reset."""
+        result, deps = self._tick_with_quota(tmp_path, (42, "2026-08-17T07:00:00Z"))
+
+        assert result.quota_skip is True
+        assert result.quota_remaining == 42
+        assert result.quota_reset == "2026-08-17T07:00:00Z"
+        assert deps["fired"] == [], "no headless fire may run on a skipped pass"
+        ticks = [e for e in deps["events"] if e["type"] == "pr_watch_tick"]
+        assert ticks == [], "a quota skip must not mint liveness"
+
+    def test_unreadable_budget_proceeds(self, tmp_path):
+        """AC6-EDGE: (None, None) is unknown, not zero - the tick runs."""
+        result, deps = self._tick_with_quota(tmp_path, (None, None))
+
+        assert result.quota_skip is False
+        assert result.quota_unknown is True
+        assert result.open_prs == 1
+        assert any(e["type"] == "pr_watch_tick" for e in deps["events"])
+
+    def test_healthy_budget_proceeds_normally(self, tmp_path):
+        result, deps = self._tick_with_quota(tmp_path, (4800, "2026-08-17T07:00:00Z"))
+        assert result.quota_skip is False
+        assert result.quota_unknown is False
+
+    def test_receipt_carries_sweep_failures_and_listing_api(self, tmp_path):
+        """The receipt names which code path produced it and how many repos
+        failed, so the event log alone answers without version inference."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 1),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+        )
+
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["listing_api"] == "rest"
+        assert receipt["sweep_failures"] == 1
+
+    def test_quota_skip_return_carries_the_sweep_failures(self, tmp_path):
+        """The sweep runs before the preflight, so a skip after failed repo
+        listings must still carry the count: the end record is then the only
+        durable trace of the outage, and reading sweep_failures 0 there is
+        the AC4 swallowed-failure shape."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "UNKNOWN" for key in keys}, 3),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (10, "2026-08-17T07:00:00Z"),
+        )
+
+        assert result.quota_skip is True
+        assert result.sweep_failures == 3
+
+    def test_deadline_raised_inside_the_sweep_aborts_the_tick(self, tmp_path):
+        """AC7 at the swallow site. TickDeadlineExceeded raised inside the
+        guarded sweep must abort the whole tick. If a broad except seam can
+        swallow it as a 'sweep failed' warning, the tick continues past the
+        one-shot alarm with nothing bounding the rest - exactly the stall
+        class the deadline exists to stop."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+        from fno.pr_watch.cli import TickDeadlineExceeded
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+
+        def _stall(keys):
+            raise TickDeadlineExceeded()
+
+        with pytest.raises(TickDeadlineExceeded):
+            tick(
+                graph_path=tmp_path / "graph.json",
+                store_path=store_path,
+                discover_fn=deps["discover"],
+                read_pr_state_fn=deps["read_pr_state"],
+                read_tracked_states_fn=_stall,
+                fire_skill_fn=deps["fire_skill"],
+                emit=deps["emit"],
+                reviewers_for=deps["reviewers_for"],
+                claim=deps["claim"],
+                notify=deps["notify"],
+                post_merge_readiness_fn=deps["post_merge_readiness"],
+                now_iso="2026-06-14T12:00:00Z",
+                graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+            )
+
+    def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
+        """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
+        outcome degraded, keys UNKNOWN - and a completed sweep still mints
+        pr_watch_tick carrying the failure count (AC9's no-tick list is
+        disabled/lock-held/quota-skip/timeout/error, not degraded)."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "UNKNOWN" for key in keys}, 1),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+        )
+        assert result.sweep_failures == 1
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["sweep_failures"] == 1

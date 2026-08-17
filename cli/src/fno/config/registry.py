@@ -366,6 +366,16 @@ FIELD_META: dict[str, Meta] = {
     "pr_watch.retries": Meta("never", "PR-watcher consecutive-failure park threshold."),
     "pr_watch.max_age_days": Meta("never", "PR-watcher: park PRs older than N days."),
     "pr_watch.model": Meta("never", "Claude model used for headless PR-watcher skill fires."),
+    "pr_watch.tick_timeout_seconds": Meta(
+        "never",
+        "Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a"
+        " stalled tick can never suppress its successor.",
+    ),
+    "pr_watch.graphql_min_remaining": Meta(
+        "never",
+        "Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below"
+        " this floor.",
+    ),
     # --- config.groom.* ---
     "groom.enabled": Meta("never", "Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true."),
     # --- config.restart.* ---

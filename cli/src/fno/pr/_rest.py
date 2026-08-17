@@ -19,7 +19,9 @@ replaces.
 from __future__ import annotations
 
 import json
+import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from fno.pr._proc import run
@@ -30,6 +32,8 @@ from fno.pr._ritual import _parse_origin_slug
 # rate limit exceeded" - the word "secondary" is the discriminator, so a 403
 # without it must fall through to the core-bucket branch.
 _SECONDARY = re.compile(r"secondary rate limit", re.IGNORECASE)
+
+log = logging.getLogger(__name__)
 
 
 def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
@@ -167,3 +171,93 @@ def fetch_pr_rest(
         {"state": _map_pr_state(pr_data), "statusCheckRollup": rollup, "headRefOid": sha},
         "",
     )
+
+
+def list_prs_rest(
+    slug: str,
+    *,
+    state: str = "open",
+    runner: Callable = run,
+    cwd: Optional[str] = None,
+    per_page: int = 100,
+    max_pages: int = 20,
+    timeout: Optional[float] = 30.0,
+) -> "tuple[Optional[list[dict]], str]":
+    """List a repo's PRs on REST: `(rows, reason)`.
+
+    Measured with the GraphQL bucket at 0/5000, this endpoint answered the
+    open-PR question completely and left core untouched, which is why the
+    pr-watch bulk sweep routes here instead of `gh pr list` (GraphQL bills
+    by point cost; one oversized sweep drained the shared per-user budget).
+    Paginates on `page=` until a short page or the `max_pages` ceiling; rows
+    are reduced to ``{"number", "state"}`` with ``_map_pr_state``, so the
+    caller sees the OPEN/CLOSED/MERGED shape the GraphQL path produced.
+    `(None, reason)` on any failure, matching `fetch_pr_rest`'s loud contract.
+    """
+    rows: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        res = runner(
+            ["gh", "api", f"repos/{slug}/pulls?state={state}&per_page={per_page}&page={page}"],
+            cwd=cwd,
+            timeout=timeout,
+        )
+        if not res.ok:
+            return None, _rest_reason(res)
+        try:
+            payload = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            return None, f"gh api pulls list page {page} returned output that is not JSON"
+        if not isinstance(payload, list):
+            return None, f"gh api pulls list page {page} was not a JSON array"
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            number = row.get("number")
+            if not isinstance(number, int):
+                continue
+            rows.append({"number": number, "state": _map_pr_state(row)})
+        if len(payload) < per_page:
+            break
+    else:
+        # Every page came back full, so the ceiling cut a listing that had more
+        # rows. Loud on purpose: the old gh pr list path logged "possibly
+        # truncated" for the same condition, and a silent ceiling is a sweep
+        # that reads complete while missing its tail.
+        log.warning(
+            "gh api pulls list for %s hit the max_pages=%d ceiling with a full last page:"
+            " listing is possibly truncated after %d rows",
+            slug,
+            max_pages,
+            len(rows),
+        )
+    return rows, ""
+
+
+def graphql_remaining(
+    runner: Callable = run, cwd: Optional[str] = None, timeout: Optional[float] = 30.0
+) -> "tuple[Optional[int], Optional[str]]":
+    """Read the shared GraphQL budget: `(remaining, reset_iso)`.
+
+    `gh api rate_limit` does not itself count against any bucket. Both values
+    are None on any failure, and a caller MUST read None as unknown, never as
+    zero: skipping work because the instrument is unreadable is an absence
+    read as evidence.
+    """
+    try:
+        res = runner(["gh", "api", "rate_limit"], cwd=cwd, timeout=timeout)
+    except Exception:  # noqa: BLE001 - unreadable instrument, never a skip (AC6)
+        return None, None
+    if not res.ok:
+        return None, None
+    try:
+        graphql = json.loads(res.stdout)["resources"]["graphql"]
+        remaining = graphql["remaining"]
+        reset_epoch = graphql["reset"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None, None
+    if not isinstance(remaining, int) or not isinstance(reset_epoch, (int, float)):
+        return None, None
+    reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    return remaining, reset_iso

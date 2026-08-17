@@ -351,13 +351,162 @@ def test_status_json_emits_liveness_verdict(monkeypatch):
 
     monkeypatch.setattr(
         m, "liveness_report_live",
-        lambda: {"enabled": True, "verdict": "dead", "detail": "no tick",
-                 "fix": "fno pr-watch install", "loaded": True, "last_tick": None},
+        lambda **_kw: {"enabled": True, "verdict": "dead", "detail": "no tick",
+                       "fix": "fno pr-watch install", "loaded": True, "last_tick": None},
     )
     result = CliRunner().invoke(app, ["pr-watch", "status", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout.strip())
     assert payload["verdict"] == "dead" and payload["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# x-c12c wave 1: status prints a verdict, not a fact (AC10/AC11)
+# ---------------------------------------------------------------------------
+
+
+def _write_tick_events(events_file, *, tick_ts, attempt_ts=None, end=None):
+    lines = []
+    if attempt_ts:
+        lines.append({"type": "pr_watch_tick_attempt", "ts": attempt_ts,
+                      "data": {"pid": 111, "phase": "entry"}})
+    if tick_ts:
+        lines.append({"type": "pr_watch_tick", "ts": tick_ts,
+                      "data": {"open_prs": 0, "acted": 0, "swept_count": 0, "swept": {},
+                               "dropped_count": 0, "dropped": {}}})
+    if end:
+        lines.append({"type": "pr_watch_tick_end", "ts": tick_ts, "data": end})
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    events_file.write_text("".join(json.dumps(ln) + "\n" for ln in lines))
+
+
+def test_status_prints_healthy_verdict_and_both_watermarks(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """AC10-HP: a live cadence reads `Verdict: healthy (...)` plus the
+    attempt/outcome watermarks, in the exact label shape the done_probes grep."""
+    import time as _time
+    from datetime import datetime, timezone
+    import fno.pr_watch._install as m
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / m._PLIST_FILENAME
+    plist_path.write_text("<plist/>")
+    # Plist older than the tick: the fresh-install grace must not fire.
+    old = _time.time() - 60
+    import os as _os
+    _os.utime(plist_path, (old, old))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts=now, attempt_ts=now,
+        end={"outcome": "ok", "duration_s": 14.2, "phase": "catchup", "pid": 111},
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    import re
+    assert re.search(r"^Verdict: +healthy \(", out, re.M), out
+    assert re.search(r"^Last tick outcome: +ok \(14\.2s\)", out, re.M), out
+    assert re.search(r"^Last attempt: ", out, re.M), out
+
+
+def test_status_prints_dead_verdict_with_fix_command(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """AC10-HP: a stale cadence reads `dead` with the detail and the fix verb."""
+    import time as _time
+    from datetime import datetime, timezone, timedelta
+    import fno.pr_watch._install as m
+
+    (tmp_home / ".fno" / "config.toml").write_text("[pr_watch]\nenabled = true\n")
+    plist_path = tmp_launch_agents / m._PLIST_FILENAME
+    plist_path.write_text("<plist/>")
+    stale = _time.time() - 7200
+    import os as _os
+    _os.utime(plist_path, (stale, stale))
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    # Attempts advancing while Last tick stands still: the exact fault profile.
+    _write_tick_events(
+        events_file, tick_ts=old_ts, attempt_ts=now,
+        end={"outcome": "timeout", "duration_s": 480.0, "phase": "sweep", "pid": 111},
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    import re
+    assert re.search(r"^Verdict: +dead \(last tick \d+s ago", out, re.M), out
+    assert re.search(r"^Fix: +fno pr-watch install", out, re.M), out
+    assert "timeout" in out
+
+
+def test_status_prints_disabled_verdict_by_default(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch
+):
+    """AC10-EDGE: the third verdict, disabled, is named rather than implied."""
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    m.status(launch_agents_dir=tmp_launch_agents)
+    out = capsys.readouterr().out
+    assert "Verdict:      disabled (" in out, out
+
+
+class _SpyEventsPath:
+    """Count read_text calls: the one-pass scan proof (AC11)."""
+
+    def __init__(self, path):
+        self._path = path
+        self.reads = 0
+
+    def exists(self):
+        return self._path.exists()
+
+    def read_text(self, *a, **kw):
+        self.reads += 1
+        return self._path.read_text(*a, **kw)
+
+
+def test_tick_watermarks_single_pass(tmp_path):
+    """AC11-EDGE: all three watermarks come from ONE read of events.jsonl."""
+    from fno.pr_watch._install import _tick_watermarks
+
+    events_file = tmp_path / "events.jsonl"
+    _write_tick_events(
+        events_file, tick_ts="2026-08-17T06:12:01Z", attempt_ts="2026-08-17T06:12:00Z",
+        end={"outcome": "ok", "duration_s": 1.0, "phase": "catchup", "sweep_failures": 0},
+    )
+    spy = _SpyEventsPath(events_file)
+
+    marks = _tick_watermarks(spy)
+
+    assert marks["last_tick"] == "2026-08-17T06:12:01Z"
+    assert marks["last_attempt"] == "2026-08-17T06:12:00Z"
+    assert marks["last_end"]["outcome"] == "ok"
+    assert spy.reads == 1
+
+
+def test_status_reads_the_event_log_once(tmp_home, tmp_launch_agents, capsys, monkeypatch):
+    """AC11-EDGE at the status boundary: the verdict reuses the marks already
+    read; a second scan would double the read count."""
+    from datetime import datetime, timezone
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: False)
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_tick_events(events_file, tick_ts=now, attempt_ts=now)
+    spy = _SpyEventsPath(events_file)
+
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=spy)
+    capsys.readouterr()
+    assert spy.reads == 1, "status must derive verdict and watermarks from one pass"
 
 
 def _settings_with_pr_watch(enabled: bool):
