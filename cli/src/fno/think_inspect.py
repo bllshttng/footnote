@@ -117,6 +117,7 @@ def _graph_section(
             "status": "error",
             "resolved": None,
             "parent": None,
+            "closure": None,
             "duplicates": [],
             "epic_candidates": [],
             "archive_status": "error" if archive_error else "ok",
@@ -124,7 +125,7 @@ def _graph_section(
         }
 
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.relatedness import epic_candidates, similar_nodes
+    from fno.graph.relatedness import _MIN_SCORE, epic_candidates, similar_nodes
 
     active_by_id = {
         row["id"]: row for row in entries if isinstance(row, dict) and isinstance(row.get("id"), str)
@@ -143,7 +144,10 @@ def _graph_section(
         "slug": seed,
         "details": seed,
     }
-    scored = similar_nodes(probe, combined, k=5)
+    # floor=_MIN_SCORE: blueprint's consolidation gate reads this list, and the
+    # real x-17ba family sits at 0.26-0.27 under a 0.30 dedup floor. Ranked
+    # recall is the point; a full-context reader makes the judgment.
+    scored = similar_nodes(probe, combined, k=5, floor=_MIN_SCORE)
     duplicates = []
     for node_id, score, reason in scored:
         row = active_by_id.get(node_id) or archive_by_id.get(node_id)
@@ -170,6 +174,17 @@ def _graph_section(
                 parent_row,
                 archived=resolved["parent"] in archive_by_id and resolved["parent"] not in active_by_id,
             )
+    # Graph re-read of the resolved node's closure, not classify_closure: that
+    # helper probes a named behavior against current main and needs inputs a
+    # blueprint does not have. A done/superseded row here is a halt signal for
+    # the consolidation gate, so the fields are read verbatim from the row.
+    closure = None
+    if resolved:
+        closure = {
+            "status": resolved.get("status"),
+            "pr_number": resolved.get("pr_number"),
+            "superseded_by": resolved.get("superseded_by"),
+        }
     return {
         "status": "partial" if archive_error else "ok",
         "resolved": (
@@ -184,6 +199,7 @@ def _graph_section(
             else None
         ),
         "parent": parent,
+        "closure": closure,
         "duplicates": duplicates,
         "epic_candidates": rollups,
         "archive_status": "error" if archive_error else "ok",
