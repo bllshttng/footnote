@@ -183,6 +183,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 - **`fno claim`** - the single work-claim primitive; atomic lockfiles under `.fno/claims/`. `fno target init` already claims the node - never `fno claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; when refused, `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply won't). The code-payload self-review obligation is enforced in code at the stop gate (`loopcheck.rs`) and `fno pr merge`; opt out `config.review.self_review_required = false`. [review lanes](docs/architecture/review-lanes.md).
+- **`fno decide`** - `--subject <node|pr-N|area> --decision "..."` records a ruling; `fno decide list [--subject X]` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
 - **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.

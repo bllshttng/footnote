@@ -28,7 +28,8 @@ One file per install. These belong at the root.
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
-| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated by `scripts/lib/hook-events.sh` | rotated |
+| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs` | rotated |
+| `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
 | `evals-history.jsonl` | `paths.evals_history()` | append-only |
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
