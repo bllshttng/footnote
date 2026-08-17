@@ -697,9 +697,8 @@ impl VerifyFail {
 }
 
 fn install_verified(uv: &Path) -> Result<(), VerifyFail> {
-    let tool_dir = uv_tool_dir(uv).ok_or_else(|| {
-        VerifyFail::CouldNotAnswer(UV_DIR_UNREADABLE.to_string())
-    })?;
+    let tool_dir =
+        uv_tool_dir(uv).ok_or_else(|| VerifyFail::CouldNotAnswer(UV_DIR_UNREADABLE.to_string()))?;
     let venv = tool_dir.join(TOOL_NAME);
     let entry = venv.join("bin").join("fno-py");
     match fs::metadata(&entry) {
@@ -2080,7 +2079,10 @@ mod tests {
             ("empty", "name=\\nauthor=\\nversion=\\n"),
             ("none", "name=None\\nauthor=\\nversion=None\\n"),
             ("no-author", "name=fno\\nauthor=\\nversion=0.4.2\\n"),
-            ("torn-author", "name=fno\\nauthor=Jason Noah Ch\\nversion=0.4.2\\n"),
+            (
+                "torn-author",
+                "name=fno\\nauthor=Jason Noah Ch\\nversion=0.4.2\\n",
+            ),
         ] {
             let bin = root.join(case);
             fs::create_dir_all(&bin).unwrap();
