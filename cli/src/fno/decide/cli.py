@@ -158,6 +158,7 @@ def list_cmd(
 ) -> None:
     """Recover the decision history for a subject, newest first."""
     from fno.decide import list_decisions
+    from fno.tracker.metadata import ExternalMetadataUnavailable
 
     try:
         # No cap on the read. The cap is applied HERE so the total is known,
@@ -168,6 +169,9 @@ def list_cmd(
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
         typer.echo(f"decide list: cannot read the decision index: {exc}", err=True)
+        raise typer.Exit(1)
+    except ExternalMetadataUnavailable as exc:
+        typer.echo(f"decide list: {exc}", err=True)
         raise typer.Exit(1)
 
     decisions = found[:limit] if limit > 0 else found

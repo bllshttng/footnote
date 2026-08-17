@@ -82,13 +82,13 @@ def _workspace_paths() -> dict[str, str]:
 
 def _active_missions() -> list[dict]:
     """Epic nodes with ``mission_active=true`` (K1's durable activation record),
-    across all projects. The field ``fno backlog advance --epic`` sets/clears; a
-    graph read fault yields none (fail-safe, never raises)."""
+    across all projects. The field ``fno backlog advance --epic`` sets/clears;
+    a store read fault (or an external backend selection, which can never carry
+    a footnote-set activation flag) yields none (fail-safe, never raises)."""
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        from fno.tracker.metadata import read_entries
 
-        entries = read_graph(graph_json())
+        entries = read_entries("active_backlog")
         if not isinstance(entries, list):
             return []
         # Require str id + project: a non-str id would pass a truthy check but

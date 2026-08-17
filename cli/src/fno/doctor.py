@@ -837,14 +837,18 @@ def _archive_id_collisions() -> dict[str, Any]:
     exit green in exactly the state where the ids cannot be checked.
     """
     try:
-        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json, read_graph
-        from fno.paths import graph_archive_json, graph_json
+        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
+        from fno.paths import graph_archive_json
+        from fno.tracker.metadata import read_entries
 
         archive_path = graph_archive_json()
         if not archive_path.exists():
             return {"count": 0, "ids": []}
+        # Guarded metadata read: this alarm compares the LOCAL store against
+        # its LOCAL archive, which is default-backend machinery; an external
+        # selection degrades to the silent count-0 path through the except.
         working_ids = {
-            nid for e in read_graph(graph_json())
+            nid for e in read_entries("doctor")
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         try:

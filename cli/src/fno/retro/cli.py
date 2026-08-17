@@ -485,13 +485,13 @@ def _run_postmortem_pass(repo_root: Path, node_root: Path) -> tuple[bool, int]:
     code); harvested is the count of postmortems drained (0 on the empty/error
     path). Fully self-contained: an exception here never sinks the sentinel
     loop."""
-    from fno.graph.store import read_graph
-    from fno.paths import graph_json, postmortems_dir
+    from fno.paths import postmortems_dir
     from fno.retro.routine import triage_postmortems
+    from fno.tracker.metadata import read_entries
 
     try:
         try:
-            existing_nodes = read_graph(graph_json())
+            existing_nodes = read_entries("retro.postmortem")
         except Exception:
             existing_nodes = []
         try:
@@ -600,10 +600,10 @@ def sweep_carveouts_cmd(
     to live in.
     """
     from fno.carveout.core import BACKFILL_KIND, VALID_KINDS, resolve_carveout_root
-    from fno.graph.store import read_graph
-    from fno.paths import graph_json, resolve_canonical_repo_root, resolve_repo_root
+    from fno.paths import resolve_canonical_repo_root, resolve_repo_root
     from fno.retro.land import MODE_AUTONOMOUS, MODE_INTERACTIVE
     from fno.retro.sweep import render_sweep, sweep_carveouts
+    from fno.tracker.metadata import read_entries
 
     sweepable = [k for k in VALID_KINDS if k != BACKFILL_KIND]
     if kind is not None and kind not in sweepable:
@@ -625,10 +625,10 @@ def sweep_carveouts_cmd(
     repo_root = resolve_repo_root()
     node_root = resolve_canonical_repo_root()
     try:
-        nodes = read_graph(graph_json())
+        nodes = read_entries("retro.sweep")
     except Exception as exc:
-        # Without the graph there is no dedup, and filing blind is the failure
-        # this sweep exists to prevent. Refuse rather than duplicate.
+        # Without the node store there is no dedup, and filing blind is the
+        # failure this sweep exists to prevent. Refuse rather than duplicate.
         typer.echo(f"retro: cannot read the graph for dedup ({exc}); refusing to sweep", err=True)
         raise typer.Exit(1)
 
@@ -718,14 +718,13 @@ def run(
     session = merge_deprecated_alias(
         session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
     )
-    from fno.graph.store import read_graph
     from fno.paths import (
-        graph_json,
         ledger_json,
         resolve_canonical_repo_root,
         resolve_repo_root,
         retro_pending_dir,
     )
+    from fno.tracker.metadata import read_entries
 
     repo_root = resolve_repo_root()
     # Filed nodes are scoped to the CANONICAL root, never the worktree: a node
@@ -835,7 +834,7 @@ def run(
         # Reload live nodes per sentinel so a node filed by an earlier sentinel
         # in THIS run is seen by dedup for the next one (AC6-FR: dual triggers).
         try:
-            existing_nodes = read_graph(graph_json())
+            existing_nodes = read_entries("retro.run")
         except Exception:
             existing_nodes = []
         try:
@@ -889,7 +888,7 @@ def run(
             if keep_going_enabled(project_root=repo_root):
                 payload["mode"] = "autonomous"
         try:
-            existing_nodes = read_graph(graph_json())
+            existing_nodes = read_entries("retro.run")
         except Exception:
             existing_nodes = []
         # The synthetic path is carve-out-FIRST. With no resolvable repo (gh

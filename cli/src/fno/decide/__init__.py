@@ -150,11 +150,18 @@ def _project(event: dict[str, Any]) -> str | None:
         return None
 
     # Pre-check on the unlocked read so an unresolvable subject (a file, an
-    # area) does not pay for a full graph rewrite that changes nothing. Read
-    # through _graph_entries, which is strict AND says so on failure: the soft
-    # reader answers [] for a corrupt graph, and the receipt would then tell
-    # the operator their real node "names no graph node" with no hint why.
-    if resolve_node(subject, _graph_entries()).kind != "exact":
+    # area) does not pay for a full graph rewrite that changes nothing. The
+    # decisions list is footnote-minted metadata, read through the guarded
+    # metadata reader; an external selection raises and the decision stays
+    # events-only (the same outcome as an unresolvable subject - the append
+    # above already landed, the node projection is what is unavailable).
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        precheck_entries = read_entries("decide")
+    except ExternalMetadataUnavailable:
+        return None
+    if resolve_node(subject, precheck_entries).kind != "exact":
         return None
 
     matched: list[str] = []

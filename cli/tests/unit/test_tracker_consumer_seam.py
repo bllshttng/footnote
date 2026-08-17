@@ -36,9 +36,12 @@ def contradictory_graph(tmp_path, monkeypatch):
     g.write_text(
         json.dumps({"entries": [
             {"id": "N-1", "pr_number": 999, "pr_url": "https://graph/999",
-             "cwd": "/graph-cwd", "size": "GRAPH-SIZE", "source_cwd": "/graph-src"},
+             "cwd": "/graph-cwd", "size": "GRAPH-SIZE", "source_cwd": "/graph-src",
+             "slug": "graph-slug-1", "type": "epic", "project": "graph-proj",
+             "mission_active": True, "session_id": "sess-graph"},
             {"id": "N-2", "pr_number": 999, "pr_url": "https://graph/999b",
-             "cwd": "/graph-cwd", "size": None},
+             "cwd": "/graph-cwd", "size": None, "type": "feature",
+             "mission_active": False},
         ]}),
         encoding="utf-8",
     )
@@ -117,6 +120,38 @@ def test_node_size_is_guarded_metadata(external_store, contradictory_graph, monk
     # Graph mode reads the same pin it always did (byte-compat, AC1).
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
     assert review_mod._resolve_node_size(tmp_path / "state.md") == "GRAPH-SIZE"
+
+
+def test_metadata_class_guards_external(external_store, contradictory_graph):
+    """Reader class: footnote-minted metadata (slug / type / project /
+    mission_active / session pins) raises under an external backend and every
+    caller keeps its missing-data path - never a stale graph row."""
+    from fno.active_backlog import _active_missions
+    from fno.agents.crown import _graph_entry
+    from fno.relay.router import _default_node_resolver
+    from fno.worktree import _slug_for_node
+
+    assert _active_missions() == []
+    assert _graph_entry("N-1") is None
+    assert _default_node_resolver("N-1") is None
+    assert _slug_for_node("N-1") == ""
+
+
+def test_metadata_class_reads_graph_backend(contradictory_graph, monkeypatch):
+    """Graph-mode parity for the guarded reader class: the store's rows come
+    through byte-for-byte (AC1) - slug, type, mission flags, session pins."""
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    from fno.active_backlog import _active_missions
+    from fno.agents.crown import _graph_entry
+    from fno.relay.router import _default_node_resolver
+    from fno.worktree import _slug_for_node
+
+    assert [m["id"] for m in _active_missions()] == ["N-1"]
+    assert _graph_entry("N-2")["type"] == "feature"
+    assert _graph_entry("N-1")["project"] == "graph-proj"
+    assert _slug_for_node("N-1") == "graph-slug-1"
+    assert _default_node_resolver("N-1") == "sess-graph"
+    assert _default_node_resolver("graph-slug-1") == "sess-graph"
 
 
 def test_graph_mode_scans_project_from_the_store(tmp_path, monkeypatch):

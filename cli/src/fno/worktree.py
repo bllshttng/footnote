@@ -45,15 +45,15 @@ def _branch_prefix() -> str:
 
 
 def _slug_for_node(node_id: str) -> str:
-    """Look up a node's immutable slug from the graph; "" if unresolvable."""
+    """Look up a node's immutable slug (footnote-minted metadata: guarded
+    default-backend read); "" if unresolvable."""
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        from fno.tracker.metadata import read_entries
 
-        for e in read_graph(graph_json()):
+        for e in read_entries("worktree"):
             if e.get("id") == node_id:
                 return e.get("slug") or ""
-    except Exception:  # noqa: BLE001 - no graph => no slug => bare <prefix>/<node>
+    except Exception:  # noqa: BLE001 - no store => no slug => bare <prefix>/<node>
         return ""
     return ""
 
