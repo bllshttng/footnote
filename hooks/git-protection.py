@@ -545,23 +545,41 @@ def _targets_other_repo(command):
     and which the flag test cannot see. Prefix match, not equality: gh accepts
     the attached shorthand `-Rowner/repo` as readily as `-R owner/repo`.
 
-    Quote-aware and single-token: a flag VALUE carrying `-R` or a PR link
-    (`-t "-R fixes the deref"`, a subject citing another PR's URL) is one
-    quoted argument, not an override, and must not disarm the vetoes. shlex
-    keeps it one token; the whitespace and leading-dash rejects then drop it.
-    A quoted value whose flag is absent still fails in gh itself, so nothing
-    real is lost by refusing to match it here.
+    Quote-aware and value-shaped, because a flag VALUE can carry the override
+    spelling (`-t "-R fixes the deref"`, a subject citing another PR's URL,
+    `--body 'See /pull/123'`) and a matcher that fires on any such token
+    silently disarms the vetoes. shlex keeps each quoted value one token; the
+    leading-dash reject drops flag spellings inside a value, an attached
+    override must carry an `owner/repo` shape (a slash, no leading dash), and
+    the PR-URL arm fires only on a URL-anchored token. A merge body that is
+    EXACTLY a bare pull URL as a separate flag value still trips the URL arm
+    and fails open; that is the documented residue, one command of recovery
+    away, and safer than misreading every flag value as an override.
     """
     try:
         tokens = shlex.split(command)
     except ValueError:  # unbalanced quotes -> plain split, same as before
         tokens = command.split()
-    for t in tokens:
-        if " " in t:
+    for i, t in enumerate(tokens):
+        if " " in t or t.startswith("-") and not t.startswith(("-R", "--repo")):
             continue
-        if t.startswith(("-R", "--repo", "GH_REPO=")):
+        if t.startswith("GH_REPO="):
             return True
-        if "/pull/" in t and not t.startswith("-"):
+        if t == "-R" or t == "--repo":
+            # The value rides the NEXT token; a following flag means the
+            # override is malformed and gh itself will refuse it.
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                return True
+            continue
+        if t.startswith(("-R", "--repo")):
+            # Attached shorthand: `-Rowner/repo`, `--repo=owner/repo`. Require
+            # the owner/repo shape so `-t "-Rfix"` (a subject, no slash) stays
+            # an ordinary value.
+            attached = t[2:] if not t.startswith("--") else t.split("=", 1)[-1]
+            if "/" in attached and not attached.startswith("-"):
+                return True
+            continue
+        if "/pull/" in t and t.startswith(("http://", "https://", "github.com/")):
             return True
     return False
 

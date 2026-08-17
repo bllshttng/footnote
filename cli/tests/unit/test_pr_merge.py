@@ -1381,6 +1381,9 @@ def test_a_pending_hold_does_not_mark_the_node_failed(
 
 def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):
     """No review_coverage event -> Unknown -> the sanctioned merge refuses."""
+    # Pin the head the stubbed (absent) row would describe: the gate refuses a
+    # head it could not fetch, and this test pins the missing-ROW refusal.
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo, head=None: (None, ""))
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys, stream="err")

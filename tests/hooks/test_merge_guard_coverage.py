@@ -110,6 +110,44 @@ def test_other_repo_is_skipped(monkeypatch):
     assert "cmd" not in calls
 
 
+def test_flag_values_do_not_disarm_the_veto(monkeypatch):
+    """A flag VALUE carrying the override spelling is one argument to gh, not
+    a repo override. The whitespace-split matcher read them as overrides and
+    silently skipped both vetoes: `-t "-R fixes the null deref"`, a subject
+    citing another PR's URL, and a body saying `See /pull/123`."""
+    seen = _patch_run(monkeypatch, _Proc(3, stderr="coverage uncovered: 0 reviewed\n"))
+    msg = git_protection._coverage_refusal(
+        'gh pr merge 42 --squash -t "-R fixes the null deref"'
+    )
+    assert msg and msg.startswith("coverage uncovered")
+    msg = git_protection._coverage_refusal(
+        'gh pr merge 42 --subject "see https://github.com/other/repo/pull/9"'
+    )
+    assert msg and msg.startswith("coverage uncovered")
+    # Single-token values carry no space for the quote-aware matcher to lean
+    # on, so the override arms must anchor on shape: a subject is not an
+    # owner/repo pair and a body word is not a URL.
+    msg = git_protection._coverage_refusal('gh pr merge 42 -t "-Rfix"')
+    assert msg and msg.startswith("coverage uncovered")
+    msg = git_protection._coverage_refusal("gh pr merge 42 --body 'See /pull/123'")
+    assert msg and msg.startswith("coverage uncovered")
+    msg = git_protection._coverage_refusal("gh pr merge 42 -b see/pull/1")
+    assert msg and msg.startswith("coverage uncovered")
+    assert seen["cmd"] == ["fno", "pr", "coverage-check", "42"]
+
+
+def test_stale_binary_fails_open(monkeypatch):
+    """A `fno` deployment older than this verb answers an unknown-command
+    exit 2, indistinguishable from any other usage error. It fails open (the
+    documented rollout-window behavior in `_fno_veto_refusal`) rather than
+    turning every stale install into a merge outage."""
+    _patch_run(
+        monkeypatch,
+        _Proc(2, stderr='Error: unknown command "coverage-check" for "fno pr"\n'),
+    )
+    assert git_protection._coverage_refusal("gh pr merge 900") is None
+
+
 def test_probe_budgets_fit_the_hook_budget(monkeypatch):
     """Worst case both probes run to their limits. A bound at or above the
     harness hook budget (60s default) is nearly as bad as none: the HOOK gets

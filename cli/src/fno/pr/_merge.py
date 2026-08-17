@@ -1174,8 +1174,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # describes the head (x-3a3f). Consume the review_coverage event loop-check
     # emits (Ownership: Rust computes, Python reads); missing/stale/zero/
     # unknown refuses (fail closed), and so does UNANSWERED: a merge that
-    # cannot read its own coverage has not been reviewed, and this path can
-    # afford the recompute that would have answered. Runs only when auto_merge
+    # cannot read its own coverage has not been reviewed. The recompute cannot
+    # rescue the UNANSWERED arm - the producer needs the head to pin the row it
+    # would emit - so a failed head fetch blocks until gh answers again. Runs
+    # only when auto_merge
     # is enabled (step 1), so a manual `gh pr merge` on a non-auto-merge repo
     # is untouched. After the gh check so a missing gh still reports its own
     # exit 127. Skipped when no review lane is configured (a stock install
@@ -1189,12 +1191,23 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         # Bracket append, never paren-splice surgery on a builder's output: a
         # reason whose trailing paren closes an inner clause (a searched list,
         # a truncated sha) would swallow the note into the wrong parenthetical.
-        if note:
-            refusal = f"{refusal} [{note}]" if refusal else note
+        line = _coverage_gate.refusal_line(refusal, note)
+        if state == _coverage_gate.UNANSWERED:
+            # UNANSWERED is an instrument failure, not a review verdict: a
+            # receipt that says "unreviewed" about a probe that died sends a
+            # worker hunting reviewers when the recovery is retrying the merge.
+            _emit(
+                pr_number,
+                "blocked",
+                f"coverage probe failed, merge refused: {line}",
+                "none",
+                err=True,
+            )
+            return 2
         _emit(
             pr_number,
             "blocked",
-            f"unreviewed merge refused: {refusal}",
+            f"unreviewed merge refused: {line}",
             "none",
             err=True,
         )

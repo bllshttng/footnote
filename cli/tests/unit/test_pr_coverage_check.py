@@ -196,3 +196,21 @@ def test_raised_read_is_unanswered_not_absence(
     note = capsys.readouterr().err.strip()
     assert rc == 4
     assert "events read raised" in note
+
+
+def test_merge_blocks_when_the_head_fetch_fails(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The merge surface fails closed on UNANSWERED: a covered row cannot
+    rescue a merge whose head probe died (the recompute needs the head to pin
+    the row it would emit). The receipt names the dead probe instead of
+    calling the PR unreviewed, so a worker's recovery is a retry, not a hunt
+    for reviewers."""
+    _seed_row(tmp_path, coverage="covered", count=2, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: None)
+    fake = FakeRun(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    assert obj["reason"] == "coverage probe failed, merge refused: pr head fetch failed"

@@ -2,9 +2,11 @@
 
 Lifted out of ``run_merge`` unchanged so a second caller can ask the same
 question without a second copy of it. The predicate is MOVED, never restated:
-every helper lives in ``fno.pr._merge`` and is reached through the module, so a
-test that patches ``_merge`` still steers both surfaces at once, and the two
-readers that already disagree stay two, not three.
+every helper lives in ``fno.pr._merge`` and is reached through the module, so
+the merge path is steered by patching ``_merge`` alone. The verb's no-recompute
+read calls ``_reviews.latest_review_coverage`` directly, so a test that must
+steer BOTH surfaces patches both modules (as this module's own tests do), and
+the two readers that already disagree stay two, not three.
 
 One predicate, three reachable surfaces:
 
@@ -119,6 +121,20 @@ def coverage_verdict(
     return REFUSED, refusal, "", recompute_note
 
 
+def refusal_line(refusal: str, note: str) -> str:
+    """The one refusal sentence: the reason with the note bracket-appended.
+
+    Bracket append, never paren-splice surgery on a builder's output: a reason
+    whose trailing paren closes an inner clause (a searched list, a truncated
+    sha) would swallow the note into the wrong parenthetical. One copy shared
+    by ``run_merge`` and ``run_coverage_check`` so the two surfaces cannot grow
+    different formatting rules for the same verdict.
+    """
+    if refusal and note:
+        return f"{refusal} [{note}]"
+    return refusal or note
+
+
 def run_coverage_check(pr_number: int, recompute: bool = False, cwd: str = None) -> int:
     """The verb body: print the refusal, return the state as an exit code.
 
@@ -131,8 +147,7 @@ def run_coverage_check(pr_number: int, recompute: bool = False, cwd: str = None)
         pr_number, repo, recompute=recompute
     )
     if state == REFUSED:
-        line = f"{refusal} [{note}]" if note else refusal
-        sys.stderr.write(f"{line}\n")
+        sys.stderr.write(f"{refusal_line(refusal, note)}\n")
     elif state == UNANSWERED:
         sys.stderr.write(f"{note}\n")
     return state
