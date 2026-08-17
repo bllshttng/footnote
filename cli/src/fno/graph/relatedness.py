@@ -317,7 +317,7 @@ def epic_candidates(
 
 
 def similar_nodes(
-    entry: Entry, entries: list[Entry], k: int = 3
+    entry: Entry, entries: list[Entry], k: int = 3, *, floor: float | None = None
 ) -> list[tuple[str, float, str]]:
     """Score ``entry`` against every live node for filing-time dedup, top-K.
 
@@ -329,7 +329,16 @@ def similar_nodes(
     floor is the dedup threshold ``_DEDUP_MIN_SCORE`` instead of ``_MIN_SCORE``.
     Ties break on id for reproducibility. The just-born node's own id is
     excluded so a filing never warns about itself.
+
+    ``floor`` narrows that third difference for readers who want the ranked
+    list (blueprint's consolidation gate) rather than a dedup verdict: the real
+    x-17ba family scores 0.26-0.27 and pure noise scores the same, so no
+    threshold separates them - recall is the scorer's job, judgment is the
+    full-context reader's. The default stays ``_DEDUP_MIN_SCORE`` so intake's
+    tuned 0.30 behavior is unchanged. One scorer, one parameter (the
+    ``include_epic`` precedent), never a second implementation.
     """
+    threshold = _DEDUP_MIN_SCORE if floor is None else floor
     ta = _tokens(entry)
     nid = entry.get("id")
     by_id = {
@@ -356,7 +365,7 @@ def similar_nodes(
         if e.get("status") == "superseded":
             continue
         score, reason = _score(entry, e, ta, _tokens(e), include_epic=False)
-        if score >= _DEDUP_MIN_SCORE:
+        if score >= threshold:
             scored.append((eid, score, reason))
     scored.sort(key=lambda r: (-r[1], r[0]))
     return scored[:k]
