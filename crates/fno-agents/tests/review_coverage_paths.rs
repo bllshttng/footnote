@@ -381,7 +381,16 @@ fn every_table_row_names_a_path_that_exists() {
         }
         if let Some(open) = path_name.find('(') {
             let close = path_name.find(')').unwrap_or(path_name.len());
-            let symbol = path_name[open + 1..close].split_whitespace().next_back().unwrap_or("");
+            let inner = &path_name[open + 1..close];
+            // A named argument sits inside the parens ("(...symbol...)");
+            // call syntax leaves them empty ("decide()"), so fall back to the
+            // token immediately before the '(' - the callee's own name.
+            let symbol = inner
+                .split_whitespace()
+                .next_back()
+                .filter(|s| !s.is_empty())
+                .or_else(|| path_name[..open].split_whitespace().next_back())
+                .unwrap_or("");
             assert!(
                 !symbol.is_empty() && rust_srcs.iter().any(|t| t.contains(symbol)),
                 "row '{path_name}' names symbol '{symbol}' that no crate source defines"
