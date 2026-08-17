@@ -1,6 +1,6 @@
 # Quick Plan Template
 
-Single flat markdown file for bugs, focused features, and single-session work. One `.md` == one PR == one node; no folder, no `00-INDEX.md`, no phase files. Frontmatter is **mandatory** on every plan (quick or not): `status`, `kind`, `kill_criteria` always ride in it - the markdown-heading form of kill_criteria is invisible to the stamp/validate parser and is not used.
+Single flat markdown file for bugs, focused features, and single-session work. One `.md` == one PR == one node; no folder, no `00-INDEX.md`, no phase files. Frontmatter is **mandatory** on every plan (quick or not): `status`, `kind`, `consolidation`, `kill_criteria` always ride in it - the markdown-heading form of kill_criteria is invisible to the stamp/validate parser and is not used.
 
 ---
 
@@ -22,6 +22,28 @@ kind: quick-plan
 # depends_on:                     # Graph edges wired at auto-adopt time
 #   - ../2026-04-19-sibling-slug  # sibling plan (resolved against graph.plan_path)
 #   - ab-d359579e                 # or an existing graph node ID
+# consolidation: the step 2d Consolidation Gate's recorded outcome. Exactly one
+#                                 # of absorb | append | proceed_alone, judged on the
+#                                 # 2b receipt's graph.duplicates + graph.closure with
+#                                 # the node details and code in hand. MANDATORY:
+#                                 # validate-plan.sh errors on a missing, empty, or
+#                                 # out-of-enum block. See SKILL.md step 2d.
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []      # ids considered and rejected, each with a reason:
+  #  - id: x-0000
+  #    reason: <why it is not the same work, in text a later reader can check>
+  # outcome: absorb - the other node is a wave of THIS deliverable. After
+  # intake run: fno backlog supersede <this-node> --replaces <id> --reason "..."
+  # absorbed:
+  #   - id: x-0000
+  #     reason: <why this node is a wave of this deliverable>
+  # reversal: fno backlog unsupersede x-0000
+  # outcome: append - THIS content belongs on the OTHER node; no plan is
+  # written and the content goes via fno backlog update <id> --details ...
+  # appended_to:
+  #   - id: x-0000
+  #     reason: <why this content belongs on that node>
 # kill_criteria: abort conditions target/do evaluate at wave + iteration boundaries.
 # Emit these defaults unless the plan overrides them (see SKILL.md "Kill Criteria
 # Declaration"). They live HERE in frontmatter, never under a `## Kill Criteria` heading.

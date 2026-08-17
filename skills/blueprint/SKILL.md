@@ -24,6 +24,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Gate | Read its section when |
 |------|-----------------------|
 | Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
+| Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
 | Model Pin / Model Routing | the plan frontmatter sets `model:` or `model_tier:` |
@@ -140,6 +141,20 @@ fi
    When creating a fresh plan from raw prose or a node-seeded path with no cited findings, blueprint grounds itself first. Run `fno think inspect "<seed>" --json` for the receipt. It reports duplicate candidates, schema status, and the active pitfalls.
    Then load `references/discovery-gate.md`. Ask at most 3 questions with `quick`, or 5 otherwise.
    For a plan that needs deeper investigation than the receipt, run `/think` first. Think writes cited findings that blueprint then compiles.
+
+2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). Read the step 2b receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`) and `closure` for the resolved node (`status`, `pr_number`, `superseded_by`). The scores are a reading aid, not a verdict: a real family and pure noise both sit near 0.26, so the judgment is made here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent; a truncated context reading that list decides confidently and is wrong in both directions.
+
+   **Halt first (x-64c4).** When `graph.closure.status` is `done` or `superseded`, stop before compiling. Report the closure fields and do not finalize `status: ready` onto work that already shipped.
+
+   **Judge the candidates (x-9043 lesson).** Weigh what actually identifies a family over title words: the same file-and-line pair and the verbatim error string. Three sessions filed one bug as three titles sharing almost no words; the file and the error string were the identity. A familiar file alone is not family: a genuinely new bug in a familiar file gets its own node, and the failure mode to avoid is a gate so strict it swallows new work into an old node.
+
+   **Record exactly one outcome** in the plan frontmatter as a `consolidation:` block (schema: [references/quick-template.md](references/quick-template.md); `validate-plan.sh` refuses a plan without a well-formed one):
+
+   - **absorb** - the other node is a wave of THIS deliverable. Record its id and a reason a later reader can check. After intake (3b), run `fno backlog supersede <this-node> --replaces <other> --reason "<recorded reason>"`, and record the reversal (`fno backlog unsupersede <other>`) in the block.
+   - **append** - THIS node's content belongs on the OTHER node. Record the id and reason, write no second plan, and stop. The content reaches the other node through its own channel (`fno backlog update <other> --details ...`).
+   - **proceed_alone** - record every id considered under `proceed_alone_against:` with the reason each is not the same work. An empty candidate list is a legal `proceed_alone`.
+
+   Silence is not an outcome: a plan written as if the sibling did not exist is the failure this gate exists to prevent. Do not build a second consolidator here: `fno backlog groom` already owns the daily levers-only pass and its allowlist already carries `supersede`. This gate is the pre-write half only.
 
 3. **Write** the plan.
 
