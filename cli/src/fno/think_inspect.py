@@ -145,8 +145,8 @@ def _graph_section(
         "details": seed,
     }
     # floor=_MIN_SCORE: blueprint's consolidation gate reads this list, and the
-    # real x-17ba family sits at 0.26-0.27 under a 0.30 dedup floor. Ranked
-    # recall is the point; a full-context reader makes the judgment.
+    # real lock family behind that gate sits at 0.26-0.27 under a 0.30 dedup
+    # floor. Ranked recall is the point; a full-context reader makes the call.
     scored = similar_nodes(probe, combined, k=5, floor=_MIN_SCORE)
     duplicates = []
     for node_id, score, reason in scored:

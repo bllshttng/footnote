@@ -690,6 +690,40 @@ def project_root_from_settings(project: str | None) -> str | None:
     return None
 
 
+def plan_claims(plan_path: str) -> "set[str]":
+    """The node ids a plan's frontmatter declares ownership of, as a set.
+
+    Reads both ``claims:`` (a list) and ``node:`` (a single id). 330 of 807 plans
+    carry ``node:`` instead of ``claims:``, so reading only ``claims:`` leaves a
+    reader blind on roughly 41% of plans and the leniency is invisible.
+
+    The single parser for this fact: graph/cli.py's stamp guard and
+    collision.py's self-exclusion default both call here, so a plan resolved
+    as claimed by one reader is claimed by every reader.
+
+    Empty means "no claim declared" -- including every unreadable-plan case, since
+    ``_read_plan_frontmatter`` returns ``{}`` on all of them. Callers treat
+    empty as their no-claim branch, so only a positive claim can act.
+    """
+    fm = _read_plan_frontmatter(plan_path)
+    out: "set[str]" = set()
+
+    claims = fm.get("claims")
+    if isinstance(claims, str):
+        claims = [claims]
+    if isinstance(claims, list):
+        out.update(
+            c.strip() for c in claims
+            if isinstance(c, str) and c.strip() not in ("", "null")
+        )
+
+    node = fm.get("node")
+    if isinstance(node, str) and node.strip() not in ("", "null"):
+        out.add(node.strip())
+
+    return out
+
+
 def _read_plan_frontmatter(plan_path: str) -> dict:
     """Parse YAML frontmatter from a single-file plan.
 

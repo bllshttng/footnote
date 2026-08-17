@@ -1,8 +1,8 @@
-"""Consolidation-gate regression fixture: the pair the detector scores as unrelated (plan x-3bd3).
+"""Consolidation-gate regression fixture: the pair the detector scores as unrelated.
 
-Frozen 2026-08-17 from the live node text of x-17ba, x-49c8, x-5756 (the real
-three-node lock family) plus x-b917 and the four nodes its rollup leg wrongly
-attracted (x-3bd3, x-c136, x-1fbb, x-b281). The two family members now carry
+Frozen 2026-08-17 from the live node text of the real three-node lock family
+plus the epic attractor and the four nodes its rollup leg wrongly attracted
+(ids are the fixture's own data, below). The two family members now carry
 status "superseded" on the live graph and similar_nodes filters superseded
 candidates, so the fixture freezes them as the live "idea" rows they were when
 the pair was measured. Everything else is verbatim node text.

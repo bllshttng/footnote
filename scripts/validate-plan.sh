@@ -657,7 +657,7 @@ if [[ -f "$PLAN_DIR" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# Check 6b-bis: Consolidation block (step 2d gate, plan x-3bd3)
+# Check 6b-bis: Consolidation block (step 2d gate)
 # -------------------------------------------------------------------
 # A blueprint MUST record exactly one consolidation outcome in frontmatter:
 # absorb | append | proceed_alone, with a non-empty reason for every id
@@ -683,19 +683,57 @@ check_consolidation_file() {
     ')
 
     if [[ -z "$block" ]]; then
-        error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone); silence is not an outcome"
-        return 1
+        # Grandfather: the gate governs plans written after it shipped
+        # (2026-08-17). ~1900 pre-existing plans cannot retroactively record a
+        # decision, and erroring on them would halt /do and /target on every
+        # in-flight deliverable, so they WARN until backfilled. created is the
+        # discriminator; lexicographic ISO comparison is safe on YYYY-MM-DD.
+        local created gate_date="2026-08-17"
+        created=$(awk '
+            /^---/ { c++; if (c==2) exit; next }
+            c==1 && /^created:/ {
+                line=$0
+                sub(/^[[:space:]]*created:[[:space:]]*/, "", line)
+                sub(/[[:space:]]#.*$/, "", line)
+                print substr(line, 1, 10)
+                exit
+            }
+        ' "$file")
+        if [[ -z "$created" || "$created" < "$gate_date" ]]; then
+            warn "$label: no consolidation: block (created ${created:-unknown}, before the $gate_date gate) - backfill one before the next blueprint of this node"
+        else
+            error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone); silence is not an outcome"
+        fi
+        # Never abort the validator here: the later checks and the summary
+        # must still run on the most common failure path.
+        return 0
     fi
 
-    local outcome
+    # Flow-style lists (`absorbed: [{id: ...}]`) are valid YAML this awk walk
+    # cannot parse - error with the fix rather than misreading them.
+    if printf '%s\n' "$block" | grep -Eq '^[[:space:]]*(absorbed|appended_to|proceed_alone_against):[[:space:]]*\[[^]]'; then
+        error "$label: consolidation id lists must use block style (one '- id:' + 'reason:' pair per line), not a flow-style list"
+    fi
+
+    local outcome outcome_rc=0
     outcome=$(printf '%s\n' "$block" | awk '
         /^[[:space:]]*outcome:[[:space:]]*/ {
             line=$0
             sub(/^[[:space:]]*outcome:[[:space:]]*/, "", line)
+            sub(/[[:space:]]#.*$/, "", line)
+            sub(/[[:space:]]+$/, "", line)
             gsub(/^["'"'"']|["'"'"']$/, "", line)
-            print line
-            exit
-        }')
+            n++
+            if (n == 1) value = line
+            next
+        }
+        END { if (n > 0) print value; exit(n > 1 ? 42 : 0) }
+    ') || outcome_rc=$?
+    # A YAML reader takes the LAST duplicate key while this walk pinned the
+    # first, so more than one outcome line is an error, not a silent pick.
+    if [[ "$outcome_rc" -eq 42 ]]; then
+        error "$label: consolidation block has more than one outcome: line - a block records exactly one outcome"
+    fi
     if [[ -z "$outcome" ]]; then
         error "$label: consolidation block present but has no outcome: line (expected absorb | append | proceed_alone)"
     elif [[ "$outcome" != "absorb" && "$outcome" != "append" && "$outcome" != "proceed_alone" ]]; then
@@ -718,6 +756,7 @@ check_consolidation_file() {
             flush()
             cur=$0
             sub(/^[[:space:]]*-[[:space:]]+id:[[:space:]]*/, "", cur)
+            sub(/[[:space:]]#.*$/, "", cur)
             gsub(/^["'"'"']|["'"'"']$/, "", cur)
             rsn=""
             next
@@ -760,6 +799,10 @@ check_consolidation_file() {
 
 if [[ -f "$PLAN_DIR" ]]; then
     check_consolidation_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    # Folder plans carry the frontmatter in 00-INDEX.md; the gate's "every
+    # plan" scope includes them, so do not silently skip the check.
+    check_consolidation_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
 fi
 
 # -------------------------------------------------------------------

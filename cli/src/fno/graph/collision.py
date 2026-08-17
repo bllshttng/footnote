@@ -452,28 +452,23 @@ def _build_rationale(
 
 
 def _claims_default(plan_path: Path) -> str | None:
-    """Default the self-exclusion from the plan's own ``claims:`` frontmatter.
+    """Default the self-exclusion from the plan's own claimed ids.
 
     A plan intaked against a node collides with that node's plan at HIGH, the
     exact severity meant to stop an operator, so a caller that forgets
     ``self_id`` manufactures a reflexive finding. The plan file is already in
     hand here, so the default lives in this one place and every caller
-    (graph/cli.py, backlog/advance.py, graph/triage.py) inherits it. One
-    declared id is used; zero or several leave the behavior unchanged, and an
-    explicit ``self_id`` still wins because this only runs when it is None.
+    (graph/cli.py, backlog/advance.py, graph/triage.py) inherits it. Claims are
+    read by the shared ``_intake.plan_claims`` parser (both ``claims:`` and
+    ``node:`` - 41% of plans carry only the latter). One declared id is used;
+    zero or several leave the behavior unchanged, and an explicit ``self_id``
+    still wins because this only runs when it is None.
     """
-    from fno.graph._intake import _read_plan_frontmatter
+    from fno.graph._intake import plan_claims
 
     target = plan_path / "00-INDEX.md" if plan_path.is_dir() else plan_path
-    fm = _read_plan_frontmatter(str(target))
-    claims = fm.get("claims")
-    if isinstance(claims, str):
-        claims = [claims]
-    if isinstance(claims, list):
-        ids = [c.strip() for c in claims if isinstance(c, str) and c.strip() not in ("", "null")]
-        if len(ids) == 1:
-            return ids[0]
-    return None
+    ids = plan_claims(str(target))
+    return next(iter(ids)) if len(ids) == 1 else None
 
 
 def find_collisions(

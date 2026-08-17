@@ -332,11 +332,12 @@ def similar_nodes(
 
     ``floor`` narrows that third difference for readers who want the ranked
     list (blueprint's consolidation gate) rather than a dedup verdict: the real
-    x-17ba family scores 0.26-0.27 and pure noise scores the same, so no
-    threshold separates them - recall is the scorer's job, judgment is the
-    full-context reader's. The default stays ``_DEDUP_MIN_SCORE`` so intake's
-    tuned 0.30 behavior is unchanged. One scorer, one parameter (the
-    ``include_epic`` precedent), never a second implementation.
+    lock family behind that gate scores 0.26-0.27 and pure noise scores the
+    same, so no threshold separates them - recall is the scorer's job,
+    judgment is the full-context reader's. The default stays
+    ``_DEDUP_MIN_SCORE`` so intake's tuned 0.30 behavior is unchanged. One
+    scorer, one parameter (the ``include_epic`` precedent), never a second
+    implementation.
     """
     threshold = _DEDUP_MIN_SCORE if floor is None else floor
     ta = _tokens(entry)

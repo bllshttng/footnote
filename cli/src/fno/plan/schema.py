@@ -35,6 +35,39 @@ PlanStatus = enum.Enum(  # type: ignore[misc]
 )
 
 
+class ConsolidationEntry(BaseModel):
+    """One candidate id judged by blueprint's step 2d gate, with its reason."""
+
+    id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class ConsolidationBlock(BaseModel):
+    """The step 2d Consolidation Gate's recorded outcome.
+
+    Shape authority only: this model pins the enum and the non-empty reason
+    per id so `fno plan validate` and scripts/validate-plan.sh can never
+    disagree about a PRESENT block. Presence itself is the bash gate's call,
+    because grandfathering pre-gate plans is a policy date, not a shape.
+    """
+
+    outcome: Literal["absorb", "append", "proceed_alone"]
+    absorbed: list[ConsolidationEntry] = Field(default_factory=list)
+    appended_to: list[ConsolidationEntry] = Field(default_factory=list)
+    proceed_alone_against: list[ConsolidationEntry] = Field(default_factory=list)
+    reversal: str | None = None
+
+    @model_validator(mode="after")
+    def _outcome_has_its_decision(self) -> "ConsolidationBlock":
+        # An outcome that records no decision is an empty block wearing a
+        # label - the same rule the bash gate enforces on its side.
+        if self.outcome == "absorb" and not self.absorbed:
+            raise ValueError("outcome absorb requires at least one absorbed entry")
+        if self.outcome == "append" and not self.appended_to:
+            raise ValueError("outcome append requires at least one appended_to entry")
+        return self
+
+
 class PlanFrontmatter(BaseModel):
     """The canonical shape of a single-doc plan's YAML frontmatter.
 
@@ -79,6 +112,9 @@ class PlanFrontmatter(BaseModel):
     # (237 list vs 17 scalar in the corpus). The dead `## Kill Criteria`
     # markdown-heading form stays out of scope (Locked Decision 3).
     kill_criteria: str | list[Any] | None = None
+    # Step 2d gate decision; shape-validated above. Absent on plans created
+    # before the gate shipped (the bash validator warns, not errors, there).
+    consolidation: ConsolidationBlock | None = None
     updated: datetime | None = None
     # compiled-v1 marks a plan whose Acceptance Criteria Blueprint compiled and
     # whose task acceptance references all resolve (x-f905). Absent on historical
