@@ -580,6 +580,114 @@ def test_ac1_hp_graph_status(tmp_graph):
     assert "test-proj" in r.output
 
 
+class _SnapshotFakeTracker:
+    """A NodeTracker fake carrying sentinels distinct from any graph value."""
+
+    name = "fake-external"
+
+    def __init__(self):
+        from fno.tracker.types import TrackerCandidate, TrackerState
+
+        self._TrackerCandidate = TrackerCandidate
+        self._TrackerState = TrackerState
+
+    def read(self, id):
+        if id == "EXT-done":
+            return self._TrackerCandidate(
+                id=id, title="Closed blocker", state=self._TrackerState.closed
+            )
+        raise KeyError(id)
+
+    def list_open(self):
+        T, S = self._TrackerCandidate, self._TrackerState
+        return [
+            T(id="EXT-1", title="Free work", state=S.open, priority="p1",
+              created_at="2026-01-02T00:00:00Z", blocked_by=["EXT-done"]),
+            T(id="EXT-2", title="Waiting", state=S.open, priority="p2",
+              created_at="2026-01-03T00:00:00Z"),
+        ]
+
+    def close(self, id):
+        raise AssertionError("close is not part of the snapshot read path")
+
+
+def test_snapshot_mode_joins_tracker_and_sidecar_sentinels(
+    tmp_graph, tmp_path, monkeypatch
+):
+    """AC2-HP (mux snapshot path): `backlog status --snapshot` enumerates
+    list_open, joins sidecars, and emits the live fields - without reading the
+    default graph file for values. The graph file carries contradictory
+    sentinels; if the snapshot returned any of them, this test fails."""
+    # The graph file exists and is NON-empty with contradictory values.
+    tmp_graph.write_text(
+        json.dumps({"entries": [{
+            "id": "EXT-1", "title": "graph-title-sentinel",
+            "cwd": "/graph-cwd-sentinel", "plan_path": "/graph-plan-sentinel",
+            "pr_number": 999,
+        }]}),
+        encoding="utf-8",
+    )
+    sidecars = tmp_path / "sidecars"
+    sidecars.mkdir()
+    (sidecars / "EXT-1.json").write_text(
+        json.dumps({"id": "EXT-1", "cwd": "/external-cwd",
+                    "plan_path": "/external-plan.md", "pr_number": 7}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _SnapshotFakeTracker())
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_graph)
+    import fno.tracker.sidecar as sidecar_store
+
+    monkeypatch.setattr(sidecar_store, "sidecar_path",
+                        lambda i: sidecars / f"{i}.json")
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    r = _invoke("backlog", "status", "--snapshot")
+    assert r.exit_code == 0, r.output
+    doc = json.loads(r.output)
+    assert doc["backend"] == "fake-external"
+    by_id = {e["id"]: e for e in doc["entries"]}
+    # Sidecar sentinels ride the joined rows; the graph sentinels do not.
+    assert by_id["EXT-1"]["cwd"] == "/external-cwd"
+    assert by_id["EXT-1"]["plan_path"] == "/external-plan.md"
+    assert by_id["EXT-1"]["pr_number"] == 7
+    assert by_id["EXT-1"]["title"] == "Free work"
+    assert by_id["EXT-2"]["pr_number"] is None
+    # The closed dependency arrives as a tombstone row so the consumer's
+    # read-time readiness derives "satisfied" without a stored flag.
+    assert by_id["EXT-done"]["status"] == "done"
+    assert by_id["EXT-done"]["completed_at"]
+    # An open row never carries completed_at.
+    assert not by_id["EXT-1"].get("completed_at")
+
+
+def test_snapshot_mode_is_bounded_to_the_open_set(tmp_path, monkeypatch):
+    """AC4 enumeration bound, snapshot side: closed history is never requested.
+    The fake's read() is only ever called for blocker resolution of OPEN
+    items; a backend asked for its archive would fail loudly here."""
+    calls: list[str] = []
+
+    class _Tracker(_SnapshotFakeTracker):
+        def read(self, id):
+            calls.append(id)
+            return super().read(id)
+
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _Tracker())
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "absent.json")
+    import fno.tracker.sidecar as sidecar_store
+
+    monkeypatch.setattr(sidecar_store, "sidecar_path",
+                        lambda i: tmp_path / "sidecars" / f"{i}.json")
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    r = _invoke("backlog", "status", "--snapshot")
+    assert r.exit_code == 0, r.output
+    doc = json.loads(r.output)
+    ids = [e["id"] for e in doc["entries"]]
+    assert set(ids) == {"EXT-1", "EXT-2", "EXT-done"}
+    assert calls == ["EXT-done"], f"read() must only resolve open blockers, saw {calls}"
+
+
 # --- validate ---
 
 # --- cost ---

@@ -5399,14 +5399,105 @@ def cmd_roadmap(
 
 # -- status --
 
+
+# The stamp a closed-blocker tombstone carries in the live snapshot. Any
+# non-empty string satisfies the consumer's has_stamp checks; a constant (not
+# the real close time) keeps the tombstone honest about being a projection of
+# "this dependency is satisfied", which is the only fact the consumer derives
+# from it.
+_SNAPSHOT_CLOSED_STAMP = "closed"
+
+
+def _build_live_snapshot(tracker=None) -> dict:
+    """The backend-neutral joined live view for non-Python consumers (the mux).
+
+    Enumerates through ``list_open`` (bounded to the open set: a backend with
+    thousands of historical rows is never materialized merely to render a
+    queue), joins each id's sidecar, and emits exactly the live fields the
+    Rust reader derives from. Readiness stays a derivation on the consumer
+    side: open items carry their ``blocked_by`` ids, and a dependency that is
+    already closed rides as a minimal tombstone row so the consumer's
+    read-time blocked/ready logic (which fails closed on an unknown blocker)
+    resolves it without footnote persisting any derived flag.
+    """
+    from fno.graph.slug import derive_base_slug
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+
+    tracker = tracker or get_tracker()
+    candidates = tracker.list_open()
+    open_ids = {c.id for c in candidates}
+
+    # Tombstones for closed dependencies referenced by open items. An
+    # unresolvable blocker id is skipped: the consumer's own fail-closed rule
+    # (unknown dep == blocked) is the correct outcome there, and this loop must
+    # not invent an opinion about a backend read that errored.
+    blocker_ids = {b for c in candidates for b in c.blocked_by} - open_ids
+    tombstones: dict[str, dict] = {}
+    for bid in sorted(blocker_ids):
+        try:
+            node = tracker.read(bid)
+        except Exception:  # noqa: BLE001 - advisory resolution; consumer fails closed
+            continue
+        if str(node.state.value) == "closed":
+            tombstones[bid] = {
+                "id": bid,
+                "status": "done",
+                "completed_at": _SNAPSHOT_CLOSED_STAMP,
+            }
+
+    entries = []
+    for c in candidates:
+        sc = sidecar_store.load(c.id)
+        entries.append(
+            {
+                "id": c.id,
+                # Display handle; transient (graph mode's persistent slugs are
+                # assigned by the store at write time, which a read-only
+                # snapshot must not do).
+                "slug": derive_base_slug(c.title) if c.title else "",
+                "title": c.title,
+                # Open + a PR the sidecar knows about == work that has left the
+                # queue for review; anything else open is ready work. Computed
+                # here from evidence at read time, never stored.
+                "status": "in_review" if sc.pr_number else "ready",
+                "priority": c.priority,
+                "rank": c.rank,
+                "created_at": c.created_at,
+                "parent": c.parent,
+                "blocked_by": list(c.blocked_by),
+                "plan_path": sc.plan_path,
+                "pr_number": sc.pr_number,
+                "pr_url": sc.pr_url,
+                "cwd": sc.cwd,
+            }
+        )
+    entries.extend(tombstones.values())
+    return {"backend": tracker.name, "entries": entries}
+
+
 @cli.command("status", hidden=True)
 def cmd_status(
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    snapshot: bool = typer.Option(
+        False,
+        "--snapshot",
+        help=(
+            "Internal: emit the backend-neutral joined live view as one JSON "
+            "document. Consumed by the fno-agents mux reader when an external "
+            "tracker backend is selected; the summary render below is the "
+            "human surface."
+        ),
+    ),
 ) -> None:
     from fno.graph.store import read_graph
     from fno.graph._intake import detect_project
+
+    if snapshot:
+        typer.echo(json.dumps(_build_live_snapshot(), indent=2))
+        return
 
     entries = read_graph(_graph_path())
 

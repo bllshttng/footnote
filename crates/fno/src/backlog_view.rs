@@ -36,6 +36,47 @@ pub fn graph_path() -> PathBuf {
     base.join(".fno").join("graph.json")
 }
 
+/// Whether an external tracker backend is selected, resolved exactly as the
+/// Python side resolves it (`FNO_TRACKER_BACKEND`, default `graph`). Shared
+/// resolution so the reader and `get_tracker` can never disagree about which
+/// store is live - the mux reading graph.json while selection reads GitHub
+/// would display rows the dispatcher will never pick.
+pub fn external_backend_selected() -> bool {
+    match std::env::var("FNO_TRACKER_BACKEND") {
+        Ok(v) => !v.trim().is_empty() && v.trim() != "graph",
+        Err(_) => false,
+    }
+}
+
+/// Seconds between snapshot refreshes in external mode (Risk 4: a remote
+/// backend has no mtime to gate on, so the refresh must be bounded by the
+/// clock instead - a backend outage must not become a hot exec loop).
+pub const SNAPSHOT_REFRESH_SECS: u64 = 10;
+
+/// Execute the backend-neutral snapshot verb (`fno backlog status --snapshot`)
+/// and return its stdout. `None` on any failure - missing binary, non-zero
+/// exit, unparseable stdout - so the caller's last-good/stale machinery treats
+/// a failed snapshot exactly like a failed file read.
+///
+/// The snapshot document is the SAME shape `derive_queue` consumes
+/// (`{"backend": ..., "entries": [...]}` with graph-compatible entry fields),
+/// so both reader modes feed the same pure derivation functions; the mux
+/// classification, lanes, and read-time dependency readiness are unchanged.
+pub fn read_snapshot() -> Option<String> {
+    let out = std::process::Command::new("fno")
+        .args(["backlog", "status", "--snapshot"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Parse gate: a truncated/torn stdout is a failed read, not a document to
+    // cache (mirrors the torn-file retry the graph path gets for free).
+    serde_json::from_str::<serde_json::Value>(&s).ok()?;
+    Some(s)
+}
+
 /// Read a node's derived status, tolerating the pre-rename `_status` key so a
 /// graph.json not yet re-written by the Python side still classifies.
 fn node_status(e: &serde_json::Value) -> Option<&str> {
@@ -754,6 +795,105 @@ mod tests {
 
     fn graph(nodes: &str) -> String {
         format!(r#"{{"entries": [{nodes}]}}"#)
+    }
+
+    #[test]
+    fn external_backend_selected_follows_the_python_resolution() {
+        // Same resolution as fno.tracker.active_backend_name: unset -> graph,
+        // "graph" -> graph, anything else -> external. The two sides must
+        // never disagree about which store is live.
+        let key = "FNO_TRACKER_BACKEND";
+        let guard = std::env::var(key).ok();
+        std::env::remove_var(key);
+        assert!(!external_backend_selected());
+        std::env::set_var(key, "graph");
+        assert!(!external_backend_selected());
+        std::env::set_var(key, "github");
+        assert!(external_backend_selected());
+        match guard {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn snapshot_document_feeds_the_same_derivation() {
+        // The backend-neutral snapshot (`fno backlog status --snapshot`) is the
+        // same document shape the graph file is: entries[] with graph-compatible
+        // fields plus an extra `backend` key the reader must tolerate. Readiness
+        // stays derived: a closed blocker arrives as a tombstone row, and an
+        // open blocker keeps the card Blocked.
+        let raw = r#"{
+            "backend": "github",
+            "entries": [
+                {"id":"EXT-1","slug":"free","title":"Free work","status":"ready",
+                 "priority":"p1","blocked_by":[],"parent":null,
+                 "plan_path":"/plans/one.md","pr_number":null,"created_at":"2026-01-02T00:00:00Z"},
+                {"id":"EXT-2","slug":"waiting","title":"Waiting","status":"ready",
+                 "priority":"p1","blocked_by":["EXT-9"],
+                 "created_at":"2026-01-03T00:00:00Z"},
+                {"id":"EXT-3","slug":"reviewed","title":"In review","status":"in_review",
+                 "priority":"p1","blocked_by":[],"pr_number":31,
+                 "created_at":"2026-01-04T00:00:00Z"},
+                {"id":"EXT-9","status":"done","completed_at":"closed"}
+            ]
+        }"#;
+        let queue = derive_queue(raw, None).unwrap();
+        let ids: Vec<_> = queue.cards.iter().map(|c| c.id.as_str()).collect();
+        // EXT-2 sorts after EXT-1 on created_at; the tombstone and the
+        // in-review row never render as cards.
+        assert_eq!(ids, ["EXT-1", "EXT-2"]);
+        assert_eq!(queue.cards[0].state, CardState::Ready);
+        // EXT-9 is closed (tombstone), so EXT-2's dependency is satisfied and
+        // it renders Ready, not Blocked - the read-time derivation resolving
+        // through tombstone evidence rather than a stored flag.
+        assert_eq!(queue.cards[1].state, CardState::Ready);
+        assert_eq!(queue.cards[0].plan_path.as_deref(), Some("/plans/one.md"));
+        // (x-9c5f) the pr map derives from the same document.
+        let prs = derive_pr_map(raw);
+        assert_eq!(prs.get("EXT-3"), Some(&31u64));
+        assert!(!prs.contains_key("EXT-1"));
+    }
+
+    #[test]
+    fn snapshot_mode_failures_keep_last_good_and_clear_on_recovery() {
+        // A failing snapshot exec is a read failure like a torn file read:
+        // the run counts toward the stale threshold without publishing, and a
+        // landed read clears it (Risk 4: a backend outage is never a blank
+        // mux, and recovery is immediate).
+        let mut state = ReaderState::default();
+        let stamp = Some((std::time::SystemTime::UNIX_EPOCH, 0u64));
+        let first = state.tick(stamp, || {
+            Some(r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#.into())
+        }, None);
+        assert!(first.is_some());
+        // Three failing refreshes with strictly increasing stamps (the exec
+        // path mints a new clock stamp per window; a failed read commits none
+        // of them, so every window differs from the cached stamp). The first
+        // two publish nothing; the third crosses STALE_AFTER_FAILED_READS and
+        // publishes exactly once, with the stale marker set - that is how the
+        // marker reaches the UI while the cards stay last-good.
+        let mut stale_publish: Option<Queue> = None;
+        for i in 1..=3u64 {
+            let s = Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(i), 0));
+            let out = state.tick(s, || None, None);
+            if i < 3 {
+                assert!(out.is_none(), "failures below the threshold never publish");
+            } else {
+                let (queue, _, _) = out.expect("the stale crossing publishes");
+                assert!(queue.stale, "the crossing publish carries the stale marker");
+                assert!(!queue.cards.is_empty(), "last-good cards survive the outage");
+                stale_publish = Some(queue);
+            }
+        }
+        assert!(stale_publish.is_some());
+        let recovered = state.tick(
+            Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(9), 0)),
+            || Some(r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#.into()),
+            None,
+        );
+        let (queue, _, _) = recovered.expect("recovery republishes");
+        assert!(!queue.stale, "a landed read clears the failure run");
     }
 
     #[test]
