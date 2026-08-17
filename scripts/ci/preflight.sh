@@ -153,7 +153,7 @@ FAILED_LEG_SCOPES=""
 if [[ $RETRY_FAILED -eq 1 && -r "$LEG_RECORD" ]]; then
     while read -r _leg_line; do
         [[ -z "$_leg_line" ]] && continue
-        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno " in
+        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno tracker-gates:fno " in
             *" $_leg_line "*)
                 case " $FAILED_LEG_SCOPES " in
                     *" $_leg_line "*) ;;
@@ -994,7 +994,7 @@ exit_if_void() {
         EXECUTED_COUNT=1
     else
         REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
-        [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+        [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno tracker-gates:fno)
         REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
         REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
         EXECUTED_COUNT=$REQUIRED_EXECUTED
@@ -1122,6 +1122,33 @@ if retry_run_leg smoke; then
 else
     echo "preflight: === smoke suite (skipped - not in the retry leg record) ==="
     record_leg "" "smoke suite" skipped 0
+fi
+
+# tracker gates (zero-overlap partition + consumer census) -------------------
+# Static, seconds-fast, the same instruments CI runs
+# (.github/workflows/tracker-partition.yml): the sidecar/tracker partition
+# with its self-test, and the graph-consumer census (verbs + reads) with its
+# self-test, on the hermetic candidate tree.
+if retry_run_leg tracker-gates:fno; then
+    echo "preflight: === tracker gates (partition + consumer census) ==="
+    tg0="$SECONDS"
+    run_hermetic bash scripts/ci/check-tracker-partition.sh --self-test
+    tgp=$?
+    run_hermetic bash scripts/ci/check-tracker-partition.sh
+    tgp2=$?
+    [[ $tgp2 -gt $tgp ]] && tgp=$tgp2
+    run_hermetic bash scripts/ci/check-tracker-consumers.sh
+    tgc=$?
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    if [[ $tgp -eq 0 && $tgc -eq 0 ]]; then
+        record_leg tracker-gates:fno "tracker gates (fno)" pass $(( SECONDS - tg0 ))
+    else
+        record_leg tracker-gates:fno "tracker gates (fno)" fail $(( SECONDS - tg0 ))
+        FAIL=1
+    fi
+else
+    echo "preflight: === tracker gates (skipped - not in the retry leg record) ==="
+    record_leg "" "tracker gates (fno)" skipped 0
 fi
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
@@ -1314,7 +1341,7 @@ write_leg_record() {
 write_leg_record
 
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
-[[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+[[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno tracker-gates:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether

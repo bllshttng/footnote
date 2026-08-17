@@ -1,5 +1,10 @@
 """fno backlog advance - merge-triggered auto-continue dispatcher.
 
+tracker-owned machinery: every entry path into this module is a tracker-owned
+backlog verb behind the shared external-backend refusal, so its direct graph
+reads are census-classified as guarded machinery
+(scripts/diagnostics/tracker-consumers.py --reads).
+
 Node ab-3cd195b6. When a backlog node's PR merges, a merge-detector
 (``fno backlog reconcile`` or the /pr merged skill) calls this verb after the
 node-close write commits. If auto-continue is armed for the project and no live

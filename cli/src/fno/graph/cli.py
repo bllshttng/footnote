@@ -2491,6 +2491,10 @@ def _intake_impl(
         [d.strip() for d in deps.split(",") if d.strip()] if deps else []
     )
 
+    # Creation path: the same external-backend refusal every birth path
+    # carries (an intake mints new nodes).
+    _refuse_create_on_external_backend()
+
     entries = read_graph(_graph_path())
 
     if roadmap_id and not force_new_roadmap:
@@ -5685,7 +5689,8 @@ def cmd_roadmap(
         )
         raise typer.Exit(code=1)
 
-    md = render_public_roadmap_md(_display_entries("roadmap"), resolved_project)
+    entries = _display_entries("roadmap")
+    md = render_public_roadmap_md(entries, resolved_project)
 
     if out:
         Path(os.path.expanduser(out)).write_text(md)
@@ -6174,6 +6179,14 @@ def cmd_queued(
     """List nodes the user has queued for action. JSON output, sorted by priority."""
     from fno.graph.store import read_graph
     from fno.graph._intake import filter_by_project, _graph_sort_key_fn
+    from fno.tracker import active_backend_name
+
+    # Queue state is footnote-minted (the queue verb is tracker-owned), so no
+    # external item can be queued: answer the empty list rather than consult
+    # local rows behind an external selection.
+    if active_backend_name() != "graph":
+        typer.echo("[]")
+        return
 
     entries = read_graph(_graph_path())
     queued = [e for e in entries
@@ -6810,10 +6823,13 @@ def _project_plans_from_graph(
     if not ids:
         return
     try:
-        from fno.graph.store import read_graph
+        # Vault mirror projection is default-backend machinery (same class as
+        # plan sync): guarded metadata read, degrades to a no-op under an
+        # external selection rather than painting stale local rows.
         from fno.plan._project import project_graph_nodes
+        from fno.tracker.metadata import read_entries
 
-        entries = read_graph(_graph_path())
+        entries = read_entries("plan.project")
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
@@ -7982,6 +7998,13 @@ def _archived_entry(node_id: str) -> Optional[dict]:
     from fno.graph.store import read_graph
 
     try:
+        # The archive is default-backend storage: never consulted behind an
+        # external selection (the caller's refusal already fired; this guard
+        # keeps the helper honest for any future caller).
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            return None
         # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
         # already route through it, and a helper that resolves the archive its
         # own way is a second path that drifts on the first config change.
@@ -10627,6 +10650,14 @@ def cmd_album(
     214 in the archive against 1741 done) are not ships. Card fields: title,
     id, completed_at, and pr_url present only when one was recorded.
     """
+    from fno.tracker import active_backend_name
+
+    # The album renders the local archive's shipped work: guarded local-store
+    # display, refused (named) under an external selection.
+    if active_backend_name() != "graph":
+        typer.echo("fno backlog album: the album renders the local archive; unavailable under an external tracker backend", err=True)
+        raise typer.Exit(code=2)
+
     from fno.graph.store import read_graph
 
     archive_path = _archive_path()
@@ -10904,6 +10935,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     cli_deps: list[str] = (
         [d.strip() for d in args.deps.split(",") if d.strip()] if args.deps else []
     )
+    _refuse_create_on_external_backend()
     _validate_cli_deps(cli_deps, read_graph(_graph_path()))
 
     resolved: list[dict] = []
@@ -11029,6 +11061,7 @@ def cmd_find(
     """
     from fno.graph.fuzzy import resolve_id, resolve_node, search_entries
     from fno.graph.slug import format_handle
+    from fno.graph.store import read_graph
 
     entries = _display_entries("find")
     q = (query or "").strip()
@@ -11072,9 +11105,16 @@ def cmd_find(
     # never a crash (design "Errors").
     if not matched:
         from fno.paths import graph_archive_json
+        from fno.tracker import active_backend_name
 
-        archive_path = graph_archive_json()
-        if archive_path.exists():
+        # The archive is default-backend storage; no read-through behind an
+        # external selection (stale local rows are the leak the seam closes).
+        archive_path = (
+            graph_archive_json()
+            if active_backend_name() == "graph"
+            else None
+        )
+        if archive_path is not None and archive_path.exists():
             # Guard the whole read + resolve + filter: a corrupt archive OR a
             # malformed archived entry must degrade to a miss, never propagate a
             # crash to the caller (design "Errors").
@@ -11367,9 +11407,10 @@ def cmd_collisions_check(
     from dataclasses import asdict
 
     from fno.graph.collision import find_collisions, has_file_surface
-    from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
+    # A plan-vs-graph collision check is local-store machinery: guarded read,
+    # refused (named) under an external selection.
+    entries = _display_entries("collisions.check")
     evaluated = has_file_surface(plan_path)
     collisions = find_collisions(plan_path, entries, self_id=self_id) if evaluated else []
 

@@ -109,6 +109,9 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    # Seam readers (guarded metadata/display reads) resolve paths.graph_json
+    # at call time; pin the resolver to the same hermetic file.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     # Route paths.graph_archive_json (used by cmd_get read-through) to the temp.
     import fno.paths as p
     monkeypatch.setattr(p, "graph_json", lambda: g)

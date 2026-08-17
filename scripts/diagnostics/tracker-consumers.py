@@ -147,48 +147,149 @@ def _guard_fires_runtime() -> tuple[bool, str]:
 
 
 def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
-    """Scan direct read_graph consumers (Python) + the Rust direct parser."""
+    """AST census of direct read_graph consumers plus the Rust direct parser.
+
+    Every Python read site must attribute to a VERIFIED class:
+      owner             - the named backend/storage modules.
+      guarded-verb      - inside the registered callback of a tracker-owned
+                          verb (cross-checked against the LIVE registry; the
+                          shared refusal wraps it) or a helper that itself
+                          calls the shared/create refusal.
+      guarded-machinery - a named mutation-machinery module carrying the
+                          tracker-owned marker comment (every entry path is a
+                          guarded verb).
+      backend-switched  - the enclosing function branches on
+                          active_backend_name() before reading, so the local
+                          read is unreachable under an external selection.
+      redirect-seam     - reads only an EXPLICIT caller-supplied path (a
+                          hermetic-test seam), never the default store.
+    Anything else is unclassified and fails the census. Regexes would flag
+    imports and docstrings; the AST only sees real calls.
+    """
+    import ast
+
     problems: list[str] = []
     total = 0
-    allow = {str(REPO_ROOT / p) for p in READ_ALLOWLIST}
+    owner_files = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".py")}
+    rust_allow = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".rs")}
+    machinery = {str(REPO_ROOT / "cli/src/fno/backlog/advance.py")}
+    machinery_marker = "tracker-owned machinery"
+
+    # Live registry: function names of tracker-owned verb callbacks.
+    guarded_names: set[str] = set()
+    for _label, info in _iter_registry(_registry()):
+        cb = info.callback
+        if getattr(cb, "_fno_tracker_owned", False):
+            guarded_names.add(getattr(getattr(cb, "__wrapped__", cb), "__name__", ""))
+    refusal_calls = {
+        "_refuse_tracker_owned_on_external_backend",
+        "_refuse_create_on_external_backend",
+        # Creation delegation: _create_node_impl refuses on an external
+        # backend before any store access, so a helper that routes births
+        # through it is guarded by that first act.
+        "_create_node_impl",
+    }
+
+    def _has_call(subtree, names):
+        for node in ast.walk(subtree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                fname = f.id if isinstance(f, ast.Name) else (
+                    f.attr if isinstance(f, ast.Attribute) else ""
+                )
+                if fname in names:
+                    return True
+        return False
+
+    def _is_read_graph(node):
+        if not isinstance(node, ast.Call):
+            return False
+        f = node.func
+        return (isinstance(f, ast.Name) and f.id == "read_graph") or (
+            isinstance(f, ast.Attribute) and f.attr == "read_graph"
+        )
+
     py_root = REPO_ROOT / "cli" / "src"
-    pattern = re.compile(r"\bread_graph\b")
     for path in sorted(py_root.rglob("*.py")):
         rel = str(path)
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            problems.append(f"unreadable: {rel}: {exc}")
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as exc:
+            problems.append(f"unparseable: {rel}: {exc}")
             continue
-        hits = [
-            (i + 1, line.strip())
-            for i, line in enumerate(text.splitlines())
-            if pattern.search(line)
-            and "import" not in line
-            and not line.strip().startswith("#")
-        ]
-        if not hits:
-            continue
-        total += len(hits)
-        if rel in allow:
+        allow_module = rel in owner_files
+        mach_module = rel in machinery
+        if mach_module and machinery_marker not in path.read_text(encoding="utf-8"):
+            problems.append(f"machinery module missing marker comment: {rel}")
+        # Parent map so a read inside a nested closure attributes to its
+        # OUTERMOST enclosing function: the command/callback boundary is what
+        # the guard and the backend switch live on.
+        parents: dict[int, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
+
+        def _outermost(node):
+            cur = node
+            top_fn = None
+            while True:
+                parent = parents.get(id(cur))
+                if parent is None:
+                    return top_fn
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    top_fn = parent
+                cur = parent
+
+        seen_scopes: set[int] = set()
+        for site in [n for n in ast.walk(tree) if _is_read_graph(n)]:
+            top = _outermost(site)
+            if top is None or id(top) in seen_scopes and False:
+                continue
+            seen_scopes.add(id(top))
+            if top is None:
+                problems.append(f"unclassified consumer: {rel}:{site.lineno} at module level")
+                continue
+            switched = _has_call(top, {"active_backend_name", "_external_mode"})
+            guarded = top.name in guarded_names or _has_call(top, refusal_calls)
+            params = {a.arg for a in top.args.args}
+            params |= {a.arg for a in top.args.kwonlyargs}
+            total += 1
+            if allow_module:
+                klass = "owner"
+            elif mach_module:
+                klass = "guarded-machinery"
+            elif guarded:
+                klass = "guarded-verb"
+            elif switched:
+                klass = "backend-switched"
+            elif site.args and isinstance(site.args[0], ast.Name) and site.args[0].id in params:
+                klass = "redirect-seam"
+            else:
+                problems.append(
+                    f"unclassified consumer: {rel}:{site.lineno} "
+                    f"in {top.name}()"
+                )
+                continue
             if verbose:
-                print(f"  allowlisted owner: {Path(rel).relative_to(REPO_ROOT)} ({len(hits)} site(s))")
-            continue
-        for lineno, line in hits:
-            problems.append(f"unclassified consumer: {rel}:{lineno}: {line[:80]}")
-    # Rust: the mux must not open graph.json directly outside backlog_view.rs.
+                print(f"  {klass:<18} {Path(rel).relative_to(REPO_ROOT)}:{site.lineno} in {top.name}()")
+
+    # Rust modality: direct graph.json opens outside the allowlist, in
+    # PRODUCTION sources (test fixtures legitimately point FNO_GRAPH_JSON at
+    # fixture files; that is not a consumer).
     rust_root = REPO_ROOT / "crates"
-    for path in sorted(rust_root.rglob("*.rs")):
+    for path in sorted(rust_root.rglob("src/*.rs")):
         rel = str(path)
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
         for i, line in enumerate(text.splitlines()):
-            if re.search(r'"?graph\.json"?|GRAPH_JSON', line) and not line.strip().startswith("//"):
+            if re.search(r'"?graph\.json"?', line) and not line.strip().startswith("//"):
                 total += 1
-                if rel not in allow:
-                    problems.append(f"unclassified rust consumer: {rel}:{i + 1}: {line.strip()[:80]}")
+                if rel not in rust_allow:
+                    problems.append(
+                        f"unclassified rust consumer: {rel}:{i + 1}: {line.strip()[:80]}"
+                    )
     return total, problems
 
 

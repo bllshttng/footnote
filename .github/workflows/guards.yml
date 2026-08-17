@@ -289,6 +289,11 @@ jobs:
           bash scripts/ci/check-tracker-partition.sh --self-test
           bash scripts/ci/check-tracker-partition.sh
 
+      - name: Tracker consumer census + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-tracker-consumers.sh
+
       # From uv-install-bytecode.yml.
       - name: Bytecode gate + self-test
         if: ${{ !cancelled() }}
