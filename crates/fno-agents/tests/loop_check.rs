@@ -5232,6 +5232,59 @@ fn attestation_scope_second_pr_does_not_clobber_the_first() {
     );
 }
 
+/// THE false-positive specimen, built: one reviewer, one attester session,
+/// its latest pass earned on PR A. PR B's evaluation would carry that sha
+/// (the code-diff identity hashes equal, which a cherry-pick produces; a
+/// documentation-only tree diff is the other trigger), and the old unscoped
+/// scan keyed on (reviewer, attester) read the foreign pass as coverage for
+/// a PR nobody reviewed. Scope, not freshness, must stop it.
+#[test]
+fn attestation_scope_cherry_picked_foreign_pass_never_counts() {
+    let head_a = "aaaa0000000000000000000000000000000000000";
+    let head_b = "bbbb0000000000000000000000000000000000000";
+    let attested = serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": "code-review", "head_sha": head_a, "verdict": "pass",
+                 "attester_session_id": "reviewer-session-1", "branch": "feature/a"}
+    })
+    .to_string();
+    // The resolver carries EVERY sha: the equal-delta shape the delta
+    // predicate exists to grant, which is exactly the exposure.
+    let carries_all = |_: &str| Freshness::CarriedBaseSync;
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &attested,
+        &[],
+        true,
+        None,
+        &carries_all,
+        "feature/b",
+        head_b,
+    );
+    assert_eq!(
+        rep.coverage,
+        Coverage::Covered(0),
+        "a carried foreign pass must not count for a PR nobody reviewed"
+    );
+    assert!(rep.verdicts.is_empty());
+
+    // The same line, same carrying resolver, still counts for the PR it was
+    // attested on - the relief x-62a1 exists to grant survives the scoping.
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &attested,
+        &[],
+        true,
+        None,
+        &carries_all,
+        "feature/a",
+        head_b,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
 /// AC2-HP + the N-reachable-paths rule: BOTH scans over the SAME foreign
 /// attestation at a different head (the carry shape the scope predicate
 /// exists to stop). The coverage axis (`classify_coverage`) and the
