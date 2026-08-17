@@ -160,7 +160,7 @@ than it costs, so the recipe lives here for hand-running instead.
 
 ### What is and is not fixed
 
-Fixed, in two layers.
+Fixed, in four layers.
 
 **Legibility.** The error path performs no first-time import, and a missing
 module under the `fno` package says so and names both candidate causes (a
@@ -176,6 +176,16 @@ launchd agents plus live sessions nearly always has an `fno` process mid-flight
 during the few seconds `uv tool install --reinstall` takes, so every `fno update`
 was hitting it.
 
+**The same retry, on the other import path.** `_load_real` guards the lazy command-group import. That is one path of two. The other one carries far more traffic. It is a deferred `from fno. ...` written inside a command body, and there are about 2000 of those. `fno agents truth` reaches `fno.agents.session_truth` that way. The fno-agents daemon runs that verb as a continuous per-session liveness probe, so it is the highest-frequency reader of the window. Those sites used to fail with a bare `ModuleNotFoundError`, no retry and no dual-cause message. A guard on one of two reachable paths is decorative, so the guard moved to the one site both paths cross.
+
+`fno/__init__.py` appends a meta-path finder, `_ReinstallWindowFinder`, at the END of `sys.meta_path`. Every `fno.*` import imports `fno` first, so no caller can miss it. That covers the console script, `python -m fno.cli`, a spawned worker, and all 2000 in-body imports. Being last means it is consulted only after every normal finder has already answered "no such module". So it costs nothing on the happy path. At that point it runs the same `_module_is_now_on_disk` re-check `_load_real` runs, then asks `PathFinder` one more time. Present now, the import proceeds. Still absent, it raises the dual-cause message instead of the bare error. An absent module is neither slept on nor masked. Both paths share one check and one message, and both live in `fno/__init__.py`. A second copy rebuilds the same one-of-N trap.
+
+Measured cost: `import fno` self-time rises from 99us to 171us per process. That is 0.07% of a 110ms `fno --help`. This file carries no `from __future__ import annotations` for the same reason. That import alone measured 154us, and nothing in the module needs it.
+
+The re-check itself is not free, and the number is worth stating. `importlib.invalidate_caches()` ends in `from importlib.metadata import MetadataPathFinder`, so its first call in a process that has not already loaded that module pulls in `importlib.metadata`, `email` and `zipfile`. Measured on a bare interpreter: 17.9ms and 84 modules for that first call, 0.003ms for every call after it. The figure moves with what the process has already imported, so read it as tens of milliseconds, once. Every one of them is paid on an import that has already failed, so no successful path sees any of it.
+
+**One transient failure tolerated at the daemon probe.** The truth probe is the loudest victim of the window. `family1_truth_probe` in `crates/fno-agents/src/claude_ask.rs` now retries once before it warns. The discriminator is narrow on purpose. It fires on a non-zero exit with NO parseable body on stdout, and on a failure to spawn at all. Both shapes mean the process never reached the code that writes a verdict. The reinstall replaces the `fno` console script as well as the tree behind it. So ENOENT on spawn is as much a face of the window as an import crash. Guarding only the crash reaches one shape of two. A refusal always carries its `{state, reason}` body. So the volume case, `not-found`, still answers on the first attempt. No dead registry row pays for a second process. A probe that crashes twice keeps its WARN. This tolerates a transient failure. It does not hide a persistent one.
+
 **The exposure gap (symptom 3).** `/bin/sh: .../fno-py: No such file or directory`
 fails in the shell before any interpreter starts, so no import-level retry can
 reach it. Measured by sampling every 5ms across a reinstall: the venv's `python3`
@@ -187,6 +197,10 @@ correct in principle and much too tight in practice. `update.py` now waits up to
 3s for the console script before running the refresh, and if it never returns,
 skips loudly with the manual commands rather than leaving a launchd agent pinned
 to the old binary.
+
+What the meta-path finder closed is the COVERAGE gap, not the window. Every `fno.*` import now gets the same one retry. The paragraph below still holds.
+
+The message reaches one shape less than the retry does. For `from fno.pkg import submodule`, CPython's `_handle_fromlist` swallows our ModuleNotFoundError and raises `cannot import name ... from ...` in its place. Nothing at this layer can reach that decision. The retry still runs, because it happens inside `find_spec` before the exception exists. The in-body imports are written as `from fno.pkg.submodule import name`, which keeps the message. Raising from a finder also inverts one stdlib contract: `importlib.util.find_spec` on an absent `fno.*` module raises rather than returning None. No caller in this repo probes an fno module that way, and the error stays an ImportError subclass.
 
 Not fixed, and unfixable at this layer: the window itself. A process whose import
 lands while the file is genuinely still absent still fails. Closing that would

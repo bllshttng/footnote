@@ -744,3 +744,186 @@ def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch)
     # The stale fno hint must NOT be attached to a third-party failure.
     assert "fno doctor" not in flat, combined
     assert "_mid_reinstall" not in flat, combined
+
+
+# ---------------------------------------------------------------------------
+# AC8-HOOK: the same verify-then-retry, for the imports the lazy group cannot see
+# ---------------------------------------------------------------------------
+
+
+def _installed_finder():
+    """The one guard instance `import fno` appended to sys.meta_path."""
+    import fno
+
+    found = [f for f in sys.meta_path if isinstance(f, fno._ReinstallWindowFinder)]
+    assert len(found) == 1, f"expected exactly one guard, got {len(found)}"
+    # Behind PathFinder, so it is consulted only after every normal finder has
+    # already answered "no such module". Anywhere earlier and it would pay its
+    # re-check on imports that were about to succeed. Asserted as "after
+    # PathFinder" rather than "last", because any library imported later is free
+    # to append a finder of its own and that would not break this one.
+    # Found by name, not by identity: a test that spies on
+    # `importlib.machinery.PathFinder` must not also move this assertion.
+    path_finder = max(
+        i for i, f in enumerate(sys.meta_path) if getattr(f, "__name__", "") == "PathFinder"
+    )
+    assert sys.meta_path.index(found[0]) > path_finder
+    return found[0]
+
+
+def _spy_path_finder(monkeypatch, seen: list, spec="SPEC"):
+    """Replace PathFinder so the retry lookup is countable rather than inferred."""
+    import importlib.machinery
+
+    class _Spy:
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            seen.append(name)
+            return spec
+
+    monkeypatch.setattr(importlib.machinery, "PathFinder", _Spy)
+
+
+def test_import_hook_retries_a_module_that_is_on_disk_now(monkeypatch):
+    """A tree that is whole again gets one more lookup, and the import proceeds.
+
+    This is the same disk-recheck-then-retry-once `_load_real` does, reaching the
+    ~2000 function-level `from fno. ...` imports inside command bodies that the
+    lazy group never sees -- `fno agents truth` -> `fno.agents.session_truth`
+    among them.
+    """
+    import fno
+    import fno._lazy_group
+
+    seen: list[str] = []
+    finder = _installed_finder()
+    # The gate is the SHARED helper, the same one `_load_real` consults. Asserted
+    # by identity rather than left to the patch below: `_lazy_group` binds the
+    # function by VALUE at import time, so monkeypatching `fno` reaches the
+    # finder only. An inlined second copy of the on-disk check in `_load_real`
+    # would sail past the patch, and this line is what refuses it.
+    assert fno._lazy_group._module_is_now_on_disk is fno._module_is_now_on_disk
+    checked: list[str] = []
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: checked.append(name) or True)
+    _spy_path_finder(monkeypatch, seen)
+
+    spec = finder.find_spec("fno.agents.session_truth", None, None)
+
+    assert spec == "SPEC"
+    assert checked == ["fno.agents.session_truth"], "the shared re-check is the gate"
+    assert seen == ["fno.agents.session_truth"], "retried exactly once, no loop"
+
+
+def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
+    """An absent module is never waited on and never masked.
+
+    The disk re-check is the whole difference between this and a hopeful
+    sleep-retry: a stale or broken install still fails, and now fails with the
+    dual-cause message instead of the bare ModuleNotFoundError these call sites
+    produce today.
+    """
+    import fno
+
+    seen: list[str] = []
+    finder = _installed_finder()
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: False)
+    _spy_path_finder(monkeypatch, seen, spec=None)
+
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        finder.find_spec("fno.state._never_shipped", None, None)
+
+    assert seen == [], "absent on the shared re-check: never looked up again"
+    assert excinfo.value.name == "fno.state._never_shipped"
+    message = str(excinfo.value)
+    assert "reinstalled underneath the running process" in message
+    assert "fno doctor" in message
+
+
+def test_import_hook_ignores_third_party_modules(monkeypatch):
+    """A missing dependency is a broken install: no re-check, no retry, no hint."""
+    seen: list[str] = []
+    finder = _installed_finder()
+    _spy_path_finder(monkeypatch, seen)
+
+    assert finder.find_spec("rich.console", None, None) is None
+    assert finder.find_spec("fnord.core", None, None) is None
+    assert seen == [], "a third-party module is never looked up again"
+
+
+def test_absent_fno_submodule_names_both_causes_end_to_end():
+    """The acceptance shape, through a real import in a real process: a function-level
+    `from fno. ...` for a module that is not there says why, twice over."""
+    proc = _run_py(
+        "import fno\n"
+        "try:\n"
+        "    from fno.agents.no_such_module import thing\n"
+        "except ModuleNotFoundError as exc:\n"
+        "    print(exc)\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "reinstalled underneath the running process" in proc.stdout, proc.stdout
+    assert "fno update" in proc.stdout
+
+
+def test_lazy_group_states_the_hint_once_not_twice():
+    """Both guards now fire on one absent module, and they share one message.
+
+    The finder raises WITH the hint already in it, and that error is what the
+    lazy group catches, so an unconditional append prints the same parenthetical
+    twice in the operator's face.
+    """
+    import click
+
+    from fno._lazy_group import _LazyStub
+
+    stub = _LazyStub(name="zzz", help="h", import_path="fno.no_such_lazy_target:cli")
+    with pytest.raises(click.ClickException) as excinfo:
+        stub._load_real()
+
+    assert excinfo.value.message.count("is part of fno itself") == 1, excinfo.value.message
+
+
+def test_import_hook_is_installed_once_even_when_fno_is_reimported():
+    """Stacking guards would multiply the re-check per failed import for no gain."""
+    proc = _run_py(
+        "import sys, importlib, fno\n"
+        "importlib.reload(fno)\n"
+        "print(sum(1 for f in sys.meta_path "
+        "if type(f).__name__ == '_ReinstallWindowFinder'))\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "1"
+
+
+def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
+    """The one shape whose message CPython takes away, pinned so the docs stay honest.
+
+    For `from fno.pkg import submodule`, `_handle_fromlist` swallows a
+    ModuleNotFoundError matching the fromlist entry and raises `cannot import
+    name ... from ...` instead, so the dual-cause text never reaches the reader.
+    The retry is untouched: it happens inside find_spec, before that exception
+    exists. Both halves are asserted here because the claim in the docs is about
+    the retry, not the message.
+    """
+    proc = _run_py(
+        "import fno, importlib.machinery\n"
+        "seen = []\n"
+        "class Spy:\n"
+        "    @staticmethod\n"
+        "    def find_spec(name, path=None, target=None):\n"
+        "        seen.append(name)\n"
+        "        return None\n"
+        "fno._module_is_now_on_disk = lambda name: True\n"
+        "importlib.machinery.PathFinder = Spy\n"
+        "try:\n"
+        "    from fno.agents import no_such_submodule\n"
+        "except ImportError as exc:\n"
+        "    print('MSG', exc)\n"
+        "print('SEEN', seen)\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    # The retry ran, for the fully-qualified submodule name.
+    assert "SEEN ['fno.agents.no_such_submodule']" in proc.stdout, proc.stdout
+    # And CPython, not us, wrote the message the reader sees.
+    assert "cannot import name 'no_such_submodule'" in proc.stdout, proc.stdout
+    assert "is part of fno itself" not in proc.stdout, proc.stdout

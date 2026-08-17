@@ -136,12 +136,56 @@ pub struct TruthProbe {
     pub observed_model: serde_json::Value,
 }
 
-pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
+fn family1_truth_command(handle: &str) -> std::process::Command {
     let mut command = std::process::Command::new("fno");
     command
         .args(["agents", "truth", handle, "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");
-    family1_truth_probe_with_command(command, Duration::from_secs(5), handle)
+    command
+}
+
+pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
+    // This probe runs once per tracked session, continuously, which makes it
+    // the highest-frequency reader of the tree `uv tool install --reinstall`
+    // (what `fno update` runs) rewrites in place. A probe landing in that
+    // window dies before `cmd_truth` can write anything, and spent a WARN line
+    // on a failure that is over by the next sweep.
+    //
+    // So the crash shape specifically -- and only that shape -- buys one silent
+    // retry. A refusal always carries its `{state, reason}` body, so `not-found`
+    // and friends still answer on the first attempt and no dead registry row
+    // pays for a second process. A genuinely broken probe crashes twice and
+    // keeps its warning, which is the point: this tolerates a transient
+    // failure, it does not hide a persistent one.
+    //
+    // Worth naming, because the Python half of this fix is built the other way:
+    // that one FALSIFIES (is the module on disk right now?) before retrying,
+    // while this one INFERS from the failure shape alone. There is no cheap
+    // equivalent question to ask here -- "why did it exit 1" has no answer from
+    // out here -- so a permanent fault matching the shape retries every sweep
+    // rather than settling. The cost is bounded and visible: one extra
+    // fast-failing spawn per affected row, and the second attempt always keeps
+    // its WARN, so a stuck probe is loud rather than silent.
+    family1_truth_probe_retrying(
+        || family1_truth_command(handle),
+        Duration::from_secs(5),
+        handle,
+    )
+}
+
+/// [`family1_truth_probe`] with the command built per attempt, so a test can
+/// count the attempts a given failure shape actually costs. A `Command` cannot
+/// be reused after a spawn, which is why this takes a factory.
+fn family1_truth_probe_retrying(
+    mut command_for_attempt: impl FnMut() -> std::process::Command,
+    timeout: Duration,
+    handle: &str,
+) -> Option<TruthProbe> {
+    let first = family1_truth_attempt(command_for_attempt(), timeout, handle, false);
+    if !first.crashed {
+        return first.probe;
+    }
+    family1_truth_attempt(command_for_attempt(), timeout, handle, true).probe
 }
 
 /// The transcript state, LOWERED to `"unreachable"` when the shared verdict
@@ -247,19 +291,53 @@ fn truth_failure_is_routine(detail: &str) -> bool {
     detail.trim() == TRUTH_NOT_FOUND
 }
 
-fn family1_truth_probe_with_command(
+/// One probe run's outcome, split just far enough to answer "is this worth a
+/// single silent retry?".
+struct TruthAttempt {
+    probe: Option<TruthProbe>,
+    /// The probe never got far enough to measure anything: it failed to spawn
+    /// at all, or exited non-zero with NO parseable body on stdout, meaning the
+    /// process died before `cmd_truth` wrote its verdict. Both are what a
+    /// `uv tool install --reinstall` looks like from out here - it replaces the
+    /// console script and the package tree together. A refusal writes
+    /// `{state, reason}` first, so `not-found` never sets this.
+    crashed: bool,
+}
+
+impl TruthAttempt {
+    /// An answer, whatever it is, that a second run could only repeat.
+    fn answered(probe: Option<TruthProbe>) -> Self {
+        Self {
+            probe,
+            crashed: false,
+        }
+    }
+}
+
+fn family1_truth_attempt(
     mut command: std::process::Command,
     timeout: Duration,
     handle: &str,
-) -> Option<TruthProbe> {
+    warn_on_crash: bool,
+) -> TruthAttempt {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
-            return None;
+            // `uv tool install --reinstall` replaces the `fno` console script
+            // itself, not just the package tree, so the window shows up out here
+            // as a bare ENOENT on spawn. That is the same "measured nothing"
+            // shape as an import crash and gets the same single retry, with the
+            // WARN held back for it.
+            if warn_on_crash {
+                eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
+            }
+            return TruthAttempt {
+                probe: None,
+                crashed: true,
+            };
         }
     };
     let deadline = Instant::now() + timeout;
@@ -273,13 +351,13 @@ fn family1_truth_probe_with_command(
                 let _ = child.kill();
                 let _ = child.wait();
                 eprintln!("WARN: family-1 truth probe for {handle} timed out");
-                return None;
+                return TruthAttempt::answered(None);
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 eprintln!("WARN: family-1 truth probe for {handle} wait failed: {error}");
-                return None;
+                return TruthAttempt::answered(None);
             }
         }
     }
@@ -287,7 +365,7 @@ fn family1_truth_probe_with_command(
         Ok(output) => output,
         Err(error) => {
             eprintln!("WARN: family-1 truth probe for {handle} output failed: {error}");
-            return None;
+            return TruthAttempt::answered(None);
         }
     };
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
@@ -295,12 +373,17 @@ fn family1_truth_probe_with_command(
         .as_ref()
         .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
     if !output.status.success() {
+        // No parseable body at all means the process never reached the code
+        // that writes one, so this run measured nothing about the session -
+        // unlike a refusal, which is a real answer. Only that shape is worth a
+        // retry, and only that shape holds its WARN back for it.
+        let crashed = parsed.is_none();
         // The warn-on-malfunction decision stays exactly as before, keyed off
         // `reason` regardless of what follows: a resolver crash still needs
         // its WARN even though its body is about to be salvaged below.
         let detail =
             family1_truth_failure_detail(&output.stdout, &String::from_utf8_lossy(&output.stderr));
-        if !truth_failure_is_routine(&detail) {
+        if !truth_failure_is_routine(&detail) && (warn_on_crash || !crashed) {
             eprintln!(
                 "WARN: family-1 truth probe for {handle} exited {}: {}",
                 output.status, detail
@@ -317,14 +400,15 @@ fn family1_truth_probe_with_command(
         // standing to assert liveness, so this is monotone-lowering only,
         // exactly like `lower_state_with_verdict` above - it can report
         // done/stalled/unknown, never invent "still working".
-        return match state.as_deref() {
+        let probe = match state.as_deref() {
             Some(s @ ("done" | "stalled" | "unknown")) => {
                 Some(build_truth_probe(parsed.as_ref(), s))
             }
             _ => None,
         };
+        return TruthAttempt { probe, crashed };
     }
-    match state.as_deref() {
+    TruthAttempt::answered(match state.as_deref() {
         Some(s @ ("done" | "watching" | "your-move" | "working" | "stalled" | "unknown")) => {
             Some(build_truth_probe(parsed.as_ref(), s))
         }
@@ -332,7 +416,7 @@ fn family1_truth_probe_with_command(
             eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
             None
         }
-    }
+    })
 }
 
 /// Build a [`TruthProbe`] from a parsed truth JSON body and its already-read
@@ -4121,6 +4205,105 @@ mod tests {
             }
             other => panic!("expected routing gap, got {:?}", other),
         }
+    }
+
+    /// A single probe attempt with warnings on, which is what every assertion
+    /// below is about. The retry that production wraps around this is not
+    /// hidden by it: it lives in `family1_truth_probe_retrying` and has its own
+    /// attempt-counting tests further down.
+    fn family1_truth_probe_with_command(
+        command: std::process::Command,
+        timeout: Duration,
+        handle: &str,
+    ) -> Option<TruthProbe> {
+        family1_truth_attempt(command, timeout, handle, true).probe
+    }
+
+    /// A shell command, built fresh per attempt so the retry path can spawn it
+    /// twice. `-c` body only; the probe supplies nothing else.
+    fn sh(script: &'static str) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn crashing_truth_probe_is_retried_exactly_once() {
+        // The reinstall window: the process dies before `cmd_truth` writes a
+        // body, so the run measured nothing and is worth one more try. The
+        // second attempt answering is what production needs; the WARN the first
+        // attempt withheld belongs to a failure that no longer exists.
+        let attempts = std::cell::Cell::new(0);
+        let probe = family1_truth_probe_retrying(
+            || {
+                attempts.set(attempts.get() + 1);
+                match attempts.get() {
+                    1 => sh("echo 'ModuleNotFoundError: fno.agents.session_truth' >&2; exit 1"),
+                    _ => sh("printf '{\"state\":\"working\"}'"),
+                }
+            },
+            Duration::from_secs(5),
+            "h1",
+        );
+        assert_eq!(attempts.get(), 2, "a crash must buy exactly one retry");
+        assert_eq!(probe.expect("retry answers").state, "working");
+    }
+
+    #[test]
+    fn crashing_twice_still_answers_none_and_stops() {
+        // Tolerating a transient failure must not become tolerating a broken
+        // one: two attempts, then the answer stands.
+        let attempts = std::cell::Cell::new(0);
+        let probe = family1_truth_probe_retrying(
+            || {
+                attempts.set(attempts.get() + 1);
+                sh("echo boom >&2; exit 1")
+            },
+            Duration::from_secs(5),
+            "h1",
+        );
+        assert_eq!(attempts.get(), 2, "never more than one retry");
+        assert!(probe.is_none());
+    }
+
+    #[test]
+    fn a_probe_that_cannot_spawn_is_retried_too() {
+        // The reinstall replaces the `fno` console script as well as the tree
+        // behind it, so the window is just as likely to show up as ENOENT on
+        // spawn as it is as an import crash. Guarding only the second reaches
+        // one of two shapes.
+        let attempts = std::cell::Cell::new(0);
+        let probe = family1_truth_probe_retrying(
+            || {
+                attempts.set(attempts.get() + 1);
+                match attempts.get() {
+                    1 => std::process::Command::new("fno-no-such-binary-reinstall-window"),
+                    _ => sh("printf '{\"state\":\"working\"}'"),
+                }
+            },
+            Duration::from_secs(5),
+            "h1",
+        );
+        assert_eq!(attempts.get(), 2, "a failed spawn must buy one retry");
+        assert_eq!(probe.expect("retry answers").state, "working");
+    }
+
+    #[test]
+    fn a_refusal_with_a_body_is_never_retried() {
+        // `not-found` is the volume case - `handle_list` probes every registry
+        // row - and it is a real answer, not a crash. Retrying it would double
+        // the process count of every sweep for nothing.
+        let attempts = std::cell::Cell::new(0);
+        let probe = family1_truth_probe_retrying(
+            || {
+                attempts.set(attempts.get() + 1);
+                sh("printf '{\"state\":\"unknown\",\"reason\":\"not-found\"}'; exit 13")
+            },
+            Duration::from_secs(5),
+            "h1",
+        );
+        assert_eq!(attempts.get(), 1, "a refusal carries a body: no retry");
+        assert_eq!(probe.expect("salvaged body").state, "unknown");
     }
 
     /// The state half of a probe, for the tests that only pin the state enum.
