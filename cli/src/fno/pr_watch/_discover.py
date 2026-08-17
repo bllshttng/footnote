@@ -21,7 +21,7 @@ import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from fno.graph._reconcile import (
     PrMergeState,
