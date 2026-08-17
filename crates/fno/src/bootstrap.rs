@@ -621,8 +621,21 @@ fn install_verified(uv: &Path) -> Result<(), String> {
     let tool_dir = uv_tool_dir(uv).ok_or(UV_DIR_UNREADABLE)?;
     let venv = tool_dir.join(TOOL_NAME);
     let entry = venv.join("bin").join("fno-py");
-    if !entry.exists() {
-        return Err(format!("no console script at {}", entry.display()));
+    match fs::metadata(&entry) {
+        Ok(_) => {}
+        // True absence, worded as absence. Any OTHER stat failure (a parent
+        // dir the predicate cannot read) is could-not-answer, not a missing
+        // script, so it carries the unreadable marker the stamp carve-out
+        // keys on instead of a false-absence diagnosis.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("no console script at {}", entry.display()));
+        }
+        Err(e) => {
+            return Err(format!(
+                "cannot read the console script at {}: {e} ({UV_DIR_UNREADABLE})",
+                entry.display()
+            ));
+        }
     }
     // Executable, not merely present. The three shell twins verify with
     // `[ -x ... ]`, and `run()` requires an executable script one call later. A
@@ -640,30 +653,51 @@ fn install_verified(uv: &Path) -> Result<(), String> {
         ));
     }
     let lib = venv.join("lib");
-    if count_pyc(&lib) == 0 {
-        return Err(format!(
-            "no compiled bytecode under {} (--compile-bytecode install ships it)",
-            lib.display()
-        ));
+    match count_pyc(&lib) {
+        // An absent or empty lib tree is an answer: the install shipped no
+        // bytecode. NotFound joins the empty case because a venv with no lib/
+        // at all is a bad install, not an unreadable one.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "no compiled bytecode under {} (--compile-bytecode install ships it)",
+                lib.display()
+            ));
+        }
+        Ok(0) => {
+            return Err(format!(
+                "no compiled bytecode under {} (--compile-bytecode install ships it)",
+                lib.display()
+            ));
+        }
+        // A read error partway through the walk is could-not-answer: the tree
+        // may ship bytecode the predicate was not allowed to list, and the
+        // unreadable marker keeps it out of the failure stamp.
+        Err(e) => {
+            return Err(format!(
+                "cannot read under {}: {e} ({UV_DIR_UNREADABLE})",
+                lib.display()
+            ));
+        }
+        Ok(_) => {}
     }
     Ok(())
 }
 
 /// Count `*.pyc` files under `dir`, recursively. Pure filesystem, testable.
-fn count_pyc(dir: &Path) -> usize {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
-    };
+/// Read errors propagate: the caller decides which of them mean absence and
+/// which mean the predicate could not answer.
+fn count_pyc(dir: &Path) -> std::io::Result<usize> {
     let mut n = 0;
-    for entry in entries.flatten() {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            n += count_pyc(&path);
+            n += count_pyc(&path)?;
         } else if path.extension().is_some_and(|e| e == "pyc") {
             n += 1;
         }
     }
-    n
+    Ok(n)
 }
 
 /// `uv tool dir` as a PathBuf, or None when uv is absent/fails. Shared by the
@@ -945,9 +979,9 @@ fn verify_ours(real: &Path) -> BootResult<()> {
     // from a stranger.
     let probe = "import importlib.metadata as m\n\
                  md = m.metadata('fno')\n\
-                 print(md.get('Name') or '')\n\
-                 print(md.get('Author') or md.get('Author-email') or '')\n\
-                 print(md.get('Version') or '')\n";
+                 print('name=' + (md.get('Name') or ''))\n\
+                 print('author=' + (md.get('Author') or md.get('Author-email') or ''))\n\
+                 print('version=' + (md.get('Version') or ''))\n";
     let out = Command::new(&venv_python)
         .args(["-c", probe])
         .output()
@@ -960,10 +994,7 @@ fn verify_ours(real: &Path) -> BootResult<()> {
         ));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines();
-    let name = lines.next().unwrap_or("").trim();
-    let author = lines.next().unwrap_or("").trim();
-    let version = lines.next().unwrap_or("").trim();
+    let (name, author, version) = parse_probe_fields(&text);
 
     // A COMPLETE answer is what makes an identity refusal stable. A METADATA file
     // truncated mid-write - say right after `Metadata-Version: 2.1`, the same
@@ -990,8 +1021,8 @@ fn verify_ours(real: &Path) -> BootResult<()> {
     // and the guard has to hold whichever way the probe above is spelled. No real
     // package answers to it: the worst a false positive costs is one re-ask.
     let present = |v: &str| !v.is_empty() && v != "None";
-    let answered = present(name) && present(version) && present(author);
-    decide_identity(name, author).map_err(|why| {
+    let answered = present(&name) && present(&version) && present(&author);
+    decide_identity(&name, &author).map_err(|why| {
         let e = BootErr::new(
             1,
             format!(
@@ -1001,15 +1032,64 @@ fn verify_ours(real: &Path) -> BootResult<()> {
         );
         // The probe ran and answered in full. Waiting cannot make a stranger's
         // package into ours, so that refusal is returned on the first pass.
-        if answered {
+        if refusal_is_stable(answered, &author) {
             e.stable()
         } else {
             e
         }
     })?;
     // Report what we accepted so the user can audit what ran (AC3-UI).
-    eprintln!("fno: verified fno {version} (this project's package).");
+    eprintln!("{}", verified_receipt(&version));
     Ok(())
+}
+
+/// The owner marker the identity rule keys on. A constant beside both users -
+/// [`decide_identity`]'s match and the torn-read detector in
+/// [`refusal_is_stable`] - so the two cannot drift apart.
+const OWNER_AUTHOR: &str = "Jason Noah Choi";
+
+/// Parse the identity probe's stdout into (name, author, version).
+///
+/// The probe emits `key=value` lines, and anything a venv's startup prints
+/// before them (a `.pth` file, `sitecustomize`) must not reassign a field:
+/// unrecognized lines are skipped, and the LAST occurrence of a key wins,
+/// because startup prints happen before the probe's own prints.
+fn parse_probe_fields(text: &str) -> (String, String, String) {
+    let mut name = String::new();
+    let mut author = String::new();
+    let mut version = String::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("name=") {
+            name = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("author=") {
+            author = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("version=") {
+            version = v.trim().to_string();
+        }
+    }
+    (name, author, version)
+}
+
+/// Is an identity refusal final, or should the wait budget re-ask?
+///
+/// `answered` covers the MISSING-field tears. A tear INSIDE the Author value
+/// answers all three fields with the author truncated - a prefix of the one
+/// string the rule matches on - and no foreign package carries that prefix,
+/// so it is an instrument failure, not an identity verdict.
+fn refusal_is_stable(answered: bool, author: &str) -> bool {
+    answered && !author.is_empty() && OWNER_AUTHOR.strip_prefix(author).is_none()
+}
+
+/// The audit line for a verified install (AC3-UI). A blank version must not
+/// print as one: the version is the one fact this line exists to carry.
+fn verified_receipt(version: &str) -> String {
+    let v = if version.is_empty() {
+        "(version unreadable)"
+    } else {
+        version
+    };
+    format!("fno: verified fno {v} (this project's package).")
 }
 
 /// Pure identity decision: the package must be named `fno` AND authored by this
@@ -1018,7 +1098,7 @@ fn decide_identity(name: &str, author: &str) -> Result<(), String> {
     if !name.eq_ignore_ascii_case("fno") {
         return Err(format!("name={name}"));
     }
-    if !author.contains("Jason Noah Choi") {
+    if !author.contains(OWNER_AUTHOR) {
         return Err(format!("author={author}"));
     }
     Ok(())
@@ -1310,6 +1390,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stray_stdout_line_does_not_reassign_probe_fields() {
+        // A venv can print at interpreter startup - a .pth file, a
+        // sitecustomize - BEFORE the probe's own lines run. Positional parsing
+        // read that line as the name and shifted every field into the next
+        // slot, and the misparse was complete-looking, so it could stamp.
+        let (name, author, version) = parse_probe_fields(
+            "deprecation warning from a stray .pth\nname=fno\nauthor=Jason Noah Choi <dev@x>\nversion=0.3.1\n",
+        );
+        assert_eq!(name, "fno");
+        assert!(author.starts_with("Jason Noah Choi"), "{author}");
+        assert_eq!(version, "0.3.1");
+    }
+
+    #[test]
+    fn tear_inside_the_author_value_is_not_a_stable_refusal() {
+        // METADATA torn mid-value answers all three fields with the author
+        // truncated. "Jason Noah Ch" is not a stranger's answer: it is a
+        // prefix of the one string the rule matches on, and stamping it as a
+        // stable foreign refusal replays a false diagnosis for the cooldown
+        // over an install milliseconds from verifying.
+        assert!(refusal_is_stable(true, "Jason Noah Choi <dev@x>"));
+        assert!(refusal_is_stable(true, "Mallory"));
+        assert!(
+            !refusal_is_stable(true, "Jason Noah Ch"),
+            "a torn prefix is an instrument failure: re-ask it"
+        );
+        assert!(!refusal_is_stable(false, "fno"));
+    }
+
+    #[test]
+    fn a_receipt_never_prints_a_blank_version() {
+        // An absent Version header verifies (identity keys on name and
+        // author), and the audit line is the one place the version lands.
+        // A blank where it belongs reads as a fact nobody checked.
+        let blank = verified_receipt("");
+        assert!(!blank.contains("fno  ("), "{blank}");
+        assert!(blank.contains("unreadable"), "{blank}");
+        assert_eq!(
+            verified_receipt("0.3.1"),
+            "fno: verified fno 0.3.1 (this project's package)."
+        );
+    }
+
+    #[test]
     fn identity_accepts_our_package() {
         assert!(decide_identity("fno", "Jason Noah Choi").is_ok());
         // case-insensitive name, author embedded in a longer string
@@ -1525,9 +1649,10 @@ mod tests {
         fs::write(pkg.join("cli.cpython-313.pyc"), "").unwrap();
         fs::write(pkg.join("stray.py"), "").unwrap();
         fs::write(root.join("lib/other.txt"), "").unwrap();
-        assert_eq!(count_pyc(&root.join("lib")), 1);
-        // Absent dir is 0, not a panic.
-        assert_eq!(count_pyc(&root.join("nope")), 0);
+        assert_eq!(count_pyc(&root.join("lib")).unwrap(), 1);
+        // An absent dir is now an error the CALLER classifies (absence vs
+        // could-not-answer), not a silent 0.
+        assert!(count_pyc(&root.join("nope")).is_err());
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1677,6 +1802,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_lib_dir_is_not_diagnosed_as_missing_bytecode() {
+        // A read error under lib/ means the predicate could not ANSWER, not
+        // that the tree ships no bytecode. The absent-bytecode wording is one
+        // the failure stamp replays for the whole cooldown, so conflating
+        // EACCES with absence publishes a false diagnosis with a remedy that
+        // walks back into the same wall.
+        let root = env::temp_dir().join(format!("fno-libacc-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        let venv = tool_dir.join("fno");
+        fs::create_dir_all(venv.join("bin")).unwrap();
+        fs::create_dir_all(venv.join("lib")).unwrap();
+        let entry = venv.join("bin/fno-py");
+        fs::write(&entry, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(venv.join("lib/x.pyc"), "").unwrap();
+        fs::set_permissions(venv.join("lib"), fs::Permissions::from_mode(0o000)).unwrap();
+        let uv = uv_reporting_tool_dir(&root, &tool_dir);
+
+        let e = install_verified(&uv).unwrap_err();
+        assert!(e.contains(UV_DIR_UNREADABLE), "{e}");
+        assert!(!e.contains("no compiled bytecode"), "{e}");
+
+        fs::set_permissions(venv.join("lib"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn sentinel_survives_a_binary_that_is_only_transiently_absent() {
         // The trigger for the storm, not just the refusal. A single look during
         // the ~490ms window answers "gone", the caller drops the sentinel, and
@@ -1749,7 +1902,7 @@ mod tests {
         fs::write(
             &python,
             format!(
-                "#!/bin/sh\necho x >> {}\nprintf 'fno\\nSomeone Else\\n9.9.9\\n'\n",
+                "#!/bin/sh\necho x >> {}\nprintf 'name=fno\\nauthor=Someone Else\\nversion=9.9.9\\n'\n",
                 calls.display()
             ),
         )
@@ -1801,9 +1954,10 @@ mod tests {
         // cooldown over an install milliseconds from verifying.
         let root = env::temp_dir().join(format!("fno-torn-{}", std::process::id()));
         for (case, payload) in [
-            ("empty", "\\n\\n\\n"),
-            ("none", "None\\n\\nNone\\n"),
-            ("no-author", "fno\\n\\n0.4.2\\n"),
+            ("empty", "name=\\nauthor=\\nversion=\\n"),
+            ("none", "name=None\\nauthor=\\nversion=None\\n"),
+            ("no-author", "name=fno\\nauthor=\\nversion=0.4.2\\n"),
+            ("torn-author", "name=fno\\nauthor=Jason Noah Ch\\nversion=0.4.2\\n"),
         ] {
             let bin = root.join(case);
             fs::create_dir_all(&bin).unwrap();
