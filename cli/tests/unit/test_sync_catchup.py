@@ -383,7 +383,14 @@ def test_catchup_survives_a_wedged_events_bus(tmp_path, monkeypatch):  # AC5-FR
 
 def _tick_settings(**over):
     s = _pm(**over)
-    s.pr_watch = SimpleNamespace(max_age_days=7, retries=3, enabled=True)
+    s.pr_watch = SimpleNamespace(
+        max_age_days=7,
+        retries=3,
+        enabled=True,
+        tick_timeout_seconds=None,
+        interval_seconds=600,
+        graphql_min_remaining=200,
+    )
     s.recovery = SimpleNamespace(enabled=False)
     s.autonomy = SimpleNamespace(enabled=True)
     return s
@@ -403,7 +410,16 @@ def _run_tick(monkeypatch, catchup_result):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
     calls: list[str] = []
@@ -466,7 +482,16 @@ def test_tick_sweeps_each_project_independently(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
 
@@ -498,7 +523,16 @@ def test_tick_continues_after_one_project_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
 
@@ -563,7 +597,16 @@ def test_tick_survives_a_catchup_exception(monkeypatch):  # US2 non-fatal
     monkeypatch.setattr(
         "fno.pr_watch._dispatch.tick",
         lambda **_kw: SimpleNamespace(
-            lock_held=False, lock_holder=None, open_prs=0, acted=0, skipped=0, disabled=False
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=False,
+            quota_remaining=None,
+            quota_reset=None,
         ),
     )
     monkeypatch.setattr(
