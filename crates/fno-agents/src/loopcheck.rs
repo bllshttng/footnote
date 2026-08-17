@@ -3493,10 +3493,7 @@ fn reviewed_commit_from_body(body: &str) -> &str {
     // The marker match lowercases the body, so the lowercased spelling parses
     // here too; any other casing stays unpinned, which is the fail-closed no.
     let marker_lc = MARKER.to_lowercase();
-    let Some(idx) = body
-        .find(MARKER)
-        .or_else(|| body.find(marker_lc.as_str()))
-    else {
+    let Some(idx) = body.find(MARKER).or_else(|| body.find(marker_lc.as_str())) else {
         return "";
     };
     let token = body[idx + MARKER.len()..]
@@ -3581,10 +3578,7 @@ fn clean_pass_review(
 fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
     lower.match_indices(marker).any(|(i, _)| {
         let rest = lower[i + marker.len()..].trim_start();
-        rest.is_empty()
-            || rest.starts_with('.')
-            || rest.starts_with('!')
-            || rest.starts_with('?')
+        rest.is_empty() || rest.starts_with('.') || rest.starts_with('!') || rest.starts_with('?')
     })
 }
 
@@ -3627,7 +3621,11 @@ fn bot_verdict(
         if !logins_correspond(author, login) {
             continue;
         }
-        if r.get("state").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if r.get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             continue;
         }
         let oid = r
@@ -13856,11 +13854,7 @@ mod tests {
         assert_eq!(verdict, CoverageVerdict::Reviewed);
         assert_eq!(sha, "abc12345");
         let json = serde_json::json!({"reviews": reviews, "comments": comments});
-        let info = compute_review_info(
-            &json,
-            &["chatgpt-codex-connector".to_string()],
-            &fresh_at,
-        );
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
         assert!(info.all_required_passed());
     }
 
@@ -13877,11 +13871,7 @@ mod tests {
         let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
         assert_eq!(verdict, CoverageVerdict::Refused);
         let json = serde_json::json!({"reviews": [], "comments": comments});
-        let info = compute_review_info(
-            &json,
-            &["chatgpt-codex-connector".to_string()],
-            &fresh_at,
-        );
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
         assert!(!info.all_required_passed());
         assert_eq!(
             info.usage_limited,
@@ -13901,11 +13891,7 @@ mod tests {
         let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
         assert_eq!(verdict, CoverageVerdict::Reviewed);
         let json = serde_json::json!({"reviews": [], "comments": comments});
-        let info = compute_review_info(
-            &json,
-            &["chatgpt-codex-connector".to_string()],
-            &fresh_at,
-        );
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
         assert!(info.all_required_passed());
     }
 
@@ -13921,11 +13907,7 @@ mod tests {
         let fresh_at = fresh_at_head();
         assert!(clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none());
         let json = serde_json::json!({"reviews": [], "comments": comments});
-        let info = compute_review_info(
-            &json,
-            &["chatgpt-codex-connector".to_string()],
-            &fresh_at,
-        );
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
         assert_eq!(
             info.missing_bots,
             vec!["chatgpt-codex-connector".to_string()]
