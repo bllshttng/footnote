@@ -39,6 +39,12 @@ from typing import Any, Callable, Optional
 # ``stalled`` verdict asserts the session went silent while still owing its
 # next move, which is a fact about the tail rather than an absence in it.
 from fno.agents.session_truth import classify_tail
+# The quota phrasings the shipped taxonomy owns. The wake window must mark
+# every spelling the failover classifier marks: three workers died on
+# "Usage limit reached" (2026-08-17), which a rate-limit-only regex reads as
+# ordinary silence, and the wake lane then burns a turn inside a closed
+# window.
+from fno.adapters.providers.error_taxonomy import _QUOTA_BODY_MARKERS
 
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
 Row = namedtuple("Row", "row_id name state node cwd")
@@ -96,11 +102,18 @@ REAP_QUIET_AFTER_S = 900
 # sessions launched at 18:45 and 18:46 took a 429 they would not have taken
 # three minutes later, so waking inside a closed window costs a real turn -
 # which is why an UNPARSEABLE stamp classifies leave, never wake.
-_RATE_MARK_RE = re.compile(r"\b429\b|rate[ _-]?limit", re.IGNORECASE)
+_RATE_MARK_RE = re.compile(
+    r"\b429\b|" + "|".join(re.escape(m) for m in _QUOTA_BODY_MARKERS),
+    re.IGNORECASE,
+)
 _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
 _SGT_OFFSET_S = 8 * 3600
 _TAIL_BYTES = 64 * 1024
 _TAIL_RECORDS = 15
+#: A chatty attach (restore markers, compaction lines) can push the wake
+#: message past the 15-record classification tail between the resume and the
+#: confirmation read, so confirmation scans deeper than classification.
+_CONFIRM_RECORDS = 60
 
 #: The generated no-session holder form (target_cli._successor_claim_holder
 #: and init-target-state.sh's claim_owner_id): ``<UTC stamp>-<pid junk>-<hex>``.
@@ -361,7 +374,9 @@ def _holder_session(holder: Optional[str]) -> Optional[str]:
 # Real I/O seams (every one injectable; the classifier above stays pure)
 # ---------------------------------------------------------------------------
 
-def tail_facts(session_id: str, cwd: str) -> Optional[TailFacts]:
+def tail_facts(
+    session_id: str, cwd: str, *, max_records: int = _TAIL_RECORDS
+) -> Optional[TailFacts]:
     """Resolve a session's transcript and tail-read it. Never raises.
 
     Reuses the provenance resolver (content-aware across every project dir -
@@ -416,7 +431,7 @@ def tail_facts(session_id: str, cwd: str) -> Optional[TailFacts]:
             last_role = str(role)
             last_text = text
             last_kind = "tool" if _has_tool_use(e) else "text"
-    records = records[-_TAIL_RECORDS:]
+    records = records[-max_records:]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
     return TailFacts(
         records, last_epoch, " ".join(t for _, t in records),
@@ -464,8 +479,11 @@ def _ledger_nodes() -> dict[str, str]:
     the operator fleet's ``t-`` shorthand names are ambiguous (the node's
     dash is stripped, so the slug boundary is unknowable - the name-join trap
     in its exact measured form). The ledger is machine-written recorded
-    identity: each execution entry names its node and the claude sessions
-    that ran it. A miss degrades to no node, which condemns nothing."""
+    identity: each execution entry names its node in ``graph_node_id``, the
+    documented join key, and the claude sessions that ran it. ``title`` is
+    the free-text task input and joins nothing - keying on it was the
+    name-join trap wearing a second coat. A miss degrades to no node, which
+    condemns nothing."""
     from fno import paths
 
     try:
@@ -478,7 +496,7 @@ def _ledger_nodes() -> dict[str, str]:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        node = str(e.get("title") or "")
+        node = str(e.get("graph_node_id") or "")
         if not node:
             continue
         for sid in e.get("sessions") or []:
@@ -514,9 +532,14 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
     # multi-megabyte ledger once per manifest-less row.
     ledger_nodes: Optional[dict[str, str]] = None
     out: list[Row] = []
+    skipped_no_sid = 0
     for r in raw:
-        sid = str(r.get("sessionId") or r.get("id") or "")
+        sid = str(r.get("sessionId") or "")
         if not sid:
+            # A row carrying only claude's 8-hex short id can never resolve a
+            # transcript, a claim, or a ledger row - carrying it forward reads
+            # a live session as a ghost. Skipped loudly, never classified.
+            skipped_no_sid += 1
             continue
         match: Any = by_sid.get(sid)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
@@ -533,6 +556,11 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
             node=node,
             cwd=cwd,
         ))
+    if skipped_no_sid:
+        warnings = [
+            *warnings,
+            f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
+        ]
     return out, warnings
 
 
@@ -850,14 +878,18 @@ def confirm_wake_landed(
     row_id: str, cwd: str, message: str, before_epoch: Optional[float]
 ) -> bool:
     """The message must appear in the recipient transcript AFTER the pre-wake
-    marker. The state field is not evidence: ``wake.sh`` printed
-    ``working -> working`` for both a message that landed and one that did not
-    (the same content-not-state contract as mail_inject's confirm_content_after)."""
-    facts = tail_facts(row_id, cwd)
+    marker, as a record whose whole text EQUALS the message - a substring
+    match reads "Let me continue with the tests" as a landed wake. The state
+    field is not evidence: ``wake.sh`` printed ``working -> working`` for both
+    a message that landed and one that did not (the same content-not-state
+    contract as mail_inject's confirm_content_after). The scan runs deeper
+    than the classification tail so a chatty attach cannot push the message
+    out of the confirmation window."""
+    facts = tail_facts(row_id, cwd, max_records=_CONFIRM_RECORDS)
     if facts is None:
         return False
     for epoch, text in facts.records:
-        if message not in text:
+        if text != message:
             continue
         if before_epoch is None or (epoch is not None and epoch > before_epoch):
             # before_epoch None (no parseable pre-wake stamp) degrades to a
@@ -956,12 +988,29 @@ def _apply_reroute(
         cwd=cwd, name=v.row_id,
     )
     outcome = fn(candidate, err)
-    if outcome in ("swapped", "notified"):
-        return "applied", f"failover {outcome} ({v.basis})"
+    if outcome == "swapped":
+        return "applied", f"failover swapped ({v.basis})"
+    if outcome == "notified":
+        # The revive path failed and only a human ping fired: nothing was
+        # delivered, so this is never an applied.
+        return (
+            "reported",
+            f"failover rotated, replacement not spawned, human notified ({v.basis})",
+        )
+    if outcome == "rotated-no-worker":
+        # The receipt must not claim the session is untouched: on this path
+        # the stop and the node-claim force-release may ALREADY have run
+        # before the spawn failed. Name what is certain and what to check.
+        return (
+            "refused",
+            f"failover rotated but no replacement spawned ({v.basis}). The "
+            "old session may already be stopped and its claim force-released. "
+            "Re-check the row before acting on it",
+        )
     return (
         "refused",
         f"reroute refused: failover outcome {outcome!r}, no alternate armed "
-        f"({v.basis}); session left as-is",
+        f"({v.basis}). Nothing rotated and the session is left as-is",
     )
 
 

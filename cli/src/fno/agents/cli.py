@@ -2714,14 +2714,19 @@ def cmd_watchdog(
         print(f"watchdog mail failed: {exc}", file=sys.stderr)
     wd.write_sweep_file("manual", payload["counts"], now, signature)
 
+    # Classification events ride every mode: a verdict emitted only under a
+    # dry run left apply modes with no event record at all, while the tick
+    # emits per non-leave row regardless of mode. The two lanes must not
+    # diverge on what the record shows.
+    for v, _row in pairs:
+        if v.verdict != wd.LEAVE:
+            wd.emit_event(
+                "watchdog_verdict",
+                {"row_id": v.row_id, "name": v.name,
+                 "verdict": v.verdict, "basis": v.basis},
+            )
+
     if not apply and not apply_all:
-        for v, _row in pairs:
-            if v.verdict != wd.LEAVE:
-                wd.emit_event(
-                    "watchdog_verdict",
-                    {"row_id": v.row_id, "name": v.name,
-                     "verdict": v.verdict, "basis": v.basis},
-                )
         if json_out:
             filtered = {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
             sys.stdout.write(json.dumps(filtered) + "\n")
@@ -2738,7 +2743,10 @@ def cmd_watchdog(
     lanes = "all" if apply_all else "wake"
     results = []
     for v, row in pairs:
-        outcome, detail = wd.apply_verdict(v, lanes=lanes, cwd=row.cwd)
+        try:
+            outcome, detail = wd.apply_verdict(v, lanes=lanes, cwd=row.cwd)
+        except Exception as exc:  # noqa: BLE001 - one broken row never aborts the rest
+            outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
         results.append({"row_id": v.row_id, "verdict": v.verdict,
                         "outcome": outcome, "detail": detail})
         if outcome == "reported":

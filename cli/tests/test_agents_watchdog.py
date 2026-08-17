@@ -117,6 +117,31 @@ def test_newest_429_stamp_decides_the_window():
     assert rate_limit_window("429 resets 02:10:00 SGT 429 quota exceeded", NOW_1840)[0] == "unknown"
 
 
+def test_taxonomy_quota_phrasings_mark_the_window():
+    """The wake window must mark every spelling the failover taxonomy marks.
+    Three workers died on the usage-limit phrasing on 2026-08-17, and a
+    rate-limit-only regex reads their tails as ordinary silence."""
+    assert rate_limit_window(
+        "Claude usage limit reached. Window resets at 02:48:21 SGT", NOW_1840
+    )[0] == "live"
+    assert rate_limit_window(
+        "quota exceeded, resets 02:48:21 SGT", NOW_1840
+    )[0] == "live"
+    # A usage-limit tail with no parseable stamp is unknown: fail safe.
+    assert rate_limit_window(
+        "API Error Request rejected 429, Usage limit reached for 5 hour", NOW_1840
+    )[0] == "unknown"
+    row = Row("ab12cd34-0000", "u1", "blocked", None, "/tmp/u1")
+    [v] = _run(
+        [row],
+        {"ab12cd34-0000": _facts(
+            "API Error Request rejected 429, Usage limit reached for 5 hour",
+            age_min=125,
+        )},
+    )
+    assert v.verdict == LEAVE
+
+
 def test_old_passed_plus_new_live_429_is_reroute_not_wake():
     row = Row("eeee5555-0000", "r2", "blocked", None, "/tmp/r2")
     old = "429 rate limit, window resets at 02:10:00 SGT"
@@ -249,13 +274,18 @@ def test_ledger_join_finds_nodes_for_manifest_less_rows(monkeypatch, tmp_path):
     # dash is stripped in it, so the slug boundary is unknowable.
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"title": "x-d214", "sessions": ["e65d5fff-8ba4-46d4-b2df-f19b2eb832f1"]},
+        # graph_node_id is the documented join key; title is the free-text
+        # task input and must join nothing - not even a bare node-shaped one.
+        {"title": "fix the login bug", "graph_node_id": "x-d214",
+         "sessions": ["e65d5fff-8ba4-46d4-b2df-f19b2eb832f1"]},
+        {"title": "x-d214", "sessions": ["aaaa1111-0000"]},
     ]}))
     import fno.paths as paths_mod
 
     monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
     nodes = watchdog._ledger_nodes()
     assert nodes["e65d5fff-8ba4-46d4-b2df-f19b2eb832f1"] == "x-d214"
+    assert "aaaa1111-0000" not in nodes
 
 
 def test_no_parseable_evidence_never_wakes():
@@ -329,7 +359,7 @@ def test_wake_reports_failure_when_message_missing_despite_working_state(
     working -> working for a wake whose message never landed."""
     v = Verdict("dddd4444-0000", "k1", "stopped", WAKE, "stopped 30m", "resume")
     monkeypatch.setattr(
-        watchdog, "tail_facts", lambda sid, cwd: _facts("stopped mid turn")
+        watchdog, "tail_facts", lambda *a, **k: _facts("stopped mid turn")
     )
     outcome, detail = apply_verdict(
         v, lanes="wake", cwd="/tmp/k1", runner=lambda *a, **k: _Proc(0)
@@ -342,7 +372,7 @@ def test_wake_applies_when_message_lands(monkeypatch):
     v = Verdict("dddd4444-0000", "k1", "stopped", WAKE, "stopped 30m", "resume")
     reads = {"n": 0}
 
-    def fake_tail(sid, cwd):
+    def fake_tail(*a, **k):
         # First read (pre-wake marker) has no message; the post-wake read
         # carries it at a LATER epoch, the way a landed message really lands.
         reads["n"] += 1
@@ -364,7 +394,7 @@ def test_lifecycle_subprocesses_run_in_the_rows_worktree(monkeypatch):
     seen = {}
     reads = {"n": 0}
 
-    def fake_tail(sid, cwd):
+    def fake_tail(*a, **k):
         reads["n"] += 1
         if reads["n"] == 1:
             return _facts("stopped mid turn")
@@ -392,7 +422,7 @@ def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
         before_epoch,
         "we continue with the plan old turn",
     )
-    monkeypatch.setattr(watchdog, "tail_facts", lambda sid, cwd: facts)
+    monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert not watchdog.confirm_wake_landed(
         "dddd4444-0000", "/tmp/k1", "continue", before_epoch
     )
@@ -402,6 +432,58 @@ def test_wake_lane_only_wakes_even_with_lanes_all_available():
     reroute = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
     outcome, _ = apply_verdict(reroute, lanes="wake", cwd="/tmp/r1")
     assert outcome == "reported"
+
+
+def test_wake_confirmation_requires_the_exact_message(monkeypatch):
+    """A substring match read 'Let me continue with the tests' as a landed
+    wake. The record's whole text must equal the message."""
+    before = NOW_1840 - 5 * 60
+    facts = TailFacts(
+        [(before, "stopped mid turn"), (NOW_1840, "Let me continue with the tests")],
+        NOW_1840,
+        "stopped mid turn Let me continue with the tests",
+    )
+    monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
+    assert not watchdog.confirm_wake_landed(
+        "dddd4444-0000", "/tmp/k1", "continue", before
+    )
+
+
+def test_wake_confirmation_scans_past_the_classification_tail(monkeypatch):
+    """A chatty attach pushes the message past the 15-record classification
+    tail. Confirmation reads deeper, so a landed wake never reads refused."""
+    marker = NOW_1840 - 200 * 60
+    records = [(marker, "continue")] + [
+        (marker + i * 30, f"restore noise {i}") for i in range(1, 41)
+    ]
+    facts = TailFacts(records, records[-1][0], " ".join(t for _, t in records))
+    monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
+    assert watchdog.confirm_wake_landed(
+        "dddd4444-0000", "/tmp/k1", "continue", marker - 60
+    )
+
+
+def test_rows_without_a_session_id_are_skipped_loudly(monkeypatch, tmp_path):
+    """A short id never resolves a transcript, so a live row keyed on it
+    reads ghost. Such rows are skipped with a warning, never classified."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    import fno.paths as paths_mod
+
+    raw = [
+        {"id": "51f36553", "state": "working", "cwd": "/tmp/w2", "name": "tgt-live"},
+        {"sessionId": "baf9409a-2af5-444a-846c-059e8fa2f758", "state": "stopped",
+         "cwd": "/tmp/w", "name": "tgt-stopped"},
+    ]
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda: (raw, []))
+    monkeypatch.setattr(
+        registry_mod, "load_registry", lambda: (_ for _ in ()).throw(OSError())
+    )
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: tmp_path / "no.json")
+
+    rows, warnings = watchdog.fleet_rows()
+    assert [r.row_id for r in rows] == ["baf9409a-2af5-444a-846c-059e8fa2f758"]
+    assert any("no session id" in w for w in warnings)
 
 
 def test_reap_refuses_on_unpushed_commits_with_count_named(tmp_path):
@@ -508,6 +590,39 @@ def test_reroute_refuses_when_no_alternate_is_armed(monkeypatch):
     )
     # Refusing beats a stop/respawn loop onto the same capped account.
     assert outcome == "refused" and "queue-exhausted" in detail
+
+
+def test_reroute_receipts_tell_the_truth(monkeypatch):
+    """The receipt must not lie about an action already taken: on
+    rotated-no-worker the stop and the node-claim force-release may already
+    have run, and notified means a human ping, not a delivery."""
+    monkeypatch.setattr(
+        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+    )
+    v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
+
+    def returning(outcome_value):
+        def fn(candidate, err):
+            return outcome_value
+        return fn
+
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/tmp/r1", failover_fn=returning("rotated-no-worker")
+    )
+    assert outcome == "refused"
+    assert "no replacement spawned" in detail and "Re-check" in detail
+    assert "left as-is" not in detail
+
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/tmp/r1", failover_fn=returning("notified")
+    )
+    assert outcome == "reported"
+    assert "human notified" in detail
+
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/tmp/r1", failover_fn=returning("no-swap")
+    )
+    assert outcome == "refused" and "left as-is" in detail
 
 
 # ---------------------------------------------------------------------------
@@ -800,3 +915,50 @@ def test_cli_refused_sweep_exits_loud_without_writing(monkeypatch, tmp_path):
     else:
         raise AssertionError("a refused sweep must exit non-zero")
     assert wrote == []
+
+
+def test_manual_apply_survives_one_crashing_row_and_emits_verdicts(
+    monkeypatch, tmp_path
+):
+    """One broken row never aborts the rest of an --apply run, and the
+    classification events ride apply modes exactly like the tick's."""
+    import contextlib
+    import io as _io
+    from fno.agents import cli as agents_cli
+
+    verdicts = [
+        Verdict("aaaa1111-0000", "w1", "stopped", WAKE, "blocked 30m", "resume"),
+        Verdict("bbbb2222-0000", "w2", "stopped", WAKE, "blocked 30m", "resume"),
+    ]
+    rows = [Row("aaaa1111-0000", "w1", "stopped", None, "/tmp/w1"),
+            Row("bbbb2222-0000", "w2", "stopped", None, "/tmp/w2")]
+    payload = {"generated_at": "x", "verdicts": [v._asdict() for v in verdicts],
+               "counts": {WAKE: 2}, "warnings": []}
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, rows))
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+
+    def crashy(v, **kw):
+        if v.row_id.startswith("aaaa"):
+            raise TypeError("boom")
+        return "applied", "woke w2"
+
+    monkeypatch.setattr(watchdog, "apply_verdict", crashy)
+    events = []
+    monkeypatch.setattr(
+        watchdog, "emit_event", lambda kind, data: events.append(kind)
+    )
+
+    out = _io.StringIO()
+    with contextlib.redirect_stdout(out):
+        agents_cli.cmd_watchdog(json_out=True, apply=True, apply_all=False,
+                                only=None, mail_to="")
+    data = json.loads(out.getvalue().strip().splitlines()[-1])
+    by_row = {r["row_id"]: r for r in data["results"]}
+    assert by_row["aaaa1111-0000"]["outcome"] == "refused"
+    assert "crashed" in by_row["aaaa1111-0000"]["detail"]
+    assert by_row["bbbb2222-0000"]["outcome"] == "applied"
+    # Verdict events fire in apply mode too, matching the tick's contract.
+    assert events.count("watchdog_verdict") == 2
