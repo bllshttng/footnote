@@ -197,3 +197,26 @@ def test_rust_merge_strategy_allowlist_matches_model() -> None:
     assert rust == model, (
         f"{rs.name} allows {sorted(rust)} but AutoMergeBlock allows {sorted(model)}"
     )
+
+
+def test_rust_auto_merge_grant_reads_both_spellings() -> None:
+    """`auto_merge_grant` is the Rust reader of the actor-scope key (x-4be1).
+
+    It must read the canonical `auto_merge.grant` spelling AND keep the legacy
+    `dispatch.auto_merge` arm for one release, mirroring the Python alias; a
+    rename honored on one of N reachable paths is exactly the pitfalls-corpus
+    trap this file exists to pin. Source-to-source, same shape as the
+    strategy guard above; the behavior cases live in the Rust unit tests.
+    """
+    rs = _repo_root() / "crates" / "fno-agents" / "src" / "agents_config.rs"
+    src = rs.read_text(encoding="utf-8")
+    m = re.search(r"pub fn auto_merge_grant.*?\n\}", src, re.DOTALL)
+    assert m, f"auto_merge_grant not found in {rs.name} (guard inert?)"
+    body = m.group(0)
+    assert 'get("auto_merge")' in body and 'get("grant")' in body, (
+        "Rust reader lost the canonical auto_merge.grant spelling"
+    )
+    assert 'get("dispatch")' in body and "auto_merge" in body, (
+        "Rust reader lost the legacy dispatch.auto_merge arm"
+    )
+    assert '"dispatch"' in body, "Rust reader does not compare against the grant literal"
