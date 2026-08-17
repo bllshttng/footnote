@@ -227,3 +227,20 @@ def test_fno_done_front_door_routes_through_the_same_terminal(
     r = runner.invoke(app, ["done", "EXT-1"], catch_exceptions=False)
     assert r.exit_code == 0, r.output
     assert tracker.close_calls == ["EXT-1"]
+
+
+def test_backfill_sweep_refused_externally_without_touching_graph(
+    tmp_path, monkeypatch
+):
+    """The graph-store sweep (enumerate done nodes, write rollups back) has no
+    legal target under an external backend: it must refuse before any read and
+    leave the contradictory local graph file byte-identical."""
+    rows = [{"id": "EXT-1", "state": "closed", "title": "Done thing"}]
+    _wire(monkeypatch, tmp_path, rows, {"EXT-1": {}})
+    g = tmp_path / "graph.json"
+    before = g.read_bytes()
+
+    r = runner.invoke(app, ["done", "--backfill"], catch_exceptions=False)
+    assert r.exit_code == 1
+    assert "refused" in r.output
+    assert g.read_bytes() == before

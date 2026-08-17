@@ -409,6 +409,21 @@ def done_command(
 
     # -- backfill mode (no status change, may be batch) --
     if backfill:
+        # The sweep enumerates done nodes from the graph store and writes
+        # rollup fields back into it. Under an external backend the done
+        # roster lives in the tracker and the rollup lives in the footnote
+        # sidecar, so both halves target the wrong store; the per-node door
+        # above already fills sidecar rollups at completion time.
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            typer.echo(
+                "fno done --backfill: refused - the sweep reads and writes "
+                "the graph store, which is not selected (rollups live in the "
+                "footnote sidecar under an external backend)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         entries = read_graph(graph_path)
         if query:
             branch = _current_branch()
