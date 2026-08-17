@@ -44,6 +44,37 @@ REFUSED = 3
 UNANSWERED = 4
 
 
+def covered_conjuncts(
+    cov: Optional[dict], head: str, code_review_required: bool
+) -> Tuple[bool, str]:
+    """Which gate conjuncts a coverage row satisfies: ``(covered, failed)``.
+
+    The single spelling of "does this row clear the coverage guard", consumed
+    by ``coverage_verdict`` below AND by ``fno pr status``'s ``ready``
+    conjunct, so status can never report ready on a row merge refuses (a
+    partial copy of this predicate is exactly how it did). ``failed`` is
+    empty when covered, else one of ``uncovered`` / ``no_local_pass`` /
+    ``stale_head`` naming the conjunct that broke; callers map it to their
+    own blocker names. An empty ``head`` skips the staleness conjunct: the
+    gate always reaches here with a confirmed-live head, and a status read
+    missing one degrades on staleness rather than guessing a mismatch.
+    """
+    if not (
+        cov is not None
+        and cov.get("coverage") == "covered"
+        and _merge._safe_int(cov.get("reviewed_count"), 0) > 0
+    ):
+        return False, "uncovered"
+    if code_review_required and not _merge._coverage_has_local_pass(cov, "code-review"):
+        return False, "no_local_pass"
+    # Staleness: the event pins a head; if the PR head moved after the row was
+    # computed, the coverage no longer describes what would merge.
+    ev_head = cov.get("head_sha") if cov else None
+    if ev_head and head and head != ev_head:
+        return False, "stale_head"
+    return True, ""
+
+
 def coverage_verdict(
     pr_number: int, repo: str, *, recompute: bool
 ) -> Tuple[int, str, str, str]:
@@ -86,23 +117,7 @@ def coverage_verdict(
             return UNANSWERED, "", "", f"events read raised: {exc}"
         recompute_note = ""
 
-    covered = (
-        cov is not None
-        and cov.get("coverage") == "covered"
-        and _merge._safe_int(cov.get("reviewed_count"), 0) > 0
-        and (
-            not code_review_required
-            or _merge._coverage_has_local_pass(cov, "code-review")
-        )
-    )
-    if covered:
-        # Staleness: the event pins a head; if the PR head moved after the gate
-        # eval, the coverage no longer describes what would merge. The caller's
-        # head is confirmed live here (UNANSWERED above), so a mismatch is
-        # always a real mismatch.
-        ev_head = cov.get("head_sha") if cov else None
-        if ev_head and head != ev_head:
-            covered = False
+    covered, _failed = covered_conjuncts(cov, head, code_review_required)
     if covered:
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", recompute_note
 
