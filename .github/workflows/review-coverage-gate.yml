@@ -17,9 +17,11 @@ name: review-coverage-gate
 #     - UNLESS the coverage-override label is applied: the override is durable
 #     shared state that a push does not revoke, so it is re-read first.
 #   labeled/unlabeled with `coverage-override` - the override arm: label
-#     present posts success naming the actor; withdrawn posts failure. Any
-#     other label is a no-op: re-posting failure would clobber a green marker
-#     a worker legitimately published on that same sha.
+#     present posts success naming the actor; withdrawn invalidates the
+#     override's OWN green, re-reading the head first so a verdict a
+#     publisher wrote survives the spent label's removal. Any other label is
+#     a no-op: re-posting failure would clobber a green marker a worker
+#     legitimately published on that same sha.
 #
 # The override label is read by EVERY writer of this status (the Rust
 # publishers in loopcheck.rs re-read it before each post), so a cancelled
@@ -112,6 +114,16 @@ jobs:
               fi
               ;;
           esac
+          # The description our context currently carries on this head, via
+          # the COMBINED endpoint (one entry per context, the latest - no
+          # same-second tie to break; the same read the post-merge audit
+          # uses). Empty means no status yet.
+          current_desc() {
+            gh api -R "${GITHUB_REPOSITORY}" \
+              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
+              --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\"" \
+              2>/dev/null || true
+          }
           case "$EVENT:$ACTION" in
             pull_request:labeled)
               if [ "$LABEL" = "coverage-override" ]; then
@@ -123,8 +135,23 @@ jobs:
               ;;
             pull_request:unlabeled)
               if [ "$LABEL" = "coverage-override" ]; then
-                post failure "coverage-override withdrawn by ${ACTOR}; run the review verb at HEAD"
-                echo "override withdrawn: posted failure"
+                # Withdrawal invalidates the LABEL's green, never a verdict a
+                # publisher wrote. At 3am the operator labels, the worker
+                # then reviews for real, the publisher greens the head, and
+                # the operator removes the spent label - posting failure
+                # there blocks a covered PR until someone re-reviews. Re-read
+                # what the head carries; only the override's own green dies
+                # with the override.
+                cur="$(current_desc)"
+                case "$cur" in
+                  coverage-override*)
+                    post failure "coverage-override withdrawn by ${ACTOR}; run the review verb at HEAD"
+                    echo "override withdrawn: invalidated the override green"
+                    ;;
+                  *)
+                    echo "override withdrawn; head carries '${cur:-no status}' - no change"
+                    ;;
+                esac
               else
                 echo "label '${LABEL}' is not the override; no status change"
               fi
@@ -146,8 +173,21 @@ jobs:
                 post success "coverage-override label still applied (head moved to ${HEAD_SHA:0:8})"
                 echo "synchronize: override still held; re-stamped success at ${HEAD_SHA:0:8}"
               else
-                post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
-                echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+                # The same guard as withdrawal, for the delayed run: a
+                # publisher may have reviewed this new head and posted a
+                # covered verdict before this queued run got its turn.
+                # Invalidation must not clobber a real verdict, only hold
+                # the line where none exists yet.
+                cur="$(current_desc)"
+                case "$cur" in
+                  covered*|"no review lane"*)
+                    echo "synchronize: head ${HEAD_SHA:0:8} already carries a publisher verdict - no change"
+                    ;;
+                  *)
+                    post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
+                    echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+                    ;;
+                esac
               fi
               ;;
             workflow_dispatch:)
