@@ -357,6 +357,10 @@ retries = 3
 max_age_days = 14
 # Claude model used for headless PR-watcher skill fires.
 model = "claude-haiku-4-5"
+# Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a stalled tick can never suppress its successor.
+# tick_timeout_seconds = <unset>   # optional; no default
+# Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below this floor.
+graphql_min_remaining = 200
 
 [groom]
 # Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true.
