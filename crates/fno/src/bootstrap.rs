@@ -224,7 +224,23 @@ fn run(args: &[OsString]) -> BootResult<()> {
     eprintln!(
         "fno: first run - provisioning the fno CLI via uv (one time, may take a few seconds)..."
     );
-    install_wheel(&uv, &source)?;
+    // A verify failure here has to be REMEMBERED, or the stamp below is a guard
+    // on one of N paths. `install_verified` refuses on three shapes now (absent
+    // script, non-executable script, no bytecode), and every one of them means
+    // uv exited zero over a tree that yields no usable fno. Propagating with a
+    // bare `?` leaves nothing behind, so the very next `fno` call repeats the
+    // whole 19-package install - the per-call reinstall this cooldown exists to
+    // stop. The non-executable shape used to reach the stamped locate arm below;
+    // once `install_verified` started refusing it, it stopped.
+    //
+    // Only this shape. A uv that itself failed (network, auth, disk) must not be
+    // cached: the operator fixes it and the next call must try again.
+    if let Err(e) = install_wheel(&uv, &source) {
+        if e.msg.starts_with(UNVERIFIED_INSTALL_PREFIX) {
+            write_failure_stamp(&source, &e.msg);
+        }
+        return Err(e);
+    }
 
     // Waited for the same reason the verify below is, and this gate runs FIRST:
     // `install_verified_within` proved the script executable moments ago, so a
@@ -417,10 +433,7 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         if out.status.success() {
             return match install_verified_within(uv, VERIFY_ATTEMPTS, VERIFY_POLL) {
                 Ok(()) => Ok(()),
-                Err(m) => Err(BootErr::new(
-                    1,
-                    format!("uv reported success but the install does not verify: {m}"),
-                )),
+                Err(m) => Err(BootErr::new(1, format!("{UNVERIFIED_INSTALL_PREFIX}: {m}"))),
             };
         }
         let code = out.status.code().unwrap_or(1);
@@ -442,6 +455,13 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     }
     unreachable!("the loop returns on success, non-signature failure, or final attempt")
 }
+
+/// The one `install_wheel` failure shape that means "uv exited zero and nothing
+/// usable landed". `run()` keys the failure stamp on it, so the text is a
+/// constant rather than a literal repeated at both sites: the two must not drift.
+/// A uv that itself failed (network, auth, disk) is deliberately NOT this shape
+/// and is never cached, so the operator's fix takes effect on the next call.
+const UNVERIFIED_INSTALL_PREFIX: &str = "uv reported success but the install does not verify";
 
 /// How many times `install_wheel` may run uv before giving up. Three: one
 /// real attempt plus two retries, enough to absorb the measured intermittent
@@ -1621,7 +1641,11 @@ mod tests {
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
 
         let e = install_wheel(&uv, "fno").unwrap_err();
-        assert!(e.msg.contains("does not verify"), "{}", e.msg);
+        // Pinned to the PREFIX, not just the words: `run()` decides whether to
+        // remember this failure by matching the start of the message, and a
+        // reworded first clause would silently turn the stamp back off and
+        // restore the reinstall-on-every-call behaviour.
+        assert!(e.msg.starts_with(UNVERIFIED_INSTALL_PREFIX), "{}", e.msg);
         assert!(e.msg.contains("no compiled bytecode"), "{}", e.msg);
         fs::remove_dir_all(&root).ok();
     }
