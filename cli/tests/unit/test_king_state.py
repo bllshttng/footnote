@@ -1,0 +1,139 @@
+"""The king session manifest and the freshness predicate that proves a walk ran."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from fno.king.state import (
+    KingManifestExists,
+    last_run_is_fresh,
+    parse_manifest,
+    write_manifest,
+)
+
+
+def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):
+    path = tmp_path / "king-state.md"
+    write_manifest(path, scope="board drain", harness_session_id="sess-1")
+
+    fields = parse_manifest(path)
+    assert fields["scope"] == "board drain"
+    assert fields["harness_session_id"] == "sess-1"
+    assert fields["fno_id"]
+    assert fields["created_at"].endswith("Z")
+    assert int(fields["budget_max_iterations"]) > 0
+
+
+def test_the_manifest_is_immutable_after_init(tmp_path):
+    """Same rule as the target manifest: write-once, and a second init refuses
+    rather than silently forking one session's identity in place."""
+    path = tmp_path / "king-state.md"
+    write_manifest(path, scope="first", harness_session_id="sess-1")
+    before = path.read_text(encoding="utf-8")
+
+    with pytest.raises(KingManifestExists):
+        write_manifest(path, scope="second", harness_session_id="sess-2")
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_force_replaces_the_manifest_for_a_deliberate_re_init(tmp_path):
+    path = tmp_path / "king-state.md"
+    write_manifest(path, scope="first", harness_session_id="sess-1")
+    write_manifest(path, scope="second", harness_session_id="sess-2", force=True)
+    assert parse_manifest(path)["scope"] == "second"
+
+
+def test_a_scope_with_a_quote_survives_the_round_trip(tmp_path):
+    path = tmp_path / "king-state.md"
+    write_manifest(path, scope='drain "x-e747" and friends', harness_session_id="s")
+    assert parse_manifest(path)["scope"] == 'drain "x-e747" and friends'
+
+
+def test_parsing_a_missing_manifest_returns_nothing(tmp_path):
+    assert parse_manifest(tmp_path / "absent.md") == {}
+
+
+# --- the freshness predicate ------------------------------------------------
+
+
+def _journal(tmp_path, *events):
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8"
+    )
+    return path
+
+
+def _terminated(ts, *, driver="king", reason="NoWork"):
+    return {
+        "ts": ts,
+        "type": "loop_terminated",
+        "source": "loop",
+        "data": {"driver": driver, "reason": reason},
+    }
+
+
+NOW = "2026-08-18T12:00:00Z"
+
+
+def test_a_king_termination_inside_the_window_is_fresh(tmp_path):
+    path = _journal(tmp_path, _terminated("2026-08-18T02:00:00Z"))
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is True
+
+
+def test_a_king_termination_outside_the_window_is_stale(tmp_path):
+    path = _journal(tmp_path, _terminated("2026-08-01T02:00:00Z"))
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is False
+
+
+def test_an_empty_journal_is_not_fresh(tmp_path):
+    """The predicate has to be a real freshness read, not a vacuous file test:
+    an absent run is exactly what it exists to report."""
+    path = _journal(tmp_path)
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is False
+
+
+def test_a_target_termination_does_not_satisfy_the_king_predicate(tmp_path):
+    path = _journal(tmp_path, _terminated("2026-08-18T02:00:00Z", driver="target"))
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is False
+
+
+def test_the_newest_king_termination_wins_over_an_older_one(tmp_path):
+    path = _journal(
+        tmp_path,
+        _terminated("2026-08-18T02:00:00Z"),
+        _terminated("2026-08-01T02:00:00Z"),
+    )
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is True
+
+
+def test_a_corrupt_line_does_not_hide_a_real_termination(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        "{not json\n" + json.dumps(_terminated("2026-08-18T02:00:00Z")) + "\n",
+        encoding="utf-8",
+    )
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is True
+
+
+def test_a_missing_journal_is_not_fresh(tmp_path):
+    assert last_run_is_fresh(tmp_path / "absent.jsonl", since_s=3600, now_iso=NOW) is False
+
+
+@pytest.mark.parametrize(
+    "window,seconds",
+    [("24h", 24 * 3600), ("90m", 90 * 60), ("7d", 7 * 86400), ("30s", 30), ("3600", 3600)],
+)
+def test_window_parsing(window, seconds):
+    from fno.king.state import parse_window
+
+    assert parse_window(window) == seconds
+
+
+def test_an_unparseable_window_is_refused():
+    from fno.king.state import parse_window
+
+    with pytest.raises(ValueError):
+        parse_window("soon")
