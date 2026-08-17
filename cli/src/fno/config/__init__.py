@@ -1507,6 +1507,8 @@ class DispatchBlock(BaseModel):
     # path (dispatch-node.sh / normalize.sh / advance.py / the Rust loop) defaults
     # its posture from this key; an explicit --allow-merge/--no-merge flag wins.
     # Layer-separate from config.auto_merge.* (the worker-side review gate).
+    # DEPRECATED (x-4be1): reads as `auto_merge.grant` ("dispatch" when true).
+    # Kept one release so nothing breaks on upgrade; no consumer reads it.
     auto_merge: bool = False
     # x-0676: on provider exhaustion, defer (today's floor) or fail over to the
     # next healthy provider in the active combo. Default "defer" = byte-identical
@@ -2057,11 +2059,30 @@ class AutoMergeBlock(BaseModel):
     the same fallback). A malformed block degrades to defaults (auto-merge OFF)
     rather than failing the whole settings load - false-enabled is the dangerous
     direction for a merge opt-in.
+
+    Scope-ordered to read like the AND chain ``fno pr merge`` enforces
+    (``pr/_merge.py`` step 1/1b): ``enabled`` is PROJECT scope (the master
+    switch, checked first); ``grant`` is ACTOR scope (who may merge once
+    ``enabled`` passes); the policy keys below only matter once both do.
+
+    RUN scope is deliberately not a key here. ``fno target init`` folds
+    ``enabled`` plus ``grant`` plus ``--allow-merge`` / ``--no-merge`` plus the
+    ``/target bg`` injected default into ``auto_merge_approved`` in
+    ``.fno/target-state.md``, with ``auto_merge_source`` naming the decider.
+    That fold is one-directional: a run can withhold merge authority, never
+    grant it (``cli/src/fno/pr/_merge.py`` step 1b). The review rung of the
+    same chain is ``config.review.required_bots`` / ``config.review.reviewers``,
+    enforced at the coverage guard in ``_merge.py``.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
+    # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
+    # `dispatch.auto_merge`, which spelled the same decision in another table.
+    #   none     - humans only, via `fno pr merge`
+    #   dispatch - autonomously dispatched /target workers may merge too
+    grant: str = "none"
     merge_strategy: str = "merge"
     delete_branch_on_merge: bool = True
     require_checks_pass: bool = True
@@ -2072,6 +2093,14 @@ class AutoMergeBlock(BaseModel):
     @classmethod
     def _coerce_enabled(cls, v: object) -> bool:
         return _coerce_affirmative(v, default=False)
+
+    @field_validator("grant", mode="before")
+    @classmethod
+    def _coerce_grant(cls, v: object) -> str:
+        """Only the two literals are honored; anything else degrades to "none".
+        Same stance as `DispatchBlock._coerce_auto_merge`: a config error can
+        never grant merge rights, only withhold them."""
+        return v if v in ("none", "dispatch") else "none"
 
     @field_validator("delete_branch_on_merge", "require_checks_pass", mode="before")
     @classmethod
@@ -4003,7 +4032,45 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
             "use 'config.work' instead."
         )
 
+    # --- dispatch.auto_merge -> auto_merge.grant (x-4be1) -------------------
+    # Same concept, one table: the actor-scope grant moves into the [auto_merge]
+    # block. Runs PER LAYER (the caller merges after), so precedence between a
+    # legacy and a canonical spelling across files is file-ordered, not
+    # last-merged. Canonical wins silently. Deliberately NO warning here, unlike
+    # the arms above: this key sits in real config files on real machines, and
+    # the warning fires from every settings load - including subprocesses whose
+    # single-line stdout other tools parse (dispatch-node.sh's agent-name
+    # bridge rejects any stderr noise). The operator-facing deprecation surface
+    # is `fno config doctor`, which names the file and the migration command.
+    # Both shapes carry the tables: flat config.toml at top level, a
+    # settings.yaml-era file wrapped under `config:` (flattened after this pass).
+    if _alias_am_grant(raw) or (had_config and _alias_am_grant(config)):
+        if had_config:
+            raw["config"] = config
+
     return raw
+
+
+def _alias_am_grant(scope: dict[str, object]) -> bool:
+    """Fold a scope's legacy ``dispatch.auto_merge`` into ``auto_merge.grant``.
+
+    True when the fold fired (the caller draws the one-time warning). A
+    canonical ``grant`` already present wins and returns False - never masked
+    by the file's own legacy key. Only a real TOML ``True`` grants; a malformed
+    legacy value folds to ``"none"`` (degrade toward safety, same stance as
+    ``DispatchBlock._coerce_auto_merge``).
+    """
+    dispatch = scope.get("dispatch")
+    if not isinstance(dispatch, dict):
+        return False
+    am = scope.get("auto_merge")
+    am = am if isinstance(am, dict) else {}
+    legacy_am = dispatch.get("auto_merge")
+    if legacy_am is None or "grant" in am:
+        return False
+    am["grant"] = "dispatch" if legacy_am is True else "none"
+    scope["auto_merge"] = am
+    return True
 
 
 @lru_cache(maxsize=1)
@@ -4129,6 +4196,64 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
     raw = _layer_worktree_local_override(raw, Path(repo_root) / ".fno")
     return SettingsModel.model_validate(raw)
+
+
+def resolve_source(key: str) -> Optional[tuple[Path, list[Path]]]:
+    """Which config file decided ``key``: ``(decider, overridden)`` or None.
+
+    Walks the SAME candidate chain :func:`load_settings` merges (the chain
+    ``fno config get`` reads), in the same order, and returns the
+    highest-precedence file whose parsed dict carries the dotted path, plus
+    every lower-precedence file that also sets it. Never re-derives precedence:
+    one resolver, one order. Runs the same per-layer ``_alias_legacy_keys``
+    pass, so a value that arrived through the legacy spelling reports the file
+    that actually holds it. The worktree-local ``config.local.toml`` enters as
+    the highest layer through the same allowlist filter the loader applies, so
+    a dropped non-allowlisted key can never masquerade as a source.
+
+    None = no file sets the key (the value is a built-in default).
+    """
+    layers: list[tuple[Path, dict[str, object]]] = []
+    candidates = _candidate_paths()
+    for candidate in candidates:
+        if candidate.is_file():
+            parsed, ok = _load_raw(candidate)
+            if ok:
+                layers.append((candidate.resolve(), _alias_legacy_keys(parsed)))
+    if candidates:
+        local_path = candidates[0].parent / "config.local.toml"
+        if local_path.is_file() and not local_path.is_symlink():
+            local_parsed, lok = _load_raw(local_path)
+            if lok:
+                override = _worktree_local_override(local_parsed)
+                if override:
+                    layers.insert(0, (local_path.resolve(), override))
+
+    def _has(dotted: str, data: object) -> bool:
+        node: object = data
+        for part in dotted.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return False
+            node = node[part]
+        return True
+
+    # The same prefix tolerance get_cmd applies to lookups: a bare
+    # `review.required_bots` and a legacy `config.`-prefixed spelling are one key.
+    variants = [key, key[len("config.") :]] if key.startswith("config.") else [key, f"config.{key}"]
+
+    setters: list[Path] = []
+    for path, parsed in layers:  # layers[0] is the highest-precedence file
+        # A worktree's .fno/config.toml is often a symlink to the canonical
+        # checkout's; candidate.resolve() collapses both chain tiers onto one
+        # path, and the same file must not appear as its own overrider.
+        if path in setters:
+            continue
+        data = _unwrap_config_dict(parsed)
+        if any(_has(v, data) for v in variants):
+            setters.append(path)
+    if not setters:
+        return None
+    return (setters[0], setters[1:])
 
 
 def agents_headless_yolo(provider: str) -> bool:

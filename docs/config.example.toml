@@ -275,7 +275,7 @@ substrate = ""
 command = ""
 # Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).
 allowed_verbs = ["/target", "/think"]
-# Per-project merge posture for autonomous dispatch. Default false = no-merge (a fresh install is unchanged); true lets dispatched /target workers merge (still gated by config.auto_merge.* review). An explicit --allow-merge/--no-merge flag wins; any non-bool value degrades to false.
+# DEPRECATED: reads as auto_merge.grant for one release ('dispatch' when true); migrate with `fno config set auto_merge.grant <none|dispatch>`. Formerly the per-project merge posture for autonomous dispatch.
 auto_merge = false
 # On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.
 on_exhaustion = "defer"
@@ -333,6 +333,8 @@ max_lanes = 1
 [auto_merge]
 # Auto-merge a PR once external review passes.
 enabled = false
+# WHO may merge once enabled passes (actor scope): 'none' = humans only via `fno pr merge`; 'dispatch' = autonomously dispatched /target workers may merge too. Replaces the deprecated dispatch.auto_merge bool. Any unknown value degrades to 'none'.
+grant = "none"
 # Merge strategy: merge | squash | rebase.
 merge_strategy = "merge"
 # Delete the remote branch after a merge. Executor paths only (`fno pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook.
