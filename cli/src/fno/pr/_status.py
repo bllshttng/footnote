@@ -219,13 +219,44 @@ def coverage_recompute_note(coverage: dict) -> None:
         sys.stderr.write(f"note: coverage recompute: {note}\n")
 
 
+def _ready_blockers(
+    green: bool, verdict: str, unresolved: object, coverage: dict
+) -> list[str]:
+    """Which conjuncts of ``ready`` fail, in a stable order.
+
+    A bare ``ready: false`` has one explanation per conjunct (CI red, an
+    unresolved optional finding, coverage unknown or uncovered) and a reader
+    cannot tell them apart; the list is the positive marker that names what is
+    holding. ``unknown`` coverage blocks and is named as its own blocker: the
+    reason a read returned unknown is a separate question (x-b56a), this only
+    reports that the answer is missing. Fail-closed everywhere: an unset
+    unresolved count blocks as ``optional_reviews_unknown``.
+    """
+    blockers: list[str] = []
+    if not green:
+        blockers.append(f"ci_{verdict}")
+    if unresolved is None:
+        blockers.append("optional_reviews_unknown")
+    elif unresolved > 0:
+        blockers.append("optional_reviews_unresolved")
+    cov_word = coverage.get("coverage")
+    if cov_word == "unknown":
+        blockers.append("review_coverage_unknown")
+    elif not (cov_word == "covered" and (coverage.get("reviewed_count") or 0) > 0):
+        blockers.append("review_coverage_uncovered")
+    return blockers
+
+
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
     The exit code is ALWAYS the CI verdict's code (0/1/2/3/4/127) - the review
     fields are additive and advisory (optional stays advisory; an unresolved
-    optional finding on a green PR still exits 0). ``review_reader`` is injectable
-    for tests; it defaults to the real time-boxed read.
+    optional finding on a green PR still exits 0). ``ready`` is the one field
+    that conjoins them all (CI green, optional findings resolved, coverage a
+    counted pass), with ``ready_blockers`` naming any conjunct that failed;
+    a caller branching on the exit code is untouched. ``review_reader`` is
+    injectable for tests; it defaults to the real time-boxed read.
     """
     import sys
 
@@ -276,6 +307,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # is a shape that drifts the moment a key is added on one side only.
         coverage = dict(_UNKNOWN_COVERAGE)
 
+    blockers = _ready_blockers(green, verdict, unresolved, coverage)
     sys.stdout.write(
         json.dumps(
             {
@@ -291,9 +323,19 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 "optional_reviews": reviews.get("optional_reviews", "unknown"),
                 "optional_reviews_unresolved": unresolved,
                 "review_coverage": coverage,
-                # The obvious "read this, not green": ready iff CI is green AND no
-                # optional finding is unresolved. Advisory - never the exit code.
-                "ready": green and unresolved == 0,
+                # The obvious "read this, not green": ready iff CI is green AND
+                # no optional finding is unresolved AND review coverage is a
+                # counted pass. Coverage joined the conjunction because `fno
+                # pr merge` already read it (x-e601): with it absent here, the
+                # two verbs answered opposite ways from one payload and every
+                # ready: true PR refused at the merge gate. The blockers list
+                # names WHICH conjunct failed - a bare false has one
+                # explanation per conjunct and a reader would have to guess.
+                # `covered and reviewed_count > 0` rather than the word alone:
+                # historical events serialize a real zero as `covered`, and
+                # every existing consumer tests both.
+                "ready": not blockers,
+                "ready_blockers": blockers,
             }
         )
         + "\n"
