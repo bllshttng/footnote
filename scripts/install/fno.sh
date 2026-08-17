@@ -160,7 +160,7 @@ uv_install_verifies() {
 # crates/fno/src/bootstrap.rs, and `uv_install_verifies_within` in
 # .claude-plugin/postinstall.sh. All four spend the same 15 * 0.2s = 3s and all
 # four RE-CHECK rather than sleeping blind, so a genuinely broken install still
-# fails with the same message. tests/test-postinstall-verify-wait.sh asserts the
+# fails with the same message. tests/ci/test_uv_install_verify_wait.sh asserts the
 # four budgets match; change one and change all four.
 uv_install_verifies_within() {
 	_n=0

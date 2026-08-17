@@ -378,7 +378,7 @@ fn stderr_is_enotempty(stderr: &str) -> bool {
 /// `.claude-plugin/postinstall.sh`, and the same function in
 /// `scripts/install/fno.sh`. Rust, emitted POSIX sh, and bash cannot share an
 /// implementation across those boundaries, so they share the numbers, and
-/// `tests/test-postinstall-verify-wait.sh` reads all of them and fails on drift.
+/// `tests/ci/test_uv_install_verify_wait.sh` reads all of them and fails on drift.
 /// Change one budget and change all of them.
 const VERIFY_ATTEMPTS: u32 = 15;
 const VERIFY_POLL: Duration = Duration::from_millis(200);
@@ -1479,7 +1479,7 @@ mod tests {
         // This half only: nothing here can read the shell twins, so it pins the
         // Rust numbers and nothing more. The cross-language pin - the one that
         // fails when update.py, postinstall.sh, or scripts/install/fno.sh drift
-        // off these numbers - is tests/test-postinstall-verify-wait.sh, which
+        // off these numbers - is tests/ci/test_uv_install_verify_wait.sh, which
         // reads all four files. Claiming otherwise here would be a guard on one
         // of N paths, which is the bug this whole change exists to close.
         assert_eq!(VERIFY_ATTEMPTS, 15);

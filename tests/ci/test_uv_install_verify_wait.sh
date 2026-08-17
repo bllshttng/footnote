@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-postinstall-verify-wait.sh
+# test_uv_install_verify_wait.sh
 #
 # `uv tool install` exits before its own artifacts settle. The console script
 # `<tools>/fno/bin/fno-py` is deleted and recreated across an install and is
@@ -18,7 +18,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$HERE/../.claude-plugin/postinstall.sh"
+REPO="$(cd "$HERE/../.." && pwd)"
+SCRIPT="$REPO/.claude-plugin/postinstall.sh"
 
 [[ -r "$SCRIPT" ]] || { echo "skip: no postinstall.sh at $SCRIPT"; exit 77; }
 
@@ -71,12 +72,12 @@ rm -f "$tries_file"
 #    on its own. Nothing else can pin numbers across Rust, bash, and emitted
 #    POSIX sh, so this is where drift fails.
 have() { # have <file> <fixed-string> <what it must keep>
-  local f="$HERE/../$1"
+  local f="$REPO/$1"
   [[ -r "$f" ]] || fail "cannot read $1 (the pin is only as good as the file)"
   grep -qF -- "$2" "$f" || fail "$1 lost its $3 (looked for: $2)"
 }
 lacks() { # lacks <file> <fixed-string> <why>
-  local f="$HERE/../$1"
+  local f="$REPO/$1"
   [[ -r "$f" ]] || fail "cannot read $1"
   grep -qF -- "$2" "$f" && fail "$1 still has a single-shot verify: $3"
   return 0
