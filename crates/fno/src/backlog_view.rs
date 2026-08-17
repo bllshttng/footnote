@@ -63,7 +63,10 @@ pub const SNAPSHOT_REFRESH_SECS: u64 = 10;
 /// so both reader modes feed the same pure derivation functions; the mux
 /// classification, lanes, and read-time dependency readiness are unchanged.
 pub fn read_snapshot() -> Option<String> {
-    let out = std::process::Command::new("fno")
+    // fno_bin (FNO_BIN override, else the running binary) - the same resolver
+    // every other fno-subprocess site in the crate uses, so the snapshot is
+    // read from the binary version that owns this document's schema.
+    let out = std::process::Command::new(crate::server::fno_bin())
         .args(["backlog", "status", "--snapshot"])
         .output()
         .ok()?;

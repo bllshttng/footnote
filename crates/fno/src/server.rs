@@ -9503,9 +9503,13 @@ async fn serve(
             let mut sweep_failing = false;
             // Snapshot-mode pacing: the current minted stamp and when the next
             // refresh is due. A fresh stamp is minted only when the window
-            // opens, so the exec runs at most once per refresh window.
+            // opens, and the exec is attempted at most once per window (a
+            // failed read never commits its stamp to ReaderState, so without
+            // the attempted flag every 1s tick would re-exec during an
+            // outage - the hot loop SNAPSHOT_REFRESH_SECS exists to bound).
             let mut snapshot_stamp: Option<(std::time::SystemTime, u64)> = None;
             let mut next_refresh = tokio::time::Instant::now();
+            let mut snapshot_attempted = false;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -9557,13 +9561,14 @@ async fn serve(
                             now + Duration::from_secs(backlog_view::SNAPSHOT_REFRESH_SECS);
                         // A clock-derived stamp: SystemTime::now() advances
                         // past every previously minted (and cached) stamp, so
-                        // each refresh window reads as changed exactly once
-                        // and no tick in between re-execs the snapshot verb.
+                        // each refresh window reads as changed exactly once.
                         snapshot_stamp = Some((std::time::SystemTime::now(), 0));
+                        snapshot_attempted = false;
                     }
                     let stamp = snapshot_stamp;
                     let changed = stamp != state.cached_stamp();
-                    let raw = if changed {
+                    let raw = if changed && !snapshot_attempted {
+                        snapshot_attempted = true;
                         tokio::task::spawn_blocking(backlog_view::read_snapshot)
                             .await
                             .ok()

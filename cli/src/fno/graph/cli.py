@@ -7475,6 +7475,16 @@ def _done_gate_pipeline(
         repo_slug_from_url, resolve_merge_evidence, resolve_promise_evidence,
     )
 
+    # Usage guard lives in the shared terminal so every front door and every
+    # backend gets it: the external dispatch reaches this pipeline before any
+    # caller-side guard can fire.
+    if force and not reason:
+        typer.echo(
+            "Error: --force requires --reason TEXT (explain why the cross-check is bypassed)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     evidence_pr_url: Optional[str] = None
     if refs and not force:
         # There are PR references; require evidence before closing.
@@ -7649,6 +7659,9 @@ def _done_via_seam(
         "plan_path": sc.plan_path, "pr_number": sc.pr_number,
         "pr_url": sc.pr_url, "additional_prs": sc.additional_prs,
         "sessions": sc.sessions,
+        # The rollup reads containment off the node (a contained child claims
+        # no cost); dropping it here would double-count the delivery unit.
+        "contained_in": sc.contained_in,
     }
     refs = node_pr_refs(row)
     evidence_pr_url = _done_gate_pipeline(
@@ -7752,12 +7765,7 @@ def cmd_done(
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
-    from fno.graph._reconcile import (
-        node_pr_refs,
-        repo_slug_from_url,
-        resolve_merge_evidence,
-        resolve_promise_evidence,
-    )
+    from fno.graph._reconcile import node_pr_refs
 
     # External backend (task 4.1): the shared gates then exactly one
     # tracker.close. The local <prefix>-<hex> grammar guard does not apply to
@@ -7800,12 +7808,10 @@ def cmd_done(
     # -- Step 2: gh cross-check (outside the lock) --
     refs = node_pr_refs(node)
 
-    # The PR url that evidences the close, captured so the plan stamp records
-    # the actual ship (ab-bd9f476c). None when there is no PR ref / no evidence.
-    evidence_pr_url: Optional[str] = None
-
     # Shared rich-completion gates (task 4.1): both front doors and both
     # backends run the identical evidence/promise pipeline before any close.
+    # The return is the PR url that evidences the close, captured so the plan
+    # stamp records the actual ship; None when there is no PR ref / no evidence.
     evidence_pr_url = _done_gate_pipeline(
         task_id, node, refs, force=force, reason=reason
     )
@@ -11849,10 +11855,16 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
         raise typer.Exit(code=1)
 
 
-def _classify_backlog_verbs() -> None:
-    import functools
+def iter_backlog_registry():
+    """The (group-label, typer-app) pairs carrying every backlog verb.
 
-    apps = [
+    The ONE structural list: the verb classifier below, the consumer census
+    (scripts/diagnostics/tracker-consumers.py), and the classification tests
+    all walk it, so a new sub-app is registered exactly here, beside its
+    add_typer call - never re-copied into an instrument that would then
+    certify a registry it never saw.
+    """
+    return [
         (None, cli),
         ("triage", _triage_cli),
         ("capture", _capture_cli),
@@ -11862,6 +11874,12 @@ def _classify_backlog_verbs() -> None:
         ("session", session_app),
         ("collisions", collisions_app),
     ]
+
+
+def _classify_backlog_verbs() -> None:
+    import functools
+
+    apps = iter_backlog_registry()
     seen: set[str] = set()
     for group, app in apps:
         for info in app.registered_commands:

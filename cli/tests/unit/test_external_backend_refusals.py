@@ -20,17 +20,7 @@ runner = CliRunner()
 
 
 def _registry_labels():
-    apps = [
-        (None, graph_cli.cli),
-        ("triage", graph_cli._triage_cli),
-        ("capture", graph_cli._capture_cli),
-        ("batch", graph_cli._batch_cli),
-        ("relatedness", graph_cli._relatedness_cli),
-        ("epic", graph_cli._epic_cli),
-        ("session", graph_cli.session_app),
-        ("collisions", graph_cli.collisions_app),
-    ]
-    for group, typer_app in apps:
+    for group, typer_app in graph_cli.iter_backlog_registry():
         for info in typer_app.registered_commands:
             name = info.name or ""
             yield (f"{group} {name}" if group else name), info

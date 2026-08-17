@@ -724,7 +724,20 @@ def run(
         resolve_repo_root,
         retro_pending_dir,
     )
-    from fno.tracker.metadata import read_entries
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    # Node filing dedups against the store; under an external backend the
+    # dedup roster is unreachable and filing still writes the local graph, so
+    # every sentinel would file duplicates. Refuse, exactly as the sweep does.
+    try:
+        read_entries("retro.run")
+    except ExternalMetadataUnavailable as exc:
+        typer.echo(
+            f"retro: {exc}; node dedup is unavailable, refusing to file "
+            "(re-run under the graph backend)",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     repo_root = resolve_repo_root()
     # Filed nodes are scoped to the CANONICAL root, never the worktree: a node

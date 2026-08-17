@@ -130,18 +130,27 @@ def _graph_store_path() -> Path:
 
 
 def _load_from_graph(id: str) -> Sidecar:
+    from pydantic import ValidationError
+
     from fno.graph.store import read_graph
 
     for entry in read_graph(_graph_store_path()):
         if entry.get("id") == id:
-            return Sidecar(
-                id=id,
-                **{
-                    name: entry[name]
-                    for name in _GRAPH_PROJECTED_FIELDS
-                    if name in entry
-                },
-            )
+            try:
+                return Sidecar(
+                    id=id,
+                    **{
+                        name: entry[name]
+                        for name in _GRAPH_PROJECTED_FIELDS
+                        if name in entry
+                    },
+                )
+            except ValidationError:
+                # A legacy entry whose projected fields do not validate (the
+                # pre-projection raw scans tolerated any shape) has no valid
+                # sidecar projection: degrade to the empty one, never fail the
+                # whole read (mirrors the corrupt-file skip in load_all).
+                return Sidecar(id=id)
     # A missing row has no sidecar anywhere: the graph is the store, so there
     # is no per-id file to fall back to (mirrors the no-file branch below).
     return Sidecar(id=id)
@@ -207,6 +216,8 @@ def load_all() -> dict[str, Sidecar]:
             except ValueError:
                 continue  # a corrupt file is not a sidecar; scans skip it
         return out
+    from pydantic import ValidationError
+
     from fno.graph.store import read_graph
 
     entries = read_graph(_graph_store_path())
@@ -214,14 +225,20 @@ def load_all() -> dict[str, Sidecar]:
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
-        out[entry["id"]] = Sidecar(
-            id=entry["id"],
-            **{
-                name: entry[name]
-                for name in _GRAPH_PROJECTED_FIELDS
-                if name in entry
-            },
-        )
+        try:
+            out[entry["id"]] = Sidecar(
+                id=entry["id"],
+                **{
+                    name: entry[name]
+                    for name in _GRAPH_PROJECTED_FIELDS
+                    if name in entry
+                },
+            )
+        except ValidationError:
+            # One legacy entry with a type-drifted projected field (the raw
+            # scans this projection replaced tolerated any shape) must not
+            # fail the whole scan; skip it like a corrupt per-id file.
+            continue
     return out
 
 

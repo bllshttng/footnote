@@ -63,16 +63,9 @@ def _registry():
     sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
     from fno.graph import cli as graph_cli
 
-    return [
-        (None, graph_cli.cli),
-        ("triage", graph_cli._triage_cli),
-        ("capture", graph_cli._capture_cli),
-        ("batch", graph_cli._batch_cli),
-        ("relatedness", graph_cli._relatedness_cli),
-        ("epic", graph_cli._epic_cli),
-        ("session", graph_cli.session_app),
-        ("collisions", graph_cli.collisions_app),
-    ]
+    # The classifier's own structural list, never a copy: the census must
+    # enumerate the registry the guard actually walked.
+    return list(graph_cli.iter_backlog_registry())
 
 
 def _marker_of(info) -> str | None:
@@ -240,14 +233,15 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
                     top_fn = parent
                 cur = parent
 
-        seen_scopes: set[int] = set()
         for site in [n for n in ast.walk(tree) if _is_read_graph(n)]:
             top = _outermost(site)
-            if top is None or id(top) in seen_scopes and False:
-                continue
-            seen_scopes.add(id(top))
             if top is None:
-                problems.append(f"unclassified consumer: {rel}:{site.lineno} at module level")
+                # A module-level read has no command/callback boundary any
+                # guard could sit on; only the storage owners may do it.
+                if not allow_module:
+                    problems.append(
+                        f"unclassified consumer: {rel}:{site.lineno} at module level"
+                    )
                 continue
             switched = _has_call(top, {"active_backend_name", "_external_mode"})
             guarded = top.name in guarded_names or _has_call(top, refusal_calls)

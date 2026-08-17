@@ -129,6 +129,25 @@ def test_gates_then_sidecar_then_exactly_one_close(tmp_path, monkeypatch):
     assert tracker._rows["EXT-1"].get("state") == "closed"
 
 
+def test_force_without_reason_is_a_usage_error_on_either_backend(
+    tmp_path, monkeypatch
+):
+    """The `--force requires --reason` guard lives in the shared gate
+    pipeline, so the external dispatch (which reaches the pipeline before any
+    caller-side guard) still exits 2 with the item open instead of crashing
+    on the pipeline's reason assertion or force-closing reasonless."""
+    rows = [{"id": "EXT-1", "title": "Shipped thing"}]
+    tracker, _ = _wire(monkeypatch, tmp_path, rows, {
+        "EXT-1": {"pr_number": 7},
+    })
+    r = runner.invoke(app, ["backlog", "done", "EXT-1", "--force"],
+                      catch_exceptions=False)
+    assert r.exit_code == 2
+    assert "--force requires --reason" in r.output
+    assert tracker.close_calls == []
+    assert tracker._rows["EXT-1"].get("state", "open") == "open"
+
+
 def test_open_pr_refusal_keeps_item_open(tmp_path, monkeypatch):
     """AC8-ERR: an OPEN PR is not closing evidence - exit 5 (the graph-mode
     contract), close never called, item stays open."""

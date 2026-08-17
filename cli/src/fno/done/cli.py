@@ -502,6 +502,17 @@ def done_command(
     if active_backend_name() != "graph":
         from fno.graph.cli import _done_via_seam
 
+        # Graph-backend completions the seam cannot record: the sidecar has no
+        # artifact_url/completion_note fields and the gates run on the
+        # sidecar's stored refs. Refuse rather than silently drop them.
+        if pr or pr_url or link or note:
+            typer.echo(
+                "fno done: --pr/--pr-url/--link/--note record graph-backend "
+                "completion metadata and cannot be recorded under an external "
+                "tracker backend",
+                err=True,
+            )
+            raise typer.Exit(code=2)
         if not query:
             typer.echo(
                 "fno done: an external tracker backend needs an explicit node "
