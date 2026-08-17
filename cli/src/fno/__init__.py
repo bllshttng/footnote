@@ -139,9 +139,10 @@ class _ReinstallWindowFinder:
     # would see a stranger and stack a second guard onto the same meta path.
     _fno_reinstall_window_guard = True
 
-    # ponytail: a plain flag, not thread-local state. It exists only to stop the
-    # re-check below from recursing into this finder. Two threads racing it lose
-    # one retry and fall back to today's behavior; neither can get a wrong answer.
+    # A plain flag rather than thread-local state, because its only job is to
+    # stop the re-check below from recursing back into this finder. Two threads
+    # racing it lose one retry and fall back to the pre-guard behavior, which is
+    # a hard failure either way. Neither can be handed a wrong answer.
     _rechecking = False
 
     def find_spec(self, fullname: str, path=None, target=None):  # noqa: ANN001
