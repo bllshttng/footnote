@@ -312,10 +312,19 @@ exit 1"#,
     let data: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(data["coverage"], serde_json::json!("unknown"));
     assert_eq!(data["pr"], serde_json::json!(842));
+    // Exit-4 stdout additionally carries the stdout-only quota diagnostic
+    // (null here: the stub cannot answer `api rate_limit` either); the
+    // persisted row keeps the bare schema, so compare with the keys stripped.
+    let mut row = data.clone();
+    if let Some(obj) = row.as_object_mut() {
+        obj.remove("graphql_remaining");
+        obj.remove("graphql_exhausted");
+        obj.remove("reason");
+    }
     // The unknown row reached both logs, so the merge re-read sees the failed
     // read rather than nothing.
-    assert_eq!(last_coverage(&project).as_ref(), Some(&data));
-    assert_eq!(last_coverage(&global).as_ref(), Some(&data));
+    assert_eq!(last_coverage(&project).as_ref(), Some(&row));
+    assert_eq!(last_coverage(&global).as_ref(), Some(&row));
 }
 
 /// An attestation pinned to a superseded sha -> verdict `stale`, never

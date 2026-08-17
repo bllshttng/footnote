@@ -99,6 +99,12 @@ def _serve(row: dict, *, stale: bool) -> int:
         )
     out["cached"] = True
     sys.stdout.write(json.dumps(out) + "\n")
+    # A degraded-coverage note must survive the coalescing this module exists
+    # to do: without this, the note reaches only the one session whose live
+    # read produced the row and none of the serves that follow it.
+    from fno.pr._status import coverage_recompute_note
+
+    coverage_recompute_note(out.get("review_coverage") or {})
     return code
 
 

@@ -203,6 +203,22 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     return ("green", 0, counts)
 
 
+def coverage_recompute_note(coverage: dict) -> None:
+    """Print the coverage recompute note on stderr.
+
+    Shared by the live read and the cache serve, so a degraded reason reaches
+    every terminal rather than only the one session whose read produced the
+    row. The bare success note stays silent: it adds nothing the coverage
+    line above does not already say, and a prefix that fires on every first
+    poll trains a reader to skip the line where a reason appears.
+    """
+    import sys
+
+    note = coverage.get("recompute")
+    if note and note != "recomputed":
+        sys.stderr.write(f"note: coverage recompute: {note}\n")
+
+
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
@@ -357,8 +373,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # `unknown` from a degraded gh read and `unknown` from "nobody reviewed
     # this" are different facts; the recompute note is the only thing that
     # separates them, and the JSON field alone would never reach a terminal.
-    if coverage.get("recompute"):
-        sys.stderr.write(f"note: coverage recompute: {coverage['recompute']}\n")
+    coverage_recompute_note(coverage)
     return code
 
 
