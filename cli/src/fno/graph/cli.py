@@ -3836,6 +3836,81 @@ def _starvation_receipts(
     return out
 
 
+class _ExternalSelectionError(RuntimeError):
+    """A tracker or required sidecar read failed during joined selection.
+
+    AC6-ERR: selection fails CLOSED. The message names the failing backend or
+    id; the caller exits nonzero and never falls back to the local graph file
+    or silently selects a different node.
+    """
+
+
+def _joined_open_candidates(tracker=None) -> list[dict]:
+    """The transient joined selection model: ``list_open()`` exactly once, one
+    sidecar load per OPEN id, never the closed history (AC4's bound: 48 live
+    rows, not the ~2,000 inactive archive).
+
+    A transient render for selection filters and ranking only - never
+    persisted, never a shared convenience record (locked decision 3). The
+    rung is DERIVED at read time from seam-carried evidence (open + PR = in
+    review; open + linked plan = ready; plan-less = idea, the cold-dispatch
+    admission): no stored status flag crosses the seam, and footnote's
+    mutation-stamped rungs (deferred/superseded) cannot exist on an
+    externally-owned item. Footnote-minted scoping pins (project, roadmap_id,
+    mission_*) carry no external equivalent and stay absent: a scoped request
+    over them is honestly empty, and `--project`/-A detection degrades to
+    "all open candidates" exactly as a join with no project column must.
+    Priority/rank/created_at ride the selection projection, so footnote's
+    ranking (applied by _pick_ready AFTER this join) is tracker-owned on both
+    backends - the same sort key picks the same winner (AC5).
+    """
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+
+    tracker = tracker or get_tracker()
+    try:
+        candidates = tracker.list_open()
+    except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
+        raise _ExternalSelectionError(
+            f"tracker {tracker.name!r} list_open failed: {exc}"
+        ) from exc
+    joined: list[dict] = []
+    for c in candidates:
+        try:
+            sc = sidecar_store.load(c.id)
+        except Exception as exc:  # noqa: BLE001 - name the id, fail closed
+            raise _ExternalSelectionError(
+                f"sidecar read failed for {c.id}: {exc}"
+            ) from exc
+        row = {
+            "id": c.id,
+            "title": c.title,
+            "state": str(c.state.value),
+            "status": (
+                "in_review" if sc.pr_number
+                else ("ready" if sc.plan_path else "idea")
+            ),
+            "parent": c.parent,
+            "blocked_by": list(c.blocked_by),
+            "priority": c.priority,
+            "rank": c.rank,
+            "created_at": c.created_at,
+            # Footnote-owned selection facts joined before the filters run.
+            "cwd": sc.cwd,
+            "plan_path": sc.plan_path,
+            "pr_number": sc.pr_number,
+            "pr_url": sc.pr_url,
+            "additional_prs": sc.additional_prs,
+            "batch": sc.batch,
+            "contained_in": sc.contained_in,
+            "sessions": sc.sessions,
+            "claimed_at": sc.claimed_at,
+            "cost_usd": sc.cost_usd,
+        }
+        joined.append(row)
+    return joined
+
+
 @cli.command("next")
 def cmd_next(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -3874,14 +3949,25 @@ def cmd_next(
         descendants_of, _find_node,
     )
     from fno.graph.ladder import is_cold_dispatchable
+    from fno.tracker import active_backend_name
 
     result: list = [None]
     project_filter = project
-    # Read the graph at most once for project detection AND parent
-    # resolution (both need the full entry list).
-    pre_entries = None
-    if (not project_filter and not all_) or parent:
-        pre_entries = read_graph(_graph_path())
+    _external = active_backend_name() != "graph"
+    # One read for the prelude AND selection: under an external backend the
+    # transient joined model (list_open + sidecar join, fail-closed); under
+    # the default backend the working graph, read at most once for project
+    # detection AND parent resolution (both need the full entry list).
+    try:
+        if _external:
+            pre_entries = _joined_open_candidates()
+        else:
+            pre_entries = None
+            if (not project_filter and not all_) or parent:
+                pre_entries = read_graph(_graph_path())
+    except _ExternalSelectionError as exc:
+        typer.echo(f"Error: {exc}; selection refused", err=True)
+        raise typer.Exit(code=1)
     if not project_filter and not all_:
         assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
@@ -4022,17 +4108,34 @@ def cmd_next(
         }
 
     if claim:
-        def mutator(entries):
-            candidates = _pick_ready(entries)
-            if candidates:
-                winner = candidates[0]
-                winner["locked_by"] = claim
-                winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
+        if _external:
+            # External claims use the claims subsystem only: no graph
+            # mutation, and no claim pointer written into tracker or sidecar
+            # (the live holder lives in the claims dir). Contention falls
+            # through to the next ranked candidate rather than failing the
+            # whole selection.
+            from fno.claims.core import ClaimHeldByOther, acquire_claim
+
+            candidates = _pick_ready(pre_entries)
+            for winner in candidates:
+                try:
+                    acquire_claim(f"node:{winner['id']}", claim)
+                except ClaimHeldByOther:
+                    continue
                 result[0] = _node_summary(winner)
-            return entries
-        locked_mutate_graph(_graph_path(), mutator)
+                break
+        else:
+            def mutator(entries):
+                candidates = _pick_ready(entries)
+                if candidates:
+                    winner = candidates[0]
+                    winner["locked_by"] = claim
+                    winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
+                    result[0] = _node_summary(winner)
+                return entries
+            locked_mutate_graph(_graph_path(), mutator)
     else:
-        entries = read_graph(_graph_path())
+        entries = pre_entries if _external else read_graph(_graph_path())
         candidates = _pick_ready(entries)
         if candidates:
             result[0] = _node_summary(candidates[0])
@@ -4041,11 +4144,15 @@ def cmd_next(
         # Zero-silent-starvation receipts (x-3236 G1): explain to stderr why
         # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
         # contract `_next_node` parses, so a receipt failure never breaks
-        # dispatch.
+        # dispatch. Under an external backend the receipts explain the ACTUAL
+        # joined denominator, never the local graph.
         try:
             from fno.backlog.advance import _guard_staleness_days
 
-            recv_entries = read_graph(_graph_path()) if claim else entries
+            recv_entries = (
+                pre_entries if _external
+                else (read_graph(_graph_path()) if claim else entries)
+            )
             scope_ids = (
                 descendants_of(recv_entries, parent_target_id)
                 if parent_target_id is not None else None
@@ -4106,8 +4213,19 @@ def cmd_ready(
         filter_by_project, make_selection_sort_key, descendants_of, _find_node,
     )
     from fno.graph.ladder import is_cold_dispatchable
+    from fno.tracker import active_backend_name
 
-    entries = read_graph(_graph_path())
+    # Joined selection under an external backend: the same filters and ranking
+    # run over the transient list_open + sidecar join (fail-closed, never the
+    # local graph), so `ready` and `next` cannot drift between backends.
+    if active_backend_name() != "graph":
+        try:
+            entries = _joined_open_candidates()
+        except _ExternalSelectionError as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1)
+    else:
+        entries = read_graph(_graph_path())
     allowed = {"ready"}
     if include_ideas:
         allowed.add("idea")
