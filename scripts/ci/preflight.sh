@@ -994,7 +994,12 @@ exit_if_void() {
         EXECUTED_COUNT=1
     else
         REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
-        [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno tracker-gates:fno)
+        [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+        # The tracker gates leg is independent of the squads guard: it runs on
+        # every full pass, so it is a required scope whenever it executed
+        # (riding SQUADS_INCLUDED undercounted it on machines with no real
+        # squads store, and the receipt validator rejected the step mismatch).
+        [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
         REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
         REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
         EXECUTED_COUNT=$REQUIRED_EXECUTED
@@ -1105,6 +1110,7 @@ fi
 echo ""
 REQUIRED_EXECUTED=0
 SQUADS_INCLUDED=0
+TG_INCLUDED=0
 RECEIPT_UNAVAILABLE=0
 if retry_run_leg smoke; then
     echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
@@ -1140,6 +1146,7 @@ if retry_run_leg tracker-gates:fno; then
     run_hermetic bash scripts/ci/check-tracker-consumers.sh
     tgc=$?
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    TG_INCLUDED=1
     if [[ $tgp -eq 0 && $tgc -eq 0 ]]; then
         record_leg tracker-gates:fno "tracker gates (fno)" pass $(( SECONDS - tg0 ))
     else
@@ -1341,7 +1348,8 @@ write_leg_record() {
 write_leg_record
 
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
-[[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno tracker-gates:fno)
+[[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
+[[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether
