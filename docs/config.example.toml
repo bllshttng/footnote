@@ -483,3 +483,9 @@ interval_secs = 5
 http_timeout_secs = 5
 # Retry budget per webhook dispatch before drop/short-circuit.
 retries = 2
+
+[king]
+# Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false.
+enabled = false
+# Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work.
+autonomous_merge = false
