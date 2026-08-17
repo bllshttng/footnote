@@ -3677,8 +3677,10 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
                     &json!({
                         "name": from,
                         "from_name": to,
-                        "provider": "claude",
                         "transport": "switchboard-mirror",
+                        // No provider field: a provider-named binding holding a
+                        // harness literal is the axis-vocabulary violation the
+                        // content scan prohibits (check-axis-vocabulary).
                         "reason": format!("registry re-read failed: {e}"),
                     }),
                 );
