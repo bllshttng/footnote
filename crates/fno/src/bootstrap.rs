@@ -120,7 +120,7 @@ fn run(args: &[OsString]) -> BootResult<()> {
             // fails the probe through every pass and is still refused. It pays
             // one python spawn per pass, which is the expensive case, and it is
             // the rare one: something else has taken our install path.
-            if verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
+            if verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL).is_ok() {
                 return Err(record_and_exec(&real, args));
             }
             // A foreign package now sits at our path: drop the sentinel and fall
@@ -135,9 +135,17 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // Already provisioned by another channel (`uv tool install fno`, or a
     // pip install that uv can see) but no sentinel yet - adopt it without a
     // redundant reinstall (AC4-EDGE). Still verify before trusting it (AC3).
+    //
+    // Waited for the same reason the sentinel arm above is, and this one is the
+    // harsher of the two: the storm's first act is to DROP the sentinel, so the
+    // very next call arrives here with no fast path, hits a venv still being
+    // rewritten, and gets "tool venv python is missing" or "no readable package
+    // metadata" from a probe that would pass a moment later. The `?` makes that
+    // a hard exit rather than a fall-through, so a single-shot probe here is a
+    // user-visible refusal, not a retry.
     if let Some(real) = resolve_via_uv_tool_dir() {
         if is_executable(&real) {
-            verify_ours(&real)?;
+            verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)?;
             return Err(record_and_exec(&real, args));
         }
     }
@@ -189,7 +197,12 @@ fn run(args: &[OsString]) -> BootResult<()> {
             return Err(BootErr::new(1, msg));
         }
     };
-    if let Err(e) = verify_ours(&real) {
+    // Waited too, and here the cost of a single-shot miss is the worst of the
+    // three: this arm STAMPS the failure, so one transient probe error during
+    // another process's `--force` caches a refusal for FAILURE_COOLDOWN_SECS.
+    // `install_verified` proves the console script and the bytecode landed; it
+    // does not prove the venv python can answer for its own metadata yet.
+    if let Err(e) = verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
         // Same reasoning: a foreign package at our path is a stable condition, so
         // re-downloading 18 packages to reach the same refusal helps nobody.
         write_failure_stamp(&source, &e.msg);
@@ -435,25 +448,29 @@ fn executable_within(path: &Path, attempts: u32, poll: Duration) -> bool {
 /// [`verify_ours`], retried until it passes or the budget runs out.
 ///
 /// The third twin of [`executable_within`] and [`install_verified_within`], and
-/// the one that guards the arm a racing install actually reaches. Costs one
-/// python spawn per pass rather than a stat, which is why the budget matters:
-/// it is bounded, and it is only ever paid when the recorded mtime already
-/// failed to match, meaning something rewrote our console script.
+/// the one that guards every arm a racing install can reach. Costs one python
+/// spawn per pass rather than a stat, which is why the budget matters: it is
+/// bounded, and every pass after the first is only ever paid on a probe that
+/// already failed once.
+///
+/// Returns the LAST result rather than a bool, because two of the three callers
+/// need the message: one propagates it with `?` and one writes it to the
+/// failure stamp. A bool there would have turned a named refusal into a silent
+/// re-provision.
 ///
 /// A genuinely foreign package fails every pass and is still refused, so this
 /// buys tolerance for a mid-rewrite venv without weakening the "never run a
 /// foreign fno" invariant.
-fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> bool {
-    if verify_ours(path).is_ok() {
-        return true;
-    }
+fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> BootResult<()> {
+    let mut last = verify_ours(path);
     for _ in 0..attempts {
-        thread::sleep(poll);
-        if verify_ours(path).is_ok() {
-            return true;
+        if last.is_ok() {
+            return last;
         }
+        thread::sleep(poll);
+        last = verify_ours(path);
     }
-    false
+    last
 }
 
 /// [`install_verified`], retried on a disk RE-CHECK until it passes or the
@@ -487,7 +504,9 @@ fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(
     }
     last.map_err(|m| {
         let waited = poll.as_millis() * u128::from(attempts);
-        format!("{m} (still absent after waiting {waited}ms for uv's own artifact)")
+        // "still failing", not "still absent": the predicate has three ways to
+        // say no now, and only one of them is absence.
+        format!("{m} (still failing after waiting {waited}ms for uv's own artifact)")
     })
 }
 
@@ -501,13 +520,23 @@ fn install_verified(uv: &Path) -> Result<(), String> {
     let tool_dir = uv_tool_dir(uv).ok_or("uv tool dir unreadable")?;
     let venv = tool_dir.join(TOOL_NAME);
     let entry = venv.join("bin").join("fno-py");
+    if !entry.exists() {
+        return Err(format!("no console script at {}", entry.display()));
+    }
     // Executable, not merely present. The three shell twins verify with
     // `[ -x ... ]`, and `run()` requires an executable script one call later. A
     // file uv has written but not yet chmodded would pass a bare `exists()`,
     // clear the waited verify, then fail the locate below - which writes a
     // failure stamp and refuses every LATER call for the stamp's lifetime.
+    //
+    // Worded apart from absence on purpose: this message is the one the stamp
+    // replays for 600s, and "no console script" would send the operator hunting
+    // for a file `ls` plainly shows.
     if !is_executable(&entry) {
-        return Err(format!("no console script at {}", entry.display()));
+        return Err(format!(
+            "the console script at {} is not executable",
+            entry.display()
+        ));
     }
     let lib = venv.join("lib");
     if count_pyc(&lib) == 0 {
@@ -1532,21 +1561,26 @@ mod tests {
     }
 
     #[test]
-    fn verify_ours_within_still_refuses_a_genuinely_foreign_package() {
-        // The half that must NOT soften. `verify_ours` runs the venv's own
-        // python; a path with no python there fails every pass, so the sentinel
-        // is still dropped and the "never run a foreign fno" invariant holds.
-        // Without this, the retry above would read as "keep trying until you
-        // trust it", which is the opposite of what it does.
+    fn verify_ours_within_does_not_retry_its_way_to_yes() {
+        // The half that must NOT soften. This fixture stops at `verify_ours`'s
+        // first guard - no `python` beside the script - so what it pins is that
+        // a probe failing every pass stays refused, the sentinel is still
+        // dropped, and the caller still gets the MESSAGE rather than a bare
+        // false. The name/author rule itself is pinned by the decide_identity
+        // tests above. Without this, the retry would read as "keep trying until
+        // you trust it", which is the opposite of what it does.
         let root = env::temp_dir().join(format!("fno-foreign-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let fake = root.join("fno-py");
         fs::write(&fake, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
 
+        let e = verify_ours_within(&fake, 2, Duration::from_millis(10))
+            .expect_err("a package that never verifies must stay refused");
         assert!(
-            !verify_ours_within(&fake, 2, Duration::from_millis(10)),
-            "a package that never verifies must stay refused"
+            e.msg.contains("refusing to run an unverified fno"),
+            "{}",
+            e.msg
         );
         fs::remove_dir_all(&root).ok();
     }
@@ -1604,6 +1638,31 @@ mod tests {
     }
 
     #[test]
+    fn a_present_but_unchmodded_script_is_not_reported_as_absent() {
+        // The tightened predicate must not lie about WHY it refused. A script
+        // uv wrote but has not chmodded (or one on a noexec mount) is present,
+        // and the old wording sent the operator hunting for a missing file that
+        // `ls` plainly shows - a message the failure stamp then replays for the
+        // whole cooldown.
+        let root = env::temp_dir().join(format!("fno-noexec-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        let venv = tool_dir.join("fno");
+        fs::create_dir_all(venv.join("bin")).unwrap();
+        fs::create_dir_all(venv.join("lib")).unwrap();
+        fs::write(venv.join("lib/x.pyc"), "").unwrap();
+        let entry = venv.join("bin/fno-py");
+        fs::write(&entry, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o644)).unwrap();
+        let uv = uv_reporting_tool_dir(&root, &tool_dir);
+
+        let e = install_verified(&uv).unwrap_err();
+        assert!(e.contains("is not executable"), "{e}");
+        assert!(!e.contains("no console script"), "{e}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn verify_gives_up_bounded_and_says_what_it_waited_for() {
         // The wait is bounded and falsifiable: a genuinely broken install still
         // fails, with the same marker message plus what we waited. Nothing is
@@ -1617,7 +1676,7 @@ mod tests {
 
         let e = install_verified_within(&uv, 3, Duration::from_millis(10)).unwrap_err();
         assert!(e.contains("no console script at"), "{e}");
-        assert!(e.contains("still absent after waiting 30ms"), "{e}");
+        assert!(e.contains("still failing after waiting 30ms"), "{e}");
         fs::remove_dir_all(&root).ok();
     }
 
