@@ -339,26 +339,32 @@ def test_decision_receipt_names_the_merge_posture():
 
 
 def test_partial_settings_object_does_not_drop_auto_merge():
-    """A settings stub carrying only `.dispatch.auto_merge` must still yield it.
+    """A settings stub carrying only `.auto_merge.grant` must still yield it.
 
     Field access used to be one try block over `d.harness`/`d.substrate`/
     `d.command`, so a settings object missing any one of them raised and threw
     the WHOLE dict away - one absent key silently disabling every other. That is
-    the shape of the bug being fixed, so it gets its own test."""
+    the shape of the bug being fixed, so it gets its own test. x-4be1: the
+    grant lives OUTSIDE the dispatch block, so a stub with an auto_merge block
+    and no dispatch overlay still resolves the grant."""
     import types
 
     from fno.agents.harness_map import _load_dispatch_cfg
 
-    stub = types.SimpleNamespace(dispatch=types.SimpleNamespace(auto_merge=True))
+    stub = types.SimpleNamespace(
+        auto_merge=types.SimpleNamespace(grant="dispatch")
+    )
     assert _load_dispatch_cfg(stub)["auto_merge"] is True
 
 
 def test_settings_without_dispatch_section_yields_empty_cfg():
+    """x-4be1: no dispatch overlay and no grant -> only the (no-)grant key; the
+    harness/substrate/command keys stay absent so their builtin rungs run."""
     import types
 
     from fno.agents.harness_map import _load_dispatch_cfg
 
-    assert _load_dispatch_cfg(types.SimpleNamespace()) == {}
+    assert _load_dispatch_cfg(types.SimpleNamespace()) == {"auto_merge": False}
 
 
 @pytest.mark.parametrize("allow,expected", [(True, "/target {id}"), (False, "/target --no-merge {id}")])
