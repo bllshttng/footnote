@@ -196,7 +196,9 @@ correct in principle and much too tight in practice. `update.py` now waits up to
 skips loudly with the manual commands rather than leaving a launchd agent pinned
 to the old binary.
 
-What the meta-path finder closed is the COVERAGE gap, not the window. Every `fno.*` import now gets the same one retry and the same legible failure. The paragraph below still holds.
+What the meta-path finder closed is the COVERAGE gap, not the window. Every `fno.*` import now gets the same one retry. The paragraph below still holds.
+
+The message reaches one shape less than the retry does. For `from fno.pkg import submodule`, CPython's `_handle_fromlist` swallows our ModuleNotFoundError and raises `cannot import name ... from ...` in its place. Nothing at this layer can reach that decision. The retry still runs, because it happens inside `find_spec` before the exception exists. The in-body imports are written as `from fno.pkg.submodule import name`, which keeps the message. Raising from a finder also inverts one stdlib contract: `importlib.util.find_spec` on an absent `fno.*` module raises rather than returning None. No caller in this repo probes an fno module that way, and the error stays an ImportError subclass.
 
 Not fixed, and unfixable at this layer: the window itself. A process whose import
 lands while the file is genuinely still absent still fails. Closing that would

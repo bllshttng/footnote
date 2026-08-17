@@ -114,6 +114,24 @@ class _ReinstallWindowFinder:
 
     The disk re-check is the whole difference between this and a hopeful
     sleep-retry, and it is why an absent module is still a hard, legible failure.
+
+    Two limits, both deliberate.
+
+    The RETRY reaches every import shape, but the MESSAGE does not reach one of
+    them. For ``from fno.pkg import submodule`` CPython's ``_handle_fromlist``
+    swallows a ModuleNotFoundError whose name matches the fromlist entry and
+    raises ``cannot import name ... from ...`` in its place, so the dual-cause
+    text is dropped there. Nothing at this layer can reach that decision. The
+    retry is unaffected because it happens inside ``find_spec``, before the
+    exception exists. ``from fno.pkg.submodule import name``, which is how the
+    in-body imports are written, keeps the message.
+
+    Raising here inverts one stdlib contract: ``importlib.util.find_spec`` on an
+    absent ``fno.*`` module raises instead of returning None. That is the price
+    of carrying the message to call sites we do not edit, and it is priced
+    knowingly: no caller in this repo probes for an fno module that way, and the
+    exception is still an ImportError subclass, so an existing
+    ``try/except ImportError`` guard behaves as before.
     """
 
     # How `_install_reinstall_window_finder` recognizes an already-installed

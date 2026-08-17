@@ -852,6 +852,24 @@ def test_absent_fno_submodule_names_both_causes_end_to_end():
     assert "fno update" in proc.stdout
 
 
+def test_lazy_group_states_the_hint_once_not_twice():
+    """Both guards now fire on one absent module, and they share one message.
+
+    The finder raises WITH the hint already in it, and that error is what the
+    lazy group catches, so an unconditional append prints the same parenthetical
+    twice in the operator's face.
+    """
+    import click
+
+    from fno._lazy_group import _LazyStub
+
+    stub = _LazyStub(name="zzz", help="h", import_path="fno.no_such_lazy_target:cli")
+    with pytest.raises(click.ClickException) as excinfo:
+        stub._load_real()
+
+    assert excinfo.value.message.count("is part of fno itself") == 1, excinfo.value.message
+
+
 def test_import_hook_is_installed_once_even_when_fno_is_reimported():
     """Stacking guards would multiply the re-check per failed import for no gain."""
     proc = _run_py(
@@ -862,3 +880,37 @@ def test_import_hook_is_installed_once_even_when_fno_is_reimported():
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "1"
+
+
+def test_fromlist_submodule_keeps_the_retry_and_loses_only_the_message():
+    """The one shape whose message CPython takes away, pinned so the docs stay honest.
+
+    For `from fno.pkg import submodule`, `_handle_fromlist` swallows a
+    ModuleNotFoundError matching the fromlist entry and raises `cannot import
+    name ... from ...` instead, so the dual-cause text never reaches the reader.
+    The retry is untouched: it happens inside find_spec, before that exception
+    exists. Both halves are asserted here because the claim in the docs is about
+    the retry, not the message.
+    """
+    proc = _run_py(
+        "import fno, importlib.machinery\n"
+        "seen = []\n"
+        "class Spy:\n"
+        "    @staticmethod\n"
+        "    def find_spec(name, path=None, target=None):\n"
+        "        seen.append(name)\n"
+        "        return None\n"
+        "fno._module_is_now_on_disk = lambda name: True\n"
+        "importlib.machinery.PathFinder = Spy\n"
+        "try:\n"
+        "    from fno.agents import no_such_submodule\n"
+        "except ImportError as exc:\n"
+        "    print('MSG', exc)\n"
+        "print('SEEN', seen)\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    # The retry ran, for the fully-qualified submodule name.
+    assert "SEEN ['fno.agents.no_such_submodule']" in proc.stdout, proc.stdout
+    # And CPython, not us, wrote the message the reader sees.
+    assert "cannot import name 'no_such_submodule'" in proc.stdout, proc.stdout
+    assert "is part of fno itself" not in proc.stdout, proc.stdout

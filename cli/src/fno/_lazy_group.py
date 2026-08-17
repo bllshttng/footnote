@@ -144,8 +144,13 @@ def _import_failure_hint(exc: ImportError) -> str:
     Exception-shaped adapter over ``fno._reinstall_hint``, which is where the
     text and the "is it ours?" gate actually live so the meta-path finder in
     ``fno/__init__.py`` and this path cannot drift into two different messages.
+
+    Sharing one text is exactly why this has to check for it first: the finder
+    raises with the hint ALREADY in its message, and that error is what arrives
+    here, so appending unconditionally prints the same parenthetical twice.
     """
-    return _reinstall_hint(getattr(exc, "name", None) or "")
+    hint = _reinstall_hint(getattr(exc, "name", None) or "")
+    return "" if hint and hint in str(exc) else hint
 
 
 # ---------------------------------------------------------------------------
