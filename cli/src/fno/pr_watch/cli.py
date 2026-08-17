@@ -352,9 +352,17 @@ def tick() -> None:
                 typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
             elif result.quota_skip:
                 reset = f", resets {result.quota_reset}" if result.quota_reset else ""
+                # The skip can follow a sweep with failed repos, and this stdout
+                # line is what an operator tails during an outage: the failure
+                # count rides the skip line too, matching the end record.
+                degraded = (
+                    f" (degraded: {result.sweep_failures} sweep failure(s))"
+                    if result.sweep_failures
+                    else ""
+                )
                 typer.echo(
                     f"pr-watch tick: graphql remaining {result.quota_remaining} below floor"
-                    f" - dispatch pass skipped{reset}"
+                    f" - dispatch pass skipped{reset}{degraded}"
                 )
             elif result.sweep_failures:
                 typer.echo(

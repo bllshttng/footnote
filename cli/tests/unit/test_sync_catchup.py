@@ -453,7 +453,7 @@ def test_quota_skip_defers_the_catchup_leg(monkeypatch):
             acted=0,
             skipped=0,
             disabled=False,
-            sweep_failures=0,
+            sweep_failures=2,
             quota_skip=True,
             quota_remaining=12,
             quota_reset="2026-08-17T15:00:00Z",
@@ -470,6 +470,9 @@ def test_quota_skip_defers_the_catchup_leg(monkeypatch):
 
     assert res.exit_code == 0
     assert ran == []
+    # The skip line must carry the outage count too: an operator tailing
+    # stdout during a budget drought sees the degraded sweep, not a clean one.
+    assert "degraded: 2 sweep failure(s)" in res.output
 
 
 def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
