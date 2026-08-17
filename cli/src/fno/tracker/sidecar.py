@@ -24,6 +24,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -104,11 +105,31 @@ _GRAPH_PROJECTED_FIELDS = tuple(
 )
 
 
+def _graph_store_path() -> Path:
+    """The graph store path, resolved at call time through ``fno.paths``.
+
+    Goes to ``paths.graph_json()`` directly rather than the
+    ``_constants.GRAPH_JSON`` lazy attr: a ``monkeypatch.setattr`` on that
+    attr concretizes it at teardown (the module-``__getattr__`` stop firing),
+    so a later ``paths.graph_json`` redirect would be silently ignored. The
+    direct call honors a config override or test redirect at every read; the
+    fallback mirrors ``_constants``' fail-open default on a broken settings
+    file.
+    """
+    try:
+        from fno import paths
+
+        return paths.graph_json()
+    except Exception:
+        from fno.graph._constants import _state_dir
+
+        return _state_dir() / "graph.json"
+
+
 def _load_from_graph(id: str) -> Sidecar:
     from fno.graph.store import read_graph
-    from fno.paths import graph_json
 
-    for entry in read_graph(graph_json()):
+    for entry in read_graph(_graph_store_path()):
         if entry.get("id") == id:
             return Sidecar(
                 id=id,
@@ -125,14 +146,13 @@ def _load_from_graph(id: str) -> Sidecar:
 
 def _save_to_graph(sidecar: Sidecar) -> Path:
     from fno.graph.store import locked_mutate_graph
-    from fno.paths import graph_json
 
     from .types import NodeNotFound
 
     # Only fields explicitly set on this instance are written back, so a
     # partial Sidecar cannot null out entry values it never carried.
     payload = sidecar.model_dump(exclude_unset=True, exclude={"id"})
-    path = graph_json()
+    path = _graph_store_path()
 
     def _apply(entries: list[dict]) -> list[dict]:
         for entry in entries:
@@ -159,6 +179,47 @@ def load(id: str) -> Sidecar:
             return Sidecar(id=id)
         return Sidecar.model_validate_json(path.read_text(encoding="utf-8"))
     return _load_from_graph(id)
+
+
+def load_all() -> dict[str, Sidecar]:
+    """Project the whole sidecar store in one pass, keyed by id.
+
+    The scan primitive for sidecar-field lookups (by PR number, by cwd): a
+    caller must never loop :func:`load` over ids it only has because some
+    store happened to be enumerable, and in graph mode each ``load`` re-reads
+    the store - so scans project everything from a single read instead.
+    Graph mode walks the store's storage order (today's scan semantics);
+    external mode decodes the per-id filenames, which round-trip the id
+    through the same encoder the claims dir uses.
+    """
+    if _external_mode():
+        root = sidecar_path("_probe").parent
+        out: dict[str, Sidecar] = {}
+        if not root.is_dir():
+            return out
+        for f in sorted(root.glob("*.json")):
+            sid = unquote(f.stem)
+            try:
+                out[sid] = Sidecar.model_validate_json(f.read_text(encoding="utf-8"))
+            except ValueError:
+                continue  # a corrupt file is not a sidecar; scans skip it
+        return out
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_store_path())
+    out = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        out[entry["id"]] = Sidecar(
+            id=entry["id"],
+            **{
+                name: entry[name]
+                for name in _GRAPH_PROJECTED_FIELDS
+                if name in entry
+            },
+        )
+    return out
 
 
 def save(sidecar: Sidecar) -> Path:

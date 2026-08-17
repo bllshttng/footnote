@@ -76,20 +76,20 @@ def _session_from_holder(holder: Optional[str]) -> Optional[str]:
 def _node_ids_for_pr(pr_number: int) -> list[str]:
     """Every backlog node id carrying PR ``pr_number`` (primary OR additional).
 
-    PR numbers are per-repo, so the cross-project graph can carry the same number
-    under more than one node: the caller refuses on ambiguity rather than
-    silently routing ``pr:<n>`` to the wrong project's holder. Reuses
-    ``_node_carries_pr`` so the primary + ``additional_prs`` contract stays the
-    graph module's, not a restatement here.
+    PR numbers are per-repo, so the cross-project store can carry the same
+    number under more than one node: the caller refuses on ambiguity rather
+    than silently routing ``pr:<n>`` to the wrong project's holder. Scans the
+    sidecar store (PR links are footnote-owned ship evidence), so the lookup
+    works on any tracker backend.
     """
-    from fno.graph.store import _node_carries_pr, read_graph
+    from fno.tracker import sidecar as sidecar_store
 
     out: list[str] = []
-    for node in read_graph():
-        if not isinstance(node, dict):
-            continue
-        nid = node.get("id")
-        if isinstance(nid, str) and _node_carries_pr(node, pr_number):
+    for nid, sc in sidecar_store.load_all().items():
+        if sc.pr_number == pr_number or any(
+            isinstance(p, dict) and p.get("number") == pr_number
+            for p in sc.additional_prs or []
+        ):
             out.append(nid)
     return out
 

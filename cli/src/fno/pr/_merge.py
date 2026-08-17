@@ -604,7 +604,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     """
     try:
         from fno.paths import graph_json
-        from fno.graph.store import locked_mutate_graph, read_graph
+        from fno.graph.store import locked_mutate_graph
 
         path = graph_json()
         if not path.exists():
@@ -616,7 +616,17 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         )
         if view.ok:
             pr_url = view.stdout.strip()
-        nid = _find_pr_node_id(read_graph(path), pr_number, pr_url)
+        # PR links are footnote-owned sidecar data: the resolver scan runs over
+        # the sidecar projection so it works on any tracker backend. The rows
+        # carry exactly the fields _find_pr_node_id/node_pr_refs consume.
+        from fno.tracker import sidecar as sidecar_store
+
+        rows = [
+            {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url,
+             "additional_prs": sc.additional_prs}
+            for nid, sc in sidecar_store.load_all().items()
+        ]
+        nid = _find_pr_node_id(rows, pr_number, pr_url)
         if not nid:
             return  # no node linked to this PR - nothing to close
 
@@ -794,23 +804,25 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
         return
     node_id = None
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json, resolve_canonical_repo_root
+        from fno.paths import resolve_canonical_repo_root
+        from fno.tracker import sidecar as sidecar_store
 
-        # The graph is global across projects, so bare PR numbers collide;
-        # only nodes homed in THIS repo (node.cwd == canonical root) may
+        # The store is global across projects, so bare PR numbers collide;
+        # only nodes homed in THIS repo (sidecar cwd == canonical root) may
         # claim the touch, and only an UNAMBIGUOUS match does (two same-repo
         # nodes on one number -> resolution=failed, never an arbitrary pick).
+        # cwd and PR links are both footnote-owned sidecar fields, so the scan
+        # runs over the sidecar projection and works on any tracker backend.
         root = str(resolve_canonical_repo_root())
         hits = set()
-        for e in read_graph(graph_json()):
-            if e.get("cwd") != root:
+        for nid, sc in sidecar_store.load_all().items():
+            if sc.cwd != root:
                 continue
-            if e.get("pr_number") == pr_number or any(
+            if sc.pr_number == pr_number or any(
                 isinstance(p, dict) and p.get("number") == pr_number
-                for p in e.get("additional_prs") or []
+                for p in sc.additional_prs or []
             ):
-                hits.add(e.get("id"))
+                hits.add(nid)
         node_id = hits.pop() if len(hits) == 1 else None
     except Exception:
         node_id = None
