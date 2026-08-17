@@ -1168,82 +1168,55 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return 127
 
     # (2a) Coverage guard (x-0eaf): the sanctioned merge must not land a PR
-    # nothing reviewed. Consume the review_coverage event loop-check emits
-    # (Ownership: Rust computes, Python reads); missing/stale/zero/unknown
-    # refuses (fail closed). Runs only when auto_merge is enabled (step 1), so a
-    # manual `gh pr merge` on a non-auto-merge repo is untouched - the
-    # discriminator is auto_merge.enabled, not attendance. After the gh check so
-    # a missing gh still reports its own exit 127. Skipped when no review lane is
-    # configured (x-0eaf boundary: a stock install opted out of review).
-    # Cache both checks: coverage answers whether anyone reviewed, while the
-    # local-attestation check preserves a specifically required code-review.
-    review_lane = _review_lane_configured(repo, pr_number)
-    code_review_required = _code_review_attestation_required(repo, pr_number)
-    # Head fetched up front (x-3a3f): the recompute below needs it to pin the
-    # emitted event to what would actually merge, and the staleness comparison
-    # needs it anyway. A failed fetch returns None and neither consumer can
-    # act on it - same best-effort stance as before, one round trip earlier.
-    head: Optional[str] = _pr_head_oid(pr_number, repo) if review_lane else None
-    # Same lane guard as the head fetch: with no lane configured `cov` is never
-    # consulted (`covered` short-circuits, `covered_head` is lane-gated), and
-    # the read is no longer free - a missing row would fire the 120s recompute
-    # subprocess and append coverage rows nobody on this path asked for.
-    cov, recompute_note = (
-        _review_coverage_for_pr(pr_number, repo, head) if review_lane else (None, "")
+    # nothing reviewed. The predicate lives in _coverage_gate - one copy,
+    # shared with the hook-facing `fno pr coverage-check` verb - and this path
+    # passes recompute=True, firing the standalone producer once when no row
+    # describes the head (x-3a3f). Consume the review_coverage event loop-check
+    # emits (Ownership: Rust computes, Python reads); missing/stale/zero/
+    # unknown refuses (fail closed), and so does UNANSWERED: a merge that
+    # cannot read its own coverage has not been reviewed. The recompute cannot
+    # rescue the UNANSWERED arm - the producer needs the head to pin the row it
+    # would emit - so a failed head fetch blocks until gh answers again. Runs
+    # only when auto_merge
+    # is enabled (step 1), so a manual `gh pr merge` on a non-auto-merge repo
+    # is untouched. After the gh check so a missing gh still reports its own
+    # exit 127. Skipped when no review lane is configured (a stock install
+    # opted out of review).
+    from fno.pr import _coverage_gate
+
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        pr_number, repo, recompute=True
     )
-    covered = (
-        not review_lane
-        or (
-            cov is not None
-            and cov.get("coverage") == "covered"
-            and _safe_int(cov.get("reviewed_count"), 0) > 0
-            and (
-                not code_review_required
-                or _coverage_has_local_pass(cov, "code-review")
+    if state != _coverage_gate.COVERED:
+        # Bracket append, never paren-splice surgery on a builder's output: a
+        # reason whose trailing paren closes an inner clause (a searched list,
+        # a truncated sha) would swallow the note into the wrong parenthetical.
+        line = _coverage_gate.refusal_line(refusal, note)
+        if state == _coverage_gate.UNANSWERED:
+            # UNANSWERED is an instrument failure, not a review verdict: a
+            # receipt that says "unreviewed" about a probe that died sends a
+            # worker hunting reviewers when the recovery is retrying the merge.
+            _emit(
+                pr_number,
+                "blocked",
+                f"coverage probe failed, merge refused: {line}",
+                "none",
+                err=True,
             )
-        )
-    )
-    if covered and cov is not None and review_lane:
-        # Staleness: the event pins a head; if the PR head moved after the gate
-        # eval, the coverage no longer describes what would merge. A recompute
-        # ran against this same head when the row was stale or missing, so a
-        # mismatch here means the recompute's own output disagrees with the PR
-        # - still a confirmed mismatch, still refuses.
-        ev_head = cov.get("head_sha") if cov else None
-        if head and ev_head and head != ev_head:
-            covered = False
-    if not covered:
-        if code_review_required and not _coverage_has_local_pass(cov, "code-review"):
-            refusal = (
-                "required code-review has no head-pinned local pass attestation; "
-                "run the harness review verb at HEAD, then emit the code-review attestation"
-            )
-        else:
-            refusal = _coverage_refused_reason(
-                cov, head, _coverage_sources(repo) if cov is None else None
-            )
-        # Name the recompute and its outcome: a refusal reporting only a count
-        # is what taught two workers to design around a gate that was green
-        # somewhere else (x-3a3f). Bracket append, never paren-splice surgery
-        # on a builder's output: a reason whose trailing paren closes an inner
-        # clause (a searched list, a truncated sha) would swallow the note
-        # into the wrong parenthetical.
-        if recompute_note:
-            refusal = f"{refusal} [{recompute_note}]"
+            return 2
         _emit(
             pr_number,
             "blocked",
-            f"unreviewed merge refused: {refusal}",
+            f"unreviewed merge refused: {line}",
             "none",
             err=True,
         )
         return 2
 
-    # The covered head pins the merge so a racing push after the coverage check
-    # cannot land an unreviewed head via `--auto`'s queue (x-0eaf TOCTOU). The
-    # staleness check above already refused a current mismatch; this makes gh
-    # itself refuse if the head moves between here and the merge.
-    covered_head = (cov.get("head_sha") or "") if cov and review_lane else ""
+    # covered_head (from the gate) pins the merge so a racing push after the
+    # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The
+    # staleness check inside the gate already refused a current mismatch; this
+    # makes gh itself refuse if the head moves between here and the merge.
 
     # (2c) Plan fidelity guard (x-cbab): the inverse of the coverage guard on the
     # ownership axis - review_coverage is Rust-computed/Python-read; plan fidelity

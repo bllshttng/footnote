@@ -430,6 +430,8 @@ The verb cannot assert coverage without performing the reads. There is no `--for
 
 That pre-empts the aggregate-that-overstates-its-inputs shape at the field that becomes a bypass on the day anything enforces it.
 
+A bare `gh pr merge` from an agent tool call is a fourth reader of the same predicate. The merge hook in `hooks/git-protection.py` shells the hidden `fno pr coverage-check` verb. That verb evaluates the guard's coverage check in `cli/src/fno/pr/_coverage_gate.py` without the recompute. A PreToolUse hook has a 60s harness budget and the Rust producer is budgeted in minutes. The invariant between the two surfaces is one-directional by design. The hook never allows what the guard refuses. When the row is missing or stale the hook denies where `fno pr merge` can still allow after recomputing. Absence denies. A named instrument failure (exit 4) fails open. Both surfaces refuse with one sentence, pinned character for character in `cli/tests/unit/test_pr_coverage_check.py`.
+
 ### Zero rows vs a frozen streak: the discriminator
 
 Two symptoms read alike and are different defects. Count `loop_check` rows in the worktree's own `.fno/events.jsonl`. Zero rows means the producer never ran there. A manual `fno-agents review-coverage --cwd <worktree>` settles it. Rows present with `consecutive_unchanged` frozen below `MUTE_PROBE_N` is the streak-gated shape the merge recompute makes moot.

@@ -55,6 +55,9 @@ def test_recompute_unreviewed_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     recompute."""
     calls: list = []
     _stub_recompute(monkeypatch, tmp_path, coverage="uncovered", count=0, head="abc", calls=calls)
+    # The gate now refuses a head it could not fetch, so pin the head the
+    # stubbed rows describe (no real gh call from a hermetic test).
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "blocked"
@@ -74,6 +77,7 @@ def test_recompute_unavailable_fails_closed(enabled, monkeypatch, capsys, tmp_pa
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: _reviews.review_coverage_for_gate(pr, repo, head),
     )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     reason = _last_json(capsys, stream="err")["reason"]
     assert "no review_coverage event" in reason
@@ -88,6 +92,7 @@ def test_recompute_reviewed_pr_passes_after_exactly_one(enabled, monkeypatch, ca
     monkeypatch.setattr(_merge, "run", fake)
     calls: list = []
     _stub_recompute(monkeypatch, tmp_path, coverage="covered", count=1, head="abc", calls=calls)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
     assert len(calls) == 1, f"the recompute must fire exactly once, fired {len(calls)}"

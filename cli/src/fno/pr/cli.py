@@ -175,6 +175,29 @@ def base_lineage_check(
 
 
 @pr_app.command(
+    "coverage-check",
+    hidden=True,
+    help=(
+        "The merge guard's coverage predicate, for callers that cannot import "
+        "it (the stdlib-only git-protection hook shells this verb on a bare "
+        "gh pr merge). Exit 0 covered, 3 uncovered (the guard's refusal on "
+        "stderr), 4 unanswered (a named instrument failure)."
+    ),
+)
+def coverage_check(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    recompute: bool = typer.Option(
+        False,
+        "--recompute",
+        help="Fire the Rust producer once when no row describes this head.",
+    ),
+) -> None:
+    from fno.pr import _coverage_gate
+
+    raise typer.Exit(code=_coverage_gate.run_coverage_check(pr_number, recompute=recompute))
+
+
+@pr_app.command(
     "evidence-check",
     help=(
         "Require a newest exact-HEAD full/passed verification receipt across "

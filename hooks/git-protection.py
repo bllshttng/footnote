@@ -536,6 +536,54 @@ def _parse_merge_pr(command):
     return None
 
 
+def _targets_other_repo(command):
+    """True when the gh invocation names a repository other than this checkout.
+
+    Every probe here reads THIS checkout, so a command pointed elsewhere is
+    unanswerable and fails open. Four forms carry the override: `-R`,
+    `--repo`, a `GH_REPO=` assignment, and a PR URL, which names its own repo
+    and which the flag test cannot see. Prefix match, not equality: gh accepts
+    the attached shorthand `-Rowner/repo` as readily as `-R owner/repo`.
+
+    Quote-aware and value-shaped, because a flag VALUE can carry the override
+    spelling (`-t "-R fixes the deref"`, a subject citing another PR's URL,
+    `--body 'See /pull/123'`) and a matcher that fires on any such token
+    silently disarms the vetoes. shlex keeps each quoted value one token; the
+    leading-dash reject drops flag spellings inside a value, an attached
+    override must carry an `owner/repo` shape (a slash, no leading dash), and
+    the PR-URL arm fires only on a URL-anchored token. A merge body that is
+    EXACTLY a bare pull URL as a separate flag value still trips the URL arm
+    and fails open; that is the documented residue, one command of recovery
+    away, and safer than misreading every flag value as an override.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:  # unbalanced quotes -> plain split, same as before
+        tokens = command.split()
+    for i, t in enumerate(tokens):
+        if " " in t or t.startswith("-") and not t.startswith(("-R", "--repo")):
+            continue
+        if t.startswith("GH_REPO="):
+            return True
+        if t == "-R" or t == "--repo":
+            # The value rides the NEXT token; a following flag means the
+            # override is malformed and gh itself will refuse it.
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                return True
+            continue
+        if t.startswith(("-R", "--repo")):
+            # Attached shorthand: `-Rowner/repo`, `--repo=owner/repo`. Require
+            # the owner/repo shape so `-t "-Rfix"` (a subject, no slash) stays
+            # an ordinary value.
+            attached = t[2:] if not t.startswith("--") else t.split("=", 1)[-1]
+            if "/" in attached and not attached.startswith("-"):
+                return True
+            continue
+        if "/pull/" in t and t.startswith(("http://", "https://", "github.com/")):
+            return True
+    return False
+
+
 def _stacked_base_refusal(command=""):
     """Refusal text when the PR's base no longer leads to the default branch.
 
@@ -567,37 +615,86 @@ def _stacked_base_refusal(command=""):
     pr_number = _parse_merge_pr(command)
     if not pr_number:
         return None  # branch-name or current-branch form: nothing to check
-    # `--repo`/`-R` points gh at a DIFFERENT repository, while the lineage check
-    # reads this checkout: `gh pr merge 42 --repo other/repo` would be judged
-    # against PR 42 HERE and could deny a merge on a verdict about an unrelated
-    # PR. Fail open, like every other unanswerable case in this function.
-    # Prefix match, not equality: gh accepts the attached shorthand
-    # `-Rowner/repo` as readily as `-R owner/repo`, and an equality test skipped
-    # exactly the form that carries the value. `GH_REPO=` is the third form -
-    # gh reads it as the repo override, so a flag-only test judged
-    # `GH_REPO=other/repo gh pr merge 42` against PR 42 in THIS checkout.
-    # A PR URL names its own repository, so it is the fourth cross-repo form and
-    # the flag test above cannot see it: `gh pr merge
-    # https://github.com/other/repo/pull/42` parses as 42 and would be judged
-    # against PR 42 in THIS checkout. Comparing owner/repo needs a slug this
-    # stdlib-only hook has no cheap way to obtain, so the URL form is treated as
-    # unanswerable and fails open like every other one here.
-    if any(t.startswith(("-R", "--repo", "GH_REPO=")) or "/pull/" in t
-           for t in command.split()):
+    # A merge aimed at another repository is unanswerable here: the lineage
+    # check reads THIS checkout, so judging `gh pr merge 42 --repo other/repo`
+    # against PR 42 here could deny a merge on a verdict about an unrelated PR.
+    # Fail open, like every other unanswerable case in this function.
+    if _targets_other_repo(command):
         return None
+    return _fno_veto_refusal(
+        ["pr", "base-lineage-check", pr_number],
+        timeout=25,
+        fallback=f"PR {pr_number}: base no longer leads to the default branch",
+    )
+
+
+def _fno_veto_refusal(args, timeout, fallback):
+    """One fno-verb probe: deny on the verb's exit-3 refusal line, else open.
+
+    The shared scaffold of both merge vetoes (lineage, coverage): fail OPEN on
+    every way the probe itself can die - a missing `fno`, a timeout, any exit
+    other than the verb's refusal code - because a guard whose own machinery is
+    down must not become a merge outage. That includes an unknown-command exit
+    from a `fno` deployment older than the verb (the rollout window): it is
+    indistinguishable from any other usage error and fails open silently, which
+    is why each veto's timeout stays well under the harness hook budget.
+    """
     try:
         proc = subprocess.run(
-            ["fno", "pr", "base-lineage-check", pr_number],
+            ["fno", *args],
             capture_output=True,
             text=True,
-            timeout=25,
+            timeout=timeout,
         )
     except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
         return None
     if proc.returncode != 3:
         return None
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return detail[0] if detail else f"PR {pr_number}: base no longer leads to the default branch"
+    return detail[0] if detail else fallback
+
+
+def _coverage_refusal(command=""):
+    """Refusal text when the merge guard's coverage predicate says no.
+
+    The hook's own two-factor check asks a different question than
+    `fno pr merge` does: a manifest flag and a session-scoped external-review
+    artifact, neither of which reads review coverage at the PR's head. Passing
+    it was never evidence that the sanctioned merge primitive would agree. This
+    consults the guard's predicate itself rather than carrying a third copy of
+    it, so both paths refuse for the same reason and print the same sentence.
+
+    Absence is a refusal here, not a shrug. `fno pr merge` refuses a missing
+    or head-mismatched row, so a veto that waved those through would recreate
+    the divergence it exists to close, on the precise input where nothing has
+    reviewed the PR. A wrong deny costs one command: `fno pr merge` is the
+    sanctioned primitive, this hook does not gate it, and it recomputes. A
+    wrong allow lands an unreviewed merge. Deny is the cheap direction.
+
+    Runs WITHOUT the recompute. `fno pr merge` fires the Rust producer once
+    when no row describes the head, and that subprocess is budgeted in
+    minutes. This veto runs inside a PreToolUse hook whose harness budget is
+    60s, and a hook that gets killed emits no verdict at all, so a probe
+    allowed to eat the budget would let an unauthorized merge through - the
+    same reasoning the lineage veto's timeout carries. The cases only a
+    recompute can answer are refused here and answered by `fno pr merge`,
+    which is where the time is affordable.
+
+    Fails OPEN only on a named instrument failure: exit 4, a missing `fno`, a
+    timeout, another repository - and on an unknown-command exit from a `fno`
+    deployment older than this verb (the rollout window), which the probe
+    cannot distinguish from any other usage error. A guard whose own machinery
+    is down must not become a merge outage. An empty read is not a machinery
+    failure - it is the answer that nothing attested this head, and it exits 3.
+    """
+    pr_number = _parse_merge_pr(command)
+    if not pr_number or _targets_other_repo(command):
+        return None
+    return _fno_veto_refusal(
+        ["pr", "coverage-check", pr_number],
+        timeout=15,
+        fallback=f"PR {pr_number}: review coverage refused",
+    )
 
 
 def _check_pr_merge_allowed(command=""):
@@ -620,6 +717,15 @@ def _check_pr_merge_allowed(command=""):
     which worktree session authorizes when several are active.
     """
     pr_number = _parse_merge_pr(command)
+
+    # A merge aimed at another repository cannot be authorized by THIS
+    # checkout's session artifacts: the state file and the external-review
+    # artifact below both belong to this repo, so an allow here would vouch
+    # for an unrelated PR that happens to carry the same number. Same
+    # predicate the two vetoes use; decline to authorize (the deny paths
+    # still run), never answer a question about the wrong PR.
+    if _targets_other_repo(command):
+        return None
 
     state_file, fm, repo_root = _get_active_target_session(prefer_pr=pr_number)
     if state_file is None:
@@ -1448,6 +1554,12 @@ Auto-merge directly from Claude Code requires ALL of:
 The artifact proves /pr check actually ran for this session. A stale
 or missing artifact blocks the merge even if the state flag is true.
 
+Ahead of the two factors above sits a third veto: review coverage. A bare
+`gh pr merge` also requires a `covered` review_coverage row pinned to the
+PR's current head. A missing or stale row is refused here even when both
+factors pass, because nothing reviewed the head that would merge. The
+sanctioned primitive `fno pr merge` recomputes that row itself.
+
 If /pr check was skipped or failed, the correct recovery is to run it
 again or explicitly configure --no-external. Do not forge the artifact.
 
@@ -1705,6 +1817,18 @@ def main():
         stacked = _stacked_base_refusal(merge_seg)
         if stacked:
             _emit("deny", f"[fno stacked-base] {stacked}")
+            sys.exit(0)
+        # Beside the lineage veto and ahead of the two-factor allow for the
+        # same reason: the override marker buys out review ceremony, and a PR
+        # nothing reviewed at the head that would merge is not ceremony. The
+        # recovery line wraps the guard's own sentence verbatim - never edits
+        # it - so the hook's reason and `fno pr merge`'s receipt carry one
+        # recognizable sentence between them.
+        covref = _coverage_refusal(merge_seg)
+        if covref:
+            _emit("deny", f"[fno review-coverage] {covref}\n"
+                          "Recovery: run `fno pr merge`, which recomputes coverage "
+                          "and is not gated by this hook.")
             sys.exit(0)
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
