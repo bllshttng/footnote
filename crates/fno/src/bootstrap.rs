@@ -135,8 +135,13 @@ fn run(args: &[OsString]) -> BootResult<()> {
             if verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL).is_ok() {
                 return Err(record_and_exec(&real, args));
             }
-            // A foreign package now sits at our path: drop the sentinel and fall
-            // through to re-provision (which re-verifies and aborts on mismatch).
+            // A foreign package now sits at our path: drop the sentinel so the
+            // fast path stops vouching for it. What follows is NOT a
+            // re-provision - the adopt arm below resolves this same path,
+            // re-verifies it, and exits on the same refusal. The wheel is only
+            // reinstalled when the path stops resolving at all, which is the
+            // conservative direction: `--force` over a stranger's install is a
+            // decision for the operator, not for the shim.
             let _ = fs::remove_file(sentinel_path());
         } else {
             // Stale sentinel (wheel uninstalled): drop it and re-provision.
@@ -890,11 +895,18 @@ fn verify_ours(real: &Path) -> BootResult<()> {
     // The owner's name travels in both, so the substring match in
     // decide_identity still holds and a routine pyproject edit can't lock the
     // legitimate package out.
+    //
+    // `.get(...) or ''` on every field, never `md['Name']`: an absent header
+    // makes the subscript answer None, which `print` renders as the literal
+    // "None" - a value decide_identity reads as a foreign package name. An
+    // empty line says "the field was not there" without dressing it up as an
+    // answer, which is what lets the stability check below tell a torn read
+    // from a stranger.
     let probe = "import importlib.metadata as m\n\
                  md = m.metadata('fno')\n\
-                 print(md['Name'])\n\
+                 print(md.get('Name') or '')\n\
                  print(md.get('Author') or md.get('Author-email') or '')\n\
-                 print(md['Version'])\n";
+                 print(md.get('Version') or '')\n";
     let out = Command::new(&venv_python)
         .args(["-c", probe])
         .output()
@@ -912,17 +924,36 @@ fn verify_ours(real: &Path) -> BootResult<()> {
     let author = lines.next().unwrap_or("").trim();
     let version = lines.next().unwrap_or("").trim();
 
+    // A COMPLETE answer is what makes an identity refusal stable. A METADATA file
+    // truncated mid-write - say right after `Metadata-Version: 2.1`, the same
+    // mid-rewrite window every other wait here covers - still parses, and it
+    // yields no Name and no Version. decide_identity refuses that as `name=`.
+    // It is an instrument failure wearing an identity refusal's clothes: marking
+    // it stable skips the retry and, on the post-install arm, stamps "refusing to
+    // run a foreign fno" for the whole cooldown over an install that was
+    // milliseconds from verifying.
+    //
+    // "None" is checked beside emptiness because that is what an absent header
+    // renders as the moment anyone writes `md['Name']` instead of `md.get(...)`,
+    // and the guard has to hold whichever way the probe above is spelled. No real
+    // package answers to it: the worst a false positive costs is one re-ask.
+    let present = |v: &str| !v.is_empty() && v != "None";
+    let answered = present(name) && present(version);
     decide_identity(name, author).map_err(|why| {
-        BootErr::new(
+        let e = BootErr::new(
             1,
             format!(
                 "the installed `fno` is not this project's package ({why}); \
                  refusing to run a foreign fno."
             ),
-        )
-        // The probe ran and answered. Waiting cannot make a stranger's package
-        // into ours, so this refusal is returned on the first pass.
-        .stable()
+        );
+        // The probe ran and answered in full. Waiting cannot make a stranger's
+        // package into ours, so that refusal is returned on the first pass.
+        if answered {
+            e.stable()
+        } else {
+            e
+        }
     })?;
     // Report what we accepted so the user can audit what ran (AC3-UI).
     eprintln!("fno: verified fno {version} (this project's package).");
@@ -1688,6 +1719,59 @@ mod tests {
             spawns, 1,
             "a stable refusal must cost one spawn, not the whole budget"
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_torn_metadata_read_is_retried_not_stamped_as_foreign() {
+        // The other side of the stability rule. A METADATA file truncated
+        // mid-write still parses and answers with no Name and no Version, and
+        // decide_identity refuses it as `name=`. Calling that stable would skip
+        // the retry and let the post-install arm stamp "foreign fno" for the
+        // whole cooldown over an install that was seconds from fine. Counting
+        // spawns is what separates the two: a stranger costs one, a torn read
+        // costs the budget.
+        //
+        // Both spellings of "the header was not there": the empty line the probe
+        // emits today, and the literal "None" a bare `md['Name']` would emit if
+        // anyone rewrote it that way.
+        let root = env::temp_dir().join(format!("fno-torn-{}", std::process::id()));
+        for (case, payload) in [("empty", "\\n\\n\\n"), ("none", "None\\n\\nNone\\n")] {
+            let bin = root.join(case);
+            fs::create_dir_all(&bin).unwrap();
+            let calls = bin.join("calls");
+
+            let python = bin.join("python");
+            fs::write(
+                &python,
+                format!(
+                    "#!/bin/sh\necho x >> {}\nprintf '{payload}'\n",
+                    calls.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let real = bin.join("fno-py");
+            fs::write(&real, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let e = verify_ours_within(&real, 3, Duration::from_millis(10))
+                .expect_err("an unreadable answer must still refuse");
+            assert!(
+                e.msg.contains("refusing to run a foreign fno"),
+                "{case}: {}",
+                e.msg
+            );
+            let spawns = fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .lines()
+                .count();
+            assert_eq!(
+                spawns, 4,
+                "{case}: an incomplete answer is an instrument failure: re-ask it"
+            );
+        }
         fs::remove_dir_all(&root).ok();
     }
 
