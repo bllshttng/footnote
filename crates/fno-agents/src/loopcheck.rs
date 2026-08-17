@@ -3664,6 +3664,25 @@ fn compute_review_info(
         }
     }
 
+    // A clean-pass issue comment is the SAME evidence the coverage axis reads
+    // (x-e601): a required bot that posts `Didn't find any major issues.
+    // Reviewed commit: <sha>` instead of a review object has reviewed, and the
+    // presence gate must agree with the coverage gate about the same comment
+    // or the PR waits forever on a bot that already passed it - the PR #947
+    // shape one axis down. Same selection and same freshness predicate as
+    // classify_coverage's clean-pass arm; a marker with no pinned sha is not
+    // evidence on either axis.
+    for (i, bot) in required_bots.iter().enumerate() {
+        if passed[i] {
+            continue;
+        }
+        if let Some((_, fresh)) = clean_pass_review(comments, bot, freshness) {
+            if fresh.counts() {
+                passed[i] = true;
+            }
+        }
+    }
+
     let mut missing_bots: Vec<String> = required_bots
         .iter()
         .zip(passed.iter())
@@ -13677,6 +13696,86 @@ mod tests {
         assert!(!info.all_required_passed());
         assert_eq!(info.missing_bots, vec!["gemini-code-assist".to_string()]);
         assert_eq!(info.latest_ts, "2026-06-05T01:00:00Z");
+    }
+
+    // ── clean-pass comments satisfy the required-bot gate too (x-e601 P1) ────
+    //
+    // The coverage axis and the presence gate must agree about the same
+    // comment. Before this, a clean-pass comment marked coverage reviewed
+    // while missing_bots kept naming the bot, so the PR waited forever on a
+    // reviewer that had already passed it.
+
+    fn clean_pass_comment(head: &str) -> Value {
+        serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": format!(
+                "Codex Review: Didn't find any major issues. Bravo. Reviewed commit: {head}"
+            ),
+            "createdAt": "2026-08-17T02:00:00Z"
+        })
+    }
+
+    #[test]
+    fn compute_review_info_clean_pass_comment_satisfies_the_gate() {
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [clean_pass_comment("abc12345")]
+        });
+        let fresh_at = |sha: &str| {
+            if sha == "abc12345" {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        };
+        let info = compute_review_info(&json, &required, &fresh_at);
+        assert!(info.all_required_passed());
+        assert!(info.missing_bots.is_empty());
+        assert!(info.usage_limited.is_empty());
+    }
+
+    #[test]
+    fn compute_review_info_stale_clean_pass_stays_missing() {
+        // The comment names an older commit: the bot responded, but not to
+        // this code - same staleness rule the review-object path applies.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [clean_pass_comment("0000000000")]
+        });
+        let fresh_at = |sha: &str| {
+            if sha == "abc12345" {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        };
+        let info = compute_review_info(&json, &required, &fresh_at);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_review_info_unpinned_clean_pass_stays_missing() {
+        // A marker with no Reviewed commit line is not evidence on the
+        // coverage axis; it must not be evidence on this one either.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "Codex Review: Didn't find any major issues. Bravo.",
+                "createdAt": "2026-08-17T02:00:00Z"
+            }]
+        });
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
     }
 
     // ── x-b167 nudge state ────────────────────────────────────────────────────
