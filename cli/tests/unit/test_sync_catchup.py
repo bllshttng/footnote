@@ -429,6 +429,47 @@ def _run_tick(monkeypatch, catchup_result):
     return result, calls
 
 
+def test_quota_skip_defers_the_catchup_leg(monkeypatch):
+    """The catch-up leg spends the same shared GraphQL pool the skip just
+    refused to drain (gh pr list --state merged, gh pr view per root), so a
+    quota skip defers it to the next healthy tick instead of stalling it
+    out against the drained budget it was protecting."""
+    from typer.testing import CliRunner
+
+    from fno.pr import _sync_canonical as sc_mod
+    from fno.pr_watch import cli as pw
+
+    monkeypatch.setattr(pw, "load_settings", _tick_settings)
+    monkeypatch.setattr(pw, "load_settings_for_repo", lambda _root: _tick_settings())
+    monkeypatch.setattr(pw, "_catchup_roots", lambda: [Path("/tmp/proj-alpha")])
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: SimpleNamespace(
+            lock_held=False,
+            lock_holder=None,
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            disabled=False,
+            sweep_failures=0,
+            quota_skip=True,
+            quota_remaining=12,
+            quota_reset="2026-08-17T15:00:00Z",
+        ),
+    )
+    ran: list[str] = []
+    monkeypatch.setattr(
+        sc_mod,
+        "run_sync_catchup",
+        lambda **_kw: ran.append("ran")
+        or SimpleNamespace(outcome="synced", detail="", stale=False),
+    )
+    res = CliRunner().invoke(pw.cli, ["tick"])
+
+    assert res.exit_code == 0
+    assert ran == []
+
+
 def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
     """launchd starts the daemon in `/`, so there is no ambient project.
 
