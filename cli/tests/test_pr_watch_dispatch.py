@@ -2369,6 +2369,42 @@ class TestQuotaPreflight:
         assert receipt["listing_api"] == "rest"
         assert receipt["sweep_failures"] == 1
 
+    def test_quota_skip_return_carries_the_sweep_failures(self, tmp_path):
+        """The sweep runs before the preflight, so a skip after failed repo
+        listings must still carry the count: the end record is then the only
+        durable trace of the outage, and reading sweep_failures 0 there is
+        the AC4 swallowed-failure shape."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "UNKNOWN" for key in keys}, 3),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (10, "2026-08-17T07:00:00Z"),
+        )
+
+        assert result.quota_skip is True
+        assert result.sweep_failures == 3
+
     def test_deadline_raised_inside_the_sweep_aborts_the_tick(self, tmp_path):
         """AC7 at the swallow site. TickDeadlineExceeded raised inside the
         guarded sweep must abort the whole tick. If a broad except seam can

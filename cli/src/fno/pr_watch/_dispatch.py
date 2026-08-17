@@ -683,6 +683,10 @@ def _run_tick(
             open_prs=0,
             acted=0,
             skipped=0,
+            # The sweep already ran above the preflight; its failures ride the
+            # skip home, because the skip mints no pr_watch_tick receipt and
+            # this end record is then the only durable trace of the outage.
+            sweep_failures=sweep_failures,
             quota_skip=True,
             quota_remaining=quota_remaining,
             quota_reset=quota_reset,
