@@ -597,7 +597,11 @@ struct HarnessStoreIndex {
 impl HarnessStoreIndex {
     /// Test seam: fixed roots, so the per-harness keying is unit-testable
     /// against temp trees instead of the developer's real `~/.claude`/`~/.codex`.
-    #[cfg(test)]
+    /// (Called only from the lib test suite. Deliberately NOT gated with the
+    /// test cfg attribute: the emit-kind scanner in lib.rs truncates each file
+    /// at the first byte-level occurrence of that attribute's text, so a
+    /// mid-file gate would classify every later production emit as test-only.)
+    #[allow(dead_code)]
     fn with_roots(claude_root: std::path::PathBuf, codex_root: std::path::PathBuf) -> Self {
         HarnessStoreIndex {
             claude_root: Some(claude_root),
