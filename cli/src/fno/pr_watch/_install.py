@@ -588,7 +588,7 @@ def status(
     events_path: Optional[Path] = None,
     state_path: Optional[Path] = None,
 ) -> None:
-    """Print watcher status: loaded?, last tick, open-PR count, parked PRs."""
+    """Print watcher status: loaded?, verdict, watermarks, open-PR count, parked PRs."""
     plist_path = launch_agents_dir / _PLIST_FILENAME
 
     # Loaded?
@@ -596,9 +596,32 @@ def status(
     typer.echo(f"Agent loaded: {'yes' if loaded else 'no'}")
     typer.echo(f"Plist path:   {plist_path} ({'exists' if plist_path.exists() else 'missing'})")
 
-    # Last tick from events.jsonl
-    last_tick_ts = _last_tick_ts(events_path)
-    typer.echo(f"Last tick:    {last_tick_ts or '(no tick recorded)'}")
+    # All three watermarks from ONE pass (AC11); the verdict reads the same
+    # marks rather than re-scanning the log.
+    marks = _tick_watermarks(events_path)
+    report = liveness_report_live(
+        events_path=events_path,
+        launch_agents_dir=launch_agents_dir,
+        marks=marks,
+    )
+    typer.echo(f"Verdict:      {report['verdict']} ({report['detail']})")
+    if report.get("fix"):
+        typer.echo(f"Fix:          {report['fix']}")
+    typer.echo(f"Last tick:    {marks['last_tick'] or '(no tick recorded)'}")
+    typer.echo(f"Last attempt: {marks['last_attempt'] or '(no attempt recorded)'}")
+    end = marks["last_end"]
+    if end is None:
+        typer.echo("Last tick outcome: (no end record)")
+    else:
+        bits: list[str] = []
+        if end.get("duration_s") is not None:
+            bits.append(f"{end['duration_s']:.1f}s")
+        if end.get("sweep_failures"):
+            bits.append(f"{end['sweep_failures']} sweep failures")
+        if end.get("phase") and end.get("outcome") in ("timeout", "error"):
+            bits.append(f"phase: {end['phase']}")
+        detail = f" ({', '.join(bits)})" if bits else ""
+        typer.echo(f"Last tick outcome: {end['outcome']}{detail}")
 
     # Open PRs
     open_count = _observed_open_pr_count(state_path)
@@ -614,21 +637,26 @@ def status(
         typer.echo("Parked PRs:   none")
 
 
-def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
-    """Return the ts of the most recent pr_watch_tick event, or None."""
+def _tick_watermarks(events_path: Optional[Path]) -> dict:
+    """Derive all three tick watermarks from a single pass over events.jsonl.
+
+    ``last_tick`` stays the liveness watermark (completed sweeps only);
+    ``last_attempt`` and ``last_end`` bracket every invocation, including the
+    exits that never minted a tick. One read, three marks (AC11): the old
+    per-watermark scans cost one full-log pass each.
+    """
+    marks: dict = {"last_tick": None, "last_attempt": None, "last_end": None}
     if events_path is None:
-        # Default path
         try:
             from fno.paths import state_dir
 
             events_path = state_dir() / "events.jsonl"
         except Exception:
-            return None
+            return marks
 
     if not events_path.exists():
-        return None
+        return marks
 
-    last: Optional[str] = None
     try:
         for line in events_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -640,11 +668,34 @@ def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
                     continue
             except json.JSONDecodeError:
                 continue
-            if ev.get("type") == "pr_watch_tick":
-                last = ev.get("ts")
+            etype = ev.get("type")
+            if etype == "pr_watch_tick":
+                marks["last_tick"] = ev.get("ts")
+            elif etype == "pr_watch_tick_attempt":
+                marks["last_attempt"] = ev.get("ts")
+            elif etype == "pr_watch_tick_end":
+                data = ev.get("data")
+                data = data if isinstance(data, dict) else {}
+                marks["last_end"] = {
+                    "ts": ev.get("ts"),
+                    "outcome": data.get("outcome"),
+                    "phase": data.get("phase"),
+                    "duration_s": data.get("duration_s"),
+                    "sweep_failures": data.get("sweep_failures"),
+                }
     except OSError:
-        return None
-    return last
+        pass
+    return marks
+
+
+def _last_tick_ts(events_path: Optional[Path]) -> Optional[str]:
+    """Return the ts of the most recent pr_watch_tick event, or None.
+
+    Thin wrapper over ``_tick_watermarks``: the liveness verdict and the
+    tests keep this name while the single-pass scan lives next to its
+    sibling watermarks.
+    """
+    return _tick_watermarks(events_path)["last_tick"]
 
 
 def _parked_prs(state_path: Optional[Path]) -> dict:
@@ -761,20 +812,33 @@ def liveness_report(
     return verdict("healthy", f"last tick {int(age)}s ago")
 
 
-def liveness_report_live() -> dict:
-    """Gather ground truth (config, launchd, tick, plist mtime) and judge liveness."""
+def liveness_report_live(
+    *,
+    events_path: Optional[Path] = None,
+    launch_agents_dir: Optional[Path] = None,
+    marks: Optional[dict] = None,
+) -> dict:
+    """Gather ground truth (config, launchd, tick, plist mtime) and judge liveness.
+
+    ``status`` passes the watermarks it already read (and its injected
+    launch_agents_dir) so the event log is scanned once per invocation;
+    every other caller (doctor, SessionStart hook) uses the global defaults.
+    """
     from fno.config import load_settings
 
     cfg = load_settings().pr_watch
-    plist_path = _LAUNCH_AGENTS_DIR / _PLIST_FILENAME
+    plist_path = (launch_agents_dir or _LAUNCH_AGENTS_DIR) / _PLIST_FILENAME
     plist_exists = plist_path.exists()
     plist_mtime = plist_path.stat().st_mtime if plist_exists else None
+    last_tick_ts = (
+        marks["last_tick"] if marks is not None else _tick_watermarks(events_path)["last_tick"]
+    )
 
     return liveness_report(
         enabled=cfg.enabled,
         interval_seconds=cfg.interval_seconds,
         loaded=_launchctl_is_loaded(),
-        last_tick_ts=_last_tick_ts(None),
+        last_tick_ts=last_tick_ts,
         plist_exists=plist_exists,
         plist_mtime=plist_mtime,
         now=time.time(),
