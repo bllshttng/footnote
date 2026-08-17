@@ -69,6 +69,7 @@ config set
 context
 cost
 decide list
+decide reindex
 delivery
 dispatch
 doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host

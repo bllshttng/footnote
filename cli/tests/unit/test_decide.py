@@ -1,9 +1,13 @@
 """Tests for `fno decide` - the durable decision record and its recovery query.
 
-The record has two halves that must both exist: the append-only
-``operator_decision`` event (survives compaction) and the projection onto the
-subject node's graph entry (findable by subject, inherits the archive
-read-through). A record that is only greppable is not recoverable.
+The record has three stores: the append-only ``operator_decision`` event in the
+project journal (durability), the machine-wide ``decisions.jsonl`` index (the
+reader's only source), and the projection onto the subject node's graph entry
+(the node view). A record that is only greppable is not recoverable.
+
+The defect these guard against is a write that succeeded and a read that could
+not find it. So every recall assertion names a POSITIVE marker - the returned
+``decision_id`` - never the absence of an error.
 """
 from __future__ import annotations
 
@@ -31,9 +35,23 @@ def _node(nid: str, **over) -> dict:
 
 
 @pytest.fixture
+def index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The machine-wide decision index, pinned into the sandbox.
+
+    Every test takes this: without it a test writes to the developer's real
+    ``~/.fno/decisions.jsonl``, and reads back whatever else is in there.
+    """
+    path = tmp_path / "state" / "decisions.jsonl"
+    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: path)
+    return path
+
+
+@pytest.fixture
 def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [_node("x-7d94")]}, indent=2) + "\n")
+    g.write_text(
+        json.dumps({"entries": [_node("x-7d94", slug="fold-the-inbox")]}, indent=2) + "\n"
+    )
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -67,7 +85,7 @@ def _events(root: Path) -> list[dict]:
     ]
 
 
-def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path):
+def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path, index: Path):
     """fno decide writes the event AND the graph projection."""
     res = runner.invoke(
         decide_app,
@@ -102,7 +120,7 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     assert "options: fold first, migrate first" in listed.output
 
 
-def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path):
+def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path, index: Path):
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "first"])
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "second"])
 
@@ -115,7 +133,7 @@ def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path):
     assert [d["decision"] for d in payload["decisions"]] == ["second", "first"]
 
 
-def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path):
+def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, index: Path):
     """Two decisions on one subject order themselves; the older one
     is marked, not hidden."""
     first = runner.invoke(
@@ -137,7 +155,7 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path):
     assert "superseded by" in listed.output, "the render marks the superseded row"
 
 
-def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path):
+def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, index: Path):
     """A decision recorded pre-archive is still listable post-archive
     through entries_with_archive."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
@@ -151,13 +169,18 @@ def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path):
     assert "fold first" in listed.output
 
 
-def test_list_refuses_a_subject_that_resolves_to_nothing(root: Path, tmp_graph: Path):
+def test_list_of_a_subject_with_nothing_on_record_is_a_successful_read(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Exit 0, not 1. A read that answered "none" ran; only a read that could
+    not run is a failure, and the two must not share an exit code."""
     listed = runner.invoke(decide_app, ["list", "--subject", "x-nope"])
-    assert listed.exit_code == 1
+    assert listed.exit_code == 0, listed.output
+    assert "no decisions recorded for 'x-nope'" in listed.output
 
 
 def test_record_without_a_resolvable_subject_still_writes_the_event(
-    root: Path, tmp_graph: Path
+    root: Path, tmp_graph: Path, index: Path
 ):
     """A subject that names a file or area, not a node, loses the projection
     but keeps the durable event; the verb says so on stderr."""
@@ -178,3 +201,201 @@ def test_decisions_default_applies_on_read_for_legacy_rows(tmp_path: Path):
 
     entries = _apply_graph_defaults([{"id": "x-old", "title": "old", "status": "ready"}])
     assert entries[0]["decisions"] == []
+
+
+# --- recall parity: the reader takes every subject the writer takes ---------
+
+
+@pytest.mark.parametrize(
+    "subject",
+    ["x-7d94", "fold-the-inbox", "pr-923", "docs/foo.md", "the mail bus"],
+    ids=["node-id", "slug", "pr", "path", "area"],
+)
+def test_recall_answers_every_subject_shape_the_help_promises(
+    root: Path, tmp_graph: Path, index: Path, subject: str
+):
+    """The defect, named. `--help` says the subject may be a node id/slug, a
+    file, or an area; the writer took all of them and the reader took one, so a
+    ruling about `pr-923` was written, receipted, and lost.
+
+    Asserts the returned decision_id comes back - a positive marker. Restore the
+    graph-only reader and the pr, path and area cases fail.
+    """
+    written = runner.invoke(
+        decide_app, ["--subject", subject, "--decision", f"ruling about {subject}"]
+    )
+    assert written.exit_code == 0, written.output
+    did = written.stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+    )
+    assert did in [d["decision_id"] for d in payload["decisions"]]
+
+
+def test_recall_is_exact_never_a_prefix_match(root: Path, tmp_graph: Path, index: Path):
+    """A decision about pr-92 must not answer a query for pr-921. Set
+    membership on the recorded string, never a fuzzy match."""
+    runner.invoke(decide_app, ["--subject", "pr-92", "--decision", "the short one"])
+    on_921 = runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"])
+    assert json.loads(on_921.stdout)["decisions"] == []
+
+    on_92 = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-92", "--json"]).stdout
+    )
+    assert [d["decision"] for d in on_92["decisions"]] == ["the short one"]
+
+
+def test_supersession_is_derived_from_index_rows_alone(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The graph projection stamped superseded_by under the lock. For a subject
+    that names no node there is no projection, so the reader must derive it."""
+    first = runner.invoke(
+        decide_app, ["--subject", "pr-922", "--decision", "merge it"]
+    ).stdout.strip().splitlines()[-1]
+    second = runner.invoke(
+        decide_app,
+        ["--subject", "pr-922", "--decision", "hold it", "--supersedes", first],
+    )
+    assert second.exit_code == 0, second.output
+    newer = second.stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-922", "--json"]).stdout
+    )
+    by_id = {d["decision_id"]: d for d in payload["decisions"]}
+    assert by_id[first]["superseded_by"] == newer
+    assert by_id[newer]["superseded_by"] is None
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "pr-922"])
+    assert f"[superseded by {newer}]" in listed.output
+
+
+def test_a_subjectless_decision_is_reachable_only_without_a_subject(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`fno outstanding clear --answer` on a question naming no node records a
+    decision with subject=None. A subject-less list is the only way to it."""
+    from fno.outstanding.cli import outstanding_app
+
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+
+    cleared = runner.invoke(
+        outstanding_app, ["clear", qid, "--answer", "the dispatcher owns it"]
+    )
+    assert cleared.exit_code == 0, cleared.output
+
+    payload = json.loads(runner.invoke(decide_app, ["list", "--json"]).stdout)
+    assert "the dispatcher owns it" in [d["decision"] for d in payload["decisions"]]
+    assert payload["subject"] == "(all)"
+
+
+def test_limit_caps_the_newest_and_zero_means_no_cap(
+    root: Path, tmp_graph: Path, index: Path
+):
+    for n in range(4):
+        runner.invoke(decide_app, ["--subject", "pr-900", "--decision", f"call {n}"])
+
+    capped = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "pr-900", "--limit", "2", "--json"]
+        ).stdout
+    )
+    assert [d["decision"] for d in capped["decisions"]] == ["call 3", "call 2"]
+
+    uncapped = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "pr-900", "--limit", "0", "--json"]
+        ).stdout
+    )
+    assert len(uncapped["decisions"]) == 4
+
+
+# --- reindex: the records already on disk become readable -------------------
+
+
+def test_reindex_recovers_journal_records_and_is_idempotent(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The backfill is the whole point: without it the fix helps no record that
+    already exists."""
+    from fno.decide import reindex
+
+    journal = root / ".fno" / "events.jsonl"
+    for subject in ("pr-923", "pr-921", "x-6352-worktree"):
+        runner.invoke(decide_app, ["--subject", subject, "--decision", f"on {subject}"])
+    index.unlink()  # the state before the index existed: journal only
+
+    counts = reindex(sources=[journal])
+    assert counts["added"] == 3, counts
+    for subject in ("pr-923", "pr-921", "x-6352-worktree"):
+        payload = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+        )
+        assert [d["decision"] for d in payload["decisions"]] == [f"on {subject}"]
+
+    again = reindex(sources=[journal])
+    assert again["added"] == 0 and again["already"] == 3, again
+
+
+def test_reindex_reads_one_journal_once_through_a_symlink(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path
+):
+    """A linked checkout points .fno/events.jsonl at the canonical file. The
+    (st_dev, st_ino) dedupe is what keeps a 54 MB journal from being read once
+    per name it is reachable under."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+
+    journal = root / ".fno" / "events.jsonl"
+    link = tmp_path / "linked-events.jsonl"
+    link.symlink_to(journal)
+
+    counts = reindex(sources=[journal, link])
+    assert counts["added"] == 1, counts
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert len(payload["decisions"]) == 1
+
+
+def test_reindex_recovers_a_projection_row_that_stored_no_subject(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The oldest projection on this machine predates the subject field. The
+    row lives ON the node, so the node is the subject; without that fallback
+    the recovered decision answers no query at all."""
+    from fno.decide import reindex
+
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"] = [
+        {
+            "decision_id": "d-legacy1",
+            "decision": "fold every project's inbox first",
+            "decided_by": "operator",
+            "ts": "2026-08-15T00:31:06.178560Z",
+        }
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    assert reindex(sources=[])["added"] == 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == ["d-legacy1"]
+
+
+def test_operator_decision_retention_is_durable_by_an_explicit_key():
+    """It behaved this way only because it named no retention and the default
+    is durable. The record the recall promise rests on is then one schema edit
+    from being GC'd out of the project journal."""
+    from fno.events import SCHEMA, retention_for
+
+    assert retention_for("operator_decision") == "durable"
+    entry = next(e for e in SCHEMA["event_types"] if e["name"] == "operator_decision")
+    assert entry.get("retention") == "durable", "explicit, not inherited from the default"

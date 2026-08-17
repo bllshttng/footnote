@@ -18,9 +18,13 @@ import typer
 decide_app = typer.Typer(
     help=(
         "Record an operator decision so it survives the session, and recover "
-        "the decision history for a subject. `fno decide --subject <node> "
-        "--decision \"...\"` records; `fno decide list --subject <node>` "
-        "recovers, newest first, including superseded ones (marked, not hidden)."
+        "the decision history for a subject. `fno decide --subject <subject> "
+        "--decision \"...\"` records; `fno decide list --subject <subject>` "
+        "recovers, newest first, including superseded ones (marked, not "
+        "hidden). The subject is any string - a node id/slug, a PR (`pr-923`), "
+        "a file, an area - and the reader takes every one the writer takes. "
+        "`fno decide list` with no subject shows the recent ones; "
+        "`fno decide reindex` backfills decisions recorded before the index."
     ),
 )
 
@@ -83,10 +87,14 @@ def record(
         raise typer.Exit(1)
 
     did = result["decision_id"]
+    # The receipt names the recall command in BOTH branches. A subject that
+    # names no node loses only the graph projection; it is indexed and
+    # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
             f"decide: recorded {did}; subject names no graph node, so no "
-            f"projection was written (the event is the record).",
+            f"projection was written (the event and the index are the record). "
+            f"Recover with: fno decide list --subject {subject}",
             err=True,
         )
     else:
@@ -101,8 +109,14 @@ def record(
 
 @decide_app.command("list")
 def list_cmd(
-    subject: str = typer.Option(
-        ..., "--subject", help="Node id/slug whose decision history to recover."
+    subject: Optional[str] = typer.Option(
+        None,
+        "--subject",
+        help="What the decision governs: a node id/slug, a PR, a file, an area. "
+        "Omit it to see the recent decisions across every subject.",
+    ),
+    limit: int = typer.Option(
+        20, "--limit", help="Most recent N. 0 means no cap."
     ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
@@ -111,30 +125,31 @@ def list_cmd(
     """Recover the decision history for a subject, newest first."""
     from fno.decide import list_decisions
 
-    try:
-        node_id, decisions = list_decisions(subject)
-    except LookupError as exc:
-        typer.echo(f"decide list: {exc}", err=True)
-        raise typer.Exit(1)
+    label, decisions = list_decisions(subject, limit=limit)
 
     if as_json:
         typer.echo(
             json.dumps(
-                {"subject": node_id, "decisions": decisions}, separators=(",", ":")
+                {"subject": label, "decisions": decisions}, separators=(",", ":")
             )
         )
         return
 
     if not decisions:
-        typer.echo(f"decide list: {node_id} has no recorded decisions", err=True)
+        # Exit 0: a read that answered "none" is a successful read. Only a read
+        # that could not run is a failure.
+        typer.echo(f"decide list: no decisions recorded for '{label}'", err=True)
         return
 
     for d in decisions:
         superseded = str(d.get("superseded_by") or "")
         marker = f"  [superseded by {superseded}]" if superseded else ""
+        # Across subjects the subject IS the column that tells the rows apart;
+        # scoped to one it is the same word on every line.
+        scope = "" if subject else f"{d.get('subject') or '(none)'}  "
         typer.echo(
-            f"{d.get('decision_id')}  {d.get('ts', '')}  {d.get('decided_by', '')}  "
-            f"{d.get('decision', '')}{marker}"
+            f"{d.get('decision_id')}  {d.get('ts', '')}  {scope}"
+            f"{d.get('decided_by', '')}  {d.get('decision', '')}{marker}"
         )
         if d.get("rationale"):
             typer.echo(f"    rationale: {d['rationale']}")
@@ -144,3 +159,26 @@ def list_cmd(
             typer.echo(f"    options: {', '.join(str(o) for o in d['options'])}")
         if d.get("supersedes"):
             typer.echo(f"    supersedes: {d['supersedes']}")
+
+
+@decide_app.command("reindex")
+def reindex_cmd() -> None:
+    """Backfill the recall index from the graph projections and the journals.
+
+    A decision recorded before the index existed is durable but unreadable
+    until this runs. Idempotent by decision id, so running it twice is free.
+    """
+    from fno.decide import reindex
+
+    try:
+        counts = reindex()
+    except Exception as exc:  # noqa: BLE001 - a partial backfill must not read as done
+        typer.echo(f"decide reindex: failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
+    if counts.get("invalid"):
+        note += f", {counts['invalid']} unreadable rows skipped"
+    typer.echo(note, err=True)
+    # stdout carries the value: the number of decisions now recoverable.
+    typer.echo(counts["total"])
