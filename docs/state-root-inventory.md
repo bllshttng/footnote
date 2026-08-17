@@ -107,6 +107,12 @@ A `.fno/`, `.claude/`, `.abilities/`, or `.impeccable/` directory nested *inside
 
 Leave them. The finding is the cwd fallback, not the directories it produced. `.abilities` is the pre-rename state-root name, so anything under it predates the rename. <!-- fno-rename-keep: historical pre-rename name, documented for forensic purposes -->
 
+## The project journal and `FNO_EVENTS_PATH`
+
+The per-checkout journal `<repo>/.fno/events.jsonl` resolves through `paths.project_events_json()`, and `FNO_EVENTS_PATH` overrides it. The override exists because repo-root resolution cannot be sandboxed: `fno.hermetic.neutralise` deliberately leaves `FNO_REPO_ROOT` unset, so an unpathed `append_event` under test writes a real row into the developer's checkout, and both operator readers fold that file. On 2026-08-17 six test fixtures were sitting in the needs panel beside two genuine operator questions.
+
+`neutralise` pins the override at one line, and it reaches the pytest, shell, and cargo trees because all three come through that function. Reach for it, not for a marker the fold recognises: a fold that must know about test data carries an exception list, and the next fixture that does not match the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and then reads the journal back by hand must name the same file in `FNO_EVENTS_PATH`, because the pin outranks the root.
+
 ## Adding a new root writer
 
 1. Prefer a subfolder. Reach for the root only for one durable file named after itself.
