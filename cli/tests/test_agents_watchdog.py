@@ -94,9 +94,9 @@ def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
 
 
 def test_unparseable_reset_stamp_is_leave_never_wake():
-    assert rate_limit_window("429 quota exceeded", NOW_1840)[0] == "unknown"
+    assert rate_limit_window([(None, "API Error: 429 quota exceeded")], NOW_1840)[0] == "unknown"
     rows = [Row("dddd4444-0000", "k1", "blocked", None, "/tmp/k1")]
-    [v] = _run(rows, {"dddd4444-0000": _facts("429 quota exceeded, try later")})
+    [v] = _run(rows, {"dddd4444-0000": _facts("API Error: 429 quota exceeded, try later")})
     assert v.verdict == LEAVE
 
 
@@ -105,16 +105,21 @@ def test_newest_429_stamp_decides_the_window():
     OLDEST 429's reset. Two 429s in the tail with the old window passed and
     the newest still closed must read live, or the wake lane spends a turn
     inside the open window."""
-    old = "429 rate limit, window resets at 02:10:00 SGT"
+    old = "API Error: 429 rate limit, window resets at 02:10:00 SGT"
     new = RATE_LIMIT_TAIL
-    tail = f"{old} {new}"
+    tail = [(None, old), (None, new)]
     window, epoch, _stamp = rate_limit_window(tail, NOW_1840)
     assert window == "live"
     assert epoch == datetime(2026, 8, 16, 18, 48, 21, tzinfo=timezone.utc).timestamp()
     # Once the NEWEST window has passed too, the row is wakeable again.
     assert rate_limit_window(tail, NOW_1850)[0] == "passed"
-    # A newest 429 with no stamp of its own is unknown, never the old stamp.
-    assert rate_limit_window("429 resets 02:10:00 SGT 429 quota exceeded", NOW_1840)[0] == "unknown"
+    # A newest rate record with no stamp of its own is unknown, never an
+    # older record's stamp.
+    assert rate_limit_window(
+        [(None, "API Error: 429 resets 02:10:00 SGT"),
+         (None, "API Error: 429 quota exceeded")],
+        NOW_1840,
+    )[0] == "unknown"
 
 
 def test_taxonomy_quota_phrasings_mark_the_window():
@@ -122,15 +127,26 @@ def test_taxonomy_quota_phrasings_mark_the_window():
     Three workers died on the usage-limit phrasing on 2026-08-17, and a
     rate-limit-only regex reads their tails as ordinary silence."""
     assert rate_limit_window(
-        "Claude usage limit reached. Window resets at 02:48:21 SGT", NOW_1840
+        [(None, "API Error: Claude usage limit reached. Window resets at 02:48:21 SGT")],
+        NOW_1840,
     )[0] == "live"
     assert rate_limit_window(
-        "quota exceeded, resets 02:48:21 SGT", NOW_1840
+        [(None, "API Error: quota exceeded, resets 02:48:21 SGT")], NOW_1840
     )[0] == "live"
     # A usage-limit tail with no parseable stamp is unknown: fail safe.
     assert rate_limit_window(
-        "API Error Request rejected 429, Usage limit reached for 5 hour", NOW_1840
+        [(None, "API Error Request rejected 429, Usage limit reached for 5 hour")],
+        NOW_1840,
     )[0] == "unknown"
+    # Prose quoting the vocabulary is not a rate event: no error signature,
+    # no window, however many quota phrases or 429 digits it carries.
+    assert rate_limit_window(
+        [(None, "we are rate limited on the search API. sync at 02:48:21 SGT")],
+        NOW_1840,
+    )[0] == "none"
+    assert rate_limit_window(
+        [(None, "reviewing PR 429 now")], NOW_1840
+    )[0] == "none"
     row = Row("ab12cd34-0000", "u1", "blocked", None, "/tmp/u1")
     [v] = _run(
         [row],
@@ -144,7 +160,7 @@ def test_taxonomy_quota_phrasings_mark_the_window():
 
 def test_old_passed_plus_new_live_429_is_reroute_not_wake():
     row = Row("eeee5555-0000", "r2", "blocked", None, "/tmp/r2")
-    old = "429 rate limit, window resets at 02:10:00 SGT"
+    old = "API Error: 429 rate limit, window resets at 02:10:00 SGT"
     facts = TailFacts(
         [(NOW_1840 - 130 * 60, old), (NOW_1840 - 125 * 60, RATE_LIMIT_TAIL)],
         NOW_1840 - 125 * 60,
@@ -461,6 +477,34 @@ def test_wake_confirmation_scans_past_the_classification_tail(monkeypatch):
     assert watchdog.confirm_wake_landed(
         "dddd4444-0000", "/tmp/k1", "continue", marker - 60
     )
+
+
+def test_tail_window_bounds_the_role_triple_too(monkeypatch, tmp_path):
+    """last_role/last_text/last_kind must come from inside the same
+    max_records window as the records they are classified against. A triple
+    read from an arbitrarily older record pairs a stale text with a fresh
+    age, and reap's tool gate can fire on an ancient tool call."""
+    import fno.provenance.observed as obs
+
+    lines = [{
+        "timestamp": "2026-08-16T16:00:00Z",
+        "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "ancient turn"}]},
+    }]
+    for i in range(20):
+        lines.append({"timestamp": f"2026-08-16T17:{i:02d}:00Z",
+                      "text": f"progress {i}"})
+    path = tmp_path / "t.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in lines))
+    monkeypatch.setattr(obs, "resolve_transcript_path", lambda *a, **k: path)
+
+    facts = watchdog.tail_facts("sid", "/tmp")
+    assert len(facts.records) == 15
+    assert facts.records[-1][1] == "progress 19"
+    # The ancient role-bearing record fell outside the window, so the triple
+    # reads empty rather than stale.
+    assert facts.last_role is None and facts.last_text == ""
+    assert facts.last_kind is None
 
 
 def test_rows_without_a_session_id_are_skipped_loudly(monkeypatch, tmp_path):

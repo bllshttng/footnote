@@ -286,6 +286,7 @@ def tick() -> None:
     # config must never crash the tick - "off" is the no-op that fails safe.
     if (
         getattr(settings.recovery, "watchdog", "off") in ("report", "wake")
+        and settings.recovery.enabled
         and settings.autonomy.enabled
     ):
         try:

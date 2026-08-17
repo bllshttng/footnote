@@ -3193,7 +3193,7 @@ event_types:
           description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
 
   - name: watchdog_verdict
-    description: "The external fleet watchdog (x-55c3) classified a fleet row outside every session and the verdict is not 'leave': a ghost, a reapable, a reroute, or a wake candidate. The basis names the measurement that decided it so a reader can falsify the call."
+    description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a reapable, a reroute, or a wake candidate. The basis names the measurement that decided it so a reader can falsify the call."
     sources: [daemon]
     data:
       required: [row_id, verdict]

@@ -39,12 +39,6 @@ from typing import Any, Callable, Optional
 # ``stalled`` verdict asserts the session went silent while still owing its
 # next move, which is a fact about the tail rather than an absence in it.
 from fno.agents.session_truth import classify_tail
-# The quota phrasings the shipped taxonomy owns. The wake window must mark
-# every spelling the failover classifier marks: three workers died on
-# "Usage limit reached" (2026-08-17), which a rate-limit-only regex reads as
-# ordinary silence, and the wake lane then burns a turn inside a closed
-# window.
-from fno.adapters.providers.error_taxonomy import _QUOTA_BODY_MARKERS
 
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
 Row = namedtuple("Row", "row_id name state node cwd")
@@ -97,16 +91,20 @@ WAKE_MAX_AGE_S = 24 * 3600
 #: call. A row executing a tool never reaps.
 REAP_QUIET_AFTER_S = 900
 
-# The 429 marker and its reset stamp. Reset stamps ride the provider error
-# text in Singapore local time (UTC+8): "02:48:21 SGT" is 18:48:21Z. Two
-# sessions launched at 18:45 and 18:46 took a 429 they would not have taken
-# three minutes later, so waking inside a closed window costs a real turn -
-# which is why an UNPARSEABLE stamp classifies leave, never wake.
-_RATE_MARK_RE = re.compile(
-    r"\b429\b|" + "|".join(re.escape(m) for m in _QUOTA_BODY_MARKERS),
-    re.IGNORECASE,
-)
+# Reset stamps ride the provider error text in Singapore local time (UTC+8):
+# "02:48:21 SGT" is 18:48:21Z. Two sessions launched at 18:45 and 18:46 took
+# a 429 they would not have taken three minutes later, so waking inside a
+# closed window costs a real turn - which is why an UNPARSEABLE stamp
+# classifies leave, never wake.
 _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
+#: A rate EVENT is a record that both reads as an error and the shipped
+#: classifier marks quota-swap-class. The classifier's body markers ("rate
+#: limit", "quota exceeded", "usage limit") were built for provider error
+#: bodies; run bare over transcript prose they let "we are rate limited on
+#: the search API" or "reviewing PR 429" open or hold closed a window. The
+#: error signature is the one cheap discriminator between a provider error
+#: record and prose quoting its vocabulary.
+_ERROR_SIG_RE = re.compile(r"\berror\b", re.IGNORECASE)
 _SGT_OFFSET_S = 8 * 3600
 _TAIL_BYTES = 64 * 1024
 _TAIL_RECORDS = 15
@@ -152,30 +150,38 @@ def parse_sgt_stamp(
 
 
 def rate_limit_window(
-    tail_text: str, now_s: float
+    records: list, now_s: float
 ) -> tuple[str, Optional[float], str]:
-    """``("none"|"live"|"passed"|"unknown", reset_epoch, stamp_str)``.
+    """``("none"|"live"|"passed"|"unknown", reset_epoch, stamp_str)`` over
+    ``records`` (``[(epoch, text)]``, newest-last).
 
-    ``none``: no 429 marker in the tail. ``live``/``passed``: a 429 whose reset
-    stamp sits in the future / past. ``unknown``: a 429 whose stamp cannot be
-    found or parsed - fail safe, the caller must not wake on it.
-    """
-    marks = list(_RATE_MARK_RE.finditer(tail_text))
-    if not marks:
-        return "none", None, ""
-    # Only the NEWEST rate-limit record decides: records join newest-last, so
-    # a first-match search reads the OLDEST 429's stamp and calls a still-open
-    # window passed, spending a wake turn inside it. The stamp must sit at or
-    # after the last rate mark; a newest record with no parseable stamp of its
-    # own is unknown (fail safe), never the previous record's stamp.
-    m = _RESET_STAMP_RE.search(tail_text, marks[-1].start())
-    if m is None:
-        return "unknown", None, ""
-    stamp = m.group(0)
-    epoch = parse_sgt_stamp(int(m.group(1)), int(m.group(2)), int(m.group(3)), now_s)
-    if epoch is None:
-        return "unknown", None, stamp
-    return ("live" if epoch > now_s else "passed"), epoch, stamp
+    A rate event is the NEWEST record that reads as an error and the shipped
+    classifier (:func:`fno.recovery.classify_session_error`) marks
+    quota-swap-class - the sole integration point recovery itself uses, so
+    the watchdog and the failover cannot disagree about what a rate event
+    is. ``none``: no such record. ``live``/``passed``: its reset stamp sits
+    in the future / past. ``unknown``: it carries no parseable stamp - fail
+    safe, the caller must not wake on it, and an older record's stamp never
+    stands in for the newest one's."""
+    from fno.recovery import classify_session_error
+
+    for _epoch, text in reversed(records):
+        if not _ERROR_SIG_RE.search(text):
+            continue
+        err = classify_session_error(text)
+        if err is None or not getattr(err, "triggers_swap", False):
+            continue
+        m = _RESET_STAMP_RE.search(text)
+        if m is None:
+            return "unknown", None, ""
+        stamp = m.group(0)
+        epoch = parse_sgt_stamp(
+            int(m.group(1)), int(m.group(2)), int(m.group(3)), now_s
+        )
+        if epoch is None:
+            return "unknown", None, stamp
+        return ("live" if epoch > now_s else "passed"), epoch, stamp
+    return "none", None, ""
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +311,7 @@ def _verdict_one(
 
     window, reset_epoch, stamp = ("none", None, "")
     if facts is not None:
-        window, reset_epoch, stamp = rate_limit_window(facts.tail_text, now_s)
+        window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
 
     # reroute: blocked on a 429 whose window has NOT opened. Waking bounces
     # (proved twice by hand); the session must be stopped before the window
@@ -403,10 +409,7 @@ def tail_facts(
     lines = chunk.decode("utf-8", "replace").splitlines()
     if size > _TAIL_BYTES and lines:
         lines = lines[1:]  # a mid-file seek lands inside a line; drop it
-    records: list[tuple[Optional[float], str]] = []
-    last_role: Optional[str] = None
-    last_text = ""
-    last_kind: Optional[str] = None
+    entries: list[tuple[Optional[float], str, Optional[str], Optional[str]]] = []
     for line in lines:
         try:
             e = json.loads(line)
@@ -422,17 +425,27 @@ def tail_facts(
             except ValueError:
                 epoch = None
         text = _record_text(e)
-        records.append((epoch, text))
         msg = e.get("message")
         role = msg.get("role") if isinstance(msg, dict) else None
-        if role:
-            # The LAST role-bearing record decides the tail classifier's
-            # input; a trailing user turn clears stale assistant signals.
-            last_role = str(role)
-            last_text = text
-            last_kind = "tool" if _has_tool_use(e) else "text"
-    records = records[-max_records:]
+        kind = ("tool" if _has_tool_use(e) else "text") if role else None
+        entries.append((epoch, text, str(role) if role else None, kind))
+    # The window bounds EVERYTHING downstream, the (role, text, kind) triple
+    # included: a triple read from a record older than max_records would pair
+    # a stale text with the fresh age and window inputs it is classified
+    # against.
+    window = entries[-max_records:]
+    records = [(epoch, text) for epoch, text, _role, _kind in window]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
+    last_role: Optional[str] = None
+    last_text = ""
+    last_kind: Optional[str] = None
+    for _epoch, text, role, kind in reversed(window):
+        if role:
+            # The LAST role-bearing record inside the window decides the tail
+            # classifier's input; a trailing user turn clears stale assistant
+            # signals.
+            last_role, last_text, last_kind = role, text, kind
+            break
     return TailFacts(
         records, last_epoch, " ".join(t for _, t in records),
         last_role, last_text, last_kind,
