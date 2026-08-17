@@ -100,6 +100,19 @@ def _claude_nonzero_response(rc: int = 1) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=rc, stdout="", stderr="error")
 
 
+def _rest_ok(stdout: str):
+    """fno.pr._proc.run result shape for a successful REST read."""
+    from fno.pr._proc import Result
+
+    return Result(returncode=0, stdout=stdout, stderr="")
+
+
+def _rest_fail(stderr: str):
+    from fno.pr._proc import Result
+
+    return Result(returncode=1, stdout="", stderr=stderr)
+
+
 # ---------------------------------------------------------------------------
 # State module tests
 # ---------------------------------------------------------------------------
@@ -236,7 +249,11 @@ class TestWatermarkStore:
 
 
 class TestTrackedStateBatch:
-    """The production sweep reads each repository once and fails closed."""
+    """The production sweep reads each repository once and fails closed.
+
+    x-c12c: the sweep runs on REST (``gh api repos/<slug>/pulls``) with the
+    ``fno.pr._proc.run`` runner contract; untracked-but-open PRs still
+    surface, and a repo failure counts into the sweep_failures return."""
 
     def test_reads_all_requested_states_one_call_per_repo(self):
         from fno.pr_watch._discover import read_tracked_pr_states
@@ -244,17 +261,28 @@ class TestTrackedStateBatch:
         calls = []
 
         def runner(cmd, **_kwargs):
-            calls.append(cmd)
-            repo = cmd[cmd.index("--repo") + 1]
-            rows = (
-                [{"number": 1, "state": "OPEN"}, {"number": 2, "state": "MERGED"},
-                 {"number": 99, "state": "OPEN"}]
-                if repo == "owner/one"
-                else [{"number": 3, "state": "CLOSED"}]
-            )
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(rows), "")
+            calls.append(list(cmd))
+            # owner/one: tracked #2 closed+merged (absent from the open list,
+            # resolved by its per-key read) plus untracked open #99; owner/two:
+            # tracked #3 closed.
+            open_rows = {
+                "owner/one": [{"number": 1, "state": "open", "merged": False},
+                              {"number": 99, "state": "open", "merged": False}],
+                "owner/two": [],
+            }
+            per_key = {
+                "owner/one#2": {"number": 2, "state": "closed", "merged": True},
+                "owner/two#3": {"number": 3, "state": "closed", "merged": False},
+            }
+            path = cmd[2]
+            if path.startswith("repos/") and path.endswith("/pulls?state=open&per_page=100&page=1"):
+                repo = path[len("repos/"): path.index("/pulls?")]
+                return _rest_ok(json.dumps(open_rows[repo]))
+            number = path.rsplit("/", 1)[-1]
+            repo = path[len("repos/"): -len(f"/pulls/{number}")]
+            return _rest_ok(json.dumps(per_key[f"{repo}#{number}"]))
 
-        states = read_tracked_pr_states(
+        states, sweep_failures = read_tracked_pr_states(
             {"owner/one#1", "owner/one#2", "owner/two#3"}, runner=runner
         )
 
@@ -264,19 +292,23 @@ class TestTrackedStateBatch:
             "owner/one#99": "OPEN",
             "owner/two#3": "CLOSED",
         }
-        assert len(calls) == 2
+        assert sweep_failures == 0
+        # One open-listing per repo plus one per-key read for each tracked
+        # key the open list did not answer.
+        assert len(calls) == 4
 
     def test_repo_read_failure_returns_unknown_for_each_requested_key(self):
         from fno.pr_watch._discover import read_tracked_pr_states
 
         def runner(cmd, **_kwargs):
-            return subprocess.CompletedProcess(cmd, 1, "", "network down")
+            return _rest_fail("network down")
 
-        states = read_tracked_pr_states(
+        states, sweep_failures = read_tracked_pr_states(
             {"owner/repo#1", "owner/repo#2"}, runner=runner
         )
 
         assert states == {"owner/repo#1": "UNKNOWN", "owner/repo#2": "UNKNOWN"}
+        assert sweep_failures == 1
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +614,7 @@ class TestTickOrchestrator:
             store_path=store_path,
             discover_fn=deps["discover"],
             read_pr_state_fn=deps["read_pr_state"],
-            read_tracked_states_fn=lambda keys: {key: "CLOSED" for key in keys},
+            read_tracked_states_fn=lambda keys: ({key: "CLOSED" for key in keys}, 0),
             fire_skill_fn=deps["fire_skill"],
             emit=deps["emit"],
             reviewers_for=deps["reviewers_for"],
@@ -771,7 +803,7 @@ class TestTickOrchestrator:
             store_path=store_path,
             discover_fn=deps["discover"],
             read_pr_state_fn=deps["read_pr_state"],
-            read_tracked_states_fn=lambda keys: {key: "OPEN" for key in keys},
+            read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 0),
             fire_skill_fn=deps["fire_skill"],
             emit=deps["emit"],
             reviewers_for=deps["reviewers_for"],

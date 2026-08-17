@@ -611,6 +611,7 @@ def _run_tick(
     batch_terminal: set[str] = set()
     batch_baselined: set[str] = set()
     query_keys = batch_keys | candidate_keys
+    sweep_failures = 0
     set_tick_phase("sweep")
     if query_keys:
         # The batch reader attempts every qualified key up front. Record that
@@ -618,10 +619,12 @@ def _run_tick(
         # observation for one candidate.
         swept.update(query_keys)
         try:
-            batch_states = read_tracked_states_fn(query_keys)
+            # The seam returns (states, sweep_failures): a swallowed repo
+            # failure used to be indistinguishable from a clean sweep.
+            batch_states, sweep_failures = read_tracked_states_fn(query_keys)
         except Exception as exc:  # noqa: BLE001 - receipt names the outage
             log.warning("pr-watch: tracked-state sweep failed: %s", exc)
-            batch_states = {}
+            batch_states, sweep_failures = {}, 1
         for key in sorted(batch_keys):
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
@@ -927,7 +930,9 @@ def _run_tick(
         "failed": sorted(failed),
     }
     _emit_tick_receipt(emit, receipt)
-    return TickResult(open_prs=open_prs, acted=acted, skipped=skipped)
+    return TickResult(
+        open_prs=open_prs, acted=acted, skipped=skipped, sweep_failures=sweep_failures
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +968,7 @@ def _default_read_tracked_states(keys: set[str]) -> dict[str, str]:  # pragma: n
     return read_tracked_pr_states(keys)
 
 
-def _tracked_states_from_reader(keys: set[str], reader: Callable) -> dict[str, str]:
+def _tracked_states_from_reader(keys: set[str], reader: Callable) -> tuple[dict[str, str], int]:
     """Adapt an injected per-candidate reader into the batch seam for tests."""
     from fno.graph._reconcile import ReconcileError
     from fno.pr_watch._discover import PrCandidate
@@ -986,7 +991,7 @@ def _tracked_states_from_reader(keys: set[str], reader: Callable) -> dict[str, s
             states[key] = reader(candidate, reviewers=[]).state
         except ReconcileError:
             states[key] = "UNKNOWN"
-    return states
+    return states, 0
 
 
 def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> Any:

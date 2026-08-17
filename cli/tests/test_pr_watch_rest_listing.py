@@ -167,3 +167,113 @@ class TestGraphqlRemaining:
             runner=lambda cmd, **_kw: _ok('{"resources": {}}')
         )
         assert remaining is None and reset_iso is None
+
+
+# ---------------------------------------------------------------------------
+# read_tracked_pr_states on REST (the sweep itself)
+# ---------------------------------------------------------------------------
+
+
+def _sweep_runner(calls, *, open_pages, per_key):
+    """Answer the sweep's two read shapes: the paginated open list and the
+    per-key pulls/<n> reads for tracked keys the open list did not resolve."""
+
+    def runner(cmd, **_kw):
+        calls.append(list(cmd))
+        path = cmd[2]
+        if "/pulls?state=" in path:
+            repo = path[len("repos/"): path.index("/pulls?")]
+            pages = open_pages.get(repo)
+            if pages is None:
+                return Result(returncode=1, stdout="", stderr="network down")
+            page_no = int(path.split("&page=")[1])
+            if page_no > len(pages):
+                return _page([])
+            return _page(pages[page_no - 1])
+        number = int(path.rsplit("/", 1)[-1])
+        repo = path[len("repos/"): -len(f"/pulls/{number}")]
+        row = per_key.get(f"{repo}#{number}")
+        if row is None:
+            return Result(returncode=1, stdout="", stderr="not found")
+        return _ok(json.dumps(row))
+
+    return runner
+
+
+class TestTrackedStateSweepOnRest:
+    def test_sweep_uses_rest_and_never_spawns_gh_pr_list(self):
+        """AC1-HP: positive REST shape match plus an explicit absence of the
+        old GraphQL verb, asserted across every argv the sweep issued."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+        runner = _sweep_runner(
+            calls,
+            open_pages={"owner/repo": [[_pr_row(1), _pr_row(2)]]},
+            per_key={},
+        )
+
+        states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
+
+        assert failures == 0
+        assert states == {"owner/repo#1": "OPEN", "owner/repo#2": "OPEN"}
+        rest_calls = [c for c in calls if c[:2] == ["gh", "api"]]
+        assert rest_calls, "no gh api call issued"
+        assert all("/pulls" in c[2] for c in rest_calls)
+        assert not any(_has_pr_list_pair(c) for c in calls)
+
+    def test_open_list_paginates_into_page_two(self):
+        """AC2-HP: a repo spanning more than one REST page returns every open
+        PR; there is no truncation path left to hit."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+        runner = _sweep_runner(
+            calls,
+            open_pages={"owner/repo": [
+                [_pr_row(n) for n in range(1, 101)],
+                [_pr_row(100), _pr_row(101)],
+            ]},
+            per_key={},
+        )
+
+        states, failures = read_tracked_pr_states({"owner/repo#101"}, runner=runner)
+
+        assert failures == 0
+        assert states["owner/repo#100"] == "OPEN"
+        assert states["owner/repo#101"] == "OPEN"
+        pages = [c[2] for c in calls if "/pulls?state=" in c[2]]
+        assert any("&page=2" in p for p in pages)
+
+    def test_missing_tracked_key_resolved_by_one_per_key_read(self):
+        """AC3-HP: absent from the open list -> exactly one pulls/<n> read,
+        mapped through _map_pr_state to MERGED, never UNKNOWN."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+        runner = _sweep_runner(
+            calls,
+            open_pages={"owner/repo": [[_pr_row(7)]]},
+            per_key={"owner/repo#9": {"number": 9, "state": "closed", "merged": True}},
+        )
+
+        states, failures = read_tracked_pr_states({"owner/repo#9"}, runner=runner)
+
+        assert states == {"owner/repo#7": "OPEN", "owner/repo#9": "MERGED"}
+        assert failures == 0
+        per_key_calls = [c for c in calls if c[2].endswith("/pulls/9")]
+        assert len(per_key_calls) == 1
+
+    def test_failed_repo_listing_degrades_with_failure_count(self):
+        """AC4-EDGE: keys UNKNOWN (not deleted), sweep_failures counts the repo."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+        runner = _sweep_runner(calls, open_pages={}, per_key={})
+
+        states, failures = read_tracked_pr_states(
+            {"owner/repo#1", "owner/repo#2"}, runner=runner
+        )
+
+        assert states == {"owner/repo#1": "UNKNOWN", "owner/repo#2": "UNKNOWN"}
+        assert failures == 1

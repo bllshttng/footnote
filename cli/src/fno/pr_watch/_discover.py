@@ -31,10 +31,9 @@ from fno.graph._reconcile import (
     query_pr_merge_state,
     repo_slug_from_url,
 )
+from fno.pr._proc import run as _rest_run
 
 log = logging.getLogger(__name__)
-
-_TRACKED_PR_LIST_LIMIT = 10_000
 
 
 @dataclass(frozen=True)
@@ -352,19 +351,27 @@ def read_pr_state(
 def read_tracked_pr_states(
     keys: set[str],
     *,
-    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    runner: Callable[..., Any] = _rest_run,
     timeout_s: float = 30.0,
-    limit: int = _TRACKED_PR_LIST_LIMIT,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], int]:
     """Read tracked states and discover all currently open PRs in those repos.
 
-    One ``gh pr list`` per repository avoids hundreds of per-PR subprocesses on
-    the first cleanup tick. Every requested key is returned; a repository read
-    failure, malformed response, or truncated absence yields ``UNKNOWN`` so the
-    caller can stop asserting a remembered OPEN state without deleting on an
-    outage. Successful repo reads also return every OPEN PR, even when it was
-    absent from the cache, so the swept snapshot converges to repository truth.
+    One REST listing per repository (``gh api repos/<slug>/pulls``) replaces
+    the old ``gh pr list --state all --limit 10000``: that GraphQL sweep
+    billed by point cost against the per-USER budget every worker shares,
+    while the measured REST listing answered the same question off the
+    untouched core bucket. Every requested key is returned; a repo whose
+    listing fails keeps ``UNKNOWN`` keys (never deleted on an outage) and
+    counts into the failure return so a degraded sweep cannot read as a
+    clean one. Successful listings also return every OPEN PR, even when it
+    was absent from the cache, so the swept snapshot converges to repository
+    truth. A tracked key absent from the open list gets exactly one
+    ``repos/<slug>/pulls/<n>`` read - the only way to tell CLOSED from
+    MERGED - bounded by the tracked-key count rather than by 1057 rows.
+
+    Returns ``(states, sweep_failures)``.
     """
+    from fno.pr._rest import _map_pr_state, list_prs_rest
     from fno.pr_watch._state import make_watermark_key, parse_watermark_key
 
     grouped: dict[str, set[int]] = defaultdict(set)
@@ -378,62 +385,47 @@ def read_tracked_pr_states(
         grouped[repo].add(number)
         states[canonical] = "UNKNOWN"
 
+    sweep_failures = 0
     for repo, requested in sorted(grouped.items()):
-        cmd = [
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "all",
-            "--limit",
-            str(limit),
-            "--json",
-            "number,state",
-        ]
         try:
-            result = runner(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout_s,
-            )
-            if result.returncode != 0:
-                raise ReconcileError(
-                    (result.stderr or "").strip() or f"gh exited {result.returncode}"
-                )
-            rows = json.loads(result.stdout or "[]")
-            if not isinstance(rows, list):
-                raise ReconcileError("gh pr list stdout was not a JSON list")
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, ReconcileError) as exc:
-            log.warning("pr-watch: tracked-state sweep failed for %s: %s", repo, exc)
+            rows, reason = list_prs_rest(repo, state="open", runner=runner)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            rows, reason = None, str(exc)
+        if rows is None:
+            log.warning("pr-watch: tracked-state sweep failed for %s: %s", repo, reason)
+            sweep_failures += 1
             continue
 
         returned: set[int] = set()
         for row in rows:
-            if not isinstance(row, dict):
+            number, state = row["number"], row["state"]
+            if number not in requested and state != "OPEN":
                 continue
-            row_number = row.get("number")
-            row_state = row.get("state")
-            if not isinstance(row_number, int):
-                continue
-            state = row_state if row_state in ("OPEN", "CLOSED", "MERGED") else "UNKNOWN"
-            if row_number not in requested and state != "OPEN":
-                continue
-            key = make_watermark_key(repo_slug=repo, pr_number=row_number)
+            key = make_watermark_key(repo_slug=repo, pr_number=number)
             states[key] = state
-            returned.add(row_number)
+            returned.add(number)
 
-        missing = requested - returned
-        if missing:
-            detail = "possibly truncated" if len(rows) >= limit else "not returned"
-            log.warning(
-                "pr-watch: %s did not resolve %d tracked PR(s) (%s)",
-                repo,
-                len(missing),
-                detail,
-            )
+        # Distinguishing CLOSED from MERGED needs the PR itself; the open
+        # list proved only that it is not open.
+        for number in sorted(requested - returned):
+            try:
+                res = runner(["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=timeout_s)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                log.warning("pr-watch: per-key read failed for %s#%d: %s", repo, number, exc)
+                continue
+            if not res.ok:
+                log.warning(
+                    "pr-watch: per-key read failed for %s#%d: %s",
+                    repo,
+                    number,
+                    (getattr(res, "stderr", "") or "").strip()[:200],
+                )
+                continue
+            try:
+                one = json.loads(res.stdout)
+            except json.JSONDecodeError:
+                log.warning("pr-watch: per-key read for %s#%d was not JSON", repo, number)
+                continue
+            states[make_watermark_key(repo_slug=repo, pr_number=number)] = _map_pr_state(one)
 
-    return states
+    return states, sweep_failures
