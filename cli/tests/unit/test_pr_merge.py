@@ -1455,7 +1455,8 @@ def test_covered_merge_publishes_coverage_status(enabled, monkeypatch, capsys, t
     published = []
     monkeypatch.setattr(
         "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None: published.append((pr, head)) or (True, ""),
+        lambda pr, head=None, cwd=None, repo=None, cov=None: published.append((pr, head))
+        or (True, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"

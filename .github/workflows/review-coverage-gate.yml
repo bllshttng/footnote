@@ -13,11 +13,18 @@ name: review-coverage-gate
 # What fires when:
 #   synchronize - the head is new, so no local attestation can exist for it
 #     yet. Post failure "head moved; re-run the review verb at HEAD" so a
-#     previously-green status can never survive onto a commit nobody reviewed.
+#     previously-green status can never survive onto a commit nobody reviewed
+#     - UNLESS the coverage-override label is applied: the override is durable
+#     shared state that a push does not revoke, so it is re-read first.
 #   labeled/unlabeled with `coverage-override` - the override arm: label
 #     present posts success naming the actor; withdrawn posts failure. Any
 #     other label is a no-op: re-posting failure would clobber a green marker
 #     a worker legitimately published on that same sha.
+#
+# The override label is read by EVERY writer of this status (the Rust
+# publishers in loopcheck.rs re-read it before each post), so a cancelled
+# labeled run here heals on the next write from any of them rather than
+# silently revoking the valve.
 #   opened/reopened/ready_for_review - no status change. The context starts
 #     absent, which a required-check reads as pending: exactly right for a
 #     PR no review verb has run on yet.
@@ -96,8 +103,18 @@ jobs:
               fi
               ;;
             pull_request:synchronize)
-              post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
-              echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+              # The override label is durable: a push does not revoke it. The
+              # operator's fix commit after a 3am override keeps the valve
+              # they are still holding, so the label is re-read before the
+              # head is invalidated.
+              if gh pr view "${{ github.event.pull_request.number }}" --json labels \
+                   | grep -q '"coverage-override"'; then
+                post success "coverage-override label still applied (head moved to ${HEAD_SHA:0:8})"
+                echo "synchronize: override still held; re-stamped success at ${HEAD_SHA:0:8}"
+              else
+                post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
+                echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+              fi
               ;;
             workflow_dispatch:)
               post failure "manual invalidate at ${HEAD_SHA:0:8}; run the review verb at HEAD"

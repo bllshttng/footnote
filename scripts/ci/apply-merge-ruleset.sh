@@ -105,10 +105,21 @@ print(" ".join(sorted(ctxs)))
     if ! printf '%s' "$live" | python3 -c '
 import json,sys
 d = json.load(sys.stdin)
-assert d.get("bypass_actors") == [], "live bypass_actors not empty: %r" % d.get("bypass_actors")
+f = json.load(open(sys.argv[1]))
+# bypass_actors is withheld from tokens without administration scope, and a
+# workflow GITHUB_TOKEN cannot be granted one. A missing field is a named
+# note, not a failure: the visible fields still positively pin the gate, and
+# constant red on main for an unreadable field is the noise that teaches
+# ignoring the audit. A NON-empty list is still a hard failure.
+bypass = d.get("bypass_actors")
+assert bypass in (None, []), "live bypass_actors not empty: %r" % bypass
+if bypass is None:
+    print("note: live bypass_actors withheld from this token (no administration scope); verified the visible fields")
 assert any(r.get("type") == "non_fast_forward" for r in d.get("rules", [])), "no non_fast_forward rule"
 assert d.get("enforcement") == "active", "enforcement is %r" % d.get("enforcement")
-' ; then
+assert d.get("target") == f.get("target"), "target drifted: %r vs %r" % (d.get("target"), f.get("target"))
+assert d.get("conditions") == f.get("conditions"), "conditions drifted (which refs the ruleset protects)"
+' "$DATA_FILE" ; then
       fail=1
     fi
     if [ "$fail" = 1 ]; then

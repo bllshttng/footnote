@@ -2843,6 +2843,50 @@ fn is_code_review_reviewer(name: &str) -> bool {
 /// Skipped entirely when no review lane is configured: a stock install has no
 /// ruleset requiring the context, and a permanent failure status there would
 /// be noise that teaches readers to ignore the check.
+/// Whether the PR carries the `coverage-override` label. The label is durable
+/// shared state: EVERY writer of the coverage status re-reads it before
+/// posting, so a green stamped by the gate workflow's labeled arm survives a
+/// later stop-hook or verb fire instead of being clobbered red. One gh read,
+/// fail-closed to false (no label read -> no override -> the normal verdict).
+fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> bool {
+    let out = Command::new(gh_bin)
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "labels",
+            "--jq",
+            "[.labels[].name] | index(\"coverage-override\") != null",
+        ])
+        .current_dir(cwd)
+        .output();
+    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+}
+
+/// The one POST shape every coverage-status writer uses.
+fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+    let target = format!("repos/:owner/:repo/statuses/{head}");
+    let state_arg = format!("state={state}");
+    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let description_arg = format!("description={description}");
+    let _ = Command::new(gh_bin)
+        .args([
+            "api",
+            "--method",
+            "POST",
+            target.as_str(),
+            "-f",
+            state_arg.as_str(),
+            "-f",
+            context_arg.as_str(),
+            "-f",
+            description_arg.as_str(),
+        ])
+        .current_dir(cwd)
+        .output();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn publish_coverage_status(
     gh_bin: &str,
@@ -2856,7 +2900,14 @@ fn publish_coverage_status(
     external_reviewers: &[String],
     reviewers: &[String],
 ) {
-    if pr_number <= 0 || pr_head_oid.is_empty() {
+    // A status target that is not a real 40-hex sha (an unresolved local
+    // HEAD, the "unknown" sentinel from a failed git read) would POST to a
+    // garbage path, or worse to the canonical checkout's default-branch tip -
+    // a red marker on a commit whose coverage was never evaluated.
+    if pr_number <= 0
+        || pr_head_oid.len() != 40
+        || !pr_head_oid.chars().all(|c| c.is_ascii_hexdigit())
+    {
         return;
     }
     let lane = !(required_bots.is_empty()
@@ -2864,6 +2915,19 @@ fn publish_coverage_status(
         && external_reviewers.is_empty()
         && reviewers.is_empty());
     if !lane {
+        return;
+    }
+    // The override first, mirroring the Python publisher: the label outranks
+    // the verdict, and its green must not be clobbered by this writer. The
+    // actor is named by the workflow's labeled arm, which sees the event.
+    if pr_has_override_label(gh_bin, cwd, pr_number) {
+        post_coverage_status(
+            gh_bin,
+            cwd,
+            pr_head_oid,
+            "success",
+            "coverage-override label applied on the PR",
+        );
         return;
     }
     let local_pass_required = reviewers.iter().any(|r| is_code_review_reviewer(r));
@@ -2901,25 +2965,7 @@ fn publish_coverage_status(
             ),
         )
     };
-    let target = format!("repos/:owner/:repo/statuses/{pr_head_oid}");
-    let state_arg = format!("state={state}");
-    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
-    let description_arg = format!("description={description}");
-    let _ = Command::new(gh_bin)
-        .args([
-            "api",
-            "--method",
-            "POST",
-            target.as_str(),
-            "-f",
-            state_arg.as_str(),
-            "-f",
-            context_arg.as_str(),
-            "-f",
-            description_arg.as_str(),
-        ])
-        .current_dir(cwd)
-        .output();
+    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
 }
 
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
@@ -7156,19 +7202,25 @@ fn run_done(
     // (x-6352) read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
     // same evidence the merge gate will read, and the status targets the live
-    // PR head the row is compared against - not merely the local HEAD.
-    publish_coverage_status(
-        gh_bin,
-        cwd,
-        info.number,
-        &info.head_oid,
-        head_sha,
-        &info.coverage,
-        required_bots,
-        optional_bots,
-        external_reviewers,
-        reviewers,
-    );
+    // PR head the row is compared against - not merely the local HEAD. Only
+    // an OPEN PR: read_pr_info short-circuits a MERGED PR to the
+    // Covered(0) sentinel, and publishing that as failure would flip the
+    // latest status on the merged head red and fail the post-merge audit for
+    // a merge that passed the gate.
+    if matches!(info.state, PrState::Open) {
+        publish_coverage_status(
+            gh_bin,
+            cwd,
+            info.number,
+            &info.head_oid,
+            head_sha,
+            &info.coverage,
+            required_bots,
+            optional_bots,
+            external_reviewers,
+            reviewers,
+        );
+    }
     Ok(info)
 }
 
@@ -8379,6 +8431,11 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // local HEAD; --head overrides with a caller that knows the PR head. A
     // --head sha the local repository does not contain leaves freshness
     // unresolvable, which resolves stale and refuses - the safe direction.
+    // Whether the caller supplied it decides the exit-4 publish below: a
+    // caller that knows the PR head gets the visible failure status; a
+    // derived-from-local-HEAD sha does not (it may be the canonical
+    // checkout's default-branch tip, a commit this row never described).
+    let head_explicit = head.is_some();
     let head_sha = head.unwrap_or_else(|| git_head_sha(&git_bin, &cwd));
 
     // Authorship: --session-id, else the manifest's harness_session_id when one
@@ -8433,19 +8490,22 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             // print the same object so stdout and the logs agree. And publish
             // the same verdict as the commit status (x-6352), so the standalone
             // verb satisfies the server-side gate for every session shape that
-            // has no stop hook at all.
-            publish_coverage_status(
-                &gh_bin,
-                &cwd,
-                pr_info.number,
-                &pr_info.head_oid,
-                &head_sha,
-                &pr_info.coverage,
-                &inputs.required_bots,
-                &inputs.optional_bots,
-                &inputs.settings.external_reviewers,
-                &inputs.required_reviewers,
-            );
+            // has no stop hook at all. Open PRs only: a MERGED PR carries the
+            // Covered(0) sentinel, not evidence.
+            if matches!(pr_info.state, PrState::Open) {
+                publish_coverage_status(
+                    &gh_bin,
+                    &cwd,
+                    pr_info.number,
+                    &pr_info.head_oid,
+                    &head_sha,
+                    &pr_info.coverage,
+                    &inputs.required_bots,
+                    &inputs.optional_bots,
+                    &inputs.settings.external_reviewers,
+                    &inputs.required_reviewers,
+                );
+            }
             (
                 0,
                 coverage_event_data(
@@ -8483,26 +8543,28 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 );
                 // (x-6352) The unknown row is a failure the server must SEE,
                 // never an absence: publish it as a failing status so the
-                // ruleset refuses rather than silently waiting. The live PR
-                // head is unavailable on this arm (the gh read failed), so the
-                // status lands on the local HEAD the row pins; if those
-                // disagree the PR head simply keeps no passing status, which
-                // is the same refusal - never a wrong green.
-                publish_coverage_status(
-                    &gh_bin,
-                    &cwd,
-                    pr_num,
-                    &head_sha,
-                    &head_sha,
-                    &CoverageReport {
-                        coverage: Coverage::Unknown,
-                        verdicts: Vec::new(),
-                    },
-                    &inputs.required_bots,
-                    &inputs.optional_bots,
-                    &inputs.settings.external_reviewers,
-                    &inputs.required_reviewers,
-                );
+                // ruleset refuses rather than silently waiting. Only when the
+                // caller PASSED --head (the merge recompute always does): an
+                // explicit head is the PR head a caller that knows; a derived
+                // local HEAD can be the canonical checkout's default-branch
+                // tip, and a red marker there is a refusal aimed at nothing.
+                if head_explicit {
+                    publish_coverage_status(
+                        &gh_bin,
+                        &cwd,
+                        pr_num,
+                        &head_sha,
+                        &head_sha,
+                        &CoverageReport {
+                            coverage: Coverage::Unknown,
+                            verdicts: Vec::new(),
+                        },
+                        &inputs.required_bots,
+                        &inputs.optional_bots,
+                        &inputs.settings.external_reviewers,
+                        &inputs.required_reviewers,
+                    );
+                }
                 // The persisted row above is schema-gated (the pr_num == 0
                 // comment below applies here too); the quota diagnosis rides
                 // stdout only. Without it, exit 4's unknown row is

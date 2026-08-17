@@ -78,7 +78,7 @@ The implementation-entry gates will refuse a write on a protected branch and poi
 
 ## Route ships through the fno verbs
 
-Drive merges and PR operations through `fno pr merge` and the ship gate rather than raw `gh`/`git`. The server enforces the same rule where a guard cannot reach: once the merge ruleset is applied (`bash scripts/ci/apply-merge-ruleset.sh --apply`), GitHub itself refuses a merge whose head carries no passing `fno/review-coverage` status, on every path - the web button, raw REST, `gh pr merge`, and the auto-merge queue alike. The only way past an uncovered head is the `coverage-override` label. The dangerous-command guards block merge and force-push commands (by their text, even inside an echo or a commit body), so hand-running them tends to get blocked anyway. Writing PR and commit bodies with `--body-file` avoids tripping the same guards.
+Drive merges and PR operations through `fno pr merge` and the ship gate. Do not reach for raw `gh`/`git`. The server enforces the same rule where no guard can reach. If the merge ruleset is applied, GitHub itself refuses a merge with no passing `fno/review-coverage` status on the head. Run `bash scripts/ci/apply-merge-ruleset.sh --apply` to apply it. Every path is covered: the web button, raw REST, `gh pr merge`, and the auto-merge queue. The only way past an uncovered head is the `coverage-override` label. The dangerous-command guards block merge and force-push commands by their text, even inside an echo or a commit body. Hand-running them tends to get blocked anyway. Writing PR and commit bodies with `--body-file` avoids tripping the same guards.
 
 ## Trust external truth for "done"
 

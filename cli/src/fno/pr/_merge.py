@@ -1305,11 +1305,13 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         # Server-visible receipt of the verdict this gate just acted on: the
         # commit status the repo ruleset requires is written by the same
         # predicate that satisfied it here, so `fno pr merge` leaves the green
-        # marker behind on the path that did not need to read it. Inside the
-        # lock, ahead of the merge call, so the status exists before GitHub
-        # judges the merge against it. Best-effort and reported, never
-        # blocking: the gate lives on the GitHub side, where a missing status
-        # already reads as not-passing (fail-closed).
+        # marker behind on the path that did not need to read it. Posted only
+        # now, after fidelity, the lock, stale-base, and lineage have all said
+        # yes: a success status stamped before a later refusal would green the
+        # head for the web button - which enforces only the coverage context -
+        # against exactly what this verb just refused. Best-effort and
+        # reported, never blocking: the gate lives on the GitHub side, where a
+        # missing status already reads as not-passing (fail-closed).
         try:
             from fno.pr._reviews import publish_coverage_status
 
