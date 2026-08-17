@@ -219,7 +219,7 @@ def list_prs_rest(
 
 
 def graphql_remaining(
-    runner: Callable = run, cwd: Optional[str] = None
+    runner: Callable = run, cwd: Optional[str] = None, timeout: Optional[float] = 30.0
 ) -> "tuple[Optional[int], Optional[str]]":
     """Read the shared GraphQL budget: `(remaining, reset_iso)`.
 
@@ -229,7 +229,7 @@ def graphql_remaining(
     read as evidence.
     """
     try:
-        res = runner(["gh", "api", "rate_limit"], cwd=cwd)
+        res = runner(["gh", "api", "rate_limit"], cwd=cwd, timeout=timeout)
     except Exception:  # noqa: BLE001 - unreadable instrument, never a skip (AC6)
         return None, None
     if not res.ok:

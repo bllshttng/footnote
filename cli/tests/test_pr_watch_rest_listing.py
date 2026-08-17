@@ -334,3 +334,51 @@ class TestRestReaderHardening:
 
         assert states == {"owner/repo#1": "UNKNOWN"}
         assert failures == 1
+
+    def test_graphql_remaining_bounds_the_subprocess_wait(self):
+        """The preflight read must not hand a black-holed gh an unbounded
+        wait: this PR exists to end tick hangs, not to add one."""
+        from fno.pr._rest import graphql_remaining
+
+        seen = {}
+
+        def runner(cmd, timeout=None, **_kw):
+            seen["timeout"] = timeout
+            return _ok(
+                json.dumps({"resources": {"graphql": {"remaining": 5, "reset": 1755433200}}})
+            )
+
+        remaining, _reset = graphql_remaining(runner=runner)
+        assert remaining == 5
+        assert seen["timeout"] is not None and seen["timeout"] > 0
+
+    def test_per_key_payload_that_is_not_an_object_degrades_one_key(self):
+        """gh output drift can return rc 0 with a JSON array; _map_pr_state
+        would raise AttributeError out of the whole sweep instead of one
+        key failing."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        calls: list[list] = []
+        runner = _sweep_runner(calls, open_pages={"owner/repo": []}, per_key={"owner/repo#1": [1]})
+
+        states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
+
+        assert states == {"owner/repo#1": "UNKNOWN"}
+        assert failures == 1
+
+    def test_sweep_passes_the_caller_timeout_to_the_listing(self):
+        """timeout_s is the caller's bound on the sweep's gh calls; the REST
+        listing must honor it, not silently run on its own default."""
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        seen: dict[str, object] = {}
+
+        def runner(cmd, timeout=None, **_kw):
+            if "/pulls?state=" in cmd[2]:
+                seen["listing_timeout"] = timeout
+                return _page([])
+            return _ok("{}")
+
+        read_tracked_pr_states({"owner/repo#1"}, runner=runner, timeout_s=5.0)
+
+        assert seen["listing_timeout"] == 5.0

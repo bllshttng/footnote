@@ -389,7 +389,7 @@ def read_tracked_pr_states(
     sweep_failures = 0
     for repo, requested in sorted(grouped.items()):
         try:
-            rows, reason = list_prs_rest(repo, state="open", runner=runner)
+            rows, reason = list_prs_rest(repo, state="open", runner=runner, timeout=timeout_s)
         except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
             rows, reason = None, str(exc)
         if rows is None:
@@ -430,6 +430,10 @@ def read_tracked_pr_states(
                 one = json.loads(res.stdout)
             except json.JSONDecodeError:
                 log.warning("pr-watch: per-key read for %s#%d was not JSON", repo, number)
+                sweep_failures += 1
+                continue
+            if not isinstance(one, dict):
+                log.warning("pr-watch: per-key read for %s#%d was not an object", repo, number)
                 sweep_failures += 1
                 continue
             states[make_watermark_key(repo_slug=repo, pr_number=number)] = _map_pr_state(one)
