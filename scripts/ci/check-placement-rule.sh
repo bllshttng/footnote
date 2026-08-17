@@ -52,6 +52,10 @@
 #      that eight rounds of hand-written cases missed. Read-only rglob over
 #      the harness's data; footnote stores nothing there, and a missing root
 #      exits 1 with a message rather than creating anything.
+#      The inherited-model-env remedy strings (model_routing.py,
+#      model_env_scrub.rs, attest-model.sh) NAME ~/.claude/settings.json in
+#      operator-facing text - they advise a pin in Claude Code's own config,
+#      never construct or write a path there.
 #      review_capability.py's `requires: skill` predicate globs the two roots
 #      Claude resolves a bare skill name from (~/.claude/skills and
 #      <cwd>/.claude/skills) to answer "is this registered reviewer's skill
@@ -171,6 +175,7 @@ cli/src/fno/agents/format.py
 cli/src/fno/agents/orphans.py
 cli/src/fno/agents/harnesses/_claude_session_registry.py
 cli/src/fno/agents/harnesses/claude.py
+cli/src/fno/agents/model_routing.py
 cli/src/fno/agents/read.py
 cli/src/fno/agents/registry.py
 cli/src/fno/agents/rust_runtime.py
@@ -224,6 +229,7 @@ crates/fno-agents/src/claude_roster.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/finalize.rs
+crates/fno-agents/src/model_env_scrub.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/state.rs
 crates/fno-agents/src/stream_worker.rs
@@ -232,6 +238,7 @@ crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs
 crates/fno/src/agents_view.rs
 crates/fno/src/connections_view.rs
+hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
 hooks/corrections-git-postcommit.sh
 hooks/session-start.sh

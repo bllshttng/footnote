@@ -164,7 +164,10 @@ mod tests {
     fn bedrock_and_vertex_lanes_are_coherent() {
         let get = env_of(&[
             ("CLAUDE_CODE_USE_BEDROCK", "1"),
-            ("ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-20250514-v1:0"),
+            (
+                "ANTHROPIC_MODEL",
+                "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            ),
         ]);
         assert!(incoherent_model_env(&get).is_empty());
     }
