@@ -34,6 +34,32 @@ def test_partition_holds_on_real_models():
     # the overlap is exactly {id}, so a lockstep rename of `id` on both sides
     # (overlap becomes empty) would fail this, not pass vacuously.
     assert "exactly the join key ['id']" in r.stdout
+    # Every tracker-owned projection is named in the receipt: the selection
+    # projection joins the inspection set, so the marker proves the gate saw
+    # more than TrackerNode.
+    assert "TrackerCandidate" in r.stdout
+
+
+def test_gate_fails_on_subclass_projection_overlap(tmp_path):
+    # A forbidden mirror smuggled onto a SUBCLASS projection (not TrackerNode
+    # itself) must still fail the gate: the union rule covers every projection.
+    poisoned = tmp_path / "poison"
+    types = poisoned / "cli/src/fno/tracker/types.py"
+    sidecar = poisoned / "cli/src/fno/tracker/sidecar.py"
+    types.parent.mkdir(parents=True)
+    types.write_text(
+        "class TrackerNode:\n"
+        "    id: str\n"
+        "    title: str = None\n"
+        "class TrackerCandidate(TrackerNode):\n"
+        "    batch: str = None\n"
+    )
+    sidecar.write_text("class Sidecar:\n    id: str\n    batch: str = None\n")
+    r = subprocess.run(
+        ["bash", str(GATE), str(poisoned)], capture_output=True, text=True
+    )
+    assert r.returncode == 1
+    assert "batch" in r.stderr
 
 
 def test_gate_fails_when_id_key_missing(tmp_path):

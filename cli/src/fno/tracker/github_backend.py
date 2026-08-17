@@ -20,7 +20,13 @@ import re
 import subprocess
 import sys
 
-from .types import NodeNotFound, TrackerError, TrackerNode, TrackerState
+from .types import (
+    NodeNotFound,
+    TrackerCandidate,
+    TrackerError,
+    TrackerNode,
+    TrackerState,
+)
 
 _GH_ID_RE = re.compile(r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([0-9]+)$")
 # stderr fragments gh emits when an issue does not exist (vs. a network/auth
@@ -95,7 +101,7 @@ class GitHubIssuesTracker:
             blocked_by=[],
         )
 
-    def list_open(self) -> list[TrackerNode]:
+    def list_open(self) -> list[TrackerCandidate]:
         if not self._default_repo:
             # No repo scope configured. There is no silent fallback to another
             # backend: warn loudly so a user who set only FNO_TRACKER_BACKEND
@@ -110,7 +116,7 @@ class GitHubIssuesTracker:
         # parent and blocked_by rather than guess at pagination across forks.
         rc, out, err = self._gh(
             ["issue", "list", "-R", self._default_repo, "--state", "open",
-             "--json", "number,title,state", "--limit", "1000"]
+             "--json", "number,title,state,createdAt", "--limit", "1000"]
         )
         if rc != 0:
             raise TrackerError(
@@ -120,13 +126,20 @@ class GitHubIssuesTracker:
         if isinstance(items, dict):
             items = []
         prefix = self._default_repo
+        # GitHub Issues carries no priority/rank footnote can read without
+        # extra per-issue API calls, so those two use the projection defaults
+        # (p2 / unranked) and footnote's ranking falls back to its post-join
+        # tiebreakers. createdAt rides the same listing call, so that ordering
+        # input is real rather than degraded. Same degradation class as
+        # parent/blocked_by.
         return [
-            TrackerNode(
+            TrackerCandidate(
                 id=f"{prefix}#{it.get('number')}",
                 title=it.get("title"),
                 state=_state_from_gh(it.get("state")),
                 parent=None,
                 blocked_by=[],
+                created_at=it.get("createdAt"),
             )
             for it in items
         ]

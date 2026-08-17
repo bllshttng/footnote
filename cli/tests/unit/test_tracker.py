@@ -1,7 +1,8 @@
 """Tests for the work-item tracker seam (bring-your-own-id foundation).
 
 Covers the five-field read projection, the single close write, the footnote-
-owned sidecar roundtrip, and the backend factory. The partition invariant
+owned sidecar roundtrip, the backend factory, and the backend-selected sidecar
+store (graph projection vs external per-id file). The partition invariant
 itself (zero overlap between sidecar and read interface) has its own CI gate
 in scripts/ci/check-tracker-partition.sh, exercised in test_partition_gate.py.
 """
@@ -17,6 +18,7 @@ from fno.tracker import (
     GitHubIssuesTracker,
     GraphTracker,
     NodeNotFound,
+    TrackerCandidate,
     TrackerError,
     TrackerNode,
     TrackerState,
@@ -106,7 +108,7 @@ def test_get_tracker_unknown_backend():
         get_tracker("linear")  # not shipped in the foundation
 
 
-def test_sidecar_roundtrip(tmp_path, monkeypatch):
+def test_sidecar_roundtrip(tmp_path, monkeypatch, external_mode):
     monkeypatch.setattr(sidecar_mod, "sidecar_path", lambda i: tmp_path / f"{i}.json")
     sc = Sidecar(id="ENG-441", cwd="/repo", plan_path="/plan.md", pr_number=7)
     save_path = save(sc)
@@ -157,6 +159,166 @@ def test_list_open_excludes_terminal(tmp_path):
     )
     open_ids = [n.id for n in GraphTracker(path=g).list_open()]
     assert open_ids == ["ab-open1", "ab-open2"]
+
+
+def test_list_open_returns_candidates_with_ordering_inputs(tmp_path):
+    # The selection projection: every open item carries priority / rank /
+    # created_at (the inputs make_selection_sort_key reads off the candidate)
+    # while read() stays five-field. Positive assertions on each widened field.
+    g = _write_graph(
+        tmp_path / "graph.json",
+        [
+            {
+                "id": "ab-1", "plan_path": "/p.md", "priority": "p0",
+                "rank": 2.0, "created_at": "2026-01-02T00:00:00Z",
+                "cwd": "/repo", "pr_number": 9,
+            },
+            {"id": "ab-2", "plan_path": "/q.md"},
+        ],
+    )
+    by_id = {c.id: c for c in GraphTracker(path=g).list_open()}
+    assert set(by_id) == {"ab-1", "ab-2"}
+    assert isinstance(by_id["ab-1"], TrackerCandidate)
+    assert by_id["ab-1"].priority == "p0"
+    assert by_id["ab-1"].rank == 2.0
+    assert by_id["ab-1"].created_at == "2026-01-02T00:00:00Z"
+    # Absent entry values fall back to the projection defaults, and the
+    # sidecar-only fields (cwd, pr_number) stay OFF the candidate.
+    assert by_id["ab-2"].priority == "p2"
+    assert by_id["ab-2"].rank is None
+    assert "cwd" not in TrackerCandidate.model_fields
+    assert "pr_number" not in TrackerCandidate.model_fields
+
+
+def test_candidate_ordering_reproduces_priority_rank_recency(tmp_path):
+    # Distinct ordering inputs produce a distinct, reproducible order once
+    # footnote's sort key runs over candidates - the parity property AC5-EDGE
+    # leans on. Rank beats priority; priority beats created_at.
+    from fno.graph._intake import make_selection_sort_key
+
+    g = _write_graph(
+        tmp_path / "graph.json",
+        [
+            {"id": "ab-lo", "plan_path": "/a.md", "priority": "p3",
+             "created_at": "2026-01-01T00:00:00Z"},
+            {"id": "ab-hi", "plan_path": "/b.md", "priority": "p1",
+             "created_at": "2026-03-01T00:00:00Z"},
+            {"id": "ab-ranked", "plan_path": "/c.md", "priority": "p3",
+             "rank": 1.0, "created_at": "2026-02-01T00:00:00Z"},
+        ],
+    )
+    cands = GraphTracker(path=g).list_open()
+    as_entries = [c.model_dump() for c in cands]
+    ordered = sorted(as_entries, key=make_selection_sort_key(as_entries))
+    assert [e["id"] for e in ordered] == ["ab-ranked", "ab-hi", "ab-lo"]
+
+
+# -- sidecar store selection (graph projection vs external per-id file) --
+
+
+@pytest.fixture
+def graph_mode(monkeypatch):
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+
+
+@pytest.fixture
+def external_mode(monkeypatch):
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+
+def test_sidecar_graph_mode_projects_from_entry(tmp_path, monkeypatch, graph_mode):
+    g = _write_graph(
+        tmp_path / "graph.json",
+        [{
+            "id": "ab-1", "cwd": "/repo", "plan_path": "/p.md",
+            "pr_number": 7, "cost_usd": 1.5, "claimed_at": "2026-01-01T00:00:00Z",
+            "batch": "batch-1", "contained_in": "ab-0",
+            "title": "tracker-owned, must not cross",
+        }],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    sc = load("ab-1")
+    assert sc.cwd == "/repo"
+    assert sc.plan_path == "/p.md"
+    assert sc.pr_number == 7
+    assert sc.cost_usd == 1.5
+    assert sc.claimed_at == "2026-01-01T00:00:00Z"
+    assert sc.batch == "batch-1"
+    assert sc.contained_in == "ab-0"
+    # Tracker-owned fields never ride the sidecar projection.
+    assert not hasattr(sc, "title")
+
+
+def test_sidecar_graph_mode_roundtrips_through_entry(tmp_path, monkeypatch, graph_mode):
+    g = _write_graph(
+        tmp_path / "graph.json",
+        [{"id": "ab-1", "cwd": "/old", "plan_path": "/p.md"}],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    monkeypatch.setattr(sidecar_mod, "sidecar_path", lambda i: tmp_path / "sidecars" / f"{i}.json")
+    sc = load("ab-1")
+    sc.cwd = "/new"
+    sc.pr_number = 42
+    returned = save(sc)
+    # Graph mode returns the graph path and updates the entry in place...
+    assert returned == g
+    entries = json.loads(g.read_text())["entries"]
+    entry = next(e for e in entries if e["id"] == "ab-1")
+    assert entry["cwd"] == "/new"
+    assert entry["pr_number"] == 42
+    assert entry["plan_path"] == "/p.md"
+    # ...and never creates a per-id sidecar file (one physical owner; plan Risk 1).
+    assert not (tmp_path / "sidecars" / "ab-1.json").exists()
+
+
+def test_sidecar_graph_mode_missing_id_is_empty(tmp_path, monkeypatch, graph_mode):
+    g = _write_graph(tmp_path / "graph.json", [{"id": "ab-1"}])
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    sc = load("ab-missing")
+    assert sc == Sidecar(id="ab-missing")
+
+
+def test_sidecar_graph_mode_save_missing_id_raises(tmp_path, monkeypatch, graph_mode):
+    g = _write_graph(tmp_path / "graph.json", [{"id": "ab-1"}])
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    with pytest.raises(NodeNotFound):
+        save(Sidecar(id="ab-ghost", cwd="/nowhere"))
+
+
+def test_sidecar_external_mode_never_reads_the_graph(
+    tmp_path, monkeypatch, external_mode
+):
+    # Contradictory sentinel (plan Verification step 7): the graph file carries
+    # one cwd, the per-id sidecar file another. External mode must return the
+    # sidecar sentinel - positive evidence it never fell back to the graph.
+    g = _write_graph(
+        tmp_path / "graph.json",
+        [{"id": "EXT-1", "cwd": "/graph-sentinel", "plan_path": "/graph.md"}],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    sidecars = tmp_path / "sidecars"
+    sidecars.mkdir()
+    (sidecars / "EXT-1.json").write_text(
+        json.dumps({"id": "EXT-1", "cwd": "/external-sentinel",
+                    "plan_path": "/external.md"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sidecar_mod, "sidecar_path", lambda i: sidecars / f"{i}.json")
+    sc = load("EXT-1")
+    assert sc.cwd == "/external-sentinel"
+    assert sc.plan_path == "/external.md"
+    sc.pr_number = 5
+    path = save(sc)
+    assert path == sidecars / "EXT-1.json"
+    # The graph file is byte-identical: external mode never wrote through it.
+    assert json.loads(g.read_text())["entries"][0]["cwd"] == "/graph-sentinel"
+
+
+def test_sidecar_external_mode_missing_file_is_empty(tmp_path, monkeypatch, external_mode):
+    monkeypatch.setattr(
+        sidecar_mod, "sidecar_path", lambda i: tmp_path / "sidecars" / f"{i}.json"
+    )
+    assert load("EXT-new") == Sidecar(id="EXT-new")
 
 
 # -- GitHub Issues backend --

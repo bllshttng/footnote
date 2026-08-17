@@ -61,6 +61,14 @@ class Sidecar(BaseModel):
     # When this id was first claimed (footnote-owned timestamp; the live holder
     # is in the claims dir, not here).
     claimed_at: Optional[str] = None
+    # Batch-lane membership (an open batch ships this node via the batch PR,
+    # so selection must drop it; cleared on abandon). Selection fact the
+    # tracker cannot express.
+    batch: Optional[str] = None
+    # Delivery-unit containment (x-e957): this node's work ships inside
+    # another node's PR, so it is not separately dispatchable. Selection
+    # fact the tracker cannot express.
+    contained_in: Optional[str] = None
     # Lifecycle provenance (append-only phase records).
     sessions: list[dict] = Field(default_factory=list)
     # Agent provenance.
@@ -73,21 +81,103 @@ class Sidecar(BaseModel):
     spawned_by_cwd: Optional[str] = None
 
 
+def _external_mode() -> bool:
+    """True when the selected tracker backend is not the default graph one.
+
+    Resolved through :func:`fno.tracker.active_backend_name` (lazily, to keep
+    this module importable before the package finishes initializing) so the
+    sidecar store and the tracker can never disagree about which backend is
+    live. Graph mode projects sidecar fields in place inside the graph entry;
+    every other backend uses the per-id JSON file.
+    """
+    from . import active_backend_name
+
+    return active_backend_name() != "graph"
+
+
+# Every Sidecar field except the join key projects 1:1 onto a graph entry field
+# of the same name (the graph entry is "a sidecar plus a tracker merged into
+# one record"). Derived from the model so a new field cannot be added without
+# automatically joining the projection.
+_GRAPH_PROJECTED_FIELDS = tuple(
+    name for name in Sidecar.model_fields if name != "id"
+)
+
+
+def _load_from_graph(id: str) -> Sidecar:
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    for entry in read_graph(graph_json()):
+        if entry.get("id") == id:
+            return Sidecar(
+                id=id,
+                **{
+                    name: entry[name]
+                    for name in _GRAPH_PROJECTED_FIELDS
+                    if name in entry
+                },
+            )
+    # A missing row has no sidecar anywhere: the graph is the store, so there
+    # is no per-id file to fall back to (mirrors the no-file branch below).
+    return Sidecar(id=id)
+
+
+def _save_to_graph(sidecar: Sidecar) -> Path:
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    from .types import NodeNotFound
+
+    # Only fields explicitly set on this instance are written back, so a
+    # partial Sidecar cannot null out entry values it never carried.
+    payload = sidecar.model_dump(exclude_unset=True, exclude={"id"})
+    path = graph_json()
+
+    def _apply(entries: list[dict]) -> list[dict]:
+        for entry in entries:
+            if entry.get("id") == sidecar.id:
+                entry.update(payload)
+                return entries
+        raise NodeNotFound(sidecar.id)
+
+    locked_mutate_graph(path, _apply)
+    return path
+
+
 def load(id: str) -> Sidecar:
-    """Read the sidecar for ``id``. Returns an empty Sidecar if none exists yet."""
-    path = sidecar_path(id)
-    if not path.exists():
-        return Sidecar(id=id)
-    return Sidecar.model_validate_json(path.read_text(encoding="utf-8"))
+    """Read the sidecar for ``id``. Returns an empty Sidecar if none exists yet.
+
+    Selects the logical sidecar store for the active backend: graph mode
+    projects the footnote-owned fields out of the item's graph entry; an
+    external backend reads the per-id JSON file. One physical owner per
+    backend, never both.
+    """
+    if _external_mode():
+        path = sidecar_path(id)
+        if not path.exists():
+            return Sidecar(id=id)
+        return Sidecar.model_validate_json(path.read_text(encoding="utf-8"))
+    return _load_from_graph(id)
 
 
 def save(sidecar: Sidecar) -> Path:
-    """Atomically write ``sidecar`` to its per-id path. Returns the path.
+    """Persist ``sidecar`` to the active backend's sidecar store. Returns the
+    physical path written (the graph file in graph mode, the per-id JSON
+    otherwise).
 
-    Temp-file + ``os.replace`` so a concurrent reader on another item never sees
-    a half-written file. One file per item means writers on different ids never
-    contend.
+    External mode is temp-file + ``os.replace`` so a concurrent reader on
+    another item never sees a half-written file; one file per item means
+    writers on different ids never contend. Graph mode routes through
+    ``locked_mutate_graph`` so the projection stays atomic with the rest of
+    the entry and recompute_statuses/canonicalization run as usual.
     """
+    if _external_mode():
+        return _save_to_file(sidecar)
+    return _save_to_graph(sidecar)
+
+
+def _save_to_file(sidecar: Sidecar) -> Path:
     path = sidecar_path(sidecar.id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = sidecar.model_dump_json(indent=2, exclude_unset=True) + "\n"
