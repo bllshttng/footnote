@@ -3104,6 +3104,13 @@ event_types:
         failed:
           type: array
           description: "Qualified keys retained as UNKNOWN after a failed state read."
+        sweep_failures:
+          type: integer
+          description: "Repos whose REST listing failed during this tick; zero on a clean sweep. Non-zero is outcome `degraded`, never ok."
+        listing_api:
+          type: string
+          enum: [rest]
+          description: "Which code path produced the swept states; lets a later reader confirm the REST port from the event log alone."
         receipt_id:
           type: string
           description: "Identifier shared with pr_watch_sweep_chunk events when the exact receipt exceeds the inline event budget."
@@ -3139,6 +3146,51 @@ event_types:
                 type: string
               target:
                 type: string
+
+  - name: pr_watch_tick_attempt
+    description: "Written at tick entry, before settings load, so a tick that hangs or dies during bootstrap is still attributable: this record is the only one that survives a SIGKILL. NOT a liveness watermark - only a completed sweep mints pr_watch_tick."
+    sources: [daemon]
+    data:
+      required: [pid, phase]
+      properties:
+        pid:
+          type: integer
+          description: "OS pid of the tick process; the envelope ts is the start timestamp."
+        phase:
+          type: string
+          description: "Stage marker at emission time; 'entry' for this record."
+
+  - name: pr_watch_tick_end
+    description: "Bracket close for pr_watch_tick_attempt: always emitted when the tick process exits, including timeout and error paths, carrying the resolved outcome and the last phase marker reached. status() prints this outcome as 'Last tick outcome'."
+    sources: [daemon]
+    data:
+      required: [outcome, duration_s, phase]
+      properties:
+        outcome:
+          type: string
+          enum: [ok, degraded, disabled, lock_held, quota_skip, timeout, error]
+          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; the rest never minted a pr_watch_tick."
+        duration_s:
+          type: number
+          description: "Wall-clock seconds from tick entry to this record."
+        phase:
+          type: string
+          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, catchup."
+        sweep_failures:
+          type: integer
+          description: "Repo listing failures (present when a sweep ran)."
+        quota_remaining:
+          type: integer
+          description: "GraphQL budget remaining at the skip decision (quota_skip only)."
+        quota_reset:
+          type: string
+          description: "ISO timestamp of the GraphQL budget reset (quota_skip only)."
+        quota_unknown:
+          type: boolean
+          description: "The budget preflight ran but the instrument was unreadable; the tick proceeded rather than reading the absence as a low budget."
+        pid:
+          type: integer
+          description: "OS pid of the tick process."
 
   - name: recovery_nudge
     description: "Session auto-recovery (x-f47c) injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."
