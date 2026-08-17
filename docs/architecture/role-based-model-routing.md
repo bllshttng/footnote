@@ -185,7 +185,7 @@ Wires native per-spawn routing for the claude lane (Anthropic-protocol providers
 
 ## Sigma panel routes
 
-`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer. Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles. At the measured 50–60K tokens per preamble, routing all six agents costs roughly 300–360K tokens before review work; use whole-session routing when the full panel should share one model.
+`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer. Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles. At the measured 50–60K tokens per preamble, a six-agent panel costs roughly 300–360K tokens before review work. Whenever the full panel must share one model, use whole-session routing.
 
 ```yaml
 config:
