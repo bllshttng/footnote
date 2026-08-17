@@ -79,12 +79,29 @@ jobs:
         run: |
           set -euo pipefail
           ctx=fno/review-coverage
+          # This job has no checkout and gh does not fall back to
+          # GITHUB_REPOSITORY without a git repo, so every gh call names the
+          # repository explicitly or dies client-side.
           # A failed POST fails the step on purpose: a release valve that
           # silently fails to open reads as open.
           post() {
             gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
               -f state="$1" -f context="$ctx" -f description="$2" >/dev/null
           }
+          case "$EVENT:$ACTION" in
+            pull_request:synchronize|pull_request:labeled|pull_request:unlabeled)
+              # A queued run can outlive its PR. A status posted on a MERGED
+              # head is read by the post-merge audit, where a late invalidate
+              # would false-red a merge that passed every gate, and nothing
+              # can repair it (the branch is gone). Re-read the live state.
+              state="$(gh pr view "${{ github.event.pull_request.number }}" \
+                -R "${GITHUB_REPOSITORY}" --json state --jq .state)"
+              if [ "$state" != "OPEN" ]; then
+                echo "PR is ${state}; no status change"
+                exit 0
+              fi
+              ;;
+          esac
           case "$EVENT:$ACTION" in
             pull_request:labeled)
               if [ "$LABEL" = "coverage-override" ]; then
@@ -107,7 +124,8 @@ jobs:
               # operator's fix commit after a 3am override keeps the valve
               # they are still holding, so the label is re-read before the
               # head is invalidated.
-              if gh pr view "${{ github.event.pull_request.number }}" --json labels \
+              if gh pr view "${{ github.event.pull_request.number }}" \
+                    -R "${GITHUB_REPOSITORY}" --json labels \
                    | grep -q '"coverage-override"'; then
                 post success "coverage-override label still applied (head moved to ${HEAD_SHA:0:8})"
                 echo "synchronize: override still held; re-stamped success at ${HEAD_SHA:0:8}"

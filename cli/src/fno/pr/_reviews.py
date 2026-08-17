@@ -551,18 +551,24 @@ def _override_label_actor(
     if COVERAGE_OVERRIDE_LABEL not in labels:
         return False, None
     actor: Optional[str] = None
-    ev = runner(
-        [
-            "gh", "api",
-            f"repos/:owner/:repo/issues/{pr_number}/events",
-            "--jq",
-            "[.[] | select(.event==\"labeled\" and .label.name==\""
-            + COVERAGE_OVERRIDE_LABEL
-            + "\")][-1].actor.login",
-        ],
-        cwd=repo,
-        timeout=30,
-    )
+    try:
+        ev = runner(
+            [
+                "gh", "api",
+                f"repos/:owner/:repo/issues/{pr_number}/events",
+                "--jq",
+                "[.[] | select(.event==\"labeled\" and .label.name==\""
+                + COVERAGE_OVERRIDE_LABEL
+                + "\")][-1].actor.login",
+            ],
+            cwd=repo,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - the actor is cosmetic; the label stands
+        # A slow events feed must not abort the publish: the label was already
+        # confirmed, so post the override with an unnamed actor rather than
+        # leaving an override-labelled PR with no status at all.
+        return True, None
     if ev.ok and (ev.stdout or "").strip():
         actor = ev.stdout.strip().splitlines()[-1]
     return True, actor

@@ -2812,7 +2812,7 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
         .find(|n| n.class == NudgeClass::Unresponsive)
 }
 
-/// The commit-status context the merge ruleset requires (x-6352). One const for
+/// The commit-status context the merge ruleset requires. One const for
 /// both emitter call sites and the standalone verb arm; the Python publisher,
 /// the refresher workflow, and the post-merge audit pin the same name from
 /// their own surfaces, and a context string that splits in two is a green
@@ -2822,19 +2822,19 @@ const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
 /// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
 fn is_code_review_reviewer(name: &str) -> bool {
-    name.strip_prefix('/').unwrap_or(name) == "code-review"
+    normalize_reviewer(name) == "code-review"
 }
 
 /// Publish the just-emitted `review_coverage` verdict as a commit status on
-/// the PR head (x-6352), so every path that can WRITE the row also leaves the
+/// the PR head, so every path that can WRITE the row also leaves the
 /// server-visible marker `gh pr merge`, the web button, and the auto-merge
 /// queue are judged by. Direct `gh api` POST on the same `gh_bin` seam as the
 /// nudge comment; the outcome never gates the caller - the durable verdict is
 /// the event row, and a failed POST leaves the status absent, which the
 /// ruleset reads as not-passing (fail-closed).
 ///
-/// The success conjunction MIRRORS `_coverage_gate_verdict` in
-/// cli/src/fno/pr/_merge.py: covered count > 0, the row pinned to the PR head
+/// The success conjunction MIRRORS `coverage_verdict` in
+/// cli/src/fno/pr/_coverage_gate.py: covered count > 0, the row pinned to the PR head
 /// (not merely the local HEAD), and - when `code-review` is a configured
 /// reviewer - a head-pinned local pass from it. The two must agree, because
 /// this status is exactly what lets a merge through where `fno pr merge`
@@ -7199,7 +7199,7 @@ fn run_done(
         author_session,
         None,
     )?;
-    // (x-6352) read_pr_info stays read-only against GitHub; the CALLER owns
+    // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
     // same evidence the merge gate will read, and the status targets the live
     // PR head the row is compared against - not merely the local HEAD. Only
@@ -8438,6 +8438,26 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     let head_explicit = head.is_some();
     let head_sha = head.unwrap_or_else(|| git_head_sha(&git_bin, &cwd));
 
+    // The self-review floor, exactly as decide() applies it for the stop
+    // hook: a code payload on a lane-less stock install owes a local
+    // code-review pass. Without the floor here the verb's publish computed
+    // "no lane" and posted nothing on the install shape whose only publisher
+    // is this verb (a session with no stop hook), and the emitted row
+    // disagreed with the stop hook's floored row for the same PR.
+    let mut required_reviewers = inputs.required_reviewers;
+    let lane_configured = !(inputs.required_bots.is_empty()
+        && inputs.optional_bots.is_empty()
+        && required_reviewers.is_empty());
+    if !lane_configured
+        && inputs.settings.self_review_required.unwrap_or(true)
+        && harness_can_self_review(inputs.author_harness.as_deref())
+    {
+        let payload = classify_payload(&git_bin, &cwd);
+        if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
+            required_reviewers.push(floored);
+        }
+    }
+
     // Authorship: --session-id, else the manifest's harness_session_id when one
     // exists, else None. None leaves every local verdict's attestation_origin
     // Unknown (the documented fail-open-on-authorship behavior) and the payload
@@ -8463,7 +8483,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         &inputs.required_bots,
         &inputs.optional_bots,
         &inputs.settings.external_reviewers,
-        &inputs.required_reviewers,
+        &required_reviewers,
         &inputs.nudge_configs,
         &head_sha,
         &inputs.project_events,
@@ -8488,7 +8508,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             }
             // read_pr_info already emitted this exact payload to both logs;
             // print the same object so stdout and the logs agree. And publish
-            // the same verdict as the commit status (x-6352), so the standalone
+            // the same verdict as the commit status, so the standalone
             // verb satisfies the server-side gate for every session shape that
             // has no stop hook at all. Open PRs only: a MERGED PR carries the
             // Covered(0) sentinel, not evidence.
@@ -8503,7 +8523,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &inputs.required_bots,
                     &inputs.optional_bots,
                     &inputs.settings.external_reviewers,
-                    &inputs.required_reviewers,
+                    &required_reviewers,
                 );
             }
             (
@@ -8541,7 +8561,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
-                // (x-6352) The unknown row is a failure the server must SEE,
+                // The unknown row is a failure the server must SEE,
                 // never an absence: publish it as a failing status so the
                 // ruleset refuses rather than silently waiting. Only when the
                 // caller PASSED --head (the merge recompute always does): an
@@ -8562,7 +8582,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         &inputs.required_bots,
                         &inputs.optional_bots,
                         &inputs.settings.external_reviewers,
-                        &inputs.required_reviewers,
+                        &required_reviewers,
                     );
                 }
                 // The persisted row above is schema-gated (the pr_num == 0

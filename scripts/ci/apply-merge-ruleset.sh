@@ -51,23 +51,34 @@ fi
 
 # The data file is validated before any mode runs: a malformed file must fail
 # as a data error (exit 2), never as a confusing API error halfway through.
+# required_status_checks is its OWN rule type in the repository-rulesets API;
+# nesting it under the pull_request rule (the classic branch-protection shape)
+# makes the POST 422, so the validation reads the rulesets schema only.
 file_contexts="$(python3 -c '
 import json
 d = json.load(open("'"$DATA_FILE"'"))
 rules = d.get("rules", [])
-pr = next((r for r in rules if r.get("type") == "pull_request"), None)
-assert pr, "data file: no pull_request rule"
-ctxs = pr.get("parameters", {}).get("required_status_checks", {}).get("contexts")
-assert isinstance(ctxs, list) and ctxs, "data file: no required status contexts"
+rsc = next((r for r in rules if r.get("type") == "required_status_checks"), None)
+assert rsc, "data file: no required_status_checks rule"
+checks = rsc.get("parameters", {}).get("required_status_checks")
+assert isinstance(checks, list) and checks, "data file: no required status checks"
+ctxs = sorted(
+    str(c.get("context")) for c in checks if isinstance(c, dict) and c.get("context")
+)
+assert ctxs, "data file: no required status contexts"
 assert d.get("bypass_actors") == [], "data file: bypass_actors is not empty"
 assert any(r.get("type") == "non_fast_forward" for r in rules), "data file: no non_fast_forward rule"
-print(" ".join(sorted(ctxs)))
+print(" ".join(ctxs))
 ')" || exit 2
 
 # The live ruleset with this name, or "" when none exists.
 live_id() {
-  gh api "$REPO_PATH/rulesets" --paginate \
-    --jq ".[] | select(.name == \"${RULESET_NAME}\") | .id" 2>/dev/null | head -1
+  local all
+  all="$(gh api "$REPO_PATH/rulesets" --paginate \
+    --jq ".[] | select(.name == \"${RULESET_NAME}\") | .id" 2>/dev/null)" || return 1
+  # First line WITHOUT a pipe: `| head -1` under pipefail turns gh's SIGPIPE
+  # on page 2 into a false "could not read live rulesets".
+  printf '%s' "${all%%$'\n'*}"
 }
 
 found="$(live_id)" || { echo "FAIL: could not read live rulesets" >&2; exit 1; }
@@ -94,9 +105,10 @@ case "$mode" in
     live_contexts="$(printf '%s' "$live" | python3 -c '
 import json,sys
 d = json.load(sys.stdin)
-pr = next((r for r in d.get("rules", []) if r.get("type") == "pull_request"), None)
-ctxs = (pr or {}).get("parameters", {}).get("required_status_checks", {}).get("contexts") or []
-print(" ".join(sorted(ctxs)))
+rsc = next((r for r in d.get("rules", []) if r.get("type") == "required_status_checks"), None)
+checks = (rsc or {}).get("parameters", {}).get("required_status_checks") or []
+ctxs = sorted(str(c.get("context")) for c in checks if isinstance(c, dict) and c.get("context"))
+print(" ".join(ctxs))
 ')"
     if [ "$live_contexts" != "$file_contexts" ]; then
       echo "FAIL: required contexts drifted - live [${live_contexts}] vs file [${file_contexts}]" >&2

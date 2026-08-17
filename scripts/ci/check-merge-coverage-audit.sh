@@ -14,7 +14,10 @@
 #      BY NAME, so the release valve is counted, not hidden.
 #
 # A first-parent commit with no second parent (a direct push that predates
-# the ruleset) is skipped with a named line, never silently.
+# the ruleset) is skipped with a named line, never silently. Squash and rebase
+# merges have no second parent either, so this audit covers MERGE commits -
+# the strategy this repo's auto_merge config uses; a repo retargeting the
+# script at a squash workflow must key the walk on the PR API instead.
 #
 # Usage: check-merge-coverage-audit.sh --since <git-range-start>   (full audit)
 #        check-merge-coverage-audit.sh --status-only <sha>         (assertion 2 only)
