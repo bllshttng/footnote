@@ -473,7 +473,116 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "optional_reviews_unresolved": 0,
         "review_coverage": {"coverage": "covered", "reviewed_count": 2},
         "ready": True,
+        "ready_blockers": [],
     }
+
+
+# ---- x-e601: ready conjoins review coverage, ready_blockers names the conjunct ----
+#
+# `fno pr merge` already refused on uncovered coverage while this verb printed
+# ready: true from the same payload (the specimen set: five PRs at once, each
+# green and uncovered). ready now conjoins coverage exactly the way merge
+# reads it, and the blockers list is the positive marker for WHICH conjunct
+# failed - a bare false has one explanation per conjunct.
+
+
+def _green_fetch(monkeypatch):
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+
+
+def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
+    """AC3-HP: green CI and zero unresolved findings no longer say ready while
+    the merge gate refuses the same PR for zero coverage."""
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["green"] is True
+    assert out["ready"] is False
+    assert "review_coverage_uncovered" in out["ready_blockers"]
+
+
+def test_ready_is_false_when_coverage_is_unknown(monkeypatch, capsys):
+    """AC3-EDGE: an unknown coverage read blocks and is named as its own
+    blocker. WHY the read degraded is x-b56a's question; this only reports
+    that the answer is missing."""
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert "review_coverage_unknown" in out["ready_blockers"]
+    assert "review_coverage_uncovered" not in out["ready_blockers"]
+
+
+def test_ready_treats_a_legacy_covered_zero_as_uncovered(monkeypatch, capsys):
+    """Historical events serialize a real zero as `covered` with count 0;
+    every consumer tests both, so ready does too."""
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 0},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert "review_coverage_uncovered" in out["ready_blockers"]
+
+
+def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
+    """The list is not coverage-only: a red verdict is named with the verdict's
+    own word, so a reader never guesses which of the conjuncts failed."""
+    import json
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["ci_red"]
 
 
 def test_read_review_coverage_from_events(tmp_path):
@@ -755,6 +864,13 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
             "optional_reviews_unresolved": 2,
         },
     )
+    # Coverage stubbed to a counted pass so the ONLY blocker under test is the
+    # unresolved optional finding (ready conjoins coverage since x-e601).
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+    )
     code = _status.run_status("42")
     assert code == 0  # green exit unchanged despite an unresolved optional finding
     out = _json.loads(capsys.readouterr().out)
@@ -777,6 +893,13 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
         _status,
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": "unknown", "optional_reviews_unresolved": None},
+    )
+    # Coverage stubbed to a counted pass so the only blocker under test is the
+    # unknown optional read.
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
     code = _status.run_status("42")
     assert code == 0
