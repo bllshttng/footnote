@@ -2645,7 +2645,8 @@ def cmd_watchdog(
         ),
     ),
     only: Optional[str] = typer.Option(
-        None, "--only", help="Filter to one verdict: wake|reroute|reap|ghost|leave."
+        None, "--only",
+        help="Filter to one verdict: wake|reroute|reap|ghost|stale|leave.",
     ),
     mail_to: Optional[str] = typer.Option(
         None,

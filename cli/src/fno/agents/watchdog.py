@@ -85,8 +85,10 @@ WAKE_MAX_AGE_S = 24 * 3600
 #: finished. A done node proves the old task ended and proves nothing about
 #: whether the session was re-tasked since - an operator mail can hand a
 #: worker new work after its PR merges. So a done-node row reaps only when
-#: the transcript has gone QUIET (past recovery's idle threshold) and its
-#: last event was not a tool call. A row executing a tool never reaps.
+#: the transcript has gone QUIET (past recovery's idle threshold,
+#: ``config.recovery.idle_threshold_seconds``; this constant is only the
+#: fallback when the config will not read) and its last event was not a tool
+#: call. A row executing a tool never reaps.
 REAP_QUIET_AFTER_S = 900
 
 # The 429 marker and its reset stamp. Reset stamps ride the provider error
@@ -168,6 +170,7 @@ def verdicts(
     claim_for: Callable[[str], dict],
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
+    quiet_after_s: float = REAP_QUIET_AFTER_S,
 ) -> list[Verdict]:
     """One verdict per row, in table precedence (ghost > reap > reroute >
     wake > leave). Each basis string names the measurement that decided it, so
@@ -183,6 +186,7 @@ def verdicts(
                 claim_for=claim_for,
                 node_state_for=node_state_for,
                 now_s=now_s,
+                quiet_after_s=quiet_after_s,
             )
         )
     return out
@@ -206,6 +210,7 @@ def _verdict_one(
     claim_for: Callable[[str], dict],
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
+    quiet_after_s: float = REAP_QUIET_AFTER_S,
 ) -> Verdict:
     facts = transcript_for(row.row_id)
 
@@ -251,7 +256,7 @@ def _verdict_one(
                                f"{reap_basis} but no parseable evidence, "
                                f"not reaped", "none")
             age_s = max(0.0, now_s - facts.last_event_epoch)
-            if age_s <= REAP_QUIET_AFTER_S:
+            if age_s <= quiet_after_s:
                 return Verdict(row.row_id, row.name, row.state, LEAVE,
                                f"{reap_basis} but executing, last turn "
                                f"{_mins(now_s, facts.last_event_epoch)}m ago",
@@ -337,13 +342,13 @@ def _verdict_one(
 
 
 def _holder_session(holder: Optional[str]) -> Optional[str]:
-    """``target-session:<uuid>`` -> ``<uuid>`` (truth_status._session_from_holder
-    semantics; a foreign holder shape returns None and condemns nothing)."""
-    prefix = "target-session:"
-    if holder and holder.startswith(prefix):
-        sid = holder[len(prefix):]
-        return sid or None
-    return None
+    """The canonical holder parser, so the holder vocabulary (claude
+    ``target-session:<uuid>`` today, codex durable thread ids as they land)
+    lives in one place; a foreign holder shape returns None and condemns
+    nothing."""
+    from fno.agents.truth_status import _session_from_holder
+
+    return _session_from_holder(holder)
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +504,9 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
                 by_sid[str(sid)] = entry
     except Exception:  # noqa: BLE001 - registry read miss degrades to claude rows
         by_sid = {}
-    ledger_nodes: dict[str, str] = {}
+    # None = not read yet; a read that maps nothing must not re-read the
+    # multi-megabyte ledger once per manifest-less row.
+    ledger_nodes: Optional[dict[str, str]] = None
     out: list[Row] = []
     for r in raw:
         sid = str(r.get("sessionId") or r.get("id") or "")
@@ -510,7 +517,7 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
         cwd = str(r.get("cwd") or getattr(entry, "cwd", "") or "")
         node = _node_id_from_worktree(cwd) if cwd else None
         if node is None:
-            if not ledger_nodes:
+            if ledger_nodes is None:
                 ledger_nodes = _ledger_nodes()
             node = ledger_nodes.get(sid)
         out.append(Row(
@@ -598,12 +605,19 @@ def run_sweep(
 
         def graph_fn() -> dict[str, dict]:
             return index
+    try:
+        from fno.config import load_settings
+
+        quiet_after_s = float(load_settings().recovery.idle_threshold_seconds)
+    except Exception:  # noqa: BLE001 - config miss falls back to the default
+        quiet_after_s = REAP_QUIET_AFTER_S
     vs = verdicts(
         rows,
         transcript_for=transcript_fn,
         claim_for=claim_fn,
         node_state_for=lambda node: graph_fn().get(node),
         now_s=now_s,
+        quiet_after_s=quiet_after_s,
     )
     counts: dict[str, int] = {}
     for v in vs:

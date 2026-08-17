@@ -14,7 +14,7 @@ Order is precedence. The top row wins.
 
 | Verdict | Condition | Basis it prints |
 |---------|-----------|-----------------|
-| `ghost` | state is `working` or `blocked` and no transcript resolves for the row's recorded id | `no transcript for <id>` |
+| `ghost` | state is `working`, `busy`, or `blocked` and no transcript resolves for the row's recorded id | `no transcript for <id>` |
 | `reap` | the node is done, or the `node:<id>` claim is held live by a different session | `node <id> done` / `claim held by <other>` |
 | `stale` | a wake-state row whose last transcript event is older than the 1d ceiling | `<state> <n>d old, past the 1d wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |

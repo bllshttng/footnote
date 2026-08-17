@@ -55,6 +55,25 @@ def test_markdown_generation_is_deterministic() -> None:
     assert schema_gen.render_markdown() == schema_gen.render_markdown()
 
 
+def test_markdown_table_rows_never_split_on_doc_pipes() -> None:
+    """A registry doc blurb carrying a literal ``|`` must render escaped.
+
+    ``recovery.watchdog`` shipped a five-cell row split into eight columns:
+    every pipe in a cell splits the rendered table exactly where the new
+    feature is documented. Escaping in the generator (not hand-patching the
+    generated file) is the guard, so pin it here.
+    """
+    rows = [
+        line
+        for line in schema_gen.render_markdown().splitlines()
+        if line.startswith("| `")
+    ]
+    assert rows  # sanity: the reference table exists
+    for line in rows:
+        unescaped = re.sub(r"\\\|", "", line)
+        assert unescaped.count("|") == 6, f"row split by unescaped pipe: {line[:80]}"
+
+
 def test_committed_docs_are_fresh() -> None:
     """docs/configuration-guide.md must equal the generator's output.
 
