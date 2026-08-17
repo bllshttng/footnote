@@ -329,17 +329,25 @@ exit 1"#,
 
 /// An attestation pinned to a superseded sha -> verdict `stale`, never
 /// `reviewed`. The recompute is as head-pinned as the stop hook's own eval.
+/// The fixture names the PR's head branch (x-e601): a legacy line with no
+/// branch on a moved head is out of scope and produces NO verdict, so the
+/// stale-verdict path is only reachable through a branch-scoped attestation.
 #[test]
 fn stale_attestation_recomputes_to_stale() {
     let parent = TempDir::new().unwrap();
     let (cwd, project, global) = fixture(parent.path(), "stale");
     fs::write(
         &project,
-        attestation_line(
-            "code-review",
-            "oldhead0000000000000000000000000000000",
-            "sess-x",
-        ) + "\n",
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review",
+                     "head_sha": "oldhead0000000000000000000000000000000",
+                     "verdict": "pass",
+                     "attester_session_id": "sess-x",
+                     "branch": "main"}
+        })
+        .to_string()
+            + "\n",
     )
     .unwrap();
     let bins = TempDir::new().unwrap();

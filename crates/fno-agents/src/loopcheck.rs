@@ -1339,6 +1339,33 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
     }
 }
 
+/// Whether a `review_attestation` line is about the PR under evaluation.
+///
+/// The events journal is shared across every worktree of a repo
+/// (setup-worktree.sh links them to one canonical file), so an unscoped scan
+/// reads every branch's attestations into every PR's verdict list. That is
+/// noise in the common case and a false pass in the bad one: `review_freshness`
+/// grants CarriedBaseSync on a code-diff identity match, which two branches
+/// carrying the same delta (a cherry-pick, a duplicate-PR pair) satisfy.
+///
+/// `attested_branch` is empty for every event predating the field. Those fall
+/// back to exact head equality, which is unambiguous evidence about THIS PR
+/// (a foreign branch cannot share this head sha without being this commit) and
+/// keeps in-flight gates satisfiable. It deliberately does NOT inherit the
+/// carry: a legacy attestation on a moved head is not scopeable and must not
+/// count.
+fn attestation_in_scope(
+    attested_branch: &str,
+    attested_head: &str,
+    head_branch: &str,
+    head_sha: &str,
+) -> bool {
+    if attested_branch.is_empty() {
+        return !attested_head.is_empty() && attested_head == head_sha;
+    }
+    !head_branch.is_empty() && attested_branch == head_branch
+}
+
 /// The path from a `git diff --raw` line (`:<meta>\t<path>`), or `""`.
 /// `--no-renames` guarantees one path per line, so there is no second field.
 fn raw_diff_line_path(line: &str) -> &str {
@@ -1642,7 +1669,7 @@ fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
 
 /// A configured local reviewer with no head-pinned `pass` attestation.
 #[derive(Debug, Clone, PartialEq)]
-struct UnattestedReviewer {
+pub struct UnattestedReviewer {
     name: String,
     /// A head this reviewer DID attest at, which is no longer HEAD. Always a
     /// PASS and never empty - normalized at construction so `Some` means
@@ -1758,8 +1785,9 @@ fn scan_unrecorded_decisions(
 /// `review_attestation` event (x-e703 Phase 2; list form added by x-cdc7). A
 /// reviewer is satisfied when events.jsonl carries a line with
 /// `type == "review_attestation"`, `data.reviewer` matching (leading '/'
-/// stripped on both sides), `data.head_sha == head_sha`, and
-/// `data.verdict == "pass"`.
+/// stripped on both sides), the line in scope for this PR
+/// (`attestation_in_scope`: `data.branch == head_branch`, or the legacy
+/// exact-head fallback), and `data.verdict == "pass"`.
 ///
 /// The gate reads `.is_empty()` and the block message reads the names, so the
 /// decision and the explanation come from ONE scan. When they came from two,
@@ -1775,10 +1803,12 @@ fn scan_unrecorded_decisions(
 /// same class of lie this node exists to delete - so the count is surfaced in
 /// the reason. Mirrors `open_review_findings`, which already does this for
 /// `review_finding`.
-fn unattested_reviewers_scan(
+pub fn unattested_reviewers_scan(
     events_path: &Path,
     reviewers: &[String],
     freshness: &dyn Fn(&str) -> Freshness,
+    head_branch: &str,
+    head_sha: &str,
 ) -> (Vec<UnattestedReviewer>, usize) {
     let unsatisfied_all = || -> Vec<UnattestedReviewer> {
         reviewers
@@ -1835,6 +1865,18 @@ fn unattested_reviewers_scan(
             continue;
         };
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
+        // The SAME scope predicate the coverage axis uses (attestation_in_scope),
+        // applied before any freshness call: an attestation from another
+        // branch is not evidence about this PR at all, so it must never reach
+        // `latest_pass` or `other_heads` - recording it as a superseded head
+        // would name a reviewer that never touched this PR.
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
         // The SAME predicate the coverage axis uses, not a second head-equality
         // rule beside it. Leaving this one a bare equality would have made the
         // softening decorative: this is the scan that satisfies
@@ -2072,6 +2114,15 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // The PR's head branch, same `gh pr view` round trip as headRefOid. The
+    // scope predicate needs it: attestations are keyed to the branch they
+    // reviewed, and an empty read must pass "" so the predicate fails closed
+    // onto exact head equality.
+    let head_branch = pr_json
+        .get("headRefName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     // GitHub's mergeable state: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" (still
     // computing). Only "CONFLICTING" is a definitive no; UNKNOWN must not hold
     // the terminal (it clears on its own). Missing field -> "UNKNOWN".
@@ -2189,7 +2240,7 @@ fn read_pr_info(
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
     let (unattested, malformed_attestations) =
-        unattested_reviewers_scan(events_path, reviewers, &freshness);
+        unattested_reviewers_scan(events_path, reviewers, &freshness, &head_branch, head_sha);
     let reviewers_ok = unattested.is_empty();
     // Coverage reads the same events.jsonl as the attestation scan (its local
     // axis) plus the GitHub review arrays (its github_app axis). Read once;
@@ -2220,6 +2271,8 @@ fn read_pr_info(
             false,
             author_session,
             &freshness,
+            &head_branch,
+            head_sha,
         );
         (
             "none".to_string(),
@@ -2409,6 +2462,8 @@ fn read_pr_info(
             true,
             author_session,
             &freshness,
+            &head_branch,
+            head_sha,
         );
         (
             activity_ts,
@@ -2842,19 +2897,31 @@ struct BotProfile {
     /// ISSUE-comment body markers this bot posts when it is rate-limited and will
     /// never post a review object (PR #214). Empty for a bot never seen to do so.
     usage_markers: &'static [&'static str],
+    /// Body markers for a CLEAN pass this bot posts as a plain issue comment
+    /// rather than a review object. Codex submits a formal review only when it
+    /// has findings (measured on PR #947: the clean pass is the comment `Codex
+    /// Review: Didn't find any major issues. Bravo. Reviewed commit: <sha>`),
+    /// so without reading it a clean pass can never clear the gate and the
+    /// gate is strictly easier to satisfy with a flawed PR than a clean one.
+    /// Lowercased comparison; both apostrophe forms because the bot posts a
+    /// typographic one and a human quoting it may not. Empty for a bot whose
+    /// clean-pass shape was not measured - do not guess a marker.
+    clean_pass_markers: &'static [&'static str],
     nudgeable: bool,
 }
 
 /// The shipped bot table. `chatgpt-codex-connector` is characterized from PR #618
-/// (mention-triggered, ~4-7m latency, 5/5 mentions answered); `gemini-code-assist`
-/// stays `nudgeable: false` with an empty `review_handle` until its trigger is
-/// characterized (Evidence Gaps), which is strictly more than the old lists knew.
+/// (mention-triggered, ~4-7m latency, 5/5 mentions answered) and PR #947 (the
+/// clean-pass comment); `gemini-code-assist` stays `nudgeable: false` with an
+/// empty `review_handle` until its trigger is characterized (Evidence Gaps),
+/// which is strictly more than the old lists knew.
 const BOT_PROFILES: &[BotProfile] = &[
     BotProfile {
         login: "chatgpt-codex-connector",
         review_handle: "@codex review",
         reply_handle: "@chatgpt-codex-connector",
         usage_markers: &["usage limits for code reviews", "codex usage limits"],
+        clean_pass_markers: &["didn't find any major issues", "didn\u{2019}t find any major issues"],
         nudgeable: true,
     },
     BotProfile {
@@ -2862,6 +2929,7 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "",
         reply_handle: "@gemini-code-assist",
         usage_markers: &[],
+        clean_pass_markers: &[],
         nudgeable: false,
     },
 ];
@@ -3389,6 +3457,77 @@ pub(crate) fn body_is_usage_limit(body: &str) -> bool {
         .any(|m| body.contains(m))
 }
 
+/// The clean-pass markers for a CONFIGURED login (may differ from the comment
+/// author by case or a `[bot]` suffix). Empty for a login with no measured
+/// clean-pass shape, which the caller treats as "no clean-pass evidence".
+fn clean_pass_markers_for(login: &str) -> &'static [&'static str] {
+    BOT_PROFILES
+        .iter()
+        .find(|p| login_matches_bot(login, p.login))
+        .map(|p| p.clean_pass_markers)
+        .unwrap_or(&[])
+}
+
+/// The commit a bot comment says it reviewed, from a `Reviewed commit: <hex>`
+/// line. Returns "" when the line is absent or the token is not hex, which
+/// makes the comment unpinned and therefore not evidence: a clean-pass comment
+/// that names no commit cannot be aged, so counting it would be exactly the
+/// unpinned-attestation hole the local axis already refuses. Trailing
+/// punctuation (`.`, `)`, `,`) is stripped so a sentence-embedded sha parses.
+fn reviewed_commit_from_body(body: &str) -> &str {
+    const MARKER: &str = "Reviewed commit:";
+    let Some(idx) = body.find(MARKER) else {
+        return "";
+    };
+    let token = body[idx + MARKER.len()..]
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let hex: &str = token.trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+    if hex.len() >= 7 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        hex
+    } else {
+        ""
+    }
+}
+
+/// A clean-pass issue comment by `login` that pins the commit it read, as
+/// `(sha, freshness)`. The FIRST pinned comment wins: the freshness predicate
+/// decides whether that sha still describes HEAD, exactly as the review-object
+/// path does, and a marker with no pinned sha is not evidence (returns None,
+/// never an invented sha).
+fn clean_pass_review(
+    comments: &[Value],
+    login: &str,
+    freshness: &dyn Fn(&str) -> Freshness,
+) -> Option<(String, Freshness)> {
+    let markers = clean_pass_markers_for(login);
+    if markers.is_empty() {
+        return None;
+    }
+    for c in comments {
+        let author = c
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !logins_correspond(author, login) {
+            continue;
+        }
+        let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let lower = body.to_lowercase();
+        if !markers.iter().any(|m| lower.contains(m)) {
+            continue;
+        }
+        let sha = reviewed_commit_from_body(body);
+        if sha.is_empty() {
+            continue;
+        }
+        return Some((sha.to_string(), freshness(sha)));
+    }
+    None
+}
+
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
 #[derive(Debug)]
 struct ReviewInfo {
@@ -3662,6 +3801,19 @@ pub enum AttestationOrigin {
     Unknown,
 }
 
+/// How a local attestation was scoped to this PR: it named this PR's head
+/// branch (`attested_branch`), or it predates the `branch` field and was
+/// admitted on exact head equality (`legacy_head_match`). The second is the
+/// one a refusal must NAME rather than silently drop: a pre-branch-field
+/// attestation on a moved head is unscopeable, and a reader told only "0
+/// reviewed" cannot tell it from nobody-ever-reviewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationScope {
+    AttestedBranch,
+    LegacyHeadMatch,
+}
+
 /// One reviewer's classification, for the `review_coverage` event and receipts.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewerVerdict {
@@ -3702,6 +3854,12 @@ pub struct ReviewerVerdict {
     /// nothing to be fresh or stale about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness: Option<Freshness>,
+    /// How this verdict was scoped to the PR under evaluation. Only meaningful
+    /// (and only serialized) on `local_attestation` verdicts: github_app
+    /// evidence is scoped by being a review object ON this PR, so it needs no
+    /// scope field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<AttestationScope>,
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
@@ -3782,6 +3940,9 @@ struct LocalPass {
     /// The head this attestation pinned. Whether it still counts is
     /// [`review_freshness`]'s call, not this scan's.
     head: String,
+    /// The branch the attestation named. Empty only for the legacy exact-head
+    /// fallback, so the verdict can carry the matching scope label.
+    branch: String,
 }
 
 /// Distinct `(reviewer, attester_session_id)` pairs whose LATEST
@@ -3796,13 +3957,19 @@ struct LocalPass {
 /// `unattested_reviewers_scan`'s retraction handling. Pure: scans text, no IO.
 /// Presence-based: counts any reviewer regardless of the configured `reviewers`
 /// list, so a worker-run `/code-review` counts even when `reviewers: []`.
-fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
-    // (reviewer, attester_session_id) -> (head it attested, was it a pass). The
-    // attester lives in the key so cross-session attestations join instead of
-    // replace. The HEAD is no longer a filter, it is a RESULT: which head an
-    // attestation pinned is what the freshness predicate needs, and dropping
-    // every non-matching line here is what made a rebase destroy a review.
-    let mut latest: std::collections::HashMap<(String, Option<String>), (String, bool)> =
+///
+/// Scoped to the PR under evaluation via `attestation_in_scope`: an
+/// out-of-scope line is skipped ENTIRELY (never a verdict, never a stale
+/// entry), which is also what keeps the pair key honest - one session
+/// attesting PR B after PR A no longer overwrites A's pass with B's head.
+fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<LocalPass> {
+    // (reviewer, attester_session_id) -> (head it attested, branch it named,
+    // was it a pass). The attester lives in the key so cross-session
+    // attestations join instead of replace. The HEAD is no longer a filter, it
+    // is a RESULT: which head an attestation pinned is what the freshness
+    // predicate needs, and dropping every non-matching line here is what made
+    // a rebase destroy a review.
+    let mut latest: std::collections::HashMap<(String, Option<String>), (String, String, bool)> =
         std::collections::HashMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -3824,6 +3991,17 @@ fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
         if line_head.is_empty() {
             continue;
         }
+        // The branch this attestation named; empty on every event predating
+        // the field, which attestation_in_scope then admits only on exact
+        // head equality.
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !attestation_in_scope(&line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
         // attester_session_id is the live session that emitted; None on events
         // that predate the field (the whole backlog), which classifies as
@@ -3841,16 +4019,17 @@ fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
         // which keeps its name key (the config.review.reviewers gate).
         latest.insert(
             (r.trim_start_matches('/').to_string(), attester),
-            (line_head.to_string(), is_pass),
+            (line_head.to_string(), line_branch, is_pass),
         );
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
-        .filter(|(_, (_, pass))| *pass)
-        .map(|((reviewer, attester), (head, _))| LocalPass {
+        .filter(|(_, (_, _, pass))| *pass)
+        .map(|((reviewer, attester), (head, branch, _))| LocalPass {
             reviewer,
             attester,
             head,
+            branch,
         })
         .collect();
     out.sort_by(|a, b| {
@@ -3900,8 +4079,10 @@ pub fn classify_coverage(
     github_read_ok: bool,
     author_session: Option<&str>,
     freshness: &dyn Fn(&str) -> Freshness,
+    head_branch: &str,
+    head_sha: &str,
 ) -> CoverageReport {
-    let local_passes = local_latest_passes(events_text);
+    let local_passes = local_latest_passes(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
 
     if github_read_ok {
@@ -3990,15 +4171,26 @@ pub fn classify_coverage(
                                 c.get("body").and_then(|v| v.as_str()).unwrap_or(""),
                             )
                     });
-                    (
-                        if refused {
-                            CoverageVerdict::Refused
-                        } else {
-                            CoverageVerdict::Absent
-                        },
-                        String::new(),
-                        None,
-                    )
+                    // Usage FIRST: a usage-limit comment means the bot did not
+                    // read the code, so a body somehow carrying both markers
+                    // must land on the pessimistic verdict.
+                    if refused {
+                        (CoverageVerdict::Refused, String::new(), None)
+                    } else if let Some((sha, fresh)) =
+                        clean_pass_review(comments, login, freshness)
+                    {
+                        (
+                            if fresh.counts() {
+                                CoverageVerdict::Reviewed
+                            } else {
+                                CoverageVerdict::Stale
+                            },
+                            sha,
+                            Some(fresh),
+                        )
+                    } else {
+                        (CoverageVerdict::Absent, String::new(), None)
+                    }
                 }
             };
             verdicts.push(ReviewerVerdict {
@@ -4009,6 +4201,7 @@ pub fn classify_coverage(
                 attestation_origin: AttestationOrigin::Unknown,
                 reviewed_sha,
                 freshness: fresh,
+                scope: None,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -4027,6 +4220,7 @@ pub fn classify_coverage(
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: sha.clone(),
                     freshness: Some(*fresh),
+                    scope: None,
                 });
             }
         }
@@ -4071,6 +4265,7 @@ pub fn classify_coverage(
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: oid.to_string(),
                     freshness: Some(fresh),
+                    scope: None,
                 });
             }
         }
@@ -4093,6 +4288,15 @@ pub fn classify_coverage(
             attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
             reviewed_sha: lp.head.clone(),
             freshness: Some(fresh),
+            // In-scope guarantees one of exactly two shapes: a named branch
+            // that equals this PR's head branch, or a legacy line admitted on
+            // exact head equality. The label lets a refusal name the second
+            // kind rather than drop it silently.
+            scope: Some(if lp.branch.is_empty() {
+                AttestationScope::LegacyHeadMatch
+            } else {
+                AttestationScope::AttestedBranch
+            }),
         });
     }
 
@@ -8811,6 +9015,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::Stale,
+            "",
+            "",
         );
         let v = &rep.verdicts[0];
         assert_eq!(v.verdict, CoverageVerdict::Stale);
@@ -8835,6 +9041,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::CarriedBaseSync,
+            "",
+            "",
         );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Reviewed);
         assert_eq!(rep.coverage, Coverage::Covered(1));
@@ -8858,6 +9066,8 @@ mod tests {
             // The real predicate, not a stub: an empty sha must reach Stale on
             // its own rather than because a fake said so.
             &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+            "",
+            "",
         );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
         assert_eq!(rep.coverage, Coverage::Covered(0));
@@ -8877,6 +9087,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::Stale,
+            "",
+            "",
         );
         let line = coverage_receipt_line(&rep);
         // Counted in the tally, NAMED in the next action - the same split the
@@ -8906,6 +9118,8 @@ mod tests {
             true,
             None,
             &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+            "",
+            "",
         );
         let line = coverage_receipt_line(&rep);
         assert!(
@@ -8924,6 +9138,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::Stale,
+            "",
+            "",
         );
         let line = coverage_receipt_line(&old_commit);
         assert!(line.contains("ask for a re-read"), "{line}");
@@ -8939,6 +9155,24 @@ mod tests {
         .to_string()
     }
 
+    /// Like `attestation_line` but naming the branch the attestation is about -
+    /// the scoping field every post-x-e601 event carries. A legacy line (no
+    /// branch) is admitted only on exact head equality, so tests exercising a
+    /// MOVED head must scope by branch or their fixture silently vanishes.
+    fn attestation_line_on_branch(
+        reviewer: &str,
+        head: &str,
+        verdict: &str,
+        branch: &str,
+    ) -> String {
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
+                     "attester_session_id": "sess-author", "branch": branch}
+        })
+        .to_string()
+    }
+
     #[test]
     fn local_attestation_survives_a_carrying_head_move() {
         // THE x-62a1 relief, and the only relief the measurement supports: an
@@ -8946,10 +9180,18 @@ mod tests {
         // keeps counting. Before this, the scan dropped every line whose head
         // was not byte-equal to the current one, so the mandatory pre-merge
         // rebase destroyed a review that was still entirely valid.
-        let events = attestation_line("code-review", "oldhead", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
-            Freshness::CarriedBaseSync
-        });
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::CarriedBaseSync,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Reviewed);
         assert_eq!(rep.verdicts[0].reviewed_sha, "oldhead");
         assert_eq!(rep.coverage, Coverage::Covered(1));
@@ -8958,8 +9200,18 @@ mod tests {
     #[test]
     fn local_attestation_dies_on_a_real_code_change() {
         // The other 91%. No rule that refuses to guess can absorb these.
-        let events = attestation_line("code-review", "oldhead", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Stale);
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
         assert_eq!(rep.coverage, Coverage::Covered(0));
     }
@@ -8971,10 +9223,20 @@ mod tests {
         // sit on different commits that both carry.
         let events = format!(
             "{}\n{}",
-            attestation_line("code-review", "headA", "pass"),
-            attestation_line("code-review", "headB", "fail")
+            attestation_line_on_branch("code-review", "headA", "pass", "feature/x"),
+            attestation_line_on_branch("code-review", "headB", "fail", "feature/x")
         );
-        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "headA",
+        );
         assert!(rep.verdicts.is_empty());
         assert_eq!(rep.coverage, Coverage::Covered(0));
     }
@@ -8984,11 +9246,31 @@ mod tests {
         // Positive local evidence trumps a bot outage (x-0eaf). A STALE local
         // pass is not positive evidence of anything current, so it must not
         // buy `covered` the way a fresh one does.
-        let events = attestation_line("code-review", "oldhead", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], false, None, &|_| Freshness::Stale);
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(rep.coverage, Coverage::Unknown);
 
-        let fresh = classify_coverage(&[], &[], &events, &[], false, None, &|_| Freshness::Fresh);
+        let fresh = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(fresh.coverage, Coverage::Covered(1));
     }
 
@@ -9005,9 +9287,17 @@ mod tests {
                          "attester_session_id": "sess-peer"}
             })
         );
-        let rep = classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
-            Freshness::Fresh
-        });
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
         assert_eq!(rep.coverage, Coverage::Covered(2));
         assert_eq!(rep.self_attested_count(), 1);
         let data = coverage_event_data(826, &rep, "h", "", Some("sess-author"));
@@ -9025,7 +9315,17 @@ mod tests {
         // so a future gate on it cannot read absence-of-measurement as
         // absence-of-self-attestation (the x-62a1 aggregate shape).
         let events = attestation_line("code-review", "h", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
         assert_eq!(rep.coverage, Coverage::Covered(1));
         // Every origin is Unknown - the direct statement of "unmeasured".
         assert!(rep
@@ -9044,10 +9344,17 @@ mod tests {
         // happens at classify_coverage time, so the measured report is built
         // with the author - exactly how read_pr_info threads one
         // author_session into both.
-        let measured_rep =
-            classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
-                Freshness::Fresh
-            });
+        let measured_rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
         let measured = coverage_event_data(826, &measured_rep, "h", "", Some("sess-author"));
         assert_eq!(measured["self_attested_count"], serde_json::json!(1));
     }
@@ -9060,16 +9367,34 @@ mod tests {
         // before and the softening purely decorative.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("events.jsonl");
-        std::fs::write(&p, attestation_line("code-review", "oldhead", "pass")).unwrap();
+        std::fs::write(
+            &p,
+            attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x"),
+        )
+        .unwrap();
         let reviewers = vec!["code-review".to_string()];
 
-        let carried = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::CarriedBaseSync).0;
+        let carried = unattested_reviewers_scan(
+            &p,
+            &reviewers,
+            &|_| Freshness::CarriedBaseSync,
+            "feature/x",
+            "currenthead",
+        )
+        .0;
         assert!(
             carried.is_empty(),
             "a carried attestation must satisfy the gate"
         );
 
-        let stale = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::Stale).0;
+        let stale = unattested_reviewers_scan(
+            &p,
+            &reviewers,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+        )
+        .0;
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].superseded_head.as_deref(), Some("oldhead"));
     }
@@ -9258,12 +9583,22 @@ mod tests {
 
     /// The list half of the scan. Production reads the count too, so this
     /// wrapper lives here rather than as an unused function in the binary.
+    /// `head_branch` "" models a legacy fixture (no branch field, admitted on
+    /// exact head equality); a multi-head fixture passes the branch it named.
     fn unattested_reviewers(
         events_path: &Path,
         reviewers: &[String],
         head_sha: &str,
+        head_branch: &str,
     ) -> Vec<UnattestedReviewer> {
-        unattested_reviewers_scan(events_path, reviewers, &sha_equality_freshness(head_sha)).0
+        unattested_reviewers_scan(
+            events_path,
+            reviewers,
+            &sha_equality_freshness(head_sha),
+            head_branch,
+            head_sha,
+        )
+        .0
     }
 
     /// The gate's boolean view of `unattested_reviewers`, exactly as
@@ -9271,7 +9606,7 @@ mod tests {
     /// unchanged on purpose: promoting the return value to a list must not
     /// move the gate.
     fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
-        unattested_reviewers(events_path, reviewers, head_sha).is_empty()
+        unattested_reviewers(events_path, reviewers, head_sha, "").is_empty()
     }
 
     // ── streak debounce (x-6231) ─────────────────────────────────────────────
@@ -10471,15 +10806,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("absent.jsonl");
         let sigma = vec!["sigma".to_string()];
-        assert!(!unattested_reviewers(&missing, &sigma, "h").is_empty());
+        assert!(!unattested_reviewers(&missing, &sigma, "h", "").is_empty());
 
         let stale = tmp.path().join("stale.jsonl");
         std::fs::write(
             &stale,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&stale, &sigma, "NEW");
+        let out = unattested_reviewers(&stale, &sigma, "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
         assert!(!out[0].failed_at_head);
@@ -10490,7 +10825,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&failed, &sigma, "h");
+        let out = unattested_reviewers(&failed, &sigma, "h", "");
         assert_eq!(out.len(), 1);
         // A head-pinned fail is not a superseded pass; do not offer a stale head.
         assert_eq!(out[0].superseded_head, None);
@@ -10516,7 +10851,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"sigma","verdict":"pass"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "", "");
         assert_eq!(out.len(), 1, "unpinned evidence must not satisfy the gate");
         assert_eq!(out[0].superseded_head, None);
     }
@@ -10529,10 +10864,10 @@ mod tests {
         let p = tmp.path().join("e.jsonl");
         std::fs::write(
             &p,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
     }
@@ -10555,8 +10890,13 @@ mod tests {
             ),
         )
         .unwrap();
-        let (out, malformed) =
-            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h"));
+        let (out, malformed) = unattested_reviewers_scan(
+            &p,
+            &["sigma".to_string()],
+            &sha_equality_freshness("h"),
+            "",
+            "h",
+        );
         assert_eq!(out.len(), 1, "a corrupt line never satisfies the gate");
         assert_eq!(malformed, 1, "and it is counted, not silently dropped");
 
@@ -10573,7 +10913,14 @@ mod tests {
         // A clean file adds nothing to the message.
         std::fs::write(&p, r#"{"type":"loop_check","data":{}}"#).unwrap();
         assert_eq!(
-            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h")).1,
+            unattested_reviewers_scan(
+                &p,
+                &["sigma".to_string()],
+                &sha_equality_freshness("h"),
+                "",
+                "h"
+            )
+            .1,
             0
         );
         assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true)
@@ -10591,7 +10938,7 @@ mod tests {
         let p = tmp.path().join("e.jsonl");
         let line = |head: &str, verdict: &str| {
             format!(
-                r#"{{"type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}"}}}}"#
+                r#"{{"type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}","branch":"feature/x"}}}}"#
             )
         };
         std::fs::write(
@@ -10604,7 +10951,7 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].superseded_head.as_deref(),
@@ -10614,7 +10961,7 @@ mod tests {
 
         // The newest STILL-PASSING head wins when several are valid.
         std::fs::write(&p, [line("AAA", "pass"), line("BBB", "pass")].join("\n")).unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out[0].superseded_head.as_deref(), Some("BBB"));
 
         // Every old head retracted -> nothing to name.
@@ -10629,7 +10976,7 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out[0].superseded_head, None);
     }
 
@@ -10644,13 +10991,13 @@ mod tests {
         std::fs::write(
             &p,
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
             ),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].superseded_head, None,
@@ -10662,15 +11009,15 @@ mod tests {
         std::fs::write(
             &p,
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
             ),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
     }
 
@@ -10856,7 +11203,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"","verdict":"pass"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
     }
@@ -11059,7 +11406,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["code-review".to_string()], "h");
+        let out = unattested_reviewers(&p, &["code-review".to_string()], "h", "");
         assert!(
             out.is_empty(),
             "code-review should clear on a pass: {out:?}"

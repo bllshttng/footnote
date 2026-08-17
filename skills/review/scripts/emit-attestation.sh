@@ -65,6 +65,18 @@ head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
   exit 1
 }
 
+# The journal is SHARED across worktrees by design (setup-worktree.sh links
+# every worktree's .fno/events.jsonl to canonical), so head_sha alone cannot
+# say which PR an attestation is about: two branches can carry the same code
+# delta and a global head-sha match then counts a foreign review. The branch
+# is what scopes the event to the PR that was reviewed. A detached HEAD prints
+# the literal "HEAD", which names no branch, so it is recorded as empty rather
+# than as a branch called HEAD. git rev-parse is local and free; do NOT reach
+# for `gh pr view` here - a network call on the emit path turns a review
+# receipt into something that fails when GitHub is slow.
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [[ "$branch" == "HEAD" ]]; then branch=""; fi
+
 # Record the attesting ACTOR alongside what was certified (x-27c5): without a
 # session, an author attesting its own diff is indistinguishable from an
 # independent reviewer, which clears config.review.reviewers with no trace.
@@ -161,9 +173,10 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
   --arg attester_session_id "$attester_session_id" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id}')"
+  --arg branch "$branch" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,branch:$branch}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2

@@ -1646,6 +1646,54 @@ def test_refusal_reason_never_claims_zero_when_the_count_is_positive():
     assert "0 reviewed" not in _merge._coverage_refused_reason(cov, "newhead")
 
 
+def test_moved_head_names_a_legacy_attestation_as_unscoped():
+    """x-e601: a pre-branch-field attestation was admitted on exact head
+    equality, so it dies the moment the head moves. The generic head-pinned
+    message then reads as "nobody reviewed" over a review that genuinely
+    happened on an older commit of this branch; name the unscoped shape so the
+    reader can tell the two apart."""
+    cov = {
+        "coverage": "covered",
+        "reviewed_count": 0,
+        "head_sha": "oldhead0deadbeef",
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "oldhead0deadbeef",
+                "scope": "legacy_head_match",
+            }
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
+    assert "unscoped attestation (pre-branch-field) at oldhead0" in reason
+    assert "re-run the review verb at HEAD" in reason
+
+
+def test_moved_head_keeps_the_generic_message_for_branch_scoped_passes():
+    """The unscoped branch is for legacy attestations only: a branch-scoped
+    pass under a moved head is the ordinary staleness case and keeps the
+    ordinary message."""
+    cov = {
+        "coverage": "covered",
+        "reviewed_count": 0,
+        "head_sha": "oldhead0deadbeef",
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "oldhead0deadbeef",
+                "scope": "attested_branch",
+            }
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
+    assert "unscoped attestation" not in reason
+    assert "head-pinned by design" in reason
+
+
 def test_genuine_zero_refusal_names_the_missing_evidence():
     """A true zero says WHAT is missing (a head-pinned pass) and what to do, not
     just that the number is zero. It must not mention attestation origin:

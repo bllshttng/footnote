@@ -4985,8 +4985,8 @@ fn nudge_awaiting_defers_the_backstop() {
 // ── coverage classifier (x-0eaf task 1.1) ────────────────────────────────────
 
 use fno_agents::loopcheck::{
-    classify_coverage, coverage_receipt_line, AttestationOrigin, Coverage, CoverageProducer,
-    CoverageReport, CoverageVerdict, Freshness,
+    classify_coverage, coverage_receipt_line, unattested_reviewers_scan, AttestationOrigin,
+    AttestationScope, Coverage, CoverageProducer, CoverageReport, CoverageVerdict, Freshness,
 };
 
 const COV_HEAD: &str = "abc1234567890abcdef1234567890abcdef1234";
@@ -5029,6 +5029,211 @@ fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
     .to_string()
 }
 
+/// Like `attestation_line` but naming the branch the attestation is about -
+/// the scoping field every post-x-e601 producer stamps. A legacy line (no
+/// branch) is admitted only on exact head equality, so a test exercising a
+/// MOVED head must scope by branch or its fixture silently vanishes.
+fn attestation_line_on_branch(reviewer: &str, head: &str, verdict: &str, branch: &str) -> String {
+    serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict, "branch": branch}
+    })
+    .to_string()
+}
+
+// ── attestation scope (x-e601: which PR an attestation is about) ─────────────
+//
+// The events journal is shared across every worktree by design, so an
+// unscoped scan reads every branch's attestations into every PR's verdict
+// list. These tests pin the scoping predicate through BOTH consumers.
+
+/// AC1-HP: an attestation recorded on ANOTHER branch never reaches this PR's
+/// verdict list at all. Same head sha on purpose - that is the cherry-pick /
+/// duplicate-PR shape where the old global scan read a foreign pass as
+/// coverage via CarriedBaseSync, so this pins that scope, not freshness, is
+/// what stops it.
+#[test]
+fn attestation_scope_foreign_branch_is_absent_not_stale() {
+    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        "feature/b",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    assert!(
+        rep.verdicts.is_empty(),
+        "a foreign-branch attestation must not appear as any verdict: {:?}",
+        rep.verdicts
+    );
+}
+
+/// The same-branch counterpart: in scope, counted, and labeled so a receipt
+/// can say HOW the pass was scoped.
+#[test]
+fn attestation_scope_own_branch_counts_and_labels() {
+    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        "feature/a",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.reviewed_sha, COV_HEAD);
+    assert_eq!(local.scope, Some(AttestationScope::AttestedBranch));
+}
+
+/// AC1-EDGE, first half: a legacy line (no branch field) with its head
+/// byte-equal to the PR head still counts, so no in-flight gate is wedged by
+/// the new field. The verdict carries the legacy label.
+#[test]
+fn attestation_scope_legacy_exact_head_still_counts() {
+    let events = attestation_line("code-review", COV_HEAD, "pass");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        "feature/a",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.scope, Some(AttestationScope::LegacyHeadMatch));
+}
+
+/// AC1-EDGE, second half: a legacy line on a DIFFERENT head is not evidence
+/// about this PR - absent entirely, never a stale verdict to nudge on.
+#[test]
+fn attestation_scope_legacy_other_head_is_absent() {
+    let old_head = "0000000000000000000000000000000000000000";
+    let events = attestation_line("code-review", old_head, "pass");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        "feature/a",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    assert!(rep.verdicts.is_empty());
+}
+
+/// A PR read that returned no branch fails closed: a branch-carrying
+/// attestation does not count when the PR's own branch is unknown.
+#[test]
+fn attestation_scope_unknown_pr_branch_fails_closed() {
+    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// AC1-EDGE2: one session attesting PR B after PR A no longer overwrites A's
+/// pass. The map key is (reviewer, attester); before scoping, B's line landed
+/// in the same key and A's gate read unreviewed with no trace of the deletion.
+#[test]
+fn attestation_scope_second_pr_does_not_clobber_the_first() {
+    let head_a = "aaaa0000000000000000000000000000000000000";
+    let head_b = "bbbb0000000000000000000000000000000000000";
+    let events = format!(
+        "{}\n{}",
+        attestation_line_on_branch("code-review", head_a, "pass", "feature/a"),
+        attestation_line_on_branch("code-review", head_b, "pass", "feature/b"),
+    );
+    let fresh_at_a = |sha: &str| {
+        if sha == head_a {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &fresh_at_a,
+        "feature/a",
+        head_a,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(
+        local.reviewed_sha, head_a,
+        "feature/a must carry ITS OWN pass, not feature/b's head"
+    );
+}
+
+/// AC2-HP + the N-reachable-paths rule: BOTH scans over the SAME foreign
+/// attestation. The coverage axis (`classify_coverage`) and the
+/// `config.review.reviewers` gate (`unattested_reviewers_scan`) must agree
+/// that a foreign-branch line is not about this PR; a guard on one of the two
+/// paths is decorative.
+#[test]
+fn attestation_scope_both_scans_agree_on_foreign_line() {
+    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("events.jsonl");
+    std::fs::write(&p, &events).unwrap();
+    let reviewers = vec!["code-review".to_string()];
+
+    let (unattested, _malformed) =
+        unattested_reviewers_scan(&p, &reviewers, &at_head, "feature/b", COV_HEAD);
+    assert_eq!(
+        unattested.len(),
+        1,
+        "the reviewers gate must NOT be satisfied by a foreign branch"
+    );
+
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        "feature/b",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    assert!(rep.verdicts.is_empty());
+}
+
 /// Seed a head-pinned `code-review` pass attestation into `.fno/events.jsonl` so
 /// the coverage classifier counts a local review. Used by tests whose PRIMARY
 /// intent is not coverage (CI-skip, no_external, empty-config) but which now
@@ -5057,6 +5262,8 @@ fn coverage_classify_quota_refusal_is_zero_coverage_refused() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(0));
     let bot = rep
@@ -5080,6 +5287,8 @@ fn coverage_classify_real_review_counts() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
 }
@@ -5088,7 +5297,7 @@ fn coverage_classify_real_review_counts() {
 /// error and not vacuous success.
 #[test]
 fn coverage_classify_zero_configured_is_covered_zero() {
-    let rep = classify_coverage(&[], &[], "", &[], true, None, &at_head);
+    let rep = classify_coverage(&[], &[], "", &[], true, None, &at_head, "", COV_HEAD);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5103,6 +5312,8 @@ fn coverage_classify_github_read_failure_is_unknown_without_local() {
         false,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Unknown);
     assert_eq!(rep.coverage_count(), None);
@@ -5122,6 +5333,8 @@ fn coverage_classify_local_pass_survives_github_outage() {
         false,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let local = rep
@@ -5150,6 +5363,8 @@ fn coverage_classify_bot_refused_plus_local_is_covered() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     assert_eq!(
@@ -5178,6 +5393,8 @@ fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     let g = rep
         .verdicts
@@ -5188,12 +5405,223 @@ fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
+// ── clean-pass comments (x-e601: the PR #947 specimen) ───────────────────────
+//
+// chatgpt-codex-connector submits a formal review ONLY when it has findings;
+// on a clean pass it posts a plain issue comment pinning the commit it read.
+// Nothing read that comment, so a clean pass could never clear the gate and
+// the gate was strictly easier to satisfy with a flawed PR than a clean one.
+
+/// AC4-HP: the specimen comment verbatim (modulo the head being the test's
+/// COV_HEAD) earns a Reviewed verdict pinned to that sha.
+#[test]
+fn clean_pass_comment_counts_as_a_head_pinned_review() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        &format!(
+            "Codex Review: Didn't find any major issues. Bravo. Reviewed commit: {}",
+            COV_HEAD
+        ),
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let v = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(v.verdict, CoverageVerdict::Reviewed);
+    assert_eq!(v.reviewed_sha, COV_HEAD);
+}
+
+/// The typographic apostrophe the bot actually posts matches the marker too -
+/// one is pinned here so a marker edit that drops either form fails loudly.
+#[test]
+fn clean_pass_marker_covers_the_typographic_apostrophe() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        &format!(
+            "Codex Review: Didn\u{2019}t find any major issues. Reviewed commit: {}.",
+            COV_HEAD
+        ),
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
+/// AC4-EDGE: a clean pass naming an older sha whose code no longer matches is
+/// stale - recorded, excluded from the count, and nudgeable for a re-read.
+#[test]
+fn clean_pass_comment_at_an_older_sha_is_stale() {
+    let old = "0000000000000000000000000000000000000000";
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        &format!("Codex Review: Didn't find any major issues. Reviewed commit: {old}"),
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    let v = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(v.verdict, CoverageVerdict::Stale);
+    assert_eq!(v.reviewed_sha, old);
+}
+
+/// AC4-EDGE: a clean-pass comment with no `Reviewed commit:` line stays
+/// Absent. Nothing is head-pinned, so counting it would be the unpinned-
+/// attestation hole the local axis already refuses; do not invent a sha.
+#[test]
+fn clean_pass_comment_with_no_pinned_sha_stays_absent() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        "Codex Review: Didn't find any major issues. Bravo.",
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    let v = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(v.verdict, CoverageVerdict::Absent);
+    assert_eq!(v.reviewed_sha, "");
+}
+
+/// A non-hex token after the marker is as good as no marker line at all.
+#[test]
+fn clean_pass_comment_with_a_non_hex_token_stays_absent() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        "Codex Review: Didn't find any major issues. Reviewed commit: tomorrow",
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    let v = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(v.verdict, CoverageVerdict::Absent);
+}
+
+/// Ordering: a usage-limit comment means the bot did not read the code, so a
+/// body carrying BOTH markers lands on Refused, never on a clean pass.
+#[test]
+fn usage_limit_marker_beats_a_clean_pass_marker() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        &format!(
+            "You have reached the Codex usage limits for code reviews. \
+             (An earlier note said: Didn't find any major issues. \
+             Reviewed commit: {}.)",
+            COV_HEAD
+        ),
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    let v = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(v.verdict, CoverageVerdict::Refused);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// gemini-code-assist has no MEASURED clean-pass shape, so no marker is
+/// guessed for it: its unrecognized comment stays absent even though the
+/// codex markers exist in the same table.
+#[test]
+fn no_clean_pass_marker_is_guessed_for_an_unmeasured_bot() {
+    let comments = vec![gh_comment(
+        "gemini-code-assist[bot]",
+        "Didn't find any major issues. Bravo.",
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["gemini-code-assist".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    let g = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "gemini-code-assist")
+        .unwrap();
+    assert_eq!(g.verdict, CoverageVerdict::Absent);
+}
+
 /// The hedge: a human GitHub APPROVAL is recorded (human_approval: true) but
 /// excluded from the count. Lean: exclude; one predicate flip includes it.
 #[test]
 fn coverage_classify_human_approval_excluded() {
     let reviews = vec![gh_review("jason", "APPROVED")];
-    let rep = classify_coverage(&reviews, &[], "", &[], true, None, &at_head);
+    let rep = classify_coverage(&reviews, &[], "", &[], true, None, &at_head, "", COV_HEAD);
     let human = rep.verdicts.iter().find(|v| v.name == "jason").unwrap();
     assert!(human.human_approval);
     assert_eq!(human.verdict, CoverageVerdict::Reviewed);
@@ -5209,7 +5637,17 @@ fn coverage_classify_duplicate_login_one_verdict() {
         "chatgpt-codex-connector".to_string(),
         "chatgpt-codex-connector".to_string(),
     ];
-    let rep = classify_coverage(&reviews, &[], "", &logins, true, None, &at_head);
+    let rep = classify_coverage(
+        &reviews,
+        &[],
+        "",
+        &logins,
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     assert_eq!(
         rep.verdicts
@@ -5228,7 +5666,7 @@ fn coverage_classify_local_fail_then_pass_latest_wins() {
         attestation_line("code-review", COV_HEAD, "fail"),
         attestation_line("code-review", COV_HEAD, "pass"),
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
     assert_eq!(rep.coverage, Coverage::Covered(1));
 }
 
@@ -5240,7 +5678,7 @@ fn coverage_classify_local_pass_then_fail_revokes() {
         attestation_line("code-review", COV_HEAD, "pass"),
         attestation_line("code-review", COV_HEAD, "fail"),
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5249,7 +5687,7 @@ fn coverage_classify_local_pass_then_fail_revokes() {
 fn coverage_classify_stale_head_does_not_count() {
     let old_head = "0000000000000000000000000000000000000000";
     let events = attestation_line("code-review", old_head, "pass");
-    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5266,7 +5704,7 @@ fn coverage_classify_local_pass_unconfigured_name_counts() {
     // the same display name as the github_app bot - the producer axis field is
     // what keeps them distinct, and an unconfigured name still counts.
     let events = attestation_line("codex", COV_HEAD, "pass");
-    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let local = rep
         .verdicts
@@ -5491,6 +5929,8 @@ fn coverage_receipt_covered_names_reviewers() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.starts_with("review coverage: 1 reviewed ("), "{line}");
@@ -5514,6 +5954,8 @@ fn coverage_receipt_zero_names_refused_and_absent() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("0 reviewed"), "{line}");
@@ -5559,6 +6001,8 @@ fn coverage_receipt_zero_prescribes_the_verb_when_the_only_reviewer_refused() {
         true,
         None,
         &at_head,
+        "",
+        COV_HEAD,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("1 refused"), "{line}");
@@ -5606,7 +6050,17 @@ const OTHER: &str = "reviewer-session-bbbb";
 #[test]
 fn coverage_origin_self_attested_does_not_change_count() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let local = rep
         .verdicts
         .iter()
@@ -5623,7 +6077,17 @@ fn coverage_origin_self_attested_does_not_change_count() {
 #[test]
 fn coverage_origin_other_session_is_not_independent_count_unchanged() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", OTHER);
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let local = rep
         .verdicts
         .iter()
@@ -5640,7 +6104,17 @@ fn coverage_origin_other_session_is_not_independent_count_unchanged() {
 fn coverage_origin_unknown_when_attester_empty_count_unchanged() {
     // attestation_line omits attester_session_id entirely, modeling the backlog.
     let events = attestation_line("code-review", COV_HEAD, "pass");
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let local = rep
         .verdicts
         .iter()
@@ -5660,7 +6134,7 @@ fn coverage_origin_author_unknown_is_unknown_fail_open() {
         "{}\n",
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR)
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head);
+    let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
     let local = rep
         .verdicts
         .iter()
@@ -5687,7 +6161,17 @@ fn coverage_two_sessions_same_reviewer_join_not_replace() {
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
         attestation_line_attested("code-review", COV_HEAD, "pass", OTHER),
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5727,7 +6211,17 @@ fn coverage_same_session_same_reviewer_dedups_to_one() {
         attestation_line_attested("code-review", COV_HEAD, "fail", AUTHOR),
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5752,7 +6246,17 @@ fn coverage_legacy_no_attester_byte_identical_to_name_key() {
         // a distinct reviewer with no attester: its own entry
         attestation_line("codex", COV_HEAD, "pass"),
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5779,7 +6283,17 @@ fn coverage_peer_fail_does_not_revoke_author_pass() {
         attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
         attestation_line_attested("code-review", COV_HEAD, "fail", OTHER),
     );
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let locals: Vec<_> = rep
         .verdicts
         .iter()
@@ -5798,7 +6312,17 @@ fn coverage_peer_fail_does_not_revoke_author_pass() {
 #[test]
 fn coverage_receipt_names_origin_buckets() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
-    let rep = classify_coverage(&[], &[], &events, &[], true, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("self 1"), "{line}");
     assert!(line.contains("other 0"), "{line}");
@@ -5821,6 +6345,8 @@ fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
         true,
         Some(AUTHOR),
         &at_head,
+        "",
+        COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(2));
     let line = coverage_receipt_line(&rep);
@@ -5841,7 +6367,17 @@ fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
 #[test]
 fn coverage_receipt_states_the_tally_is_not_a_subtraction() {
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
-    let rep = classify_coverage(&[], &[], &events, &[], false, Some(AUTHOR), &at_head);
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        false,
+        Some(AUTHOR),
+        &at_head,
+        "",
+        COV_HEAD,
+    );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let line = coverage_receipt_line(&rep);
 
