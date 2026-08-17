@@ -597,6 +597,7 @@ struct HarnessStoreIndex {
 impl HarnessStoreIndex {
     /// Test seam: fixed roots, so the per-harness keying is unit-testable
     /// against temp trees instead of the developer's real `~/.claude`/`~/.codex`.
+    /// (Dead in non-test builds; the lib test suite is the caller.)
     fn with_roots(claude_root: std::path::PathBuf, codex_root: std::path::PathBuf) -> Self {
         HarnessStoreIndex {
             claude_root: Some(claude_root),
@@ -2170,10 +2171,6 @@ where
     }
 }
 
-/// Offload the blocking flock + file read of `state::load_registry` to the
-/// blocking pool so it never stalls an async handler's runtime thread
-/// (ab-e86e326b). Mirrors the existing `handle_status` offload and the
-/// `run_blocking` wrapper. Since x-4c87 a join failure maps to a `StateError`
 /// The daemon-face x-4c87 read: the typed decode plus the raw-count
 /// assertion, on EVERY roster read the daemon serves (startup, recovery, and
 /// every RPC handler). The tolerant state reader still returns a PARTIAL
@@ -2191,6 +2188,10 @@ fn load_registry_asserted(path: &std::path::Path) -> Result<state::Registry, sta
     Ok(registry)
 }
 
+/// Offload the blocking flock + file read of `load_registry_asserted` to the
+/// blocking pool so it never stalls an async handler's runtime thread
+/// (ab-e86e326b). Mirrors the `update_registry_offloaded` wrapper and the
+/// `run_blocking` helper. Since x-4c87 a join failure maps to a `StateError`
 /// (like `update_registry_offloaded`) and a read error propagates: both used
 /// to collapse to the empty registry, which turned an unreadable registry into
 /// the valid-looking answer "zero agents" for every caller below.
@@ -3664,14 +3665,27 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         // Re-load the registry: driving B can take up to the turn budget (~120s),
         // during which A may have been restarted with a new short_id. The pre-turn
         // snapshot could point at A's old socket (gemini-review HIGH). A read
-        // failure here is propagated (x-4c87): skipping the mirror while
-        // pretending nothing happened is the same swallowed-read failure this
-        // handler already refuses above.
+        // failure here DEMOTES the mirror the same way a mirror transport
+        // failure does below: B's turn already completed, so failing the whole
+        // request would discard a delivered reply and invite a duplicate
+        // re-send (code-review on PR 924).
         let fresh = match load_registry_offloaded(ctx.home.registry_json()).await {
-            Ok(r) => r,
-            Err(e) => return registry_read_failed(req.id, e),
+            Ok(r) => Some(r),
+            Err(e) => {
+                let _ = ctx.emitter.emit(
+                    "agent_deliver_demoted",
+                    &json!({
+                        "name": from,
+                        "from_name": to,
+                        "provider": "claude",
+                        "transport": "switchboard-mirror",
+                        "reason": format!("registry re-read failed: {e}"),
+                    }),
+                );
+                None
+            }
         };
-        if let Some(from_entry) = fresh.find(&from).filter(|entry| {
+        if let Some(from_entry) = fresh.as_ref().and_then(|f| f.find(&from)).filter(|entry| {
             from_identity.is_some_and(|identity| switchboard_identity_matches(entry, identity))
         }) {
             let from_sock = ctx.home.worker_sock(&from_entry.short_id);
@@ -5144,7 +5158,13 @@ fn run_reconcile_sweep(
     // that follows.
     late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout);
 
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    // x-4c87: a broken registry is a failed sweep, never a successful zero-row
+    // scan. `unwrap_or_default()` here answered the client-facing reconcile
+    // RPC with `scanned: 0` over a store full of rows (code-review on PR 924).
+    let registry = match load_registry_asserted(&home.registry_json()) {
+        Ok(r) => r,
+        Err(e) => return Err(format!("registry read failed: {e}")),
+    };
 
     // Fairness: probe least-recently-reconciled first (None < Some), so a
     // budget-exhausted sweep eventually covers every entry (finding #1).
