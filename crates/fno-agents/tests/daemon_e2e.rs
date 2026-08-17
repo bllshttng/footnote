@@ -882,36 +882,52 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
             r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
-    std::fs::write(
-        home.registry_json(),
-        format!(
-            r#"{{"schema_version":15,"agents":[{},{},{}]}}"#,
-            row("worker-alpha", "live"),
-            row("worker-beta", "flux"),
-            row("worker-gamma", "live")
-        ),
-    )
-    .expect("seed future-schema registry");
+    let fixture = format!(
+        r#"{{"schema_version":15,"agents":[{},{},{}]}}"#,
+        row("worker-alpha", "live"),
+        row("worker-beta", "flux"),
+        row("worker-gamma", "live")
+    );
 
-    let out = Command::new(CLIENT_BIN)
-        .args(["list", "--json"])
-        .env("FNO_AGENTS_HOME", home.root())
-        .output()
-        .expect("client list runs");
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        !out.status.success(),
-        "a partial roster is not a valid complete one: {stdout}"
-    );
-    assert!(
-        stderr.contains("registry read failed"),
-        "must name the failed read: {stderr}"
-    );
-    assert!(
-        stderr.contains("raw_rows=3") && stderr.contains("decoded_rows=2"),
-        "must carry both counts: {stderr}"
-    );
+    // The idle-tick sweeps (scrape, GC) read-modify-write the registry and can
+    // HEAL a future-schema fixture mid-race (seen once on a slow CI runner):
+    // the healed file is then a valid registry and serving it is correct. A
+    // healed file breaks the test's precondition, not the code, so re-seed and
+    // retry. A file still holding the 3-raw-row v15 shape that GETS SERVED is
+    // the real failure and always panics here.
+    let mut attempt = 0;
+    loop {
+        std::fs::write(home.registry_json(), &fixture).expect("seed future-schema registry");
+        let out = Command::new(CLIENT_BIN)
+            .args(["list", "--json"])
+            .env("FNO_AGENTS_HOME", home.root())
+            .output()
+            .expect("client list runs");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                stderr.contains("registry read failed"),
+                "must name the failed read: {stderr}"
+            );
+            assert!(
+                stderr.contains("raw_rows=3") && stderr.contains("decoded_rows=2"),
+                "must carry both counts: {stderr}"
+            );
+            break;
+        }
+        attempt += 1;
+        let on_disk = std::fs::read_to_string(home.registry_json()).unwrap_or_default();
+        assert!(
+            on_disk != fixture,
+            "daemon served the 3-raw-row future-schema roster as complete: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            attempt < 5,
+            "an idle-tick sweep keeps healing the fixture before the read; on-disk: {}",
+            on_disk
+        );
+    }
 
     unsafe {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
