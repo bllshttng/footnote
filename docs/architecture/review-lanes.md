@@ -304,11 +304,10 @@ Narrowing it is a real behavior change and has to move in lockstep with the Pyth
 
 A valid attestation can exist while the gate cannot see it, and this PR does not close that.
 
-Raw `review_attestation` events never leave the checkout they are emitted in.
-`scripts/setup/setup-worktree.sh` links `.fno/config.toml`, `.fno/carveouts.jsonl`, and `.fno/codemap.md` into a worktree.
-`events.jsonl` appears zero times in that script, so a worktree's event log is a real per-checkout file.
-Only the DERIVED `review_coverage` aggregate reaches the global `~/.fno/events.jsonl`, written by the Rust runtime.
-So the propagation path is the aggregate, and the aggregate only exists after a loop-check run.
+Raw `review_attestation` events land in the shared journal the moment they are emitted.
+`scripts/setup/setup-worktree.sh` links every worktree's `.fno/events.jsonl` to the canonical journal (`link_events_journal`), the same sharing that makes the `branch` field necessary: two worktrees, one log.
+But the Python gate reads the DERIVED `review_coverage` aggregate, which the Rust runtime writes only on a loop-check run.
+So the propagation path is still the aggregate, and the window below is a derive gap, not a copy gap.
 
 PR #830 is the specimen.
 Its attestation was emitted at 04:12:35 into a worktree-local log.

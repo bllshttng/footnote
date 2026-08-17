@@ -595,6 +595,10 @@ def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: False,
+    )
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False

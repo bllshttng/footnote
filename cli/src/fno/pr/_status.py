@@ -346,7 +346,23 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # no-lane repo the read's recompute is a 120s subprocess that appends
     # coverage rows nobody acts on - the exact cost `fno pr merge` skips on
     # this same boundary - so a conjunct ready ignores must not fire it either.
-    review_lane = _review_lane(pr, cwd)
+    #
+    # ONE probe chain where two ran: required implies lane (a configured
+    # code-review reviewer IS a lane, and the self-review floor that makes a
+    # code payload required is the same floor that makes the lane exist), so
+    # the required probe answers both when true and only a clean not-required
+    # verdict pays for the lane probe. Each predicate keeps its own
+    # fail-closed direction on a thrown probe.
+    code_review_required = False
+    try:
+        from fno.pr import _merge
+
+        code_review_required = bool(
+            _merge._code_review_attestation_required(cwd or os.getcwd(), int(pr))
+        )
+    except Exception:  # noqa: BLE001 - fail closed, like the gate
+        code_review_required = True
+    review_lane = code_review_required or _review_lane(pr, cwd)
     try:
         coverage = read_review_coverage(
             int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
@@ -356,21 +372,6 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # is a shape that drifts the moment a key is added on one side only.
         coverage = dict(_UNKNOWN_COVERAGE)
 
-    # The local code-review conjunct mirrors the merge gate's own requirement
-    # (_code_review_attestation_required): a repo that requires the harness
-    # review verb must not read ready before that attestation exists, or
-    # status and merge answer the same PR differently. Fail closed like the
-    # gate this mirrors.
-    code_review_required = False
-    if review_lane:
-        try:
-            from fno.pr import _merge
-
-            code_review_required = bool(
-                _merge._code_review_attestation_required(cwd or os.getcwd(), int(pr))
-            )
-        except Exception:  # noqa: BLE001 - fail closed, like the gate
-            code_review_required = True
     merged = (pr_json.get("state") or "").upper() == "MERGED"
     blockers = _ready_blockers(
         green,
