@@ -2812,6 +2812,116 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
         .find(|n| n.class == NudgeClass::Unresponsive)
 }
 
+/// The commit-status context the merge ruleset requires (x-6352). One const for
+/// both emitter call sites and the standalone verb arm; the Python publisher,
+/// the refresher workflow, and the post-merge audit pin the same name from
+/// their own surfaces, and a context string that splits in two is a green
+/// marker on nothing.
+const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+
+/// Whether `name` is the local reviewer Python's gate demands a pass from,
+/// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
+fn is_code_review_reviewer(name: &str) -> bool {
+    name.strip_prefix('/').unwrap_or(name) == "code-review"
+}
+
+/// Publish the just-emitted `review_coverage` verdict as a commit status on
+/// the PR head (x-6352), so every path that can WRITE the row also leaves the
+/// server-visible marker `gh pr merge`, the web button, and the auto-merge
+/// queue are judged by. Direct `gh api` POST on the same `gh_bin` seam as the
+/// nudge comment; the outcome never gates the caller - the durable verdict is
+/// the event row, and a failed POST leaves the status absent, which the
+/// ruleset reads as not-passing (fail-closed).
+///
+/// The success conjunction MIRRORS `_coverage_gate_verdict` in
+/// cli/src/fno/pr/_merge.py: covered count > 0, the row pinned to the PR head
+/// (not merely the local HEAD), and - when `code-review` is a configured
+/// reviewer - a head-pinned local pass from it. The two must agree, because
+/// this status is exactly what lets a merge through where `fno pr merge`
+/// already looked; the post-merge audit on main is what catches a drift.
+///
+/// Skipped entirely when no review lane is configured: a stock install has no
+/// ruleset requiring the context, and a permanent failure status there would
+/// be noise that teaches readers to ignore the check.
+#[allow(clippy::too_many_arguments)]
+fn publish_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    pr_number: i64,
+    pr_head_oid: &str,
+    event_head: &str,
+    coverage: &CoverageReport,
+    required_bots: &[String],
+    optional_bots: &[String],
+    external_reviewers: &[String],
+    reviewers: &[String],
+) {
+    if pr_number <= 0 || pr_head_oid.is_empty() {
+        return;
+    }
+    let lane = !(required_bots.is_empty()
+        && optional_bots.is_empty()
+        && external_reviewers.is_empty()
+        && reviewers.is_empty());
+    if !lane {
+        return;
+    }
+    let local_pass_required = reviewers.iter().any(|r| is_code_review_reviewer(r));
+    let covered = coverage.coverage.is_covered()
+        && event_head == pr_head_oid
+        && (!local_pass_required
+            || coverage.verdicts.iter().any(|v| {
+                is_code_review_reviewer(&v.name)
+                    && v.producer == CoverageProducer::LocalAttestation
+                    && v.verdict == CoverageVerdict::Reviewed
+            }));
+    let (state, description) = if covered {
+        let n = match coverage.coverage {
+            Coverage::Covered(n) => n,
+            _ => 0,
+        };
+        (
+            "success",
+            format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
+        )
+    } else if matches!(coverage.coverage, Coverage::Unknown) {
+        (
+            "failure",
+            format!(
+                "coverage unknown (gh read failed) at {}; retry the review verb",
+                short_sha(pr_head_oid)
+            ),
+        )
+    } else {
+        (
+            "failure",
+            format!(
+                "no covered review at {}; run the review verb at HEAD",
+                short_sha(pr_head_oid)
+            ),
+        )
+    };
+    let target = format!("repos/:owner/:repo/statuses/{pr_head_oid}");
+    let state_arg = format!("state={state}");
+    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let description_arg = format!("description={description}");
+    let _ = Command::new(gh_bin)
+        .args([
+            "api",
+            "--method",
+            "POST",
+            target.as_str(),
+            "-f",
+            state_arg.as_str(),
+            "-f",
+            context_arg.as_str(),
+            "-f",
+            description_arg.as_str(),
+        ])
+        .current_dir(cwd)
+        .output();
+}
+
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
 /// two questions ("will it finish, must I act") answered in one line.
 fn nudge_giveup_message(n: &BotNudge) -> String {
@@ -7025,7 +7135,7 @@ fn run_done(
     repo_slug: &str,
     author_session: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
-    read_pr_info(
+    let info = read_pr_info(
         gh_bin,
         git_bin,
         cwd,
@@ -7042,7 +7152,24 @@ fn run_done(
         repo_slug,
         author_session,
         None,
-    )
+    )?;
+    // (x-6352) read_pr_info stays read-only against GitHub; the CALLER owns
+    // the write. A row was just emitted for this PR, so the publisher has the
+    // same evidence the merge gate will read, and the status targets the live
+    // PR head the row is compared against - not merely the local HEAD.
+    publish_coverage_status(
+        gh_bin,
+        cwd,
+        info.number,
+        &info.head_oid,
+        head_sha,
+        &info.coverage,
+        required_bots,
+        optional_bots,
+        external_reviewers,
+        reviewers,
+    );
+    Ok(info)
 }
 
 /// Slack added beyond the declared watch window so the claim lease outlives the
@@ -8303,7 +8430,22 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 );
             }
             // read_pr_info already emitted this exact payload to both logs;
-            // print the same object so stdout and the logs agree.
+            // print the same object so stdout and the logs agree. And publish
+            // the same verdict as the commit status (x-6352), so the standalone
+            // verb satisfies the server-side gate for every session shape that
+            // has no stop hook at all.
+            publish_coverage_status(
+                &gh_bin,
+                &cwd,
+                pr_info.number,
+                &pr_info.head_oid,
+                &head_sha,
+                &pr_info.coverage,
+                &inputs.required_bots,
+                &inputs.optional_bots,
+                &inputs.settings.external_reviewers,
+                &inputs.required_reviewers,
+            );
             (
                 0,
                 coverage_event_data(
@@ -8338,6 +8480,28 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &inputs.global_events,
                     "review_coverage",
                     data.clone(),
+                );
+                // (x-6352) The unknown row is a failure the server must SEE,
+                // never an absence: publish it as a failing status so the
+                // ruleset refuses rather than silently waiting. The live PR
+                // head is unavailable on this arm (the gh read failed), so the
+                // status lands on the local HEAD the row pins; if those
+                // disagree the PR head simply keeps no passing status, which
+                // is the same refusal - never a wrong green.
+                publish_coverage_status(
+                    &gh_bin,
+                    &cwd,
+                    pr_num,
+                    &head_sha,
+                    &head_sha,
+                    &CoverageReport {
+                        coverage: Coverage::Unknown,
+                        verdicts: Vec::new(),
+                    },
+                    &inputs.required_bots,
+                    &inputs.optional_bots,
+                    &inputs.settings.external_reviewers,
+                    &inputs.required_reviewers,
                 );
                 // The persisted row above is schema-gated (the pr_num == 0
                 // comment below applies here too); the quota diagnosis rides
