@@ -16,29 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def _no_global_tick_events(monkeypatch):
-    """The tick command now emits pr_watch_tick_attempt/end itself (x-c12c).
-
-    Tests that drive the Typer command would otherwise append those records
-    to the real ~/.fno/events.jsonl. Capture instead (the deadline tests read
-    the captured records); an explicit events_path still delegates to the
-    real writer so the direct _emit_event tests keep their tmp files.
-    """
-    from fno.pr_watch import cli as prcli
-
-    real = prcli._emit_event
-    events: list[tuple[str, dict]] = []
-
-    def _capture(event_type, data, *, events_path=None):
-        if events_path is not None:
-            return real(event_type, data, events_path=events_path)
-        events.append((event_type, dict(data)))
-        return True
-
-    monkeypatch.setattr(prcli, "_emit_event", _capture)
-    return events
+pytestmark = pytest.mark.usefixtures("_no_global_tick_events")
 
 
 # ---------------------------------------------------------------------------
