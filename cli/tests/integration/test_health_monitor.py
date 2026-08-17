@@ -45,6 +45,9 @@ def tmp_graph(tmp_path, monkeypatch):
     # GRAPH_JSON is computed at import time from Path.home(); monkeypatch
     # it to the temp path so reads/writes land in the test sandbox.
     monkeypatch.setattr(gc, "GRAPH_JSON", fno_dir / "graph.json")
+    # Seam readers resolve fno.paths.graph_json at call time; pin the
+    # resolver to the same hermetic file (module-attr pins do not reach it).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: fno_dir / "graph.json")
 
     return fno_dir
 

@@ -41,6 +41,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(gc, "GRAPH_HTML", tmp_path / "graph.html")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    # Seam readers resolve fno.paths.graph_json at call time; pin the
+    # resolver to the same hermetic file (module-attr pins do not reach it).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     # Pin the global claims root to tmp: clear any inherited override so
     # global_claims_root() falls through to $HOME (which we pin here), and the
     # acquire root (tmp_path) and the selection filter resolve to the same dir.
