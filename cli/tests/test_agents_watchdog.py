@@ -37,9 +37,11 @@ NOW_1850 = datetime(2026, 8, 16, 18, 50, 0, tzinfo=timezone.utc).timestamp()
 RATE_LIMIT_TAIL = "API Error: 429 rate limit, window resets at 02:48:21 SGT"
 
 
-def _facts(text: str, age_min: float = 5, role: str = "assistant") -> TailFacts:
+def _facts(
+    text: str, age_min: float = 5, role: str = "assistant", kind: str = "text"
+) -> TailFacts:
     epoch = NOW_1840 - age_min * 60
-    return TailFacts([(epoch, text)], epoch, text, role, text)
+    return TailFacts([(epoch, text)], epoch, text, role, text, kind)
 
 
 def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840):
@@ -104,7 +106,7 @@ def test_identity_joins_on_claim_holder_not_name():
         Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a"),
         Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
-    transcripts = {r.row_id: _facts("ok") for r in rows}
+    transcripts = {r.row_id: _facts("ok", age_min=30) for r in rows}
     vs = _run(
         rows,
         transcripts,
@@ -123,7 +125,7 @@ def test_node_done_reaps_and_own_claim_does_not():
         Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1"),
         Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
-    transcripts = {r.row_id: _facts("ok") for r in rows}
+    transcripts = {r.row_id: _facts("ok", age_min=30) for r in rows}
     vs = _run(
         rows,
         transcripts,
@@ -133,6 +135,34 @@ def test_node_done_reaps_and_own_claim_does_not():
     assert vs[0].verdict == REAP and "node x-done done" in vs[0].basis
     # Holding your own claim is ownership, not a reap reason.
     assert vs[1].verdict == LEAVE
+
+
+def test_done_node_but_executing_leaves_not_reaps():
+    # The c696fddd case (king ruling 2026-08-17): re-tasked after its PR
+    # merged, basis transcript, last event a tool call 0 minutes ago. A done
+    # node proves the old task ended and proves nothing about re-tasking.
+    rows = [Row("c696fddd-0000", "t-xb56a", "working", "x-b56a", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"c696fddd-0000": _facts("tool_use Bash", age_min=0, kind="tool")},
+        nodes={"x-b56a": {"status": "done"}},
+    )
+    assert v.verdict == LEAVE
+    assert "executing" in v.basis
+
+
+def test_done_node_quiet_on_a_tool_call_still_leaves():
+    # Quiet past the idle threshold but the LAST event is a tool call: the
+    # session may be re-tasked and waiting on something long. Never reap on
+    # tool activity.
+    rows = [Row("c696fddd-0000", "t-xb56a", "working", "x-b56a", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"c696fddd-0000": _facts("tool_use Bash", age_min=60, kind="tool")},
+        nodes={"x-b56a": {"status": "done"}},
+    )
+    assert v.verdict == LEAVE
+    assert "tool call" in v.basis
 
 
 def test_stopped_row_is_wakeable():
@@ -376,20 +406,41 @@ def test_reap_applies_on_clean_worktree(tmp_path):
     assert not any("--force" in " ".join(a) for a in stopped)
 
 
-def test_reroute_delegates_to_redispatch():
+def test_reroute_delegates_to_the_full_failover(monkeypatch):
     seen = {}
 
-    def fake_redispatch(candidate):
+    def fake_failover(candidate, err):
         seen["cwd"] = candidate.cwd
         seen["name"] = candidate.name
-        return True
+        seen["swap"] = getattr(err, "triggers_swap", None)
+        return "swapped"
+
+    # The tail must classify swap-class or the lane refuses before delegating.
+    monkeypatch.setattr(
+        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+    )
+    v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/tmp/r1", failover_fn=fake_failover
+    )
+    assert outcome == "applied", detail
+    assert seen == {"cwd": "/tmp/r1", "name": "r1", "swap": True}
+
+
+def test_reroute_refuses_when_no_alternate_is_armed(monkeypatch):
+    monkeypatch.setattr(
+        watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
+    )
+
+    def exhausted(candidate, err):
+        return "queue-exhausted"
 
     v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
-    outcome, _ = apply_verdict(
-        v, lanes="all", cwd="/tmp/r1", redispatch_fn=fake_redispatch
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/tmp/r1", failover_fn=exhausted
     )
-    assert outcome == "applied"
-    assert seen == {"cwd": "/tmp/r1", "name": "r1"}
+    # Refusing beats a stop/respawn loop onto the same capped account.
+    assert outcome == "refused" and "queue-exhausted" in detail
 
 
 # ---------------------------------------------------------------------------

@@ -21,19 +21,19 @@ Order is precedence. The top row wins.
 | `wake` | state `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `reachable, last turn <n>m ago` |
 
-`stale` is the needs-human bucket, and it is checked before the 429 window math on purpose: the reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage and would poison reroute. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
+`stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
 
-Every wake condition is positive evidence. A parseable last event, an age under the ceiling, and a tail the shipped classifier (`session_truth.classify_tail`) reads as `stalled` - silent while still owing its next move. "No 429 in tail" is an absence and never a wake reason, and a tail with no parseable evidence reads leave, never an action lane.
+Every wake condition is positive evidence. The last event parses. The age sits under the ceiling. And the shipped classifier (`session_truth.classify_tail`) reads the tail as `stalled`: silent while still owing its next move. "No 429 in tail" is an absence and never a wake reason, and a tail with no parseable evidence reads leave, never an action lane.
 
 Reset stamps ride the provider error text in Singapore time, UTC+8. `02:48:21 SGT` is `18:48:21Z`. Two sessions launched at 18:45 and 18:46 took a 429 three minutes before their window opened. When a stamp fails to parse, the window is unknown and the row classifies `leave`, never `wake`. Bouncing a session off a closed window was proved twice by hand and costs a real turn each time.
 
-`reap` reads the deliverable, never the session's own state. A session whose state reads `done` finished a turn and is resumable. On 2026-08-15 a bulk reap that trusted `done` as terminal killed live sessions in another project. The reap conditions are the graph artifacts: the node is done, or another live session owns the node claim.
+`reap` is the one verdict that must satisfy all three signals. The basis says the process is real. The last event says what it is doing now. The node says whether its old task finished. A session whose state reads `done` finished a turn and is resumable. A done node proves the old task ended. It proves nothing about re-tasking: an operator mail can hand a worker new work after its PR merges. The 2026-08-15 bulk reap that trusted `done` as terminal killed live sessions. If a done-node row's transcript has gone quiet past the idle threshold and its last event was not a tool call, it reaps. A row executing a tool never reaps.
 
 ## The two traps
 
 These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/tests/test_agents_watchdog.py`.
 
-1. Node identity joins on the recorded claim holder and worktree manifest, never on a name regex. Eight auto-named workers read as nobody-on-this-node under a name join and were nearly double-dispatched. Worker names are a convention, not a guarantee.
+1. Node identity joins on recorded identity only, never a name regex. The worktree manifest comes first. The execution ledger is the fallback. Its rows are machine-written and map each claude session to its node. That covers a worker that ran in the canonical checkout and has no manifest of its own. Eight auto-named workers read as nobody-on-this-node under a name join and were nearly double-dispatched. The operator fleet's `t-` shorthand strips the node's dash, so no regex can find the slug boundary. Worker names are a convention, not a guarantee.
 2. A wake is confirmed by content in the recipient transcript, never by a state field. The scratch `wake.sh` printed `working -> working` for both a message that landed and one that did not. The watchdog calls `fno agents resume`, which verifies the state move and holds a single-writer claim. It then separately requires the wake message to appear in the transcript after the pre-wake marker. This mirrors `confirm_content_after` in `crates/fno-agents/src/mail_inject.rs`.
 
 ## Lanes
@@ -45,7 +45,7 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | Verdict | Action |
 |---------|--------|
 | `wake` | `fno agents resume <id>`, then content confirmation in the transcript |
-| `reroute` | `fno.recovery._redispatch`: stop first, then respawn in the same worktree. Skip the stop and the old session wakes into a duplicate when the window opens |
+| `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `reap` | refuse when the worktree has uncommitted changes or unpushed commits, naming the count. Then `fno agents stop` and `fno agents rm`, never forced: `claude rm`'s own refusal on a dirty worktree is a safety feature to lean on |
 | `ghost` | report only |
 
@@ -61,8 +61,8 @@ A verdict the king has to remember to fetch goes unread. When `config.recovery.w
 
 ## Two row sources, one truth
 
-The sweep enumerates from `claude agents --json --all` and joins registry identity where it exists, so it counts MORE rows than `fno agents list`. On 2026-08-17 the sweep saw 38 rows where the roster returned 23, and most named wake rows were absent from the roster. That gap is expected, not a bug: claude's supervisor view holds every claude bg session on the machine, including hand-started `claude --bg` threads, restored rows, and sessions other tools launched, while the registry holds only fno-spawned workers and can go stale in both directions (it called a working session exited and a removed one live on 2026-08-15). The watchdog reads the superset on purpose - a non-fno session burning a gigabyte is still a fleet fact - and treats both stores as hints over the transcript.
+The sweep enumerates from `claude agents --json --all` and joins registry identity where it exists, so it counts MORE rows than `fno agents list`. On 2026-08-17 the sweep saw 38 rows where the roster returned 23, and most named wake rows were absent from the roster. That gap is expected, not a bug. Claude's supervisor view holds every claude bg session on the machine. That includes hand-started `claude --bg` threads, restored rows, and sessions other tools launched. The registry holds only fno-spawned workers and goes stale in both directions. It called a working session exited and a removed one live on 2026-08-15. The watchdog reads the superset on purpose. A non-fno session burning a gigabyte is still a fleet fact. Both stores are hints over the transcript.
 
 ## What this does not replace
 
-`fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window, reap on settled deliverables, and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either. A future port into the Rust daemon's `gc_sweep_impl` is filed as x-f93a and blocked by x-cd31 (the daemon lazy-start leak), because a second cadence would triple the verdicts and the mail.
+`fno.recovery` keeps its own job: provider failover on swap-class deaths and close-surfacing for finished-but-lingering sessions. The watchdog adds the transcript-truth decisions recovery never had: wake on a passed 429 window, reap on settled deliverables, and the ghost flag. `claude_agents_rows` (`--all`) is the one enumeration both read, so stopped rows are never invisible to either. A future port into the Rust daemon's `gc_sweep_impl` is filed as a dedicated follow-up node. It is blocked by the daemon lazy-start leak, because a second cadence can triple the verdicts and the mail.

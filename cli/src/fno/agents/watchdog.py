@@ -45,12 +45,14 @@ Row = namedtuple("Row", "row_id name state node cwd")
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
-#: resumability marker - the absence of a 429 is not one). No transcript
-#: resolving -> None (ghost), which is a different fact from a
+#: resumability marker - the absence of a 429 is not one); ``last_kind`` is
+#: "tool" when the last event was a tool call, which reap must never fire on.
+#: No transcript resolving -> None (ghost), which is a different fact from a
 #: resolved-but-quiet transcript.
 TailFacts = namedtuple(
-    "TailFacts", "records last_event_epoch tail_text last_role last_text",
-    defaults=(None, ""),
+    "TailFacts",
+    "records last_event_epoch tail_text last_role last_text last_kind",
+    defaults=(None, "", None),
 )
 
 GHOST = "ghost"
@@ -76,6 +78,16 @@ _WAKE_STATES = frozenset({"blocked", "stopped"})
 #: action lane: the 429 reset stamp carries no date, so on an old tail its
 #: time-of-day reading is garbage, which also poisons reroute.
 WAKE_MAX_AGE_S = 24 * 3600
+
+#: Reap is the one verdict that must satisfy THREE signals (king ruling
+#: 2026-08-17, the c696fddd case): the basis says the process is real, the
+#: last event says what it is doing NOW, and the node says its OLD task
+#: finished. A done node proves the old task ended and proves nothing about
+#: whether the session was re-tasked since - an operator mail can hand a
+#: worker new work after its PR merges. So a done-node row reaps only when
+#: the transcript has gone QUIET (past recovery's idle threshold) and its
+#: last event was not a tool call. A row executing a tool never reaps.
+REAP_QUIET_AFTER_S = 900
 
 # The 429 marker and its reset stamp. Reset stamps ride the provider error
 # text in Singapore local time (UTC+8): "02:48:21 SGT" is 18:48:21Z. Two
@@ -207,22 +219,50 @@ def _verdict_one(
 
     # reap: the DELIVERABLE is settled (node done / claim held live by another
     # session), never the session's own state - a `done` row is resumable and
-    # a reap keyed on it killed live sessions on 2026-08-15.
+    # a reap keyed on it killed live sessions on 2026-08-15. The deliverable
+    # is necessary and NOT sufficient (king ruling 2026-08-17, c696fddd): a
+    # done node proves the old task ended and proves nothing about re-tasking,
+    # so the row must also be QUIET - past the idle threshold, with a last
+    # event that is not a tool call. Three signals: the basis says the
+    # process is real, the last event says what it is doing now, the node
+    # says its old task finished.
     if row.node:
+        reap_basis = None
         entry = node_state_for(row.node)
         if entry is not None and entry.get("status") == "done":
+            reap_basis = f"node {row.node} done"
+        else:
+            claim = claim_for(row.node)
+            holder_sid = _holder_session(claim.get("holder"))
+            if (
+                claim.get("state") == "live"
+                and holder_sid
+                and holder_sid != row.row_id
+                and not _GENERATED_HOLDER_RE.match(holder_sid)
+            ):
+                reap_basis = f"claim held by {holder_sid}"
+        if reap_basis is not None:
+            if facts is None:
+                # No transcript: no process to kill mid-task.
+                return Verdict(row.row_id, row.name, row.state, REAP,
+                               reap_basis, "stop+rm")
+            if facts.last_event_epoch is None:
+                return Verdict(row.row_id, row.name, row.state, LEAVE,
+                               f"{reap_basis} but no parseable evidence, "
+                               f"not reaped", "none")
+            age_s = max(0.0, now_s - facts.last_event_epoch)
+            if age_s <= REAP_QUIET_AFTER_S:
+                return Verdict(row.row_id, row.name, row.state, LEAVE,
+                               f"{reap_basis} but executing, last turn "
+                               f"{_mins(now_s, facts.last_event_epoch)}m ago",
+                               "none")
+            if facts.last_kind == "tool":
+                return Verdict(row.row_id, row.name, row.state, LEAVE,
+                               f"{reap_basis} but last event is a tool call, "
+                               f"never reaped on tool activity", "none")
             return Verdict(row.row_id, row.name, row.state, REAP,
-                           f"node {row.node} done", "stop+rm")
-        claim = claim_for(row.node)
-        holder_sid = _holder_session(claim.get("holder"))
-        if (
-            claim.get("state") == "live"
-            and holder_sid
-            and holder_sid != row.row_id
-            and not _GENERATED_HOLDER_RE.match(holder_sid)
-        ):
-            return Verdict(row.row_id, row.name, row.state, REAP,
-                           f"claim held by {holder_sid}", "stop+rm")
+                           f"{reap_basis}, quiet "
+                           f"{_mins(now_s, facts.last_event_epoch)}m", "stop+rm")
 
     # stale: the hard age ceiling, BEFORE the 429 window math - the reset
     # stamp carries no date, so on a tail older than the ceiling its
@@ -340,6 +380,7 @@ def tail_facts(session_id: str, cwd: str) -> Optional[TailFacts]:
     records: list[tuple[Optional[float], str]] = []
     last_role: Optional[str] = None
     last_text = ""
+    last_kind: Optional[str] = None
     for line in lines:
         try:
             e = json.loads(line)
@@ -363,10 +404,25 @@ def tail_facts(session_id: str, cwd: str) -> Optional[TailFacts]:
             # input; a trailing user turn clears stale assistant signals.
             last_role = str(role)
             last_text = text
+            last_kind = "tool" if _has_tool_use(e) else "text"
     records = records[-_TAIL_RECORDS:]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
     return TailFacts(
-        records, last_epoch, " ".join(t for _, t in records), last_role, last_text
+        records, last_epoch, " ".join(t for _, t in records),
+        last_role, last_text, last_kind,
+    )
+
+
+def _has_tool_use(e: dict) -> bool:
+    """Does this record carry a tool call? A row whose last event is a tool
+    call is a session WORKING (the c696fddd case: re-tasked after its PR
+    merged), and reap must never fire on it."""
+    msg = e.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(p, dict) and p.get("type") == "tool_use" for p in content
     )
 
 
@@ -770,7 +826,7 @@ def apply_verdict(
     lanes: str,
     cwd: str = "",
     runner=subprocess.run,
-    redispatch_fn: Optional[Callable[[Any], bool]] = None,
+    failover_fn: Optional[Callable[[Any, Any], str]] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
     ``(outcome, detail)`` with outcome in applied | refused | reported.
@@ -784,7 +840,7 @@ def apply_verdict(
         if v.verdict == WAKE:
             return _apply_wake(v, cwd=cwd, runner=runner)
         if v.verdict == REROUTE:
-            return _apply_reroute(v, cwd=cwd, redispatch_fn=redispatch_fn)
+            return _apply_reroute(v, cwd=cwd, failover_fn=failover_fn)
         if v.verdict == REAP:
             return _apply_reap(v, cwd=cwd, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -812,20 +868,38 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
 
 
 def _apply_reroute(
-    v: Verdict, *, cwd: str, redispatch_fn: Optional[Callable[[Any], bool]]
+    v: Verdict, *, cwd: str, failover_fn: Optional[Callable[[Any, Any], str]]
 ) -> tuple[str, str]:
-    from fno.recovery import Candidate, _redispatch
+    """Reroute through the FULL failover, not a bare respawn.
+
+    ``_redispatch`` alone has a precondition its own docstring names: the
+    caller must already have swapped the active provider, or the replacement
+    spawns onto the SAME capped account and 429s immediately - a stop/respawn
+    loop at one real spawn per apply run. ``_default_failover`` does the
+    rotation and the redispatch as one unit; with no alternate provider
+    armed it returns ``queue-exhausted`` and this lane refuses, naming it,
+    rather than looping the fleet on the dead account."""
+    from fno.recovery import Candidate, _default_failover, classify_session_error
 
     if not cwd:
         return "refused", "reroute refused: no recorded worktree to respawn into"
-    fn = redispatch_fn or _redispatch
+    facts = tail_facts(v.row_id, cwd)
+    err = classify_session_error(facts.tail_text if facts is not None else "")
+    if err is None or not getattr(err, "triggers_swap", False):
+        return "refused", f"reroute refused: tail is not swap-class ({v.basis})"
+    fn = failover_fn or _default_failover
     candidate = Candidate(
         short_id=v.row_id[:8], sock_path="", jobs_dir=None,
         cwd=cwd, name=v.name,
     )
-    if fn(candidate):
-        return "applied", f"stopped and respawned via redispatch ({v.basis})"
-    return "refused", f"redispatch declined ({v.basis}); session left as-is"
+    outcome = fn(candidate, err)
+    if outcome in ("swapped", "notified"):
+        return "applied", f"failover {outcome} ({v.basis})"
+    return (
+        "refused",
+        f"reroute refused: failover outcome {outcome!r}, no alternate armed "
+        f"({v.basis}); session left as-is",
+    )
 
 
 def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
