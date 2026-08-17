@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -202,6 +203,50 @@ from fno.notify._impl import send_notification  # noqa: E402
 # tick
 # ---------------------------------------------------------------------------
 
+# EX_TEMPFAIL: launchd logs the non-zero exit but does not respawn a
+# StartInterval job early, so a timed-out tick surfaces without suppressing
+# the successor it was bounded to protect.
+_TICK_TIMEOUT_EXIT = 75
+
+_ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
+
+
+class TickDeadlineExceeded(Exception):
+    """The tick's wall-clock deadline fired; the phase marker names where."""
+
+
+def _on_deadline(signum, frame) -> None:  # noqa: ARG001 - signal handler signature
+    raise TickDeadlineExceeded()
+
+
+def _resolve_tick_deadline(cfg) -> int:
+    """Env seam first, then config, then 0.8x the interval (min 60s)."""
+    env = (os.environ.get(_ENV_TICK_TIMEOUT) or "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    if cfg.tick_timeout_seconds:
+        return int(cfg.tick_timeout_seconds)
+    return max(60, int(cfg.interval_seconds * 0.8))
+
+
+def _tick_outcome(result, tick_failed: Optional[str], timed_out: bool) -> str:
+    """Map one tick run to its end-record outcome (AC table in the plan)."""
+    if timed_out:
+        return "timeout"
+    if tick_failed is not None:
+        return "error"
+    if result is None:
+        return "error"
+    if result.disabled:
+        return "disabled"
+    if result.lock_held:
+        return "lock_held"
+    if getattr(result, "quota_skip", False):
+        return "quota_skip"
+    if getattr(result, "sweep_failures", 0):
+        return "degraded"
+    return "ok"
+
 
 @cli.command()
 def tick() -> None:
@@ -211,109 +256,191 @@ def tick() -> None:
     It builds the real adapters (claims, emit, reviewers_for, etc.) and
     calls tick() from fno.pr_watch._dispatch.
     """
+    import time
+
     from fno.config_cli import post_merge_readiness
+    from fno.pr_watch._dispatch import current_tick_phase, set_tick_phase
     from fno.pr_watch._dispatch import tick as _tick
 
-    settings = load_settings()
-    cfg = settings.pr_watch
+    started = time.monotonic()
+    # Entry is recorded before anything that can hang: settings load, imports,
+    # and the graph read all precede any other record, so a tick that dies
+    # mid-bootstrap is still attributable (AC8). This is NOT the liveness
+    # watermark: only a completed sweep mints pr_watch_tick (AC9).
+    set_tick_phase("entry")
+    _emit_event(
+        "pr_watch_tick_attempt",
+        {"pid": os.getpid(), "phase": "entry"},
+    )
 
-    # x-aaaf wave 3: the master panic switch outranks pr_watch's own gate too.
-    tick_enabled = cfg.enabled and settings.autonomy.enabled
-
-    # A dead tick must not kill the legs below. The receipt contract makes
-    # _tick raise on a failed emission even though state is already persisted,
-    # so a broken events path would otherwise crash-loop recovery and sync
-    # catch-up, which ride this same launchd cadence. Fail the exit code at
-    # the end instead, mirroring how those legs wrap their own failures.
+    outcome = "error"
+    result = None
     tick_failed = None
+    timed_out = False
+    settings = None
+
     try:
-        result = _tick(
-            claim=ClaimAdapter(),
-            emit=_emit_event,
-            reviewers_for=_reviewers_for,
-            notify=lambda message, **_kw: _notify_parked(message),
-            post_merge_readiness_fn=post_merge_readiness,
-            now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            max_age_days=cfg.max_age_days,
-            max_retries=cfg.retries,
-            enabled=tick_enabled,
-        )
-    except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
-        tick_failed = str(exc)
-        log.warning("pr-watch: tick failed: %s", exc)
-        typer.echo(f"pr-watch tick: failed: {exc}", err=True)
-        result = None
+        set_tick_phase("settings")
+        settings = load_settings()
+        cfg = settings.pr_watch
 
-    if result is not None:
-        if result.disabled:
-            reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
-            typer.echo(f"pr-watch tick: {reason} is false - skipped")
-        elif result.lock_held:
-            typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
-        else:
-            typer.echo(
-                f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
-            )
+        # x-aaaf wave 3: the master panic switch outranks pr_watch's own gate too.
+        tick_enabled = cfg.enabled and settings.autonomy.enabled
 
-    # Session recovery rides this same launchd cadence: a sweep over
-    # footnote-launched bg /target sessions that rotates providers on swap-class
-    # deaths and surfaces finished-but-lingering sessions to close. The held
-    # socket nudge was removed (a bypass recipient holds it by design), so the
-    # sweep no longer resumes idle-but-incomplete sessions. Gated by
-    # config.recovery.enabled and wrapped non-fatally so a recovery failure
-    # never breaks the PR-watch tick. The master switch (x-aaaf wave 3) outranks
-    # this gate too - a recovery respawn is exactly the "session starts itself"
-    # behavior the panic switch exists to stop.
-    if settings.recovery.enabled and settings.autonomy.enabled:
+        deadline = _resolve_tick_deadline(cfg)
+        # SIGALRM, not a thread timer: the observed 22-minute 0%-CPU hang sat
+        # in fcntl.flock(LOCK_EX) with no timeout (graph/store.py), and only a
+        # signal can interrupt a main thread blocked in a syscall - a timer
+        # thread would watch the deadline pass and then do nothing. alarm(0)
+        # in the finally cancels an untriggered deadline.
         try:
-            from fno.recovery import run_recovery_sweep
+            signal.signal(signal.SIGALRM, _on_deadline)
+            signal.alarm(deadline)
+        except ValueError:
+            # Not the main thread (tests embedding the command): no alarm
+            # available, run unbounded like before.
+            log.debug("pr-watch: SIGALRM unavailable outside main thread")
 
-            def emit_recovery(event_type: str, data: dict) -> None:
-                _emit_event(event_type, data)
-
-            n = run_recovery_sweep(settings.recovery, emit=emit_recovery)
-            typer.echo(f"recovery sweep: candidates={n}")
-        except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
-            log.warning("pr-watch: recovery sweep failed: %s", exc)
-
-    # Canonical-sync catch-up. The dispatch above is event-time-only:
-    # it acts on merges it DETECTS, so a merge that landed while the daemon was
-    # wedged is never synced by it. This leg is keyed on outcome instead - it
-    # asks whether recent merges have markers, not whether we saw them happen.
-    # Wrapped exactly like the recovery sweep: a catch-up failure logs and never
-    # breaks the tick. auto_run gating lives inside run_sync_catchup.
-    try:
-        from fno.pr._sync_canonical import run_sync_catchup
-
-        for root in _catchup_roots():
-            try:
-                res = run_sync_catchup(
-                    settings=load_settings_for_repo(root), canonical_root=root
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
-                log.warning("pr-watch: sync catch-up failed for %s: %s", root, exc)
-                continue
-            if res.outcome == "disabled":
-                continue
-            typer.echo(
-                f"sync catch-up [{root.name}]: {res.outcome}"
-                + (f" ({res.detail})" if res.detail else "")
+        set_tick_phase("sweep")
+        # A dead tick must not kill the legs below. The receipt contract makes
+        # _tick raise on a failed emission even though state is already persisted,
+        # so a broken events path would otherwise crash-loop recovery and sync
+        # catch-up, which ride this same launchd cadence. Fail the exit code at
+        # the end instead, mirroring how those legs wrap their own failures.
+        try:
+            result = _tick(
+                claim=ClaimAdapter(),
+                emit=_emit_event,
+                reviewers_for=_reviewers_for,
+                notify=lambda message, **_kw: _notify_parked(message),
+                post_merge_readiness_fn=post_merge_readiness,
+                now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                max_age_days=cfg.max_age_days,
+                max_retries=cfg.retries,
+                enabled=tick_enabled,
             )
-            # Detected AND unresolved. Keying on a failed sync alone would alarm
-            # on a merge from two minutes ago whose retry is seconds away, and
-            # stay silent on a canonical proven behind with every marker present
-            # - the state where there is nothing to sweep and the markers lie.
-            if res.stale and res.outcome != "synced":
-                typer.echo(
-                    f"ALARM: {root.name} canonical sync is stale and the catch-up "
-                    f"did not resolve it ({res.detail}). That checkout and its "
-                    f"installed tooling are behind; sync it by hand.",
-                    err=True,
-                )
-                _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
-    except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
-        log.warning("pr-watch: sync catch-up failed: %s", exc)
+        except TickDeadlineExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
+            tick_failed = str(exc)
+            log.warning("pr-watch: tick failed: %s", exc)
+            typer.echo(f"pr-watch tick: failed: {exc}", err=True)
+            result = None
 
+        if result is not None:
+            if result.disabled:
+                reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
+                typer.echo(f"pr-watch tick: {reason} is false - skipped")
+            elif result.lock_held:
+                typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
+            elif result.quota_skip:
+                reset = f", resets {result.quota_reset}" if result.quota_reset else ""
+                typer.echo(
+                    f"pr-watch tick: graphql remaining {result.quota_remaining} below floor"
+                    f" - dispatch pass skipped{reset}"
+                )
+            elif result.sweep_failures:
+                typer.echo(
+                    f"pr-watch tick: degraded: {result.sweep_failures} repo sweep failure(s)"
+                )
+            else:
+                typer.echo(
+                    f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+                )
+
+        # Session recovery rides this same launchd cadence: a sweep over
+        # footnote-launched bg /target sessions that rotates providers on swap-class
+        # deaths and surfaces finished-but-lingering sessions to close. The held
+        # socket nudge was removed (a bypass recipient holds it by design), so the
+        # sweep no longer resumes idle-but-incomplete sessions. Gated by
+        # config.recovery.enabled and wrapped non-fatally so a recovery failure
+        # never breaks the PR-watch tick. The master switch (x-aaaf wave 3) outranks
+        # this gate too - a recovery respawn is exactly the "session starts itself"
+        # behavior the panic switch exists to stop.
+        set_tick_phase("recovery")
+        if settings.recovery.enabled and settings.autonomy.enabled:
+            try:
+                from fno.recovery import run_recovery_sweep
+
+                def emit_recovery(event_type: str, data: dict) -> None:
+                    _emit_event(event_type, data)
+
+                n = run_recovery_sweep(settings.recovery, emit=emit_recovery)
+                typer.echo(f"recovery sweep: candidates={n}")
+            except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
+                log.warning("pr-watch: recovery sweep failed: %s", exc)
+
+        # Canonical-sync catch-up. The dispatch above is event-time-only:
+        # it acts on merges it DETECTS, so a merge that landed while the daemon was
+        # wedged is never synced by it. This leg is keyed on outcome instead - it
+        # asks whether recent merges have markers, not whether we saw them happen.
+        # Wrapped exactly like the recovery sweep: a catch-up failure logs and never
+        # breaks the tick. auto_run gating lives inside run_sync_catchup.
+        set_tick_phase("catchup")
+        try:
+            from fno.pr._sync_canonical import run_sync_catchup
+
+            for root in _catchup_roots():
+                try:
+                    res = run_sync_catchup(
+                        settings=load_settings_for_repo(root), canonical_root=root
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
+                    log.warning("pr-watch: sync catch-up failed for %s: %s", root, exc)
+                    continue
+                if res.outcome == "disabled":
+                    continue
+                typer.echo(
+                    f"sync catch-up [{root.name}]: {res.outcome}"
+                    + (f" ({res.detail})" if res.detail else "")
+                )
+                # Detected AND unresolved. Keying on a failed sync alone would alarm
+                # on a merge from two minutes ago whose retry is seconds away, and
+                # stay silent on a canonical proven behind with every marker present
+                # - the state where there is nothing to sweep and the markers lie.
+                if res.stale and res.outcome != "synced":
+                    typer.echo(
+                        f"ALARM: {root.name} canonical sync is stale and the catch-up "
+                        f"did not resolve it ({res.detail}). That checkout and its "
+                        f"installed tooling are behind; sync it by hand.",
+                        err=True,
+                    )
+                    _notify_parked(f"canonical sync stale: {root.name} ({res.outcome})")
+        except Exception as exc:  # noqa: BLE001 - never let catch-up break pr-watch
+            log.warning("pr-watch: sync catch-up failed: %s", exc)
+    except TickDeadlineExceeded:
+        # The deadline fired somewhere above; phase names where. Recovery and
+        # catch-up are skipped on purpose: the process has already overrun the
+        # interval and launchd's next tick must not be suppressed further.
+        timed_out = True
+        typer.echo(
+            f"pr-watch tick: deadline exceeded in phase {current_tick_phase()} - aborted",
+            err=True,
+        )
+    finally:
+        try:
+            signal.alarm(0)
+        except ValueError:
+            pass
+        outcome = _tick_outcome(result, tick_failed, timed_out)
+        end_data: dict[str, Any] = {
+            "outcome": outcome,
+            "duration_s": round(time.monotonic() - started, 3),
+            "phase": current_tick_phase(),
+            "pid": os.getpid(),
+        }
+        if result is not None:
+            end_data["sweep_failures"] = getattr(result, "sweep_failures", 0)
+            if getattr(result, "quota_skip", False):
+                end_data["quota_remaining"] = result.quota_remaining
+                end_data["quota_reset"] = result.quota_reset
+        # The end record always fires - including on timeout and error - so the
+        # attempt/end pair brackets every invocation; only outcome=ok/degraded
+        # corresponds to a pr_watch_tick (the liveness watermark) having fired.
+        _emit_event("pr_watch_tick_end", end_data)
+
+    if timed_out:
+        raise typer.Exit(code=_TICK_TIMEOUT_EXIT)
     if tick_failed is not None:
         raise typer.Exit(code=1)
 

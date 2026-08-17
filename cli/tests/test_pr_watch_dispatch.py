@@ -2127,3 +2127,117 @@ class TestWarmMergeRouting:
         assert parked[0]["data"]["reason"] == "retries-exhausted"
         receipts = [e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick"]
         assert [receipt["dropped_count"] for receipt in receipts] == [1, 0, 0, 0]
+
+
+# ---------------------------------------------------------------------------
+# Tick entry/exit records + wall-clock deadline (x-c12c wave 1)
+# ---------------------------------------------------------------------------
+
+
+class TestTickRecordsAndDeadline:
+    """AC7-HP/AC8-HP/AC9-EDGE: the CLI verb records entry and exit, and a tick
+    that outlives its deadline writes a timeout record and exits 75 instead of
+    suppressing its launchd successors."""
+
+    def _invoke_tick(self, monkeypatch, dispatch_tick):
+        import typer
+        from typer.testing import CliRunner
+        from unittest.mock import MagicMock
+
+        from fno.pr_watch import cli as prcli
+
+        monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
+
+        settings = MagicMock()
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.recovery.enabled = False
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+        events: list[tuple[str, dict]] = []
+
+        def _capture(event_type, data, *, events_path=None):
+            events.append((event_type, dict(data)))
+            return True
+
+        monkeypatch.setattr(prcli, "_emit_event", _capture, raising=True)
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        res = CliRunner().invoke(app, [])
+        return res, events
+
+    def test_attempt_record_precedes_settings_load(self, monkeypatch):
+        """AC8-HP: a hang or crash during config load still leaves an attempt."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.pr_watch import cli as prcli
+
+        def _boom():
+            raise RuntimeError("settings exploded during import")
+
+        monkeypatch.setattr(prcli, "load_settings", _boom, raising=True)
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            prcli, "_emit_event",
+            lambda t, d, **_kw: events.append((t, dict(d))) or True,
+            raising=True,
+        )
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        res = CliRunner().invoke(app, [])
+
+        assert events[0][0] == "pr_watch_tick_attempt"
+        assert events[0][1]["pid"] > 0
+        # The end record still fires with outcome error and the settings phase.
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert len(ends) == 1
+        assert ends[0]["outcome"] == "error"
+        assert ends[0]["phase"] == "settings"
+        assert res.exit_code != 0
+
+    def test_deadline_timeout_writes_end_record_and_exits_75(self, monkeypatch):
+        """AC7-HP: a tick stalled past its deadline ends with outcome timeout."""
+        import time as _time
+
+        def _stall(**_kw):
+            _time.sleep(1.5)
+            raise AssertionError("deadline did not interrupt the stalled tick")
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
+        res, events = self._invoke_tick(monkeypatch, _stall)
+
+        assert res.exit_code == 75, f"expected exit 75, got {res.exit_code}: {res.output!r}"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert len(ends) == 1
+        assert ends[0]["outcome"] == "timeout"
+        assert ends[0]["phase"] == "sweep"
+        assert ends[0]["duration_s"] >= 1.0
+
+    def test_healthy_tick_brackets_with_ok_end_record(self, monkeypatch):
+        """AC9-EDGE backdrop: a normal tick emits attempt, tick, and end ok."""
+        from fno.pr_watch._dispatch import TickResult
+
+        res, events = self._invoke_tick(
+            monkeypatch, lambda **_kw: TickResult(open_prs=0, acted=0)
+        )
+        assert res.exit_code == 0, res.output
+        assert events[0][0] == "pr_watch_tick_attempt"
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert len(ends) == 1
+        assert ends[0]["outcome"] == "ok"
+
+    def test_sweep_failure_end_record_reads_degraded(self, monkeypatch):
+        """AC4-EDGE at the CLI boundary: the end record distinguishes degraded."""
+        from fno.pr_watch._dispatch import TickResult
+
+        res, events = self._invoke_tick(
+            monkeypatch,
+            lambda **_kw: TickResult(open_prs=0, acted=0, sweep_failures=2),
+        )
+        assert res.exit_code == 0, res.output
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[0]["outcome"] == "degraded"
+        assert ends[0]["sweep_failures"] == 2

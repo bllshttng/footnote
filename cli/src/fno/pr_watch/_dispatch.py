@@ -72,6 +72,15 @@ class TickResult:
     # A disabled tick takes no lock (mirrors an introspection read, never a
     # gate side-effect) and reports here rather than as open_prs=0.
     disabled: bool = False
+    # Repos whose REST listing failed this tick. A swallowed failure used to be
+    # indistinguishable from a clean sweep (every key UNKNOWN, receipt normal),
+    # so the count rides the result and the end record turns it into outcome
+    # `degraded` instead of `ok`.
+    sweep_failures: int = 0
+    # The GraphQL budget preflight skip: per-PR dispatch was not attempted.
+    quota_skip: bool = False
+    quota_remaining: Optional[int] = None
+    quota_reset: Optional[str] = None
 
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
@@ -373,6 +382,22 @@ class _NullClaim:
 _MAX_RETRIES = 3
 _TICK_CLAIM_KEY = "pr-watch:tick"
 
+# The stage a live tick is in ("entry" -> "settings" -> "lock" -> "discover"
+# -> "sweep" -> "dispatch" -> "recovery" -> "catchup"). The CLI's deadline
+# record reads this so a hang names WHERE it hung - the difference between
+# "the tick hung" and "the tick hung waiting on the graph flock" - without
+# threading a callback through every injectable seam.
+_tick_phase = "entry"
+
+
+def set_tick_phase(phase: str) -> None:
+    global _tick_phase
+    _tick_phase = phase
+
+
+def current_tick_phase() -> str:
+    return _tick_phase
+
 
 def tick(
     *,
@@ -465,6 +490,7 @@ def tick(
     holder = f"pr-watch:{os.getpid()}"
 
     # Step 1: tick-level mutex
+    set_tick_phase("lock")
     try:
         _claim.acquire_tick_lock(_TICK_CLAIM_KEY, holder)
     except Exception as exc:  # noqa: BLE001 - any acquire failure means no work ran
@@ -536,6 +562,7 @@ def _run_tick(
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
+    set_tick_phase("discover")
     entries = read_graph(gpath) if gpath.exists() else []
     candidates = discover_fn(entries)
 
@@ -584,6 +611,7 @@ def _run_tick(
     batch_terminal: set[str] = set()
     batch_baselined: set[str] = set()
     query_keys = batch_keys | candidate_keys
+    set_tick_phase("sweep")
     if query_keys:
         # The batch reader attempts every qualified key up front. Record that
         # positive fact even when a later per-PR lock prevents rich dispatch
@@ -624,6 +652,7 @@ def _run_tick(
     acted = 0
     skipped = 0
 
+    set_tick_phase("dispatch")
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
