@@ -473,6 +473,42 @@ def test_hook_var_list_matches_model_env_keys():
     )
 
 
+def test_seam_scrub_covers_the_rust_exec_lane(monkeypatch, capsys):
+    # A bg/headless spawn execs the Rust client with os.environ, and that
+    # binary hands the child the env verbatim - a scrub only inside the Python
+    # substrate seams is decorative on that lane. The seam scrub is the one
+    # edit both runtimes see.
+    from fno.agents.rust_runtime import _scrub_incoherent_model_env_at_seam
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.2[1m]")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
+    _scrub_incoherent_model_env_at_seam(BASE)
+    assert "ANTHROPIC_MODEL" not in os.environ
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in os.environ
+    err = capsys.readouterr().err
+    assert "ANTHROPIC_MODEL" in err
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" in err
+
+
+def test_seam_scrub_leaves_a_non_claude_spawn_and_a_route_alone(monkeypatch, capsys):
+    from fno.agents.rust_runtime import _scrub_incoherent_model_env_at_seam
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.2[1m]")
+    # A non-claude harness never reads these vars; stripping them from its
+    # child would be unrelated.
+    _scrub_incoherent_model_env_at_seam([*BASE, "-H", "codex"])
+    assert os.environ["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+    assert capsys.readouterr().err == ""
+    # A real route (foreign base URL) is never stripped: the endpoint serves
+    # those model ids, so the composed route reaches the child unchanged.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", ZAI_ENV["ANTHROPIC_BASE_URL"])
+    _scrub_incoherent_model_env_at_seam(BASE)
+    assert os.environ["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
+    assert capsys.readouterr().err == ""
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
