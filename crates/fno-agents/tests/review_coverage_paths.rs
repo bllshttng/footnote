@@ -55,6 +55,19 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
             ProducerReach::SafeDirection("cannot be starved: terminal-allow implies run_done ran"),
         ),
         (
+            "fno pr coverage-check <n> without --recompute (and the git-protection hook through it)",
+            "default is the no-recompute read: a recompute shells the Rust producer \
+             at minutes while a PreToolUse hook has a 60s budget, and a killed hook \
+             emits no verdict at all. --recompute is producer-reachable, same as \
+             `fno pr merge`",
+            ProducerReach::SafeDirection(
+                "one-directional by design: on a missing or stale row this DENIES \
+                 where `fno pr merge` may yet allow after recomputing. An empty \
+                 read is an answer and refuses. Recovery from a wrong deny is one \
+                 command; from a wrong allow it is a revert",
+            ),
+        ),
+        (
             "a human running the verb by hand",
             "fno-agents review-coverage",
             ProducerReach::Reachable,
@@ -278,6 +291,14 @@ fn new_reader_sites_must_join_the_table() {
     for name in &reader_files {
         let known = match name.as_str() {
             "_reviews.py" => true, // the shared reader/helper itself
+            // The merge guard's predicate, lifted out of `run_merge` unchanged so
+            // `fno pr merge` and `fno pr coverage-check` ask it through one copy.
+            // Whitelisted for the same reason `_reviews.py` is: it is the shared
+            // body, not a new path. Unlike `_reviews.py`, its row is enforced:
+            // exact equality, so no renamed or split sibling row satisfies the arm.
+            "_coverage_gate.py" => table_names.iter().any(|n| {
+                *n == "fno pr coverage-check <n> without --recompute (and the git-protection hook through it)"
+            }),
             "_merge.py" => table_names.iter().any(|n| *n == "fno pr merge <n>"),
             "_status.py" => table_names.iter().any(|n| *n == "fno pr status <n>"),
             _ => false,
@@ -289,7 +310,8 @@ fn new_reader_sites_must_join_the_table() {
     }
     assert!(
         reader_files.contains(&"_merge.py".to_string())
-            && reader_files.contains(&"_status.py".to_string()),
+            && reader_files.contains(&"_status.py".to_string())
+            && reader_files.contains(&"_coverage_gate.py".to_string()),
         "a gate row stopped reading coverage"
     );
 
