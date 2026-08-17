@@ -2915,6 +2915,54 @@ def test_discover_live_sessions_keeps_cross_harness_rows_distinct(tmp_path, monk
     ]
 
 
+def test_discovery_address_matches_skips_truth_classification(tmp_path, monkeypatch):
+    """Address matching must not truth-classify every enumerated session.
+
+    The per-session truth fan-out dominates discovery cost and its result is
+    discarded here: matching reads identity fields alone. The returned session
+    is the positive marker; the patched classifier raising proves none ran.
+    """
+    from fno.agents import session_truth
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="addr-probe",
+                harness="claude",
+                cwd="/probe-cwd",
+                log_path="/tmp/probe.log",
+                short_id="add2e55",
+                harness_session_id="e10acb68-1111-7222-8333-4444add2e55",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    def _truth_is_forbidden(*_args, **_kwargs):
+        raise AssertionError("truth resolved during address matching")
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", _truth_is_forbidden)
+
+    # discovery_address_matches takes no seam kwargs, so isolate the host
+    # sources at the discover_live_sessions boundary. truth_fn stays unset:
+    # the default truth path is the one whose skip is under test.
+    real_discover = discover.discover_live_sessions
+
+    def _isolated(**kwargs):
+        kwargs.update(_empty_seams(tmp_path))
+        kwargs["truth_fn"] = None
+        return real_discover(**kwargs)
+
+    monkeypatch.setattr(discover, "discover_live_sessions", _isolated)
+
+    matches = discover.discovery_address_matches("add2e55", registry_path=reg)
+
+    assert [(s.agent, s.short_id) for s in matches] == [("claude", "add2e55")]
+
+
 def test_resolve_reachable_includes_complete_harness_store_hits(tmp_path, monkeypatch):
     """Codex/OpenCode stores participate below the liveness listing."""
     sid = "019fb417-1111-7222-8333-4444deadbeef"
