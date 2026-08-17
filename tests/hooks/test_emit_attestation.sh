@@ -110,6 +110,20 @@ got="$(stored '.branch')"
   && pass "worktree branch records its upstream PR branch" \
   || fail "worktree branch: want feature/x-e601 (upstream), got '$got'"
 
+# 5. An author worktree pre-push: the branch tracks origin/main (fno creates
+#    worktrees off main and `push -u` only fires at PR create), so the
+#    upstream names the BASE. The LOCAL name is the PR branch and must win,
+#    or every pre-push emit mis-scopes to main and loses the carry.
+git -C "$REPO" checkout -q feature/x-e601
+git -C "$REPO" update-ref refs/remotes/origin/main "$HEAD_SHA"
+git -C "$REPO" branch --set-upstream-to=origin/main feature/x-e601 >/dev/null 2>&1
+rm -f "$TMP/last-emit.txt"
+emit
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "a main-tracking branch keeps its local PR-branch name" \
+  || fail "main-tracking branch: want feature/x-e601 (local), got '$got'"
+
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
