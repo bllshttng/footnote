@@ -274,6 +274,25 @@ def latest_review_coverage(
     return best
 
 
+def _exit4_degraded_reason(stdout: Optional[str]) -> str:
+    """The exit-4 degradation reason from the verb's stdout, or ``""``.
+
+    The verb's stdout is one JSON object whose last line is it even under
+    stray warnings. Unparseable or non-exhausted stdout keeps the empty
+    string - the unknown row the verb emitted is still the caller's answer;
+    only a stated ``graphql_exhausted`` upgrades the empty string to a
+    reason a gate can interpolate.
+    """
+    lines = [ln for ln in (stdout or "").splitlines() if ln.strip()]
+    try:
+        payload = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return ""
+    if isinstance(payload, dict) and payload.get("graphql_exhausted"):
+        return str(payload.get("reason") or "graphql quota exhausted")
+    return ""
+
+
 def _fire_review_coverage_verb(
     pr_number: int, cwd: Optional[str], head: Optional[str]
 ) -> tuple[bool, str]:
@@ -281,7 +300,11 @@ def _fire_review_coverage_verb(
 
     ``ran`` is True for any exit the verb defines (0/3/4) - including the
     unknown-coverage exit 4, which still emitted a row the caller re-reads.
-    ``why`` names the failure when ``ran`` is False, for the refusal text.
+    ``why`` names the failure when ``ran`` is False, for the refusal text; on
+    exit 4 it carries the verb's degradation reason when stdout says the read
+    failed on an exhausted GraphQL quota (``graphql_exhausted``), so a caller
+    can tell "retriable after the reset" from "go get a review". ``why`` is
+    advisory text callers interpolate, never a boolean.
     Binary resolution reuses :func:`fno.rust_binary.resolve_binary` (the one
     resolver; never a second lookup here).
     """
@@ -315,6 +338,8 @@ def _fire_review_coverage_verb(
         # names the exit with no cause.
         why = ((proc.stderr or "").strip() or (proc.stdout or "").strip()).splitlines()
         return False, f"recompute failed (exit {proc.returncode}: {why[-1] if why else ''})"
+    if proc.returncode == 4:
+        return True, _exit4_degraded_reason(proc.stdout)
     return True, ""
 
 
@@ -341,8 +366,11 @@ def review_coverage_for_gate(
     design around a gate that was green somewhere else.
 
     Returns ``(data_or_None, note)``; ``note`` is ``""`` when no recompute ran,
-    else ``"recomputed"``, ``"recompute produced no row"``, or
-    ``"recompute unavailable: <why>"``.
+    else ``"recomputed"``, ``"recompute produced no row"``,
+    ``"recompute unavailable: <why>"``, or - when the recompute ran but its gh
+    read failed on an exhausted GraphQL quota and the re-read row is still
+    ``unknown`` - ``"recompute degraded to unknown: <why>"``, so a gate can say
+    "retry after the quota reset" instead of a bare "nobody reviewed this".
     """
     data = latest_review_coverage(pr_number, cwd)
     note = ""
@@ -356,6 +384,8 @@ def review_coverage_for_gate(
             if fresh is not None:
                 data = fresh
                 note = "recomputed"
+                if why and fresh.get("coverage") == "unknown":
+                    note = f"recompute degraded to unknown: {why}"
             else:
                 note = "recompute produced no row"
         else:

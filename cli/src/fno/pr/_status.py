@@ -354,6 +354,11 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             f"{str(v.get('reviewed_sha') or 'an unknown commit')[:8]}, whose code no longer "
             "matches HEAD - that verdict does not count. Ask it to re-read.\n"
         )
+    # `unknown` from a degraded gh read and `unknown` from "nobody reviewed
+    # this" are different facts; the recompute note is the only thing that
+    # separates them, and the JSON field alone would never reach a terminal.
+    if coverage.get("recompute"):
+        sys.stderr.write(f"note: coverage recompute: {coverage['recompute']}\n")
     return code
 
 

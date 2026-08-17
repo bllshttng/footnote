@@ -8137,7 +8137,12 @@ harness_session_id scanned from <cwd>/.fno/target-state.md, else none
 unmeasured 0).
 
 Exits: 0 emitted a row; 3 no PR for the selector; 4 gh read failed
-(emitted row is unknown); 2 bad arguments.";
+(emitted row is unknown); 2 bad arguments.
+
+On exit 4 stdout additionally carries graphql_remaining /
+graphql_exhausted (plus a reason string when exhausted), so a degraded
+read is distinguishable from a genuinely unreviewed one. The persisted
+row keeps the bare unknown schema.";
 
 fn decide_review_coverage(args: &[String]) -> (i32, String) {
     let args = if args.first().map(|s| s.as_str()) == Some("review-coverage") {
@@ -8309,7 +8314,31 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
-                return (4, data.to_string());
+                // The persisted row above is schema-gated (the pr_num == 0
+                // comment below applies here too); the quota diagnosis rides
+                // stdout only. Without it, exit 4's unknown row is
+                // indistinguishable from a genuine "nobody reviewed this" -
+                // the reader was told to re-review a PR whose only problem
+                // was an exhausted quota window.
+                let quota = probe_graphql_quota(&gh_bin, &cwd);
+                let mut out = data;
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert(
+                        "graphql_remaining".into(),
+                        serde_json::json!(quota.as_ref().map(|q| q.remaining)),
+                    );
+                    obj.insert(
+                        "graphql_exhausted".into(),
+                        serde_json::json!(quota.as_ref().map(|q| q.remaining == 0)),
+                    );
+                    if let Some(q) = quota.as_ref().filter(|q| q.remaining == 0) {
+                        obj.insert(
+                            "reason".into(),
+                            serde_json::json!(graphql_exhausted_reason(q)),
+                        );
+                    }
+                }
+                return (4, out.to_string());
             }
             // The emitted unknown row above is schema-gated, so the exhaustion
             // diagnosis rides this stdout-only branch (and the stop hook's own
@@ -11090,6 +11119,148 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 1\n");
         assert!(probe_graphql_quota(gh.to_str().unwrap(), tmp.path()).is_none());
+    }
+
+    /// One stub gh for the pr_num > 0 failure-arm tests: `pr view` fails with a
+    /// rate-limit stderr (NOT the "no pull requests found" no-PR wording, which
+    /// would take the Ok(PrState::None) branch), `api rate_limit` answers the
+    /// given graphql bucket.
+    fn write_failing_pr_view_gh(dir: &Path, graphql_remaining: i64, reset_in_secs: i64) -> String {
+        let reset = Utc::now().timestamp() + reset_in_secs;
+        write_exec(
+            dir,
+            "gh",
+            &format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = pr ] && [ \"$2\" = view ] && \
+                 echo 'GraphQL: API rate limit exceeded for user ID 1.' >&2 && exit 1\n\
+                 [ \"$1\" = api ] && [ \"$2\" = rate_limit ] && \
+                 echo '{{\"resources\":{{\"graphql\":{{\"remaining\":{remaining},\"reset\":{reset}}}}}}}' && exit 0\n\
+                 exit 1\n",
+                remaining = graphql_remaining,
+                reset = reset,
+            ),
+        )
+        .to_str()
+        .unwrap()
+        .to_string()
+    }
+
+    #[test]
+    fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
+        // x-b56a: exit 4 with a known PR persists a schema-gated unknown row,
+        // and its stdout must say WHY the read degraded. A bare unknown is
+        // indistinguishable from "nobody reviewed this" and sent operators to
+        // re-review PRs whose only problem was an exhausted quota window.
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_failing_pr_view_gh(tmp.path(), 0, 14 * 60);
+        let events = tmp.path().join("ev.jsonl");
+        let global = tmp.path().join("gev.jsonl");
+        let args: Vec<String> = [
+            "review-coverage",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            "930c2e9dad5d2dc5ba2deae320070bd86ecfcfc2",
+            "--events",
+            events.to_str().unwrap(),
+            "--global-events",
+            global.to_str().unwrap(),
+            "--settings",
+            tmp.path().join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            &gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // Retry only on an undecided probe (graphql_exhausted null): the
+        // spawn flake the quota-parsing test above retries for lands here as
+        // probe_graphql_quota -> None, which is correct behavior - the
+        // ASSERTIONS need a decisive read, not the first one.
+        let mut v: Option<Value> = None;
+        for _ in 0..5 {
+            let (code, out) = run_review_coverage_capture(&args);
+            assert_eq!(code, 4);
+            let parsed: Value = serde_json::from_str(&out).expect("stdout is one JSON object");
+            if parsed
+                .get("graphql_exhausted")
+                .and_then(|x| x.as_bool())
+                .is_some()
+            {
+                v = Some(parsed);
+                break;
+            }
+        }
+        let v = v.expect("gh spawn kept failing across 5 retries - a real regression");
+        assert_eq!(v["coverage"], "unknown");
+        assert_eq!(v["graphql_exhausted"], true, "got: {v}");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("GraphQL quota exhausted"),
+            "reason must name the cause, got: {reason}"
+        );
+        // The PERSISTED row keeps the bare schema: stdout-only diagnostics, no
+        // event-contract fork. Pin the destination, not the tag - the row must
+        // lack the diagnostic keys, and carry the unknown verdict as emitted.
+        let log = std::fs::read_to_string(&events).expect("the verb emitted a row");
+        let row: Value =
+            serde_json::from_str(log.lines().next().expect("one row")).expect("row is JSON");
+        assert_eq!(row["type"], "review_coverage");
+        assert_eq!(row["data"]["coverage"], "unknown");
+        assert_eq!(row["data"]["verdicts"], serde_json::json!([]));
+        assert!(row["data"].get("graphql_exhausted").is_none());
+        assert!(row["data"].get("graphql_remaining").is_none());
+        assert!(row["data"].get("reason").is_none());
+    }
+
+    #[test]
+    fn review_coverage_pr_failure_healthy_quota_reports_not_exhausted() {
+        // The diagnostic must not cry wolf: a gh failure with graphql budget
+        // left is an outage, not exhaustion, and stdout saying exhausted=false
+        // is what lets a reader stop guessing between the two.
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_failing_pr_view_gh(tmp.path(), 4890, 0);
+        let args: Vec<String> = [
+            "review-coverage",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--pr",
+            "865",
+            "--head",
+            "deadbeef",
+            "--events",
+            tmp.path().join("ev.jsonl").to_str().unwrap(),
+            "--global-events",
+            tmp.path().join("gev.jsonl").to_str().unwrap(),
+            "--settings",
+            tmp.path().join("absent.toml").to_str().unwrap(),
+            "--gh-bin",
+            &gh,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut v: Option<Value> = None;
+        for _ in 0..5 {
+            let (code, out) = run_review_coverage_capture(&args);
+            assert_eq!(code, 4);
+            let parsed: Value = serde_json::from_str(&out).unwrap();
+            if parsed
+                .get("graphql_exhausted")
+                .and_then(|x| x.as_bool())
+                .is_some()
+            {
+                v = Some(parsed);
+                break;
+            }
+        }
+        let v = v.expect("gh spawn kept failing across 5 retries - a real regression");
+        assert_eq!(v["graphql_exhausted"], false, "got: {v}");
+        assert_eq!(v["graphql_remaining"], 4890);
+        assert!(v.get("reason").is_none(), "no reason without exhaustion");
     }
 
     #[test]

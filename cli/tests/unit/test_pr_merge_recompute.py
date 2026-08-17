@@ -18,9 +18,10 @@ from fno.pr._proc import Result
 from .test_pr_merge import FakeRun, _last_json, enabled  # noqa: F401
 
 
-def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls):
+def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls, why=""):
     """Replace the verb seam with one that appends a coverage event to the
-    project log - the observable effect of the real binary's append."""
+    project log - the observable effect of the real binary's append. ``why``
+    models the verb's exit-4 degraded-run reason (x-b56a)."""
 
     def fake(pr_number, cwd, head_arg):
         calls.append((pr_number, head_arg))
@@ -36,7 +37,7 @@ def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls):
                 )
                 + "\n"
             )
-        return True, ""
+        return True, why
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake)
     # Route the gate through the REAL read (the `enabled` fixture's covered
@@ -110,3 +111,76 @@ def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     assert "otherhea" in reason and "newhead" in reason, reason
     assert "[recomputed]" in reason, reason
     assert len(calls) == 1
+
+
+# ---- x-b56a: a degraded recompute names its reason ----
+
+
+def test_recompute_quota_exhaustion_names_the_reason(monkeypatch, tmp_path):
+    """A recompute that ran but degraded to unknown because the GraphQL quota
+    was exhausted must say so in the note. A bare "recomputed" beside an
+    unknown row reads as "re-checked, still unreviewed" - the exact confusion
+    that sent operators to re-review PRs whose only problem was the quota
+    window. Distinct from the unavailable case: the verb RAN (exit 4)."""
+    calls: list = []
+    _stub_recompute(
+        monkeypatch,
+        tmp_path,
+        coverage="unknown",
+        count=0,
+        head="abc",
+        calls=calls,
+        why=(
+            "GraphQL quota exhausted (0 remaining, resets in ~14m). "
+            "`gh pr view` / `gh pr checks` cannot succeed until the reset."
+        ),
+    )
+    data, note = _reviews.review_coverage_for_gate(42, str(tmp_path), "abc")
+    assert data is not None and data.get("coverage") == "unknown"
+    assert "degraded to unknown" in note, note
+    assert "quota exhausted" in note, note
+    assert len(calls) == 1
+
+
+def test_recompute_covered_row_keeps_bare_note_even_with_a_reason(monkeypatch, tmp_path):
+    """The reason is folded in only when the re-read row is still unknown: a
+    recompute that produced a real verdict is not degraded, whatever the
+    quota probe said along the way."""
+    calls: list = []
+    _stub_recompute(
+        monkeypatch,
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head="abc",
+        calls=calls,
+        why="GraphQL quota exhausted (0 remaining, resets in ~14m).",
+    )
+    data, note = _reviews.review_coverage_for_gate(42, str(tmp_path), "abc")
+    assert data is not None and data.get("coverage") == "covered"
+    assert note == "recomputed", note
+
+
+def test_exit4_reason_parses_the_verb_stdout():
+    """The verb's exit-4 stdout carries graphql_exhausted/reason; the parser
+    hands the reason back (this is what `_fire_review_coverage_verb` returns
+    as `why` with ran=True - the conftest seam stub makes a subprocess test
+    here fight the harness, so the parse is a pure seam)."""
+    stdout = (
+        '{"coverage":"unknown","head_sha":"abc","graphql_remaining":0,'
+        '"graphql_exhausted":true,'
+        '"reason":"GraphQL quota exhausted (0 remaining, resets in ~14m)."}'
+    )
+    assert "GraphQL quota exhausted" in _reviews._exit4_degraded_reason(stdout)
+
+
+def test_exit4_reason_stays_empty_without_exhaustion():
+    """Exit 4 with a healthy quota (an outage, not exhaustion) or unparseable
+    stdout keeps the empty string: the emitted unknown row is still the
+    caller's answer. Exhaustion without a reason string degrades to the bare
+    fallback, never to silence."""
+    healthy = '{"coverage":"unknown","graphql_remaining":4890,"graphql_exhausted":false}'
+    for stdout in (healthy, "not json", "", None):
+        assert _reviews._exit4_degraded_reason(stdout) == "", stdout
+    no_reason = '{"coverage":"unknown","graphql_exhausted":true}'
+    assert _reviews._exit4_degraded_reason(no_reason) == "graphql quota exhausted"

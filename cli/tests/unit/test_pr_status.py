@@ -839,6 +839,56 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
     assert cov["recompute"] == "recomputed", cov
 
 
+def test_status_prints_degraded_recompute_reason_on_stderr(monkeypatch, capsys, tmp_path):
+    """x-b56a: a recompute that degraded to unknown on an exhausted GraphQL
+    quota must reach the human-readable stderr note, not just the JSON field.
+    `unknown` from a dead read and `unknown` from "nobody reviewed this" are
+    different facts; without the printed reason an operator cannot tell a
+    quota window from a genuinely unreviewed PR."""
+    import json
+
+    from fno.pr import _reviews
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+
+    def fake_verb(pr_number, cwd, head):
+        events.write_text(
+            json.dumps({
+                "ts": "2026-08-14T03:00:00Z",
+                "type": "review_coverage",
+                "data": {"pr": pr_number, "coverage": "unknown",
+                         "head_sha": "abc", "verdicts": []},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        return True, "GraphQL quota exhausted (0 remaining, resets in ~14m)."
+
+    monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    cov = out["review_coverage"]
+    assert cov["coverage"] == "unknown", cov
+    assert "degraded to unknown" in cov["recompute"], cov
+    assert "quota exhausted" in cap.err, cap.err
+
+
 def test_status_recompute_failure_degrades_to_unknown(monkeypatch, capsys, tmp_path):
     """The verb unavailable -> the existing unknown sentinel, exit 0: a
     read-only report never goes non-zero on a coverage read."""
