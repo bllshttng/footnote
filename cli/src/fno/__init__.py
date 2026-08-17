@@ -140,9 +140,10 @@ class _ReinstallWindowFinder:
     _fno_reinstall_window_guard = True
 
     # A plain flag rather than thread-local state, because its only job is to
-    # stop the re-check below from recursing back into this finder. Two threads
-    # racing it lose one retry and fall back to the pre-guard behavior, which is
-    # a hard failure either way. Neither can be handed a wrong answer.
+    # stop the re-check below from recursing back into this finder: it goes
+    # through `importlib.util.find_spec`, which DOES walk `sys.meta_path`. Two
+    # threads racing it lose one retry and fall back to the pre-guard behavior,
+    # which is a hard failure either way. Neither can be handed a wrong answer.
     _rechecking = False
 
     def find_spec(self, fullname: str, path=None, target=None):  # noqa: ANN001
@@ -151,6 +152,12 @@ class _ReinstallWindowFinder:
             return None
         cls._rechecking = True
         try:
+            # `_module_is_now_on_disk` rather than an inlined PathFinder probe,
+            # even though inlining would save this second lookup: `_load_real`
+            # asks the same question, and two implementations of "is it on disk
+            # now" is the one-of-N-paths trap this guard exists to close. The
+            # duplicate lookup costs microseconds and only ever runs on an
+            # import that has already failed.
             if not _module_is_now_on_disk(fullname):
                 raise ModuleNotFoundError(
                     f"No module named {fullname!r}{_reinstall_hint(fullname)}",

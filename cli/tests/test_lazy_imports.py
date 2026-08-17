@@ -759,14 +759,21 @@ def _installed_finder():
 
     found = [f for f in sys.meta_path if isinstance(f, fno._ReinstallWindowFinder)]
     assert len(found) == 1, f"expected exactly one guard, got {len(found)}"
-    # Last, so it is consulted only after every normal finder has already
-    # answered "no such module". Anywhere earlier and it would pay its
-    # re-check on imports that were about to succeed.
-    assert sys.meta_path[-1] is found[0]
+    # Behind PathFinder, so it is consulted only after every normal finder has
+    # already answered "no such module". Anywhere earlier and it would pay its
+    # re-check on imports that were about to succeed. Asserted as "after
+    # PathFinder" rather than "last", because any library imported later is free
+    # to append a finder of its own and that would not break this one.
+    # Found by name, not by identity: a test that spies on
+    # `importlib.machinery.PathFinder` must not also move this assertion.
+    path_finder = max(
+        i for i, f in enumerate(sys.meta_path) if getattr(f, "__name__", "") == "PathFinder"
+    )
+    assert sys.meta_path.index(found[0]) > path_finder
     return found[0]
 
 
-def _spy_path_finder(monkeypatch, seen: list):
+def _spy_path_finder(monkeypatch, seen: list, spec="SPEC"):
     """Replace PathFinder so the retry lookup is countable rather than inferred."""
     import importlib.machinery
 
@@ -774,7 +781,7 @@ def _spy_path_finder(monkeypatch, seen: list):
         @staticmethod
         def find_spec(name, path=None, target=None):
             seen.append(name)
-            return "SPEC"
+            return spec
 
     monkeypatch.setattr(importlib.machinery, "PathFinder", _Spy)
 
@@ -789,13 +796,19 @@ def test_import_hook_retries_a_module_that_is_on_disk_now(monkeypatch):
     """
     import fno
 
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: True)
     seen: list[str] = []
+    finder = _installed_finder()
+    # The gate is the SHARED helper, the same one `_load_real` consults. Patching
+    # it here is what pins that: an inlined second copy of the on-disk check
+    # would sail past this and the two paths could drift apart unnoticed.
+    checked: list[str] = []
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: checked.append(name) or True)
     _spy_path_finder(monkeypatch, seen)
 
-    spec = _installed_finder().find_spec("fno.agents.session_truth", None, None)
+    spec = finder.find_spec("fno.agents.session_truth", None, None)
 
     assert spec == "SPEC"
+    assert checked == ["fno.agents.session_truth"], "the shared re-check is the gate"
     assert seen == ["fno.agents.session_truth"], "retried exactly once, no loop"
 
 
@@ -809,14 +822,15 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
     """
     import fno
 
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: False)
     seen: list[str] = []
-    _spy_path_finder(monkeypatch, seen)
+    finder = _installed_finder()
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: False)
+    _spy_path_finder(monkeypatch, seen, spec=None)
 
     with pytest.raises(ModuleNotFoundError) as excinfo:
-        _installed_finder().find_spec("fno.state._never_shipped", None, None)
+        finder.find_spec("fno.state._never_shipped", None, None)
 
-    assert seen == [], "an absent module must not be looked up again"
+    assert seen == [], "absent on the shared re-check: never looked up again"
     assert excinfo.value.name == "fno.state._never_shipped"
     message = str(excinfo.value)
     assert "reinstalled underneath the running process" in message
@@ -825,16 +839,13 @@ def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
 
 def test_import_hook_ignores_third_party_modules(monkeypatch):
     """A missing dependency is a broken install: no re-check, no retry, no hint."""
-    import fno
-
-    def _boom(name):  # pragma: no cover - must never run
-        raise AssertionError(f"re-checked a third-party module: {name}")
-
-    monkeypatch.setattr(fno, "_module_is_now_on_disk", _boom)
-
+    seen: list[str] = []
     finder = _installed_finder()
+    _spy_path_finder(monkeypatch, seen)
+
     assert finder.find_spec("rich.console", None, None) is None
     assert finder.find_spec("fnord.core", None, None) is None
+    assert seen == [], "a third-party module is never looked up again"
 
 
 def test_absent_fno_submodule_names_both_causes_end_to_end():

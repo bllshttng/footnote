@@ -286,9 +286,11 @@ fn truth_failure_is_routine(detail: &str) -> bool {
 /// single silent retry?".
 struct TruthAttempt {
     probe: Option<TruthProbe>,
-    /// Non-zero exit with NO parseable body on stdout: the process died before
-    /// `cmd_truth` wrote its verdict. That is what an import landing inside a
-    /// `uv tool install --reinstall` looks like from out here. A refusal writes
+    /// The probe never got far enough to measure anything: it failed to spawn
+    /// at all, or exited non-zero with NO parseable body on stdout, meaning the
+    /// process died before `cmd_truth` wrote its verdict. Both are what a
+    /// `uv tool install --reinstall` looks like from out here - it replaces the
+    /// console script and the package tree together. A refusal writes
     /// `{state, reason}` first, so `not-found` never sets this.
     crashed: bool,
 }
@@ -315,8 +317,18 @@ fn family1_truth_attempt(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
-            return TruthAttempt::answered(None);
+            // `uv tool install --reinstall` replaces the `fno` console script
+            // itself, not just the package tree, so the window shows up out here
+            // as a bare ENOENT on spawn. That is the same "measured nothing"
+            // shape as an import crash and gets the same single retry, with the
+            // WARN held back for it.
+            if warn_on_crash {
+                eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
+            }
+            return TruthAttempt {
+                probe: None,
+                crashed: true,
+            };
         }
     };
     let deadline = Instant::now() + timeout;
@@ -4281,6 +4293,28 @@ mod tests {
         );
         assert_eq!(attempts.get(), 2, "never more than one retry");
         assert!(probe.is_none());
+    }
+
+    #[test]
+    fn a_probe_that_cannot_spawn_is_retried_too() {
+        // The reinstall replaces the `fno` console script as well as the tree
+        // behind it, so the window is just as likely to show up as ENOENT on
+        // spawn as it is as an import crash. Guarding only the second reaches
+        // one of two shapes.
+        let attempts = std::cell::Cell::new(0);
+        let probe = family1_truth_probe_retrying(
+            || {
+                attempts.set(attempts.get() + 1);
+                match attempts.get() {
+                    1 => std::process::Command::new("fno-no-such-binary-reinstall-window"),
+                    _ => sh("printf '{\"state\":\"working\"}'"),
+                }
+            },
+            Duration::from_secs(5),
+            "h1",
+        );
+        assert_eq!(attempts.get(), 2, "a failed spawn must buy one retry");
+        assert_eq!(probe.expect("retry answers").state, "working");
     }
 
     #[test]
