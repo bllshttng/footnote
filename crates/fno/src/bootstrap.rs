@@ -49,6 +49,11 @@ use std::time::Duration;
 struct BootErr {
     msg: String,
     code: i32,
+    /// True when re-running the probe cannot change the answer. Only the
+    /// identity refusal sets it: there the probe SUCCEEDED and read a real
+    /// package that belongs to someone else. Every other arm is an instrument
+    /// failure a mid-rewrite venv can explain, so those are worth a retry.
+    stable: bool,
 }
 
 impl BootErr {
@@ -56,7 +61,14 @@ impl BootErr {
         BootErr {
             msg: msg.into(),
             code,
+            stable: false,
         }
+    }
+
+    /// Mark a verdict the retry loop must not re-ask.
+    fn stable(mut self) -> Self {
+        self.stable = true;
+        self
     }
 }
 
@@ -147,15 +159,28 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // The `is_executable` gate in front of it needs the same wait, or the guard
     // below is decorative: during a `--force` the script is absent for ~490ms,
     // a single look skips this whole arm, and control falls straight into
-    // another `--force` - the storm. But NOT unconditionally. This arm also
-    // runs on a box that never installed fno, and during the whole
-    // failure-stamp cooldown below, where a blind 3s is a per-call tax on
-    // exactly the paths the stamp exists to keep cheap. The bin DIRECTORY is
-    // the discriminator: it survives the rewrite that deletes the script inside
-    // it (docs/architecture/cli-lazy-imports.md), and it is absent on a box
-    // with no tool venv at all.
+    // another `--force` - the storm. But NOT unconditionally: this arm also
+    // runs on a box that never installed fno, where a blind 3s is a first-run
+    // tax on a wait that can never pay off.
+    //
+    // The discriminator is "has this box ever had an fno install", asked two
+    // ways because neither alone survives every window. The bin DIRECTORY
+    // answers for an install this shim never made (the installer script, a
+    // plain `uv tool install`), but `uv tool install --force` removes
+    // `<tools>/fno` WHOLE - that recursive removal is what the "failed to
+    // remove directory .../fno/lib (os error 66)" race message names - so the
+    // bin dir is gone too for part of the very window this wait exists to
+    // cover. Our own cache dir survives that removal and is absent on a box
+    // that has never bootstrapped fno, so ask it first and fall back to the
+    // bin dir. Both being absent is the only cheap-look case.
+    //
+    // Stated rather than discovered: a box carrying a failure stamp carries a
+    // cache dir too, so every call in the cooldown pays this 3s before it
+    // reaches the stamp below. Bounded, and still an order cheaper than the
+    // reinstall the stamp exists to prevent.
     if let Some(real) = resolve_via_uv_tool_dir() {
-        let mid_rewrite_possible = real.parent().is_some_and(|bin| bin.is_dir());
+        let mid_rewrite_possible =
+            sentinel_dir().is_dir() || real.parent().is_some_and(|bin| bin.is_dir());
         let ready = if mid_rewrite_possible {
             executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)
         } else {
@@ -481,14 +506,21 @@ fn executable_within(path: &Path, attempts: u32, poll: Duration) -> bool {
 /// failure stamp. A bool there would have turned a named refusal into a silent
 /// re-provision.
 ///
-/// A genuinely foreign package fails every pass and is still refused, so this
-/// buys tolerance for a mid-rewrite venv without weakening the "never run a
-/// foreign fno" invariant.
+/// A genuinely foreign package is refused on the FIRST pass, not the last. Its
+/// probe succeeded and named a stranger, and no amount of waiting rewrites that
+/// answer - retrying it would charge every later call 3s and 16 spawns of the
+/// stranger's interpreter, forever, since the identity refusal returns above the
+/// failure stamp that would otherwise relieve it. Only instrument failures (a
+/// venv python that is missing mid-rewrite, a probe that will not spawn,
+/// metadata being rewritten) are worth a second look, so the retry is scoped to
+/// those and the "never run a foreign fno" invariant is unchanged.
 fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> BootResult<()> {
     let mut last = verify_ours(path);
     for _ in 0..attempts {
-        if last.is_ok() {
-            return last;
+        match &last {
+            Ok(()) => return last,
+            Err(e) if e.stable => return last,
+            Err(_) => {}
         }
         thread::sleep(poll);
         last = verify_ours(path);
@@ -888,6 +920,9 @@ fn verify_ours(real: &Path) -> BootResult<()> {
                  refusing to run a foreign fno."
             ),
         )
+        // The probe ran and answered. Waiting cannot make a stranger's package
+        // into ours, so this refusal is returned on the first pass.
+        .stable()
     })?;
     // Report what we accepted so the user can audit what ran (AC3-UI).
     eprintln!("fno: verified fno {version} (this project's package).");
@@ -1604,6 +1639,54 @@ mod tests {
             e.msg.contains("refusing to run an unverified fno"),
             "{}",
             e.msg
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_foreign_package_is_refused_on_the_first_pass_not_the_last() {
+        // The cost this pins is per-call and permanent, not one slow startup.
+        // A stranger's `fno` at the resolved path answers the probe correctly
+        // every time, so retrying it charges 3s and 16 spawns of THAT
+        // interpreter on every later `fno` call - and the identity refusal
+        // returns above `write_failure_stamp`, so the stamp never relieves it.
+        // Counting spawns rather than timing the call keeps this deterministic.
+        let root = env::temp_dir().join(format!("fno-stranger-{}", std::process::id()));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let calls = root.join("calls");
+
+        // A python that answers as a real, well-formed, FOREIGN package: the
+        // probe succeeds and decide_identity is what refuses.
+        let python = bin.join("python");
+        fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho x >> {}\nprintf 'fno\\nSomeone Else\\n9.9.9\\n'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let real = bin.join("fno-py");
+        fs::write(&real, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let e = verify_ours_within(&real, 15, Duration::from_millis(200))
+            .expect_err("a foreign package must still be refused");
+        assert!(
+            e.msg.contains("refusing to run a foreign fno"),
+            "the refusal must name the cause: {}",
+            e.msg
+        );
+        let spawns = fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            spawns, 1,
+            "a stable refusal must cost one spawn, not the whole budget"
         );
         fs::remove_dir_all(&root).ok();
     }
