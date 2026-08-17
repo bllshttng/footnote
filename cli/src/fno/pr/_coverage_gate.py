@@ -135,7 +135,9 @@ def refusal_line(refusal: str, note: str) -> str:
     return refusal or note
 
 
-def run_coverage_check(pr_number: int, recompute: bool = False, cwd: str = None) -> int:
+def run_coverage_check(
+    pr_number: int, recompute: bool = False, cwd: Optional[str] = None
+) -> int:
     """The verb body: print the refusal, return the state as an exit code.
 
     Exit 0 covered, 3 refused (the guard's sentence on stderr), 4 unanswered
