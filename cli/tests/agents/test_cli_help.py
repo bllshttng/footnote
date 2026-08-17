@@ -74,12 +74,13 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
 # x-71b6: the advertised `fno agents` menu (the eight In-N-Out verbs).
 _ADVERTISED_AGENTS_VERBS = {
     "spawn", "list", "logs", "watch", "attach", "stop", "resume", "status",
+    "watchdog",
 }
 
 
 def test_agents_help_advertises_only_the_eight_menu_verbs(runner: CliRunner) -> None:
     """AC1-HP: `fno agents --help` lists at most 12 verbs, and exactly the
-    advertised set (spawn/list/logs/watch/attach/stop/resume/status)."""
+    advertised set (spawn/list/logs/watch/attach/stop/resume/status/watchdog)."""
     import click
     import typer.main
 
