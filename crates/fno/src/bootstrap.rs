@@ -372,11 +372,14 @@ fn stderr_is_enotempty(stderr: &str) -> bool {
 
 /// Ceiling and poll interval for [`install_verified_within`].
 ///
-/// 15 * 200ms = 3s, deliberately the SAME budget `update.py`'s `_await_binary`
-/// spends on the same file. The two are a pair: one Rust, one emitted shell,
-/// guarding the two provisioning paths. They cannot share an implementation
-/// across that language boundary, so they share the numbers and a test that
-/// pins the shape instead. Change one and change the other.
+/// 15 * 200ms = 3s, deliberately the SAME budget every other provisioning path
+/// spends on the same file: `_uv_retry_sh` and `_await_binary` in
+/// `cli/src/fno/update.py`, `uv_install_verifies_within` in
+/// `.claude-plugin/postinstall.sh`, and the same function in
+/// `scripts/install/fno.sh`. Rust, emitted POSIX sh, and bash cannot share an
+/// implementation across those boundaries, so they share the numbers, and
+/// `tests/test-postinstall-verify-wait.sh` reads all of them and fails on drift.
+/// Change one budget and change all of them.
 const VERIFY_ATTEMPTS: u32 = 15;
 const VERIFY_POLL: Duration = Duration::from_millis(200);
 
@@ -1472,11 +1475,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_budget_matches_the_python_half() {
-        // The two provisioning paths cannot share an implementation across the
-        // Rust/shell boundary, so they share the numbers and this test. The
-        // shell twin is `_await_binary` in cli/src/fno/update.py: 15 iterations
-        // of `sleep 0.2`, a 3s ceiling. Drift fails here rather than in review.
+    fn verify_budget_is_the_shared_three_second_ceiling() {
+        // This half only: nothing here can read the shell twins, so it pins the
+        // Rust numbers and nothing more. The cross-language pin - the one that
+        // fails when update.py, postinstall.sh, or scripts/install/fno.sh drift
+        // off these numbers - is tests/test-postinstall-verify-wait.sh, which
+        // reads all four files. Claiming otherwise here would be a guard on one
+        // of N paths, which is the bug this whole change exists to close.
         assert_eq!(VERIFY_ATTEMPTS, 15);
         assert_eq!(VERIFY_POLL, Duration::from_millis(200));
         assert_eq!(

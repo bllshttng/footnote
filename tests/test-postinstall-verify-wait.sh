@@ -25,7 +25,8 @@ SCRIPT="$HERE/../.claude-plugin/postinstall.sh"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Pull just the wait out of the script. Sourcing the whole file would run its
-# installer, so this extracts the two functions under test by name.
+# installer, so this extracts the one function under test by name; the predicate
+# it re-checks is stubbed below.
 helper="$(mktemp)"
 trap 'rm -f "$helper"' EXIT
 sed -n '/^uv_install_verifies_within() {/,/^}/p' "$SCRIPT" > "$helper"
@@ -62,5 +63,43 @@ elapsed=$((SECONDS - start))
 [[ "$elapsed" -le 10 ]] || fail "wait is not bounded: took ${elapsed}s"
 
 rm -f "$tries_file"
-echo "PASS: postinstall verify waits for a late artifact and still fails bounded on a broken one"
+
+# 3. The SAME bounded re-check, on every provisioning path, with the same 3s.
+#    A guard on one of N paths is decorative, and this one has been proven so
+#    twice: `scripts/install/fno.sh` and update.py's install verify both shipped
+#    single-shot while the other paths waited, and each refused a good install
+#    on its own. Nothing else can pin numbers across Rust, bash, and emitted
+#    POSIX sh, so this is where drift fails.
+have() { # have <file> <fixed-string> <what it must keep>
+  local f="$HERE/../$1"
+  [[ -r "$f" ]] || fail "cannot read $1 (the pin is only as good as the file)"
+  grep -qF -- "$2" "$f" || fail "$1 lost its $3 (looked for: $2)"
+}
+lacks() { # lacks <file> <fixed-string> <why>
+  local f="$HERE/../$1"
+  [[ -r "$f" ]] || fail "cannot read $1"
+  grep -qF -- "$2" "$f" && fail "$1 still has a single-shot verify: $3"
+  return 0
+}
+
+have .claude-plugin/postinstall.sh '-gt 15 ]] && return 1' "15-retry ceiling"
+have .claude-plugin/postinstall.sh 'sleep 0.2' "0.2s poll"
+have .claude-plugin/postinstall.sh 'uv_install_verifies_within ||' "waited verify call"
+lacks .claude-plugin/postinstall.sh 'uv_install_verifies ||' "call the _within wrapper"
+
+have scripts/install/fno.sh '-gt 15 ] && return 1' "15-retry ceiling"
+have scripts/install/fno.sh 'sleep 0.2' "0.2s poll"
+have scripts/install/fno.sh 'uv_install_verifies_within ||' "waited verify call"
+lacks scripts/install/fno.sh 'uv_install_verifies ||' "call the _within wrapper"
+
+have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1' "15-retry ceiling"
+have cli/src/fno/update.py 'if __fno_verify_within; then break' "waited install verify"
+have cli/src/fno/update.py '_fno_n -lt 15' "15-retry ceiling in _await_binary"
+have cli/src/fno/update.py 'sleep 0.2' "0.2s poll"
+
+have crates/fno/src/bootstrap.rs 'VERIFY_ATTEMPTS: u32 = 15' "15-retry ceiling"
+have crates/fno/src/bootstrap.rs 'VERIFY_POLL: Duration = Duration::from_millis(200)' "0.2s poll"
+have crates/fno/src/bootstrap.rs 'install_verified_within(uv, VERIFY_ATTEMPTS, VERIFY_POLL)' "waited verify call"
+
+echo "PASS: postinstall verify waits for a late artifact, still fails bounded on a broken one, and all four provisioning paths share the 3s budget"
 exit 0
