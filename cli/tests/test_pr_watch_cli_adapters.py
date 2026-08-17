@@ -493,3 +493,7 @@ def test_derived_deadline_stays_below_the_interval(monkeypatch):
     assert _resolve_tick_deadline(cfg(600)) == 480
     assert _resolve_tick_deadline(cfg(60)) == 55
     assert _resolve_tick_deadline(cfg(30)) == 25
+    # An explicit config value is clamped too: 3600 over a 600s interval
+    # would suppress up to five successor ticks.
+    explicit = SimpleNamespace(tick_timeout_seconds=3600, interval_seconds=600)
+    assert _resolve_tick_deadline(explicit) == 595
