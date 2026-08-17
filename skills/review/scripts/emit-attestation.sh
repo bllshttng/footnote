@@ -69,13 +69,27 @@ head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
 # every worktree's .fno/events.jsonl to canonical), so head_sha alone cannot
 # say which PR an attestation is about: two branches can carry the same code
 # delta and a global head-sha match then counts a foreign review. The branch
-# is what scopes the event to the PR that was reviewed. A detached HEAD prints
-# the literal "HEAD", which names no branch, so it is recorded as empty rather
-# than as a branch called HEAD. git rev-parse is local and free; do NOT reach
-# for `gh pr view` here - a network call on the emit path turns a review
-# receipt into something that fails when GitHub is slow.
+# is what scopes the event to the PR that was reviewed.
+#
+# Record the branch's UPSTREAM short name, the name GitHub reports as the PR's
+# headRefName, when one is configured: a spawned reviewer runs in its own
+# worktree on a branch of its own (git refuses two worktrees on one branch),
+# so the LOCAL name never equals the PR's branch and the post-rebase carry
+# dies on the branch arm over a pass that genuinely belongs here. The
+# upstream names the remote branch that worktree tracks, which IS the PR
+# branch. A detached HEAD names no branch at all: refuse rather than record
+# "" - the empty string is byte-identical to the pre-branch-field backlog, so
+# a live emit would mint a fresh legacy member no later carry can scope. git
+# rev-parse is local and free; do NOT reach for `gh pr view` here - a network
+# call on the emit path turns a review receipt into something that fails when
+# GitHub is slow.
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-if [[ "$branch" == "HEAD" ]]; then branch=""; fi
+if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+  echo "emit-attestation: detached HEAD names no PR branch (an empty branch field would read as a pre-branch-field event and never carry past a head move); no event emitted" >&2
+  exit 1
+fi
+upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+if [[ "$upstream" == */* ]]; then branch="${upstream#*/}"; fi
 
 # Record the attesting ACTOR alongside what was certified (x-27c5): without a
 # session, an author attesting its own diff is indistinguishable from an
