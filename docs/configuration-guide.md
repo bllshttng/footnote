@@ -148,6 +148,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed. |
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |
 | `recovery.max_nudges` | int | `3` | never | Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately). |
+| `recovery.watchdog` | typing.Literal['off', 'report', 'wake'] | `off` | advanced | External fleet watchdog lane on the same tick (x-55c3): off (default) | report (classify + emit one event per non-leave verdict) | wake (also apply the wake lane: resume plus a content-verified message). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply=all`. |
 | `health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |
 | `health_monitor.thresholds.idea_pile_depth` | int | `25` | never | Breach threshold: idea pile depth. |
 | `health_monitor.thresholds.stale_ready_days` | int | `30` | never | Breach threshold: stale-ready age (days). |

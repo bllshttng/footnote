@@ -379,10 +379,12 @@ def run_sweep(
     transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
     claim_fn: Optional[Callable[[str], dict]] = None,
     graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
-) -> dict:
-    """Build the real seams and classify the whole fleet once. Returns the
-    ``--json`` payload: ``{"generated_at", "verdicts", "counts", "warnings"}``.
-    Read-only - actions live in :func:`apply_verdict`."""
+) -> tuple[dict, list[Row]]:
+    """Build the real seams and classify the whole fleet once. Returns
+    ``(payload, rows)`` - the payload is the ``--json`` shape
+    (``{"generated_at", "verdicts", "counts", "warnings"}``) and the rows ride
+    along index-aligned with the verdicts so an apply lane can reach each
+    row's cwd. Read-only - actions live in :func:`apply_verdict`."""
     now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
     rows, warnings = (rows_provider or fleet_rows)()
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
@@ -405,7 +407,7 @@ def run_sweep(
     counts: dict[str, int] = {}
     for v in vs:
         counts[v.verdict] = counts.get(v.verdict, 0) + 1
-    return {
+    payload = {
         "generated_at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
@@ -413,6 +415,22 @@ def run_sweep(
         "counts": counts,
         "warnings": warnings,
     }
+    return payload, rows
+
+
+def emit_event(kind: str, data: dict) -> None:
+    """Best-effort schema-validated event on the global events.jsonl (the same
+    path the pr_watch tick writes). A miss is swallowed: telemetry never breaks
+    a sweep."""
+    try:
+        from fno import paths
+        from fno.events import _build, append_event
+
+        append_event(
+            _build(kind, "daemon", data), paths.state_dir() / "events.jsonl"
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never break the sweep
+        pass
 
 
 def sweep_path() -> Path:

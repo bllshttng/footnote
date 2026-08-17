@@ -12,6 +12,8 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
+
 import typer
 
 from fno.agents.rust_runtime import make_agents_group_cls
@@ -2619,6 +2621,100 @@ def cmd_truth(
         "resolver-error",
     ):
         raise typer.Exit(code=13)
+
+
+@agents_app.command("watchdog")
+def cmd_watchdog(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit the machine-readable payload."
+    ),
+    apply: Optional[str] = typer.Option(
+        None,
+        "--apply",
+        help=(
+            "Execute actions. Bare --apply runs the wake lane only (the one "
+            "action that cannot destroy work); --apply=all adds reap and "
+            "reroute, which both stop a session. A ghost never auto-acts at "
+            "any level."
+        ),
+    ),
+    only: Optional[str] = typer.Option(
+        None, "--only", help="Filter to one verdict: wake|reroute|reap|ghost|leave."
+    ),
+) -> None:
+    """Sweep the fleet from transcript truth and decide, per row: wake,
+    reroute, reap, or leave.
+
+    The transcript is the truth source (keyed by session id); the registry
+    and claude's agent view are hints. Dry run (default) prints every row
+    with its verdict and the measurement that decided it, and emits one
+    watchdog_verdict event per non-leave row.
+    """
+    import time as _time
+
+    from fno.agents import watchdog as wd
+
+    if apply not in (None, "", "all"):
+        print(
+            f"fno agents watchdog: --apply takes no value or 'all' (got {apply!r})",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if only is not None and only not in (
+        wd.GHOST, wd.REAP, wd.REROUTE, wd.WAKE, wd.LEAVE,
+    ):
+        print(f"fno agents watchdog: unknown verdict {only!r}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    now = _time.time()
+    payload, rows = wd.run_sweep(now_s=now)
+    pairs = [
+        (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
+    ]
+    if only is not None:
+        pairs = [p for p in pairs if p[0].verdict == only]
+    wd.write_sweep_file("manual", payload["counts"], now)
+
+    if apply is None:
+        for v, _row in pairs:
+            if v.verdict != wd.LEAVE:
+                wd.emit_event(
+                    "watchdog_verdict",
+                    {"row_id": v.row_id, "name": v.name,
+                     "verdict": v.verdict, "basis": v.basis},
+                )
+        if json_out:
+            filtered = {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
+            sys.stdout.write(json.dumps(filtered) + "\n")
+            sys.stdout.flush()
+            return
+        for v, _row in pairs:
+            typer.echo(f"{v.name:34} {v.state:9} {v.verdict:8} {v.basis}")
+        for warning in payload["warnings"]:
+            print(f"warning: {warning}", file=sys.stderr)
+        counts = " ".join(f"{k}={v}" for k, v in sorted(payload["counts"].items()))
+        typer.echo(f"{len(pairs)} row(s): {counts}")
+        return
+
+    lanes = "all" if apply == "all" else "wake"
+    results = []
+    for v, row in pairs:
+        outcome, detail = wd.apply_verdict(v, lanes=lanes, cwd=row.cwd)
+        results.append({"row_id": v.row_id, "verdict": v.verdict,
+                        "outcome": outcome, "detail": detail})
+        line = f"{outcome:9} {v.name:34} {detail}"
+        if outcome == "refused":
+            print(line, file=sys.stderr)
+        else:
+            typer.echo(line)
+        if outcome in ("applied", "refused"):
+            wd.emit_event(
+                "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+                {"row_id": v.row_id, "verdict": v.verdict, "detail": detail},
+            )
+    if json_out:
+        sys.stdout.write(json.dumps({"results": results}) + "\n")
+        sys.stdout.flush()
 
 
 @agents_app.command("ping", hidden=True)

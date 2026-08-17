@@ -276,6 +276,55 @@ def tick() -> None:
         except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
             log.warning("pr-watch: recovery sweep failed: %s", exc)
 
+    # Fleet watchdog (x-55c3), same cadence, same non-fatal wrap: classify
+    # every fleet row from transcript truth and act per
+    # config.recovery.watchdog. "report" emits one watchdog_verdict event per
+    # non-leave row; "wake" additionally applies the wake lane. No tick value
+    # reaps or reroutes - those stop a session and stay behind a manual
+    # `fno agents watchdog --apply=all`.
+    if settings.recovery.watchdog in ("report", "wake") and settings.autonomy.enabled:
+        try:
+            import time as _time
+
+            from fno.agents import watchdog as _wd
+
+            now = _time.time()
+            payload, rows = _wd.run_sweep(now_s=now)
+            _wd.write_sweep_file("tick", payload["counts"], now)
+            acted = 0
+            for d, row in zip(payload["verdicts"], rows):
+                verdict = _wd.Verdict(**d)
+                if verdict.verdict == _wd.LEAVE:
+                    continue
+                _wd.emit_event(
+                    "watchdog_verdict",
+                    {
+                        "row_id": verdict.row_id,
+                        "name": verdict.name,
+                        "verdict": verdict.verdict,
+                        "basis": verdict.basis,
+                    },
+                )
+                if settings.recovery.watchdog == "wake" and verdict.verdict == _wd.WAKE:
+                    outcome, detail = _wd.apply_verdict(
+                        verdict, lanes="wake", cwd=row.cwd
+                    )
+                    acted += 1
+                    _wd.emit_event(
+                        "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+                        {
+                            "row_id": verdict.row_id,
+                            "verdict": verdict.verdict,
+                            "detail": detail,
+                        },
+                    )
+            counts = " ".join(
+                f"{k}={v}" for k, v in sorted(payload["counts"].items())
+            )
+            typer.echo(f"watchdog sweep: {counts} acted={acted}")
+        except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
+            log.warning("pr-watch: watchdog sweep failed: %s", exc)
+
     # Canonical-sync catch-up. The dispatch above is event-time-only:
     # it acts on merges it DETECTS, so a merge that landed while the daemon was
     # wedged is never synced by it. This leg is keyed on outcome instead - it

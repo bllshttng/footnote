@@ -377,6 +377,8 @@ enabled = true
 idle_threshold_seconds = 900
 # Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately).
 max_nudges = 3
+# External fleet watchdog lane on the same tick (x-55c3): off (default) | report (classify + emit one event per non-leave verdict) | wake (also apply the wake lane: resume plus a content-verified message). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply=all`.
+watchdog = "off"
 
 [health_monitor]
 # Enable backlog health monitoring.

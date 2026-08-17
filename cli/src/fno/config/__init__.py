@@ -2254,6 +2254,14 @@ class RecoveryBlock(BaseModel):
         emits ``recovery_capped`` (default 3) so a genuinely wedged session
         surfaces instead of looping forever. Close notifications are once-only,
         tracked separately.
+    watchdog:
+        The external fleet watchdog lane riding the same tick (x-55c3):
+        ``off`` (default) is a no-op, ``report`` classifies every fleet row
+        from transcript truth and emits one ``watchdog_verdict`` event per
+        non-leave row, ``wake`` additionally applies the wake lane (resume +
+        content-verified message). No tick value ever reaps or reroutes:
+        those stop a session and stay behind an operator running
+        ``fno agents watchdog --apply=all`` by hand.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2261,6 +2269,7 @@ class RecoveryBlock(BaseModel):
     enabled: bool = True
     idle_threshold_seconds: int = Field(default=900, gt=0)
     max_nudges: int = Field(default=3, ge=1)
+    watchdog: Literal["off", "report", "wake"] = "off"
 
 
 class HealthThresholdsBlock(BaseModel):

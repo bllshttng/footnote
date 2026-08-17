@@ -376,6 +376,7 @@ FIELD_META: dict[str, Meta] = {
     "recovery.enabled": Meta("advanced", "Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed."),
     "recovery.idle_threshold_seconds": Meta("never", "How stale a bg session must be (seconds) before recovery acts on it."),
     "recovery.max_nudges": Meta("never", "Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately)."),
+    "recovery.watchdog": Meta("advanced", "External fleet watchdog lane on the same tick (x-55c3): off (default) | report (classify + emit one event per non-leave verdict) | wake (also apply the wake lane: resume plus a content-verified message). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply=all`."),
     # --- config.health_monitor.* ---
     "health_monitor.enabled": Meta("advanced", "Enable backlog health monitoring."),
     "health_monitor.thresholds.idea_pile_depth": Meta("never", "Breach threshold: idea pile depth."),
