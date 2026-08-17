@@ -54,6 +54,12 @@ struct BootErr {
     /// package that belongs to someone else. Every other arm is an instrument
     /// failure a mid-rewrite venv can explain, so those are worth a retry.
     stable: bool,
+    /// True when `run()` may remember this failure in the stamp. Set only at
+    /// the emission site that knows what the failure PROVES (see
+    /// [`VerifyFail`]), never inferred from message wording: a wording change
+    /// anywhere in a composed message must not be able to silently opt a
+    /// cacheable failure out of the stamp, or a could-not-answer one in.
+    cacheable: bool,
 }
 
 impl BootErr {
@@ -62,12 +68,19 @@ impl BootErr {
             msg: msg.into(),
             code,
             stable: false,
+            cacheable: false,
         }
     }
 
     /// Mark a verdict the retry loop must not re-ask.
     fn stable(mut self) -> Self {
         self.stable = true;
+        self
+    }
+
+    /// Mark a failure `run()` may remember in the stamp.
+    fn cacheable(mut self) -> Self {
+        self.cacheable = true;
         self
     }
 }
@@ -145,10 +158,14 @@ fn run(args: &[OsString]) -> BootResult<()> {
             // A foreign package now sits at our path: drop the sentinel so the
             // fast path stops vouching for it. What follows is NOT a
             // re-provision - the adopt arm below resolves this same path,
-            // re-verifies it, and exits on the same refusal. The wheel is only
-            // reinstalled when the path stops resolving at all, which is the
-            // conservative direction: `--force` over a stranger's install is a
-            // decision for the operator, not for the shim.
+            // re-verifies it, and exits on the same refusal. That is the whole
+            // promise of this arm: a VERIFIABLE stranger is never exec'd and
+            // never re-provisioned over. It is not a promise about the
+            // provisioning arm: `resolve_via_uv_tool_dir` never stats the
+            // script, so a stranger's non-executable file at our path still
+            // falls through to `uv tool install --force` there, same as it
+            // always has. Whether that --force should ever refuse over a
+            // stranger is a real design question, and it is not decided here.
             let _ = fs::remove_file(sentinel_path());
             wait_already_spent = true;
         } else {
@@ -255,7 +272,10 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // bad, and `decide_cached_failure` fails OPEN on every unreadable shape for
     // the same reason - a negative cache must never wedge the bootstrap shut.
     if let Err(e) = install_wheel(&uv, &source) {
-        if e.msg.starts_with(UNVERIFIED_INSTALL_PREFIX) && !e.msg.contains(UV_DIR_UNREADABLE) {
+        // The typed flag decides, not the wording: an unreadable-tree refusal
+        // says so in its message for the operator, and no wording change can
+        // opt a settled bad-install verdict out of the stamp.
+        if e.cacheable {
             write_failure_stamp(&source, &e.msg);
         }
         return Err(e);
@@ -452,7 +472,18 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         if out.status.success() {
             return match install_verified_within(uv, VERIFY_ATTEMPTS, VERIFY_POLL) {
                 Ok(()) => Ok(()),
-                Err(m) => Err(BootErr::new(1, format!("{UNVERIFIED_INSTALL_PREFIX}: {m}"))),
+                Err(f) => {
+                    // Cacheability is set HERE, where the failure's meaning is
+                    // known, and carried on the error: a bad install is a
+                    // settled verdict worth remembering; a could-not-answer
+                    // shape never is, whatever its message happens to say.
+                    let mut e =
+                        BootErr::new(1, format!("{UNVERIFIED_INSTALL_PREFIX}: {}", f.msg()));
+                    if matches!(f, VerifyFail::BadInstall(_)) {
+                        e = e.cacheable();
+                    }
+                    Err(e)
+                }
             };
         }
         let code = out.status.code().unwrap_or(1);
@@ -475,18 +506,14 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     unreachable!("the loop returns on success, non-signature failure, or final attempt")
 }
 
-/// The one `install_wheel` failure shape that means "uv exited zero and nothing
-/// usable landed". `run()` keys the failure stamp on it, so the text is a
-/// constant rather than a literal repeated at both sites: the two must not drift.
-/// A uv that itself failed (network, auth, disk) is deliberately NOT this shape
-/// and is never cached, so the operator's fix takes effect on the next call.
+/// The human-facing sentence for the one `install_wheel` failure shape that
+/// means "uv exited zero and nothing usable landed". Message text only: the
+/// stamp decision reads the typed `cacheable` flag, not this string.
 const UNVERIFIED_INSTALL_PREFIX: &str = "uv reported success but the install does not verify";
 
-/// The one `install_verified` refusal that means "the predicate could not ANSWER",
-/// not "the install is bad": `uv tool dir` was unreadable, so no tree was ever
-/// looked at. `run()` matches on it to keep that shape out of the failure stamp,
-/// so the text is a constant shared with the site that emits it rather than a
-/// literal repeated at both: the two must not drift.
+/// The human-facing reason a could-not-answer refusal carries: the tree under
+/// `uv tool dir` could not be read. Message text only - the cacheability
+/// decision reads `VerifyFail`, not this string.
 const UV_DIR_UNREADABLE: &str = "uv tool dir unreadable";
 
 /// How many times `install_wheel` may run uv before giving up. Three: one
@@ -609,7 +636,7 @@ fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> BootResult<
 /// at whether the disk is re-checked. This re-runs the full predicate every
 /// pass and returns the moment it passes, so a genuinely broken install still
 /// fails, with the same message it always did plus what we waited.
-fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(), String> {
+fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(), VerifyFail> {
     let mut last = install_verified(uv);
     for _ in 0..attempts {
         if last.is_ok() {
@@ -618,12 +645,13 @@ fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(
         thread::sleep(poll);
         last = install_verified(uv);
     }
-    last.map_err(|m| {
-        let waited = poll.as_millis() * u128::from(attempts);
-        // "still failing", not "still absent": the predicate has three ways to
-        // say no now, and only one of them is absence.
-        format!("{m} (still failing after waiting {waited}ms for uv's own artifact)")
-    })
+    let waited = poll.as_millis() * u128::from(attempts);
+    // "still failing", not "still absent": the predicate has several ways to
+    // say no now, and only some of them are absence.
+    if let Err(f) = &mut last {
+        f.note_waited(waited);
+    }
+    last
 }
 
 /// Confirm the install with markers only a real provisioned venv produces:
@@ -632,24 +660,64 @@ fn install_verified_within(uv: &Path, attempts: u32, poll: Duration) -> Result<(
 ///
 /// Pure and single-shot on purpose: [`install_verified_within`] owns the
 /// waiting, so this stays a predicate a test can drive against a fixed tree.
-fn install_verified(uv: &Path) -> Result<(), String> {
-    let tool_dir = uv_tool_dir(uv).ok_or(UV_DIR_UNREADABLE)?;
+/// An [`install_verified`] refusal, split by what it PROVES rather than how it
+/// is worded. `BadInstall` means uv exited zero over a tree that yields no
+/// usable fno - a settled verdict `run()` may remember in the stamp.
+/// `CouldNotAnswer` means the predicate could not read the tree - never
+/// cached, because a negative cache must never wedge the bootstrap shut over
+/// a tree nobody looked at.
+#[derive(Debug)]
+enum VerifyFail {
+    BadInstall(String),
+    CouldNotAnswer(String),
+}
+
+impl std::fmt::Display for VerifyFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.msg())
+    }
+}
+
+impl VerifyFail {
+    fn msg(&self) -> &str {
+        match self {
+            VerifyFail::BadInstall(m) | VerifyFail::CouldNotAnswer(m) => m,
+        }
+    }
+
+    /// Append the waited-suffix the way the String errors used to carry it.
+    fn note_waited(&mut self, waited: u128) {
+        let suffix = format!(" (still failing after waiting {waited}ms for uv's own artifact)");
+        match self {
+            VerifyFail::BadInstall(m) | VerifyFail::CouldNotAnswer(m) => {
+                *m = format!("{m}{suffix}")
+            }
+        }
+    }
+}
+
+fn install_verified(uv: &Path) -> Result<(), VerifyFail> {
+    let tool_dir = uv_tool_dir(uv).ok_or_else(|| {
+        VerifyFail::CouldNotAnswer(UV_DIR_UNREADABLE.to_string())
+    })?;
     let venv = tool_dir.join(TOOL_NAME);
     let entry = venv.join("bin").join("fno-py");
     match fs::metadata(&entry) {
         Ok(_) => {}
         // True absence, worded as absence. Any OTHER stat failure (a parent
         // dir the predicate cannot read) is could-not-answer, not a missing
-        // script, so it carries the unreadable marker the stamp carve-out
-        // keys on instead of a false-absence diagnosis.
+        // script: a false-absence diagnosis would be replayed by the stamp.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!("no console script at {}", entry.display()));
+            return Err(VerifyFail::BadInstall(format!(
+                "no console script at {}",
+                entry.display()
+            )));
         }
         Err(e) => {
-            return Err(format!(
+            return Err(VerifyFail::CouldNotAnswer(format!(
                 "cannot read the console script at {}: {e} ({UV_DIR_UNREADABLE})",
                 entry.display()
-            ));
+            )));
         }
     }
     // Executable, not merely present. The three shell twins verify with
@@ -662,10 +730,10 @@ fn install_verified(uv: &Path) -> Result<(), String> {
     // replays for 600s, and "no console script" would send the operator hunting
     // for a file `ls` plainly shows.
     if !is_executable(&entry) {
-        return Err(format!(
+        return Err(VerifyFail::BadInstall(format!(
             "the console script at {} is not executable",
             entry.display()
-        ));
+        )));
     }
     let lib = venv.join("lib");
     match count_pyc(&lib) {
@@ -673,29 +741,29 @@ fn install_verified(uv: &Path) -> Result<(), String> {
         // bytecode. NotFound joins the empty case because a venv with no lib/
         // at all is a bad install, not an unreadable one.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "no compiled bytecode under {} (--compile-bytecode install ships it)",
-                lib.display()
-            ));
+            return Err(VerifyFail::BadInstall(no_bytecode_msg(&lib)));
         }
         Ok(0) => {
-            return Err(format!(
-                "no compiled bytecode under {} (--compile-bytecode install ships it)",
-                lib.display()
-            ));
+            return Err(VerifyFail::BadInstall(no_bytecode_msg(&lib)));
         }
         // A read error partway through the walk is could-not-answer: the tree
-        // may ship bytecode the predicate was not allowed to list, and the
-        // unreadable marker keeps it out of the failure stamp.
+        // may ship bytecode the predicate was not allowed to list.
         Err(e) => {
-            return Err(format!(
+            return Err(VerifyFail::CouldNotAnswer(format!(
                 "cannot read under {}: {e} ({UV_DIR_UNREADABLE})",
                 lib.display()
-            ));
+            )));
         }
         Ok(_) => {}
     }
     Ok(())
+}
+
+fn no_bytecode_msg(lib: &Path) -> String {
+    format!(
+        "no compiled bytecode under {} (--compile-bytecode install ships it)",
+        lib.display()
+    )
 }
 
 /// Count `*.pyc` files under `dir`, recursively. Pure filesystem, testable.
@@ -1792,12 +1860,50 @@ mod tests {
         fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
 
         let e = install_wheel(&uv, "fno").unwrap_err();
-        // Pinned to the PREFIX, not just the words: `run()` decides whether to
-        // remember this failure by matching the start of the message, and a
-        // reworded first clause would silently turn the stamp back off and
-        // restore the reinstall-on-every-call behaviour.
         assert!(e.msg.starts_with(UNVERIFIED_INSTALL_PREFIX), "{}", e.msg);
         assert!(e.msg.contains("no compiled bytecode"), "{}", e.msg);
+        // The stamp decision reads THIS flag, set at the emission site that
+        // knows what the failure proves. It is pinned beside the wording test
+        // because the wording no longer decides anything: a bad-install
+        // message that happens to mention an unreadable dir must still stamp.
+        assert!(e.cacheable, "a settled bad install is cacheable");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_could_not_answer_verify_is_never_cacheable() {
+        // uv exits 0 over a tree the predicate cannot read. The message names
+        // the unreadable dir for the operator; the TYPED verdict, not that
+        // wording, is what keeps it out of the stamp - and the inverse shape
+        // is pinned above, so neither direction can drift back to string
+        // matching.
+        let root = env::temp_dir().join(format!("fno-uvfake5-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        let venv = tool_dir.join("fno");
+        fs::create_dir_all(venv.join("bin")).unwrap();
+        fs::create_dir_all(venv.join("lib")).unwrap();
+        let entry = venv.join("bin/fno-py");
+        fs::write(&entry, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(venv.join("lib/x.pyc"), "").unwrap();
+        fs::set_permissions(venv.join("lib"), fs::Permissions::from_mode(0o000)).unwrap();
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') echo '{}'; exit 0;;\n\
+             'tool install') exit 0;;\n\
+             esac; exit 64\n",
+            tool_dir.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let e = install_wheel(&uv, "fno").unwrap_err();
+        assert!(e.msg.contains(UV_DIR_UNREADABLE), "{}", e.msg);
+        assert!(!e.cacheable, "could-not-answer must never be stamped");
+        fs::set_permissions(venv.join("lib"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1837,8 +1943,10 @@ mod tests {
         let uv = uv_reporting_tool_dir(&root, &tool_dir);
 
         let e = install_verified(&uv).unwrap_err();
-        assert!(e.contains(UV_DIR_UNREADABLE), "{e}");
-        assert!(!e.contains("no compiled bytecode"), "{e}");
+        assert!(e.msg().contains(UV_DIR_UNREADABLE), "{e}");
+        assert!(!e.msg().contains("no compiled bytecode"), "{e}");
+        // The typed half is the one the stamp decision reads.
+        assert!(matches!(e, VerifyFail::CouldNotAnswer(_)));
 
         fs::set_permissions(venv.join("lib"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(&root).ok();
@@ -2084,8 +2192,8 @@ mod tests {
         let uv = uv_reporting_tool_dir(&root, &tool_dir);
 
         let e = install_verified(&uv).unwrap_err();
-        assert!(e.contains("is not executable"), "{e}");
-        assert!(!e.contains("no console script"), "{e}");
+        assert!(e.msg().contains("is not executable"), "{e}");
+        assert!(!e.msg().contains("no console script"), "{e}");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -2102,8 +2210,8 @@ mod tests {
         let uv = uv_reporting_tool_dir(&root, &tool_dir);
 
         let e = install_verified_within(&uv, 3, Duration::from_millis(10)).unwrap_err();
-        assert!(e.contains("no console script at"), "{e}");
-        assert!(e.contains("still failing after waiting 30ms"), "{e}");
+        assert!(e.msg().contains("no console script at"), "{e}");
+        assert!(e.msg().contains("still failing after waiting 30ms"), "{e}");
         fs::remove_dir_all(&root).ok();
     }
 
