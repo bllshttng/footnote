@@ -22,6 +22,7 @@ allowed to disagree - a cancelled latest run is red AND unsettled:
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
@@ -219,8 +220,30 @@ def coverage_recompute_note(coverage: dict) -> None:
         sys.stderr.write(f"note: coverage recompute: {note}\n")
 
 
+def _review_lane(pr: str, cwd: Optional[str]) -> bool:
+    """Whether the merge gate's coverage guard engages for this PR.
+
+    The SAME lane predicate ``fno pr merge`` reads (``_review_lane_configured``
+    in ``_merge``): a stock install with no lane opts out of review there, so
+    ``ready`` must opt out with it or the two verbs answer opposite ways - the
+    exact divergence this conjunction exists to remove, just inverted onto the
+    no-lane repo (status refusing forever at uncovered 0 while merge merges).
+    Fail-closed (True) on any error, like the merge side.
+    """
+    try:
+        from fno.pr._merge import _review_lane_configured
+
+        return bool(_review_lane_configured(cwd or os.getcwd(), int(pr)))
+    except Exception:
+        return True
+
+
 def _ready_blockers(
-    green: bool, verdict: str, unresolved: object, coverage: dict
+    green: bool,
+    verdict: str,
+    unresolved: object,
+    coverage: dict,
+    review_lane: bool = True,
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
@@ -230,7 +253,10 @@ def _ready_blockers(
     holding. ``unknown`` coverage blocks and is named as its own blocker: the
     reason a read returned unknown is a separate question (x-b56a), this only
     reports that the answer is missing. Fail-closed everywhere: an unset
-    unresolved count blocks as ``optional_reviews_unknown``.
+    unresolved count blocks as ``optional_reviews_unknown``, and the coverage
+    conjunct engages wherever the merge gate's coverage guard would
+    (``review_lane``; a repo with no review lane has no coverage answer to
+    fail).
     """
     blockers: list[str] = []
     if not green:
@@ -241,11 +267,12 @@ def _ready_blockers(
         blockers.append("optional_reviews_unknown")
     elif unresolved > 0:
         blockers.append("optional_reviews_unresolved")
-    cov_word = coverage.get("coverage")
-    if cov_word == "unknown":
-        blockers.append("review_coverage_unknown")
-    elif not (cov_word == "covered" and (coverage.get("reviewed_count") or 0) > 0):
-        blockers.append("review_coverage_uncovered")
+    if review_lane:
+        cov_word = coverage.get("coverage")
+        if cov_word == "unknown":
+            blockers.append("review_coverage_unknown")
+        elif not (cov_word == "covered" and (coverage.get("reviewed_count") or 0) > 0):
+            blockers.append("review_coverage_uncovered")
     return blockers
 
 
@@ -300,16 +327,21 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # PR merge would clear after one recompute. The PR head rides in from
     # _fetch: without it the verb would pin the emitted row to the LOCAL
     # checkout's HEAD, planting a wrong-head row both gates then disagree on.
+    # The lane answer comes BEFORE the coverage read, not beside it: on a
+    # no-lane repo the read's recompute is a 120s subprocess that appends
+    # coverage rows nobody acts on - the exact cost `fno pr merge` skips on
+    # this same boundary - so a conjunct ready ignores must not fire it either.
+    review_lane = _review_lane(pr, cwd)
     try:
         coverage = read_review_coverage(
-            int(pr), cwd, head=pr_json.get("headRefOid"), recompute=True
+            int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
         )
     except Exception:
         # The producer's own sentinel, not a copy of it: a second literal here
         # is a shape that drifts the moment a key is added on one side only.
         coverage = dict(_UNKNOWN_COVERAGE)
 
-    blockers = _ready_blockers(green, verdict, unresolved, coverage)
+    blockers = _ready_blockers(green, verdict, unresolved, coverage, review_lane)
     sys.stdout.write(
         json.dumps(
             {

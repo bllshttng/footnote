@@ -1346,24 +1346,32 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
 /// reads every branch's attestations into every PR's verdict list. That is
 /// noise in the common case and a false pass in the bad one: `review_freshness`
 /// grants CarriedBaseSync on a code-diff identity match, which two branches
-/// carrying the same delta (a cherry-pick, a duplicate-PR pair) satisfy.
+/// carrying the same delta (a cherry-pick, a duplicate-PR pair) satisfy - and
+/// that shape only exists at DIFFERENT shas, since equal shas return Fresh
+/// before any carry is computed.
 ///
-/// `attested_branch` is empty for every event predating the field. Those fall
-/// back to exact head equality, which is unambiguous evidence about THIS PR
-/// (a foreign branch cannot share this head sha without being this commit) and
-/// keeps in-flight gates satisfiable. It deliberately does NOT inherit the
-/// carry: a legacy attestation on a moved head is not scopeable and must not
-/// count.
+/// Exact head equality is therefore admitted whatever branch the emitter stood
+/// on: a foreign branch cannot share this head sha without being this commit,
+/// and the spawned-reviewer lane depends on it (review-lanes.md) - the
+/// reviewer's worktree necessarily carries a branch of its own (git refuses
+/// two worktrees on one branch), so a branch-only match would read its
+/// exact-HEAD pass as out of scope. The branch arm is what survives a head
+/// move: a same-branch attestation can still carry (x-62a1), while a foreign
+/// branch at a different head stays out of scope - the cherry-pick shape.
+///
+/// `attested_branch` is empty for every event predating the field (and for a
+/// detached-HEAD emit). Those fall back to exact head equality only: a legacy
+/// attestation on a moved head is not scopeable and must not count.
 fn attestation_in_scope(
     attested_branch: &str,
     attested_head: &str,
     head_branch: &str,
     head_sha: &str,
 ) -> bool {
-    if attested_branch.is_empty() {
-        return !attested_head.is_empty() && attested_head == head_sha;
+    if !attested_head.is_empty() && attested_head == head_sha {
+        return true;
     }
-    !head_branch.is_empty() && attested_branch == head_branch
+    !attested_branch.is_empty() && !head_branch.is_empty() && attested_branch == head_branch
 }
 
 /// The path from a `git diff --raw` line (`:<meta>\t<path>`), or `""`.
@@ -1786,8 +1794,9 @@ fn scan_unrecorded_decisions(
 /// reviewer is satisfied when events.jsonl carries a line with
 /// `type == "review_attestation"`, `data.reviewer` matching (leading '/'
 /// stripped on both sides), the line in scope for this PR
-/// (`attestation_in_scope`: `data.branch == head_branch`, or the legacy
-/// exact-head fallback), and `data.verdict == "pass"`.
+/// (`attestation_in_scope`: `data.branch == head_branch`, or the exact head
+/// sha whatever branch it emitted on - a legacy line with no branch counts
+/// only on that exact-head arm), and `data.verdict == "pass"`.
 ///
 /// The gate reads `.is_empty()` and the block message reads the names, so the
 /// decision and the explanation come from ONE scan. When they came from two,
@@ -3498,10 +3507,13 @@ fn reviewed_commit_from_body(body: &str) -> &str {
 }
 
 /// A clean-pass issue comment by `login` that pins the commit it read, as
-/// `(sha, freshness)`. The FIRST pinned comment wins: the freshness predicate
-/// decides whether that sha still describes HEAD, exactly as the review-object
-/// path does, and a marker with no pinned sha is not evidence (returns None,
-/// never an invented sha).
+/// `(sha, freshness)`. The FRESHEST pinned comment wins, selected by
+/// `freshness_rank` exactly as the review-object path selects among a bot's
+/// reviews: comments arrive oldest-first, so first-match would keep the
+/// verdict pinned to the sha of the FIRST clean pass forever - a bot that
+/// re-reviews after a head move posts a second comment the scan would never
+/// reach, and the gate could never clear through this lane again. A marker
+/// with no pinned sha is not evidence (returns None, never an invented sha).
 fn clean_pass_review(
     comments: &[Value],
     login: &str,
@@ -3511,6 +3523,7 @@ fn clean_pass_review(
     if markers.is_empty() {
         return None;
     }
+    let mut best: Option<(String, Freshness)> = None;
     for c in comments {
         let author = c
             .pointer("/author/login")
@@ -3528,9 +3541,16 @@ fn clean_pass_review(
         if sha.is_empty() {
             continue;
         }
-        return Some((sha.to_string(), freshness(sha)));
+        let fresh = freshness(sha);
+        if best
+            .as_ref()
+            .map(|(_, b)| freshness_rank(fresh) > freshness_rank(*b))
+            .unwrap_or(true)
+        {
+            best = Some((sha.to_string(), fresh));
+        }
     }
-    None
+    best
 }
 
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
@@ -3806,10 +3826,11 @@ pub enum AttestationOrigin {
     Unknown,
 }
 
-/// How a local attestation was scoped to this PR: it named this PR's head
-/// branch (`attested_branch`), or it predates the `branch` field and was
-/// admitted on exact head equality (`legacy_head_match`). The second is the
-/// one a refusal must NAME rather than silently drop: a pre-branch-field
+/// How a local attestation was scoped to this PR: it is scopeable while
+/// scope lasts (`attested_branch`: it named this PR's head branch, or it pins
+/// this PR's exact head sha), or it predates the `branch` field and was
+/// admitted on exact head equality alone (`legacy_head_match`). The second is
+/// the one a refusal must NAME rather than silently drop: a pre-branch-field
 /// attestation on a moved head is unscopeable, and a reader told only "0
 /// reviewed" cannot tell it from nobody-ever-reviewed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -4292,10 +4313,11 @@ pub fn classify_coverage(
             attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
             reviewed_sha: lp.head.clone(),
             freshness: Some(fresh),
-            // In-scope guarantees one of exactly two shapes: a named branch
-            // that equals this PR's head branch, or a legacy line admitted on
-            // exact head equality. The label lets a refusal name the second
-            // kind rather than drop it silently.
+            // In-scope guarantees one of exactly two shapes: a line admitted
+            // while scope lasts (branch match, or the exact head sha - both of
+            // which keep the carry reachable on later head moves), or a legacy
+            // line admitted on exact head equality alone. The label lets a
+            // refusal name the second kind rather than drop it silently.
             scope: Some(if lp.branch.is_empty() {
                 AttestationScope::LegacyHeadMatch
             } else {
