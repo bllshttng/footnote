@@ -630,6 +630,25 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         if not nid:
             return  # no node linked to this PR - nothing to close
 
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            # External selection: the backfill below writes the local graph and
+            # the reconcile verb is tracker-owned (it refuses under external
+            # selection), so both halves target the wrong store. Backfill the
+            # SIDECAR's primary link instead, then close through the shared
+            # external terminal: same gates, sidecar rollups, one close.
+            from fno.graph.cli import _done_via_seam
+
+            sc = sidecar_store.load(nid)
+            if not isinstance(sc.pr_number, int):
+                sc.pr_number = pr_number
+                if pr_url and not (sc.pr_url or "").strip():
+                    sc.pr_url = pr_url
+                sidecar_store.save(sc)
+            _done_via_seam(nid, skip_stamp=False, force=False, reason=None)
+            return
+
         def _mut(entries: List[dict]) -> List[dict]:
             for e in entries:
                 if e.get("id") == nid:
