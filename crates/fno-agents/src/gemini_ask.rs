@@ -677,42 +677,7 @@ fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// RAII per-agent flock (same primitive as `codex_ask::AgentLock`).
-struct AgentLock {
-    _file: std::fs::File,
-}
-
-impl AgentLock {
-    fn acquire(home: &AgentsHome, name: &str, timeout: Duration) -> Result<Self, ()> {
-        let locks_dir = home.root().join("locks");
-        let _ = std::fs::create_dir_all(&locks_dir);
-        let path = locks_dir.join(format!("{}.lock", name));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|_| ())?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(_) => {
-                    if Instant::now() >= deadline {
-                        return Err(());
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for AgentLock {
-    fn drop(&mut self) {
-        let _ = self._file.unlock();
-    }
-}
+use crate::agent_lock::{holder_note, AgentLock};
 
 /// Outcome of `dispatch_gemini_ask` (mirror of codex's `AskOutcome`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,9 +739,10 @@ pub fn dispatch_gemini_ask(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {:?} after {:.1}s",
+                    "lock timeout for agent {:?} after {:.1}s{}",
                     name,
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );
@@ -880,9 +846,10 @@ pub fn dispatch_gemini_once(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );

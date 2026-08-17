@@ -40,6 +40,7 @@
 //!   [`readiness`]).
 
 pub mod active_backlog;
+mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
 pub mod claims;

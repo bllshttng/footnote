@@ -309,3 +309,215 @@ def test_hold_agent_lock_rejects_path_traversal(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             with hold_agent_lock(bad, registry_path):
                 pytest.fail("should not have entered context")
+
+
+# ---------------------------------------------------------------------------
+# Holder stamp: a zero-byte lock is unfalsifiable by inspection
+# ---------------------------------------------------------------------------
+
+
+def _hold_via_api_in_child(
+    registry_path: str, name: str, hold_seconds: float, ready_path: str
+) -> None:
+    """Helper: hold the lock through hold_agent_lock, so the stamp is written."""
+    from pathlib import Path as _P
+
+    from fno.agents.lock import hold_agent_lock
+
+    with hold_agent_lock(name, _P(registry_path)):
+        _P(ready_path).write_text("held")
+        time.sleep(hold_seconds)
+
+
+def test_acquire_stamps_holder_and_file_does_not_grow(tmp_path: Path) -> None:
+    """The lock file carries one JSON line naming pid, name and acquire time."""
+    import json
+    import os
+
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_file = _agent_lock_path("stamped", registry_path)
+
+    sizes = []
+    for _ in range(3):
+        with hold_agent_lock("stamped", registry_path):
+            raw = lock_file.read_text()
+        sizes.append(len(raw))
+
+    assert raw.count("\n") == 1, f"lock file must stay one line: {raw!r}"
+    assert len(set(sizes)) == 1, f"lock file grew across acquires: {sizes}"
+
+    holder = json.loads(raw)
+    assert holder["pid"] == os.getpid()
+    assert holder["name"] == "stamped"
+    assert holder["acquired_at"].endswith("+00:00")
+
+
+def test_release_clears_the_stamp(tmp_path: Path) -> None:
+    """A released lock file names nobody.
+
+    The stamp is only true while the flock is held. Leaving it behind restages
+    the misreading it exists to end: a released file that still names a pid and
+    a time reads as ownership, and the pid is this process, so the liveness
+    guard cannot refuse it.
+    """
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_file = _agent_lock_path("released", registry_path)
+
+    with hold_agent_lock("released", registry_path):
+        assert "pid" in lock_file.read_text()
+
+    assert lock_file.read_text() == "", "a free lock must carry no holder"
+
+
+def test_timeout_names_the_live_holder(tmp_path: Path) -> None:
+    """A waiter that gives up reports which pid holds the lock, and since when."""
+    from fno.agents.lock import AgentLockTimeout, hold_agent_lock
+
+    registry_path = tmp_path / "registry.json"
+    ready = tmp_path / "ready.txt"
+
+    proc = multiprocessing.Process(
+        target=_hold_via_api_in_child,
+        args=(str(registry_path), "named", 5.0, str(ready)),
+    )
+    proc.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "child did not acquire lock in time"
+
+        with pytest.raises(AgentLockTimeout) as exc_info:
+            with hold_agent_lock("named", registry_path, timeout=1):
+                pytest.fail("should not have acquired the lock")
+
+        assert exc_info.value.holder is not None
+        assert exc_info.value.holder["pid"] == proc.pid
+        assert f"held by pid {proc.pid} since " in str(exc_info.value)
+    finally:
+        proc.join(timeout=10)
+
+
+def test_timeout_degrades_when_lock_carries_no_stamp(tmp_path: Path) -> None:
+    """An unstamped or corrupt lock file yields the plain message, not a raise."""
+    from fno.agents.lock import AgentLockTimeout, hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    registry_path = tmp_path / "registry.json"
+    lock_file = _agent_lock_path("bare", registry_path)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    ready = tmp_path / "ready.txt"
+
+    # _hold_in_child uses a raw flock and writes nothing: the unstamped shape.
+    proc = multiprocessing.Process(
+        target=_hold_in_child,
+        args=(str(lock_file), 5.0, str(ready)),
+    )
+    proc.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+
+        with pytest.raises(AgentLockTimeout) as exc_info:
+            with hold_agent_lock("bare", registry_path, timeout=1):
+                pytest.fail("should not have acquired the lock")
+
+        assert exc_info.value.holder is None
+        assert str(exc_info.value) == "lock timeout for agent 'bare' after 1s"
+    finally:
+        proc.join(timeout=10)
+
+
+def test_holder_note_drops_a_stamp_whose_pid_is_dead() -> None:
+    """A stamp can outlive its writer; naming a dead pid is worse than silence.
+
+    `stamp_holder` truncates before it writes, so a write that fails leaves the
+    file empty and degrades cleanly. A truncate that fails leaves the PREVIOUS
+    holder's line in place, and the waiter then reports a corpse with more
+    authority than the bare mtime this stamp replaced.
+    """
+    import os
+    import subprocess
+    import sys
+
+    from fno.agents.lock import AgentLockTimeout
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+
+    stale = AgentLockTimeout(
+        name="ghost",
+        timeout=1.0,
+        holder={"pid": dead.pid, "name": "ghost", "acquired_at": "2026-08-15T15:03:11Z"},
+    )
+    assert stale.holder_note() == ""
+    assert str(stale) == "lock timeout for agent 'ghost' after 1.0s"
+
+    live = AgentLockTimeout(
+        name="ghost",
+        timeout=1.0,
+        holder={"pid": os.getpid(), "name": "ghost", "acquired_at": "2026-08-15T15:03:11Z"},
+    )
+    assert f"held by pid {os.getpid()}" in live.holder_note()
+
+
+def test_holder_note_past_tense_for_a_caller_that_won_the_lock() -> None:
+    """A caller that has since acquired must not name a present owner.
+
+    The grace acquire only succeeds because the holder released, so present
+    tense there reports an owner that no longer owns it - and the liveness
+    guard cannot refuse that pid, because the process is usually still up.
+    """
+    import os
+
+    from fno.agents.lock import AgentLockTimeout
+
+    exc = AgentLockTimeout(
+        name="red",
+        timeout=30.0,
+        holder={"pid": os.getpid(), "name": "red", "acquired_at": "2026-08-16T00:00:00Z"},
+    )
+    assert exc.holder_note().startswith(" (held by pid ")
+    assert exc.holder_note(past=True).startswith(" (was held by pid ")
+    # An unstamped lock degrades to nothing in either tense.
+    bare = AgentLockTimeout(name="red", timeout=30.0, holder=None)
+    assert bare.holder_note() == ""
+    assert bare.holder_note(past=True) == ""
+
+
+def test_stamp_timestamp_shape_does_not_vary_with_a_zero_microsecond() -> None:
+    """The stamp renders ONE shape, including the once-in-a-million acquire.
+
+    A bare `isoformat()` drops the microseconds field when it is exactly zero,
+    writing 25 chars instead of 32. The Rust twin renders one fixed shape and
+    its test pins the length, so the drift would show up only on the Python
+    side, and only on the rare acquire nobody reproduces.
+    """
+    import json
+    import re
+    import tempfile
+    from datetime import datetime, timezone
+
+    from fno.agents.lock import hold_agent_lock
+    from fno.agents.registry import _agent_lock_path
+
+    with tempfile.TemporaryDirectory() as td:
+        reg = Path(td) / "registry.json"
+        with hold_agent_lock("shaped", reg):
+            stamped = json.loads(_agent_lock_path("shaped", reg).read_text())
+
+    at = stamped["acquired_at"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}\+00:00", at), at
+    assert len(at) == 32, at
+    # The exact boundary the bare call gets wrong.
+    zero_us = datetime(2026, 8, 16, 12, 34, 56, 0, tzinfo=timezone.utc)
+    assert len(zero_us.isoformat()) == 25, "the trap this pins is real"
+    assert len(zero_us.isoformat(timespec="microseconds")) == 32

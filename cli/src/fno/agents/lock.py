@@ -32,7 +32,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
+import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -66,13 +69,81 @@ _POLL_INTERVAL_SECONDS = 0.05
 _detached_handles: list[object] = []
 
 
+def _read_holder(lock_file: Path) -> Optional[dict]:
+    """Best-effort read of the holder JSON stamped into `lock_file`.
+
+    Returns None on any read or parse failure — an empty, missing, or
+    corrupt lock file degrades to the unstamped timeout message rather
+    than raising."""
+    try:
+        with open(lock_file, "r") as fh:
+            line = fh.readline()
+        if not line.strip():
+            return None
+        data = json.loads(line)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_is_alive(pid: object) -> bool:
+    """True when `pid` names a live process. A non-int or a dead pid is False.
+
+    `EPERM` means the process exists under another uid, so it counts as alive.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 class AgentLockTimeout(TimeoutError):
     """Raised when `hold_agent_lock` cannot acquire the flock within timeout."""
 
-    def __init__(self, name: str, timeout: float) -> None:
-        super().__init__(f"lock timeout for agent {name!r} after {timeout}s")
+    def __init__(
+        self, name: str, timeout: float, holder: Optional[dict] = None
+    ) -> None:
         self.name = name
         self.timeout = timeout
+        self.holder = holder
+        super().__init__(
+            f"lock timeout for agent {name!r} after {timeout}s{self.holder_note()}"
+        )
+
+    def holder_note(self, *, past: bool = False) -> str:
+        """`" (held by pid N since T)"`, or `""` when the lock carried no stamp.
+
+        One formatter, because every caller that rebuilds its own message from
+        `name` and `timeout` drops the holder otherwise, and the stamp then
+        reaches nobody on the path that matters.
+
+        `past=True` for a caller that has SINCE won the lock. Present tense
+        there names an owner that already released, and `_pid_is_alive` cannot
+        refuse it, because that process is usually still running.
+        """
+        holder = self.holder
+        if not holder:
+            return ""
+        pid = holder.get("pid")
+        acquired_at = holder.get("acquired_at")
+        if pid is None or not acquired_at:
+            return ""
+        # A stamp only outlives its writer when the write half-failed (the
+        # truncate landed, the line did not) or the holder died between the
+        # two. Naming a dead pid is the 31-hour-corpse misreading this stamp
+        # exists to end, told with more authority than the bare mtime ever
+        # had. An unstamped timeout degrades cleanly; a confidently wrong one
+        # does not, so a holder that is not alive is no holder at all.
+        if not _pid_is_alive(pid):
+            return ""
+        return f" ({'was held' if past else 'held'} by pid {pid} since {acquired_at})"
 
 
 class _LockHandle:
@@ -135,10 +206,10 @@ def hold_agent_lock(
     lock_file = _agent_lock_path(name, registry_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Open append-mode so we don't truncate any sentinel a peer process
-    # may have written. The flock contract treats the file as a pure
-    # sentinel for the OS lock and never reads or writes its contents,
-    # so append vs write is purely about avoiding accidental truncation.
+    # Open append-mode so acquiring the flock never truncates a sentinel a
+    # peer process may currently hold; the holder JSON is only written
+    # (via explicit truncate) once this process actually wins the flock,
+    # below.
     fh = open(lock_file, "a")
     handle = _LockHandle()
     on_wait_fired = False
@@ -155,7 +226,9 @@ def hold_agent_lock(
 
             now = time.monotonic()
             if now >= deadline:
-                raise AgentLockTimeout(name=name, timeout=timeout)
+                raise AgentLockTimeout(
+                    name=name, timeout=timeout, holder=_read_holder(lock_file)
+                )
 
             if (
                 not on_wait_fired
@@ -167,10 +240,50 @@ def hold_agent_lock(
 
             time.sleep(_POLL_INTERVAL_SECONDS)
 
+        # Stamp the holder now that the flock is ours. A zero-byte lock is
+        # unfalsifiable by inspection, which is how a live 30s wait read to
+        # two observers as a 31-hour-old corpse. Truncate first so repeated
+        # acquires keep the file at one line instead of growing it.
+        try:
+            fh.truncate(0)
+            fh.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "name": name,
+                        # timespec pinned: a bare isoformat() DROPS the
+                        # microseconds field when it happens to be zero, so
+                        # the stamp is 25 chars roughly one acquire in a
+                        # million and 32 the rest of the time. The Rust twin
+                        # renders one fixed shape, and this is the side that
+                        # varies.
+                        "acquired_at": datetime.now(timezone.utc).isoformat(
+                            timespec="microseconds"
+                        ),
+                    }
+                )
+                + "\n"
+            )
+            fh.flush()
+        except OSError:
+            pass  # the flock is held either way; the stamp is diagnostic only
+
         try:
             yield handle
         finally:
             if not handle._detached:
+                # Clear the stamp BEFORE unlocking, while the flock is still
+                # ours. A stamp that outlives its holder is the same lie the
+                # bare mtime told: a released lock file that still names a pid
+                # and a time reads as ownership to anyone inspecting it, and
+                # `_pid_is_alive` cannot refuse it while that pid is still
+                # running (it usually is - it is this process). A zero-byte
+                # file is the honest "nobody holds this".
+                try:
+                    fh.truncate(0)
+                    fh.flush()
+                except OSError:
+                    pass  # diagnostic only; the unlock below is what matters
                 try:
                     fcntl.flock(fh, fcntl.LOCK_UN)
                 except OSError:

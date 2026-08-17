@@ -294,6 +294,60 @@ _NAME_MAX_LEN = 128
 _SHORT_ID_NAME_SHAPE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_LOCK_TIMEOUT = 30.0
 
+# Every refusal that wrote nothing says this, once. The bus-lock timeout
+# already carries it, so a wrapper that appends it blindly says it twice.
+_NO_ENVELOPE_CLAUSE = "no durable envelope was written"
+
+# Floor for the post-timeout durable queue's grace window. A durable write
+# needs the lock because only the lock proves the recipient row is committed,
+# so a queue that cannot take it refuses instead of guessing.
+_LOCK_TIMEOUT_QUEUE_GRACE_SECONDS = 2.0
+
+
+def _queue_grace_seconds(lock_timeout: float) -> float:
+    """Seconds the post-timeout queue waits for the flock before giving up.
+
+    A flat floor loses to the contention it exists to catch. The holder owns
+    the lock for its whole live-delivery attempt, budgeted at
+    `_MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S`, so a caller that gave up at the
+    default 30s is usually waiting on a holder still running toward 40s: it
+    would retry for two seconds, miss by eight, and drop the very message it
+    came here to save. The window therefore covers the INJECT budget, measured
+    from what the caller already waited.
+
+    It does NOT cover every holder. The same flock spans a synchronous
+    switchboard hop, whose read budget is `_SWITCHBOARD_READ_TIMEOUT` (130s),
+    so a sender queued behind an A2A hop still exhausts this window and takes
+    the exit-11 arm. Sizing for 130s would make a routine `fno mail send`
+    block over two minutes before saying anything, which is a worse trade than
+    the loud refusal. Narrowing the flock to the registry mutation is the real
+    fix; it is tracked separately, for the reason the block comment in
+    `dispatch_send` gives.
+
+    Capped at that same wait, because the cap is what keeps the rule honest
+    for a caller who asked for a short one: a 0.1s `lock_timeout` means "do
+    not wait", and spending 42s on the fallback would answer a question
+    nobody asked. Past the ceiling the floor is all that is left, and all the
+    identity-consistency read needs.
+
+    The floor outranks the cap below two seconds, so a 0.1s caller still
+    blocks 2.0s here. That is deliberate and the test pins it: the grace
+    window's other job is the identity-consistency read, which a sub-second
+    budget cannot do at all, and a fallback that cannot verify the recipient
+    writes nothing. The cap governs the range where both jobs fit.
+    """
+    residual = _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S + _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS
+    return max(
+        _LOCK_TIMEOUT_QUEUE_GRACE_SECONDS,
+        min(residual - lock_timeout, lock_timeout),
+    )
+
+# Receipt reason for a message the lock-timeout lane queued. Exported because
+# the receipt formatter in fno.mail.cli must branch on it: a contended lock
+# means the recipient was BUSY, and the generic "not live" copy would send the
+# reader to resurrect a session that is working fine.
+LOCK_TIMEOUT_REASON = "agent-lock-timeout"
+
 _FROM_NAME_MAX_LEN = 128
 _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
@@ -1898,7 +1952,8 @@ def dispatch_ask(
             name=name,
         )
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -2654,7 +2709,8 @@ def dispatch_spawn(
 
     except AgentLockTimeout as exc:
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -3240,7 +3296,8 @@ def stop_agent(
             "agent_stopped", name=name, provider=pre_provider, claude_exit=None, lock_timeout=True
         )
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -3584,7 +3641,8 @@ def rm_agent(
             lock_timeout=True,
         )
         raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s",
+            f"lock timeout for agent {name!r} after {exc.timeout}s"
+            f"{exc.holder_note()}",
             exit_code=11,
         ) from exc
 
@@ -6472,6 +6530,200 @@ def _registered_family1_state(entry: "AgentEntry") -> str:
     return str(result.get("state") or "unknown")
 
 
+def _queue_durable_fallback(
+    entry: "AgentEntry",
+    message: str,
+    from_name: str,
+    entries: "list[AgentEntry]",
+    *,
+    msg_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    mail_ctx: "Optional[_MailCtx]" = None,
+) -> "tuple[str, str]":
+    """Write the <fno_mail> envelope to the durable bus.
+
+    Returns ``(msg_id, durable_recipient)``. The recipient rides back so a
+    caller's receipt line names the handle this actually wrote to, without
+    re-deriving it from an Optional field the refusal below already narrowed.
+
+    ``mail_ctx`` is the envelope the caller already built. Pass it whenever one
+    exists: rebuilding it here would re-run ``resolve_self_model``, a transcript
+    scan, and a live send that then falls back would stamp the durable copy with
+    a model resolved separately from the one the live turn carried.
+
+    Raises DispatchAskError(12) when the row has no harness_session_id, or
+    when the bus write fails; both messages say that no durable envelope
+    was written, so a caller cannot mistake the failure for a receipt.
+    """
+    from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
+    from fno.mail.envelope import wrap_fno_mail
+
+    durable_recipient = (
+        canonical_handle(entry.harness_session_id)
+        if entry.harness_session_id
+        else None
+    )
+    if durable_recipient is None:
+        events.emit(
+            "agent_send_failed",
+            stage="durable-address",
+            name=entry.name,
+            msg_id=msg_id,
+            reason="missing_harness_session_id",
+            caller_reason=reason,
+        )
+        raise DispatchAskError(
+            f"cannot queue durable mail for {entry.name!r}: registry row has "
+            "no full harness session id; no durable envelope was written",
+            exit_code=12,
+        )
+
+    msg_id = msg_id or generate_msg_id()
+    sender_entry = next((e for e in entries if e.name == from_name), None)
+    from_session = provider_from = None
+    if sender_entry is not None:
+        provider_from = sender_entry.harness
+        # Defensive getattr so a partial / future entry that lacks one of
+        # these fields degrades to None rather than crashing the send.
+        from_session = (
+            getattr(sender_entry, "harness_session_id", None)
+            or getattr(sender_entry, "short_id", None)
+        )
+    if mail_ctx is None:
+        mail_ctx = _build_mail_ctx(
+            from_name,
+            from_session,
+            provider_from,
+            # Never the short_id fallback the caller-built ctx uses: the
+            # refusal above already proved durable_recipient is not None here.
+            to=durable_recipient,
+            id=msg_id,
+        )
+    # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
+    # fills one whenever the caller passed none, so the envelope is always
+    # wrapped from here on. The guard that used to stand here read as a real
+    # unwrapped-body path and there is none.
+    durable_body = wrap_fno_mail(
+        message,
+        from_=mail_ctx.from_,
+        harness=mail_ctx.harness,
+        model=mail_ctx.model,
+        node=mail_ctx.node,
+        to=mail_ctx.to,
+        id=mail_ctx.id,
+    )
+    try:
+        write_new_thread(
+            recipient=durable_recipient,
+            sender=from_name,
+            kind="send",
+            body=durable_body,
+            msg_id=msg_id,
+            to_kind="session",
+            provider_to=entry.harness,
+            provider_from=provider_from,
+            from_session=from_session,
+            owner=DurableOwner.WAKE_DAEMON.value,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        events.emit(
+            "agent_send_failed",
+            stage="envelope-write",
+            name=entry.name,
+            msg_id=msg_id,
+            caller_reason=reason,
+        )
+        # The clause has to appear, and appear once. The bus-lock timeout this
+        # most often wraps already ends with it, so appending unconditionally
+        # stuttered "...; no durable envelope was written; no durable envelope
+        # was written" at the one moment the reader is deciding whether to
+        # re-send.
+        detail = str(exc)
+        tail = "" if _NO_ENVELOPE_CLAUSE in detail else f"; {_NO_ENVELOPE_CLAUSE}"
+        raise DispatchAskError(
+            f"durable envelope write failed: {detail}{tail}",
+            exit_code=12,
+        ) from exc
+    return msg_id, durable_recipient
+
+
+def _stamp_after_delivery(
+    name: str,
+    identity: "RecipientIdentity",
+    delivery: str,
+    msg_id: str,
+    *,
+    registry_path: "Path",
+    registry_lock_timeout: float,
+) -> None:
+    """Bump `last_message_at` (and `status` for a hosted send) after delivery.
+
+    Delivery is already complete when this runs, so a failure here cannot make
+    the send retryable, but it must stay visible: a hosted send has no durable
+    envelope to expose the degradation later. Shared by the normal path and the
+    lock-timeout queue so a durable success is booked the same way in both.
+    """
+    try:
+
+        def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
+            out = []
+            for e in entries_list:
+                if e.name == name:
+                    updates: dict = {"last_message_at": _utc_now_iso()}
+                    if delivery == "hosted":
+                        updates["status"] = "live"
+                    out.append(replace(e, **updates))
+                else:
+                    out.append(e)
+            return out
+
+        stamp_written = _update_registry_if_recipient_unchanged(
+            name,
+            identity,
+            _stamp,
+            registry_path=registry_path,
+            registry_lock_timeout=registry_lock_timeout,
+        )
+        if not stamp_written:
+            print(
+                f"registry stamp failed after {delivery} delivery for "
+                f"{name!r}: recipient identity changed; delivery succeeded; "
+                "do not retry",
+                file=sys.stderr,
+            )
+            try:
+                events.emit(
+                    "agent_send_failed",
+                    stage="registry-write",
+                    name=name,
+                    msg_id=msg_id,
+                    delivery=delivery,
+                    reason="recipient_identity_changed",
+                    error="recipient identity changed after delivery",
+                    error_type="RecipientIdentityChanged",
+                )
+            except (OSError, ValueError):
+                pass  # stderr already carries the non-retryable degradation
+    except (OSError, ValueError, RegistryVersionError) as exc:
+        print(
+            f"registry stamp failed after {delivery} delivery for "
+            f"{name!r}: {exc}; delivery succeeded; do not retry",
+            file=sys.stderr,
+        )
+        try:
+            events.emit(
+                "agent_send_failed",
+                stage="registry-write",
+                name=name,
+                msg_id=msg_id,
+                delivery=delivery,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        except (OSError, ValueError):
+            pass  # stderr already carries the non-retryable degradation
+
+
 def dispatch_send(
     name: str,
     message: str,
@@ -6496,7 +6748,11 @@ def dispatch_send(
     1. Validate name / message / from_name (same rules as dispatch_ask).
     2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
     3. Resolve the address to its registry primary key, then acquire that
-       per-agent flock (hold_agent_lock) with timeout (exit 11).
+       per-agent flock (hold_agent_lock) with timeout. A timeout retries the
+       acquire on a short grace window and queues the message durable when it
+       wins (delivery="durable", reason=LOCK_TIMEOUT_REASON, exit 0); only
+       sustained contention, which leaves the recipient unverified, exits 11
+       with nothing written.
     4. INSIDE the flock:
        a. Reload and re-resolve; unknown or changed identity refuses.
        b. Provider mismatch -> exit 2.
@@ -6700,11 +6956,7 @@ def dispatch_send(
             # exclusion falls back to the always-present from_ name. from_model is
             # NOT set on the durable envelope (AgentEntry has no model field; we do
             # not fabricate one -- LD11 forward-compat).
-            from fno.inbox.store import (
-                DurableOwner,
-                generate_msg_id,
-                write_new_thread,
-            )
+            from fno.inbox.store import generate_msg_id
 
             sender_entry = next((e for e in entries if e.name == from_name), None)
             from_session = provider_from = None
@@ -6743,68 +6995,18 @@ def dispatch_send(
                 not land. The jsonl bus is the fallback tier now, not a peer to the
                 live path (node x-1f23). Drain-on-wake semantics are unchanged.
 
-                The body is stored <fno_mail>-wrapped, the SAME envelope the live
-                path injects, so a delivered message carries one consistent wire
-                form everywhere and `grep <fno_mail>` reconstructs durable history
-                too (codex peer P1). The wrapped body round-trips through the
-                thread render unchanged (no unwrap, so mark_thread_read does not
-                strip it); summaries surface the open tag, which identifies the
-                message as a2a from its `from` sender."""
-                if durable_recipient is None:
-                    events.emit(
-                        "agent_send_failed",
-                        stage="durable-address",
-                        name=name,
-                        msg_id=msg_id,
-                        reason="missing_harness_session_id",
-                    )
-                    raise DispatchAskError(
-                        f"cannot queue durable mail for {name!r}: registry row has "
-                        "no full harness session id",
-                        exit_code=12,
-                    )
-                durable_body = message
-                if mail_ctx is not None:
-                    from fno.mail.envelope import wrap_fno_mail
-
-                    durable_body = wrap_fno_mail(
-                        message,
-                        from_=mail_ctx.from_,
-                        harness=mail_ctx.harness,
-                        model=mail_ctx.model,
-                        node=mail_ctx.node,
-                        to=mail_ctx.to,
-                        id=mail_ctx.id,
-                    )
-                try:
-                    write_new_thread(
-                        recipient=durable_recipient,
-                        sender=from_name,
-                        kind="send",
-                        body=durable_body,
-                        msg_id=msg_id,
-                        to_kind="session",
-                        provider_to=existing.harness,
-                        provider_from=provider_from,
-                        from_session=from_session,
-                        # US6: a registered-agent send reaches this durable
-                        # fallback only after the live inject missed, so the
-                        # recipient is asleep-but-resumable (it drains its inbox
-                        # on its next turn). The sweep escalates to dead-letter
-                        # if it sits unread past the wake-daemon horizon.
-                        owner=DurableOwner.WAKE_DAEMON.value,
-                    )
-                except (OSError, ValueError, RuntimeError) as exc:
-                    events.emit(
-                        "agent_send_failed",
-                        stage="envelope-write",
-                        name=name,
-                        msg_id=msg_id,
-                    )
-                    raise DispatchAskError(
-                        f"durable envelope write failed: {exc}",
-                        exit_code=12,
-                    ) from exc
+                Delegates to :func:`_queue_durable_fallback`, the same helper the
+                lock-timeout handler below uses, so a message queued from inside
+                the lock and one queued after failing to acquire it share one
+                envelope-construction and error path."""
+                _queue_durable_fallback(
+                    existing,
+                    message,
+                    from_name,
+                    entries,
+                    msg_id=msg_id,
+                    mail_ctx=mail_ctx,
+                )
 
             # 4d/4e. Live-inject-first, durable fallback. The context stash ensures
             # started/done share one request_id + caller attribution (mirrors the
@@ -6896,82 +7098,253 @@ def dispatch_send(
             if demotion_notice:
                 print(demotion_notice, file=sys.stderr)
 
-            # 4f. Bump registry stamps. Delivery is already complete, so a
-            # failure cannot make the send retryable, but it must stay visible:
-            # hosted sends intentionally have no durable envelope to expose the
-            # degradation later.
-            try:
-
-                def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
-                    out = []
-                    for e in entries_list:
-                        if e.name == name:
-                            updates: dict = {"last_message_at": _utc_now_iso()}
-                            if delivery == "hosted":
-                                updates["status"] = "live"
-                            out.append(replace(e, **updates))
-                        else:
-                            out.append(e)
-                    return out
-
-                stamp_written = _update_registry_if_recipient_unchanged(
-                    name,
-                    selected_identity,
-                    _stamp,
-                    registry_path=registry_path,
-                    registry_lock_timeout=registry_stamp_timeout_seconds,
-                )
-                if not stamp_written:
-                    warning = (
-                        f"registry stamp failed after {delivery} delivery for "
-                        f"{name!r}: recipient identity changed; delivery succeeded; "
-                        "do not retry"
-                    )
-                    print(warning, file=sys.stderr)
-                    try:
-                        events.emit(
-                            "agent_send_failed",
-                            stage="registry-write",
-                            name=name,
-                            msg_id=msg_id,
-                            delivery=delivery,
-                            reason="recipient_identity_changed",
-                            error="recipient identity changed after delivery",
-                            error_type="RecipientIdentityChanged",
-                        )
-                    except (OSError, ValueError):
-                        pass  # stderr already carries the non-retryable degradation
-            except (OSError, ValueError, RegistryVersionError) as exc:
-                print(
-                    f"registry stamp failed after {delivery} delivery for "
-                    f"{name!r}: {exc}; delivery succeeded; do not retry",
-                    file=sys.stderr,
-                )
-                try:
-                    events.emit(
-                        "agent_send_failed",
-                        stage="registry-write",
-                        name=name,
-                        msg_id=msg_id,
-                        delivery=delivery,
-                        error=str(exc),
-                        error_type=type(exc).__name__,
-                    )
-                except (OSError, ValueError):
-                    pass  # stderr already carries the non-retryable degradation
+            # 4f. Bump registry stamps (shared with the lock-timeout queue).
+            _stamp_after_delivery(
+                name,
+                selected_identity,
+                delivery,
+                msg_id,
+                registry_path=registry_path,
+                registry_lock_timeout=registry_stamp_timeout_seconds,
+            )
 
             return DispatchSendResult(msg_id=msg_id, delivery=delivery, reason=live_miss_reason)
 
     except AgentLockTimeout as exc:
-        events.emit(
-            "agent_send_failed",
-            stage="lock-timeout",
-            name=name,
+        # INVARIANT, and it is load-bearing: this handler guards the whole
+        # `with` body, not only the acquire, and the body now ends in a
+        # durable queue that returns exit 0. That is safe ONLY because no
+        # callee inside the block takes a per-agent flock - not _deliver_live,
+        # _switchboard_exchange, _mux_pane_send, _registered_family1_state,
+        # _queue_durable_fallback or _stamp_after_delivery. Add a nested
+        # acquire and a timeout AFTER a confirmed hosted delivery lands here,
+        # queues the same message a second time, and prints a durable receipt
+        # for one that already arrived. Narrow this `try` to the acquire
+        # before adding one.
+        #
+        # A durable write needs a VERIFIED recipient, and ONLY the lock
+        # verifies one. An unlocked re-read cannot: the contender may be a
+        # same-name reclaim that holds the flock and has not committed its
+        # replacement row yet, so the read returns the OLD identity and the
+        # "identity unchanged" check passes vacuously. Unchanged has two
+        # explanations there - it really is, or the change is not visible yet -
+        # and queuing on that reading strands the message in the dead session's
+        # mailbox. So the queue takes the lock too, on a short grace window
+        # that asks "did the holder just finish?" rather than waiting again.
+        #
+        # The locked path rebinds `name` to the registry primary key before it
+        # emits or stamps anything; this path never entered that block, so it
+        # must do the same. Everything below keys on the name: a stamp keyed to
+        # the caller's alias matches no row, so it silently skips
+        # `last_message_at` AND reports the miss as "recipient identity
+        # changed" - a false failure on a send that succeeded.
+        name = canonical_name
+        grace_seconds = _queue_grace_seconds(exc.timeout)
+        # Reassigned under the lock once the row is resolved: a bus-only row
+        # queues by design, not by deferral, and must not wear this lane's
+        # reason. Declared here because the receipt is built after the block.
+        queue_reason = LOCK_TIMEOUT_REASON
+        try:
+            with hold_agent_lock(
+                canonical_name,
+                registry_path,
+                timeout=grace_seconds,
+                # The grace window makes a default send block for 42s, not 30.
+                # Without the callback the extra 12s is silent, so the command
+                # reads as hung right after it announced it was waiting.
+                on_wait=_on_wait,
+            ):
+                # Every resolution that feeds a write happens here, under the
+                # lock, through the same call the normal path uses. An owner
+                # change now REFUSES (exit 2) rather than guessing which
+                # session the caller meant.
+                timeout_entries, timeout_entry = _load_and_resolve_target(
+                    canonical_identity
+                )
+
+                # Provider mismatch refuses BEFORE the queue. The locked path
+                # checks this and exits 2 without delivering, so lock
+                # contention must not turn a refused send into a delivered one.
+                try:
+                    select_provider(
+                        name=timeout_entry.name, requested_provider=provider
+                    )
+                except ProviderMismatchError as mismatch:
+                    raise DispatchAskError(str(mismatch), exit_code=2) from mismatch
+                except ValueError as bad_provider:
+                    # An unknown --harness is a usage error on the locked path
+                    # too. Lock timing must not change which exception the CLI
+                    # sees.
+                    raise DispatchAskError(
+                        str(bad_provider), exit_code=2
+                    ) from bad_provider
+                except (OSError, RegistryVersionError) as unreadable:
+                    events.emit("agent_send_failed", stage="registry-read", name=name)
+                    raise DispatchAskError(
+                        f"registry read failed: {unreadable}",
+                        exit_code=12,
+                    ) from unreadable
+
+                # A queued message is a delivered outcome, so it books like
+                # one: started/done and the registry stamp all fire, exactly as
+                # the normal durable path does. Emitting only agent_send_failed
+                # here left a successful send reading as a failure in the event
+                # trail and left last_message_at stale, which agent display and
+                # project anycast rank on.
+                #
+                # All of it stays INSIDE the lock, like the normal path: a stamp
+                # written after release can lose a same-name reclaim race and
+                # print "recipient identity changed" over a send that succeeded.
+                ctx_for_timeout = build_context(
+                    to_name=name,
+                    to_provider=timeout_entry.harness,
+                    transport="direct-cli",
+                    from_name_override=from_name,
+                )
+                # A legacy row with no full harness session id has no durable
+                # ADDRESS: hosted delivery is its only lane, and this path
+                # never ran one. Queuing anyway raises exit 12 "cannot queue
+                # durable mail ... no full harness session id", which reads as
+                # a permanent registry defect and stops the caller dead. The
+                # truth is narrower and recoverable, and it is what exit 11
+                # said before this lane existed: the lock was busy, live is
+                # the only lane this row has, retry.
+                if not timeout_entry.harness_session_id:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="durable-address",
+                        name=name,
+                        reason="missing_harness_session_id",
+                        caller_reason=LOCK_TIMEOUT_REASON,
+                    )
+                    raise DispatchAskError(
+                        f"live delivery to {name!r} was not attempted (its "
+                        f"agent lock was busy for {exc.timeout}s, and this "
+                        "queue holds it now), and its registry row carries no "
+                        "full harness session id, so it has no durable "
+                        f"address; {_NO_ENVELOPE_CLAUSE}; retry the send",
+                        exit_code=11,
+                    ) from exc
+
+                # It does NOT retry the live lane from here, and that is a
+                # decision rather than an omission - five review passes have
+                # read it as one, so it is written down. The block holds a
+                # verified row and could inject. It does not, because an
+                # inject here runs to the same 40s budget WHILE HOLDING this
+                # flock, on a send that has already waited out one holder: it
+                # would push a routine send past 80s and make the next sender
+                # time out on us, which is the contention that caused this bug.
+                # The sender is not stranded either way - the message is
+                # durable and the receipt names withdraw-then-resend. Moving
+                # live delivery in here belongs with narrowing the flock, and
+                # is tracked with it.
+                #
+                # A bus-only row's queue is its DESIGNED lane, not a deferral.
+                # Reporting it as a lock timeout hands the sender the recovery
+                # ladder - withdraw, then retry live - for a message that is
+                # correctly queued, against a row whose own policy forbids the
+                # live retry. The normal path branches here; a grace-path queue
+                # that skipped the check mirrored this arm's own wrong-cause
+                # defect onto a different row.
+                queue_reason = (
+                    BUS_ONLY_POLICY
+                    if _delivery_policy_refusal(timeout_entry) == BUS_ONLY_POLICY
+                    else LOCK_TIMEOUT_REASON
+                )
+
+                ctx_token = _DISPATCH_CTX.set(ctx_for_timeout)
+                # Mint the id before the started event so started and done name
+                # the same message, as they do on the normal path.
+                from fno.inbox.store import generate_msg_id
+
+                msg_id = generate_msg_id()
+                try:
+                    _emit_ev(
+                        "agent_send_started",
+                        name=name,
+                        provider=timeout_entry.harness,
+                        msg_id=msg_id,
+                    )
+                    msg_id, _durable_to = _queue_durable_fallback(
+                        timeout_entry,
+                        message,
+                        from_name,
+                        timeout_entries,
+                        msg_id=msg_id,
+                        reason=queue_reason,
+                    )
+                    _emit_ev(
+                        "agent_send_done",
+                        name=name,
+                        provider=timeout_entry.harness,
+                        msg_id=msg_id,
+                        delivery="durable",
+                        reason=queue_reason,
+                    )
+                finally:
+                    _DISPATCH_CTX.reset(ctx_token)
+
+                _stamp_after_delivery(
+                    name,
+                    _recipient_identity_key(timeout_entry),
+                    "durable",
+                    msg_id,
+                    registry_path=registry_path,
+                    registry_lock_timeout=registry_stamp_timeout_seconds,
+                )
+        except AgentLockTimeout as still_held:
+            # Sustained contention: no verified recipient, so nothing is
+            # written. Loud and nonzero beats a message delivered to whoever
+            # used to own the name. The requirement was "queue durable OR exit
+            # nonzero and say so"; this is the second arm.
+            events.emit(
+                "agent_send_failed",
+                stage="lock-timeout",
+                name=name,
+                reason="unverified_recipient",
+            )
+            # Name the holder that blocked the QUEUE, not the one that blocked
+            # the first acquire. They differ whenever the original holder
+            # released and a third process took the lock inside the grace
+            # window, and reporting the first one points at a process that no
+            # longer owns anything. Both waits are named for the same reason:
+            # the caller blocked for lock_timeout AND the grace window, so the
+            # first alone understates the block and reads as a tuning knob
+            # that did not do what it says.
+            raise DispatchAskError(
+                f"timed out waiting for agent {exc.name!r} lock "
+                f"(timeout={exc.timeout}s + {grace_seconds}s queue grace)"
+                f"{still_held.holder_note()}; "
+                "recipient identity could not be verified, so no durable "
+                "envelope was written; retry the send",
+                exit_code=11,
+            ) from still_held
+
+        # The message is queued, so this is a durable SUCCESS, not a failure.
+        # cmd_send's stdout contract is one receipt line and exit 0 for every
+        # durable outcome; a nonzero exit here would both break that and make
+        # a retry-on-failure caller enqueue the same message twice. The live
+        # lane's cause rides back as the receipt's reason, and the holder goes
+        # to stderr the way a live-miss demotion notice does.
+        # Not for a bus-only row: its queue is the designed destination, so a
+        # "live delivery deferred" notice would report a miss that never was.
+        if queue_reason == LOCK_TIMEOUT_REASON:
+            # Past tense throughout, and deliberately. Reaching this line
+            # proves the holder RELEASED, because the grace acquire only wins
+            # once it does, so a present-tense "lock busy ... held by pid P"
+            # names an owner that no longer owns it - and `_pid_is_alive`
+            # cannot refuse that pid, which is usually still running. The
+            # exit-11 arm below reads `still_held` for the same reason.
+            print(
+                f"live delivery deferred for {name!r}: "
+                f"lock was busy for {exc.timeout}s{exc.holder_note(past=True)}",
+                file=sys.stderr,
+            )
+        return DispatchSendResult(
+            msg_id=msg_id,
+            delivery="durable",
+            reason=queue_reason,
         )
-        raise DispatchAskError(
-            f"timed out waiting for agent {exc.name!r} lock (timeout={exc.timeout}s)",
-            exit_code=11,
-        ) from exc
 
 
 # ---------------------------------------------------------------------------

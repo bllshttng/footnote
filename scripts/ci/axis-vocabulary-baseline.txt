@@ -852,3 +852,4 @@ tests/test_register_task.py:280: provider="claude" (provider-named binding holds
 tests/test_register_task.py:288: provider="claude" (provider-named binding holds a harness literal)
 
 allowlist: cli/tests/agents/test_harnesses_env_inject.py:181: FNO_AGENT_PROVIDER="codex" (provider-named binding holds a harness literal) | tests the AC8 pre-cutover compat window; the legacy FNO_AGENT_PROVIDER name is the point of the fixture, not a conflation.
+allowlist: cli/tests/agents/test_send.py:2102: provider="codex" (provider-named binding holds a harness literal) | dispatch_send names this parameter provider by legacy; the test exists to prove a mismatched harness is refused on the lock-timeout path, so the harness literal is the subject, not a conflation.

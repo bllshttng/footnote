@@ -1145,7 +1145,16 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
     naming none, because it sends the reader to diagnose a recipient that was
     never the problem. A None/unreachable reason keeps the honest not-live line.
 
+    A lock timeout gets its own arm for the same reason. The per-agent flock is
+    shared by every verb that touches the agent (send, ask, spawn, stop, rm), so
+    a timeout says nothing about the recipient's liveness in EITHER direction.
+    The not-live copy would send the reader to resurrect a session that is
+    working fine; naming the holder a peer sender would tell the reader a
+    just-stopped session is fine. The arm names neither and points at `peek`.
+
     Warning only - the durable enqueue succeeded, so exit stays 0."""
+    from fno.agents.dispatch import LOCK_TIMEOUT_REASON
+
     if project:
         msg = (
             f"mail: project inbox {target} has no live drain; queued durably as "
@@ -1153,6 +1162,24 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "and may never do so\n"
             "  this is NOT delivery. Address a live session instead: "
             "`fno agents top` to find one, then `fno mail send <short-id>`"
+        )
+    elif reason == LOCK_TIMEOUT_REASON:
+        msg = (
+            f"mail: live delivery to {target} was not attempted (another verb "
+            f"held {target}'s agent lock past the wait); queued durably. That "
+            "holder is any verb on this agent - a send, an ask, a spawn, a "
+            "stop, an rm - so the token proves nothing about the recipient in "
+            "either direction. Do not resurrect it on this evidence, and do "
+            "not read it as healthy either: check it.\n"
+            "  a busy peer may not drain soon, so the rungs that stay open,\n"
+            "  in this order - a bare re-send DOUBLE-DELIVERS, since the queued\n"
+            "  copy still lands at the recipient's next drain:\n"
+            f"    fno agents peek {target}     # still taking turns, or just stopped?\n"
+            "    fno mail withdraw <id>      # retract the queued copy FIRST\n"
+            f"    fno mail send {target} '<message>'  # then retry live\n"
+            "  a withdraw that refuses because the recipient already claimed\n"
+            "  the message is telling you it LANDED. Stop there: re-sending on\n"
+            "  top of that is the double delivery this ladder exists to avoid."
         )
     elif reason in _LIVE_LANE_FAILURE_REASONS:
         msg = (
@@ -2543,8 +2570,10 @@ def cmd_send(
     resolves over the registry - one live peer delivers live, none queues
     durable for project X, many errors with the candidate list unless ``--any``.
 
-    The envelope is written durably BEFORE delivery is attempted so it survives
-    every failure path.
+    Delivery is live-inject-FIRST; the durable envelope is the fallback tier,
+    written when the live lane misses or never runs. Sustained agent-lock
+    contention writes nothing and exits 11 - it says so on stderr rather than
+    implying a receipt.
 
     Address it by the ADDRESS column of ``fno agents list`` (or the full session
     id). The NAME column is a spawn label and the discovered lane's LABEL is a
@@ -2923,10 +2952,15 @@ def cmd_send(
                     f"[bus-only: recipient polls the bus at each turn boundary]"
                 )
             else:
-                _warn_deferred(result.recipient)
+                # The anycast lane reaches the SAME dispatch_send as the by-name
+                # lane, so it must carry the same cause. Dropping the reason
+                # here printed "is not live ... fno agents resume" over an
+                # agent-lock timeout, which says nothing about the recipient,
+                # and stamped [live-miss] when no live attempt ever ran.
+                _warn_deferred(result.recipient, reason=result.reason)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
-                    f"[project {to_project}] [live-miss]"
+                    f"[project {to_project}] [{result.reason or 'live-miss'}]"
                 )
         else:
             _warn_deferred(to_project, project=True)

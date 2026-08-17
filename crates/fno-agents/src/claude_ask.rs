@@ -1947,47 +1947,7 @@ pub fn validate_spawn_inputs(name: &str, from_name: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// RAII per-agent flock at `<registry-dir>/locks/<name>.lock`, byte-compatible
-/// with Python's `_agent_lock_path` (`fcntl.flock` ⇄ `fs2`). Held for the
-/// duration of one ask so concurrent same-agent asks serialize (AC10).
-struct AgentLock {
-    _file: std::fs::File,
-}
-
-impl AgentLock {
-    fn acquire(home: &AgentsHome, name: &str, timeout: Duration) -> Result<Self, ()> {
-        let locks_dir = home.root().join("locks");
-        let _ = std::fs::create_dir_all(&locks_dir);
-        let path = locks_dir.join(format!("{}.lock", name));
-        let file = match std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-        {
-            Ok(f) => f,
-            Err(_) => return Err(()),
-        };
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(_) => {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(());
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for AgentLock {
-    fn drop(&mut self) {
-        let _ = self._file.unlock();
-    }
-}
+use crate::agent_lock::{holder_note, AgentLock};
 
 /// Stable fno-side log path for `fno agents logs <name>` (`_derive_log_path`).
 fn derive_log_path(home: &AgentsHome, name: &str) -> PathBuf {
@@ -2033,11 +1993,12 @@ pub fn dispatch_claude_ask(
             );
             return AskOutcome::err(
                 // Python: f"lock timeout for agent {name!r} after {timeout}s"
-                // with timeout=30.0 (float) -> "...after 30.0s".
+                // + holder_note(), with timeout=30.0 (float) -> "...after 30.0s".
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );
@@ -2151,9 +2112,10 @@ pub fn dispatch_claude_spawn(
             );
             return AskOutcome::err(
                 format!(
-                    "lock timeout for agent {} after {:.1}s",
+                    "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
-                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64()
+                    LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
+                    holder_note(home, name)
                 ),
                 11,
             );
