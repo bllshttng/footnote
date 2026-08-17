@@ -584,7 +584,7 @@ def _targets_other_repo(command):
     return False
 
 
-def _stacked_base_refusal(command=""):
+def _stacked_base_refusal(command="", cwd=None):
     """Refusal text when the PR's base no longer leads to the default branch.
 
     A PR merged into a base that already landed reports MERGED and ships
@@ -625,10 +625,11 @@ def _stacked_base_refusal(command=""):
         ["pr", "base-lineage-check", pr_number],
         timeout=25,
         fallback=f"PR {pr_number}: base no longer leads to the default branch",
+        cwd=cwd,
     )
 
 
-def _fno_veto_refusal(args, timeout, fallback):
+def _fno_veto_refusal(args, timeout, fallback, cwd=None):
     """One fno-verb probe: deny on the verb's exit-3 refusal line, else open.
 
     The shared scaffold of both merge vetoes (lineage, coverage): fail OPEN on
@@ -638,6 +639,12 @@ def _fno_veto_refusal(args, timeout, fallback):
     from a `fno` deployment older than the verb (the rollout window): it is
     indistinguishable from any other usage error and fails open silently, which
     is why each veto's timeout stays well under the harness hook budget.
+
+    ``cwd`` is the audited command's own working directory (the Bash payload
+    carries it). The probe must read THE repo the merge targets: run at the
+    hook process's cwd instead, a session launched in repo A that cd's to repo
+    B gets A's lane config and events, and the veto answers a question about
+    the wrong checkout.
     """
     try:
         proc = subprocess.run(
@@ -645,6 +652,7 @@ def _fno_veto_refusal(args, timeout, fallback):
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=cwd,
         )
     except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
         return None
@@ -654,7 +662,7 @@ def _fno_veto_refusal(args, timeout, fallback):
     return detail[0] if detail else fallback
 
 
-def _coverage_refusal(command=""):
+def _coverage_refusal(command="", cwd=None):
     """Refusal text when the merge guard's coverage predicate says no.
 
     The hook's own two-factor check asks a different question than
@@ -694,6 +702,7 @@ def _coverage_refusal(command=""):
         ["pr", "coverage-check", pr_number],
         timeout=15,
         fallback=f"PR {pr_number}: review coverage refused",
+        cwd=cwd,
     )
 
 
@@ -1277,13 +1286,21 @@ def _has_unquoted_heredoc(command):
 def _find_merge_segments(segments):
     """Every `gh pr merge` segment, not just the first. One override consume
     must not authorize `gh pr merge 1 && gh pr merge 2 && gh pr merge 3`, which
-    an only-the-first search allowed while logging one of the three."""
+    an only-the-first search allowed while logging one of the three.
+
+    Re-JOIN with shlex.quote, never a bare " ".join: posix tokenization already
+    stripped the quotes, so a bare join hands downstream string consumers
+    (_targets_other_repo, _parse_merge_pr) a multi-word flag value shattered
+    into words - an override spelling inside a quoted subject then stands alone
+    and disarms the vetoes the quote-aware matcher exists to protect. The
+    quoted join round-trips: shlex.split of it reproduces seg exactly.
+    """
     out = []
     for seg in segments:
         argv = _effective_argv(seg)
         if (len(argv) >= 3 and argv[0].rsplit("/", 1)[-1].lower() == "gh"
                 and argv[1].lower() == "pr" and argv[2].lower() == "merge"):
-            out.append(" ".join(seg))
+            out.append(" ".join(shlex.quote(t) for t in seg))
     return out
 
 
@@ -1656,6 +1673,12 @@ def main():
     if not command:
         sys.exit(0)
 
+    # The audited command's own working directory, when the payload carries
+    # one: the fno probes below must read the repo the merge targets, not the
+    # hook process's launch dir (a session that cd's between repos otherwise
+    # gets the launch repo's lane config and events).
+    probe_cwd = tool_input.get("cwd") or None
+
     # No pre-gate opt-out marker lives here. One used to, and being ahead of
     # every gate made it an unconditional allow: while it existed, a bare
     # `git push origin main` passed. The merge gate's scoped override is
@@ -1814,7 +1837,7 @@ def main():
         # to the default branch is not a ceremony, it is a merge that ships
         # nothing. The lineage check carries its own documented bypass
         # (FNO_PR_BASE_LINEAGE_OK), which the CLI verb honours by exiting 0.
-        stacked = _stacked_base_refusal(merge_seg)
+        stacked = _stacked_base_refusal(merge_seg, cwd=probe_cwd)
         if stacked:
             _emit("deny", f"[fno stacked-base] {stacked}")
             sys.exit(0)
@@ -1824,7 +1847,7 @@ def main():
         # recovery line wraps the guard's own sentence verbatim - never edits
         # it - so the hook's reason and `fno pr merge`'s receipt carry one
         # recognizable sentence between them.
-        covref = _coverage_refusal(merge_seg)
+        covref = _coverage_refusal(merge_seg, cwd=probe_cwd)
         if covref:
             _emit("deny", f"[fno review-coverage] {covref}\n"
                           "Recovery: run `fno pr merge`, which recomputes coverage "

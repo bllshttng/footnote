@@ -18,11 +18,13 @@ One predicate, three reachable surfaces:
 The hook consults the predicate WITHOUT the recompute: that recompute shells
 the Rust producer and is budgeted in minutes, while a PreToolUse hook has a
 60s harness budget and a killed hook emits no verdict at all. So the
-invariant between hook and guard is deliberately one-directional - the hook
-never ALLOWS what the guard refuses, but on a missing or stale row the hook
-denies where ``fno pr merge`` may yet allow after recomputing. The recovery
-from a wrong deny is one command; the recovery from a wrong allow is a
-revert.
+invariant between hook and guard is deliberately one-directional - on a
+missing or stale row the hook denies where ``fno pr merge`` may yet allow
+after recomputing. The one sanctioned exception runs the other way: a NAMED
+instrument failure (exit 4) fails open in the hook while ``run_merge`` still
+refuses it, because a guard whose own machinery is down must not become a
+merge outage. Every unnamed failure stays aligned. The recovery from a wrong
+deny is one command; the recovery from a wrong allow is a revert.
 
 States are ``COVERED`` / ``REFUSED`` / ``UNANSWERED``. ``UNANSWERED`` is a
 real third answer and is narrow on purpose: it means the instrument failed,
@@ -148,8 +150,9 @@ def run_coverage_check(
     state, refusal, _covered_head, note = coverage_verdict(
         pr_number, repo, recompute=recompute
     )
-    if state == REFUSED:
+    if state != COVERED:
+        # refusal_line is the ONE formatter: on UNANSWERED refusal is empty and
+        # its `refusal or note` fallthrough yields the note, so both states
+        # write the same shape without a second formatting branch to drift.
         sys.stderr.write(f"{refusal_line(refusal, note)}\n")
-    elif state == UNANSWERED:
-        sys.stderr.write(f"{note}\n")
     return state

@@ -38,6 +38,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Any, Iterator, List, Literal, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
@@ -348,13 +349,18 @@ def _is_documentation_path(path: str) -> bool:
     return p.endswith(".md") or p.startswith("docs/")
 
 
+@lru_cache(maxsize=64)
 def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     """Whether the PR's diff carries a code payload.
 
     CODE iff any changed file is not documentation. Fails CLOSED - a missing gh,
     a failed view, or an unparseable file list all classify as code, so a
     degraded probe cannot bypass the coverage guard. An empty file list (no diff
-    surfaced) is not code: nothing to review, no gate."""
+    surfaced) is not code: nothing to review, no gate.
+
+    Cached per (repo, pr): the lane check and the attestation check both ask it
+    inside one gate evaluation, and a second gh round trip for a byte-identical
+    answer is budget the hook-facing probe (a 15s subprocess) cannot spare."""
     if not shutil.which("gh"):
         return True
     res = _gh(["pr", "view", str(pr_number), "--json", "files", "--jq", "[.files[].path]"], repo)

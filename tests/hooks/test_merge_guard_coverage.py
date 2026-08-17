@@ -17,6 +17,7 @@ inside the harness's 60s hook budget, because a hook that gets killed emits
 no verdict at all.
 """
 import importlib.util
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -167,6 +168,28 @@ def test_probe_budgets_fit_the_hook_budget(monkeypatch):
     assert timeouts["base-lineage-check"] + timeouts["coverage-check"] < 60
 
 
+def test_quoted_flag_values_survive_the_production_join():
+    """The veto's quote-awareness must hold on the path main() actually feeds
+    it: _command_segments -> _find_merge_segments -> the joined segment string.
+    A bare " ".join shatters a quoted value into words, an override spelling
+    inside a subject then stands alone as `-R`, and both vetoes silently skip -
+    the exact disarm test_flag_values_do_not_disarm_the_veto pins as fixed, so
+    this pins it through the production pipeline, not the raw string alone."""
+    for command in (
+        'gh pr merge 42 --squash -t "-R fixes the null deref"',
+        "gh pr merge 42 --subject 'see https://github.com/other/repo/pull/9'",
+    ):
+        segs = git_protection._command_segments(command)
+        merge_segs = git_protection._find_merge_segments(segs)
+        assert merge_segs, f"merge segment not found in {command!r}"
+        assert not git_protection._targets_other_repo(merge_segs[0]), (
+            f"production join shattered a quoted value in {command!r}"
+        )
+        # Round-trip fidelity is the invariant the join must preserve: re-split
+        # reproduces the tokenizer's own tokens, quotes included.
+        assert shlex.split(merge_segs[0]) == segs[-1]
+
+
 def test_veto_precedes_the_two_factor_allow_and_the_override_marker():
     """Pinned by source order rather than by running main(): the veto has to
     sit ahead of BOTH the two-factor allow and the marker path, because the
@@ -174,8 +197,8 @@ def test_veto_precedes_the_two_factor_allow_and_the_override_marker():
     ceremony. A test that only checked the two-factor path would pass while
     the marker still shipped an unreviewed merge."""
     src = HOOK_PATH.read_text()
-    stacked = src.index("_stacked_base_refusal(merge_seg)")
-    coverage = src.index("_coverage_refusal(merge_seg)")
+    stacked = src.index("_stacked_base_refusal(merge_seg, cwd=probe_cwd)")
+    coverage = src.index("_coverage_refusal(merge_seg, cwd=probe_cwd)")
     two_factor = src.index("_check_pr_merge_allowed(merge_seg)")
     marker = src.index("_claim_marker(MERGE_GATE_MARKER)")
     assert stacked < coverage < two_factor < marker

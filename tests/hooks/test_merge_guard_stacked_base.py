@@ -127,7 +127,7 @@ def test_veto_precedes_the_override_marker():
     a merge that reaches nobody.
     """
     src = HOOK_PATH.read_text()
-    veto = src.index("_stacked_base_refusal(merge_seg)")
+    veto = src.index("_stacked_base_refusal(merge_seg, cwd=probe_cwd)")
     two_factor = src.index("_check_pr_merge_allowed(merge_seg)")
     marker = src.index("_claim_marker(MERGE_GATE_MARKER)")
     assert veto < two_factor < marker
