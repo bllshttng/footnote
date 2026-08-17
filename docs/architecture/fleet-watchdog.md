@@ -29,11 +29,11 @@ Reset stamps ride the provider error text in Singapore time, UTC+8. `02:48:21 SG
 These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/tests/test_agents_watchdog.py`.
 
 1. Node identity joins on the recorded claim holder and worktree manifest, never on a name regex. Eight auto-named workers read as nobody-on-this-node under a name join and were nearly double-dispatched. Worker names are a convention, not a guarantee.
-2. A wake is confirmed by content in the recipient transcript, never by a state field. The scratch `wake.sh` printed `working -> working` for both a message that landed and one that did not. The watchdog calls `fno agents resume` (x-c136), which verifies the state move and holds a single-writer claim. It then separately requires the wake message to appear in the transcript after the pre-wake marker. This mirrors `confirm_content_after` in `crates/fno-agents/src/mail_inject.rs`.
+2. A wake is confirmed by content in the recipient transcript, never by a state field. The scratch `wake.sh` printed `working -> working` for both a message that landed and one that did not. The watchdog calls `fno agents resume`, which verifies the state move and holds a single-writer claim. It then separately requires the wake message to appear in the transcript after the pre-wake marker. This mirrors `confirm_content_after` in `crates/fno-agents/src/mail_inject.rs`.
 
 ## Lanes
 
-`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply=all` adds reap and reroute, which both stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
+`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reap and reroute, which both stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
 
 Actions delegate. The watchdog owns the decision, never the mechanism.
 
@@ -44,11 +44,11 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `reap` | refuse when the worktree has uncommitted changes or unpushed commits, naming the count. Then `fno agents stop` and `fno agents rm`, never forced: `claude rm`'s own refusal on a dirty worktree is a safety feature to lean on |
 | `ghost` | report only |
 
-A bus-only row (`delivery_policy == "bus-only"`, x-e21e) stays bus-only. It is still eligible for `wake`, because a wake is an attach and a neutral resume, not a paste of a mail body. The wake message for such a row is the bare resume word.
+A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake is an attach and a neutral resume, not a paste of a mail body. The wake message is always the bare resume word, never a mail payload.
 
 ## Cadence
 
-`config.recovery.watchdog` rides the pr_watch tick: `off` (default), `report` (one `watchdog_verdict` event per non-leave row), `wake` (also apply the wake lane). No tick value reaps or reroutes. A destructive action stays behind an operator running `--apply=all` by hand. Every sweep, tick or manual, writes `~/.fno/watchdog-sweep.json` as freshness evidence. Its row lives in `docs/state-root-inventory.md`.
+`config.recovery.watchdog` rides the pr_watch tick: `off` (default), `report` (one `watchdog_verdict` event per non-leave row), `wake` (also apply the wake lane). No tick value reaps or reroutes. A destructive action stays behind an operator running `--apply-all` by hand. Every sweep, tick or manual, writes `~/.fno/watchdog-sweep.json` as freshness evidence. Its row lives in `docs/state-root-inventory.md`.
 
 ## Push, not pull
 

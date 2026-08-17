@@ -2628,14 +2628,20 @@ def cmd_watchdog(
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit the machine-readable payload."
     ),
-    apply: Optional[str] = typer.Option(
-        None,
+    apply: bool = typer.Option(
+        False,
         "--apply",
         help=(
-            "Execute actions. Bare --apply runs the wake lane only (the one "
-            "action that cannot destroy work); --apply=all adds reap and "
-            "reroute, which both stop a session. A ghost never auto-acts at "
-            "any level."
+            "Execute the wake lane only - the one action that cannot destroy "
+            "work. A ghost never auto-acts at any level."
+        ),
+    ),
+    apply_all: bool = typer.Option(
+        False,
+        "--apply-all",
+        help=(
+            "Execute every lane: wake plus reap and reroute, which both stop "
+            "a session. Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
@@ -2663,12 +2669,6 @@ def cmd_watchdog(
 
     from fno.agents import watchdog as wd
 
-    if apply not in (None, "", "all"):
-        print(
-            f"fno agents watchdog: --apply takes no value or 'all' (got {apply!r})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
     if only is not None and only not in (
         wd.GHOST, wd.REAP, wd.REROUTE, wd.WAKE, wd.LEAVE,
     ):
@@ -2685,7 +2685,9 @@ def cmd_watchdog(
 
     # Push, not pull: a verdict the king has to remember to fetch goes
     # unread. Mail before writing the sweep file, so the change gate compares
-    # against the PREVIOUS sweep's signature.
+    # against the PREVIOUS sweep's signature - and only a delivered digest
+    # advances it (mail_gate), or a transient send failure would permanently
+    # swallow the verdict behind an unchanged signature.
     recipient = mail_to
     if recipient is None:
         try:
@@ -2696,18 +2698,16 @@ def cmd_watchdog(
             )
         except Exception:  # noqa: BLE001 - config read miss means no mail
             recipient = ""
-    if recipient:
-        try:
-            ok, receipt = wd.mail_digest(payload, recipient)
-            if not ok:
-                print(f"watchdog mail: {receipt}", file=sys.stderr)
-        except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
-            print(f"watchdog mail failed: {exc}", file=sys.stderr)
-    wd.write_sweep_file(
-        "manual", payload["counts"], now, wd.verdict_signature(payload)
-    )
+    signature = ""
+    try:
+        ok, receipt, signature = wd.mail_gate(payload, recipient or "")
+        if not ok:
+            print(f"watchdog mail: {receipt}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
+        print(f"watchdog mail failed: {exc}", file=sys.stderr)
+    wd.write_sweep_file("manual", payload["counts"], now, signature)
 
-    if apply is None:
+    if not apply and not apply_all:
         for v, _row in pairs:
             if v.verdict != wd.LEAVE:
                 wd.emit_event(
@@ -2728,12 +2728,17 @@ def cmd_watchdog(
         typer.echo(f"{len(pairs)} row(s): {counts}")
         return
 
-    lanes = "all" if apply == "all" else "wake"
+    lanes = "all" if apply_all else "wake"
     results = []
     for v, row in pairs:
         outcome, detail = wd.apply_verdict(v, lanes=lanes, cwd=row.cwd)
         results.append({"row_id": v.row_id, "verdict": v.verdict,
                         "outcome": outcome, "detail": detail})
+        if outcome == "reported":
+            # A verdict outside the lane (every leave row on a bare --apply)
+            # is not news; printing one line per healthy row drowns the few
+            # that acted.
+            continue
         line = f"{outcome:9} {v.name:34} {detail}"
         if outcome == "refused":
             print(line, file=sys.stderr)

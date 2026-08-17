@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
-Row = namedtuple("Row", "row_id name state node cwd delivery_policy")
+Row = namedtuple("Row", "row_id name state node cwd")
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts. No transcript resolving -> None (ghost),
 #: which is a different fact from a resolved-but-quiet transcript.
@@ -51,7 +51,10 @@ LEAVE = "leave"
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
 #: transcript is not a ghost - stopped is already the operator's answer.
-_GHOST_STATES = frozenset({"working", "blocked"})
+#: ``busy`` rides here because claude emits it as a ``working`` spelling (see
+#: ``_LIVE_STATUS_INPUT`` in harnesses/claude.py); missing it would read a
+#: ghost as a healthy leave.
+_GHOST_STATES = frozenset({"working", "busy", "blocked"})
 _WAKE_STATES = frozenset({"blocked", "stopped"})
 
 # The 429 marker and its reset stamp. Reset stamps ride the provider error
@@ -64,6 +67,14 @@ _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
 _SGT_OFFSET_S = 8 * 3600
 _TAIL_BYTES = 64 * 1024
 _TAIL_RECORDS = 15
+
+#: The generated no-session holder form (target_cli._successor_claim_holder
+#: and init-target-state.sh's claim_owner_id): ``<UTC stamp>-<pid junk>-<hex>``.
+#: Such a holder is an operator/daemon context, not a fleet session, so it
+#: never justifies reaping a row as "held by another session". A claude UUID
+#: can never match: its first segment is 8 hex chars and this shape puts a
+#: literal ``T`` at position 9.
+_GENERATED_HOLDER_RE = re.compile(r"^\d{8}T\d{6}Z-")
 
 #: The bare resume word (x-e21e): a bus-only row is woken with this and never
 #: a message payload - a wake is an attach and a neutral resume, not a paste.
@@ -184,7 +195,12 @@ def _verdict_one(
                            f"node {row.node} done", "stop+rm")
         claim = claim_for(row.node)
         holder_sid = _holder_session(claim.get("holder"))
-        if claim.get("state") == "live" and holder_sid and holder_sid != row.row_id:
+        if (
+            claim.get("state") == "live"
+            and holder_sid
+            and holder_sid != row.row_id
+            and not _GENERATED_HOLDER_RE.match(holder_sid)
+        ):
             return Verdict(row.row_id, row.name, row.state, REAP,
                            f"claim held by {holder_sid}", "stop+rm")
 
@@ -205,13 +221,21 @@ def _verdict_one(
         )
 
     # wake: blocked or stopped, a transcript exists, and no live 429 window.
-    # An unknown window (stamp missing or unparseable) is NOT wakeable.
+    # An unknown window (stamp missing or unparseable) is NOT wakeable, and
+    # neither is a live one: reroute above only catches blocked rows, so a
+    # stopped row under a closed window lands here and must wait, not wake
+    # into the bounce that costs a real turn.
     if row.state in _WAKE_STATES and facts is not None:
         age = _age_clause(now_s, facts.last_event_epoch)
         if window == "unknown":
             return Verdict(row.row_id, row.name, row.state, LEAVE,
                            f"429 present, reset window unknown "
                            f"({stamp or 'no stamp'})", "none")
+        if window == "live":
+            reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+            return Verdict(row.row_id, row.name, row.state, LEAVE,
+                           f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
+                           f"window not open", "none")
         clause = ("last 429 window passed" if window == "passed"
                   else "no 429 in tail")
         return Verdict(row.row_id, row.name, row.state, WAKE,
@@ -344,7 +368,6 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
             state=str(r.get("state") or ""),
             node=node,
             cwd=cwd,
-            delivery_policy=getattr(entry, "delivery_policy", None),
         ))
     return out, warnings
 
@@ -471,6 +494,35 @@ def _last_signature() -> str:
         return ""
 
 
+#: The pr_watch launchd cadence, in seconds. A sweep older than two intervals
+#: means the cadence is dead, and a dead cadence is indistinguishable from a
+#: healthy fleet unless the staleness itself is published (the king's required
+#: ship condition: absence is never evidence, so status reads loud, not clean).
+SWEEP_INTERVAL_S = 600
+SWEEP_STALE_AFTER_S = 2 * SWEEP_INTERVAL_S
+
+
+def sweep_staleness(
+    now_s: Optional[float] = None, *, stale_after_s: float = SWEEP_STALE_AFTER_S
+) -> dict:
+    """``{"age_s", "stale", "source", "at"}`` for the last sweep, or
+    ``{"stale": True, "age_s": None, ...}`` when no sweep ever ran. Never
+    raises; a missing file is the loudest case, not a clean one."""
+    now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
+    try:
+        stat = sweep_path().stat()
+        data = json.loads(sweep_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"age_s": None, "stale": True, "source": None, "at": None}
+    age = max(0.0, now_s - stat.st_mtime)
+    return {
+        "age_s": int(age),
+        "stale": age > stale_after_s,
+        "source": str(data.get("source") or ""),
+        "at": str(data.get("at") or ""),
+    }
+
+
 def verdict_signature(payload: dict) -> str:
     """Stable identity of the non-leave verdict set (row_id:verdict, sorted).
     Two sweeps that agree on the fleet produce one signature, so the mail lane
@@ -485,16 +537,22 @@ def verdict_signature(payload: dict) -> str:
 
 def digest_text(payload: dict, limit: int = 8) -> str:
     """One-screen digest of a sweep, house-style (one physical line per
-    paragraph). The basis rides along so the king can falsify each call."""
+    paragraph). The basis rides along so the king can falsify each call.
+
+    The verdict rows are LIST ITEMS, not bare lines: ``fno mail send`` runs the
+    style gate on the body and a bare line under a paragraph reads as an
+    illegal mid-paragraph wrap (rule 6) - the first tick's digest was refused
+    by exactly that, silently, and never delivered. A list marker starts a new
+    block, which is the legal shape for a table of rows."""
     total = len(payload["verdicts"])
     counts = " ".join(f"{k}={v}" for k, v in sorted(payload["counts"].items()))
-    lines = [f"fleet watchdog swept {total} rows. {counts}"]
+    lines = [f"fleet watchdog swept {total} rows. {counts}", ""]
     non_leave = [x for x in payload["verdicts"] if x["verdict"] != LEAVE]
     for v in non_leave[:limit]:
-        lines.append(f"{v['verdict']} {v['name']}: {v['basis']}")
+        lines.append(f"- {v['verdict']} {v['name']}: {v['basis']}")
     more = len(non_leave) - limit
     if more > 0:
-        lines.append(f"{more} more row(s) not shown.")
+        lines.append(f"- {more} more row(s) not shown")
     return "\n".join(lines)
 
 
@@ -524,6 +582,23 @@ def mail_digest(
         return False, f"mail send failed: {exc}"
     ok = proc.returncode == 0
     return ok, (proc.stdout or proc.stderr or "").strip()
+
+
+def mail_gate(
+    payload: dict, to: str, *, runner: Callable = subprocess.run
+) -> tuple[bool, str, str]:
+    """``(ok, receipt, signature_to_stamp)``: run the mail lane and hand back
+    the signature the sweep file should carry, so a caller cannot stamp a
+    digest it never delivered. The stamp is the CURRENT signature only after
+    a settled-ok mail (delivered / nothing to say / unchanged); a failed send
+    or an empty recipient keeps the PREVIOUS stamp, leaving the gate armed
+    against the last digest actually mailed so the next sweep retries instead
+    of swallowing the verdict behind a signature it never sent."""
+    if not to:
+        return True, "no recipient", _last_signature()
+    ok, receipt = mail_digest(payload, to, runner=runner)
+    stamp = verdict_signature(payload) if ok else _last_signature()
+    return ok, receipt, stamp
 
 
 # ---------------------------------------------------------------------------
@@ -578,16 +653,18 @@ def confirm_wake_landed(
     for epoch, text in facts.records:
         if message not in text:
             continue
-        if before_epoch is None or epoch is None or epoch > before_epoch:
+        if before_epoch is None or (epoch is not None and epoch > before_epoch):
             # before_epoch None (no parseable pre-wake stamp) degrades to a
-            # presence check: still content, never a state field.
+            # presence check: still content, never a state field. A record
+            # with NO timestamp of its own never confirms - a torn old line
+            # carrying the word is presence, not a landing.
             return True
     return False
 
 
 #: Which verdicts each apply level may execute. ``wake`` is the one lane that
 #: cannot destroy work, so bare ``--apply`` stops there; reap and reroute both
-#: stop a session, so they need ``--apply=all``. ghost NEVER auto-acts: the
+#: stop a session, so they need ``--apply-all``. ghost NEVER auto-acts: the
 #: remedy is a respawn under a new id, which is the operator's call.
 LANES = {"wake": frozenset({WAKE}), "all": frozenset({WAKE, REROUTE, REAP})}
 

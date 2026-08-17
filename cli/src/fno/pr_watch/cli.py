@@ -281,7 +281,7 @@ def tick() -> None:
     # config.recovery.watchdog. "report" emits one watchdog_verdict event per
     # non-leave row; "wake" additionally applies the wake lane. No tick value
     # reaps or reroutes - those stop a session and stay behind a manual
-    # `fno agents watchdog --apply=all`.
+    # `fno agents watchdog --apply-all`.
     # getattr with the modeled default: a settings stub or a partially-loaded
     # config must never crash the tick - "off" is the no-op that fails safe.
     if (
@@ -296,17 +296,21 @@ def tick() -> None:
             now = _time.time()
             payload, rows = _wd.run_sweep(now_s=now)
             # Mail before the sweep file write: the change gate compares
-            # against the PREVIOUS sweep's signature (push, not pull).
+            # against the PREVIOUS sweep's signature (push, not pull), and
+            # only a delivered digest advances it (mail_gate) so a transient
+            # send failure retries on the next tick instead of vanishing.
             mail_to = str(getattr(
                 settings.recovery, "watchdog_mail_to", ""
             ) or "")
-            if mail_to:
-                try:
-                    _wd.mail_digest(payload, mail_to)
-                except Exception:  # noqa: BLE001 - mail never breaks the tick
-                    pass
+            signature = ""
+            try:
+                _ok, receipt, signature = _wd.mail_gate(payload, mail_to)
+                if not _ok:
+                    log.warning("pr-watch: watchdog mail failed: %s", receipt)
+            except Exception:  # noqa: BLE001 - mail never breaks the tick
+                log.warning("pr-watch: watchdog mail failed", exc_info=True)
             _wd.write_sweep_file(
-                "tick", payload["counts"], now, _wd.verdict_signature(payload)
+                "tick", payload["counts"], now, signature
             )
             acted = 0
             for d, row in zip(payload["verdicts"], rows):

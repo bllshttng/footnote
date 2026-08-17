@@ -600,6 +600,32 @@ def status(
     last_tick_ts = _last_tick_ts(events_path)
     typer.echo(f"Last tick:    {last_tick_ts or '(no tick recorded)'}")
 
+    # Fleet watchdog freshness (x-55c3): a watchdog on a dead cadence never
+    # fires, and its silence is indistinguishable from a healthy fleet. When
+    # the lane is armed and the last sweep is older than two intervals, say so
+    # LOUD - absence is never evidence, so status never reads clean here.
+    try:
+        from fno.agents.watchdog import sweep_staleness
+        from fno.config import load_settings
+
+        if getattr(load_settings().recovery, "watchdog", "off") != "off":
+            s = sweep_staleness()
+            age = "?" if s["age_s"] is None else f"{int(s['age_s']) // 60}m"
+            if s["stale"]:
+                typer.echo(
+                    f"FLEET WATCHDOG STALE: last sweep {age} old "
+                    f"(interval 600s, source {s['source'] or 'none'}). "
+                    "A dead cadence reads as a healthy fleet. "
+                    "Sweep manually: fno agents watchdog",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    f"Watchdog:     fresh ({age} old, source {s['source']})"
+                )
+    except Exception:  # noqa: BLE001 - status never crashes on the watchdog read
+        pass
+
     # Open PRs
     open_count = _observed_open_pr_count(state_path)
     typer.echo(f"Open PRs:     {open_count}")

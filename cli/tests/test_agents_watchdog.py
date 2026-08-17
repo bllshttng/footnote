@@ -56,7 +56,7 @@ def _run(rows, transcripts, *, claims=None, nodes=None, now_s=NOW_1840):
 # ---------------------------------------------------------------------------
 
 def test_no_transcript_working_row_is_ghost_and_apply_all_still_refuses():
-    rows = [Row("bbbb2222-0000", "w1", "working", None, "/tmp/w1", None)]
+    rows = [Row("bbbb2222-0000", "w1", "working", None, "/tmp/w1")]
     [v] = _run(rows, {})
     assert v.verdict == GHOST
     assert v.basis == "no transcript for bbbb2222-0000"
@@ -67,14 +67,14 @@ def test_no_transcript_working_row_is_ghost_and_apply_all_still_refuses():
 
 
 def test_healthy_injectable_row_is_leave():
-    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1", None)]
+    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")]
     [v] = _run(rows, {"aaaa1111-0000": _facts("still on it")})
     assert v.verdict == LEAVE
     assert "reachable" in v.basis
 
 
 def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
-    row = Row("cccc3333-0000", "r1", "blocked", None, "/tmp/r1", None)
+    row = Row("cccc3333-0000", "r1", "blocked", None, "/tmp/r1")
     [before] = _run([row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL)})
     assert before.verdict == REROUTE
     assert "18:48:21Z" in before.basis and "8m out" in before.basis
@@ -87,7 +87,7 @@ def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
 
 def test_unparseable_reset_stamp_is_leave_never_wake():
     assert rate_limit_window("429 quota exceeded", NOW_1840)[0] == "unknown"
-    rows = [Row("dddd4444-0000", "k1", "blocked", None, "/tmp/k1", None)]
+    rows = [Row("dddd4444-0000", "k1", "blocked", None, "/tmp/k1")]
     [v] = _run(rows, {"dddd4444-0000": _facts("429 quota exceeded, try later")})
     assert v.verdict == LEAVE
     assert "unknown" in v.basis
@@ -97,8 +97,8 @@ def test_identity_joins_on_claim_holder_not_name():
     # Two rows whose NAMES both carry node x-9d11, but the recorded manifest
     # node differs (x-2222 vs none). Only the claim/manifest join may decide.
     rows = [
-        Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a", None),
-        Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b", None),
+        Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a"),
+        Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
     transcripts = {r.row_id: _facts("ok") for r in rows}
     vs = _run(
@@ -116,8 +116,8 @@ def test_identity_joins_on_claim_holder_not_name():
 
 def test_node_done_reaps_and_own_claim_does_not():
     rows = [
-        Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1", None),
-        Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2", None),
+        Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1"),
+        Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
     transcripts = {r.row_id: _facts("ok") for r in rows}
     vs = _run(
@@ -131,10 +131,42 @@ def test_node_done_reaps_and_own_claim_does_not():
     assert vs[1].verdict == LEAVE
 
 
-def test_bus_only_row_is_wakeable():
-    rows = [Row("dddd4444-0000", "k1", "stopped", None, "/tmp/k1", "bus-only")]
+def test_stopped_row_is_wakeable():
+    rows = [Row("dddd4444-0000", "k1", "stopped", None, "/tmp/k1")]
     [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=30)})
     assert v.verdict == WAKE
+
+
+def test_stopped_row_under_live_429_window_waits_not_wakes():
+    # Reroute only catches blocked rows; a stopped row whose window is still
+    # closed must not wake into the bounce that costs a real turn.
+    rows = [Row("eeee5555-0000", "s1", "stopped", None, "/tmp/s1")]
+    [v] = _run(rows, {"eeee5555-0000": _facts(RATE_LIMIT_TAIL)})
+    assert v.verdict == LEAVE
+    assert "window not open" in v.basis and "18:48:21Z" in v.basis
+
+
+def test_busy_row_without_transcript_is_ghost():
+    # "busy" is claude's working spelling (_LIVE_STATUS_INPUT); missing it
+    # here read a ghost as a healthy leave.
+    rows = [Row("ffff6666-0000", "b1", "busy", None, "/tmp/b1")]
+    [v] = _run(rows, {})
+    assert v.verdict == GHOST
+
+
+def test_generated_no_session_holder_never_reaps():
+    # A generated holder ({stamp}-{pid junk}-{hex}, target_cli's fallback for
+    # a context with no session env) is an operator/daemon context, not
+    # another live session; stop+rm on its say-so destroys the wrong row.
+    rows = [Row("aaaa1111-0000", "w1", "working", "x-op", "/tmp/w1")]
+    transcripts = {r.row_id: _facts("ok") for r in rows}
+    [v] = _run(
+        rows,
+        transcripts,
+        claims={"x-op": {"state": "live",
+                         "holder": "target-session:20260816T184000Z-cl123-1a2b3c"}},
+    )
+    assert v.verdict == LEAVE
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +213,21 @@ def test_wake_applies_when_message_lands(monkeypatch):
         v, lanes="wake", cwd="/tmp/k1", runner=lambda *a, **k: _Proc(0)
     )
     assert outcome == "applied"
+
+
+def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
+    """A torn/summary record with no timestamp of its own is presence, not a
+    landing: it must not confirm a wake whose message never arrived."""
+    before_epoch = NOW_1840 - 5 * 60
+    facts = TailFacts(
+        [(None, "we continue with the plan"), (before_epoch, "old turn")],
+        before_epoch,
+        "we continue with the plan old turn",
+    )
+    monkeypatch.setattr(watchdog, "tail_facts", lambda sid, cwd: facts)
+    assert not watchdog.confirm_wake_landed(
+        "dddd4444-0000", "/tmp/k1", "continue", before_epoch
+    )
 
 
 def test_wake_lane_only_wakes_even_with_lanes_all_available():
@@ -302,7 +349,7 @@ def test_stopped_row_survives_claude_agents_json(monkeypatch):
 
 
 def test_sweep_payload_shape():
-    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp", None)]
+    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp")]
     payload, out_rows = watchdog.run_sweep(
         now_s=NOW_1840,
         rows_provider=lambda: (rows, []),
@@ -335,11 +382,19 @@ def _payload_two_rows():
 
 def test_digest_is_house_style_and_names_the_basis():
     text = watchdog.digest_text(_payload_two_rows())
-    assert "wake k1: blocked 30m" in text
+    assert "- wake k1: blocked 30m" in text
     # The mail lane is style-gated at send time; a semicolon or the modal
-    # 'could' makes the whole send exit non-zero without delivering.
+    # 'could' makes the whole send exit non-zero without delivering, and a
+    # bare verdict line under the header reads as an illegal mid-paragraph
+    # wrap (rule 6) - the first tick's digest was refused by exactly that
+    # and never delivered. Every body line after the header must be a list
+    # item, which is the legal block shape.
     assert ";" not in text
     assert "could" not in text.lower()
+    body = text.splitlines()
+    assert body[1] == ""
+    for line in body[2:]:
+        assert line.startswith("- "), f"digest body line not a list item: {line!r}"
 
 
 def test_mail_digest_sends_on_change_and_skips_when_unchanged(monkeypatch, tmp_path):
@@ -386,3 +441,54 @@ def test_mail_digest_project_recipient(monkeypatch, tmp_path):
     ok, _ = watchdog.mail_digest(_payload_two_rows(), "project:fno", runner=runner)
     assert ok
     assert "--to-project" in seen["argv"] and "fno" in seen["argv"]
+
+
+def test_staleness_reads_loud_and_never_clean(monkeypatch, tmp_path):
+    import json as _json
+    import os
+
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+
+    # No sweep ever ran: the loudest case, never a clean one.
+    assert watchdog.sweep_staleness(now_s=NOW_1840)["stale"] is True
+
+    path.write_text(_json.dumps({"source": "tick", "at": "x", "counts": {}}))
+    fresh_age = 300
+    os.utime(path, (NOW_1840 - fresh_age, NOW_1840 - fresh_age))
+    assert watchdog.sweep_staleness(now_s=NOW_1840) == {
+        "age_s": fresh_age, "stale": False, "source": "tick", "at": "x",
+    }
+
+    dead_age = 26 * 3600  # the measured case: a cadence dead for 26 hours
+    os.utime(path, (NOW_1840 - dead_age, NOW_1840 - dead_age))
+    s = watchdog.sweep_staleness(now_s=NOW_1840)
+    assert s["stale"] is True and s["age_s"] == dead_age
+
+
+def test_failed_send_keeps_the_gate_open(monkeypatch, tmp_path):
+    """A digest that failed to deliver must not advance the change gate: the
+    stamp stays the PREVIOUS signature so the next sweep retries instead of
+    swallowing the verdict behind a signature it never sent."""
+    import json as _json
+
+    (tmp_path / "watchdog-sweep.json").write_text(_json.dumps(
+        {"source": "tick", "at": "x", "counts": {}, "signature": "old-sig"}
+    ))
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json")
+
+    ok, receipt, stamp = watchdog.mail_gate(
+        _payload_two_rows(), "king", runner=lambda *a, **k: _Proc(1, stderr="boom")
+    )
+    assert not ok
+    assert stamp == "old-sig"
+
+    # Delivered: the current signature advances the gate.
+    ok2, _, stamp2 = watchdog.mail_gate(
+        _payload_two_rows(), "king", runner=lambda *a, **k: _Proc(0)
+    )
+    assert ok2 and stamp2 == watchdog.verdict_signature(_payload_two_rows())
+
+    # No recipient configured: nothing to warn about, gate unchanged.
+    ok3, _, stamp3 = watchdog.mail_gate(_payload_two_rows(), "")
+    assert ok3 and stamp3 == "old-sig"

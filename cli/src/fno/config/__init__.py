@@ -2261,7 +2261,7 @@ class RecoveryBlock(BaseModel):
         non-leave row, ``wake`` additionally applies the wake lane (resume +
         content-verified message). No tick value ever reaps or reroutes:
         those stop a session and stay behind an operator running
-        ``fno agents watchdog --apply=all`` by hand.
+        ``fno agents watchdog --apply-all`` by hand.
     watchdog_mail_to:
         Mail handle the watchdog digest is pushed to (agent name, short id,
         or ``project:<slug>``). Empty (default) mails nobody. A digest is
