@@ -421,7 +421,7 @@ The producer is now reachable from every path that can reach the gate.
 | target stop hook `decide()` -> `run_done` | yes, unchanged | streak-gated |
 | `fno pr merge <n>` | yes | with no usable row it recomputes once, before the staleness comparison, pinned to the PR head |
 | `fno pr status <n>` | yes | reads through the same recompute-then-read helper |
-| `fno pr coverage-check <n>` (and the git-protection hook through it) | no by default; `--recompute` yes | the hook path must not recompute: a PreToolUse hook has a 60s budget and the Rust producer takes minutes. `--recompute` shells the producer, same as `fno pr merge` |
+| `fno pr coverage-check <n>` without `--recompute` (and the git-protection hook through it) | no by default; `--recompute` yes | the hook path must not recompute: a PreToolUse hook has a 60s budget and the Rust producer takes minutes. `--recompute` shells the producer, same as `fno pr merge` |
 | `finalize`'s auto-merge arm | not added, by decision | reached only from a terminal-allow, which implies `run_done` already ran this fire, and a failed arm leaves a green reviewed PR for a human |
 | a human running the verb by hand | yes | `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>]` |
 
