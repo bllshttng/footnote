@@ -303,7 +303,7 @@ def test_stopped_row_survives_claude_agents_json(monkeypatch):
 
 def test_sweep_payload_shape():
     rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp", None)]
-    payload = watchdog.run_sweep(
+    payload, out_rows = watchdog.run_sweep(
         now_s=NOW_1840,
         rows_provider=lambda: (rows, []),
         transcript_fn=lambda sid: _facts("ok"),
@@ -313,3 +313,5 @@ def test_sweep_payload_shape():
     assert payload["generated_at"] == "2026-08-16T18:40:00Z"
     assert payload["verdicts"][0]["verdict"] == LEAVE
     assert payload["counts"] == {LEAVE: 1}
+    # Rows ride along index-aligned so apply lanes can reach each cwd.
+    assert out_rows == rows
