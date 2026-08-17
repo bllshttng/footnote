@@ -544,11 +544,26 @@ def _targets_other_repo(command):
     `--repo`, a `GH_REPO=` assignment, and a PR URL, which names its own repo
     and which the flag test cannot see. Prefix match, not equality: gh accepts
     the attached shorthand `-Rowner/repo` as readily as `-R owner/repo`.
+
+    Quote-aware and single-token: a flag VALUE carrying `-R` or a PR link
+    (`-t "-R fixes the deref"`, a subject citing another PR's URL) is one
+    quoted argument, not an override, and must not disarm the vetoes. shlex
+    keeps it one token; the whitespace and leading-dash rejects then drop it.
+    A quoted value whose flag is absent still fails in gh itself, so nothing
+    real is lost by refusing to match it here.
     """
-    return any(
-        t.startswith(("-R", "--repo", "GH_REPO=")) or "/pull/" in t
-        for t in command.split()
-    )
+    try:
+        tokens = shlex.split(command)
+    except ValueError:  # unbalanced quotes -> plain split, same as before
+        tokens = command.split()
+    for t in tokens:
+        if " " in t:
+            continue
+        if t.startswith(("-R", "--repo", "GH_REPO=")):
+            return True
+        if "/pull/" in t and not t.startswith("-"):
+            return True
+    return False
 
 
 def _stacked_base_refusal(command=""):
@@ -588,19 +603,37 @@ def _stacked_base_refusal(command=""):
     # Fail open, like every other unanswerable case in this function.
     if _targets_other_repo(command):
         return None
+    return _fno_veto_refusal(
+        ["pr", "base-lineage-check", pr_number],
+        timeout=25,
+        fallback=f"PR {pr_number}: base no longer leads to the default branch",
+    )
+
+
+def _fno_veto_refusal(args, timeout, fallback):
+    """One fno-verb probe: deny on the verb's exit-3 refusal line, else open.
+
+    The shared scaffold of both merge vetoes (lineage, coverage): fail OPEN on
+    every way the probe itself can die - a missing `fno`, a timeout, any exit
+    other than the verb's refusal code - because a guard whose own machinery is
+    down must not become a merge outage. That includes an unknown-command exit
+    from a `fno` deployment older than the verb (the rollout window): it is
+    indistinguishable from any other usage error and fails open silently, which
+    is why each veto's timeout stays well under the harness hook budget.
+    """
     try:
         proc = subprocess.run(
-            ["fno", "pr", "base-lineage-check", pr_number],
+            ["fno", *args],
             capture_output=True,
             text=True,
-            timeout=25,
+            timeout=timeout,
         )
     except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
         return None
     if proc.returncode != 3:
         return None
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return detail[0] if detail else f"PR {pr_number}: base no longer leads to the default branch"
+    return detail[0] if detail else fallback
 
 
 def _coverage_refusal(command=""):
@@ -630,24 +663,20 @@ def _coverage_refusal(command=""):
     which is where the time is affordable.
 
     Fails OPEN only on a named instrument failure: exit 4, a missing `fno`, a
-    timeout, another repository. A guard whose own machinery is down must not
-    become a merge outage. An empty read is not a machinery failure - it is
-    the answer that nothing attested this head, and it exits 3.
+    timeout, another repository - and on an unknown-command exit from a `fno`
+    deployment older than this verb (the rollout window), which the probe
+    cannot distinguish from any other usage error. A guard whose own machinery
+    is down must not become a merge outage. An empty read is not a machinery
+    failure - it is the answer that nothing attested this head, and it exits 3.
     """
     pr_number = _parse_merge_pr(command)
     if not pr_number or _targets_other_repo(command):
         return None
-    try:
-        proc = subprocess.run(
-            ["fno", "pr", "coverage-check", pr_number],
-            capture_output=True, text=True, timeout=15,
-        )
-    except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
-        return None
-    if proc.returncode != 3:
-        return None
-    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return detail[0] if detail else f"PR {pr_number}: review coverage refused"
+    return _fno_veto_refusal(
+        ["pr", "coverage-check", pr_number],
+        timeout=15,
+        fallback=f"PR {pr_number}: review coverage refused",
+    )
 
 
 def _check_pr_merge_allowed(command=""):
@@ -670,6 +699,15 @@ def _check_pr_merge_allowed(command=""):
     which worktree session authorizes when several are active.
     """
     pr_number = _parse_merge_pr(command)
+
+    # A merge aimed at another repository cannot be authorized by THIS
+    # checkout's session artifacts: the state file and the external-review
+    # artifact below both belong to this repo, so an allow here would vouch
+    # for an unrelated PR that happens to carry the same number. Same
+    # predicate the two vetoes use; decline to authorize (the deny paths
+    # still run), never answer a question about the wrong PR.
+    if _targets_other_repo(command):
+        return None
 
     state_file, fm, repo_root = _get_active_target_session(prefer_pr=pr_number)
     if state_file is None:
