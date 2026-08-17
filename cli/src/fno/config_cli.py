@@ -511,7 +511,44 @@ def doctor_cmd(
         _report_gates()
     except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
         pass
+    try:
+        _report_deprecated_auto_merge()
+    except Exception:  # noqa: BLE001 - advisory, same wrap as the two above
+        pass
     raise typer.Exit(rc)
+
+
+def _report_deprecated_auto_merge() -> None:
+    """Name every config file still setting the deprecated ``dispatch.auto_merge``.
+
+    The migration arm of x-4be1: the alias keeps old files working for one
+    release, and this line tells the operator WHICH file to move. Reads the
+    raw candidate chain (not the merged model) so each file is named
+    individually - the merged model cannot tell them apart, which is exactly
+    the home-vs-project confusion the node exists to end.
+    """
+    from fno.config import _candidate_paths, _load_raw
+
+    for candidate in _candidate_paths():
+        if not candidate.is_file():
+            continue
+        parsed, ok = _load_raw(candidate)
+        if not ok:
+            continue
+        # Either shape: flat config.toml (top-level dispatch) or a pre-migration
+        # settings.yaml (config-wrapped dispatch).
+        legacy = parsed.get("dispatch")
+        if not isinstance(legacy, dict):
+            wrapped = parsed.get("config")
+            legacy = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
+        if not (isinstance(legacy, dict) and "auto_merge" in legacy):
+            continue
+        reads_as = "dispatch" if legacy.get("auto_merge") is True else "none"
+        typer.echo(
+            f"warn: {candidate} sets the deprecated `dispatch.auto_merge`.\n"
+            f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
+            f"      Migrate: fno config set auto_merge.grant {reads_as}"
+        )
 
 
 @app.command("active-backlog")
@@ -580,6 +617,12 @@ def get_cmd(
         ...,
         help="Dotted config key, e.g. config.blueprint.max_prs_per_epic",
     ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        "-J",
+        help="Emit {key, value, source, overrides} as one JSON object on stdout.",
+    ),
 ) -> None:
     """Print a single resolved config value. Read-only.
 
@@ -592,11 +635,19 @@ def get_cmd(
     retried as ``config.review.required_bots`` so a caller need not remember
     the redundant prefix (x-8b64 E: the review gate defaults to
     ``config.review.required_bots`` but the shorthand used to error).
+
+    Which FILE decided the value prints on STDERR (x-4be1): the silent
+    home-vs-project override is the defect this fixes, so the resolved value
+    alone on stdout would keep the confusion. stdout stays value-only because
+    callers pipe it (normalize.sh compares the whole stream); the source line,
+    including an ``overrides`` clause exactly when a lower-precedence file
+    also sets the key, is stderr-only. ``--json`` carries both streams' facts
+    as one object.
     """
     import json
     import sys
 
-    from fno.config import load_settings
+    from fno.config import load_settings, resolve_source
     from pydantic import BaseModel
 
     root = load_settings()
@@ -623,12 +674,44 @@ def get_cmd(
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)
 
+    source = resolve_source(key)
+    if source is not None:
+        decider, overridden = source
+        source_line = f"source: {decider}"
+        if overridden:
+            source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
+    else:
+        decider, overridden = None, []
+        source_line = "source: default (no config file sets this key)"
+
+    if json_out:
+        value: object
+        if isinstance(node, BaseModel):
+            value = json.loads(node.model_dump_json())
+        elif isinstance(node, (dict, list)):
+            value = node
+        else:
+            value = node
+        typer.echo(
+            json.dumps(
+                {
+                    "key": key,
+                    "value": value,
+                    "source": str(decider) if decider else None,
+                    "overrides": [str(p) for p in overridden],
+                },
+                default=str,
+            )
+        )
+        return
+
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
     elif isinstance(node, (dict, list)):
         typer.echo(json.dumps(node, default=str))
     else:
         typer.echo("" if node is None else str(node))
+    typer.echo(source_line, file=sys.stderr)
 
 
 @app.command("set")
