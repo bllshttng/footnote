@@ -259,6 +259,18 @@ A `stale` verdict is **recorded, not dropped**.
 `CoverageVerdict::Stale` says a reviewer responded against an older commit.
 That is a different fact from `absent`, and it calls for a different response: ask for a re-read, rather than wait for a first read.
 
+### Scope: which PR an attestation is about
+
+Freshness answers when a verdict was rendered.
+Scope answers which PR it was rendered for, and the two are independent.
+The events journal is shared across every worktree of a repo by design: `setup-worktree.sh` links each worktree's `.fno/events.jsonl` to the canonical file. An unscoped scan therefore reads every branch's attestations into every PR's verdict list.
+Measured on 2026-08-16: five attestations, five heads, five branches, one file.
+The fix is the `branch` field on `review_attestation` plus one predicate, `attestation_in_scope`, applied by both scans (`local_latest_passes` and `unattested_reviewers_scan`) before any freshness call.
+An attestation naming the PR's head branch is in scope.
+An event predating the field counts only on exact head equality. A foreign branch cannot share this head sha without being this commit. The legacy line deliberately does not inherit the carry: an attestation on a moved head cannot be scoped to any PR.
+Out-of-scope lines are skipped entirely rather than marked stale: a stale verdict says "ask this reviewer to re-read", which is wrong advice about a reviewer on another branch.
+The verdict records which rule admitted it (`scope: attested_branch | legacy_head_match`), so a refusal under a moved head can name a pre-branch-field attestation.
+
 ### What the carry rule does not buy
 
 It does not deliver relief from the re-review treadmill, and the measurement says so plainly.
