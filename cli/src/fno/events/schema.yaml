@@ -219,6 +219,9 @@ event_types:
           type: string
           enum: [pass, fail]
           description: "pass satisfies the gate entry; fail (or an absent attestation) holds it (fail closed)."
+        branch:
+          type: string
+          description: "The branch the attestation was emitted on (git rev-parse --abbrev-ref HEAD at emit; empty on a detached HEAD, never the literal string 'HEAD'). OPTIONAL, and its absence means the event PREDATES the field: every consumer scanning for attestations must then fall back to exact head equality - a foreign branch cannot share this head sha without being this commit - and must NOT extend the code-diff carry to a legacy line, because a legacy attestation on a moved head is not scopeable to any PR. The field exists because the journal is shared across every worktree of a repo by design, so head_sha alone cannot say which PR an attestation is about and a global match counted foreign reviews."
         session_id:
           type: string
           description: "The target run id of the worktree the attestation was emitted in (fno_id, mirrored). NOT the attesting actor: it is grepped from the worktree manifest, so it equals manifest.session_id for every emitter in that worktree, including a reviewer who is not the author. A join on it returns self by construction; key the authorship join on attester_session_id instead."
@@ -283,6 +286,10 @@ event_types:
                 description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
               human_approval:
                 type: boolean
+              scope:
+                type: string
+                enum: [attested_branch, legacy_head_match]
+                description: "How a local_attestation verdict was scoped to this PR: `attested_branch` means the event's branch equals the PR's head branch; `legacy_head_match` means the event predates the branch field and was admitted on exact head equality. Only present on local_attestation verdicts; github_app evidence is scoped by being a review object on this PR. A refusal that sees only legacy_head_match passes under a moved head names them as unscoped (pre-branch-field) rather than reporting a bare count."
               attestation_origin:
                 type: string
                 enum: [self_attested, other_session, unknown]

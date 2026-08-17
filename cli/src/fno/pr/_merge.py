@@ -272,6 +272,24 @@ def _coverage_refused_reason(
     prefix = f"coverage {cov_word}: " if cov_word != "covered" else ""
     ev_head = cov.get("head_sha")
     if head and ev_head and head != ev_head:
+        # Pre-branch-field attestations (scope legacy_head_match) admitted on
+        # exact head equality die the moment the head moves: they cannot be
+        # scoped to this PR, so name that shape rather than the generic
+        # head-pinned line, which reads as "nobody reviewed" over a review
+        # that genuinely happened on an older commit of THIS branch.
+        raw = cov.get("verdicts")
+        verdicts = raw if isinstance(raw, list) else []
+        legacy_shas = [
+            str(v.get("reviewed_sha") or "?")[:8]
+            for v in verdicts
+            if isinstance(v, dict) and v.get("scope") == "legacy_head_match"
+        ]
+        if legacy_shas:
+            return (
+                f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
+                f"unscoped attestation (pre-branch-field) at {', '.join(legacy_shas)}; "
+                "re-run the review verb at HEAD"
+            )
         return (
             f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
             "attestations are head-pinned by design - re-run the review verb at HEAD"
