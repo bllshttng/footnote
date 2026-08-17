@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 import typer
 
@@ -4156,7 +4156,7 @@ def cmd_next(
             recv_entries = (
                 pre_entries if _external
                 else (read_graph(_graph_path()) if claim else entries)
-            )
+            ) or []
             scope_ids = (
                 descendants_of(recv_entries, parent_target_id)
                 if parent_target_id is not None else None
@@ -5066,7 +5066,7 @@ def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
         return d
 
     if json_out:
-        output = {
+        output: dict[str, Any] = {
             "node_id": node.id,
             "title": node.title,
             "edges": [_edge("node_birth", birth_result), _edge("spawn", spawn_result)],
@@ -5679,7 +5679,6 @@ def cmd_roadmap(
         render_public_roadmap_html,
         render_public_roadmap_md,
     )
-    from fno.graph.store import read_graph
 
     resolved_project = project or detect_project_from_settings(repo_root())
     if not resolved_project:
@@ -5801,7 +5800,6 @@ def cmd_status(
         ),
     ),
 ) -> None:
-    from fno.graph.store import read_graph
     from fno.graph._intake import detect_project
 
     if snapshot:
@@ -11896,10 +11894,10 @@ def _classify_backlog_verbs() -> None:
                     _refuse_tracker_owned_on_external_backend(_label)
                     return _orig(*args, **kwargs)
 
-                _guarded._fno_tracker_owned = True
+                setattr(_guarded, "_fno_tracker_owned", True)
                 info.callback = _guarded
             elif label in _FOOTNOTE_OWNED_VERBS:
-                callback._fno_footnote_owned = True
+                setattr(callback, "_fno_footnote_owned", True)
             else:
                 raise RuntimeError(
                     f"unclassified backlog verb {label!r}: classify it in "
