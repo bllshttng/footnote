@@ -294,7 +294,11 @@ pub fn worker_qos_enabled(cwd: &Path) -> bool {
 /// error never grants merge rights (Locked Decision 6). Only the real literal
 /// grants: `"dispatch"` trimmed-exact for the string, a real TOML boolean for
 /// the legacy spelling (`as_bool()` rejects `"yes"`), mirroring the Python
-/// `AutoMergeBlock` coercer and its `_alias_legacy_keys` arm.
+/// `AutoMergeBlock` coercer and its `_alias_legacy_keys` arm. Parity with that
+/// arm extends to fall-through: a legacy key that is PRESENT but not a bool is
+/// a no-grant DECISION in this file (the Python per-layer fold writes
+/// `grant = "none"`), never a fall-through that lets a lower-precedence file
+/// resurrect the grant.
 pub fn auto_merge_grant(cwd: &Path) -> bool {
     resolve(cwd, |t| {
         let grant = t
@@ -308,9 +312,11 @@ pub fn auto_merge_grant(cwd: &Path) -> bool {
             return Some(g.as_str().map(|s| s.trim() == "dispatch").unwrap_or(false));
         }
         // No canonical grant in this file; it may still carry the legacy
-        // spelling. None from either arm falls through to the next candidate
-        // file, same fall-through as every other resolve() extractor.
-        t.get("dispatch")?.as_table()?.get("auto_merge")?.as_bool()
+        // spelling. An ABSENT key falls through to the next candidate file
+        // (same as every other resolve() extractor); a present-but-non-bool
+        // value is a no-grant decision, mirroring the Python fold.
+        let legacy = t.get("dispatch")?.as_table()?.get("auto_merge")?;
+        Some(legacy.as_bool().unwrap_or(false))
     })
     .unwrap_or(false)
 }
@@ -793,6 +799,31 @@ mod tests {
         // Pin FNO_CONFIG so the None from the canonical arm cannot fall
         // through to the developer's real global config either.
         std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_grant(&cwd);
+        clear_config_env();
+        assert!(!got);
+    }
+
+    #[test]
+    fn auto_merge_grant_malformed_legacy_in_project_masks_global() {
+        // Parity with the Python per-layer fold (x-4be1): a present-but-non-bool
+        // legacy value is a no-grant DECISION in the project file. It must not
+        // fall through and let the global's canonical grant resurrect merge -
+        // the Python fold writes grant="none" into the project layer, which
+        // masks the global on merge.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("am-malformed-legacy", "[dispatch]\nauto_merge = \"yes\"\n");
+        let gdir =
+            std::env::temp_dir().join(format!("fno-agents-global-am-{}", std::process::id()));
+        std::fs::create_dir_all(&gdir).unwrap();
+        std::fs::write(
+            gdir.join("config.toml"),
+            "[auto_merge]\ngrant = \"dispatch\"\n",
+        )
+        .unwrap();
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", gdir.join("settings.json"));
         let got = auto_merge_grant(&cwd);
         clear_config_env();
         assert!(!got);

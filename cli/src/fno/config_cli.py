@@ -536,12 +536,27 @@ def _report_deprecated_auto_merge() -> None:
         if not ok:
             continue
         # Either shape: flat config.toml (top-level dispatch) or a pre-migration
-        # settings.yaml (config-wrapped dispatch).
+        # settings.yaml (config-wrapped dispatch); the canonical grant lives in
+        # the same scope so the masked check uses the file's real shape.
+        scope = parsed if isinstance(parsed.get("dispatch"), dict) else parsed.get("config")
         legacy = parsed.get("dispatch")
         if not isinstance(legacy, dict):
             wrapped = parsed.get("config")
             legacy = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
         if not (isinstance(legacy, dict) and "auto_merge" in legacy):
+            continue
+        canonical = scope.get("auto_merge") if isinstance(scope, dict) else None
+        if isinstance(canonical, dict) and "grant" in canonical:
+            # Canonical wins in this file (`_alias_am_grant` refuses to fold), so
+            # the legacy line is INERT. Never print its fold value as a migration
+            # target: telling the operator to `config set auto_merge.grant
+            # dispatch` on a file whose canonical grant is "none" would arm
+            # unattended merge on a project they just disarmed.
+            typer.echo(
+                f"warn: {candidate} still sets the deprecated `dispatch.auto_merge`, "
+                "but a canonical `auto_merge.grant` in the same file masks it "
+                "(the file reads as the canonical value). Remove the legacy line."
+            )
             continue
         reads_as = "dispatch" if legacy.get("auto_merge") is True else "none"
         typer.echo(
@@ -677,21 +692,15 @@ def get_cmd(
     source = resolve_source(key)
     if source is not None:
         decider, overridden = source
-        source_line = f"source: {decider}"
-        if overridden:
-            source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
     else:
         decider, overridden = None, []
-        source_line = "source: default (no config file sets this key)"
 
     if json_out:
-        value: object
-        if isinstance(node, BaseModel):
-            value = json.loads(node.model_dump_json())
-        elif isinstance(node, (dict, list)):
-            value = node
-        else:
-            value = node
+        # model_dump(mode="json") is the JSON-ready form in one step; scalars
+        # and containers pass through unchanged.
+        value: object = (
+            node.model_dump(mode="json") if isinstance(node, BaseModel) else node
+        )
         typer.echo(
             json.dumps(
                 {
@@ -704,6 +713,10 @@ def get_cmd(
             )
         )
         return
+
+    source_line = f"source: {decider}" if decider else "source: default (no config file sets this key)"
+    if overridden:
+        source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
 
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())

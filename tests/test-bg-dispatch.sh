@@ -177,18 +177,18 @@ case "$sub $verb" in
     [[ -n "$r_node" ]] && cmd="${cmd//\{id\}/$r_node}"
     printf '{"harness":"%s","substrate":"%s","command":"%s"}\n' "$h" "${pair##*/}" "$cmd" ;;
   "config get")
-    # x-4391: only dispatch.auto_merge is modeled; every other key (e.g.
+    # x-4391/x-4be1: only auto_merge.grant is modeled; every other key (e.g.
     # agents.spawn_permission_mode) falls through to empty, matching prod's
     # "unset => empty" so the permission-mode read stays a no-op under the mock.
     key="${3:-}"
-    if [[ "$key" == "dispatch.auto_merge" ]]; then
-      [[ -f "$S/cfg_auto_merge_err" ]] && { echo "unknown config key 'dispatch.auto_merge'" >&2; exit 1; }
+    if [[ "$key" == "auto_merge.grant" ]]; then
+      [[ -f "$S/cfg_auto_merge_err" ]] && { echo "unknown config key 'auto_merge.grant'" >&2; exit 1; }
       # x-4391 per-node (codex P2): `fno config get` reads the CURRENT cwd. The
       # launcher cd's into each node's project cwd before the read, so a node
       # carrying its own .fno/auto_merge (written by the test) simulates a
       # cross-project posture; the global cfg_auto_merge state is the fallback.
       [[ -f "$PWD/.fno/auto_merge" ]] && { cat "$PWD/.fno/auto_merge"; exit 0; }
-      cat "$S/cfg_auto_merge" 2>/dev/null || echo False   # prints a Python bool
+      cat "$S/cfg_auto_merge" 2>/dev/null || echo none   # prints the grant literal
       exit 0
     fi
     : ;;
@@ -271,12 +271,12 @@ grep -q "no-merge" "$MOCKSTATE/ask.log" \
   || pass "AC5-HP: --allow-merge suppresses the no-merge default"
 
 # ============================================================
-# x-4391: config-driven merge posture (config.dispatch.auto_merge)
+# x-4391/x-4be1: config-driven merge posture (config.auto_merge.grant)
 # ============================================================
 
-# AC2-HP: auto_merge=true -> claude builtin path omits no-merge (skip-inject).
+# AC2-HP: grant=dispatch -> claude builtin path omits no-merge (skip-inject).
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
-echo True > "$MOCKSTATE/cfg_auto_merge"
+echo dispatch > "$MOCKSTATE/cfg_auto_merge"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
 if grep -q '/target ab-aaaa1111' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
   pass "x-4391 AC2-HP: config auto_merge=true -> claude /target without no-merge"
@@ -287,7 +287,7 @@ fi
 # AC2-HP (the strip): a codex builtin command bakes no-merge (_AUTONOMOUS_COMMAND);
 # under allow posture the launcher STRIPS it, not merely skip-injects.
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
-echo True > "$MOCKSTATE/cfg_auto_merge"; echo codex/headless > "$MOCKSTATE/resolve_pair"
+echo dispatch > "$MOCKSTATE/cfg_auto_merge"; echo codex/headless > "$MOCKSTATE/resolve_pair"
 out="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
 if grep -q 'fno:target ab-aaaa1111' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
   pass "x-4391 AC2-HP: auto_merge=true strips baked no-merge from codex \$fno:target"
@@ -305,7 +305,7 @@ grep -q 'fno:target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
 
 # AC3-HP: explicit --no-merge beats config auto_merge=true.
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
-echo True > "$MOCKSTATE/cfg_auto_merge"
+echo dispatch > "$MOCKSTATE/cfg_auto_merge"
 out="$(bash "$DISPATCH" --no-merge ab-aaaa1111 2>&1)"
 grep -q '/target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
   && pass "x-4391 AC3-HP: --no-merge beats config auto_merge=true" \
@@ -340,7 +340,7 @@ eval "$(sed -n '/^strip_no_merge() {/,/^}/p' "$DISPATCH")"
 # dispatcher's. Node B's project opts in via its own .fno/auto_merge while the
 # global default stays no-merge -> B dispatches allow (from B's config).
 reset_mock
-projB="$TMP/projB"; mkdir -p "$projB/.fno"; echo True > "$projB/.fno/auto_merge"
+projB="$TMP/projB"; mkdir -p "$projB/.fno"; echo dispatch > "$projB/.fno/auto_merge"
 set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projB"
 out="$(bash "$DISPATCH" ab-bbbb2222 2>&1)"
 if grep -q '/target ab-bbbb2222' "$MOCKSTATE/ask.log" && ! grep -q 'no-merge' "$MOCKSTATE/ask.log"; then
@@ -350,7 +350,7 @@ else
 fi
 
 # The dispatcher's own cwd opting in must NOT leak to a node whose project has no
-# opt-in: with the global default false and no per-node config, B stays no-merge.
+# opt-in: with the global default none and no per-node config, B stays no-merge.
 reset_mock
 projC="$TMP/projC"; mkdir -p "$projC/.fno"   # no auto_merge file -> project default
 set_status ab-bbbb2222 ready; set_claim ab-bbbb2222 free; set_resolved_cwd ab-bbbb2222 "$projC"

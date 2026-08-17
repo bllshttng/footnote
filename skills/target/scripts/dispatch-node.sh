@@ -16,7 +16,7 @@
 #                                 [--permission-mode <mode>] [--route provider/model]
 #
 # --allow-merge / --no-merge: per-run merge posture override (x-4391). Neither
-#   flag => posture from config.dispatch.auto_merge (default false = no-merge).
+#   flag => posture from config.auto_merge.grant (default none = no-merge).
 #   An explicit flag wins the config default.
 #
 # --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
@@ -91,7 +91,7 @@ fi
 NODES=()
 ALL_READY=0
 FLAGS=""
-# x-4391 tri-state: "" = unset (resolve from config.dispatch.auto_merge after arg
+# x-4391 tri-state: "" = unset (resolve from config.auto_merge.grant after arg
 # parse); 1 = allow merge (--allow-merge); 0 = no-merge (--no-merge). Once
 # resolved it is always 0/1, so the downstream `-eq 0`/`-eq 1` checks are total.
 ALLOW_MERGE=""
@@ -135,22 +135,23 @@ if [[ -z "$PERMISSION_MODE" ]]; then
   PERMISSION_MODE="$(fno config get agents.spawn_permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
 fi
 
-# x-4391: merge posture is resolved PER NODE (in the loop) so a batch spanning
-# projects reads each node's own config.dispatch.auto_merge from that node's cwd
-# (codex P2). The global $ALLOW_MERGE tri-state here carries ONLY an explicit
-# --allow-merge/--no-merge flag (applies to every node); "" = no flag = resolve
-# config per node below. resolve_node_posture prints 1 (allow) or 0 (no-merge)
-# for a given node cwd: an explicit flag wins; else config.dispatch.auto_merge
-# read from THAT cwd. `fno config get` prints a Python bool (`True`/`False`) and
-# has no cwd flag, so cd in a subshell then lowercase before the exact-`true`
-# compare; any error / non-true output (stale fno, absent config, gone cwd)
-# degrades to no-merge (Locked Decision 6: never grant merge on error).
+# x-4391/x-4be1: merge posture is resolved PER NODE (in the loop) so a batch
+# spanning projects reads each node's own config.auto_merge.grant from that
+# node's cwd (codex P2). The global $ALLOW_MERGE tri-state here carries ONLY an
+# explicit --allow-merge/--no-merge flag (applies to every node); "" = no flag =
+# resolve config per node below. resolve_node_posture prints 1 (allow) or 0
+# (no-merge) for a given node cwd: an explicit flag wins; else
+# config.auto_merge.grant read from THAT cwd. `fno config get` prints the value
+# alone on stdout (its source-file line is stderr-only) and has no cwd flag, so
+# cd in a subshell before the exact-`dispatch` compare; any error / wrong output
+# (stale fno, absent config, gone cwd) degrades to no-merge (Locked Decision 6:
+# never grant merge on error).
 resolve_node_posture() {
   local node_cfg_cwd="$1"
   if [[ -n "$ALLOW_MERGE" ]]; then printf '%s' "$ALLOW_MERGE"; return; fi
   local am
-  am="$( ( [[ -n "$node_cfg_cwd" ]] && cd "$node_cfg_cwd" 2>/dev/null; fno config get dispatch.auto_merge 2>/dev/null ) | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
-  [[ "$am" == "true" ]] && printf '1' || printf '0'
+  am="$( ( [[ -n "$node_cfg_cwd" ]] && cd "$node_cfg_cwd" 2>/dev/null; fno config get auto_merge.grant 2>/dev/null ) | tr -d '[:space:]' || true)"
+  [[ "$am" == "dispatch" ]] && printf '1' || printf '0'
 }
 
 # x-4391: remove the standalone merge-refusal flag from a /target-family
@@ -646,7 +647,7 @@ for id in "${NODES[@]}"; do
   esac
 
   # x-4391: per-node merge posture, read from THIS node's project cwd so a batch
-  # spanning repos honors each project's config.dispatch.auto_merge (codex P2). An
+  # spanning repos honors each project's config.auto_merge.grant (codex P2). An
   # explicit flag (in $ALLOW_MERGE) wins for every node; else config-per-node.
   node_allow_merge="$(resolve_node_posture "$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)")"
 

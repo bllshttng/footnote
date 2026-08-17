@@ -460,9 +460,16 @@ def _plugin_cache_report() -> dict[str, Optional[str]]:
     try:
         registry = _plugin_registry_path()
         data = json.loads(registry.read_text(encoding="utf-8"))
-        entries = (data.get("plugins") or {}).get("fno@footnote") or []
-        entry = entries[0] if entries else {}
-    except (OSError, ValueError, IndexError):
+        plugins = data.get("plugins") if isinstance(data, dict) else None
+        entries = (
+            plugins.get("fno@footnote") if isinstance(plugins, dict) else None
+        ) or []
+        entry = entries[0] if isinstance(entries, list) and entries else {}
+    except (OSError, ValueError, IndexError, AttributeError, TypeError, KeyError):
+        # A hand-edited, corrupted, or future-version registry is exactly the
+        # broken install this advisory leg exists to describe: any malformed
+        # shape degrades to unknown, never a traceback through doctor_command's
+        # unwrapped call sites.
         report["detail"] = "no installed_plugins.json entry for fno@footnote"
         return report
     sha = entry.get("gitCommitSha")
@@ -1020,7 +1027,7 @@ def _read_posture_stamp() -> Optional[dict[str, Any]]:
         return None
 
 
-def _silent_switch_report() -> dict[str, Any]:
+def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Both directions of the silent-switch rule.
 
     Direction "inaction": a default-off switch silently producing nothing while
@@ -1109,19 +1116,21 @@ def _silent_switch_report() -> dict[str, Any]:
             "count_label": f"manifest(s): {breakdown}",
             "command": "fno config set auto_merge.enabled false",
         }
-        # An ``unknown`` count is answerable, not fated (x-4be1): when the
-        # deployed plugin cache predates the provenance writer, that staleness
-        # is the cause and ``fno update`` is the fix. Only speak when the
-        # plugin-cache signal PROVES stale; a pre-provenance manifest with a
+        # An ``unknown`` count is answerable, not fated (x-4be1): a proven-stale
+        # deployed plugin cache is a LIKELY cause (a cache pinned before the
+        # provenance writer cannot stamp manifests), and ``fno update`` is the
+        # fix for that cause. Only speak when the plugin-cache signal PROVES
+        # stale, and say "likely" - ancestor-ness alone does not prove the
+        # pinned sha predates the writer, and a pre-provenance manifest with a
         # fresh cache stays a bare unknown (never guess an origin).
         if armed.get("unknown"):
-            cache = _plugin_cache_report()
+            cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
             if cache.get("status") == "stale":
                 sha = str(cache.get("sha") or "")[:12]
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
-                    f"deployed plugin cache is stale ({sha}, {when}); the "
-                    "auto_merge_source writer landed later. Fix: fno update"
+                    f"deployed plugin cache is stale ({sha}, {when}); likely "
+                    "predates the auto_merge_source writer. Fix: fno update"
                 )
         findings.append(finding)
     return {"findings": findings, "posture": _read_posture_stamp()}
@@ -2781,12 +2790,16 @@ def doctor_command(
 
     # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.
-    # Never changes status/exit.
-    result["silent_switches"] = _silent_switch_report()
+    # Never changes status/exit. The plugin-cache report is computed ONCE and
+    # shared with the silent-switch pass (its unknown-manifest cause reads it):
+    # two invocations would run the registry read and the git probes twice and
+    # could disagree about the same cache within one report.
+    plugin_cache = _plugin_cache_report()
+    result["silent_switches"] = _silent_switch_report(plugin_cache=plugin_cache)
 
     # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
     # sessions actually run. Never changes status/exit.
-    result["plugin_cache"] = _plugin_cache_report()
+    result["plugin_cache"] = plugin_cache
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).

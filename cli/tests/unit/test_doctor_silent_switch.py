@@ -103,9 +103,12 @@ def test_auto_merge_armed_named_as_irreversible(monkeypatch: pytest.MonkeyPatch)
     assert "2 config" in by_sw["auto_merge_approved (worktree manifests)"]["count_label"]
     assert "1 env-target-auto-merge" in by_sw["auto_merge_approved (worktree manifests)"]["count_label"]
     # Every irreversible finding carries a disarm command (x-4be1: the grant
-    # disarms to the 'none' literal, not a bool).
+    # disarms to the 'none' literal, not a bool). The command must SET AN OFF
+    # VALUE, not merely be any config-set: an arming command here would tell the
+    # operator to grant unattended merge while disarming it.
     for f in irreversible:
         assert f["command"].startswith("fno config set")
+        assert f["command"].endswith((" false", " none"))
 
 
 def test_armed_unknown_manifests_name_stale_plugin_cache_as_cause(
@@ -133,8 +136,8 @@ def test_armed_unknown_manifests_name_stale_plugin_cache_as_cause(
     by_sw = {f["switch"]: f for f in report["findings"]}
     finding = by_sw["auto_merge_approved (worktree manifests)"]
     assert finding["cause"] == (
-        "deployed plugin cache is stale (a8f3c5537ed5, 2026-08-13); the "
-        "auto_merge_source writer landed later. Fix: fno update"
+        "deployed plugin cache is stale (a8f3c5537ed5, 2026-08-13); likely "
+        "predates the auto_merge_source writer. Fix: fno update"
     )
 
 
