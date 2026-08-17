@@ -52,11 +52,21 @@ _RECEIPT = '{"name":"tgt-2222aaaa","short_id":"abc12345","provider":"claude","st
 
 @pytest.fixture
 def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Isolate all claims + canonical-root resolution under tmp_path."""
+    """Isolate all claims + canonical-root resolution under tmp_path.
+
+    The journal is pinned as well as the root. `fno dispatch` writes its
+    cutover receipt through an unpathed `append_event`, which resolves through
+    `paths.project_events_json()` and so honors `FNO_EVENTS_PATH` ahead of the
+    root - and the hermetic sandbox sets that var for the whole pytest process.
+    Without this line the dispatch leg's receipt lands in a journal shared with
+    every other test, and before the pin existed it escaped to the developer's
+    real checkout, where it reached the operator needs panel.
+    """
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_AUTO_CONTINUE", "1")  # armed by default for tests
     events_path = tmp_path / ".fno" / "events.jsonl"
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(events_path))
     return events_path
 
 
