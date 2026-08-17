@@ -16,6 +16,31 @@ import pytest
 from fno.pr import _sync_canonical as sc
 
 
+@pytest.fixture(autouse=True)
+def _no_global_tick_events(monkeypatch):
+    """The tick command emits pr_watch_tick_attempt/end records itself.
+
+    These tests drive the real Typer command, which would otherwise append
+    fabricated attempt/end records to the live ~/.fno/events.jsonl - the
+    exact pollution the autouse fixture in test_pr_watch_cli_adapters.py
+    was written to prevent. Capture instead; an explicit events_path still
+    delegates to the real writer.
+    """
+    from fno.pr_watch import cli as prcli
+
+    real = prcli._emit_event
+    events: list[tuple[str, dict]] = []
+
+    def _capture(event_type, data, *, events_path=None):
+        if events_path is not None:
+            return real(event_type, data, events_path=events_path)
+        events.append((event_type, dict(data)))
+        return True
+
+    monkeypatch.setattr(prcli, "_emit_event", _capture)
+    return events
+
+
 def _pm(**over):
     base = dict(
         sync_command="true",
