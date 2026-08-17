@@ -71,11 +71,14 @@ uv_install_verifies() {
 # docs/architecture/cli-lazy-imports.md). A verify firing the instant uv returns
 # therefore races the install it is verifying and refuses a good tree.
 #
-# This is the third of three provisioning paths to get this wait. The others are
-# `_await_binary` in cli/src/fno/update.py and `install_verified_within` in
-# crates/fno/src/bootstrap.rs. All three spend the same 15 * 0.2s = 3s and all
-# three RE-CHECK rather than sleeping blind, so a genuinely broken install still
-# fails with the same message. Change one budget and change all three.
+# One of FOUR provisioning paths carrying this wait. The others are
+# `__fno_verify_within` inside `_uv_retry_sh` in cli/src/fno/update.py,
+# `install_verified_within` in crates/fno/src/bootstrap.rs, and
+# `uv_install_verifies_within` in scripts/install/fno.sh. All four spend the same
+# 15 * 0.2s = 3s and all four RE-CHECK rather than sleeping blind, so a genuinely
+# broken install still fails with the same message.
+# tests/ci/test_uv_install_verify_wait.sh asserts the four budgets match; change
+# one and change all four.
 uv_install_verifies_within() {
   local n=0
   while :; do

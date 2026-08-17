@@ -106,7 +106,21 @@ fn run(args: &[OsString]) -> BootResult<()> {
                 return Err(exec_real(&real, args)); // unchanged: already verified
             }
             // Changed (or mtime unreadable): re-verify before trusting it again.
-            if verify_ours(&real).is_ok() {
+            //
+            // This is the arm a concurrent install actually takes, not the one
+            // above. `uv tool install --force` RECREATES `bin/fno-py`, so the
+            // mtime can never match what we recorded, and every racing process
+            // lands here. `verify_ours` spawns the venv's own python, which is
+            // exactly what a mid-rewrite venv cannot answer reliably. A single
+            // failed probe here drops the sentinel just like the absent-file
+            // arm does, so guarding only that arm would have left the storm
+            // trigger fully intact.
+            //
+            // Same budget, same falsifiable shape: a genuinely foreign package
+            // fails the probe through every pass and is still refused. It pays
+            // one python spawn per pass, which is the expensive case, and it is
+            // the rare one: something else has taken our install path.
+            if verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
                 return Err(record_and_exec(&real, args));
             }
             // A foreign package now sits at our path: drop the sentinel and fall
@@ -418,6 +432,30 @@ fn executable_within(path: &Path, attempts: u32, poll: Duration) -> bool {
     false
 }
 
+/// [`verify_ours`], retried until it passes or the budget runs out.
+///
+/// The third twin of [`executable_within`] and [`install_verified_within`], and
+/// the one that guards the arm a racing install actually reaches. Costs one
+/// python spawn per pass rather than a stat, which is why the budget matters:
+/// it is bounded, and it is only ever paid when the recorded mtime already
+/// failed to match, meaning something rewrote our console script.
+///
+/// A genuinely foreign package fails every pass and is still refused, so this
+/// buys tolerance for a mid-rewrite venv without weakening the "never run a
+/// foreign fno" invariant.
+fn verify_ours_within(path: &Path, attempts: u32, poll: Duration) -> bool {
+    if verify_ours(path).is_ok() {
+        return true;
+    }
+    for _ in 0..attempts {
+        thread::sleep(poll);
+        if verify_ours(path).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 /// [`install_verified`], retried on a disk RE-CHECK until it passes or the
 /// budget runs out.
 ///
@@ -463,7 +501,12 @@ fn install_verified(uv: &Path) -> Result<(), String> {
     let tool_dir = uv_tool_dir(uv).ok_or("uv tool dir unreadable")?;
     let venv = tool_dir.join(TOOL_NAME);
     let entry = venv.join("bin").join("fno-py");
-    if !entry.exists() {
+    // Executable, not merely present. The three shell twins verify with
+    // `[ -x ... ]`, and `run()` requires an executable script one call later. A
+    // file uv has written but not yet chmodded would pass a bare `exists()`,
+    // clear the waited verify, then fail the locate below - which writes a
+    // failure stamp and refuses every LATER call for the stamp's lifetime.
+    if !is_executable(&entry) {
         return Err(format!("no console script at {}", entry.display()));
     }
     let lib = venv.join("lib");
@@ -1335,7 +1378,10 @@ mod tests {
             "",
         )
         .unwrap();
-        fs::write(tool_dir.join("fno/bin/fno-py"), "#!/bin/sh\n").unwrap();
+        let entry = tool_dir.join("fno/bin/fno-py");
+        fs::write(&entry, "#!/bin/sh\n").unwrap();
+        // Executable, as uv writes it: the marker verifies with `-x`.
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
         let counter = root.join("attempts");
         let script = format!(
             "#!/bin/sh\n\
@@ -1418,7 +1464,11 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let tool_dir = root.join("tools");
         fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
-        fs::write(tool_dir.join("fno/bin/fno-py"), "#!/bin/sh\n").unwrap();
+        let entry = tool_dir.join("fno/bin/fno-py");
+        fs::write(&entry, "#!/bin/sh\n").unwrap();
+        // Executable, as uv writes it: otherwise this asserts the console-script
+        // arm and never reaches the bytecode arm it means to test.
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
         let script = format!(
             "#!/bin/sh\n\
              case \"$1 $2\" in\n\
@@ -1482,6 +1532,26 @@ mod tests {
     }
 
     #[test]
+    fn verify_ours_within_still_refuses_a_genuinely_foreign_package() {
+        // The half that must NOT soften. `verify_ours` runs the venv's own
+        // python; a path with no python there fails every pass, so the sentinel
+        // is still dropped and the "never run a foreign fno" invariant holds.
+        // Without this, the retry above would read as "keep trying until you
+        // trust it", which is the opposite of what it does.
+        let root = env::temp_dir().join(format!("fno-foreign-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let fake = root.join("fno-py");
+        fs::write(&fake, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            !verify_ours_within(&fake, 2, Duration::from_millis(10)),
+            "a package that never verifies must stay refused"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_genuinely_uninstalled_wheel_still_answers_absent() {
         // The other half, and the reason this is a re-check rather than a hope:
         // a wheel that really is gone stays gone through every pass, so the
@@ -1521,6 +1591,7 @@ mod tests {
         let writer = thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
             fs::write(&late, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&late, fs::Permissions::from_mode(0o755)).unwrap();
         });
 
         let got = install_verified_within(&uv, 15, Duration::from_millis(50));

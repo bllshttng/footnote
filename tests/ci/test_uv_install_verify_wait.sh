@@ -93,10 +93,12 @@ have scripts/install/fno.sh 'sleep 0.2' "0.2s poll"
 have scripts/install/fno.sh 'uv_install_verifies_within ||' "waited verify call"
 lacks scripts/install/fno.sh 'uv_install_verifies ||' "call the _within wrapper"
 
-have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1' "15-retry ceiling"
+have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1; sleep 0.2' "15-retry ceiling and 0.2s poll"
 have cli/src/fno/update.py 'if __fno_verify_within; then break' "waited install verify"
 have cli/src/fno/update.py '_fno_n -lt 15' "15-retry ceiling in _await_binary"
-have cli/src/fno/update.py 'sleep 0.2' "0.2s poll"
+# Anchored to _await_binary's own increment: a bare `sleep 0.2` here would be
+# satisfied by whichever of the two polls did NOT drift, so neither would be pinned.
+have cli/src/fno/update.py '_fno_n=$((_fno_n+1)); sleep 0.2' "0.2s poll in _await_binary"
 
 have crates/fno/src/bootstrap.rs 'VERIFY_ATTEMPTS: u32 = 15' "15-retry ceiling"
 have crates/fno/src/bootstrap.rs 'VERIFY_POLL: Duration = Duration::from_millis(200)' "0.2s poll"
