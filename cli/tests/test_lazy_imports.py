@@ -744,3 +744,121 @@ def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch)
     # The stale fno hint must NOT be attached to a third-party failure.
     assert "fno doctor" not in flat, combined
     assert "_mid_reinstall" not in flat, combined
+
+
+
+
+# ---------------------------------------------------------------------------
+# AC8-HOOK: the same verify-then-retry, for the imports the lazy group cannot see
+# ---------------------------------------------------------------------------
+
+
+def _installed_finder():
+    """The one guard instance `import fno` appended to sys.meta_path."""
+    import fno
+
+    found = [f for f in sys.meta_path if isinstance(f, fno._ReinstallWindowFinder)]
+    assert len(found) == 1, f"expected exactly one guard, got {len(found)}"
+    # Last, so it is consulted only after every normal finder has already
+    # answered "no such module". Anywhere earlier and it would pay its
+    # re-check on imports that were about to succeed.
+    assert sys.meta_path[-1] is found[0]
+    return found[0]
+
+
+def _spy_path_finder(monkeypatch, seen: list):
+    """Replace PathFinder so the retry lookup is countable rather than inferred."""
+    import importlib.machinery
+
+    class _Spy:
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            seen.append(name)
+            return "SPEC"
+
+    monkeypatch.setattr(importlib.machinery, "PathFinder", _Spy)
+
+
+def test_import_hook_retries_a_module_that_is_on_disk_now(monkeypatch):
+    """A tree that is whole again gets one more lookup, and the import proceeds.
+
+    This is the same disk-recheck-then-retry-once `_load_real` does, reaching the
+    ~2000 function-level `from fno. ...` imports inside command bodies that the
+    lazy group never sees -- `fno agents truth` -> `fno.agents.session_truth`
+    among them.
+    """
+    import fno
+
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: True)
+    seen: list[str] = []
+    _spy_path_finder(monkeypatch, seen)
+
+    spec = _installed_finder().find_spec("fno.agents.session_truth", None, None)
+
+    assert spec == "SPEC"
+    assert seen == ["fno.agents.session_truth"], "retried exactly once, no loop"
+
+
+def test_import_hook_does_not_retry_a_module_that_is_absent(monkeypatch):
+    """An absent module is never waited on and never masked.
+
+    The disk re-check is the whole difference between this and a hopeful
+    sleep-retry: a stale or broken install still fails, and now fails with the
+    dual-cause message instead of the bare ModuleNotFoundError these call sites
+    produce today.
+    """
+    import fno
+
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", lambda name: False)
+    seen: list[str] = []
+    _spy_path_finder(monkeypatch, seen)
+
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        _installed_finder().find_spec("fno.state._never_shipped", None, None)
+
+    assert seen == [], "an absent module must not be looked up again"
+    assert excinfo.value.name == "fno.state._never_shipped"
+    message = str(excinfo.value)
+    assert "reinstalled underneath the running process" in message
+    assert "fno doctor" in message
+
+
+def test_import_hook_ignores_third_party_modules(monkeypatch):
+    """A missing dependency is a broken install: no re-check, no retry, no hint."""
+    import fno
+
+    def _boom(name):  # pragma: no cover - must never run
+        raise AssertionError(f"re-checked a third-party module: {name}")
+
+    monkeypatch.setattr(fno, "_module_is_now_on_disk", _boom)
+
+    finder = _installed_finder()
+    assert finder.find_spec("rich.console", None, None) is None
+    assert finder.find_spec("fnord.core", None, None) is None
+
+
+def test_absent_fno_submodule_names_both_causes_end_to_end():
+    """The acceptance shape, through a real import in a real process: a function-level
+    `from fno. ...` for a module that is not there says why, twice over."""
+    proc = _run_py(
+        "import fno\n"
+        "try:\n"
+        "    from fno.agents.no_such_module import thing\n"
+        "except ModuleNotFoundError as exc:\n"
+        "    print(exc)\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "reinstalled underneath the running process" in proc.stdout, proc.stdout
+    assert "fno update" in proc.stdout
+
+
+def test_import_hook_is_installed_once_even_when_fno_is_reimported():
+    """Stacking guards would multiply the re-check per failed import for no gain."""
+    proc = _run_py(
+        "import sys, importlib, fno\n"
+        "importlib.reload(fno)\n"
+        "print(sum(1 for f in sys.meta_path "
+        "if type(f).__name__ == '_ReinstallWindowFinder'))\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "1"
