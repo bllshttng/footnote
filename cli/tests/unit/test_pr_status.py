@@ -164,6 +164,9 @@ def _run_status_on(monkeypatch, capsys, rollup):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
+    # Same reason as _green_fetch: never the machine's own lane config, which
+    # can reach a live `gh pr view` through the self-review floor.
+    _patch("_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
     cap = capsys.readouterr()
     return code, _json.loads(cap.out), cap.err
@@ -407,6 +410,7 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
         _status, "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     _status.run_status("42")
     cap = capsys.readouterr()
     import json
@@ -433,6 +437,7 @@ def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
         _status, "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     _status.run_status("42")
     assert capsys.readouterr().err == ""
 
@@ -457,6 +462,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
     assert code == 0
     import json
@@ -500,6 +506,9 @@ def _green_fetch(monkeypatch):
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
     )
+    # A lane is on by default so the coverage conjunct is the one under test,
+    # never the machine's own config (the same predicate merge reads).
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
 
 
 def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
@@ -579,10 +588,32 @@ def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
     assert out["ready_blockers"] == ["ci_red"]
+
+
+def test_ready_skips_the_coverage_conjunct_on_a_no_lane_repo(monkeypatch, capsys):
+    """A stock install with no review lane opted OUT of the coverage guard on
+    the merge side (the x-0eaf boundary: `_review_lane_configured` gates the
+    merge guard); ready must opt out with it, or the two verbs answer opposite
+    ways again - now status refusing forever at uncovered 0 on every green PR
+    of a repo merge would merge."""
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: False)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert out["ready_blockers"] == []
 
 
 def test_read_review_coverage_from_events(tmp_path):
@@ -871,6 +902,7 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
     assert code == 0  # green exit unchanged despite an unresolved optional finding
     out = _json.loads(capsys.readouterr().out)
@@ -901,6 +933,7 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
     )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
     assert code == 0
     out = _json.loads(capsys.readouterr().out)
@@ -951,8 +984,10 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
     # The status read resolves the project log from its cwd; point it at the
-    # fixture.
+    # fixture. The lane is pinned on because recompute rides on it: a no-lane
+    # repo must not fire the producer, and tmp_path resolves no real config.
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     out = json.loads(capsys.readouterr().out)
@@ -1002,6 +1037,7 @@ def test_status_prints_degraded_recompute_reason_on_stderr(monkeypatch, capsys, 
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     cap = capsys.readouterr()
@@ -1036,7 +1072,45 @@ def test_status_recompute_failure_degrades_to_unknown(monkeypatch, capsys, tmp_p
         _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "fno-agents not found")
     )
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["review_coverage"]["coverage"] == "unknown"
+
+
+def test_no_lane_repo_never_fires_the_recompute(monkeypatch, capsys, tmp_path):
+    """The merge gate skips the coverage read entirely on a no-lane repo
+    because a missing row would fire the 120s recompute subprocess and append
+    rows nobody acts on; status must not fire it either, now that ready
+    ignores the conjunct there. A read that surfaces an EXISTING row is fine -
+    only the producer spawn is the cost being gated."""
+    import json
+
+    from fno.pr import _reviews
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+
+    def must_not_fire(pr_number, cwd, head):
+        raise AssertionError("recompute fired on a no-lane repo")
+
+    monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", must_not_fire)
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: False)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["review_coverage"]["coverage"] == "unknown"
+    assert out["ready"] is True

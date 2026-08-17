@@ -5047,14 +5047,16 @@ fn attestation_line_on_branch(reviewer: &str, head: &str, verdict: &str, branch:
 // unscoped scan reads every branch's attestations into every PR's verdict
 // list. These tests pin the scoping predicate through BOTH consumers.
 
-/// AC1-HP: an attestation recorded on ANOTHER branch never reaches this PR's
-/// verdict list at all. Same head sha on purpose - that is the cherry-pick /
+/// AC1-HP: an attestation recorded on ANOTHER branch at a DIFFERENT head never
+/// reaches this PR's verdict list at all - that is the cherry-pick /
 /// duplicate-PR shape where the old global scan read a foreign pass as
-/// coverage via CarriedBaseSync, so this pins that scope, not freshness, is
-/// what stops it.
+/// coverage via CarriedBaseSync (equal shas never carry; they are Fresh before
+/// any identity is computed), so this pins that scope, not freshness, is what
+/// stops it.
 #[test]
 fn attestation_scope_foreign_branch_is_absent_not_stale() {
-    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let foreign_head = "bbbb0000000000000000000000000000000000000";
+    let events = attestation_line_on_branch("code-review", foreign_head, "pass", "feature/a");
     let rep = classify_coverage(
         &[],
         &[],
@@ -5062,7 +5064,7 @@ fn attestation_scope_foreign_branch_is_absent_not_stale() {
         &[],
         true,
         None,
-        &at_head,
+        &|_| Freshness::CarriedBaseSync,
         "feature/b",
         COV_HEAD,
     );
@@ -5072,6 +5074,34 @@ fn attestation_scope_foreign_branch_is_absent_not_stale() {
         "a foreign-branch attestation must not appear as any verdict: {:?}",
         rep.verdicts
     );
+}
+
+/// The spawned-reviewer lane (review-lanes.md): the reviewer's worktree
+/// necessarily carries a branch of its own - git refuses two worktrees on one
+/// branch - so its exact-HEAD attestation must count for the author's PR
+/// despite the branch mismatch. A foreign branch cannot share this head sha
+/// without being this commit.
+#[test]
+fn attestation_scope_reviewer_worktree_branch_at_exact_head_counts() {
+    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "wt/reviewer-1");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        "feature/a",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.reviewed_sha, COV_HEAD);
 }
 
 /// The same-branch counterpart: in scope, counted, and labeled so a receipt
@@ -5147,11 +5177,15 @@ fn attestation_scope_legacy_other_head_is_absent() {
     assert!(rep.verdicts.is_empty());
 }
 
-/// A PR read that returned no branch fails closed: a branch-carrying
-/// attestation does not count when the PR's own branch is unknown.
+/// A PR read that returned no branch fails closed: an attestation at a
+/// DIFFERENT head cannot be admitted by branch (the PR's branch is unknown),
+/// so it does not count. An exact-head line still counts with an unknown PR
+/// branch - a foreign branch cannot share this head sha without being this
+/// commit - which is the reviewer-lane case above.
 #[test]
 fn attestation_scope_unknown_pr_branch_fails_closed() {
-    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let foreign_head = "bbbb0000000000000000000000000000000000000";
+    let events = attestation_line_on_branch("code-review", foreign_head, "pass", "feature/a");
     let rep = classify_coverage(&[], &[], &events, &[], true, None, &at_head, "", COV_HEAD);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
@@ -5199,20 +5233,23 @@ fn attestation_scope_second_pr_does_not_clobber_the_first() {
 }
 
 /// AC2-HP + the N-reachable-paths rule: BOTH scans over the SAME foreign
-/// attestation. The coverage axis (`classify_coverage`) and the
+/// attestation at a different head (the carry shape the scope predicate
+/// exists to stop). The coverage axis (`classify_coverage`) and the
 /// `config.review.reviewers` gate (`unattested_reviewers_scan`) must agree
 /// that a foreign-branch line is not about this PR; a guard on one of the two
 /// paths is decorative.
 #[test]
 fn attestation_scope_both_scans_agree_on_foreign_line() {
-    let events = attestation_line_on_branch("code-review", COV_HEAD, "pass", "feature/a");
+    let foreign_head = "bbbb0000000000000000000000000000000000000";
+    let carried = |_: &str| Freshness::CarriedBaseSync;
+    let events = attestation_line_on_branch("code-review", foreign_head, "pass", "feature/a");
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("events.jsonl");
     std::fs::write(&p, &events).unwrap();
     let reviewers = vec!["code-review".to_string()];
 
     let (unattested, _malformed) =
-        unattested_reviewers_scan(&p, &reviewers, &at_head, "feature/b", COV_HEAD);
+        unattested_reviewers_scan(&p, &reviewers, &carried, "feature/b", COV_HEAD);
     assert_eq!(
         unattested.len(),
         1,
@@ -5226,7 +5263,7 @@ fn attestation_scope_both_scans_agree_on_foreign_line() {
         &[],
         true,
         None,
-        &at_head,
+        &carried,
         "feature/b",
         COV_HEAD,
     );
@@ -5467,6 +5504,44 @@ fn clean_pass_marker_covers_the_typographic_apostrophe() {
         COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
+/// A re-read supersedes the older clean pass: comments arrive oldest-first,
+/// so the selection must rank by freshness, not take the first match - a
+/// first-match scan reads the bot's FIRST pass forever and no later re-read
+/// can ever clear the gate through this lane.
+#[test]
+fn clean_pass_comment_reread_supersedes_the_older_one() {
+    let old = "0000000000000000000000000000000000000000";
+    let comments = vec![
+        gh_comment(
+            "chatgpt-codex-connector[bot]",
+            &format!("Codex Review: Didn't find any major issues. Reviewed commit: {old}"),
+        ),
+        gh_comment(
+            "chatgpt-codex-connector[bot]",
+            &format!("Codex Review: Didn't find any major issues. Reviewed commit: {COV_HEAD}"),
+        ),
+    ];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+        &at_head,
+        "",
+        COV_HEAD,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let v = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(v.verdict, CoverageVerdict::Reviewed);
+    assert_eq!(v.reviewed_sha, COV_HEAD);
 }
 
 /// AC4-EDGE: a clean pass naming an older sha whose code no longer matches is
