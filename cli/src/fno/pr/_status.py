@@ -244,6 +244,10 @@ def _ready_blockers(
     unresolved: object,
     coverage: dict,
     review_lane: bool = True,
+    *,
+    head: str = "",
+    code_review_required: bool = False,
+    merged: bool = False,
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
@@ -257,6 +261,13 @@ def _ready_blockers(
     conjunct engages wherever the merge gate's coverage guard would
     (``review_lane``; a repo with no review lane has no coverage answer to
     fail).
+
+    The coverage conjuncts themselves are the merge gate's own, read through
+    ``_coverage_gate.covered_conjuncts`` - one copy, never a restatement - so
+    ``ready`` cannot pass a row ``fno pr merge`` refuses (missing local pass,
+    stale head pin). A MERGED PR is exempt from the coverage conjunct: the
+    gate guards what would merge, and a PR merged out-of-band (UI, bare gh)
+    has no "would" left to guard.
     """
     blockers: list[str] = []
     if not green:
@@ -267,12 +278,16 @@ def _ready_blockers(
         blockers.append("optional_reviews_unknown")
     elif unresolved > 0:
         blockers.append("optional_reviews_unresolved")
-    if review_lane:
+    if review_lane and not merged:
         cov_word = coverage.get("coverage")
         if cov_word == "unknown":
             blockers.append("review_coverage_unknown")
-        elif not (cov_word == "covered" and (coverage.get("reviewed_count") or 0) > 0):
-            blockers.append("review_coverage_uncovered")
+        else:
+            from fno.pr._coverage_gate import covered_conjuncts
+
+            ok, failed = covered_conjuncts(coverage, head, code_review_required)
+            if not ok:
+                blockers.append(f"review_coverage_{failed}")
     return blockers
 
 
@@ -341,7 +356,32 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # is a shape that drifts the moment a key is added on one side only.
         coverage = dict(_UNKNOWN_COVERAGE)
 
-    blockers = _ready_blockers(green, verdict, unresolved, coverage, review_lane)
+    # The local code-review conjunct mirrors the merge gate's own requirement
+    # (_code_review_attestation_required): a repo that requires the harness
+    # review verb must not read ready before that attestation exists, or
+    # status and merge answer the same PR differently. Fail closed like the
+    # gate this mirrors.
+    code_review_required = False
+    if review_lane:
+        try:
+            from fno.pr import _merge
+
+            code_review_required = bool(
+                _merge._code_review_attestation_required(cwd or os.getcwd(), int(pr))
+            )
+        except Exception:  # noqa: BLE001 - fail closed, like the gate
+            code_review_required = True
+    merged = (pr_json.get("state") or "").upper() == "MERGED"
+    blockers = _ready_blockers(
+        green,
+        verdict,
+        unresolved,
+        coverage,
+        review_lane,
+        head=pr_json.get("headRefOid") or "",
+        code_review_required=code_review_required,
+        merged=merged,
+    )
     sys.stdout.write(
         json.dumps(
             {

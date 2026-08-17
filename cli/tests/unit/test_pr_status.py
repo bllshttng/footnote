@@ -509,6 +509,12 @@ def _green_fetch(monkeypatch):
     # A lane is on by default so the coverage conjunct is the one under test,
     # never the machine's own config (the same predicate merge reads).
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    # The local code-review requirement is off by default so a test isolates
+    # one conjunct at a time; the conjunct's own tests enable it explicitly.
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: False,
+    )
 
 
 def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
@@ -609,6 +615,151 @@ def test_ready_skips_the_coverage_conjunct_on_a_no_lane_repo(monkeypatch, capsys
         _status,
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert out["ready_blockers"] == []
+
+
+def _lane_fetch(monkeypatch, *, state="OPEN", head="h1"):
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": state,
+                "headRefOid": head,
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: False,
+    )
+
+
+def test_ready_requires_the_local_code_review_pass_merge_does(monkeypatch, capsys):
+    """PR 917 dual review: with the lane requiring the harness review verb,
+    ready must not pass on a bot-only pass - merge refuses that row, so status
+    answering ready is the two-readers-disagree shape again."""
+    import json
+
+    _lane_fetch(monkeypatch)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: True,
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "verdicts": [
+                {
+                    "name": "chatgpt-codex-connector",
+                    "producer": "github_app",
+                    "verdict": "reviewed",
+                }
+            ],
+        },
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert "review_coverage_no_local_pass" in out["ready_blockers"]
+
+
+def test_ready_passes_with_the_local_code_review_pass_present(monkeypatch, capsys):
+    import json
+
+    _lane_fetch(monkeypatch)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: True,
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": "h1",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                }
+            ],
+        },
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert out["ready_blockers"] == []
+
+
+def test_ready_exempts_a_merged_pr_from_the_coverage_conjunct(monkeypatch, capsys):
+    """PR 917 dual review: the gate guards what WOULD merge; a PR merged
+    out-of-band has no would left, so an uncovered row on it is history, not
+    a blocker."""
+    import json
+
+    _lane_fetch(monkeypatch, state="MERGED")
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert out["ready_blockers"] == []
+
+
+def test_ready_names_a_stale_head_pin(monkeypatch, capsys):
+    """PR 917 dual review: a covered row pinned to an older head is not ready;
+    merge compares the pin, so status reading it as covered disagrees."""
+    import json
+
+    _lane_fetch(monkeypatch, head="h2")
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": "h1",
+        },
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert "review_coverage_stale_head" in out["ready_blockers"]
+
+
+def test_ready_does_not_crash_on_a_non_integer_reviewed_count(monkeypatch, capsys):
+    """PR 917 dual review: a malformed count coerces through the same
+    _safe_int merge reads instead of raising TypeError out of the verb."""
+    import json
+
+    _lane_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": "2"},
     )
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
