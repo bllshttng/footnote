@@ -382,3 +382,28 @@ class TestRestReaderHardening:
         read_tracked_pr_states({"owner/repo#1"}, runner=runner, timeout_s=5.0)
 
         assert seen["listing_timeout"] == 5.0
+
+    def test_full_listing_at_the_page_ceiling_warns_loudly(self, caplog):
+        """The ceiling is a truncation, not a completion: a listing whose
+        every page came back full must say so, the way the old gh pr list
+        path logged 'possibly truncated'."""
+        import logging as _logging
+
+        from fno.pr._rest import list_prs_rest
+
+        full_page = [_pr_row(i) for i in range(100)]
+        calls = {"pages": 0}
+
+        def runner(cmd, timeout=None, **_kw):
+            calls["pages"] += 1
+            return _page(full_page)
+
+        with caplog.at_level(_logging.WARNING, logger="fno.pr._rest"):
+            rows, reason = list_prs_rest(
+                "owner/repo", runner=runner, per_page=100, max_pages=2
+            )
+
+        assert reason == ""
+        assert len(rows) == 200
+        assert calls["pages"] == 2
+        assert "possibly truncated" in caplog.text

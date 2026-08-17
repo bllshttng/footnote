@@ -19,6 +19,7 @@ replaces.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -31,6 +32,8 @@ from fno.pr._ritual import _parse_origin_slug
 # rate limit exceeded" - the word "secondary" is the discriminator, so a 403
 # without it must fall through to the core-bucket branch.
 _SECONDARY = re.compile(r"secondary rate limit", re.IGNORECASE)
+
+log = logging.getLogger(__name__)
 
 
 def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
@@ -215,6 +218,18 @@ def list_prs_rest(
             rows.append({"number": number, "state": _map_pr_state(row)})
         if len(payload) < per_page:
             break
+    else:
+        # Every page came back full, so the ceiling cut a listing that had more
+        # rows. Loud on purpose: the old gh pr list path logged "possibly
+        # truncated" for the same condition, and a silent ceiling is a sweep
+        # that reads complete while missing its tail.
+        log.warning(
+            "gh api pulls list for %s hit the max_pages=%d ceiling with a full last page:"
+            " listing is possibly truncated after %d rows",
+            slug,
+            max_pages,
+            len(rows),
+        )
     return rows, ""
 
 
