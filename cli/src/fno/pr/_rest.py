@@ -178,6 +178,7 @@ def list_prs_rest(
     cwd: Optional[str] = None,
     per_page: int = 100,
     max_pages: int = 20,
+    timeout: Optional[float] = 30.0,
 ) -> "tuple[Optional[list[dict]], str]":
     """List a repo's PRs on REST: `(rows, reason)`.
 
@@ -195,6 +196,7 @@ def list_prs_rest(
         res = runner(
             ["gh", "api", f"repos/{slug}/pulls?state={state}&per_page={per_page}&page={page}"],
             cwd=cwd,
+            timeout=timeout,
         )
         if not res.ok:
             return None, _rest_reason(res)
@@ -226,7 +228,10 @@ def graphql_remaining(
     zero: skipping work because the instrument is unreadable is an absence
     read as evidence.
     """
-    res = runner(["gh", "api", "rate_limit"], cwd=cwd)
+    try:
+        res = runner(["gh", "api", "rate_limit"], cwd=cwd)
+    except Exception:  # noqa: BLE001 - unreadable instrument, never a skip (AC6)
+        return None, None
     if not res.ok:
         return None, None
     try:

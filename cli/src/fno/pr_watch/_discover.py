@@ -31,6 +31,7 @@ from fno.graph._reconcile import (
     query_pr_merge_state,
     repo_slug_from_url,
 )
+from fno.pr._proc import ToolMissing
 from fno.pr._proc import run as _rest_run
 
 log = logging.getLogger(__name__)
@@ -389,7 +390,7 @@ def read_tracked_pr_states(
     for repo, requested in sorted(grouped.items()):
         try:
             rows, reason = list_prs_rest(repo, state="open", runner=runner)
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
             rows, reason = None, str(exc)
         if rows is None:
             log.warning("pr-watch: tracked-state sweep failed for %s: %s", repo, reason)
@@ -410,7 +411,7 @@ def read_tracked_pr_states(
         for number in sorted(requested - returned):
             try:
                 res = runner(["gh", "api", f"repos/{repo}/pulls/{number}"], timeout=timeout_s)
-            except (subprocess.TimeoutExpired, OSError) as exc:
+            except (subprocess.TimeoutExpired, OSError, ToolMissing) as exc:
                 log.warning("pr-watch: per-key read failed for %s#%d: %s", repo, number, exc)
                 continue
             if not res.ok:

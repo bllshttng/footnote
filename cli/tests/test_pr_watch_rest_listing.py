@@ -277,3 +277,46 @@ class TestTrackedStateSweepOnRest:
 
         assert states == {"owner/repo#1": "UNKNOWN", "owner/repo#2": "UNKNOWN"}
         assert failures == 1
+
+
+class TestRestReaderHardening:
+    def test_graphql_remaining_fails_open_when_the_runner_raises(self):
+        """AC6-EDGE at the instrument: a runner that RAISES (gh off PATH
+        raises ToolMissing) is an unreadable budget, not a tick-killing
+        error. The contract is (None, None) on any failure."""
+        from fno.pr._proc import ToolMissing
+        from fno.pr._rest import graphql_remaining
+
+        def raising_runner(cmd, **_kw):
+            raise ToolMissing("gh")
+
+        assert graphql_remaining(runner=raising_runner) == (None, None)
+
+    def test_list_prs_rest_bounds_each_page_call_with_a_timeout(self):
+        """The old gh pr list sweep killed each call at 30s; the REST port
+        must not hand a black-holed page an unbounded runner."""
+        from fno.pr._rest import list_prs_rest
+
+        seen = {}
+
+        def runner(cmd, timeout=None, **_kw):
+            seen["timeout"] = timeout
+            return _page([])
+
+        rows, reason = list_prs_rest("owner/repo", runner=runner)
+        assert rows == []
+        assert reason == ""
+        assert seen["timeout"] is not None and seen["timeout"] > 0
+
+    def test_sweep_degrades_a_repo_whose_runner_raises_toolmissing(self):
+        """launchd PATH rot makes gh vanish; ToolMissing is not OSError, so
+        the per-repo handler must name it like any other repo failure."""
+        from fno.pr._proc import ToolMissing
+        from fno.pr_watch._discover import read_tracked_pr_states
+
+        def runner(cmd, **_kw):
+            raise ToolMissing("gh")
+
+        states, failures = read_tracked_pr_states({"owner/repo#1"}, runner=runner)
+        assert states == {"owner/repo#1": "UNKNOWN"}
+        assert failures == 1
