@@ -97,14 +97,6 @@ REAP_QUIET_AFTER_S = 900
 # closed window costs a real turn - which is why an UNPARSEABLE stamp
 # classifies leave, never wake.
 _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
-#: A rate EVENT is a record that both reads as an error and the shipped
-#: classifier marks quota-swap-class. The classifier's body markers ("rate
-#: limit", "quota exceeded", "usage limit") were built for provider error
-#: bodies; run bare over transcript prose they let "we are rate limited on
-#: the search API" or "reviewing PR 429" open or hold closed a window. The
-#: error signature is the one cheap discriminator between a provider error
-#: record and prose quoting its vocabulary.
-_ERROR_SIG_RE = re.compile(r"\berror\b", re.IGNORECASE)
 _SGT_OFFSET_S = 8 * 3600
 _TAIL_BYTES = 64 * 1024
 _TAIL_RECORDS = 15
@@ -155,19 +147,23 @@ def rate_limit_window(
     """``("none"|"live"|"passed"|"unknown", reset_epoch, stamp_str)`` over
     ``records`` (``[(epoch, text)]``, newest-last).
 
-    A rate event is the NEWEST record that reads as an error and the shipped
-    classifier (:func:`fno.recovery.classify_session_error`) marks
-    quota-swap-class - the sole integration point recovery itself uses, so
-    the watchdog and the failover cannot disagree about what a rate event
-    is. ``none``: no such record. ``live``/``passed``: its reset stamp sits
-    in the future / past. ``unknown``: it carries no parseable stamp - fail
-    safe, the caller must not wake on it, and an older record's stamp never
-    stands in for the newest one's."""
+    A rate event is the NEWEST record the shipped classifier
+    (:func:`fno.recovery.classify_session_error`) marks quota-swap-class -
+    the sole integration point recovery itself uses, so the watchdog and
+    the failover cannot disagree about what a rate event is. The classifier
+    is never narrowed by an extra prefilter: a real quota body with no
+    error-shaped words ("429 rate limit reached, retry after 8s") must still
+    hold the window. The accepted cost runs the OTHER way: prose quoting
+    the full vocabulary ("we are rate limited on the search API") can hold a
+    window closed and withhold a wake - erring closed never burns a turn
+    inside a live window, which is the measured failure. ``none``: no such
+    record. ``live``/``passed``: its reset stamp sits in the future / past.
+    ``unknown``: it carries no parseable stamp - fail safe, the caller must
+    not wake on it, and an older record's stamp never stands in for the
+    newest one's."""
     from fno.recovery import classify_session_error
 
     for _epoch, text in reversed(records):
-        if not _ERROR_SIG_RE.search(text):
-            continue
         err = classify_session_error(text)
         if err is None or not getattr(err, "triggers_swap", False):
             continue
@@ -702,12 +698,20 @@ def sweep_path() -> Path:
 
 
 def write_sweep_file(
-    source: str, counts: dict, now_s: float, signature: str = ""
+    source: str,
+    counts: dict,
+    now_s: float,
+    signature: str = "",
+    *,
+    events_signature: str = "",
 ) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
     best-effort (an unwritable state root must never break a tick). The
     ``signature`` of the non-leave verdict set rides along so the mail lane
-    can skip a digest that says exactly what the last one said."""
+    can skip a digest that says exactly what the last one said;
+    ``events_signature`` is the same set as the EVENT lane last emitted, so
+    the tick can suppress per-row events that say what the last tick already
+    said (the mail lane speaks on change, and so must the event lane)."""
     try:
         path = sweep_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -719,6 +723,7 @@ def write_sweep_file(
                 ),
                 "counts": counts,
                 "signature": signature,
+                "events_signature": events_signature,
             }),
             encoding="utf-8",
         )
@@ -731,6 +736,30 @@ def _last_signature() -> str:
         return str(json.loads(sweep_path().read_text(encoding="utf-8")).get("signature") or "")
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return ""
+
+
+def _last_events_signature() -> str:
+    try:
+        return str(
+            json.loads(sweep_path().read_text(encoding="utf-8"))
+            .get("events_signature")
+            or ""
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+
+
+def fresh_non_leave(payload: dict, prev_events_signature: str) -> set:
+    """Row ids whose non-leave verdict the EVENT lane has not already
+    published: k stuck rows on a 600s tick append thousands of events a day
+    saying one thing, long after the mail lane's change gate went quiet."""
+    prev = set(filter(None, prev_events_signature.split(";")))
+    return {
+        v["row_id"]
+        for v in payload["verdicts"]
+        if v["verdict"] != LEAVE
+        and f"{v['row_id']}:{v['verdict']}" not in prev
+    }
 
 
 #: The pr_watch launchd cadence, in seconds. A sweep older than two intervals

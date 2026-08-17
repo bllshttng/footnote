@@ -318,23 +318,27 @@ def tick() -> None:
                         log.warning("pr-watch: watchdog mail failed: %s", receipt)
                 except Exception:  # noqa: BLE001 - mail never breaks the tick
                     log.warning("pr-watch: watchdog mail failed", exc_info=True)
+                prev_events_sig = _wd._last_events_signature()
                 _wd.write_sweep_file(
-                    "tick", payload["counts"], now, signature
+                    "tick", payload["counts"], now, signature,
+                    events_signature=_wd.verdict_signature(payload),
                 )
+            fresh_ids = _wd.fresh_non_leave(payload, prev_events_sig)
             acted = 0
             for d, row in zip(payload["verdicts"], rows):
                 verdict = _wd.Verdict(**d)
                 if verdict.verdict == _wd.LEAVE:
                     continue
-                _wd.emit_event(
-                    "watchdog_verdict",
-                    {
-                        "row_id": verdict.row_id,
-                        "name": verdict.name,
-                        "verdict": verdict.verdict,
-                        "basis": verdict.basis,
-                    },
-                )
+                if verdict.row_id in fresh_ids:
+                    _wd.emit_event(
+                        "watchdog_verdict",
+                        {
+                            "row_id": verdict.row_id,
+                            "name": verdict.name,
+                            "verdict": verdict.verdict,
+                            "basis": verdict.basis,
+                        },
+                    )
                 if settings.recovery.watchdog == "wake" and verdict.verdict == _wd.WAKE:
                     outcome, detail = _wd.apply_verdict(
                         verdict, lanes="wake", cwd=row.cwd

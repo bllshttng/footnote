@@ -138,12 +138,19 @@ def test_taxonomy_quota_phrasings_mark_the_window():
         [(None, "API Error Request rejected 429, Usage limit reached for 5 hour")],
         NOW_1840,
     )[0] == "unknown"
-    # Prose quoting the vocabulary is not a rate event: no error signature,
-    # no window, however many quota phrases or 429 digits it carries.
+    # A real quota body with no error-shaped words still holds the window:
+    # the classifier is the gate, never an extra word prefilter.
+    assert rate_limit_window(
+        [(None, "429 rate limit reached, retry after 8s. window resets at 02:48:21 SGT")],
+        NOW_1840,
+    )[0] == "live"
+    # Prose quoting the full vocabulary errs CLOSED (withholds a wake) - the
+    # accepted cost, since erring open burns a turn inside a live window.
     assert rate_limit_window(
         [(None, "we are rate limited on the search API. sync at 02:48:21 SGT")],
         NOW_1840,
-    )[0] == "none"
+    )[0] == "live"
+    # A bare 429 mention without the taxonomy's phrases is not a rate event.
     assert rate_limit_window(
         [(None, "reviewing PR 429 now")], NOW_1840
     )[0] == "none"
@@ -819,6 +826,29 @@ def test_staleness_reads_loud_and_never_clean(monkeypatch, tmp_path):
     os.utime(path, (NOW_1840 - dead_age, NOW_1840 - dead_age))
     s = watchdog.sweep_staleness(now_s=NOW_1840)
     assert s["stale"] is True and s["age_s"] == dead_age
+
+
+def test_event_lane_suppresses_unchanged_rows(monkeypatch, tmp_path):
+    """The mail lane speaks on change, and so must the event lane: stuck
+    rows on a 600s tick would append thousands of events a day saying one
+    thing. The sweep file carries the event lane's own last signature so
+    the two change gates never share state."""
+    (tmp_path / "watchdog-sweep.json").write_text(json.dumps(
+        {"source": "tick", "at": "x", "counts": {}, "signature": "",
+         "events_signature": "dddd4444-0000:wake"}
+    ))
+    monkeypatch.setattr(
+        watchdog, "sweep_path", lambda: tmp_path / "watchdog-sweep.json"
+    )
+    assert watchdog._last_events_signature() == "dddd4444-0000:wake"
+    payload = _payload_two_rows()  # wake row dddd4444, leave row aaaa1111
+    assert watchdog.fresh_non_leave(
+        payload, watchdog._last_events_signature()
+    ) == set()
+    # A verdict that changed for the same row is fresh again.
+    payload["verdicts"][1]["verdict"] = GHOST
+    fresh = watchdog.fresh_non_leave(payload, "dddd4444-0000:wake")
+    assert fresh == {"dddd4444-0000"}
 
 
 def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):

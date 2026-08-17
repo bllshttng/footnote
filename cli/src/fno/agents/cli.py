@@ -2687,8 +2687,15 @@ def cmd_watchdog(
     pairs = [
         (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
     ]
+    shown_counts = payload["counts"]
     if only is not None:
         pairs = [p for p in pairs if p[0].verdict == only]
+        # A filtered view must not report the full sweep's counts: anything
+        # cross-checking the rows it was handed against the counts would
+        # disagree with both.
+        shown_counts = {}
+        for v, _row in pairs:
+            shown_counts[v.verdict] = shown_counts.get(v.verdict, 0) + 1
 
     # Push, not pull: a verdict the king has to remember to fetch goes
     # unread. Mail before writing the sweep file, so the change gate compares
@@ -2728,7 +2735,11 @@ def cmd_watchdog(
 
     if not apply and not apply_all:
         if json_out:
-            filtered = {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
+            filtered = {
+                **payload,
+                "verdicts": [v._asdict() for v, _ in pairs],
+                "counts": shown_counts,
+            }
             sys.stdout.write(json.dumps(filtered) + "\n")
             sys.stdout.flush()
             return
@@ -2736,7 +2747,7 @@ def cmd_watchdog(
             typer.echo(f"{v.name:34} {v.state:9} {v.verdict:8} {v.basis}")
         for warning in payload["warnings"]:
             print(f"warning: {warning}", file=sys.stderr)
-        counts = " ".join(f"{k}={v}" for k, v in sorted(payload["counts"].items()))
+        counts = " ".join(f"{k}={v}" for k, v in sorted(shown_counts.items()))
         typer.echo(f"{len(pairs)} row(s): {counts}")
         return
 
