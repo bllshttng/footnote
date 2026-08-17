@@ -692,7 +692,13 @@ def _coverage_refusal(command=""):
         return None
     return _fno_veto_refusal(
         ["pr", "coverage-check", pr_number],
-        timeout=15,
+        # The probe shells `fno`, whose bootstrap shim can legitimately spend
+        # 15s of verify waits before the CLI's own coverage read starts (see
+        # cli-lazy-imports.md's per-invocation ceiling). A 15s timeout would
+        # kill exactly that probe mid-wait and fail open in the storm state,
+        # so this carries the lineage veto's 25s: over the shim's ceiling,
+        # well under the 60s hook budget.
+        timeout=25,
         fallback=f"PR {pr_number}: review coverage refused",
     )
 

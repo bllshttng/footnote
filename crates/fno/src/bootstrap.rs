@@ -100,6 +100,13 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // instantly; a CHANGED binary (e.g. a same-path `uv tool install --force`
     // of a different package) is re-verified before exec, so the "never run a
     // foreign fno" invariant still holds after the first bootstrap.
+    // One waited subject per call. The adopt arm below resolves the SAME path
+    // this arm already waited on, so when the sentinel arm has exhausted a
+    // budget here, the adopt arm takes single-shot looks instead: re-running
+    // the full waits down there charged the same call twice - 6s and up to 32
+    // spawns against a tree this call had just spent 3s learning would not
+    // answer - for a second opinion the budget cannot produce.
+    let mut wait_already_spent = false;
     if let Some((real, recorded_mtime)) = read_sentinel() {
         // `is_executable` answers false for a purely TRANSIENT reason too: an
         // install in flight deletes and recreates this exact file, and it is
@@ -143,9 +150,11 @@ fn run(args: &[OsString]) -> BootResult<()> {
             // conservative direction: `--force` over a stranger's install is a
             // decision for the operator, not for the shim.
             let _ = fs::remove_file(sentinel_path());
+            wait_already_spent = true;
         } else {
             // Stale sentinel (wheel uninstalled): drop it and re-provision.
             let _ = fs::remove_file(sentinel_path());
+            wait_already_spent = true;
         }
     }
 
@@ -186,13 +195,19 @@ fn run(args: &[OsString]) -> BootResult<()> {
     if let Some(real) = resolve_via_uv_tool_dir() {
         let mid_rewrite_possible =
             sentinel_dir().is_dir() || real.parent().is_some_and(|bin| bin.is_dir());
-        let ready = if mid_rewrite_possible {
+        // `wait_already_spent` (see the sentinel arm) drops this to single-shot
+        // looks: the same call already exhausted the budget on this exact path.
+        let ready = if mid_rewrite_possible && !wait_already_spent {
             executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)
         } else {
             is_executable(&real)
         };
         if ready {
-            verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)?;
+            if wait_already_spent {
+                verify_ours(&real)?;
+            } else {
+                verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)?;
+            }
             return Err(record_and_exec(&real, args));
         }
     }
