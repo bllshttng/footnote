@@ -83,10 +83,20 @@ jobs:
           # GITHUB_REPOSITORY without a git repo, so every gh call names the
           # repository explicitly or dies client-side.
           # A failed POST fails the step on purpose: a release valve that
-          # silently fails to open reads as open.
+          # silently fails to open reads as open. The one exception is the
+          # transient 5xx, which GitHub's own status page says to resubmit:
+          # three attempts with a backoff before a failure counts.
           post() {
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
-              -f state="$1" -f context="$ctx" -f description="$2" >/dev/null
+            local attempt
+            for attempt in 1 2 3; do
+              if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+                -f state="$1" -f context="$ctx" -f description="$2" >/dev/null; then
+                return 0
+              fi
+              echo "status post attempt $attempt failed; retrying after a backoff" >&2
+              sleep 5
+            done
+            return 1
           }
           case "$EVENT:$ACTION" in
             pull_request:synchronize|pull_request:labeled|pull_request:unlabeled)
