@@ -851,3 +851,71 @@ async fn registry_true_empty_registry_still_serves_zero() {
     let _ = daemon.wait();
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// codex P1 on PR 924: the row-count assertion must hold on every read the
+/// daemon serves, not only at startup. A daemon that starts on a healthy store
+/// and then meets a NEWER writer's registry (one row this binary cannot
+/// represent) must refuse the read, never serve the partial roster as the
+/// complete one -- the startup assertion never re-runs.
+#[tokio::test]
+async fn registry_runtime_upgrade_refuses_a_partial_roster() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    write_valid_registry(&home);
+    let mut daemon = start_daemon(&home);
+
+    // Barrier: the startup reconcile sweep's read-modify-write settles before
+    // the future-schema fixture lands (same race the lookup test fences).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        if events.contains("daemon_started") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // A v15 store: the tolerant reader keeps the two rows it can represent and
+    // drops the announced third (an unknown status value). Raw 3, decoded 2.
+    let row = |name: &str, status: &str| {
+        format!(
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+        )
+    };
+    std::fs::write(
+        home.registry_json(),
+        format!(
+            r#"{{"schema_version":15,"agents":[{},{},{}]}}"#,
+            row("worker-alpha", "live"),
+            row("worker-beta", "flux"),
+            row("worker-gamma", "live")
+        ),
+    )
+    .expect("seed future-schema registry");
+
+    let out = Command::new(CLIENT_BIN)
+        .args(["list", "--json"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("client list runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "a partial roster is not a valid complete one: {stdout}"
+    );
+    assert!(
+        stderr.contains("registry read failed"),
+        "must name the failed read: {stderr}"
+    );
+    assert!(
+        stderr.contains("raw_rows=3") && stderr.contains("decoded_rows=2"),
+        "must carry both counts: {stderr}"
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}

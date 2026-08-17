@@ -168,7 +168,7 @@ pub fn recover(
     emitter: &EventEmitter,
 ) -> Result<RecoveryReport, state::StateError> {
     let mut report = RecoveryReport::default();
-    let registry = state::load_registry(&home.registry_json())?;
+    let registry = load_registry_asserted(&home.registry_json())?;
 
     let registered: std::collections::BTreeSet<String> = registry
         .entries
@@ -1834,16 +1834,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // counts -- rather than bind, serve, and answer every caller from a
     // silently emptied roster (the false "0 registered agents" outage: a stale
     // daemon swallowing its own read failure while discovery kept answering).
-    let (startup_registry, raw_rows) = state::load_registry_with_counts(&home.registry_json())?;
-    if startup_registry.entries.len() != raw_rows {
-        return Err(DaemonError::State(state::StateError::InvariantViolation(
-            state::registry_row_divergence_msg(
-                &home.registry_json(),
-                raw_rows,
-                startup_registry.entries.len(),
-            ),
-        )));
-    }
+    load_registry_asserted(&home.registry_json())?;
 
     // State: cold_start.
     let listener = match bind_supervisor_socket(&home).await {
@@ -2183,11 +2174,28 @@ where
 /// blocking pool so it never stalls an async handler's runtime thread
 /// (ab-e86e326b). Mirrors the existing `handle_status` offload and the
 /// `run_blocking` wrapper. Since x-4c87 a join failure maps to a `StateError`
+/// The daemon-face x-4c87 read: the typed decode plus the raw-count
+/// assertion, on EVERY roster read the daemon serves (startup, recovery, and
+/// every RPC handler). The tolerant state reader still returns a PARTIAL
+/// registry for a future-schema store with announced row drops, which the
+/// read-modify-write path needs; a daemon that serves that partial roster as
+/// the complete roster is the false-zero outage at runtime, because the
+/// startup assertion never re-runs (codex P1 on PR 924).
+fn load_registry_asserted(path: &std::path::Path) -> Result<state::Registry, state::StateError> {
+    let (registry, raw_rows) = state::load_registry_with_counts(path)?;
+    if registry.entries.len() != raw_rows {
+        return Err(state::StateError::InvariantViolation(
+            state::registry_row_divergence_msg(path, raw_rows, registry.entries.len()),
+        ));
+    }
+    Ok(registry)
+}
+
 /// (like `update_registry_offloaded`) and a read error propagates: both used
 /// to collapse to the empty registry, which turned an unreadable registry into
 /// the valid-looking answer "zero agents" for every caller below.
 async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state::StateError> {
-    match tokio::task::spawn_blocking(move || state::load_registry(&path)).await {
+    match tokio::task::spawn_blocking(move || load_registry_asserted(&path)).await {
         Ok(result) => result,
         Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
             "load_registry task panicked: {e}"
@@ -3910,8 +3918,9 @@ where
     // x-4c87: an unreadable registry is an RPC error, never a valid empty
     // roster with discovered-only rows beside it. `unwrap_or_default()` here is
     // what let a broken registered lane publish `count: 0` next to a healthy
-    // `discovered_count` and read as "no agents".
-    let registry = match state::load_registry(&ctx.home.registry_json()) {
+    // `discovered_count` and read as "no agents". This handler is sync, so it
+    // takes the asserted blocking read inline.
+    let registry = match load_registry_asserted(&ctx.home.registry_json()) {
         Ok(reg) => reg,
         Err(e) => return registry_read_failed(req.id, e),
     };
@@ -4192,19 +4201,9 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     // thread (Gemini review). The drive-table read below stays async. A read
     // failure is an RPC error (x-4c87): `unwrap_or_default()` here published
     // zero-agent status counts over a broken registry.
-    let reg_path = ctx.home.registry_json();
-    let registry = match tokio::task::spawn_blocking(move || state::load_registry(&reg_path)).await
-    {
-        Ok(Ok(reg)) => reg,
-        Ok(Err(e)) => return registry_read_failed(req.id, e),
-        Err(join) => {
-            return registry_read_failed(
-                req.id,
-                state::StateError::Io(std::io::Error::other(format!(
-                    "load_registry task panicked: {join}"
-                ))),
-            )
-        }
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(reg) => reg,
+        Err(e) => return registry_read_failed(req.id, e),
     };
     let mut by_status: Map<String, Value> = Map::new();
     let mut restarting: u64 = 0;
@@ -5885,8 +5884,10 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
         }
     };
     // x-4c87: a channel lookup over an unreadable registry reports the failed
-    // read, never a false `ChannelUnknown` for a channel its rows carry.
-    let registry = match state::load_registry(&ctx.home.registry_json()) {
+    // read, never a false `ChannelUnknown` for a channel its rows carry. The
+    // asserted read also refuses a partial roster (this handler is sync, so it
+    // takes the blocking read inline as before).
+    let registry = match load_registry_asserted(&ctx.home.registry_json()) {
         Ok(reg) => reg,
         Err(e) => return registry_read_failed(req.id, e),
     };
