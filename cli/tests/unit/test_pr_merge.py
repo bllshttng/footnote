@@ -12,7 +12,7 @@ import json
 import pytest
 
 from fno.config import AutoMergeBlock
-from fno.pr import _merge
+from fno.pr import _coverage_gate, _merge
 from fno.pr._proc import Result, ToolMissing
 
 
@@ -147,7 +147,7 @@ def enabled(monkeypatch, tmp_path):
     # publisher so no real gh spawn rides along with every merge case.
     monkeypatch.setattr(
         "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None: (True, ""),
+        lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
 
 
@@ -1460,13 +1460,20 @@ def test_covered_merge_publishes_coverage_status(enabled, monkeypatch, capsys, t
     published = []
     monkeypatch.setattr(
         "fno.pr._reviews.publish_coverage_status",
-        lambda pr, head=None, cwd=None, repo=None, cov=None: published.append((pr, head))
+        lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: published.append(
+            (pr, head, gate_verdict)
+        )
         or (True, ""),
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
-    assert published and published[0] == (42, "abc"), (
+    assert published and published[0][:2] == (42, "abc"), (
         "covered merge must publish the status on the covered head"
+    )
+    verdict = published[0][2]
+    assert verdict is not None and verdict[0] == _coverage_gate.COVERED, (
+        "the receipt must carry the gate's own verdict tuple, never a fresh "
+        "read that may have flipped between the gate and the stamp"
     )
 
 

@@ -117,12 +117,15 @@ jobs:
           # The description our context currently carries on this head, via
           # the COMBINED endpoint (one entry per context, the latest - no
           # same-second tie to break; the same read the post-merge audit
-          # uses). Empty means no status yet.
+          # uses). Empty means no status yet. A FAILED read fails the run
+          # (set -e), exactly like the label read below: an unreadable
+          # description must never masquerade as "no status", or the
+          # invalidate arms would clobber a green verdict on a transient
+          # 5xx - the same transient class post() retries for.
           current_desc() {
             gh api -R "${GITHUB_REPOSITORY}" \
               "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
-              --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\"" \
-              2>/dev/null || true
+              --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\""
           }
           case "$EVENT:$ACTION" in
             pull_request:labeled)

@@ -595,6 +595,7 @@ def publish_coverage_status(
     cwd: Optional[str] = None,
     *,
     repo: Optional[str] = None,
+    gate_verdict: Optional[tuple] = None,
 ) -> "tuple[bool, str]":
     """POST the coverage verdict as a commit status on the PR head.
 
@@ -605,6 +606,9 @@ def publish_coverage_status(
     The verdict is the SAME predicate the merge gate enforces
     (``_coverage_gate.coverage_verdict``, imported, never restated): a status
     check that disagrees with the gate it certifies is worse than none.
+    A caller that already holds the gate's answer (``fno pr merge``) passes it
+    as ``gate_verdict`` so the receipt stamps the decision that actually let
+    the merge through, never a fresh read that may have flipped since.
     Success names the reviewed count and the sha it was computed at; failure
     carries the exact refusal text the local merge gate renders, so the person
     staring at the GitHub refusal reads the sentence a worker already
@@ -626,9 +630,12 @@ def publish_coverage_status(
             return False, "no PR head to publish a status on"
 
         runner: Runner = run
-        verdict, refusal, covered_head, note = _coverage_gate.coverage_verdict(
-            pr_number, gh_dir, recompute=False
-        )
+        if gate_verdict is None:
+            verdict, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+                pr_number, gh_dir, recompute=False
+            )
+        else:
+            verdict, refusal, covered_head, note = gate_verdict
         if verdict == _coverage_gate.COVERED and note.startswith(
             _coverage_gate.OVERRIDE_NOTE_PREFIX
         ):

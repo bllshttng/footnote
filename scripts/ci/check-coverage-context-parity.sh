@@ -84,6 +84,22 @@ expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
 expect_fixed "$ROOT/scripts/ci/check-merge-coverage-audit.sh" \
   "${py_label}*)" "the post-merge audit (override label)"
 
+# The description grammar: the refresher's invalidate arms switch on prose
+# prefixes the publishers emit (the preserve list in the workflow), so those
+# prefixes are an ABI like the context and the label - a wording change on
+# any writer side would make the next push clobber a green verdict while
+# every other check stays green. Each needle anchors at the CONSTRUCTION
+# site (f"covered / format!("covered), stable across renames inside the
+# braces) so a variable rename cannot false-red the pin.
+expect_fixed "$ROOT/cli/src/fno/pr/_reviews.py" \
+  'f"covered' "the Python publisher (covered description prefix)"
+expect_fixed "$ROOT/cli/src/fno/pr/_reviews.py" \
+  '"no review lane configured; merge ungated"' "the Python publisher (no-lane description)"
+expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
+  'format!("covered' "the Rust publisher (covered description prefix)"
+expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
+  'covered\*\|"no review lane"\*' "the refresher preserve list"
+
 if [ "$fail" = 1 ]; then
   echo "FAIL: coverage context/label drift - the messages above name the surfaces" >&2
   exit 1

@@ -2897,7 +2897,6 @@ fn publish_coverage_status(
     coverage: &CoverageReport,
     required_bots: &[String],
     optional_bots: &[String],
-    external_reviewers: &[String],
     reviewers: &[String],
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
@@ -2910,11 +2909,23 @@ fn publish_coverage_status(
     {
         return;
     }
+    // The lane predicate is the gate's, not a local variant: bots and
+    // reviewers, never external_reviewers (the /pr invocation list, not a
+    // gate axis). Counting it made this writer post failure on configs the
+    // Python merge gate answers "no lane" to - two writers of one context
+    // posting opposite states.
     let lane = !(required_bots.is_empty()
         && optional_bots.is_empty()
-        && external_reviewers.is_empty()
         && reviewers.is_empty());
     if !lane {
+        return;
+    }
+    // The verdict describes event_head. A marker on pr_head_oid built from a
+    // different sha - an unpushed local HEAD at stop time, the canonical
+    // checkout's default-branch tip - aims at a commit the row never
+    // described; the refresher owns head moves, this writer only speaks for
+    // the head it evaluated.
+    if event_head != pr_head_oid {
         return;
     }
     // The override first, mirroring the Python publisher: the label outranks
@@ -7217,7 +7228,6 @@ fn run_done(
             &info.coverage,
             required_bots,
             optional_bots,
-            external_reviewers,
             reviewers,
         );
     }
@@ -8522,7 +8532,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &inputs.required_bots,
                     &inputs.optional_bots,
-                    &inputs.settings.external_reviewers,
                     &required_reviewers,
                 );
             }
@@ -8581,7 +8590,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         },
                         &inputs.required_bots,
                         &inputs.optional_bots,
-                        &inputs.settings.external_reviewers,
                         &required_reviewers,
                     );
                 }
