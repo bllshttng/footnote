@@ -95,6 +95,39 @@ def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> Non
 
 
 @pr_app.command(
+    "coverage-publish",
+    hidden=True,
+    help=(
+        "Publish the review-coverage verdict for a PR head as the commit "
+        "status fno/review-coverage (the context the repo ruleset requires). "
+        "Never recomputes: reads the row the emitters already wrote. "
+        "Prints a JSON line {pr, posted, note}; exit 0 posted, 1 not posted."
+    ),
+)
+def coverage_publish(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    head: Optional[str] = typer.Option(
+        None, "--head", help="Head sha to publish for; default: the PR's headRefOid."
+    ),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="Directory whose git remote names the repository."
+    ),
+) -> None:
+    from fno.pr import _reviews
+
+    posted, note = _reviews.publish_coverage_status(
+        pr_number, head, cwd=repo, repo=repo
+    )
+    typer.echo(
+        json.dumps(
+            {"pr": pr_number, "posted": posted, "note": note},
+            separators=(",", ":"),
+        )
+    )
+    raise typer.Exit(code=0 if posted else 1)
+
+
+@pr_app.command(
     "logs",
     help=(
         "Why did CI fail: spool the failing job's log to .fno/last-ci.log and "

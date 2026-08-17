@@ -1302,6 +1302,24 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                 f"pr-merge: stacked-base probe unavailable ({why}); "
                 "merging without the lineage guard\n"
             )
+        # Server-visible receipt of the verdict this gate just acted on: the
+        # commit status the repo ruleset requires is written by the same
+        # predicate that satisfied it here, so `fno pr merge` leaves the green
+        # marker behind on the path that did not need to read it. Inside the
+        # lock, ahead of the merge call, so the status exists before GitHub
+        # judges the merge against it. Best-effort and reported, never
+        # blocking: the gate lives on the GitHub side, where a missing status
+        # already reads as not-passing (fail-closed).
+        try:
+            from fno.pr._reviews import publish_coverage_status
+
+            _posted, _note = publish_coverage_status(
+                pr_number, head=covered_head or None, cwd=repo, repo=repo
+            )
+            if not _posted:
+                sys.stderr.write(f"pr-merge: coverage status not posted: {_note}\n")
+        except Exception as exc:  # noqa: BLE001 - a receipt must never block the merge
+            sys.stderr.write(f"pr-merge: coverage status publish failed: {exc}\n")
         return _do_merge(pr_number, auto_merge, repo, covered_head)
 
 

@@ -138,6 +138,12 @@ def enabled(monkeypatch, tmp_path):
         lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1}, ""),
     )
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    # The merge's server receipt is best-effort; hermetic tests stub the
+    # publisher so no real gh spawn rides along with every merge case.
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda pr, head=None, cwd=None, repo=None: (True, ""),
+    )
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -1423,6 +1429,39 @@ def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_covered_merge_publishes_coverage_status(enabled, monkeypatch, capsys, tmp_path):
+    """A covered merge leaves the server-visible receipt behind.
+
+    The commit status the repo ruleset requires is written from the same
+    predicate that satisfied the gate here, so the sanctioned path can never be
+    the one missing the green marker GitHub judges merges by. The receipt is
+    pinned to the covered head: the sha the verdict describes, and the sha the
+    merge itself is pinned to.
+    """
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"}, ""),
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    published = []
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda pr, head=None, cwd=None, repo=None: published.append((pr, head)) or (True, ""),
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    assert published and published[0] == (42, "abc"), (
+        "covered merge must publish the status on the covered head"
+    )
 
 
 def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
