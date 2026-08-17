@@ -82,7 +82,7 @@ def test_config_get_resolves_output_dir(tmp_path: Path, monkeypatch: pytest.Monk
         "schema_version: 1\nconfig:\n  research:\n    output_dir: ~/c3po/raw/readyrule\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "~/c3po/raw/readyrule"
+    assert result.stdout.strip() == "~/c3po/raw/readyrule"
 
 
 def test_config_get_unset_output_dir_is_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,4 +91,4 @@ def test_config_get_unset_output_dir_is_empty(tmp_path: Path, monkeypatch: pytes
         tmp_path, monkeypatch, "config.research.output_dir", "schema_version: 1\n"
     )
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == ""
+    assert result.stdout.strip() == ""
