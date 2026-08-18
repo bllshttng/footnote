@@ -167,11 +167,16 @@ assert_contains "size cap polling message" "$out" "exceeds"
 [[ ! -s "$EVENTS_FILE" ]] || { echo "FAIL size cap: polling emitter appended an oversized line"; fail=1; }
 
 # Default paths resolve from the worktree root even when sourced below it.
+# This case is about the ROOT branch, so the FNO_EVENTS_PATH pin has to be out
+# of the way: the hermetic sandbox sets it for the whole run and the library
+# checks it ahead of the root, by design. The pin's own coverage is in
+# tests/events/test-events-path-pin.sh.
 repo_root="$WORK/repo"
 mkdir -p "$repo_root/nested/source"
 git -C "$repo_root" init -q
 (
     unset EVENTS_FILE
+    unset FNO_EVENTS_PATH
     cd "$repo_root/nested/source" || exit 1
     # shellcheck disable=SC1090
     source "$EVENTS_LIB"
