@@ -150,8 +150,10 @@ task_spawn_stop() {
       last_assistant_message:$msg}'
 }
 
-# Same fork, but the harness recorded the invocation only in the .meta.json
-# sidecar (agentType generic, description carrying the real verb).
+# A subagent whose ONLY code-review trace is a name inside .meta.json. The
+# census that closed the meta fallback: every live sidecar whose name
+# matched the reviewer regex also carried the forked-skill marker, so this
+# shape is a forge attempt, not a fallback the harness produces.
 forked_meta_stop() {
   local msg="$1" desc="$2"
   local dir="$TMP/subagents"
@@ -183,31 +185,32 @@ run_hook "$(post_tool_use Bash '{"command":"ls"}')"
 expect_silent "posttooluse-other-tool"
 
 echo "== SubagentStop: shapes that must attest =="
-run_hook "$(subagent_stop "/code-review" "$JSON_CLEAN")"
-expect_attest "described-json-clean"
-
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$JSON_CLEAN")"
 expect_attest "headered-json-clean"
 
-# Three flagless forks once returned findings JSON with NO header, and the
-# description field carried nothing the matcher recognized. Zero attestations.
-run_hook "$(subagent_stop "code-review high" "$JSON_CLEAN")"
-expect_attest "described-with-level-json-clean"
+echo "== SubagentStop: caller-chosen names never identify a review =="
+# agent_name is the spawn name the caller picked. Naming a task code-review
+# does not make its output a review, whatever the output looks like.
+run_hook "$(subagent_stop "/code-review" "$JSON_CLEAN")"
+expect_silent "agent-name-spawn-name-json-clean"
 
-# The low-level protocol's empty-findings marker is the literal "(none)" as
-# the WHOLE final text. No fence at all, so the fence parser could never
-# read it.
+run_hook "$(subagent_stop "code-review high" "$JSON_CLEAN")"
+expect_silent "agent-name-with-level-json-clean"
+
+# The low-level protocol's bare marker under a caller-chosen name: the
+# verdict shape is right, the identity is not.
 run_hook "$(subagent_stop "/code-review <level>" "(none)")"
-expect_attest "described-none-marker"
+expect_silent "agent-name-none-marker"
 
 # Prose around the marker is NOT the marker. The observed shape is the whole
 # final text equal to "(none)"; anything longer must never clear the gate,
-# an excuse line above the marker least of all.
-run_hook "$(subagent_stop "/code-review" $'Reviewed.\n\n(none)\n')"
-expect_silent "described-none-marker-buried-in-prose"
+# an excuse line above the marker least of all. These carry a REAL marker
+# sidecar, so it is the verdict that stays silent, not the identity.
+run_hook "$(forked_skill_stop $'Reviewed.\n\n(none)\n' "code-review")"
+expect_silent "none-marker-buried-in-prose"
 
-run_hook "$(subagent_stop "/code-review" $'I could not inspect the diff.\n\n(none)')"
-expect_silent "described-none-marker-after-failure"
+run_hook "$(forked_skill_stop $'I could not inspect the diff.\n\n(none)' "code-review")"
+expect_silent "none-marker-after-failure"
 
 echo "== SubagentStop: the forked-skill shape measured live =="
 # This is the exact payload that produced six unmergeable PRs. Nothing in it
@@ -219,7 +222,7 @@ run_hook "$(forked_skill_stop "$JSON_CLEAN" "code-review")"
 expect_attest "forked-marker-json-clean"
 
 run_hook "$(forked_meta_stop "(none)" "/code-review <level>")"
-expect_attest "forked-meta-none"
+expect_silent "meta-spawn-name-none"
 
 run_hook "$(forked_skill_stop "$JSON_DIRTY" "code-review")"
 expect_silent "forked-marker-json-dirty"

@@ -70,11 +70,13 @@ case "$event" in
     # fence parser had nothing to parse. Six PRs shipped green and unmergeable
     # on that hole, each rescued by a hand-run emit-attestation.sh.
     #
-    # 1. A name field names the invocation: `agent_type` (the DOCUMENTED
-    #    one) or `agent_name`. The payload's description fields are CALLER
-    #    PROSE - a task told to "code-review the failing tests" names a task,
-    #    not a review - so they are not read here, for the same reason the
-    #    meta guard below refuses its description field.
+    # 1. `agent_type`, the one DOCUMENTED payload field, and the only one the
+    #    harness controls. Every other name in play is CALLER CHOSEN: the
+    #    payload's agent_name and description fields are spawn names and task
+    #    prose, and .meta.json's name is a spawn name too (live census: values
+    #    like finder-A; every sidecar whose name matched the reviewer regex
+    #    also carried the forked-skill marker). A caller-chosen string cannot
+    #    identify a review, so none of them is read.
     #
     # The reviewer identity rule lives HERE and only here; every signal reads
     # it through this variable, so one edit cannot leave two spellings
@@ -84,8 +86,8 @@ case "$event" in
     while IFS= read -r cand; do
       [[ "$cand" =~ $REVIEWER_RE ]] && described=1
     done < <(printf '%s' "$input" \
-      | jq -r '[.agent_type?, .agent_name?]
-               | map(select(type == "string")) | .[]' 2>/dev/null || true)
+      | jq -r '[.agent_type?] | map(select(type == "string")) | .[]' \
+      2>/dev/null || true)
 
     # 2. The harness's own record of WHAT THIS FORK RAN, which it writes
     #    beside the subagent transcript whatever the skill's output contract
@@ -111,15 +113,6 @@ case "$event" in
         && jq -e --arg re "$REVIEWER_RE" \
           '(.forkedSkill == true) and ((.skillName? // "") | test($re))' \
           "$sidecar_base.forked-skill.marker.json" >/dev/null 2>&1; then
-        forked=1
-      fi
-      # `.meta.json` is written for EVERY subagent, spawned tasks included,
-      # and its description is caller prose: a task told to "code-review the
-      # failing tests" is not a review fork. Only the harness-recorded name
-      # field counts.
-      if [[ "$forked" == "0" && -f "$sidecar_base.meta.json" ]] \
-        && jq -e --arg re "$REVIEWER_RE" '(.name? // "") | test($re)' \
-          "$sidecar_base.meta.json" >/dev/null 2>&1; then
         forked=1
       fi
     fi
