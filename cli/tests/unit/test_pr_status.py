@@ -149,8 +149,15 @@ def test_genuine_latest_cancel_stays_red():
 # (a result that was taken away) can never read as decided.
 
 
-def _run_status_on(monkeypatch, capsys, rollup):
-    """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
+def _run_status_on(monkeypatch, capsys, rollup, *, coverage_verdict=None):
+    """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr).
+
+    ``coverage_verdict`` defaults to COVERED (the shared merge-gate predicate
+    for "review isn't what's blocking readiness") so tests exercising CI
+    verdict logic don't have to think about review coverage - and, just as
+    important, never fall through to the real predicate, which would shell
+    out to `gh` for a PR that doesn't exist.
+    """
 
     def _patch(name, value):
         monkeypatch.setattr(_status, name, value)
@@ -163,6 +170,10 @@ def _run_status_on(monkeypatch, capsys, rollup):
     _patch(
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
+    )
+    _patch(
+        "coverage_verdict",
+        lambda pr, repo, **kw: coverage_verdict or (_status.COVERED, "", "", ""),
     )
     code = _status.run_status("42")
     cap = capsys.readouterr()
@@ -407,6 +418,9 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
         _status, "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
+    )
     _status.run_status("42")
     cap = capsys.readouterr()
     import json
@@ -433,6 +447,9 @@ def test_no_resolve_hint_when_nothing_is_unresolved(monkeypatch, capsys):
         _status, "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
+    )
     _status.run_status("42")
     assert capsys.readouterr().err == ""
 
@@ -456,6 +473,9 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         _status,
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+    )
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
     )
     code = _status.run_status("42")
     assert code == 0
@@ -796,6 +816,9 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
             "optional_reviews_unresolved": 2,
         },
     )
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
+    )
     code = _status.run_status("42")
     assert code == 0  # green exit unchanged despite an unresolved optional finding
     out = _json.loads(capsys.readouterr().out)
@@ -818,6 +841,9 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
         _status,
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": "unknown", "optional_reviews_unresolved": None},
+    )
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
     )
     code = _status.run_status("42")
     assert code == 0
@@ -871,6 +897,11 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
     # The status read resolves the project log from its cwd; point it at the
     # fixture.
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    # Hermetic: the readiness predicate is exercised separately below; here it
+    # would otherwise shell out to `gh` for a repo (tmp_path) that isn't one.
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
+    )
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     out = json.loads(capsys.readouterr().out)
@@ -920,6 +951,9 @@ def test_status_prints_degraded_recompute_reason_on_stderr(monkeypatch, capsys, 
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
+    )
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     cap = capsys.readouterr()
@@ -954,7 +988,111 @@ def test_status_recompute_failure_degrades_to_unknown(monkeypatch, capsys, tmp_p
         _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "fno-agents not found")
     )
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(
+        _status, "coverage_verdict", lambda pr, repo, **kw: (_status.COVERED, "", "", ""),
+    )
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["review_coverage"]["coverage"] == "unknown"
+
+
+# ---- x-4003: `ready` must ask the SAME predicate `fno pr merge` refuses on ----
+#
+# These drive the REAL `_coverage_gate.coverage_verdict` (only the lane check
+# and the attestation check are stubbed, same seam `test_pr_coverage_check.py`
+# uses) instead of stubbing `_status.coverage_verdict` itself, so a future
+# edit that re-diverges the predicate from `run_merge` fails here too.
+
+_X4003_HEAD = "aaaa1111bbbb2222"
+
+
+def _seed_coverage_event(tmp_path, **data):
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    with events.open("a", encoding="utf-8") as fh:
+        fh.write(
+            _json.dumps({
+                "ts": "2026-08-11T00:00:00Z",
+                "type": "review_coverage",
+                "data": {"pr": 42, "head_sha": _X4003_HEAD, **data},
+            })
+            + "\n"
+        )
+
+
+def _stub_status_reads(monkeypatch, *, green=True):
+    conclusion = "SUCCESS" if green else "FAILURE"
+    monkeypatch.setattr(
+        _status, "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "headRefOid": _X4003_HEAD,
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": conclusion}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status, "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+
+
+def test_ready_false_for_no_coverage_row(monkeypatch, capsys, tmp_path):
+    """Observed shape 1 (2026-08-11): 25/25 checks, 0 unresolved,
+    review_coverage {"coverage": "unknown", "reviewed_count": null}. `fno pr
+    merge` refuses an unreviewed PR - `ready` must refuse too, not just read
+    green + zero-unresolved."""
+    from fno.pr import _merge, _reviews
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(
+        _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "fno-agents not found")
+    )
+    _stub_status_reads(monkeypatch)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    cap = capsys.readouterr()
+    out = _json.loads(cap.out)
+    assert out["green"] is True
+    assert out["ready"] is False, "the merge gate would refuse this PR - status must agree"
+    assert "note: ready stays false" in cap.err
+    assert "no review_coverage event" in cap.err
+
+
+def test_ready_false_for_covered_row_with_zero_reviewed_count(monkeypatch, capsys, tmp_path):
+    """Observed shape 2 (2026-08-11): 28/28 checks, 0 unresolved,
+    review_coverage {"coverage": "covered", "reviewed_count": 0} - the exact
+    pair `_is_covered`/`_coverage_gate` reject (x-5b99), which `fno pr merge`
+    refuses. `ready` used to read true anyway because it never asked."""
+    from fno.pr import _merge
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_coverage_event(tmp_path, coverage="covered", reviewed_count=0)
+    _stub_status_reads(monkeypatch)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    cap = capsys.readouterr()
+    out = _json.loads(cap.out)
+    assert out["green"] is True
+    assert out["ready"] is False
+    assert "note: ready stays false" in cap.err
+    assert "0 reviewed" in cap.err
+
+
+def test_ready_true_when_coverage_actually_covers_head(monkeypatch, capsys, tmp_path):
+    """Positive marker: a real head-pinned pass (covered, count > 0) is the
+    one shape that must NOT hold ready back - the merge gate would allow it."""
+    from fno.pr import _merge
+
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_coverage_event(tmp_path, coverage="covered", reviewed_count=1)
+    _stub_status_reads(monkeypatch)
+    code = _status.run_status("42", cwd=str(tmp_path))
+    assert code == 0
+    cap = capsys.readouterr()
+    out = _json.loads(cap.out)
+    assert out["ready"] is True
+    assert "note: ready stays false" not in cap.err

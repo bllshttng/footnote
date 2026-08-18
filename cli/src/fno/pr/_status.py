@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional, Sequence
 
+from fno.pr._coverage_gate import COVERED, coverage_verdict, refusal_line
 from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
     _UNKNOWN_COVERAGE,
@@ -276,6 +277,24 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # is a shape that drifts the moment a key is added on one side only.
         coverage = dict(_UNKNOWN_COVERAGE)
 
+    # `ready` used to answer only from CI + optional reviews, so a PR could
+    # read `ready: true` here while `fno pr merge` refused it for missing
+    # coverage - the friendlier verdict sitting on the ungated path (the web
+    # merge button, a bare `gh pr merge`). Ask the SAME predicate the merge
+    # gate asks (`_coverage_gate.coverage_verdict`, already shared with `fno
+    # pr coverage-check` and the git-protection hook) instead of restating
+    # its rules here - passing the head already fetched above so this read
+    # never pays a second `gh pr view`.
+    try:
+        import os
+
+        cov_state, cov_refusal, _cov_head, cov_note = coverage_verdict(
+            int(pr), cwd or os.getcwd(), recompute=True, head=pr_json.get("headRefOid")
+        )
+    except Exception:
+        cov_state, cov_refusal, cov_note = None, "", "coverage predicate raised"
+    coverage_ready = cov_state == COVERED
+
     sys.stdout.write(
         json.dumps(
             {
@@ -291,9 +310,10 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 "optional_reviews": reviews.get("optional_reviews", "unknown"),
                 "optional_reviews_unresolved": unresolved,
                 "review_coverage": coverage,
-                # The obvious "read this, not green": ready iff CI is green AND no
-                # optional finding is unresolved. Advisory - never the exit code.
-                "ready": green and unresolved == 0,
+                # The obvious "read this, not green": ready iff CI is green,
+                # no optional finding is unresolved, AND the merge gate's own
+                # coverage predicate agrees. Advisory - never the exit code.
+                "ready": green and unresolved == 0 and coverage_ready,
             }
         )
         + "\n"
@@ -344,6 +364,16 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             "'mutation($t: ID!){resolveReviewThread(input:{threadId: $t})"
             "{thread{isResolved}}}' -F t=<threadId>` (thread ids come from "
             "`reviewThreads` on the pullRequest).\n"
+        )
+
+    # Say WHY ready is false when it's coverage holding it there, not CI or an
+    # unresolved optional finding - the exact gap this field used to leave
+    # silent: `ready: true` here while `fno pr merge` refused for coverage,
+    # because this predicate never asked the merge gate's own question. Read
+    # this note before reaching for the merge button.
+    if not coverage_ready:
+        sys.stderr.write(
+            f"note: ready stays false: {refusal_line(cov_refusal, cov_note) or 'coverage not covered'}\n"
         )
 
     # Coverage used to print a word and a number with no way to check either.

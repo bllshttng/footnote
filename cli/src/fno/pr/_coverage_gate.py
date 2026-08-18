@@ -45,7 +45,7 @@ UNANSWERED = 4
 
 
 def coverage_verdict(
-    pr_number: int, repo: str, *, recompute: bool
+    pr_number: int, repo: str, *, recompute: bool, head: Optional[str] = None
 ) -> Tuple[int, str, str, str]:
     """Return ``(state, refusal, covered_head, note)``.
 
@@ -54,6 +54,11 @@ def coverage_verdict(
     head the row pins, for the caller's TOCTOU pin; empty when no lane is
     configured or no row survives. ``note`` names a recompute outcome on
     REFUSED, or the dead probe on UNANSWERED.
+
+    ``head`` lets a caller that already fetched the PR's head (``fno pr
+    status`` reads it off the same ``gh`` response it built its own verdict
+    from) hand it in rather than pay a second ``gh pr view``. Omit it to keep
+    the original self-fetching behavior.
     """
     # The guard's own short circuit: a stock install with no review lane
     # configured opts out of coverage entirely. Checked FIRST so neither the
@@ -66,9 +71,10 @@ def coverage_verdict(
     # "no coverage" - it is "the probe that pins coverage to what would
     # actually merge could not run", and every answer built on it would
     # describe an unknown commit. Refuse to answer rather than guess.
-    head: Optional[str] = _merge._pr_head_oid(pr_number, repo)
     if head is None:
-        return UNANSWERED, "", "", "pr head fetch failed"
+        head = _merge._pr_head_oid(pr_number, repo)
+        if head is None:
+            return UNANSWERED, "", "", "pr head fetch failed"
 
     code_review_required = _merge._code_review_attestation_required(repo, pr_number)
     if recompute:
