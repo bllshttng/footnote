@@ -16,12 +16,16 @@ name: review-coverage-gate
 #     previously-green status can never survive onto a commit nobody reviewed
 #     - UNLESS the coverage-override label is applied: the override is durable
 #     shared state that a push does not revoke, so it is re-read first.
-#   labeled/unlabeled with `coverage-override` - the override arm: label
-#     present posts success naming the actor; withdrawn invalidates the
-#     override's OWN green, re-reading the head first so a verdict a
-#     publisher wrote survives the spent label's removal. Any other label is
-#     a no-op: re-posting failure would clobber a green marker a worker
-#     legitimately published on that same sha.
+#   labeled/unlabeled (ANY label) - the override arm. It re-reads the LIVE
+#     label rather than trusting the label this event carries: held posts
+#     success (naming the actor when they are the one who applied the
+#     override), absent invalidates the override's OWN green, re-reading the
+#     head first so a verdict a publisher wrote survives the spent label's
+#     removal. Reading the live label is what makes an unrelated label event
+#     harmless AND healing - `cancel-in-progress` groups by PR, so a second
+#     label event seconds later kills the override's own run, and an arm that
+#     switched on `github.event.label.name` alone would leave the valve shut
+#     with nobody to re-open it.
 #
 # The override label is read by EVERY writer of this status (the Rust
 # publishers in loopcheck.rs re-read it before each post), so a cancelled
@@ -30,7 +34,10 @@ name: review-coverage-gate
 #   opened/reopened/ready_for_review - no status change. The context starts
 #     absent, which a required-check reads as pending: exactly right for a
 #     PR no review verb has run on yet.
-#   workflow_dispatch - manual re-stamp; same invalidate-only stance.
+#   workflow_dispatch - manual re-stamp for the PR named in its required `pr`
+#     input; same invalidate-only stance. The input exists because
+#     `github.sha` on a dispatch is the default-branch tip, and a failure
+#     status there red-marks a commit on main no review verb can answer for.
 #
 # FORK PRs ARE SKIPPED, AND THAT IS ACCEPTED. A `pull_request` event from a
 # fork gets a read-only GITHUB_TOKEN whatever `permissions:` says, so a fork
@@ -49,9 +56,15 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number whose head to invalidate the coverage status on"
+        required: true
 
 concurrency:
-  group: review-coverage-gate-${{ github.event.pull_request.number || github.sha }}
+  group: >-
+    review-coverage-gate-${{ github.event.pull_request.number ||
+    github.event.inputs.pr || github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -77,7 +90,12 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name || '' }}
           ACTOR: ${{ github.actor }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_INPUT: ${{ github.event.inputs.pr || '' }}
+          # A PR event names its own head. A dispatch does NOT: `github.sha`
+          # there is the default-branch tip, and stamping a failure on it
+          # red-marks a commit on main that no review verb can ever answer for.
+          # The dispatch arm resolves the head from its `pr` input instead.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
         run: |
           set -euo pipefail
           ctx=fno/review-coverage
@@ -129,17 +147,36 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
               --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\""
           }
+          # The LIVE label state, read by NAME. A grep over the raw JSON blob
+          # also sees each label's description and colour, so an unrelated
+          # label described "coverage-override" would re-stamp success on a
+          # head nobody reviewed.
+          override_held() {
+            gh pr view "${{ github.event.pull_request.number }}" \
+              -R "${GITHUB_REPOSITORY}" --json labels \
+              --jq '[.labels[].name] | index("coverage-override") != null'
+          }
           case "$EVENT:$ACTION" in
-            pull_request:labeled)
-              if [ "$LABEL" = "coverage-override" ]; then
-                post success "coverage-override label applied by ${ACTOR}"
-                echo "override: posted success naming ${ACTOR}"
+            pull_request:labeled|pull_request:unlabeled)
+              # Every label event re-reads the LIVE label, not just the one
+              # this event carries. `cancel-in-progress` groups by PR, so an
+              # unrelated label added seconds after the override CANCELS the
+              # override's own run; if that run were the only thing that could
+              # stamp the valve, the valve would silently fail to open - the
+              # one failure mode a release valve must not have. Any label event
+              # re-converges the status on the label that is actually there.
+              held="$(override_held)"
+              if [ "$held" = "true" ]; then
+                if [ "$LABEL" = "coverage-override" ]; then
+                  post success "coverage-override label applied by ${ACTOR}"
+                  echo "override: posted success naming ${ACTOR}"
+                else
+                  # A different label moved. The actor here labelled something
+                  # else, so the description must not name them as the waiver.
+                  post success "coverage-override label still applied"
+                  echo "override still held; re-stamped success"
+                fi
               else
-                echo "label '${LABEL}' is not the override; no status change"
-              fi
-              ;;
-            pull_request:unlabeled)
-              if [ "$LABEL" = "coverage-override" ]; then
                 # Withdrawal invalidates the LABEL's green, never a verdict a
                 # publisher wrote. At 3am the operator labels, the worker
                 # then reviews for real, the publisher greens the head, and
@@ -154,11 +191,9 @@ jobs:
                     echo "override withdrawn: invalidated the override green"
                     ;;
                   *)
-                    echo "override withdrawn; head carries '${cur:-no status}' - no change"
+                    echo "no override held; head carries '${cur:-no status}' - no change"
                     ;;
                 esac
-              else
-                echo "label '${LABEL}' is not the override; no status change"
               fi
               ;;
             pull_request:synchronize)
@@ -166,14 +201,7 @@ jobs:
               # operator's fix commit after a 3am override keeps the valve
               # they are still holding, so the label is re-read before the
               # head is invalidated.
-              # Read the label by NAME, the same jq the Python and Rust
-              # siblings use. A grep over the raw JSON blob also sees each
-              # label's description and colour, so an unrelated label
-              # described "coverage-override" would re-stamp success on a
-              # head nobody reviewed.
-              held="$(gh pr view "${{ github.event.pull_request.number }}" \
-                    -R "${GITHUB_REPOSITORY}" --json labels \
-                    --jq '[.labels[].name] | index("coverage-override") != null')"
+              held="$(override_held)"
               if [ "$held" = "true" ]; then
                 post success "coverage-override label still applied (head moved to ${HEAD_SHA:0:8})"
                 echo "synchronize: override still held; re-stamped success at ${HEAD_SHA:0:8}"
@@ -196,8 +224,18 @@ jobs:
               fi
               ;;
             workflow_dispatch:)
+              if [ -z "$PR_INPUT" ]; then
+                echo "workflow_dispatch needs a 'pr' input; refusing to stamp a status on a commit no PR names" >&2
+                exit 1
+              fi
+              HEAD_SHA="$(gh pr view "$PR_INPUT" -R "${GITHUB_REPOSITORY}" \
+                --json headRefOid --jq .headRefOid)"
+              if [ -z "$HEAD_SHA" ]; then
+                echo "could not resolve the head of PR ${PR_INPUT}" >&2
+                exit 1
+              fi
               post failure "manual invalidate at ${HEAD_SHA:0:8}; run the review verb at HEAD"
-              echo "dispatch: invalidated at ${HEAD_SHA:0:8}"
+              echo "dispatch: invalidated PR ${PR_INPUT} at ${HEAD_SHA:0:8}"
               ;;
             *)
               echo "$EVENT:$ACTION: no status change (invalidate-only)"

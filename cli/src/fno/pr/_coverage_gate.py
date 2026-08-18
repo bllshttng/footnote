@@ -60,6 +60,12 @@ UNANSWERED = 4
 # that cannot tell the two apart is a receipt that lies.
 OVERRIDE_NOTE_PREFIX = "override: "
 
+# The note on the one COVERED answer that means "this gate does not apply
+# here". A reader cannot tell it from a real covered verdict by the empty
+# covered_head alone - a covered row that carried no head_sha returns the same
+# empty pin - so the discriminator is named rather than inferred.
+NO_LANE_NOTE = "no review lane configured"
+
 
 def _override_note(pr_number: int, repo: str) -> str:
     """The override note when the PR carries the label, else ``""``.
@@ -100,7 +106,7 @@ def coverage_verdict(
     # head fetch nor the events read runs for a PR nobody configured review
     # for - same order run_merge has always evaluated, one lane probe cheaper.
     if not _merge._review_lane_configured(repo, pr_number):
-        return COVERED, "", "", ""
+        return COVERED, "", "", NO_LANE_NOTE
 
     # The head fetch is an instrument, and it can fail. A None head is not
     # "no coverage" - it is "the probe that pins coverage to what would

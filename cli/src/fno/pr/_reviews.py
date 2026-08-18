@@ -13,6 +13,7 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -519,6 +520,11 @@ COVERAGE_OVERRIDE_LABEL = "coverage-override"
 # leads, the tail is detail.
 _GH_DESCRIPTION_LIMIT = 140
 
+# Wait between status-POST attempts. Matches the refresher workflow and the
+# stacked-base guard, which sleep the same 5s between their three attempts.
+# A module const so a test can shrink it rather than pay the wait.
+_POST_RETRY_SLEEP_SECS = 5.0
+
 
 def _truncate_description(text: str, limit: int = _GH_DESCRIPTION_LIMIT) -> str:
     if len(text) <= limit:
@@ -535,6 +541,13 @@ def _override_label_actor(
     feed (a labeled event carries ``actor.login``), read only when the label is
     present. Any failure degrades to ``(False, None)`` - an unreadable label
     state must not mint a success status.
+
+    The events read is PAGINATED. The feed is oldest-first at 30 per page, so
+    an unpaginated read sees the oldest 30 events and never the label applied
+    minutes ago: every busy PR would waive its review under "unknown actor",
+    which is the one fact this receipt exists to carry. ``--paginate`` with
+    ``--jq`` emits one line per page that matched, so the LAST line is the
+    latest labeling.
     """
     res = runner(
         ["gh", "pr", "view", str(pr_number), "--json", "labels"], cwd=repo, timeout=30
@@ -554,7 +567,7 @@ def _override_label_actor(
     try:
         ev = runner(
             [
-                "gh", "api",
+                "gh", "api", "--paginate",
                 f"repos/:owner/:repo/issues/{pr_number}/events",
                 "--jq",
                 "[.[] | select(.event==\"labeled\" and .label.name==\""
@@ -658,12 +671,25 @@ def publish_coverage_status(
                 if count
                 else f"covered at {head[:8]}"
             )
-        elif verdict == _coverage_gate.COVERED:
+        elif verdict == _coverage_gate.COVERED and note == _coverage_gate.NO_LANE_NOTE:
             # No review lane configured: the merge gate does not apply.
             # Say so on the status instead of reading as a pass on
-            # nothing.
+            # nothing. Keyed on the gate's OWN note, never on "covered_head is
+            # empty": a covered row that carried no head_sha lands there too,
+            # and telling the reader that a reviewed merge is ungated is the
+            # receipt lying in the reassuring direction.
             state = "success"
             description = "no review lane configured; merge ungated"
+        elif verdict == _coverage_gate.COVERED:
+            # Covered, but the row pinned no head. The verdict still stands;
+            # it just cannot name the sha it was computed at.
+            count = _best_effort_reviewed_count(pr_number, gh_dir)
+            state = "success"
+            description = (
+                f"covered: {count} reviewed (row pinned no head sha)"
+                if count
+                else "covered (row pinned no head sha)"
+            )
         else:
             state = "failure"
             line = (
@@ -676,7 +702,10 @@ def publish_coverage_status(
         # Three attempts, the same transient-5xx policy the refresher workflow
         # and the stacked-base guard apply to the same POST: once the ruleset
         # makes the context required, one blip here must not cost the merge
-        # that follows it. A permanent 4xx costs two fast retries, no sleeps.
+        # that follows it. The BACKOFF is the policy, not the count - three
+        # POSTs fired back to back inside one millisecond all land in the same
+        # outage, so a retry with no wait is a retry in name only. A permanent
+        # 4xx costs two waits, which is the price of surviving the transient.
         args = [
             "gh", "api", "--method", "POST",
             f"repos/:owner/:repo/statuses/{head}",
@@ -688,6 +717,7 @@ def publish_coverage_status(
         for _retry in range(2):
             if res.ok:
                 return True, ""
+            time.sleep(_POST_RETRY_SLEEP_SECS)
             res = runner(args, cwd=gh_dir, timeout=30)
         if res.ok:
             return True, ""

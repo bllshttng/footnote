@@ -50,8 +50,13 @@ fi
 short() { printf '%s' "$1" | cut -c1-8; }
 
 # The latest state and description of the coverage context on one sha.
-# Empty state means absent - which the caller treats as a failure, so an API
-# hiccup can never read as a pass (fail closed, like everything else here).
+# An empty ANSWER means the context is absent - which the caller treats as a
+# failure, so a missing marker can never read as a pass. A failed READ is a
+# different fact and returns non-zero: the merge is already on main and its
+# branch is gone, so a transient 5xx read as "absent" would red main for a
+# covered merge with nothing able to repair it. Three attempts before a read
+# is allowed to count as failed, the same transient-5xx policy the publishers
+# and the refresher apply to the POST.
 #
 # The COMBINED endpoint, never the status list. The list is newest-first with
 # one-second `updated_at` granularity, and jq's sort_by is stable, so
@@ -62,17 +67,30 @@ short() { printf '%s' "$1" | cut -c1-8; }
 # endpoint returns exactly one entry per context, the latest, so there is no
 # tie to break.
 coverage_field() { # <sha> <jq-tail: .state or .description>
-  gh api "repos/:owner/:repo/commits/$1/status" \
-    --jq "[.statuses[] | select(.context == \"$CTX\")] | first | $2 // empty" \
-    2>/dev/null || true
+  local attempt out
+  for attempt in 1 2 3; do
+    if out="$(gh api "repos/:owner/:repo/commits/$1/status" \
+      --jq "[.statuses[] | select(.context == \"$CTX\")] | first | $2 // empty")"; then
+      printf '%s' "$out"
+      return 0
+    fi
+    echo "status read attempt $attempt for $(short "$1") failed; retrying after a backoff" >&2
+    sleep 5
+  done
+  return 1
 }
 
 audit_head() { # <head-sha> <label-for-messages>
   local head="$1" label="$2"
   local state desc
-  state="$(coverage_field "$head" '.state')"
+  if ! state="$(coverage_field "$head" '.state')"; then
+    echo "FAIL: $label head $(short "$head") - could not READ the ${CTX} status (three attempts); the audit verified nothing" >&2
+    return 1
+  fi
   if [ "$state" = "success" ]; then
-    desc="$(coverage_field "$head" '.description')"
+    # The state already said success; the description only decides whether to
+    # NAME this as an override, so an unreadable one degrades the sentence.
+    desc="$(coverage_field "$head" '.description')" || desc=""
     case "$desc" in
       coverage-override*)
         echo "override: $label merged on the override marker ($desc)"
@@ -127,7 +145,7 @@ while read -r commit; do
   fi
 done <<<"$commits"
 
-echo "audited ${merges} merge(s) from $(short "$since") to $(short HEAD); ${skipped} first-parent-only commit(s) skipped by name"
+echo "audited ${merges} merge(s) from $(short "$since") to $(short "$(git rev-parse HEAD)"); ${skipped} first-parent-only commit(s) skipped by name"
 if [ "$fail" = 1 ]; then
   echo "FAIL: assertion 2 - a merge landed without a covered verdict at its head" >&2
   exit 1

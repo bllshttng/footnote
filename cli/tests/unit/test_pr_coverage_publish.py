@@ -49,6 +49,8 @@ def hermetic(monkeypatch):
     resolved head, no override label, and a verdict the test sets per case."""
     runner = RecordingRunner()
     monkeypatch.setattr(_reviews, "run", runner)
+    # The real backoff is 5s per retry; a failing-POST case would pay 10s.
+    monkeypatch.setattr(_reviews, "_POST_RETRY_SLEEP_SECS", 0)
     monkeypatch.setattr("fno.pr._merge._pr_head_oid", lambda pr, repo: HEAD)
     monkeypatch.setattr(
         _reviews, "_override_label_actor", lambda pr, repo, r: (False, None)
@@ -101,7 +103,9 @@ def test_a_covered_row_with_an_unreadable_count_still_names_the_sha(hermetic):
 
 def test_no_review_lane_posts_an_explicit_ungated_success(hermetic):
     runner, verdict_box = hermetic
-    verdict_box["return"] = (_coverage_gate.COVERED, "", "", "")
+    verdict_box["return"] = (
+        _coverage_gate.COVERED, "", "", _coverage_gate.NO_LANE_NOTE
+    )
     posted, _note = _reviews.publish_coverage_status(42)
     assert posted is True
     posts = _posts(runner)
@@ -110,6 +114,24 @@ def test_no_review_lane_posts_an_explicit_ungated_success(hermetic):
     fields = _fields(posts[0])
     assert fields["state"] == "success"
     assert fields["description"] == "no review lane configured; merge ungated"
+
+
+def test_a_covered_row_with_no_head_sha_is_not_reported_as_ungated(hermetic):
+    """An empty pin is not a missing lane.
+
+    Both answers reach the publisher as ``(COVERED, "", "", ...)``. Reading
+    "no review lane configured; merge ungated" off the empty pin tells the
+    operator a reviewed merge was never gated - the receipt lying in the
+    reassuring direction.
+    """
+    runner, verdict_box = hermetic
+    verdict_box["return"] = (_coverage_gate.COVERED, "", "", "")
+    posted, _note = _reviews.publish_coverage_status(42)
+    assert posted is True
+    fields = _fields(_posts(runner)[0])
+    assert fields["state"] == "success"
+    assert fields["description"].startswith("covered")
+    assert "no review lane" not in fields["description"]
 
 
 def test_a_refusal_posts_the_gate_refusal_text_truncated(hermetic):
