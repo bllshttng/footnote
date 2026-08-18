@@ -585,6 +585,10 @@ class TestQuotaRotationDeclinedEvent:
         self, monkeypatch, tmp_path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
+        # The journal too. The hermetic sandbox pins FNO_EVENTS_PATH for the
+        # whole pytest process, and project_events_json checks it ahead of the
+        # cwd-derived root, so a test reading tmp_path's journal must name it.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
         _signal(
             monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
@@ -608,6 +612,10 @@ class TestQuotaRotationDeclinedEvent:
         # snapshot_age_s is simply absent - the event must still validate and
         # append (both `provider` and `reason` are its only required fields).
         monkeypatch.chdir(tmp_path)
+        # The journal too. The hermetic sandbox pins FNO_EVENTS_PATH for the
+        # whole pytest process, and project_events_json checks it ahead of the
+        # cwd-derived root, so a test reading tmp_path's journal must name it.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
         _signal(
             monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
@@ -627,6 +635,10 @@ class TestQuotaRotationDeclinedEvent:
         import fno.events as events_mod
 
         monkeypatch.chdir(tmp_path)
+        # The journal too. The hermetic sandbox pins FNO_EVENTS_PATH for the
+        # whole pytest process, and project_events_json checks it ahead of the
+        # cwd-derived root, so a test reading tmp_path's journal must name it.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
         _signal(
             monkeypatch, state=HeadroomState.UNKNOWN, defer=False, cutover=False,
