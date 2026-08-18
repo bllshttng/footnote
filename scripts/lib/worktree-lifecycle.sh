@@ -308,12 +308,14 @@ case "${1:-status}" in
                 #    population that grows. Branched trees keep the
                 #    merged-or-upstream logic below unchanged.
                 if [[ "$branch" == "HEAD" || -z "$head" ]]; then
-                    if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
+                    unpushed_rc=0
+                    unpushed="$(wt_unpushed_count "$wt")" || unpushed_rc=$?
+                    if [[ "$unpushed" -gt 0 ]]; then
                         # The fail-safe count (1) is indistinguishable from a
                         # real one in the status column, so the row names an
                         # unverifiable refresh instead of asserting unpushed
                         # commits that may not exist.
-                        if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+                        if [[ "$unpushed_rc" -eq 0 && "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
                             printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt"
                         else
                             printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt  (remote refs unverifiable)"
@@ -436,6 +438,18 @@ case "${1:-status}" in
                 fi
 
                 BRANCH=$(cd "$wt" 2>/dev/null && git branch --show-current || echo "unknown")
+                # --force destroys uncommitted content on branched and
+                # detached trees alike. Run the shared dirt guard before the
+                # detached-only reachability check.
+                if ! wt_reapable "$wt"; then
+                    reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                    if [[ -z "$BRANCH" ]]; then
+                        echo "  SKIP: $wt (detached HEAD holds uncommitted work: $reason)"
+                    else
+                        echo "  SKIP: $wt (holds uncommitted work: $reason)"
+                    fi
+                    continue
+                fi
                 # A detached tree has no branch to preserve, so the --force
                 # below would destroy any commit no remote carries - the exact
                 # loss the merged sweep's wt_unpushed_count guard prevents.
@@ -443,20 +457,11 @@ case "${1:-status}" in
                 # a $( ) subshell that cannot carry the freshness flag back,
                 # so refreshing only inside it re-fetches per detached tree.
                 if [[ -z "$BRANCH" ]]; then
-                    # Uncommitted content first, before any network: a detached
-                    # tree has no branch holding it, so --force destroys an
-                    # untracked or modified file as surely as an unpushed
-                    # commit. Same classifier as the merged sweep; the
-                    # in-flight marker cli/src/fno/evals/runner.py drops is
-                    # untracked and rides this guard.
-                    if ! wt_reapable "$wt"; then
-                        reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
-                        echo "  SKIP: $wt (detached HEAD holds uncommitted work: $reason)"
-                        continue
-                    fi
                     wt_refresh_remote_refs "$wt" >/dev/null 2>&1 || true
-                    if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
-                        if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+                    unpushed_rc=0
+                    unpushed="$(wt_unpushed_count "$wt")" || unpushed_rc=$?
+                    if [[ "$unpushed" -gt 0 ]]; then
+                        if [[ "$unpushed_rc" -eq 0 && "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
                             echo "  SKIP: $wt (detached HEAD holds unpushed commits)"
                         else
                             echo "  SKIP: $wt (remote refs unverifiable; detached HEAD may hold unpushed commits)"

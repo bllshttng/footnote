@@ -5,6 +5,7 @@ against a throwaway git repo with a bare `origin`, so no real worktree is touche
 The two scripts are copied into the fixture so the sweep's hardcoded
 `$MAIN_DIR/scripts/setup/archive-worktree.sh` path resolves to the real code.
 """
+
 from __future__ import annotations
 
 import os
@@ -13,16 +14,22 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
+
+from fno.cli import app
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
 LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
+runner = CliRunner()
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(cwd), *args], check=check, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], check=check, capture_output=True, text=True
+    )
 
 
 def _commit(wt: Path, name: str, body: str = "x") -> None:
@@ -40,7 +47,9 @@ def repo(tmp_path: Path) -> Path:
     """
     origin = tmp_path / "origin.git"
     canon = tmp_path / "canon"
-    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(origin)], check=True, capture_output=True
+    )
     subprocess.run(["git", "init", "-b", "main", str(canon)], check=True, capture_output=True)
     _git(canon, "config", "user.email", "t@t.com")
     _git(canon, "config", "user.name", "T")
@@ -65,7 +74,9 @@ def _sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
     return subprocess.run(
         ["bash", str(script), "cleanup", "--merged", *flags],
-        cwd=str(canon), capture_output=True, text=True,
+        cwd=str(canon),
+        capture_output=True,
+        text=True,
     )
 
 
@@ -73,7 +84,9 @@ def _age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
     return subprocess.run(
         ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
-        cwd=str(canon), capture_output=True, text=True,
+        cwd=str(canon),
+        capture_output=True,
+        text=True,
     )
 
 
@@ -81,7 +94,9 @@ def _compat_age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "worktree-lifecycle.sh"
     return subprocess.run(
         ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
-        cwd=str(canon), capture_output=True, text=True,
+        cwd=str(canon),
+        capture_output=True,
+        text=True,
     )
 
 
@@ -116,6 +131,28 @@ def test_dry_run_default_mutates_nothing(repo: Path):
     assert "dry-run" in r.stdout
     assert wt.exists(), "dry-run must not remove the worktree"
     assert _git(repo, "worktree", "list").stdout == before
+
+
+def test_public_cli_cleanup_merged_dry_run_then_apply(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+):
+    """The public CLI must preserve the shell journey's dry-run/apply split."""
+    wt = _add_merged(repo, "cli-reapme")
+    monkeypatch.chdir(repo)
+
+    dry = runner.invoke(app, ["worktree", "cleanup", "--merged"])
+    dry_stdout = capfd.readouterr().out
+
+    assert dry.exit_code == 0, dry.output
+    assert "would-archive" in dry_stdout
+    assert wt.exists(), "public CLI dry-run must not remove the worktree"
+
+    applied = runner.invoke(app, ["worktree", "cleanup", "--merged", "--apply"])
+    applied_stdout = capfd.readouterr().out
+
+    assert applied.exit_code == 0, applied.output
+    assert "1 archived" in applied_stdout
+    assert not wt.exists(), "public CLI --apply must archive the candidate"
 
 
 # ── AC1-HP + branch preservation: --apply reaps, branch survives ────────────
@@ -233,8 +270,8 @@ def test_salvage_failure_keeps_worktree(repo: Path):
 
 # ── --prefix scopes the merged sweep (never touches out-of-prefix branches) ─
 def test_prefix_scopes_merged(repo: Path):
-    keep = _add_merged(repo, "keepme")   # feature/keepme
-    drop = _add_merged(repo, "dropme")   # feature/dropme
+    keep = _add_merged(repo, "keepme")  # feature/keepme
+    drop = _add_merged(repo, "dropme")  # feature/dropme
 
     r = _sweep(repo, "--apply", "--prefix", "feature/keep")
 
@@ -266,7 +303,10 @@ def test_archive_script_excludes_own_process_tree(repo: Path):
     script = repo / "scripts" / "setup" / "archive-worktree.sh"
     r = subprocess.run(
         ["bash", str(script), str(wt)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert not wt.exists(), f"stderr={r.stderr}"
@@ -284,7 +324,10 @@ def test_archive_refuses_codex_app_owned_worktree_even_with_force(
 
     r = subprocess.run(
         ["bash", str(script), "--force", str(wt)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
 
     assert r.returncode == 6
@@ -297,9 +340,7 @@ def test_merged_sweep_keeps_codex_app_owned_worktree(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     codex_home = tmp_path / ".codex"
-    wt = _add_merged_at(
-        repo, codex_home / "worktrees" / "thread-b" / repo.name, "native"
-    )
+    wt = _add_merged_at(repo, codex_home / "worktrees" / "thread-b" / repo.name, "native")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     r = _sweep(repo, "--apply")
@@ -367,6 +408,20 @@ def test_age_sweep_keeps_detached_tree_with_uncommitted_work(repo: Path):
     assert wt.exists(), "age sweep must not force-remove uncommitted work on a detached HEAD"
 
 
+def test_age_sweep_keeps_branched_tree_with_uncommitted_work(repo: Path):
+    """The age sweep uses --force for every worktree, so branched trees need
+    the same removal-time dirt guard as detached trees."""
+    wt = repo / "wt-age-dirty-branch"
+    _git(repo, "worktree", "add", str(wt), "-b", "feature/age-dirty", "main")
+    (wt / "scratch.txt").write_text("not committed\n")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (holds uncommitted work" in r.stdout
+    assert wt.exists(), "age sweep must not force-remove uncommitted work on a branch"
+
+
 def test_compat_age_sweep_delegates_app_owned_guard(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -399,9 +454,9 @@ def test_detached_at_remote_tip_is_reap_candidate(repo: Path):
     r = _sweep(repo)
 
     assert r.returncode == 0, r.stderr
-    assert any(
-        "would-archive" in line and str(wt) in line for line in r.stdout.splitlines()
-    ), r.stdout
+    assert any("would-archive" in line and str(wt) in line for line in r.stdout.splitlines()), (
+        r.stdout
+    )
     assert wt.exists(), "dry-run must not remove the worktree"
 
 
@@ -441,6 +496,16 @@ def test_preflight_tree_is_permanent(repo: Path):
     assert wt.exists(), diag
 
 
+def test_age_sweep_keeps_preflight_tree_permanently(repo: Path):
+    wt = _add_detached(repo, repo / ".claude" / "worktrees" / "preflight")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (permanent preflight worktree)" in r.stdout
+    assert wt.exists(), "the permanent preflight worktree must survive the age sweep"
+
+
 def test_archive_detached_pushed_to_nondefault_remote_branch(repo: Path):
     """The removal-time gate must agree with the sweep. A detached head that
     lives on a pushed non-default branch holds nothing unique, yet the
@@ -457,7 +522,10 @@ def test_archive_detached_pushed_to_nondefault_remote_branch(repo: Path):
     script = repo / "scripts" / "setup" / "archive-worktree.sh"
     r = subprocess.run(
         ["bash", str(script), str(det)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
 
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
@@ -471,7 +539,10 @@ def test_archive_detached_local_only_refused(repo: Path):
     script = repo / "scripts" / "setup" / "archive-worktree.sh"
     r = subprocess.run(
         ["bash", str(script), str(det)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
 
     assert r.returncode == 2
@@ -521,11 +592,84 @@ def test_archive_detached_kept_when_remote_branch_was_deleted(repo: Path):
 
     r = subprocess.run(
         ["bash", str(script), str(wt)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
 
     assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_refreshes_again_when_parent_marked_refs_fresh(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The sweep's classification refresh is not a removal-time refresh. A
+    branch can disappear between those checks, so archive must not trust an
+    inherited freshness cache."""
+    wt = _detached_at_deleted_remote_branch(repo, "gone-between-checks")
+    monkeypatch.setenv("_WT_REMOTE_REFS_FRESH", "1")
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "detached HEAD not on any remote" in r.stderr
+    assert wt.exists(), "archive must re-prune immediately before removal"
+
+
+def test_narrow_fetch_refspec_cannot_vouch_for_stale_remote_refs(repo: Path):
+    """A successful fetch only verifies refs covered by its fetch refspec.
+    Stale refs outside a narrowed refspec must never authorize removal."""
+    wt = _detached_at_deleted_remote_branch(repo, "outside-refspec")
+    _git(
+        repo,
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/main:refs/remotes/origin/main",
+    )
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "remote refs unverifiable" in r.stdout, diag
+    assert wt.exists(), "refs outside the verified refspec must fail toward keep"
+
+
+def test_negative_fetch_refspec_cannot_vouch_for_stale_remote_refs(repo: Path):
+    wt = _detached_at_deleted_remote_branch(repo, "negative-refspec")
+    _git(
+        repo,
+        "config",
+        "--add",
+        "remote.origin.fetch",
+        "^refs/heads/feature/negative-refspec",
+    )
+
+    r = _sweep(repo, "--apply")
+
+    assert r.returncode == 0, r.stderr
+    assert "remote refs unverifiable" in r.stdout
+    assert wt.exists(), "a negative fetch refspec makes remote reachability incomplete"
+
+
+def test_skip_fetch_all_remote_cannot_vouch_for_stale_remote_refs(repo: Path):
+    wt = _detached_at_deleted_remote_branch(repo, "skipped-remote")
+    _git(repo, "config", "remote.origin.skipFetchAll", "true")
+
+    r = _sweep(repo, "--apply")
+
+    assert r.returncode == 0, r.stderr
+    assert "remote refs unverifiable" in r.stdout
+    assert wt.exists(), "a remote skipped by fetch --all is not verified"
 
 
 def test_archive_detached_refused_when_refs_unverifiable(repo: Path):
@@ -538,12 +682,50 @@ def test_archive_detached_refused_when_refs_unverifiable(repo: Path):
 
     r = subprocess.run(
         ["bash", str(script), str(wt)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
 
     assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert "not verifiable" in r.stderr, f"stderr={r.stderr}"
     assert wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_reports_rev_list_probe_failure_as_unverifiable(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    wt = _add_detached(repo, repo / "wt-scratch-rev-list-error")
+    real_git = shutil.which("git")
+    assert real_git
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    git_wrapper = fake_bin / "git"
+    git_wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        'case " $* " in\n'
+        '  *" rev-list --count HEAD --not "*) exit 93 ;;\n'
+        "esac\n"
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    git_wrapper.chmod(0o755)
+    monkeypatch.setenv("REAL_GIT", real_git)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "remote reachability not verifiable" in r.stderr
+    assert "commit(s) on detached HEAD" not in r.stderr
+    assert wt.exists()
 
 
 def test_dead_secondary_remote_degrades_instead_of_aborting(repo: Path):
@@ -577,7 +759,10 @@ def test_non_origin_single_remote_detached_still_archives(repo: Path):
     script = repo / "scripts" / "setup" / "archive-worktree.sh"
     r = subprocess.run(
         ["bash", str(script), str(det)],
-        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
 
     assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"

@@ -190,6 +190,9 @@ if [[ "$FORCE" -eq 0 ]]; then
   #    non-default branch, so it is judged by the same shared reachability
   #    rule the sweep uses (wt_unpushed_count, fail toward keep).
   _UNPUSHED_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-unpushed.sh"
+  # A parent sweep's refresh is classification evidence, not a removal-time
+  # check. Do not inherit its cache across this destructive boundary.
+  unset _WT_REMOTE_REFS_FRESH _WT_REMOTE_REFS_STALE _WT_VERIFIED_REMOTE_REFS
   if [[ -f "$_UNPUSHED_LIB" ]]; then
     # shellcheck source=/dev/null
     source "$_UNPUSHED_LIB"
@@ -203,13 +206,15 @@ if [[ "$FORCE" -eq 0 ]]; then
     # exports die with it, so the receipt's verified-vs-unverifiable branch
     # below needs the freshness flag here.
     wt_refresh_remote_refs "$TARGET" >/dev/null 2>&1 || true
-    UNPUSHED="$(wt_unpushed_count "$TARGET")"
+    UNPUSHED_RC=0
+    UNPUSHED="$(wt_unpushed_count "$TARGET")" || UNPUSHED_RC=$?
     if [[ "$UNPUSHED" -gt 0 ]]; then
-      if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+      if [[ "$UNPUSHED_RC" -eq 0 && "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
         echo "archive-worktree: $UNPUSHED commit(s) on detached HEAD not on any remote at $TARGET" >&2
-        git -C "$TARGET" log --oneline -n 10 HEAD --not --remotes >&2
+        # shellcheck disable=SC2086
+        git -C "$TARGET" log --oneline -n 10 HEAD --not $_WT_VERIFIED_REMOTE_REFS >&2
       else
-        echo "archive-worktree: remote refs not verifiable (fetch failed); refusing to judge the detached HEAD at $TARGET" >&2
+        echo "archive-worktree: remote reachability not verifiable; refusing to judge the detached HEAD at $TARGET" >&2
       fi
       echo "    --force to override, or push first." >&2
       exit 2
