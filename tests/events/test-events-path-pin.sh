@@ -54,8 +54,13 @@ assert_eq "explicit EVENTS_FILE outranks the pin" "$tmp/explicit.jsonl" "$got"
 MARKER=test_events_path_pin
 checkout_journal="$REPO_ROOT/.fno/events.jsonl"
 count_marker() {
+    # `grep -c` PRINTS 0 and EXITS 1 on no match, so a `|| echo 0` fallback fires
+    # on top of grep's own output and the function returns two lines. That reads
+    # equal against another two-line 0 and unequal against a real one, so the
+    # comparison below would go red for a reason unrelated to the pin. Swallow
+    # the exit code instead of adding a second value.
     [[ -f "$1" ]] || { echo 0; return; }
-    grep -c "$MARKER" "$1" 2>/dev/null || echo 0
+    grep -c "$MARKER" "$1" 2>/dev/null || true
 }
 before_marks=$(count_marker "$checkout_journal")
 

@@ -368,9 +368,17 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         }
         items.push(item);
     }
+    // `kind` is part of the sort key because it is part of the mail accumulator's
+    // key: one recipient can now yield both a mail_question and a
+    // mail_delivery_miss, and for mail rows session_id IS the recipient, so those
+    // two tie on (ts, session_id). `sort_by` is stable, so a tie would fall back
+    // to push order, which comes from HashMap iteration and is randomized per
+    // process. That makes `needs --json` reorder run to run and anything
+    // diffing it flaky.
     items.sort_by(|a, b| {
         a.ts.cmp(&b.ts)
             .then_with(|| a.session_id.cmp(&b.session_id))
+            .then_with(|| a.kind.cmp(&b.kind))
     });
     items
 }
@@ -1094,6 +1102,45 @@ mod tests {
             items.iter().any(|i| i.kind == "mail_delivery_miss"),
             "and the miss is still folded, under its own kind"
         );
+    }
+
+    #[test]
+    fn one_recipient_two_kinds_sorts_deterministically() {
+        // Keying the mail accumulator on (recipient, kind) lets one handle yield
+        // two rows. For mail rows session_id IS the recipient, so with an equal
+        // ts they tie on both of the old sort keys, and a stable sort then falls
+        // back to push order, which comes from HashMap iteration and is
+        // randomized per process. Folding the same input repeatedly has to give
+        // one order, or `needs --json` reorders run to run.
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "question",
+                "etl",
+                "ops",
+                "which auth?"
+            ),
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "reachable-miss",
+                "web",
+                "ops",
+                "ping"
+            ),
+        );
+        let first: Vec<String> = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR)
+            .into_iter()
+            .map(|i| i.kind)
+            .collect();
+        assert_eq!(first.len(), 2, "both rows survive the fold");
+        for _ in 0..24 {
+            let again: Vec<String> = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR)
+                .into_iter()
+                .map(|i| i.kind)
+                .collect();
+            assert_eq!(again, first, "same input, same order");
+        }
     }
 
     #[test]
