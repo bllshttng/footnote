@@ -354,6 +354,46 @@ def cmd_watch(
     raise typer.Exit(rc)
 
 
+@agents_app.command("crown", hidden=True)
+def cmd_crown(
+    handle: str = typer.Argument(
+        ...,
+        help="Existing registered session handle to crown in place.",
+    ),
+    scopes: list[str] = typer.Option(
+        ...,
+        "--scope",
+        help=(
+            "Territory to grant. Repeat for a multi-project portfolio; the "
+            "crown level is derived and cannot be supplied."
+        ),
+    ),
+) -> None:
+    """Crown an existing session from an attended shell.
+
+    Run `fno agents register` inside the target session, then run this command
+    with its printed handle from another terminal. Agent-originated calls are
+    refused; subordinate grants and succession stay on `spawn --crown`.
+    """
+    from fno.agents import events
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+
+    try:
+        receipt = promote_existing_session(handle, scopes)
+    except CrownPromotionError as exc:
+        print(f"crown: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+
+    events.emit(
+        "agent_crowned",
+        name=receipt["crowned"],
+        level=receipt["level"],
+        scope=receipt["scope"],
+        grantor=receipt["grantor"],
+    )
+    print(json.dumps(receipt))
+
+
 
 
 @agents_app.command("spawn")

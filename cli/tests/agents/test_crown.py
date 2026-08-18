@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
 import pytest
+from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
 
@@ -297,20 +300,316 @@ def test_top_rows_join_the_crown_by_name() -> None:
     assert _rows([w], {})[0]["crown"] is None
 
 
-# --- US10: `fno agents crown` promotion verb ---------------------------------
-
-from types import SimpleNamespace
+# --- attended in-place crown promotion --------------------------------------
 
 
 def _entry(name: str, **kw):
     from fno.agents.registry import AgentEntry
-    return AgentEntry(name=name, cwd="/w", log_path="", harness="claude", **kw)
+    harness = kw.pop("harness", "claude")
+    return AgentEntry(name=name, cwd="/w", log_path="", harness=harness, **kw)
 
 
 def _seed(monkeypatch, tmp_path, rows) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import write_registry
     write_registry(rows)
+
+
+def _prepare_crown_cli(monkeypatch, tmp_path, rows) -> None:
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+    from fno.projects import resolve as proj_resolve
+
+    _seed(monkeypatch, tmp_path, rows)
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[work.workspaces.ws1]\n'
+        'projects = [{ name = "alpha", short_name = "a" }, { name = "beta" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", config)
+    proj_resolve._clear_cache()
+
+
+def _invoke_crown(*args: str):
+    from fno.agents.cli import agents_app
+
+    return CliRunner().invoke(agents_app, ["crown", *args])
+
+
+def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="session-worker",
+                status="idle",
+                mux={"session": "main", "pane_id": 7},
+            )
+        ],
+    )
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "crowned": "worker",
+        "level": 1,
+        "scope": "alpha",
+        "grantor": "human",
+    }
+    row = load_registry()[0]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        1,
+        "alpha",
+        "human",
+    )
+
+
+def test_in_place_crown_preserves_every_non_crown_field(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.registry import load_registry
+
+    target = _entry(
+        "worker",
+        harness="codex",
+        harness_session_id="session-worker",
+        status="idle",
+        mux={"session": "main", "pane_id": 7},
+        delivery_policy="bus-only",
+        spawned_by_session="parent-session",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [target])
+    before = asdict(load_registry()[0])
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    after = asdict(load_registry()[0])
+    for field in ("crown_level", "crown_scope", "crown_grantor"):
+        before.pop(field)
+        after.pop(field)
+    assert after == before
+
+
+def test_agent_originated_in_place_crown_is_refused_without_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness_session_id="caller-session",
+        status="idle",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "attended shell" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
+@pytest.mark.parametrize("status", ["exited", "orphaned", "failed", "permanent_dead"])
+def test_in_place_crown_refuses_a_terminal_target_without_mutation(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="worker-session", status=status)],
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert status in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_in_place_crown_refuses_an_unknown_target_without_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="worker-session", status="idle")],
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("ghost", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "no agent" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_in_place_crown_refuses_an_already_crowned_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="idle",
+                crown_level=1,
+                crown_scope="beta",
+                crown_grantor="human",
+            )
+        ],
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "already holds" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    incumbent = _entry(
+        "incumbent",
+        harness_session_id="incumbent-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "a")
+
+    assert result.exit_code == 2
+    assert "already held" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_in_place_crown_canonicalizes_a_portfolio_and_derives_its_level(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="worker-session", status="idle")],
+    )
+
+    result = _invoke_crown(
+        "worker",
+        "--scope",
+        "beta",
+        "--scope",
+        "a",
+    )
+
+    assert result.exit_code == 0, result.output
+    row = load_registry()[0]
+    assert (row.crown_level, row.crown_scope) == (0, "alpha,beta")
+
+
+def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
+    result = _invoke_crown("--help")
+
+    assert result.exit_code == 0, result.output
+    assert "attended shell" in result.output.lower()
+    assert "fno agents register" in result.output
+    assert "another terminal" in result.output.lower()
+    assert "--level" not in result.output
+    assert "--succeed" not in result.output
+
+
+def test_in_place_crown_emits_one_success_event_only_after_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import events
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="worker-session", status="idle")],
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(events, "emit", lambda kind, **data: emitted.append((kind, data)))
+
+    success = _invoke_crown("worker", "--scope", "alpha")
+    refused = _invoke_crown("worker", "--scope", "beta")
+
+    assert success.exit_code == 0, success.output
+    assert refused.exit_code == 2
+    assert emitted == [
+        (
+            "agent_crowned",
+            {
+                "name": "worker",
+                "level": 1,
+                "scope": "alpha",
+                "grantor": "human",
+            },
+        )
+    ]
+
+
+def test_racing_in_place_crowns_leave_exactly_one_live_holder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry("one", harness_session_id="session-one", status="idle"),
+            _entry("two", harness_session_id="session-two", status="idle"),
+        ],
+    )
+
+    def promote(name: str) -> str:
+        try:
+            promote_existing_session(name, ["alpha"])
+        except CrownPromotionError:
+            return "refused"
+        return "crowned"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(promote, ["one", "two"]))
+
+    assert sorted(outcomes) == ["crowned", "refused"]
+    holders = [row for row in load_registry() if row.crown_scope == "alpha"]
+    assert len(holders) == 1
 
 
 
