@@ -9,6 +9,7 @@ filesystem-global writes.  Temporary directories replace ~/.fno.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -2180,6 +2181,13 @@ class TestTickRecordsAndDeadline:
 
         monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
 
+        # A MagicMock interval int()s to 1, so the derived deadline is ONE
+        # SECOND and the real catch-up leg races it. Give the harness a
+        # generous bound unless the test pinned its own (the timeout test does,
+        # before it gets here).
+        if not os.environ.get("FNO_PR_WATCH_TICK_TIMEOUT"):
+            monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+
         settings = MagicMock()
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
@@ -2294,11 +2302,20 @@ class TestFleetLegRunsBeforeThePRLegs:
         from unittest.mock import MagicMock
 
         from fno import fleet_state as fs
+        from fno.agents import sweep as agents_sweep
         from fno.pr_watch import cli as prcli
         import fno.recovery as rec
 
         monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
         monkeypatch.setattr(rec, "run_recovery_sweep", sweep_fn, raising=True)
+        # The silence backstop reads the real registry and resolves every
+        # worker's transcript; that is seconds of work these tests do not want.
+        monkeypatch.setattr(
+            agents_sweep, "run_sweep", lambda **_kw: ([], 0), raising=True,
+        )
+
+        if not os.environ.get("FNO_PR_WATCH_TICK_TIMEOUT"):
+            monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
 
         hb = tmp_path / "fleet-sweep-state.json"
         monkeypatch.setattr(fs, "fleet_state_path", lambda: hb, raising=True)

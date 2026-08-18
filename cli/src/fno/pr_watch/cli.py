@@ -356,6 +356,7 @@ def tick() -> None:
         set_tick_phase("recovery")
         _fleet_candidates = 0
         _fleet_refused = 0
+        _fleet_silent = 0
         _fleet_swept = False
         if settings.recovery.enabled and settings.autonomy.enabled:
             try:
@@ -375,6 +376,21 @@ def tick() -> None:
             except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
                 log.warning("pr-watch: recovery sweep failed: %s", exc)
 
+            # The cadence-deadline backstop, for a refusal the taxonomy does
+            # not recognise. It reads the FULL registry, which the recovery
+            # sweep's candidate set does not: that set drops every non-claude
+            # row, so a codex successor is invisible to it. Report only - this
+            # leg stops, spawns and unclaims nothing. Wrapped separately from
+            # the recovery sweep so neither takes the other down.
+            try:
+                from fno.agents.sweep import run_sweep as _run_silence_sweep
+
+                _rows, _fleet_silent = _run_silence_sweep(emit=_emit_event)
+                if _fleet_silent:
+                    typer.echo(f"silence sweep: silent={_fleet_silent}")
+            except Exception as exc:  # noqa: BLE001 - a backstop never breaks the tick
+                log.warning("pr-watch: silence sweep failed: %s", exc)
+
             # The fleet leg's own watermark and its liveness proof. `fno pr-watch
             # status` reported the agent loaded through a six-hour outage, so a
             # status line is not evidence that anything ticked; a file with a
@@ -392,6 +408,7 @@ def tick() -> None:
 
                     write_heartbeat(
                         candidates=_fleet_candidates, refused=_fleet_refused,
+                        silent=_fleet_silent,
                     )
                 except Exception as exc:  # noqa: BLE001 - never fatal to the PR legs
                     log.warning("pr-watch: fleet heartbeat write failed: %s", exc)

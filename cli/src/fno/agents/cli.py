@@ -1965,6 +1965,68 @@ def cmd_list(
         raise typer.Exit(code=result.exit_code)
 
 
+@agents_app.command("sweep", hidden=True)
+def cmd_sweep(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit one JSON row per worker, healthy ones included."
+    ),
+    deadline: int = typer.Option(
+        None, "--deadline",
+        help="Seconds of silence that make a worker a finding "
+             "(default config.agents.silence_deadline_seconds, else 600).",
+    ),
+    budget: float = typer.Option(
+        None, "--budget",
+        help="Wall-clock budget in seconds; rows past it report unread rather "
+             "than being dropped (default 20, which is what the daemon tick uses).",
+    ),
+) -> None:
+    """Report workers whose transcripts have gone quiet past their deadline.
+
+    The backstop for a refusal the taxonomy does not recognise. A harness can
+    reword "usage limit reached" tomorrow, and a cap can arrive as a hang
+    rather than a sentence; a clock closes what a marker list cannot.
+
+    It reads the FULL registry rather than recovery's candidate set, because
+    that set drops every non-claude row and every row with no live bg socket -
+    so a codex successor spawned by failover is invisible to the very sweep
+    that would catch ITS cap.
+
+    It never acts. No stop, no spawn, no claim mutation, no row write. Silence
+    has two explanations and a component that ACTS on the wrong one loses work,
+    while one that merely reports it raises a false alarm. A worker whose
+    transcript age is unknowable emits nothing at all: absence of evidence must
+    not become a finding.
+    """
+    import json as _json
+
+    from fno.agents.sweep import DEFAULT_SWEEP_BUDGET_S, run_sweep
+
+    rows, silent = run_sweep(
+        deadline_s=deadline,
+        budget_s=DEFAULT_SWEEP_BUDGET_S if budget is None else float(budget),
+    )
+    unread = sum(1 for r in rows if r.unread)
+
+    if json_out or not bool(getattr(sys.stdout, "isatty", lambda: False)()):
+        typer.echo(_json.dumps([r.as_dict() for r in rows]))
+        return
+
+    if not rows:
+        typer.echo("no registered workers")
+        return
+    for row in rows:
+        age = "unknown" if row.age_s is None else f"{row.age_s}s"
+        mark = "SILENT" if row.silent else "ok"
+        typer.echo(
+            f"{row.handle}  [{row.harness}]  {mark:<6} age={age} "
+            f"deadline={row.deadline_s}s"
+        )
+    # Never a silent cap: a truncation nobody can see reads as full coverage.
+    tail = f", {unread} unread (budget)" if unread else ""
+    typer.echo(f"{silent} silent of {len(rows)}{tail}")
+
+
 @agents_app.command("discovered-json", hidden=True)
 def cmd_discovered_json(
     cwd: str = typer.Option(None, "--cwd", help="Filter discovered rows by cwd."),
