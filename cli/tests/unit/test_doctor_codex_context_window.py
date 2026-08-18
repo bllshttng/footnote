@@ -302,11 +302,49 @@ def test_a_missing_percent_under_a_raised_cap_does_not_crash(tmp_path, monkeypat
     assert "drops this to 272000." in line
 
 
-def test_a_missing_cap_falls_back_to_the_base_window(tmp_path, monkeypatch) -> None:
+def test_a_missing_cap_reports_a_reason_rather_than_inventing_one(
+    tmp_path, monkeypatch
+) -> None:
+    """Substituting the base produced a number the cache never carried, then
+    the line had to disclaim the very cap it quoted.  No cap, no answer."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     _write(tmp_path, configured=1000000, cached_max=None)
 
-    assert doctor._codex_context_window_report()["effective"] == 258400
+    report = doctor._codex_context_window_report()
+
+    assert report == {"reason": "cache-schema-drift: no max_context_window for gpt-5.6-sol"}
+    assert _emit(report) == []
+
+
+def test_a_non_finite_number_reports_a_reason_rather_than_raising(
+    tmp_path, monkeypatch
+) -> None:
+    """json.loads parses bare Infinity and NaN, and int() raises on both.  The
+    caller swallows a raise, so that silently voids the whole check."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000)
+    (tmp_path / "models_cache.json").write_text(
+        '{"models": [{"slug": "gpt-5.6-sol", "context_window": 272000, '
+        '"max_context_window": Infinity, "effective_context_window_percent": 95}]}'
+    )
+
+    assert "reason" in doctor._codex_context_window_report()
+
+
+def test_absent_cache_provenance_is_not_invented(tmp_path, monkeypatch) -> None:
+    """An older or hand-written cache carries no fetched_at or client_version,
+    and the clause was printing "(fetched None by codex None)" regardless."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=272000)
+    payload = json.loads((tmp_path / "models_cache.json").read_text())
+    del payload["fetched_at"]
+    del payload["client_version"]
+    (tmp_path / "models_cache.json").write_text(json.dumps(payload))
+
+    line = _emit(doctor._codex_context_window_report())[0]
+
+    assert "None" not in line
+    assert "the cache records no fetch time" in line
 
 
 def test_the_footer_claim_is_withheld_when_the_footer_is_honest(tmp_path, monkeypatch) -> None:
@@ -464,18 +502,17 @@ def test_a_float_cap_is_honored_like_a_float_percent(tmp_path, monkeypatch) -> N
     assert report["effective"] == 380000
 
 
-def test_a_synthesized_cap_says_the_cache_carries_none(tmp_path, monkeypatch) -> None:
-    """A missing max_context_window makes `cap` a copy of the base that the
-    cache never carried.  Calling that 'its base' is a false cache fact."""
+def test_no_report_ever_carries_a_cap_the_cache_did_not(tmp_path, monkeypatch) -> None:
+    """max_context_window in the report must always be a cache fact, so a
+    --json consumer reading it alone can never get a fabricated number."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    _write(tmp_path, configured=1000000, cached_max=None)
-
-    report = doctor._codex_context_window_report()
-
-    assert report["cap_synthesized"] is True
-    line = _emit(report)[0]
-    assert "carries no cap for gpt-5.6-sol" in line
-    assert "its base" not in line
+    for cached_max in (272000, 872000, None):
+        _write(tmp_path, configured=1000000, cached_max=cached_max)
+        report = doctor._codex_context_window_report()
+        if cached_max is None:
+            assert "max_context_window" not in report
+        else:
+            assert report["max_context_window"] == cached_max
 
 
 def test_a_synthesized_cap_is_not_called_the_base(tmp_path, monkeypatch) -> None:

@@ -41,6 +41,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -1856,18 +1857,22 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     cap = entry.get("max_context_window")
     base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
-    cap = int(cap) if isinstance(cap, (int, float)) and not isinstance(cap, bool) else None
-    base = int(base) if isinstance(base, (int, float)) and not isinstance(base, bool) else None
-    # A cap the cache never carried is not a cache fact, so remember that the
-    # fallback happened rather than letting the line call it one.
-    synthesized = cap is None
+    def _number(value: object) -> Optional[int]:
+        # json.loads parses bare Infinity and NaN, and int() raises on both.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return int(value) if math.isfinite(value) else None
+
+    cap = _number(cap)
+    base = _number(base)
+    # No cap means no computable window.  Substituting the base produced a
+    # number the cache never carried, and the line then had to disclaim the
+    # very cap it quoted.  Say the cache cannot answer instead.
+    if cap is None:
+        return {"reason": f"cache-schema-drift: no max_context_window for {slug}"}
     base_synthesized = base is None
-    if synthesized:
-        cap = base
     if base_synthesized:
         base = cap
-    if cap is None:
-        return {"reason": f"cache-schema-drift: {slug}"}
     # A missing percent must not silence a clamp that needs no percent to
     # compute.  Carry it as None and let the line omit the claim, rather than
     # defaulting to a number upstream did not send.
@@ -1881,7 +1886,6 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
         "window_source": window_source,
         "configured": configured,
         "max_context_window": cap,
-        "cap_synthesized": synthesized,
         "base_synthesized": base_synthesized,
         "context_window": base,
         "effective": effective,
@@ -1927,9 +1931,21 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
     # model's base, whether the cap clamped it or a raised cap spared it.
     if report.get("leans_on_cached_cap"):
         cap, base = report["max_context_window"], report["context_window"]
+        # Only claim a fetch time and a client when the cache recorded them:
+        # an older or hand-written cache carries neither, and the clause was
+        # printing "(fetched None by codex None)" as if it did.
+        stamp = report.get("cache_fetched_at")
+        client = report.get("cache_client_version")
+        if stamp and client:
+            fetched = f"(fetched {stamp} by codex {client})"
+        elif stamp:
+            fetched = f"(fetched {stamp})"
+        elif client:
+            fetched = f"(written by codex {client})"
+        else:
+            fetched = "(the cache records no fetch time)"
         provenance = (
-            f"(fetched {report['cache_fetched_at']} by codex "
-            f"{report['cache_client_version']}). That cap is served per fetching client, "
+            f"{fetched}. That cap is served per fetching client, "
             "surface and originator both, and the cache records neither"
         )
         if cap > base:
@@ -1941,24 +1957,19 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
                 f" models_cache.json holds {report['model']} at {cap}, above its {base} "
                 f"base {provenance}. A base-tier fetch drops this to {base_tier}."
             )
-        elif cap == base and not (
-            report.get("cap_synthesized") or report.get("base_synthesized")
-        ):
+        elif cap == base and not report.get("base_synthesized"):
             line += (
                 f" models_cache.json caps {report['model']} at {cap}, its base "
                 f"{provenance}, so whichever launcher fetched last set it for every "
                 "thread started since."
             )
         else:
-            # A synthesized cap equals base by construction, so it reaches here
-            # only via the flag.  A cap BELOW base is upstream nonsense and
-            # lands here too.  State the number and claim nothing about it.
-            held = "carries no cap for" if report.get("cap_synthesized") else "puts"
+            # A cap BELOW base is upstream nonsense, and a missing base leaves
+            # nothing to call it.  State the number, claim nothing about it.
             line += (
-                f" models_cache.json {held} {report['model']}"
-                f"{'' if report.get('cap_synthesized') else f' at {cap}'} "
-                f"{provenance}, so whichever launcher fetched last set it for every "
-                "thread started since."
+                f" models_cache.json puts {report['model']} at {cap} {provenance}, "
+                "so whichever launcher fetched last set it for every thread "
+                "started since."
             )
         # Belongs on every branch, and most of all on the RAISED-cap one: the
         # daemon is the thing that pulls a raised cap back down, so the run
