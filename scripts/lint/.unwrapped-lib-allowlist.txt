@@ -215,6 +215,13 @@ resolve-plan-executor.sh
 # question that must have exactly one. Pure sourcing library; no CLI of its own.
 worktree-reapable.sh
 
+# The shared "does this HEAD hold anything no remote has?" answer. Sourced by
+# scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
+# exposes wt_unpushed_count. Pure git reachability with no classifier behind
+# it, so there is no wrapped entry point to adapt; a wrapper would add a CLI
+# surface to a one-line git question. Pure sourcing library; no CLI of its own.
+worktree-unpushed.sh
+
 # Bounded append-log rotation (.fno/ dir-hygiene, ab-d5a984f6). A thin
 # `bash <path> <file> <max_bytes>` helper invoked by hooks/convo-signal-capture.sh
 # to cap convo-signals.jsonl; tests run it directly. Pure utility, not a
