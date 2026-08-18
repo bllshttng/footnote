@@ -66,6 +66,45 @@ def test_settledness_reader_issues_no_graphql_call():
     assert any(c[:2] == ["git", "remote"] for c in calls)
 
 
+def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
+    calls: list[list[str]] = []
+    pulls = {
+        "state": "open",
+        "merged": False,
+        "mergeable": True,
+        "head": {"sha": "abc123def", "ref": "feature/rest-info"},
+        "base": {"ref": "main"},
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls, calls=calls)
+    )
+    assert reason == ""
+    assert info == {
+        "pr": 42,
+        "state": "OPEN",
+        "head_sha": "abc123def",
+        "head_ref": "feature/rest-info",
+        "base_ref": "main",
+        "mergeable": "MERGEABLE",
+    }
+    assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
+
+
+def test_pr_info_preserves_unknown_mergeability():
+    pulls = {
+        "state": "open",
+        "merged": False,
+        "mergeable": None,
+        "head": {"sha": "abc123def", "ref": "feature/rest-info"},
+        "base": {"ref": "main"},
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info["mergeable"] == "UNKNOWN"
+
+
 def test_rest_green_maps_to_rollup_green():
     r = _runner(
         check_runs=[

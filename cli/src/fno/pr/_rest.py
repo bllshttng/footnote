@@ -78,6 +78,55 @@ def _map_pr_state(data: dict) -> str:
     return {"open": "OPEN", "closed": "CLOSED"}.get(str(data.get("state") or "").lower(), "UNKNOWN")
 
 
+def _map_mergeable(value: Any) -> str:
+    if value is True:
+        return "MERGEABLE"
+    if value is False:
+        return "CONFLICTING"
+    return "UNKNOWN"
+
+
+def fetch_pr_info_rest(
+    pr: str,
+    cwd: Optional[str] = None,
+    runner: Callable = run,
+    repo: Optional[str] = None,
+) -> "tuple[Optional[dict], str]":
+    """Fetch state, head, base, and mergeability with one REST request."""
+    if not str(pr).strip().isdigit():
+        return None, f"REST reader needs a numeric PR number, got {pr!r}"
+    slug = repo or _repo_slug(cwd, runner)
+    if not slug:
+        return None, "could not resolve owner/repo from `git remote get-url origin`"
+
+    pulls = runner(["gh", "api", f"repos/{slug}/pulls/{pr}"], cwd=cwd)
+    if not pulls.ok:
+        return None, _rest_reason(pulls)
+    try:
+        pr_data = json.loads(pulls.stdout)
+    except json.JSONDecodeError:
+        return None, "gh api pulls/<n> returned output that is not JSON"
+    if not isinstance(pr_data, dict):
+        return None, "gh api pulls/<n> returned a JSON value that is not an object"
+
+    head = pr_data.get("head") or {}
+    base = pr_data.get("base") or {}
+    sha = str(head.get("sha") or "")
+    if not sha:
+        return None, "gh api pulls/<n> carried no head sha"
+    return (
+        {
+            "pr": int(pr),
+            "state": _map_pr_state(pr_data),
+            "head_sha": sha,
+            "head_ref": str(head.get("ref") or ""),
+            "base_ref": str(base.get("ref") or ""),
+            "mergeable": _map_mergeable(pr_data.get("mergeable")),
+        },
+        "",
+    )
+
+
 def fetch_pr_rest(
     pr: str,
     cwd: Optional[str] = None,
@@ -90,22 +139,13 @@ def fetch_pr_rest(
     class otherwise; `(None, reason)` must reach the caller as a loud
     `verdict: error`, never as an absent answer.
     """
-    if not str(pr).strip().isdigit():
-        return None, f"REST reader needs a numeric PR number, got {pr!r}"
     slug = _repo_slug(cwd, runner)
     if not slug:
         return None, "could not resolve owner/repo from `git remote get-url origin`"
-
-    pulls = runner(["gh", "api", f"repos/{slug}/pulls/{pr}"], cwd=cwd)
-    if not pulls.ok:
-        return None, _rest_reason(pulls)
-    try:
-        pr_data = json.loads(pulls.stdout)
-    except json.JSONDecodeError:
-        return None, "gh api pulls/<n> returned output that is not JSON"
-    sha = str((pr_data.get("head") or {}).get("sha") or "")
-    if not sha:
-        return None, "gh api pulls/<n> carried no head sha"
+    info, reason = fetch_pr_info_rest(pr, cwd=cwd, runner=runner, repo=slug)
+    if info is None:
+        return None, reason
+    sha = info["head_sha"]
 
     rollup: list[dict[str, Any]] = []
     # Paginate past the first 100: a commit with more check runs than one page
@@ -168,7 +208,7 @@ def fetch_pr_rest(
             pass
 
     return (
-        {"state": _map_pr_state(pr_data), "statusCheckRollup": rollup, "headRefOid": sha},
+        {"state": info["state"], "statusCheckRollup": rollup, "headRefOid": sha},
         "",
     )
 
