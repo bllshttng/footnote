@@ -60,6 +60,15 @@ d = json.load(open("'"$DATA_FILE"'"))
 rules = d.get("rules", [])
 rsc = next((r for r in rules if r.get("type") == "required_status_checks"), None)
 assert rsc, "data file: no required_status_checks rule"
+# Unknown parameter keys 422 at the POST (the API validates parameters
+# strictly), so catch them here as a data error, never a halfway API error.
+known = {
+    "required_status_checks",
+    "do_not_enforce_on_create",
+    "strict_required_status_checks_policy",
+}
+unknown = set(rsc.get("parameters", {}).keys()) - known
+assert not unknown, "data file: unknown required_status_checks parameter(s): %s" % sorted(unknown)
 checks = rsc.get("parameters", {}).get("required_status_checks")
 assert isinstance(checks, list) and checks, "data file: no required status checks"
 ctxs = sorted(
