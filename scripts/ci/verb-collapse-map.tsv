@@ -35,6 +35,7 @@ agents spawn	KEEP	agents spawn	256	deliberate readability slack for a high-traff
 agents spawn-guard	T1	agents spawn-guard	5
 agents status	T1	agents status	5
 agents stop	T1	agents stop	22
+agents sweep	T1	agents sweep	1
 agents subscribe	T1	agents subscribe	2
 agents top	T1	agents top	20
 agents trace	T1	agents trace	14

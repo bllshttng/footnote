@@ -212,6 +212,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # boundary and must not become the generator - truncating there would make
     # the name a caller reasons about differ from the one the runtime registers.
     "name",
+    # The cadence-deadline silence backstop. Pure Python: it reads the registry
+    # and each row's transcript truth through fno.agents.sweep, writes nothing,
+    # and has NO twin on the Rust client - so it must never auto-route to the
+    # daemon.
+    "sweep",
     # x-da8c: the registry-miss healer the Rust lifecycle verbs shell out to.
     # Pure Python (fno.agents.store_fallback); no Rust port. Staying out of
     # RUST_CLIENT_VERBS is the recursion guard for that shellout, so listing it
