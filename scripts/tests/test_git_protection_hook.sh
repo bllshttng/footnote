@@ -147,6 +147,9 @@ assert_deny "GraphQL reserve: compound wrapped checks read denied" "$result"
 result=$(run_hook "bash -c 'gh api graphql -f query=x'")
 assert_deny "GraphQL reserve: shell-wrapped raw query denied" "$result"
 
+result=$(run_hook '$FNO_REAL_GH api graphql -f query=x')
+assert_deny "GraphQL reserve: raw delegate variable denied" "$result"
+
 result=$(run_hook "gh api repos/o/r/pulls/930")
 assert_no_decision "GraphQL reserve: REST read remains outside this hook" "$result"
 

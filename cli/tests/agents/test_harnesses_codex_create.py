@@ -384,7 +384,7 @@ def test_create_unrouted_leaves_argv_and_env_default(tmp_path, fake_popen, monke
     """No role leaves argv unchanged and adds only the GraphQL proxy env."""
     monkeypatch.setattr(
         "fno.setup.github_cli.worker_environment",
-        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+        lambda base: {**base, "PATH": "/proxy:/usr/bin"},
     )
     codex_mod.create(
         cwd=Path("/tmp/work"),
@@ -399,7 +399,7 @@ def test_create_unrouted_leaves_argv_and_env_default(tmp_path, fake_popen, monke
     assert "-c" not in argv
     assert argv[:2] == ["codex", "--ask-for-approval"]
     assert call_args.kwargs["env"]["PATH"].startswith("/proxy:")
-    assert call_args.kwargs["env"]["FNO_REAL_GH"] == "/real/gh"
+    assert "FNO_REAL_GH" not in call_args.kwargs["env"]
 
 
 def test_create_yolo_swaps_sandbox_for_dangerous_bypass(tmp_path, fake_popen):

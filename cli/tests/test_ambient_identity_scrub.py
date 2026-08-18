@@ -204,7 +204,7 @@ def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(
         "fno.setup.github_cli.worker_environment",
-        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+        lambda base: {**base, "PATH": "/proxy:/usr/bin"},
     )
 
     captured = _capture_subprocess_env(monkeypatch, claude_mod)
@@ -213,4 +213,5 @@ def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypat
     claude_mod.headless_create(message="hi", cwd=cwd)
     explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
     assert explicit_envs
-    assert explicit_envs[-1]["FNO_REAL_GH"] == "/real/gh"
+    assert explicit_envs[-1]["PATH"].startswith("/proxy:")
+    assert "FNO_REAL_GH" not in explicit_envs[-1]

@@ -122,11 +122,11 @@ def execute(
         if fields and fields <= _METADATA_FIELDS:
             return _metadata(args, cwd=cwd, real_gh=gh, runner=runner)
         return _quota.execute_graphql(
-            purpose, args, runner=runner, real_gh=gh
+            purpose, args, runner=runner, real_gh=gh, cwd=cwd
         )
     if len(args) >= 2 and args[:2] == ["api", "graphql"]:
         return _quota.execute_graphql(
-            purpose, args, runner=runner, real_gh=gh
+            purpose, args, runner=runner, real_gh=gh, cwd=cwd
         )
     return runner([gh, *args], cwd=cwd)
 

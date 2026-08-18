@@ -751,7 +751,7 @@ def _fetch_threads(
         if cursor:
             args += ["-f", f"cursor={cursor}"]
         res = _quota.execute_graphql(
-            "discretionary", args, runner=runner, real_gh="gh"
+            "discretionary", args, runner=runner, cwd=cwd, timeout=timeout
         )
         if not res.ok or not res.stdout.strip():
             return None
@@ -810,7 +810,8 @@ def read_optional_review_state(
         "discretionary",
         ["pr", "view", pr, "--json", "reviews,url"],
         runner=runner,
-        real_gh="gh",
+        cwd=cwd,
+        timeout=timeout,
     )
     if not res.ok or not res.stdout.strip():
         return dict(_UNKNOWN)

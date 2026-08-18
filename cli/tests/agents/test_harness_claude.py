@@ -601,7 +601,7 @@ def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
     monkeypatch.setattr(
         "fno.setup.github_cli.worker_environment",
-        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+        lambda base: {**base, "PATH": "/proxy:/usr/bin"},
     )
     cwd = tmp_path / "wd"
     cwd.mkdir()
