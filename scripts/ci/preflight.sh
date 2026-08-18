@@ -90,15 +90,16 @@ COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)"
 CANONICAL_ROOT="$(dirname "$COMMON_DIR")"
 REPO_NAME="$(basename "$CANONICAL_ROOT")"
 
-# --- resolve the persistent preflight worktree path -------------------------
+# --- resolve the persistent preflight worktree root -------------------------
 # config.paths.worktrees_base if set (same knob as everything else), else the
-# harness-native .claude/worktrees. Tilde-expanded.
+# harness-native .claude/worktrees. The full candidate SHA is appended after
+# HEAD is resolved, so unrelated candidates never reset one shared checkout.
 WT_BASE="$(fno config get paths.worktrees_base 2>/dev/null | tail -1 | tr -d '[:space:]' || true)"
 if [[ -n "$WT_BASE" && "$WT_BASE" != "null" && "$WT_BASE" != *Error* ]]; then
     WT_BASE="${WT_BASE/#\~/$HOME}"
-    PREFLIGHT_WT="$WT_BASE/$REPO_NAME/preflight"
+    PREFLIGHT_POOL_ROOT="$WT_BASE/$REPO_NAME/preflight-pool"
 else
-    PREFLIGHT_WT="$CANONICAL_ROOT/.claude/worktrees/preflight"
+    PREFLIGHT_POOL_ROOT="$CANONICAL_ROOT/.claude/worktrees/preflight-pool"
 fi
 
 # --- refuse a dirty invoking tree (AC2-ERR) ---------------------------------
@@ -111,6 +112,7 @@ if [[ -n "$DIRTY" ]]; then
 fi
 CANDIDATE_SHA="$(git -C "$INVOKING_ROOT" rev-parse HEAD)"
 CANDIDATE_SHORT="$(git -C "$INVOKING_ROOT" rev-parse --short HEAD)"
+PREFLIGHT_WT="$PREFLIGHT_POOL_ROOT/$CANDIDATE_SHA"
 
 # --- refuse a stale base (before the cache check and the lock) ---------------
 # Preflight validates the merge head: a result on a branch behind origin/main
@@ -351,7 +353,10 @@ if [[ $FORCE_RUN -eq 0 ]]; then
 fi
 
 # --- lock (atomic mkdir; steal a dead holder) -------------------------------
-LOCAL_LOCKDIR="$COMMON_DIR/.preflight.lock.d"
+# Execution ownership follows the full-SHA worktree slot. Same-SHA callers
+# retain the FIFO/cancellation contract; distinct SHAs have independent locks
+# and queues, matching the already per-SHA canonical receipt lock below.
+LOCAL_LOCKDIR="$COMMON_DIR/.preflight-locks.d/$CANDIDATE_SHA.d"
 GLOBAL_LOCKDIR="$(dirname "$GLOBAL_EVENTS_PATH")/.preflight-receipt-locks/$CANDIDATE_SHA.d"
 LOCAL_LOCK_ACQUIRED=0
 GLOBAL_LOCK_ACQUIRED=0
@@ -630,9 +635,8 @@ holder_is_stalled() {
 # or stalled). Steal by rename, never `rm -rf` + `mkdir`: rename is one atomic
 # operation, so exactly one of N concurrent stealers wins the corpse. With
 # rm -rf, a loser deletes the lockdir the winner just recreated and both
-# proceed into the one shared worktree - each then reset --hard's it mid-run
-# of the other, so a suite reports pass/fail legs earned by somebody else's
-# checkout.
+# proceed into the same SHA's worktree - each then reset --hard's it mid-run of
+# the other, so a suite reports pass/fail legs earned by somebody else's run.
 steal_dead_lock() {
     local condemned="$1" mv_err reaped
     if mv_err="$(mv "$LOCKDIR" "$LOCKDIR.reap.$$" 2>&1)"; then
@@ -640,9 +644,9 @@ steal_dead_lock() {
         # this rename are not one operation: a racer that read the same victim
         # can be descheduled while the winner reaps it and installs its own
         # lock, then rename away that LIVE lock believing it is the corpse it
-        # validated. Both then run against the one shared worktree, which is
-        # the whole bug. So confirm we moved the exact holder we condemned; if
-        # not, restore it and lose the race.
+        # validated. Both then run against the same SHA's worktree, which is
+        # still unsafe. Confirm we moved the exact holder we condemned; if not,
+        # restore it and lose the race.
         reaped="$(cat "$LOCKDIR.reap.$$/holder" 2>/dev/null || echo '')"
         if [[ "$reaped" == "$condemned" ]]; then
             rm -rf "$LOCKDIR.reap.$$"
@@ -664,7 +668,7 @@ steal_dead_lock() {
 
 # A stall steal must also stop the victim: the condemned tree still exists and,
 # if its blocked I/O ever completes, it would resume resetting and testing the
-# ONE shared preflight worktree under the stealer. Its verdict is already
+# same SHA's preflight worktree under the stealer. Its verdict is already
 # forfeit (the stamp tripwire VOIDs it), so TERM the whole tree - the victim's
 # own EXIT trap then runs and releases nothing it no longer owns.
 signal_holder_tree() {
@@ -802,6 +806,10 @@ trap cleanup EXIT
 # holder stamping, where exiting would leave an acquired lock without a
 # complete cleanup token.
 [[ "$LOCK_SIGNAL" -eq 1 ]] && exit 130
+mkdir -p "$(dirname "$LOCAL_LOCKDIR")" || {
+    echo "preflight: cannot create per-SHA execution lock directory" >&2
+    exit 1
+}
 acquire_lock
 LOCAL_LOCK_ACQUIRED=1
 mkdir -p "$(dirname "$GLOBAL_LOCKDIR")" || {
@@ -922,7 +930,7 @@ run_hermetic() {
 # --- verdict tripwire (shared by every exit path that reports a verdict) -----
 # Belt-and-braces over the lock: re-verify we still own both the worktree and
 # the lock before attributing a verdict to our candidate. Any residual clobber -
-# a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
+# a future lock bug, a hand-run `git reset` in the SHA worktree - becomes a
 # loud VOID instead of a GREEN or RED silently earned by another checkout.
 # Compare shas only; the preflight worktree is always detached HEAD.
 #
@@ -1038,7 +1046,7 @@ if [[ -n "$CHANGED_BASE" ]]; then
             echo "preflight: changed packet could not run (missing prerequisite)" >&2
             exit 2 ;;
         *)  # Verdict-bearing exit, so it owes the same ownership check the full
-            # path does: a packet that failed while the shared worktree was reset
+            # path does: a packet that failed while the SHA worktree was reset
             # under it earned nothing and must VOID rather than accuse this SHA.
             exit_if_void "changed packet (CHANGED SUBSET)"
             record_leg "" "changed packet (CHANGED SUBSET)" fail $(( SECONDS - c0 ))
@@ -1224,7 +1232,7 @@ fi
 # --- verdict tripwire --------------------------------------------------------
 # Belt-and-braces over the lock: re-verify we still own both the worktree and
 # the lock before attributing a verdict to our candidate. Any residual clobber -
-# a future lock bug, a hand-run `git reset` in the shared worktree - becomes a
+# a future lock bug, a hand-run `git reset` in the SHA worktree - becomes a
 # loud VOID instead of a GREEN or RED silently earned by another checkout.
 # Compare shas only; the preflight worktree is always detached HEAD.
 exit_if_void
