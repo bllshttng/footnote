@@ -76,11 +76,10 @@ _plan_rung() {
     printf '%s' "$_out"
 }
 
-# Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
-# nothing. Shared by _plan_rung and _semantic_validate so the "which fno runs?"
-# question has ONE answer here rather than two that can drift apart.
-_fno_source_python() {
-    local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
+# Echo the checkout root that holds `cli/src/fno`, or nothing. Three callers
+# asked this the same way in three places, so it is one function.
+_fno_source_root() {
+    local repo_root="" script_dir="" candidate=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     for candidate in \
@@ -88,10 +87,38 @@ _fno_source_python() {
         "$script_dir/.." \
         "$script_dir/../../.."; do
         if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
-            source_root=$(cd "$candidate" && pwd)
-            break
+            (cd "$candidate" && pwd)
+            return 0
         fi
     done
+    return 0
+}
+
+# Echo the YYYY-MM-DD a plan's own NAME carries, or nothing. /blueprint names
+# every plan it writes `YYYY-MM-DD-slug.md`, and a folder plan takes the date
+# from its directory, so this is real evidence of when a plan was written -
+# which is what the consolidation gate needs when frontmatter carries none.
+_plan_name_date() {
+    local file="$1" name=""
+    name=$(basename "$file")
+    if [[ "$name" == "00-INDEX.md" ]]; then
+        name=$(basename "$(dirname "$file")")
+    fi
+    # Bounded on purpose: a bare 8-digit prefix is not a date, and reading
+    # `12345678-notes.md` as 1234-56-78 would sort after any real gate date and
+    # refuse a plan for having a number in its name.
+    if [[ "$name" =~ ^(20[0-9]{2})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[-._] ]] \
+        || [[ "$name" =~ ^(20[0-9]{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])[-._] ]]; then
+        printf '%s-%s-%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    fi
+}
+
+# Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
+# nothing. Shared by _plan_rung, _semantic_validate, and the consolidation gate
+# so the "which fno runs?" question has ONE answer here.
+_fno_source_python() {
+    local source_root="" python_bin=""
+    source_root=$(_fno_source_root)
     [[ -z "$source_root" ]] && return 0
     if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
         python_bin="$FNO_PYTHON"
@@ -116,15 +143,7 @@ _semantic_validate() {
     else
         # No usable interpreter, but a source tree may still exist; the uv arm
         # below can still run it, and the refusal message names the root.
-        local script_dir candidate repo_root
-        repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
-        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-        for candidate in "$repo_root" "$script_dir/.." "$script_dir/../../.."; do
-            if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
-                source_root=$(cd "$candidate" && pwd)
-                break
-            fi
-        done
+        source_root=$(_fno_source_root)
     fi
     if [[ -n "$source_root" ]]; then
         # A source checkout whose interpreter lacks the CLI deps (a fresh
@@ -247,6 +266,7 @@ if [[ -f "$PLAN_DIR" ]]; then
         "<!-- From the epic's File Ownership Map"
         "<!-- The checks that prove"
         "<!-- Why (from epic):"
+        "<!-- Consolidation:"
     )
     _found_stub=0
     for _m in "${STUB_MARKERS[@]}"; do
@@ -613,7 +633,7 @@ check_kill_criteria_file() {
         c==1 { print }
     ' "$file" | awk '
         /^kill_criteria:/ { in_block=1; next }
-        in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
+        in_block && /^[A-Za-z_][A-Za-z0-9_-]*:/ { in_block=0 }
         in_block { print }
     ')
 
@@ -654,6 +674,298 @@ check_kill_criteria_file() {
 # heading form is no longer authored - G1).
 if [[ -f "$PLAN_DIR" ]]; then
     check_kill_criteria_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+fi
+
+# -------------------------------------------------------------------
+# Check 6b-bis: Consolidation block (step 2d gate)
+# -------------------------------------------------------------------
+# A blueprint MUST record exactly one consolidation outcome in frontmatter:
+# absorb | append | proceed_alone, with a non-empty reason for every id
+# listed. This is a positive marker, not an absence check - the gate passes
+# only on a string the real outcome produces. It cannot live in skill prose
+# alone: a direct `fno` call or a non-claude worker skips the skill layer and
+# would ship green. Missing block, empty block, or out-of-enum outcome is an
+# ERROR, never a warn.
+check_consolidation_file() {
+    local file="$1"
+    local label="$2"
+    # This check reports through its OWN counter, not the global ERRORS: the
+    # positive marker below must print on a clean block even when an unrelated
+    # earlier check already failed, or the gate goes silent exactly when the
+    # output is longest.
+    local c_errors=0
+    c_error() { error "$@"; c_errors=$((c_errors + 1)); }
+
+    # Presence only. Shape is the model's job (see below), but whether a block
+    # exists at all is a policy date rather than a shape, so it stays here.
+    # `grep -q` exits at the first match and SIGPIPEs the upstream awk, which
+    # `pipefail` then reports as a failed pipeline - and this one is NEGATED,
+    # so the plan would be told it has no block when it has one. Same trap the
+    # parent_epic check below documents. Read all the input instead.
+    if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
+            | grep -E '^consolidation:' >/dev/null; then
+        # Grandfather: the gate governs plans written AFTER it shipped. Every
+        # pre-existing plan would otherwise halt /do and /target on work
+        # already in flight, so they WARN until backfilled. The boundary is
+        # strictly-after: a plan created ON the gate date predates the gate
+        # reaching its author, and nine live plans carry that date.
+        local created gate_date="2026-08-17"
+        created=$(awk '
+            /^---/ { c++; if (c==2) exit; next }
+            c==1 && /^created:/ {
+                line=$0
+                sub(/^[[:space:]]*created:[[:space:]]*/, "", line)
+                sub(/[[:space:]]#.*$/, "", line)
+                gsub(/["'"'"']/, "", line)
+                sub(/[[:space:]].*$/, "", line)
+                sub(/T.*$/, "", line)
+                print line
+                exit
+            }
+        ' "$file")
+        # Normalize a compact YYYYMMDD stamp (real plans carry both spellings);
+        # anything else is unparsable and must not be compared lexicographically,
+        # because a malformed value sorts arbitrarily against the gate date.
+        if [[ "$created" =~ ^[0-9]{8}$ ]]; then
+            created="${created:0:4}-${created:4:2}-${created:6:2}"
+        fi
+        # No frontmatter at all is a different defect with a different owner,
+        # and the gate cannot speak about a file that carries no plan header.
+        # Say that plainly rather than passing: silence here would read as a
+        # clean block. No live plan is in this shape (0 of 1056 gate targets).
+        if ! awk '/^---/ { c++ } END { exit(c >= 2 ? 0 : 1) }' "$file"; then
+            warn "$label: consolidation gate did not run - this file has no --- frontmatter block, and frontmatter is mandatory on every plan. Add one carrying created: and the consolidation block"
+            return 0
+        fi
+        # A plan the gate cannot DATE would be grandfathered forever, so the
+        # gate would fire on a date being present and new and read absence as
+        # pre-gate. That is a silent, permanent opt-out for any plan that just
+        # omits the key. Fall back to the plan's own name, and refuse loudly
+        # when neither carries a date.
+        local created_raw="$created"
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            created=$(_plan_name_date "$file")
+        fi
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            c_error "$label: no consolidation: block, and no readable date to tell this plan from a pre-gate one (created: ${created_raw:-<missing>}, and the filename carries no YYYY-MM-DD). Add both - a plan the gate cannot date is grandfathered forever"
+        elif [[ "$created" > "$gate_date" ]]; then
+            c_error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone), and silence is not an outcome"
+        else
+            warn "$label: no consolidation: block (created $created, not after the $gate_date gate) - backfill one before the next blueprint of this node"
+        fi
+        # Never abort the validator here: the later checks and the summary
+        # must still run on the most common failure path.
+        return 0
+    fi
+
+    # Shape check: hand the block to the model that already defines it.
+    # This used to be an awk walk over the YAML, and five review rounds each
+    # found a shape it misread - block scalars, flow lists, key order,
+    # hyphenated sibling keys, duplicate keys, integer ids. Several of those
+    # hard-FAILED valid plans. A second implementation of a shape the
+    # `ConsolidationBlock` model already pins can only ever diverge from it,
+    # so there is now one implementation and bash keeps only what is policy.
+    local _src="" python_bin="" source_root="" delegate_out="" delegate_rc=0
+    _src="$(_fno_source_python)"
+    if [[ -n "$_src" ]]; then
+        python_bin="${_src%%|*}"
+        source_root="${_src##*|}"
+    else
+        source_root=$(_fno_source_root)
+    fi
+    if [[ -z "$source_root" ]]; then
+        # A tooling gap is not a clean plan. Say the check did not run rather
+        # than printing the OK marker, which would read as "the block is fine".
+        warn "$label: consolidation block NOT CHECKED (no fno source checkout to import the shape model from) - not a pass"
+        return 0
+    fi
+    local consolidation_prog
+    consolidation_prog=$(cat <<'PYEOF'
+import sys
+
+try:
+    import yaml
+    from pydantic import ValidationError
+
+    from fno.plan.schema import ConsolidationBlock
+except Exception as exc:  # missing PyYAML / pydantic / fno on this interpreter
+    sys.stdout.write("U\t" + " ".join(str(exc).split())[:160] + "\n")
+    raise SystemExit(0)
+
+ENUM = "(absorb | append | proceed_alone)"
+
+
+def frontmatter(path):
+    """The text between the first two `---` lines.
+
+    Deliberately the same rule as the `/^---/` awk every other check in this
+    script uses. A stricter reader here would report NOT CHECKED on a plan the
+    presence check had already accepted, which is the divergence this rewrite
+    exists to remove.
+    """
+    lines = open(path, encoding="utf-8").read().splitlines()
+    opened = None
+    for i, line in enumerate(lines):
+        if line.startswith("---"):
+            if opened is None:
+                opened = i
+            else:
+                return "\n".join(lines[opened + 1:i])
+    return None
+
+
+def dup_keys(node, out):
+    """Duplicate keys anywhere under the consolidation subtree.
+
+    PyYAML takes the LAST of a repeated key silently, so two `outcome:` lines
+    parse to one value and the discarded decision leaves no trace. The node
+    graph still has both, which is why this reads `compose` and not the dict.
+    """
+    if isinstance(node, yaml.MappingNode):
+        seen = set()
+        for key, value in node.value:
+            name = getattr(key, "value", None)
+            if name in seen:
+                out.append(name)
+            seen.add(name)
+            dup_keys(value, out)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            dup_keys(item, out)
+    return out
+
+
+def render(err, block):
+    loc, kind = err["loc"], err["type"]
+    if loc == ("outcome",):
+        if kind == "missing":
+            return "consolidation block present but has no outcome: line (expected %s)" % ENUM
+        raw = block.get("outcome")
+        return "consolidation outcome `%s` is not in the enum %s" % (raw, ENUM)
+    if len(loc) >= 2 and isinstance(loc[1], int):
+        section, index = loc[0], loc[1]
+        entry = None
+        listed = block.get(section)
+        if isinstance(listed, list) and index < len(listed):
+            entry = listed[index]
+        field = loc[2] if len(loc) > 2 else None
+        if field == "id":
+            if kind == "missing":
+                return "consolidation section `%s` has an entry with no id" % section
+            raw = entry.get("id") if isinstance(entry, dict) else entry
+            return (
+                "consolidation entry id `%s` (%s) is not a node id "
+                "(expected <prefix>-<hex>, e.g. x-3bd3)" % (raw, section)
+            )
+        if field == "reason":
+            named = entry.get("id") if isinstance(entry, dict) else entry
+            return (
+                "consolidation entry `%s` (%s) has an empty reason - the recorded "
+                "decision must be checkable by a later reader" % (named, section)
+            )
+        return (
+            "consolidation section `%s` entry %d is not an id/reason mapping"
+            % (section, index + 1)
+        )
+    message = err["msg"].replace("Value error, ", "")
+    for outcome, key in (("absorb", "absorbed"), ("append", "appended_to")):
+        if message == "outcome %s requires at least one %s entry" % (outcome, key):
+            return "consolidation outcome is %s but the %s: list is empty" % (outcome, key)
+    where = ".".join(str(part) for part in loc)
+    return "consolidation block%s: %s" % (" " + where if where else "", message)
+
+
+path = sys.argv[1]
+text = frontmatter(path)
+if text is None:
+    sys.stdout.write("U\tno closed --- frontmatter block\n")
+    raise SystemExit(0)
+try:
+    loaded = yaml.safe_load(text)
+    composed = yaml.compose(text)
+except yaml.YAMLError as exc:
+    # The frontmatter check above already errors on this; do not double-report.
+    sys.stdout.write("U\t" + " ".join(str(exc).split())[:160] + "\n")
+    raise SystemExit(0)
+
+block = (loaded or {}).get("consolidation")
+if not isinstance(block, dict):
+    sys.stdout.write(
+        "E\tconsolidation: must be a block of keys with an outcome: line %s, not `%s`\n"
+        % (ENUM, block)
+    )
+    raise SystemExit(0)
+
+for key, value in (composed.value if composed else []):
+    if getattr(key, "value", None) == "consolidation":
+        for name in dup_keys(value, []):
+            sys.stdout.write(
+                "E\tconsolidation block has more than one `%s:` line - a repeated key "
+                "silently discards the earlier value\n" % name
+            )
+
+try:
+    validated = ConsolidationBlock.model_validate(block)
+except ValidationError as exc:
+    for err in exc.errors():
+        sys.stdout.write("E\t" + " ".join(render(err, block).split()) + "\n")
+    raise SystemExit(0)
+sys.stdout.write("O\t%s\n" % validated.outcome)
+PYEOF
+    )
+    # Same ladder _semantic_validate walks: the checkout's own interpreter
+    # first, then uv, which is the only arm a fresh worktree with no cli/.venv
+    # can take.
+    if [[ -n "$python_bin" ]]; then
+        delegate_out=$(PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$python_bin" -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+    fi
+    if [[ -z "$python_bin" || "$delegate_out" == U$'\t'* ]] \
+            && command -v uv >/dev/null 2>&1; then
+        delegate_rc=0
+        delegate_out=$(uv run --project "$source_root/cli" \
+            python -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+    fi
+    if [[ -z "$delegate_out" && "$delegate_rc" -eq 0 ]]; then
+        warn "$label: consolidation block NOT CHECKED (no interpreter with the fno CLI importable at $source_root) - not a pass"
+        return 0
+    fi
+
+    local outcome="" line kind payload
+    if [[ "$delegate_rc" -ne 0 ]]; then
+        warn "$label: consolidation block NOT CHECKED (the shape check failed to run: ${delegate_out##*$'\n'}) - not a pass"
+        return 0
+    fi
+    while IFS=$'\t' read -r kind payload; do
+        case "$kind" in
+            E) c_error "$label: $payload" ;;
+            O) outcome="$payload" ;;
+            U) warn "$label: consolidation block NOT CHECKED ($payload) - not a pass"; return 0 ;;
+        esac
+    done <<< "$delegate_out"
+
+    # An append decision means the content went onto the OTHER node and no
+    # second plan was written. This file existing contradicts that, and it is
+    # the one self-contradiction the gate can catch mechanically - which makes
+    # it the caller's knowledge, not the block's shape.
+    if [[ "$outcome" == "append" ]]; then
+        c_error "$label: consolidation outcome is append, but a plan file was written - append records that the content went onto the other node instead, so either delete this plan or record absorb / proceed_alone"
+    fi
+
+    if [[ $c_errors -eq 0 ]]; then
+        ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate)"
+    fi
+}
+
+echo ""
+echo "--- Consolidation Gate ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_consolidation_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    # Folder plans carry the frontmatter in 00-INDEX.md; the gate's "every
+    # plan" scope includes them, so do not silently skip the check.
+    check_consolidation_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
 fi
 
 # -------------------------------------------------------------------

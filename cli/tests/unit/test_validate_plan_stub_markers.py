@@ -43,6 +43,9 @@ status: ready
 kind: quick-plan
 parent_epic: ab-epic0001
 source_doc: big.md
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
 ---
 
 # Group 1
@@ -135,7 +138,8 @@ def test_validator_ignores_why_on_non_group_plan(tmp_path):
     # A normal quick-plan (no parent_epic) is not forced to grow a Why section.
     plan = tmp_path / "normal.md"
     plan.write_text(
-        "---\ntitle: X\nproject: fno\n---\n\n# X\n\n"
+        "---\ntitle: X\nproject: fno\nconsolidation:\n  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n---\n\n# X\n\n"
         "### Task 1.1: do it\n\n**Files**: foo.py\n**Verify**: pytest\n"
     )
     result = _run(plan)

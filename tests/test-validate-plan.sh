@@ -307,6 +307,9 @@ cat > "$PLAN_SEMANTIC" <<'HEREDOC'
 status: ready
 created: 2026-07-25
 project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
 ---
 
 # Semantic plan

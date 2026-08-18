@@ -34,8 +34,26 @@ class TestBlueprintWriteAllowlist:
     def test_AC1_HP_allowlist_contains_acceptance_contract(self):
         assert "acceptance_contract" in BLUEPRINT_WRITE_ALLOWLIST
 
-    def test_AC1_HP_allowlist_has_exactly_seven_entries(self):
-        assert len(BLUEPRINT_WRITE_ALLOWLIST) == 7
+    def test_AC1_HP_allowlist_contains_consolidation(self):
+        # The plan validator requires a consolidation block, so the ownership
+        # model must permit the write that satisfies it.
+        assert "consolidation" in BLUEPRINT_WRITE_ALLOWLIST
+
+    def test_AC1_HP_allowlist_is_exactly_this_set(self):
+        # Pins membership, not just size: a count passes when someone swaps one
+        # entry for another, which is the silent widening this guards against.
+        assert BLUEPRINT_WRITE_ALLOWLIST == frozenset(
+            {
+                "Execution Strategy",
+                "File Ownership Map",
+                "Patterns to Reuse",
+                "kill_criteria",
+                "execution_mode",
+                "waves",
+                "acceptance_contract",
+                "consolidation",
+            }
+        )
 
 
 class TestAssertBlueprintCanWrite:

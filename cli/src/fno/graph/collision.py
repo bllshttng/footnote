@@ -32,6 +32,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal, TypedDict, cast
 
+# Distinguishes "node carries no plan_path" from "node is not on the graph";
+# both are self, but for different reasons and a bare None conflates them.
+_UNSET_PLAN = object()
+
 Severity = Literal["low", "medium", "high"]
 Action = Literal["coordinate", "absorb", "supersede"]
 ResolvedStatus = Literal["done", "merged"]
@@ -451,6 +455,28 @@ def _build_rationale(
     return base + "; both plans can ship if the second one rebases on the first."
 
 
+def _claims_default(plan_path: Path) -> str | None:
+    """Default the self-exclusion from the plan's own claimed ids.
+
+    A plan intaked against a node collides with that node's plan at HIGH, the
+    exact severity meant to stop an operator, so a caller that forgets
+    ``self_id`` manufactures a reflexive finding. The plan file is already in
+    hand here, so the default lives in this one place rather than in each
+    caller. In practice only a ``collisions check`` run with no ``--self-id``
+    reaches it: ``backlog/advance.py`` and ``graph/triage.py`` both pass one
+    explicitly, and this default is what covers the path they do not. Claims are
+    read by the shared ``_intake.plan_claims`` parser (both ``claims:`` and
+    ``node:`` - 41% of plans carry only the latter). One declared id is used;
+    zero or several leave the behavior unchanged, and an explicit ``self_id``
+    still wins because this only runs when it is None.
+    """
+    from fno.graph._intake import plan_claims
+
+    target = plan_path / "00-INDEX.md" if plan_path.is_dir() else plan_path
+    ids = plan_claims(str(target))
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
 def find_collisions(
     candidate_plan_path: Path,
     graph: Iterable[dict],
@@ -472,6 +498,25 @@ def find_collisions(
     """
     if thresholds is None:
         thresholds = _load_thresholds()
+
+    graph = list(graph)
+    if self_id is None:
+        # The claimed node is SELF only when this file is the plan it already
+        # registered, or when it has registered none yet. A DIFFERENT plan
+        # drafted against the same node genuinely overlaps that node's own
+        # plan, and excluding it would hide the one collision worth seeing.
+        claimed = _claims_default(candidate_plan_path)
+        if claimed:
+            registered = next(
+                (e.get("plan_path") for e in graph if e.get("id") == claimed), _UNSET_PLAN
+            )
+            if registered is _UNSET_PLAN or not registered:
+                self_id = claimed
+            elif (
+                _resolve_plan_path(str(registered), _find_repo_root()).resolve()
+                == candidate_plan_path.resolve()
+            ):
+                self_id = claimed
 
     out: list[Collision] = []
     candidate_files = parse_files_to_modify(candidate_plan_path)
