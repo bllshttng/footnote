@@ -307,13 +307,16 @@ def _default_wake_fn(
     # re-supplies its own model vars and wins.
     from fno.agents.model_routing import (
         incoherent_model_env_notice,
+        overlay_restores_model_env,
         scrub_incoherent_model_env,
     )
 
     dropped = scrub_incoherent_model_env(env)
     if dropped:
         print(
-            incoherent_model_env_notice(dropped, routed=bool(route_env)),
+            incoherent_model_env_notice(
+                dropped, routed=overlay_restores_model_env(route_env)
+            ),
             file=sys.stderr,
         )
     # Scrub only when there is something to restore, matching

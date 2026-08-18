@@ -1172,6 +1172,7 @@ def _mesh_env_wrapper(
             incoherent_model_env,
             incoherent_model_env_notice,
             incoherent_model_env_unset_args,
+            overlay_restores_model_env,
         )
 
         _incoherent = incoherent_model_env()
@@ -1180,7 +1181,7 @@ def _mesh_env_wrapper(
             print(
                 incoherent_model_env_notice(
                     [_k for _k, _v in _incoherent],
-                    routed=bool(account_env or resolved_route),
+                    routed=overlay_restores_model_env(account_env, resolved_route),
                 ),
                 file=sys.stderr,
             )

@@ -467,6 +467,25 @@ def incoherent_model_env_unset_args(env: Optional[Mapping[str, str]] = None) -> 
     return flags
 
 
+def overlay_restores_model_env(*overlays: Optional[Mapping[str, str]]) -> bool:
+    """True when at least one overlay sets a :data:`MODEL_ENV_KEYS` var.
+
+    A caller composing account_env/route_env right after the incoherent
+    scrub must not assume ANY overlay re-supplies a dropped model var: the
+    config-dir and managed-active account lanes (``resolve_account_overlay``
+    in ``account_env.py``) return an overlay of just ``CLAUDE_CONFIG_DIR`` -
+    no model var - so the dropped var stays dropped and the child genuinely
+    falls back to its account's own default. Only a route, or an
+    ``own-dir``/api-key account overlay that carries its own model pins,
+    resupplies the tier. This is the precise predicate for
+    :func:`incoherent_model_env_notice`'s ``routed`` kwarg.
+    """
+    for overlay in overlays:
+        if overlay and any(key in overlay for key in MODEL_ENV_KEYS):
+            return True
+    return False
+
+
 def incoherent_model_env_notice(dropped: Sequence[str], *, routed: bool = False) -> str:
     """The one stderr line, shared by every seam: names the dropped vars, the
     cause, and both remedies (the settings.json pin and the daemon restart).

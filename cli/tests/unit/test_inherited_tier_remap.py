@@ -26,6 +26,7 @@ from fno.agents.model_routing import (
     incoherent_model_env,
     incoherent_model_env_notice,
     incoherent_model_env_unset_args,
+    overlay_restores_model_env,
     scrub_incoherent_model_env,
 )
 from fno.agents.rust_runtime import (
@@ -468,6 +469,32 @@ def test_the_notice_names_each_dropped_var():
     # Both remedies, so the line is actionable without a doc open.
     assert "settings.json" in msg
     assert "restart the daemon" in msg
+
+
+def test_overlay_restores_model_env_requires_an_actual_model_var():
+    # A config-dir/managed-active account overlay (resolve_account_overlay's
+    # "config-dir"/"active-slot" lanes) sets only CLAUDE_CONFIG_DIR - no
+    # MODEL_ENV_KEYS entry - so the dropped var is never resupplied and the
+    # child genuinely falls back to its account's own default. A caller that
+    # treated "account_env is truthy" as "routed" printed a false claim.
+    config_dir_only = {"CLAUDE_CONFIG_DIR": "/Users/x/.claude-alt"}
+    assert overlay_restores_model_env(config_dir_only) is False
+    assert overlay_restores_model_env(None, config_dir_only) is False
+
+    # A real route, or an own-dir/api-key account overlay carrying its own
+    # model pins, DOES resupply the tier.
+    routed = {"ANTHROPIC_MODEL": "glm-5.3", "ANTHROPIC_BASE_URL": "https://api.z.ai"}
+    assert overlay_restores_model_env(routed) is True
+    assert overlay_restores_model_env(config_dir_only, routed) is True
+    assert overlay_restores_model_env(None, None) is False
+
+
+def test_the_notice_wording_matches_routed():
+    dropped = ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+    unrouted_msg = incoherent_model_env_notice(dropped, routed=False)
+    routed_msg = incoherent_model_env_notice(dropped, routed=True)
+    assert "falls back to its account's own default" in unrouted_msg
+    assert "receives that route's own model instead" in routed_msg
 
 
 def test_hook_var_list_matches_model_env_keys():

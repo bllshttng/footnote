@@ -395,6 +395,7 @@ def headless_create(
     from fno.agents.model_routing import (
         incoherent_model_env,
         incoherent_model_env_notice,
+        overlay_restores_model_env,
         scrub_incoherent_model_env,
     )
     from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
@@ -415,7 +416,9 @@ def headless_create(
         dropped = scrub_incoherent_model_env(spawn_env)
         if dropped:
             print(
-                incoherent_model_env_notice(dropped, routed=bool(account_env or route_env)),
+                incoherent_model_env_notice(
+                    dropped, routed=overlay_restores_model_env(account_env, route_env)
+                ),
                 file=sys.stderr,
             )
         if account_env or route_env:
@@ -583,13 +586,16 @@ def bg_create(
     # its own model vars and wins.
     from fno.agents.model_routing import (
         incoherent_model_env_notice,
+        overlay_restores_model_env,
         scrub_incoherent_model_env,
     )
 
     dropped = scrub_incoherent_model_env(spawn_env)
     if dropped:
         print(
-            incoherent_model_env_notice(dropped, routed=bool(account_env or route_env)),
+            incoherent_model_env_notice(
+                dropped, routed=overlay_restores_model_env(account_env, route_env)
+            ),
             file=sys.stderr,
         )
     spawn_env["FNO_AGENT_SELF"] = name
