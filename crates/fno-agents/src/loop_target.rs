@@ -373,15 +373,27 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             eprintln!("Usage: fno-agents loop run --driver target [options]");
             return Ok(2);
         }
-        Some("target") | Some("king") => {}
-        Some(other) => {
+        Some("target") => {}
+        Some("king") => {
+            // The cross-session king walk was cut before it shipped. It had no
+            // working path: the resume guard closed its unit undispatched, and
+            // the one dispatch path runs `/target --resume` for every driver.
+            // Under that, nothing crowns, returns or expires a crown at all.
+            // Refusing by NAME beats a silent fallthrough to the target walk,
+            // which would run a target session against a king's manifest.
             eprintln!(
-                "fno-agents loop run: unknown --driver '{other}'; supported: 'target', 'king'"
+                "fno-agents loop run: --driver king is not available. The \
+                 cross-session king walk needs a crown lifecycle (crown, \
+                 respawn, expire) that does not exist yet. The in-session arm \
+                 (`loop-check --driver king`, via the stop hook) is unaffected."
             );
             return Ok(2);
         }
+        Some(other) => {
+            eprintln!("fno-agents loop run: unknown --driver '{other}'; supported: 'target'");
+            return Ok(2);
+        }
     }
-    let is_king = driver.as_deref() == Some("king");
 
     // ── resolve driver-lib-dir ────────────────────────────────────────────────
     let lib_dir = match driver_lib_dir {
@@ -409,26 +421,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // ── preflight (all before any dispatch) ───────────────────────────────────
     // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
     // driver: a king reads .fno/king-state.md and never touches the target one.
-    let mut target_queue: Option<TargetQueue> = None;
-    let mut king_queue: Option<crate::loop_king::KingQueue> = None;
-    if is_king {
-        let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-        match crate::loop_king::KingQueue::from_manifest(&cwd, fno_bin) {
-            Ok(q) => king_queue = Some(q),
-            Err(e) => {
-                eprintln!("fno-agents loop run: {e}");
-                return Ok(1);
-            }
+    let mut target_queue = match TargetQueue::from_manifest(&cwd) {
+        Ok(q) => Some(q),
+        Err(e) => {
+            eprintln!("fno-agents loop run: {e}");
+            return Ok(1);
         }
-    } else {
-        match TargetQueue::from_manifest(&cwd) {
-            Ok(q) => target_queue = Some(q),
-            Err(e) => {
-                eprintln!("fno-agents loop run: {e}");
-                return Ok(1);
-            }
-        }
-    }
+    };
 
     // 2. Driver whitelist + lib file + binary (exit 77 on missing binary).
     // F2: pass cli_alias so preflight checks the same binary the dispatcher will use.
@@ -528,23 +527,18 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // Read session_id/input from the already-constructed queue instead of
     // re-reading the manifest (which avoids the TOCTOU double-read and the
     // .unwrap().unwrap() panic path).
-    let (session_id_display, input_display) = if let Some(k) = king_queue.as_ref() {
-        // The king peek reads the manifest fields the queue already parsed, so
-        // the header costs no board read: peeking must not spend a `gh pr list`.
-        (k.session_id().to_string(), k.scope().to_string())
-    } else {
-        // Peek without consuming: TargetQueue stores Option<Unit>, so we look
-        // at the inner unit via as_ref without taking it.
+    // Peek without consuming: TargetQueue stores Option<Unit>, so we look at
+    // the inner unit via as_ref without taking it.
+    let (session_id_display, input_display) =
         match target_queue.as_ref().and_then(|q| q.unit.as_ref()) {
             Some(u) => (u.id.clone(), u.title.clone()),
             None => ("(none)".to_string(), "(none)".to_string()),
-        }
-    };
+        };
 
     // Print header. resolve_driver_binary now reflects the cli_alias (F2).
     let binary_name = resolve_driver_binary(&dispatcher_name, cli_alias.as_deref());
     println!("fno-agents loop run");
-    println!("  driver:     {}", if is_king { "king" } else { "target" });
+    println!("  driver:     target");
     println!("  dispatcher: {dispatcher_name} (binary: {binary_name})");
     println!("  session:    {session_id_display}");
     println!("  input:      {input_display}");
@@ -572,45 +566,16 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // target unit is one deliverable and re-dispatches until it terminates; a
     // king unit is re-derived from the board every pass, so an uncapped
     // re-dispatch against a board that will not shrink would burn a night.
-    let queue: &mut dyn Queue = if let Some(k) = king_queue.as_mut() {
-        k
-    } else {
-        target_queue
-            .as_mut()
-            .expect("one of the two queues is always constructed above")
-    };
-    let per_unit_cap = if is_king {
-        Some(crate::loop_king::KING_MAX_DISPATCHES)
-    } else {
-        None
-    };
-    let outcome = match run_loop(queue, &dispatcher, &budget, &journal, &cancel, per_unit_cap) {
+    let queue: &mut dyn Queue = target_queue
+        .as_mut()
+        .expect("the target queue is always constructed above");
+    let outcome = match run_loop(queue, &dispatcher, &budget, &journal, &cancel, None) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("fno-agents loop run: fatal loop error: {e}");
             return Ok(2);
         }
     };
-
-    // The engine's own `loop_terminated` row carries no driver, and teaching it
-    // one would edit the shared runtime for a second driver's benefit. So the
-    // king arm appends its own driver-tagged terminal beside it, in the same
-    // shape the in-session arm emits, which is what the king freshness probe
-    // reads.
-    if is_king {
-        let _ = journal.append(
-            "termination",
-            serde_json::json!({
-                "session_id": session_id_display,
-                "driver": "king",
-                "reason": format!("{:?}", outcome.reason),
-                "message": format!(
-                    "king walk ended after {} iterations",
-                    outcome.iterations_used
-                ),
-            }),
-        );
-    }
 
     // ── report outcome ────────────────────────────────────────────────────────
     // For the degenerate single-unit walk, report the unit's evidence reason as

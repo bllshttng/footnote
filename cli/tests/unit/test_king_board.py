@@ -376,12 +376,36 @@ def test_capping_the_per_pr_reads_is_reported_not_swallowed(monkeypatch):
 # --- truncation -------------------------------------------------------------
 
 
-def test_a_capped_queue_reports_its_truncation():
-    """A silent cap reads as full coverage; the failure-modes section names this."""
+def test_the_payload_carries_every_row_so_the_loop_is_never_blind():
+    """A silent cap reads as full coverage; the failure-modes section names this.
+
+    This used to assert the OPPOSITE: that the payload itself was capped. That
+    cap was the bug. The loop derives each row's identity from this payload to
+    tell progress from a stall, so rows dropped here were rows it could never
+    see leave. A king draining a long queue cleared row 30, nothing changed in
+    the capped list, and it burned to NoProgress while working correctly.
+
+    The cap now lives only in the renderer, where a human is the consumer.
+    """
     prs = [{"number": n, "title": "t"} for n in range(50)]
-    board = build_board(_empty_inputs(prs=_ok(prs)), autonomous_merge=True, max_rows=10)
+    board = build_board(_empty_inputs(prs=_ok(prs)), autonomous_merge=True)
 
     q = _queue(board, "mergeable_pr")
-    assert len(q["rows"]) == 10
     assert q["count"] == 50
-    assert q["truncated"] == 40
+    assert len(q["rows"]) == 50, "the machine consumer must see every row"
+    assert "truncated" not in q, (
+        "a truncation field on the payload invites a reader to trust a short list"
+    )
+
+
+def test_the_renderer_elides_and_says_so(capsys):
+    """The cap is legitimate for a human, as long as it announces itself."""
+    from fno.king.cli import _render
+
+    prs = [{"number": n, "title": "t"} for n in range(50)]
+    board = build_board(_empty_inputs(prs=_ok(prs)), autonomous_merge=True)
+
+    _render(board, 10)
+
+    out = capsys.readouterr().out
+    assert "... 40 more not shown" in out, out

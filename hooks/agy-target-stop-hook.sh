@@ -197,9 +197,25 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # still held work, which is the exact failure the king loop exists to fix,
     # reproduced on the one path that never got the fix.
     if [[ -f "$ROOT/.fno/king-state.md" ]]; then
-        echo "agy stop-hook: REFUSING to gate .fno/king-state.md - the king loop is claude-only in v1." >&2
-        echo "agy stop-hook: this king is running unsupervised on agy; run it on claude, or remove the manifest to stop unsupervised." >&2
-        emit '{"decision":"continue","reason":"king manifest present but the king loop is claude-only; this adapter cannot decide its terminal"}'
+        # BOUNDED, mirroring unavailable_continue_or_allow rather than inventing
+        # a second ceiling. An unbounded continue here can never stop: nothing
+        # deletes a king manifest, kings run in the canonical checkout where
+        # ordinary sessions also run, and this branch fires on the file's
+        # presence. So the fix for "an agy king exits too early" made every agy
+        # session in that repo unstoppable, which is a worse failure than the
+        # one it was closing.
+        king_count=0
+        king_counter="$(counter_path).king"
+        [[ -f "$king_counter" ]] && king_count=$(tr -dc '0-9' < "$king_counter" 2>/dev/null || true)
+        [[ -z "$king_count" ]] && king_count=0
+        king_count=$((10#$king_count + 1))
+        echo "$king_count" > "$king_counter" 2>/dev/null || true
+        if (( king_count <= MAX_UNAVAIL_RETRIES )); then
+            echo "agy stop-hook: REFUSING to gate .fno/king-state.md (${king_count}/${MAX_UNAVAIL_RETRIES}) - the king loop is claude-only in v1." >&2
+            echo "agy stop-hook: this king is running unsupervised on agy; run it on claude, or remove the manifest to stop unsupervised." >&2
+            emit "$(printf '{"decision":"continue","reason":"king manifest present but the king loop is claude-only (%s/%s); this adapter cannot decide its terminal"}' "$king_count" "$MAX_UNAVAIL_RETRIES")"
+        fi
+        echo "agy stop-hook: king manifest refused ${king_count} times; allowing stop rather than holding this session forever." >&2
     fi
     emit '{}'
 fi

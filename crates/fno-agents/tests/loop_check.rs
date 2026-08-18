@@ -6853,6 +6853,56 @@ fn a_cleared_row_is_progress_and_needs_no_event_producer() {
 }
 
 #[test]
+fn the_cleared_row_reset_survives_into_the_next_fire() {
+    // The defect: `king_decide` reset a LOCAL `dry` and the journal kept the
+    // rows, so the next fire recounted them. The 3-fire tolerance shrank by one
+    // per fire and a king that was demonstrably working still died NoProgress.
+    //
+    // The sibling test above passes either way, because it asserts only the
+    // fire that clears. This one asserts the fire AFTER it, which is where the
+    // forgetting showed up.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-durable");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+
+    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-durable", "actionable_ids": ids}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-durable", "actionable_ids": ids}),
+    );
+
+    // Fire that clears x-1234.
+    let cleared_bin = king_board_bin(bin_dir.path(), BOARD_ONE_CLEARED, 0);
+    let (code, d) = king_fire(&state, cwd, &events, &cleared_bin);
+    assert_eq!(code, 2, "the clearing fire must keep running: {d}");
+
+    // The very next fire clears nothing. Pre-fix this read three dry fires and
+    // terminated; the king had just done real work one fire earlier.
+    let (code, d) = king_fire(&state, cwd, &events, &cleared_bin);
+    assert_eq!(
+        code, 2,
+        "a single dry fire after real progress must not end the king: {d}"
+    );
+    assert_eq!(
+        d["termination_reason"],
+        serde_json::Value::Null,
+        "no terminal one fire after a cleared row: {d}"
+    );
+    assert_eq!(
+        d["fires"], 1,
+        "the counter restarts from the clear, not from 0 fires ago"
+    );
+}
+
+#[test]
 fn a_row_cleared_while_the_board_grew_is_still_progress() {
     // Progress is a row LEAVING, never board size. The board refills while the
     // king works, so a count that went up can still carry real progress.
@@ -7120,23 +7170,21 @@ fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
     )
 }
 
-/// Plan verification 7, first half: BOTH king terminals escalate, over the same
-/// stalled set.
+/// Plan verification 7, first half: EVERY NoProgress terminal escalates.
 ///
-/// The two arms are the stop hook's NoProgress (`king_decide`) and the walk
-/// arm's per-unit park (`KingQueue::close`). A guard on one of two reachable
-/// paths is decorative, so this drives both and asserts both, rather than
-/// asserting the helper they share - which would pin the function, not the
-/// destination.
+/// `king_decide` reaches NoProgress two ways: a board it could not read for
+/// the whole dry-fire run, and a board whose rows nothing cleared. Both route
+/// through the shared `terminate` closure, so both escalate and a terminal
+/// added later is covered without anyone remembering to wire it. This drives
+/// both rather than asserting the helper they share, which would pin the
+/// function and not the destination.
 ///
-/// The second half, that the two identical calls yield exactly ONE operator
-/// question, is `test_king_escalate.py`: the dedupe lives in the verb, and a
-/// mock `fno` here records no questions to count. Neither test alone is the
-/// verification; the seam between them is the `--stalled` argument both assert.
+/// The second half, that repeated calls over one stalled set yield exactly ONE
+/// operator question, is `test_king_escalate.py`: the dedupe lives in the verb,
+/// and a mock `fno` here records no questions to count. Neither test alone is
+/// the verification; the seam between them is the `--stalled` argument.
 #[test]
-fn both_king_terminals_escalate_over_the_same_stalled_set() {
-    use fno_agents::loop_runtime::Queue as _;
-
+fn every_king_noprogress_terminal_escalates() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let bin_dir = TempDir::new().unwrap();
@@ -7145,7 +7193,7 @@ fn both_king_terminals_escalate_over_the_same_stalled_set() {
     let events = cwd.join("events.jsonl");
     let fno = king_escalate_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, &log);
 
-    // Arm 1: fire the stop hook until the dry-fire ceiling trips NoProgress.
+    // Terminal 1: a readable board whose rows nothing clears.
     let mut last = (0, serde_json::Value::Null);
     for _ in 0..3 {
         last = king_fire(&state, cwd, &events, &fno);
@@ -7156,46 +7204,107 @@ fn both_king_terminals_escalate_over_the_same_stalled_set() {
         last.1
     );
 
-    // Arm 2: the walk arm parks the unit on the same board.
-    let fno_dir = cwd.join(".fno");
-    fs::create_dir_all(&fno_dir).unwrap();
-    fs::copy(&state, fno_dir.join("king-state.md")).unwrap();
-    let mut queue =
-        fno_agents::loop_king::KingQueue::from_manifest(cwd, fno.to_str().unwrap().to_string())
-            .unwrap();
-    let unit = queue
-        .next()
-        .unwrap()
-        .expect("a non-empty board yields a unit");
-    let evidence = fno_agents::loop_runtime::Evidence {
-        reason: fno_agents::loopcheck::TerminationReason::NoProgress,
-        message: "no termination event after 3 dispatch(es); unit parked".to_string(),
-    };
-    let outcome = queue.close(&unit, &evidence).unwrap();
-    assert!(
-        matches!(outcome, fno_agents::loop_runtime::CloseOutcome::Parked(ref d) if d.contains("q-mock")),
-        "the park must carry the escalation into the journal, got {outcome:?}"
-    );
-
-    // Both arms escalated, and over the same stalled set - which is what makes
-    // the verb's dedupe key identical and the operator's question single.
     let logged = fs::read_to_string(&log).unwrap_or_default();
     let calls: Vec<&str> = logged.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(
         calls.len(),
-        2,
-        "expected one escalation per arm, got: {logged}"
+        1,
+        "the unshrunk-board terminal escalates: {logged}"
     );
-    for call in &calls {
-        assert!(
-            call.contains("--stalled undispatched:x-1234,undispatched:x-5678"),
-            "every arm escalates over the board's actionable rows, QUEUE-QUALIFIED \
-             (the same node in two queues is two rows), got: {call}"
-        );
+    assert!(
+        calls[0].contains("--stalled undispatched:x-1234,undispatched:x-5678"),
+        "it escalates over the board's actionable rows, QUEUE-QUALIFIED \
+         (the same node in two queues is two rows), got: {}",
+        calls[0]
+    );
+
+    // Terminal 2: a board that never answers. There are no ids to name, so the
+    // escalation carries an EMPTY set rather than being skipped. An operator
+    // told nothing is the failure this verb exists to prevent, and a king that
+    // cannot see its board is the case most worth telling them about.
+    let blind_tmp = TempDir::new().unwrap();
+    let blind_cwd = blind_tmp.path();
+    let blind_log = blind_cwd.join("escalations.log");
+    let blind_state = king_manifest(blind_cwd, "k-blind");
+    let blind_events = blind_cwd.join("events.jsonl");
+    let blind_bin = king_escalate_bin(bin_dir.path(), "not json at all", &blind_log);
+
+    let mut blind = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        blind = king_fire(&blind_state, blind_cwd, &blind_events, &blind_bin);
     }
     assert_eq!(
-        calls[0], calls[1],
-        "both arms must produce the same dedupe input"
+        blind.1["termination_reason"], "NoProgress",
+        "an unreadable board must terminate rather than block forever: {:?}",
+        blind.1
+    );
+    let blind_logged = fs::read_to_string(&blind_log).unwrap_or_default();
+    let blind_calls: Vec<&str> = blind_logged
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        blind_calls.len(),
+        1,
+        "the unreadable-board terminal escalates too: {blind_logged}"
+    );
+    assert!(
+        blind_calls[0].contains("--stalled  --reason NoProgress")
+            || blind_calls[0].contains("--stalled --reason"),
+        "with no rows to name it still escalates, got: {}",
+        blind_calls[0]
+    );
+}
+
+/// The ceiling `--max-iterations` advertises must actually bind.
+///
+/// It was parsed into the manifest and read by nothing, so the help string
+/// promised a bound that did not exist. A help string that lies is worse than
+/// a missing flag: someone sets it, believes the king is bounded, and walks
+/// away.
+///
+/// Progress is deliberately irrelevant here. A king clearing a row every fire
+/// never trips the dry-fire counter, so without this it runs forever. That is
+/// the case the flag exists for.
+#[test]
+fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let events = cwd.join("events.jsonl");
+
+    // A manifest with a ceiling of 3 rather than the default 40.
+    let state = cwd.join("king-state.md");
+    fs::write(
+        &state,
+        "---\nfno_id: k-budget\ncreated_at: 2026-08-18T00:00:00Z\nscope: drain\n\
+         harness: claude\nbudget_max_iterations: 3\n---\n",
+    )
+    .unwrap();
+
+    // Every fire clears a row, so the dry-fire counter never trips.
+    let boards = [BOARD_TWO_ACTIONABLE, BOARD_ONE_CLEARED, BOARD_REFILLED];
+    let mut last = (0, serde_json::Value::Null);
+    for (i, payload) in boards.iter().enumerate() {
+        let fno = king_board_bin(bin_dir.path(), payload, 0);
+        last = king_fire(&state, cwd, &events, &fno);
+        if i < boards.len() - 1 {
+            assert_eq!(
+                last.0, 2,
+                "fire {i} must keep the king running: {:?}",
+                last.1
+            );
+        }
+    }
+
+    assert_eq!(
+        last.1["termination_reason"], "Budget",
+        "the third fire reaches the manifest ceiling: {:?}",
+        last.1
+    );
+    assert_ne!(
+        last.1["termination_reason"], "NoProgress",
+        "a king that cleared a row every fire did not stall"
     );
 }
 

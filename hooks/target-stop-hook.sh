@@ -92,7 +92,25 @@ trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 KING_STATE_FILE=".fno/king-state.md"
 DRIVER="target"
 if [[ ! -f "$STATE_FILE" ]]; then
+    # Presence is NOT ownership. Kings run in the canonical checkout, which is
+    # where every ordinary session also runs, and nothing deletes this manifest
+    # when a king dies. Gating on the file alone therefore held every later
+    # claude session in the repo open until the board was clean, for people who
+    # never crowned anything, permanently.
+    #
+    # So the manifest must NAME this session. An id that is missing on either
+    # side proves nothing, and the safe reading of "cannot prove it" is to let
+    # the session go: a stale manifest outliving its king must not capture a
+    # stranger. `fno king init` refuses to write an unattributable manifest, so
+    # a real king always has an id to match.
+    KING_HARNESS_ID=""
     if [[ -f "$KING_STATE_FILE" ]]; then
+        KING_HARNESS_ID=$(grep -E '^harness_session_id:' "$KING_STATE_FILE" 2>/dev/null \
+            | sed -E 's/^harness_session_id:[[:space:]]*//' \
+            | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    fi
+    if [[ -n "$KING_HARNESS_ID" && -n "$HOOK_HARNESS_ID" \
+        && "$KING_HARNESS_ID" == "$HOOK_HARNESS_ID" ]]; then
         STATE_FILE="$KING_STATE_FILE"
         DRIVER="king"
     else

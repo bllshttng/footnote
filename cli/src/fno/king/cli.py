@@ -14,6 +14,12 @@ king_app = typer.Typer(
 )
 
 
+def _default_max_rows() -> int:
+    from fno.king.board import DEFAULT_MAX_ROWS
+
+    return DEFAULT_MAX_ROWS
+
+
 KING_STATE_PATH = ".fno/king-state.md"
 EVENTS_PATH = ".fno/events.jsonl"
 
@@ -37,7 +43,33 @@ def init_cmd(
     silently and the walk arm refuses to dispatch, which is the correct posture
     for a session nobody crowned.
     """
-    from fno.king.state import KingManifestExists, write_manifest
+    from fno.king.state import KingManifestExists, king_loop_enabled, write_manifest
+
+    # The ONE chokepoint for `config.king.enabled`. Every arm - this hook shim,
+    # `loop-check --driver king`, and `KingQueue` - arms on the manifest's
+    # existence, so gating the manifest gates all three at one place. Gating
+    # them individually is the corpus's "guard on one of N reachable paths",
+    # and the version this replaces had N of zero: the flag was read only by
+    # `fno autonomy status`, so a default-off king still held sessions open.
+    if not king_loop_enabled():
+        typer.echo(
+            "king: config.king.enabled is false, so no king is crowned. "
+            "Enable it with `fno config set king.enabled true`.",
+            err=True,
+        )
+        raise typer.Exit(3)
+
+    # An id-less manifest is the same defect from the other side: the hook can
+    # match nobody against it, so it either gates every session or none. Refuse
+    # to write one rather than ship a crown that cannot be attributed.
+    if not harness_session_id.strip():
+        typer.echo(
+            "king: --harness-session-id is required. The stop hook gates the "
+            "session the manifest NAMES, so an unattributable manifest crowns "
+            "nobody and risks holding unrelated sessions open.",
+            err=True,
+        )
+        raise typer.Exit(2)
 
     try:
         fields = write_manifest(
@@ -58,7 +90,9 @@ def init_cmd(
 @king_app.command("board")
 def board_cmd(
     as_json: bool = typer.Option(False, "--json", "-J", help="Emit the board payload."),
-    max_rows: int = typer.Option(25, "--max-rows", help="Rows rendered per queue."),
+    max_rows: int = typer.Option(
+        _default_max_rows(), "--max-rows", help="Rows rendered per queue."
+    ),
     last_run: bool = typer.Option(
         False,
         "--last-run",
@@ -86,11 +120,11 @@ def board_cmd(
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
-    board = read_board(max_rows=max_rows)
+    board = read_board()
     if as_json:
         typer.echo(json.dumps(board, indent=2))
     else:
-        _render(board)
+        _render(board, max_rows)
     raise typer.Exit(board["exit_code"])
 
 
@@ -134,7 +168,7 @@ def escalate_cmd(
     typer.echo(qid)
 
 
-def _render(board: dict) -> None:
+def _render(board: dict, max_rows: int) -> None:
     typer.echo(f"actionable: {board['actionable']}")
     for q in board["queues"]:
         if q["status"] == "unreadable":
@@ -143,10 +177,11 @@ def _render(board: dict) -> None:
             mark = "*" if q["actionable"] and q["count"] else " "
             note = f"  ({q['note']})" if q["note"] and q["count"] else ""
             typer.echo(f" {mark}{q['name']:<20} {q['count']}{note}")
-            for row in q["rows"]:
+            for row in q["rows"][:max_rows]:
                 typer.echo(f"      {row}")
-            if q["truncated"]:
-                typer.echo(f"      ... {q['truncated']} more not shown")
+            hidden = max(0, len(q["rows"]) - max_rows)
+            if hidden:
+                typer.echo(f"      ... {hidden} more not shown")
         typer.echo(f"      source: {q['source']}")
     for warning in board["warnings"]:
         typer.echo(f"warning: {warning}", err=True)

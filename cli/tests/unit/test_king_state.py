@@ -165,3 +165,61 @@ def test_an_unparseable_window_is_refused():
 
     with pytest.raises(ValueError):
         parse_window("soon")
+
+
+# --- the two refusals that make a crown real -------------------------------
+
+
+def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1"):
+    """Run `fno king init` in tmp_path and return (exit_code, stderr)."""
+    import fno.king.state as state
+    from typer.testing import CliRunner
+
+    from fno.king.cli import king_app
+
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: enabled)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    result = CliRunner().invoke(
+        king_app,
+        ["init", "--scope", "drain", "--harness-session-id", harness_id],
+    )
+    return result.exit_code, result.output
+
+
+def test_a_disabled_king_loop_writes_no_manifest(monkeypatch, tmp_path):
+    """`config.king.enabled` must gate the loop, not just describe it.
+
+    Every arm - the stop hook, `loop-check --driver king`, and `KingQueue` -
+    arms on this manifest existing. So the manifest is the one chokepoint where
+    the flag can gate all three. Before this, the flag was read ONLY by
+    `fno autonomy status`: the corpus's "guard on one of N reachable paths"
+    with N of zero, and a default-off king still held sessions open.
+    """
+    code, _ = _init(monkeypatch, tmp_path, enabled=False)
+
+    assert code == 3
+    assert not (tmp_path / ".fno" / "king-state.md").exists()
+
+
+def test_a_manifest_that_names_nobody_is_refused(monkeypatch, tmp_path):
+    """The hook gates the session the manifest NAMES, so it must name one.
+
+    An id-less manifest can be matched against no session. It then either gates
+    every session in the checkout or none of them, and both readings are wrong.
+    """
+    code, out = _init(monkeypatch, tmp_path, harness_id="")
+
+    assert code == 2
+    assert "harness-session-id" in out
+    assert not (tmp_path / ".fno" / "king-state.md").exists()
+
+
+def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
+    """The positive control: both guards pass and the manifest lands."""
+    code, _ = _init(monkeypatch, tmp_path)
+
+    assert code == 0
+    manifest = tmp_path / ".fno" / "king-state.md"
+    assert manifest.exists()
+    assert "harness_session_id: sess-1" in manifest.read_text()

@@ -39,6 +39,24 @@ _WINDOW = re.compile(r"^(\d+)([smhd]?)$")
 _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 1}
 
 
+class KingLoopDisabled(RuntimeError):
+    """`config.king.enabled` is false, so no manifest is written."""
+
+
+def king_loop_enabled() -> bool:
+    """Resolve ``config.king.enabled``, fail-safe to OFF.
+
+    An unreadable config resolves an autonomous loop to off, matching every
+    other gate resolver here.
+    """
+    try:
+        from fno.config import load_settings
+
+        return bool(load_settings().king.enabled)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class KingManifestExists(RuntimeError):
     """Raised when init would overwrite a manifest that is already there."""
 

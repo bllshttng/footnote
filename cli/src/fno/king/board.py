@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -46,7 +47,7 @@ KING_PRIORITIES = frozenset({"p0", "p1"})
 
 #: Per-queue row cap. The count stays honest; only the rendered rows are cut,
 #: and the cut is reported. A silent cap reads as full coverage.
-DEFAULT_MAX_ROWS = 25
+DEFAULT_MAX_ROWS = 25  # render bound only; see _queue
 
 #: Claim states that mean the lock outlived its holder. `fno claim list
 #: --include-stale` returns both, and a corrupted lockfile is as unreapable by
@@ -136,7 +137,6 @@ def _queue(
     *,
     actionable: bool,
     note: str = "",
-    max_rows: int = DEFAULT_MAX_ROWS,
 ) -> dict:
     if not read.ok:
         return {
@@ -146,18 +146,26 @@ def _queue(
             "error": read.error,
             "count": None,
             "rows": [],
-            "truncated": 0,
             "actionable": actionable,
             "note": note,
         }
+    # Every row, not the rendered slice. The consumer of this payload is the
+    # loop, which derives each row's identity to tell progress from a stall. A
+    # payload capped at the render limit made the loop blind past row 25: rows
+    # cleared beyond the cut left no identity behind, so a king draining a long
+    # queue read as making no progress and burned to NoProgress.
+    #
+    # The row cap now lives ONLY in `cli._render`, where a human is the
+    # consumer and eliding is correct. A cap the data applied silently was
+    # worse than a visible render bound: nothing downstream could see it had
+    # happened, so the loop read a short list as the whole truth.
     return {
         "name": name,
         "source": source,
         "status": "ok",
         "error": "",
         "count": len(rows),
-        "rows": rows[:max_rows],
-        "truncated": max(0, len(rows) - max_rows),
+        "rows": rows,
         "actionable": actionable,
         "note": note,
     }
@@ -167,7 +175,6 @@ def build_board(
     inputs: BoardInputs,
     *,
     autonomous_merge: bool = False,
-    max_rows: int = DEFAULT_MAX_ROWS,
 ) -> dict:
     """Turn fetched sources into the board payload. Pure; does no I/O."""
     claim_by_node: dict[str, dict] = {}
@@ -261,7 +268,6 @@ def build_board(
             SourceRead(error=inputs.ready.error or inputs.claims.error),
             undispatched,
             actionable=True,
-            max_rows=max_rows,
         ),
         _queue(
             "stalled_holder",
@@ -269,7 +275,6 @@ def build_board(
             SourceRead(error=inputs.claims.error or inputs.claimed_nodes.error),
             stalled,
             actionable=True,
-            max_rows=max_rows,
         ),
         _queue(
             "mergeable_pr",
@@ -283,7 +288,6 @@ def build_board(
                 else "report-only: merging is outward and hard to reverse, so it "
                 "waits on config.king.autonomous_merge"
             ),
-            max_rows=max_rows,
         ),
         _queue(
             "stale_claim",
@@ -291,7 +295,6 @@ def build_board(
             inputs.claims,
             stale_claims,
             actionable=True,
-            max_rows=max_rows,
         ),
         _queue(
             "operator_question",
@@ -301,7 +304,6 @@ def build_board(
             actionable=False,
             note="report-only: a human answers these, so counting them would "
             "hold the loop open forever",
-            max_rows=max_rows,
         ),
         _queue(
             "unreachable_worker",
@@ -311,7 +313,6 @@ def build_board(
             actionable=False,
             note="report-only: the refusal event a king would act on does not "
             "exist yet",
-            max_rows=max_rows,
         ),
     ]
 
@@ -425,7 +426,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
 
 
 def _read_questions(timeout: int) -> SourceRead:
-    read = _run_json(["fno", "outstanding", "--json"], timeout=timeout)
+    read = _run_json([*_fno(), "outstanding", "--json"], timeout=timeout)
     if not read.ok:
         return read
     payload = read.payload if isinstance(read.payload, dict) else {}
@@ -498,7 +499,7 @@ def _read_claimed_nodes(
     nodes: list[dict] = []
     holders: set[str] = set()
     for node_id, holder in held:
-        read = _run_json(["fno", "backlog", "get", node_id], timeout=timeout)
+        read = _run_json([*_fno(), "backlog", "get", node_id], timeout=timeout)
         if not read.ok:
             # One unreadable node is not an unreadable queue: the other claims
             # still answer. It is reported so a silent gap never reads as a
@@ -516,9 +517,8 @@ def _read_claimed_nodes(
 
 def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     """Fetch every source. Never raises; every failure lands in a SourceRead."""
-    ready = _run_json(["fno", "backlog", "ready", "--json"], timeout=timeout)
-    claims = _run_json(
-        ["fno", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
+    ready = _run_json([*_fno(), "backlog", "ready", "--json"], timeout=timeout)
+    claims = _run_json([*_fno(), "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
         timeout=timeout,
     )
     prs, warnings = _read_prs(timeout, max_pr_reads)
@@ -532,9 +532,23 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         holder_activity=_resolve_holder_activity(holders),
         prs=prs,
         questions=_read_questions(timeout),
-        needs=_run_json(["fno", "agents", "needs", "--json"], timeout=timeout),
+        needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         warnings=warnings,
     )
+
+
+def _fno() -> "list[str]":
+    """The argv prefix for a self-shellout, resolved without a PATH dependency.
+
+    A bare ``["fno", ...]`` fails on a cargo-only install, where only the Rust
+    mux is on PATH. All six queues would then read "fno: not found", the board
+    would exit 1 with every queue unreadable, and the king would block on a
+    blind board until the dry-fire ceiling. The shared resolver is the
+    established convention for exactly this case.
+    """
+    from fno import _subprocess_util
+
+    return _subprocess_util.fno_py_cmd()
 
 
 def autonomous_merge_enabled() -> bool:
@@ -552,10 +566,42 @@ def autonomous_merge_enabled() -> bool:
         return False
 
 
-def read_board(*, max_rows: int = DEFAULT_MAX_ROWS) -> dict:
-    timeout = int(os.environ.get("FNO_KING_BOARD_TIMEOUT", "60"))
+DEFAULT_BOARD_TIMEOUT = 60
+
+
+def _board_timeout() -> int:
+    """Read the per-source timeout, degrading loudly on a bad value.
+
+    A bare `int(...)` raised on a non-numeric override, and the Rust caller saw
+    that as "king board output unparseable" - a misconfigured env var wearing
+    the costume of a broken board. Name the real cause and carry on with the
+    default, because a typo in an env var must not read as an unreadable board.
+    """
+    raw = os.environ.get("FNO_KING_BOARD_TIMEOUT")
+    if raw is None:
+        return DEFAULT_BOARD_TIMEOUT
+    try:
+        value = int(raw)
+    except ValueError:
+        print(
+            f"king: FNO_KING_BOARD_TIMEOUT={raw!r} is not an integer; "
+            f"using {DEFAULT_BOARD_TIMEOUT}s",
+            file=sys.stderr,
+        )
+        return DEFAULT_BOARD_TIMEOUT
+    if value <= 0:
+        print(
+            f"king: FNO_KING_BOARD_TIMEOUT={value} must be positive; "
+            f"using {DEFAULT_BOARD_TIMEOUT}s",
+            file=sys.stderr,
+        )
+        return DEFAULT_BOARD_TIMEOUT
+    return value
+
+
+def read_board() -> dict:
+    timeout = _board_timeout()
     return build_board(
         collect_inputs(timeout=timeout),
         autonomous_merge=autonomous_merge_enabled(),
-        max_rows=max_rows,
     )

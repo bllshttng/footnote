@@ -15,6 +15,8 @@
 #   K3  claude shim, king manifest, NoWork    -> exit 0, finalize NOT invoked
 #   K4  claude shim, both manifests present   -> target wins, --driver target
 #   K5  agy adapter, king manifest            -> refuses by name, never allows
+#   K7  claude shim, manifest names ANOTHER session -> exit 0, never gates
+#   K8  agy adapter, repeated king refusals         -> bounded, then allows
 #   K6  agy adapter, no manifest              -> allow (the refusal is scoped)
 
 set -uo pipefail
@@ -32,6 +34,20 @@ fail() { FAIL=$((FAIL+1)); printf '[king-hook] FAIL: %s\n' "$*" >&2; }
 [[ -f "$AGY_HOOK" ]]    || { fail "missing $AGY_HOOK"; exit 1; }
 command -v jq >/dev/null 2>&1 || { printf '[king-hook] SKIP: jq not on PATH\n' >&2; exit 77; }
 
+# Write a king manifest that names `$1` as the session it crowned.
+king_manifest_naming() {
+    cat > "${TMP_DIR}/.fno/king-state.md" <<MANIFEST
+---
+fno_id: king-test-001
+created_at: 2026-08-18T00:00:00Z
+scope: board drain
+harness: claude
+harness_session_id: $1
+budget_max_iterations: 40
+---
+MANIFEST
+}
+
 # A tmp project with a king manifest and a transcript. Sets TMP_DIR, HOME_DIR,
 # TRANSCRIPT, ARGS_LOG, BIN.
 setup_king() {
@@ -40,15 +56,10 @@ setup_king() {
     mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "${TMP_DIR}/bin"
     TRANSCRIPT="${TMP_DIR}/transcript.jsonl"
     printf '{"message":{"role":"assistant","content":"working"}}\n' > "$TRANSCRIPT"
-    cat > "${TMP_DIR}/.fno/king-state.md" <<'MANIFEST'
----
-fno_id: king-test-001
-created_at: 2026-08-18T00:00:00Z
-scope: board drain
-harness: claude
-budget_max_iterations: 40
----
-MANIFEST
+    # `harness_session_id` is the transcript basename, which is what the hook
+    # derives its own id from. A real `fno king init` writes it and now refuses
+    # without it, so a manifest lacking one is a state the system cannot reach.
+    king_manifest_naming "transcript"
     ARGS_LOG="${TMP_DIR}/fno-agents.args"
     BIN="${TMP_DIR}/bin/fno-agents"
 }
@@ -186,6 +197,53 @@ MANIFEST
         pass "K6: with no king manifest agy allows as before"
     else
         fail "K6: unexpected decision: $AGY_OUT"
+    fi
+    cleanup
+}
+
+
+# ── K7: a manifest naming ANOTHER session must not gate this one ─────────────
+{
+    setup_king
+    # A king crowned in some other session, whose manifest nobody deleted when
+    # it died. Kings run in the canonical checkout, which is where every
+    # ordinary session runs too, so this file sits beside unrelated work
+    # forever. Gating on its PRESENCE held those sessions open until the board
+    # went clean, for people who never crowned anything.
+    king_manifest_naming "some-other-session"
+    stub_binary '{"decision":"block","message":"should never run"}'
+    run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
+    if [[ "$CLAUDE_RC" -eq 0 && ! -f "$ARGS_LOG" ]]; then
+        pass "K7: a stale king manifest naming another session never gates this one"
+    else
+        fail "K7: rc=$CLAUDE_RC args=$(cat "$ARGS_LOG" 2>/dev/null)"
+    fi
+    cleanup
+}
+
+
+# ── K8: the agy refusal gives up rather than holding a session forever ───────
+{
+    setup_king
+    AGY_TRANSCRIPT="${TMP_DIR}/agy.jsonl"
+    printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$AGY_TRANSCRIPT"
+    INPUT="{\"transcriptPath\":\"${AGY_TRANSCRIPT}\",\"fullyIdle\":true,\"conversationId\":\"c1\"}"
+    # Nothing deletes a king manifest, so an unbounded refusal is permanent for
+    # every agy session in the repo. Fire past the ceiling and require a real
+    # allow, mirroring how the checker-unavailable path already gives up.
+    LAST_DECISION=""
+    for _ in 1 2 3 4 5; do
+        LAST_DECISION=$(
+            cd "$TMP_DIR" || exit 1
+            env HOME="$HOME_DIR" FNO_AGENTS_BIN="$BIN" \
+                bash "$AGY_HOOK" <<< "$INPUT" 2>/dev/null \
+                | jq -r '.decision // "<none>"' 2>/dev/null
+        )
+    done
+    if [[ "$LAST_DECISION" != "continue" ]]; then
+        pass "K8: the agy king refusal is bounded and eventually allows the stop"
+    else
+        fail "K8: still continuing past the ceiling (decision=$LAST_DECISION)"
     fi
     cleanup
 }

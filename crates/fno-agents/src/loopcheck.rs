@@ -8481,6 +8481,10 @@ fn king_output(
 /// What the dry-fire scan found: how many fires have landed with no new work
 /// done, and what was actionable on the most recent one.
 pub(crate) struct KingFireHistory {
+    /// Every fire this session has made. The manifest's `budget_max_iterations`
+    /// is a ceiling on THIS, not on the dry streak: a king clearing a row every
+    /// fire makes progress forever and must still stop somewhere.
+    pub(crate) total: u64,
     pub(crate) dry: u64,
     /// Actionable row identities recorded on the previous fire, or empty when
     /// this is the first.
@@ -8510,11 +8514,13 @@ pub(crate) struct KingFireHistory {
 pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return KingFireHistory {
+            total: 0,
             dry: 0,
             last_ids: Vec::new(),
         };
     };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total: u64 = 0;
     let mut dry: u64 = 0;
     let mut last_ids: Vec<String> = Vec::new();
     for line in content.lines() {
@@ -8540,7 +8546,20 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
                 }
             }
             Some("king_loop_check") => {
+                total += 1;
                 dry += 1;
+                // The clear is recorded ON the fire that saw it, so the reset
+                // survives into every later read. Resetting only the local
+                // `dry` inside `king_decide` left the journal unchanged, so
+                // the next fire recounted this row and the tolerance shrank by
+                // one per fire until a working king died on its third.
+                if data
+                    .and_then(|d| d.get("cleared"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    dry = 0;
+                }
                 last_ids = data
                     .and_then(|d| d.get("actionable_ids"))
                     .and_then(|v| v.as_array())
@@ -8554,7 +8573,11 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
             _ => {}
         }
     }
-    KingFireHistory { dry, last_ids }
+    KingFireHistory {
+        total,
+        dry,
+        last_ids,
+    }
 }
 
 /// True when any row the previous fire called actionable is gone now.
@@ -8695,6 +8718,26 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
     }
 
+    // The ceiling `fno king init --max-iterations` advertises. Before this it
+    // was parsed into the manifest and read by nothing, so the help string
+    // promised a bound that did not exist, which is worse than no flag. Checked
+    // AFTER NoWork so a clean board still exits clean, and before NoProgress so
+    // an exhausted king reports the reason that actually stopped it.
+    if history.total + 1 >= manifest.max_iterations {
+        return terminate(
+            TerminationReason::Budget,
+            &format!(
+                "{} fires reached the manifest ceiling of {}; {} rows still actionable",
+                history.total + 1,
+                manifest.max_iterations,
+                board.actionable
+            ),
+            board.actionable,
+            dry,
+            &board.actionable_ids,
+        );
+    }
+
     // A row the previous fire called actionable and this one does not is work
     // the king cleared. That is the progress signal, read back off the board
     // rather than self-reported, so it needs no producer to exist.
@@ -8721,6 +8764,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             "session_id": session_id,
             "actionable": board.actionable,
             "actionable_ids": board.actionable_ids,
+            // Durable, because the dry-fire counter is rebuilt from this
+            // journal on every fire. A reset that lived only in the local
+            // binding was forgotten the moment this process exited.
+            "cleared": cleared,
         }),
     );
     let top = board

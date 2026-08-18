@@ -98,3 +98,34 @@ def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:
 
     with pytest.raises(OutstandingError):
         _run(tmp_path, STALLED)
+
+
+def test_a_huge_stalled_board_still_dedupes(tmp_path: Path) -> None:
+    """The marker must survive `operator_question`'s truncation.
+
+    The defect: the marker sat at the END, after the full comma-joined id list.
+    `operator_question` caps the recorded text at QUESTION_CAP, so a board with
+    enough stalled rows pushed the marker off the end. `already_asked` then
+    matched nothing and every respawned king filed a duplicate - precisely the
+    failure this module claims to prevent, reached through its own happy path.
+
+    Six queues at the board's 25-row cap is ~150 rows, so this size is
+    reachable, not hypothetical.
+    """
+    from fno.events import QUESTION_CAP
+
+    huge = [f"undispatched:x-{i:04d}" for i in range(150)]
+
+    first_outcome, first_id = _run(tmp_path, huge)
+    second_outcome, second_id = _run(tmp_path, list(reversed(huge)))
+
+    (question,) = read_open_questions(tmp_path)
+    assert len(question.question) <= QUESTION_CAP
+    assert f"[king-escalation:{dedupe_key(huge)}]" in question.question, (
+        "the marker must survive truncation, so it leads the text"
+    )
+    assert first_outcome == "recorded"
+    assert second_outcome == "duplicate"
+    assert second_id == first_id
+    # The count is load-bearing even when the rows are elided.
+    assert "150 board row(s)" in question.question

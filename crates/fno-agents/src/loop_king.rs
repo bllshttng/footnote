@@ -1,115 +1,36 @@
-//! King driver: `KingQueue` + the `loop run --driver king` walk arm.
+//! King escalation: the one thing the in-session king arm shells out for.
 //!
 //! Module name starts with "loop" so its lines count toward the control-plane
 //! LOC-ratchet glob `crates/fno-agents/src/loop*`, the same reason
 //! `loop_runtime.rs` and `loop_target.rs` are named that way.
 //!
-//! ## What this arm is for
+//! ## Why there is no walk arm here
 //!
-//! The in-session arm (`loop-check --driver king`) holds an awake king working
-//! until its board is clean. It cannot help a king that is already gone: a
-//! stop hook does not fire in a session that exited or is rate-limited. This
-//! arm is the outside half. It respawns a king while the board is non-empty and
-//! terminates `NoWork` when it is not.
+//! A cross-session `KingQueue` lived here and was cut before it shipped. It had
+//! no working path: `run_loop`'s resume guard closed its unit without
+//! dispatching, because the unit's `session_key` and the king's own termination
+//! event shared the manifest `fno_id`. On the rare path where it did dispatch,
+//! `CONTINUE_PROMPT` is hardcoded to `/target --resume` for every driver and
+//! `Unit.extra_env` is read by nothing, so the spawned session was a target
+//! resume that had no idea it was a king.
 //!
-//! It does NOT cover the other edge, a king that correctly exited on an empty
-//! board and now needs waking because the board refilled. Nothing in this crate
-//! observes that; an external watchdog owns it. Shipping this arm alone trades
-//! idle-forever-with-work-pending for exited-and-nothing-restarts-me, which is
-//! the same failure with a better exit code, so the two belong together.
-//!
-//! ## Why `close()` is inert
-//!
-//! Same reason `TargetQueue::close()` is. The king session's own stop hook
-//! already emitted the termination event before `close()` is called, and the
-//! king manifest is immutable after init. There is no plan to stamp and no
-//! node to graduate, so there is nothing left for a close to do.
+//! Under that sat a larger hole. Nothing crowns a king: the `king-for-a-day`
+//! skill never calls `fno king init`, nothing deletes the manifest when a king
+//! dies, and a spawn can transfer a crown with no verb to return it. Respawning
+//! needs crown, respawn and expire to exist together. That is a lifecycle, and
+//! it belongs to one node rather than to a queue bolted onto this one.
 
-use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
-use crate::loopcheck::TerminationReason;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-
-/// Dispatches allowed per king unit before the walk parks it. The target arm
-/// passes `None` (its single unit re-dispatches until it terminates); a king
-/// unit is re-derived from the board each pass, so an unbounded re-dispatch
-/// against a board that will not shrink is the shape that would burn a night.
-pub const KING_MAX_DISPATCHES: u64 = 3;
-
-pub struct KingQueue {
-    fno_bin: String,
-    cwd: PathBuf,
-    /// The king session this walk respawns, read from the manifest. Used as the
-    /// unit's `session_key` so the journal matches the termination event the
-    /// king's OWN stop hook emits, rather than inventing a second identity.
-    session_id: String,
-    scope: String,
-    /// One unit per walk invocation. See :meth:`Queue::next` for why.
-    yielded: bool,
-}
-
-impl KingQueue {
-    /// Read `.fno/king-state.md` from `repo_root` and construct the queue.
-    ///
-    /// A missing manifest is an error, not an empty queue. An empty queue would
-    /// terminate `NoWork` and report success, which is the absence-as-evidence
-    /// trap: "no work" and "nobody told me what I am watching" would produce
-    /// the same clean exit.
-    pub fn from_manifest(repo_root: &Path, fno_bin: String) -> Result<Self, LoopError> {
-        let manifest_path = repo_root.join(".fno").join("king-state.md");
-        let content = std::fs::read_to_string(&manifest_path).map_err(|_| {
-            LoopError::Queue(format!(
-                "no king manifest at {} - run `fno king init --scope \"<what>\"` first",
-                manifest_path.display()
-            ))
-        })?;
-        let (session_id, scope) = parse_king_fields(&content).ok_or_else(|| {
-            LoopError::Queue(format!(
-                "king manifest at {} has no fno_id - run `fno king init` to rewrite it",
-                manifest_path.display()
-            ))
-        })?;
-        Ok(Self {
-            fno_bin,
-            cwd: repo_root.to_path_buf(),
-            session_id,
-            scope,
-            yielded: false,
-        })
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn scope(&self) -> &str {
-        &self.scope
-    }
-
-    /// The board, read through `loopcheck`'s reader.
-    ///
-    /// Deliberately the SAME reader both king arms use rather than a second
-    /// parse: `actionable_ids` is derived from the queue rows, not a field the
-    /// board prints, so a private parse here would silently disagree with the
-    /// stop hook about what a stalled row even is.
-    ///
-    /// The board exits non-zero when a queue is unreadable and still prints a
-    /// full payload, so that exit code is not a read failure; only an absent or
-    /// unparseable payload is. That is an error rather than a zero: a walk that
-    /// read "0" from a broken reader would report the board clean and stop
-    /// respawning a king that still has work.
-    fn board(&self) -> Result<crate::loopcheck::KingBoard, LoopError> {
-        crate::loopcheck::read_king_board(&self.fno_bin, &self.cwd).map_err(LoopError::Queue)
-    }
-}
 
 /// Tell the operator the king stopped with work still pending.
 ///
-/// Shared by both king terminals - this arm's park and the stop hook's
-/// NoProgress in `loopcheck` - because a guard on one of two reachable paths is
-/// decorative. Returns the one-line outcome to record, never an error: a failed
-/// escalation is named and moves on, since blocking the terminal on it would
-/// leave the king running with nobody told either way.
+/// Called from every `NoProgress` terminal in `king_decide`, via that
+/// function's shared `terminate` closure, so a terminal added later is covered
+/// without anyone remembering to wire it. Returns the one-line outcome to
+/// record, never an error: a failed escalation is named and moves on, since
+/// blocking the terminal on it leaves the king stopped with nobody told either
+/// way.
 pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason: &str) -> String {
     let output = Command::new(fno_bin)
         .args([
@@ -138,124 +59,5 @@ pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason
             eprintln!("king: cannot run {fno_bin} king escalate: {e}");
             format!("escalation FAILED: cannot run {fno_bin} king escalate: {e}")
         }
-    }
-}
-
-/// `(fno_id, scope)` from a king manifest's frontmatter.
-pub(crate) fn parse_king_fields(content: &str) -> Option<(String, String)> {
-    let mut fno_id = String::new();
-    let mut scope = String::new();
-    let mut in_frontmatter = false;
-    for line in content.lines() {
-        if line.trim() == "---" {
-            if in_frontmatter {
-                break;
-            }
-            in_frontmatter = true;
-            continue;
-        }
-        let Some((key, raw)) = line.split_once(':') else {
-            continue;
-        };
-        let value = raw.trim().trim_matches('"').to_string();
-        match key.trim() {
-            "fno_id" => fno_id = value,
-            "scope" => scope = value,
-            _ => {}
-        }
-    }
-    if fno_id.is_empty() {
-        None
-    } else {
-        Some((fno_id, scope))
-    }
-}
-
-impl Queue for KingQueue {
-    /// One unit per walk invocation, then `None`. This is `TargetQueue`'s
-    /// degenerate shape and it is load-bearing, not laziness.
-    ///
-    /// `run_loop`'s resume guard closes a unit WITHOUT dispatching when the
-    /// journal already holds a termination for its session key, and it
-    /// `continue`s without incrementing `iterations_used` (the comment there
-    /// says so outright: "no dispatch happened"). Both king arms write exactly
-    /// that event under exactly this session id. A queue that re-derived the
-    /// same unit while the board stayed non-empty therefore span next, close,
-    /// continue, next forever, with Budget unable to trip because the counter
-    /// never moved.
-    ///
-    /// The counter is correct only because every queue before this one yielded
-    /// once. That is shared machinery under the target lane and is fixed
-    /// separately, so this queue matches the contract that machinery actually
-    /// has. The walk's job is to respawn a dead king, and one respawn per
-    /// invocation is a complete answer to it; something outside re-invokes.
-    fn next(&mut self) -> Result<Option<Unit>, LoopError> {
-        if self.yielded {
-            return Ok(None);
-        }
-        if self.board()?.actionable == 0 {
-            return Ok(None);
-        }
-        self.yielded = true;
-        Ok(Some(Unit {
-            id: self.session_id.clone(),
-            title: if self.scope.is_empty() {
-                "king board drain".to_string()
-            } else {
-                self.scope.clone()
-            },
-            session_key: self.session_id.clone(),
-            plan_path: None,
-            extra_env: vec![("FNO_DRIVER".to_string(), "king".to_string())],
-        }))
-    }
-
-    /// Inert on every terminal but one: see the module doc for why.
-    ///
-    /// The exception is a NoProgress park. That is the walk arm giving up with
-    /// the board still non-empty, which is this feature's own failure wearing a
-    /// different exit code, so it tells the operator rather than exiting quiet.
-    /// `Parked` carries the outcome into the journal; a failed escalation is
-    /// named there and on stderr and never blocks the park.
-    fn close(&mut self, _unit: &Unit, evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
-        if evidence.reason != TerminationReason::NoProgress {
-            return Ok(CloseOutcome::Closed);
-        }
-        // An unreadable board escalates over an EMPTY set rather than
-        // swallowing the ask: the park is already happening, and the question
-        // text tells the two cases apart so empty never reads as clean.
-        let ids = self.board().map(|b| b.actionable_ids).unwrap_or_default();
-        let outcome = escalate_stalled(&self.fno_bin, &self.cwd, &ids, "NoProgress");
-        Ok(CloseOutcome::Parked(outcome))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_the_fields_the_walk_reads() {
-        let (id, scope) =
-            parse_king_fields("---\nfno_id: k-1\nscope: drain the board\n---\n").unwrap();
-        assert_eq!(id, "k-1");
-        assert_eq!(scope, "drain the board");
-    }
-
-    #[test]
-    fn a_manifest_without_an_fno_id_is_not_a_manifest() {
-        assert!(parse_king_fields("---\nscope: nothing\n---\n").is_none());
-    }
-
-    #[test]
-    fn a_quoted_scope_survives() {
-        let (_, scope) = parse_king_fields("---\nfno_id: k\nscope: \"a b\"\n---\n").unwrap();
-        assert_eq!(scope, "a b");
-    }
-
-    #[test]
-    fn body_text_after_the_frontmatter_is_not_parsed_as_fields() {
-        let (id, _) = parse_king_fields("---\nfno_id: k-1\n---\nfno_id: not-this\n").unwrap();
-        assert_eq!(id, "k-1");
     }
 }
