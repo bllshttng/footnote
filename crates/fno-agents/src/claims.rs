@@ -735,7 +735,11 @@ fn claim_events_path_with(events_dir: Option<&Path>, cwd: &Path, pin: Option<&st
     if let Some(dir) = events_dir {
         return dir.join(".fno/events.jsonl");
     }
-    if let Some(pinned) = pin.map(str::trim).filter(|p| !p.is_empty()) {
+    // Empty means unset, matching `if override:` in Python and `-n` in the
+    // shell. Deliberately NOT trimmed: neither of those trims, and three
+    // writers disagreeing about a whitespace pin is worse than all three
+    // treating it as a path.
+    if let Some(pinned) = pin.filter(|p| !p.is_empty()) {
         return PathBuf::from(pinned);
     }
     crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl")
@@ -1761,9 +1765,10 @@ mod tests {
             claim_events_path_with(None, cwd, Some(pin)),
             PathBuf::from(pin),
         );
-        // An empty pin is not a pin.
+        // An empty pin is not a pin, which is what an exported-but-empty
+        // FNO_EVENTS_PATH looks like, and what the other two writers do.
         assert_eq!(
-            claim_events_path_with(None, cwd, Some("  ")),
+            claim_events_path_with(None, cwd, Some("")),
             crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl"),
         );
     }
