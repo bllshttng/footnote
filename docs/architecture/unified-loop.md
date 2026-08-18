@@ -32,8 +32,10 @@ All drivers share one loop body. The driver supplies a `Queue` impl and a `Dispa
 outer loop:
   check cancel -> Interrupted
   unit = queue.next()   -> None: NoWork (terminate)
+  budget check          -> Budget (axis: "iterations")
   resume guard: journal has termination for unit.session_key?
-    yes -> close without dispatch (AC1-FR; no iteration consumed)
+    yes -> close without dispatch (AC1-FR), journal node_closed,
+           iterations_used += 1, continue
   inner loop:
     budget check         -> Budget (axis: "iterations")
     cancel check         -> Interrupted

@@ -141,6 +141,40 @@ impl Queue for FixedQueue {
     }
 }
 
+/// A Queue that yields the SAME unit forever, mirroring a queue that
+/// re-derives its units from live state instead of draining a fixed list.
+struct RepeatQueue {
+    id: String,
+    session_key: String,
+    /// Records each unit.id passed to close().
+    closed: Mutex<Vec<String>>,
+}
+
+impl RepeatQueue {
+    fn new(id: &str, session_key: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            session_key: session_key.to_string(),
+            closed: Mutex::new(vec![]),
+        }
+    }
+
+    fn close_count(&self) -> usize {
+        self.closed.lock().unwrap().len()
+    }
+}
+
+impl Queue for RepeatQueue {
+    fn next(&mut self) -> Result<Option<Unit>, LoopError> {
+        Ok(Some(make_unit(&self.id, &self.session_key)))
+    }
+
+    fn close(&mut self, unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
+        self.closed.lock().unwrap().push(unit.id.clone());
+        Ok(CloseOutcome::Closed)
+    }
+}
+
 /// A Dispatcher that panics if called (for "no dispatch expected" tests).
 struct PanicDispatcher;
 
@@ -408,10 +442,11 @@ fn preexisting_termination_skips_dispatch() {
 
     let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
 
-    // Walk closes ab-004 without dispatching.
+    // Walk closes ab-004 without dispatching; the close pass still spends
+    // one iteration (a budget counts passes, not dispatches).
     assert_eq!(
-        outcome.iterations_used, 0,
-        "resume guard: no dispatch iterations"
+        outcome.iterations_used, 1,
+        "resume guard: the close-without-dispatch pass spends one iteration"
     );
     assert_eq!(outcome.units.len(), 1);
     assert_eq!(
@@ -429,6 +464,80 @@ fn preexisting_termination_skips_dispatch() {
         0,
         "resume guard: no dispatch events"
     );
+}
+
+// ── test 5b: a queue that re-derives the same unit terminates on budget ──────
+
+#[test]
+fn repeating_queue_under_resume_guard_terminates_on_budget() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+
+    // Seed a termination event BEFORE run_loop, so every pass hits the
+    // resume guard: dequeue, close, continue - no dispatch, no inner loop.
+    seed_termination_event(&project_events, "sess-rep", "DoneAdvisory");
+
+    let mut queue = RepeatQueue::new("ab-rep", "sess-rep");
+    let dispatcher = PanicDispatcher; // no dispatch may happen
+    let budget = LoopBudget::new(3).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events);
+
+    // Bounded run: no harness timeout idiom exists in this suite, so cancel
+    // flips after a generous pass ceiling (cancel fires once per outer pass).
+    // A regression then terminates as Interrupted and fails the Budget
+    // assertion below instead of wedging CI in the hot loop.
+    let cancel_calls = Arc::new(AtomicU64::new(0));
+    let calls = cancel_calls.clone();
+    let cancel = move || calls.fetch_add(1, Ordering::SeqCst) >= 50;
+
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &cancel, None).unwrap();
+
+    assert_eq!(outcome.reason, TerminationReason::Budget);
+    assert_eq!(
+        outcome.iterations_used, 3,
+        "each resume-guard close pass must spend one iteration"
+    );
+    assert_eq!(outcome.units.len(), 3, "one closed unit per pass");
+    assert_eq!(queue.close_count(), 3);
+    assert_eq!(
+        count_events(&project_events, "loop_unit_dispatched"),
+        0,
+        "no dispatch may happen on the resume-guard path"
+    );
+    assert_eq!(count_events(&project_events, "node_closed"), 3);
+
+    let terminated: Vec<_> = read_jsonl(&project_events)
+        .into_iter()
+        .filter(|v| v["type"].as_str() == Some("loop_terminated"))
+        .collect();
+    assert_eq!(terminated.len(), 1);
+    assert_eq!(terminated[0]["data"]["axis"].as_str(), Some("iterations"));
+}
+
+// ── test 5c: exhausted budget over an empty queue is NoWork, not Budget ──────
+
+#[test]
+fn exhausted_budget_then_empty_queue_reports_nowork() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+
+    // One pre-terminated unit and a budget of exactly one pass: the close
+    // spends the budget, then the queue is empty. Finished work is NoWork,
+    // not Budget - pinning that the outer budget check sits AFTER the
+    // dequeue.
+    seed_termination_event(&project_events, "sess-x", "DoneAdvisory");
+    let mut queue = FixedQueue::new(vec![make_unit("ab-x", "sess-x")]);
+    let dispatcher = PanicDispatcher;
+    let budget = LoopBudget::new(1).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events);
+
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+
+    assert_eq!(outcome.reason, TerminationReason::NoWork);
+    assert_eq!(outcome.iterations_used, 1);
+    assert_eq!(outcome.units.len(), 1);
 }
 
 // ── test 6: cancel returns Interrupted ────────────────────────────────────────
