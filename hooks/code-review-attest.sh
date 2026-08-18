@@ -133,7 +133,10 @@ case "$event" in
     # final text that is the literal "(none)" and nothing else is the
     # low-level protocol's. Both mean the same thing, and a parser that reads
     # only the first calls the second unparseable - which is a silence
-    # indistinguishable from "no review ran".
+    # indistinguishable from "no review ran". Reading only the LAST fence is
+    # no better in the other direction: a findings fence followed by an
+    # empty "excluded files" fence would read clean. The verdict is clean
+    # only when EVERY fence in the message parses to an empty list.
     findings="$(printf '%s' "$message" | python3 -c '
 import json, re, sys
 text = sys.stdin.read()
@@ -141,12 +144,16 @@ fences = re.findall(r"```json\s*(.*?)```", text, re.DOTALL)
 if not fences:
     print("absent")
     sys.exit(0)
-try:
-    data = json.loads(fences[-1])
-except Exception:
-    print("absent")
-    sys.exit(0)
-print("[]" if data == [] else "nonempty")
+for body in fences:
+    try:
+        data = json.loads(body)
+    except Exception:
+        print("absent")
+        sys.exit(0)
+    if data != []:
+        print("nonempty")
+        sys.exit(0)
+print("[]")
 ' 2>/dev/null || echo "absent")"
     if [[ "$findings" == "[]" ]]; then
       is_clean=1

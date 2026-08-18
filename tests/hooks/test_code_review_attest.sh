@@ -302,6 +302,14 @@ expect_silent "heading-quoted-midtext"
 run_hook "$(subagent_stop "/code-review" $'Spec excerpt:\n```json\n[]\n```\n\n```json\n[{"file":"a.py","summary":"boom","failure_scenario":"x"}]\n```')"
 expect_silent "later-fence-carries-findings"
 
+# And the inverse: real findings FIRST, then a later empty fence listing
+# excluded files. The verdict is clean only when EVERY fence is empty.
+FINDINGS_THEN_EMPTY=$'```json\n[{"file":"a.py","summary":"boom","failure_scenario":"x"}]\n```\n\nExcluded files:\n```json\n[]\n```'
+run_hook "$(jq -nc --arg cwd "$WORK" --arg msg "$FINDINGS_THEN_EMPTY" \
+  '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"code-review",
+    last_assistant_message:$msg}')"
+expect_silent "findings-then-empty-exclusion-fence"
+
 run_hook "$(subagent_stop "general-purpose" "(none)")"
 expect_silent "unrelated-subagent-none-word"
 
